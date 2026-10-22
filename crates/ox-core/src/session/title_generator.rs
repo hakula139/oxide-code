@@ -188,10 +188,7 @@ fn strip_code_fence(s: &str) -> &str {
 
 /// Truncates `text` to `max_chars`, keeping the tail, where the request usually is.
 fn truncate_prompt(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    let skip = text.chars().count() - max_chars;
+    let skip = text.chars().count().saturating_sub(max_chars);
     text.chars().skip(skip).collect()
 }
 

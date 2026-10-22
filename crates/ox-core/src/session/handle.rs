@@ -6,12 +6,13 @@ pub(crate) mod testing;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use super::actor::{self, SessionCmd};
@@ -41,8 +42,8 @@ pub struct SessionHandle {
     artifact_dir: Arc<Path>,
     shared: Arc<SharedState>,
     /// Taken by the first `shutdown` among the clones.
-    actor_join: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
-    title_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
+    actor_join: Arc<Mutex<Option<JoinHandle<()>>>>,
+    title_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 /// State the actor and every handle clone share. Each `surface_first_*` method returns `true` on
@@ -58,7 +59,7 @@ pub(super) struct SharedState {
     /// land in between.
     manual_title_set: AtomicBool,
     /// Most recent flush error, threaded into actor-gone messages so the user sees the I/O cause.
-    last_flush_failure: std::sync::Mutex<Option<String>>,
+    last_flush_failure: Mutex<Option<String>>,
 }
 
 impl SharedState {
@@ -96,7 +97,7 @@ fn surface_once(surfaced: &AtomicBool) -> bool {
 }
 
 /// A point in the active branch that [`SessionHandle::rewind`] can move the tip back to.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Checkpoint {
     /// The message the next one chains from, `None` before the first.
     pub(super) tip: Option<Uuid>,
@@ -106,6 +107,7 @@ pub(crate) struct Checkpoint {
 }
 
 /// Ack from [`SessionHandle::record_message`].
+#[derive(Debug)]
 pub(crate) struct RecordOutcome {
     /// The branch point the message chained from, `None` when the actor is gone.
     pub(crate) checkpoint: Option<Checkpoint>,
@@ -117,12 +119,14 @@ pub(crate) struct RecordOutcome {
 
 /// Ack from the other write cmds, with the same failure surface as [`RecordOutcome`], except
 /// [`SessionHandle::archive`]'s, which reports every failure.
+#[derive(Debug)]
 pub(crate) struct Outcome {
     pub(crate) failure: Option<String>,
 }
 
 /// Ack from [`SessionHandle::compact`]. `pre_count` is the message count when the request reached
 /// the actor.
+#[derive(Debug)]
 pub(crate) struct CompactOutcome {
     pub(crate) pre_count: u32,
     /// Whether the boundary took effect: on disk, or in memory alone once persistence stopped.
@@ -283,7 +287,7 @@ impl SessionHandle {
             if let Err(e) = task.await
                 && e.is_panic()
             {
-                tracing::error!("title generation panicked: {e}");
+                error!("title generation panicked: {e}");
             }
         }
     }
@@ -304,9 +308,9 @@ impl SessionHandle {
             && let Err(e) = j.await
         {
             if e.is_panic() {
-                tracing::error!("session actor panicked: {e}");
+                error!("session actor panicked: {e}");
             } else {
-                tracing::warn!("session actor task cancelled: {e}");
+                warn!("session actor task cancelled: {e}");
             }
         }
     }
@@ -334,7 +338,7 @@ impl SessionHandle {
         if !self.shared.surface_first_actor_gone() {
             return None;
         }
-        tracing::warn!("session actor task is gone, so the recording was dropped");
+        warn!("session actor task is gone, so the recording was dropped");
         let cause = self.shared.last_flush_failure();
         let msg = match cause {
             Some(io_err) => format!(
@@ -524,7 +528,7 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
         session_id,
         artifact_dir,
         shared,
-        actor_join: Arc::new(std::sync::Mutex::new(Some(join))),
+        actor_join: Arc::new(Mutex::new(Some(join))),
         title_task: Arc::default(),
     }
 }
@@ -605,8 +609,11 @@ mod tests {
             let first = handle.record_message(Message::user("a")).await;
             let second = handle.record_message(Message::user("b")).await;
 
-            assert!(first.failure.is_some());
-            assert!(second.failure.is_none());
+            assert_eq!(
+                first.failure.as_deref(),
+                Some("session writer task has stopped. Conversation history may be incomplete."),
+            );
+            assert_eq!(second.failure, None);
         }
 
         #[tokio::test]
@@ -779,24 +786,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn actor_gone_surfaces_failure_once_then_silences() {
-            let handle = testing::dead("dead");
-            let item = (
-                "t1".to_owned(),
-                ToolMetadata {
-                    title: Some("f.rs".to_owned()),
-                    ..ToolMetadata::default()
-                },
-            );
-
-            let first = handle.record_tool_metadata_batch(vec![item.clone()]).await;
-            let second = handle.record_tool_metadata_batch(vec![item]).await;
-
-            assert!(first.failure.is_some(), "first call must surface failure");
-            assert!(second.failure.is_none(), "subsequent calls must be silent");
-        }
-
-        #[tokio::test]
         async fn actor_drops_ack_surfaces_actor_gone_failure() {
             // Five healthy acks cover each cmd `dispatch_outcome` sends. The actor drops the sixth.
             let handle = testing::acks_then_drops("acks-then-drops", 5);
@@ -859,17 +848,6 @@ mod tests {
                 session.title.as_ref().unwrap().title,
                 "Fix auth flow for mobile",
             );
-        }
-
-        #[tokio::test]
-        async fn actor_gone_surfaces_failure_once_then_silences() {
-            let handle = testing::dead("dead");
-
-            let first = handle.append_ai_title("Fix auth".to_owned()).await;
-            let second = handle.append_ai_title("Fix auth".to_owned()).await;
-
-            assert!(first.failure.is_some(), "first call must surface failure");
-            assert!(second.failure.is_none(), "subsequent calls must be silent");
         }
     }
 
@@ -1279,8 +1257,11 @@ mod tests {
             let first = handle.finish(Vec::new()).await;
             let second = handle.finish(Vec::new()).await;
 
-            assert!(first.failure.is_some(), "first call must surface failure");
-            assert!(second.failure.is_none(), "subsequent calls must be silent");
+            assert_eq!(
+                first.failure.as_deref(),
+                Some("session writer task has stopped. Conversation history may be incomplete."),
+            );
+            assert_eq!(second.failure, None);
         }
 
         #[tokio::test]

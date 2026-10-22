@@ -1,8 +1,8 @@
 //! Test-only [`SessionHandle`] constructors.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -120,7 +120,7 @@ fn handle(
         session_id: Arc::from(session_id),
         artifact_dir: std::env::temp_dir().join(session_id).into(),
         shared: Arc::new(SharedState::default()),
-        actor_join: Arc::new(std::sync::Mutex::new(join)),
+        actor_join: Arc::new(Mutex::new(join)),
         title_task: Arc::default(),
     }
 }
