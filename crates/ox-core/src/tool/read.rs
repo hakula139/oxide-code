@@ -266,25 +266,6 @@ mod tests {
         use super::*;
 
         #[test]
-        fn names_a_home_path_by_where_it_lands() {
-            let input = serde_json::json!({"file_path": "~/example.rs"});
-
-            let view = temp_env::with_var(HOME_VAR, Some("/home/u"), || {
-                ReadTool.result_view(
-                    &input,
-                    "1\tfn main() {}",
-                    &ToolMetadata::default(),
-                    Path::new("/repo"),
-                )
-            });
-
-            let Some(ToolResultView::ReadExcerpt { path, .. }) = view else {
-                panic!("expected a read excerpt, got {view:?}");
-            };
-            assert_eq!(path, "/home/u/example.rs");
-        }
-
-        #[test]
         fn builds_read_excerpt() {
             let input = serde_json::json!({"file_path": "/repo/example.rs"});
             let view = ReadTool
@@ -313,6 +294,25 @@ mod tests {
                     total_lines: 11,
                 },
             );
+        }
+
+        #[test]
+        fn names_a_home_path_by_where_it_lands() {
+            let input = serde_json::json!({"file_path": "~/example.rs"});
+
+            let view = temp_env::with_var(HOME_VAR, Some("/home/u"), || {
+                ReadTool.result_view(
+                    &input,
+                    "1\tfn main() {}",
+                    &ToolMetadata::default(),
+                    Path::new("/repo"),
+                )
+            });
+
+            let Some(ToolResultView::ReadExcerpt { path, .. }) = view else {
+                panic!("expected a read excerpt, got {view:?}");
+            };
+            assert_eq!(path, "/home/u/example.rs");
         }
 
         #[test]

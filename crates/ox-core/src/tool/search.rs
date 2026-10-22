@@ -24,7 +24,8 @@ pub(super) fn prepare_search_root(input: serde_json::Value, ctx: &ToolCtx) -> Pr
 }
 
 /// The root a search call's `path` argument names, the cwd by default, read as [`tool_path`]
-/// reads it. The gate and the walk both take the root from here, so they see one spelling.
+/// reads it.
+/// The gate and the walk both take the root from here, so they see one spelling.
 pub(super) fn search_path(path: Option<&str>) -> PathBuf {
     tool_path(path.unwrap_or("."))
 }
