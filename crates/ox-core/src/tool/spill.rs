@@ -10,6 +10,7 @@ use tracing::warn;
 use super::{Prepared, Tool, ToolCtx, ToolOutput, run_blocking};
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::util::fs::create_private_dir_all;
+use crate::util::text::format_size;
 
 // ── Output Cap ──
 
@@ -184,8 +185,8 @@ impl Spill {
             SpillState::Pending => unreachable!("a result omits bytes only after they spill"),
             SpillState::Open { full: false, .. } => format!("full {what} saved to {path}"),
             SpillState::Open { full: true, .. } => {
-                let mib = MAX_SPILL_BYTES >> 20;
-                format!("first {mib} MiB of {what} saved to {path}")
+                let size = format_size(MAX_SPILL_BYTES);
+                format!("first {size} of {what} saved to {path}")
             }
             SpillState::Failed(error) => {
                 format!("saving the full {what} to {path} failed: {error}")

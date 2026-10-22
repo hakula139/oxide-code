@@ -14,6 +14,7 @@ use super::context::SlashContext;
 use super::delete::DeleteCmd;
 use super::diff::{DiffCmd, WorkingTreeDiff};
 use super::effort::EffortCmd;
+use super::exit::ExitCmd;
 use super::help::HelpCmd;
 use super::init::InitCmd;
 use super::login::{LoginCmd, LogoutCmd};
@@ -89,9 +90,9 @@ impl SlashOutcome {
     }
 }
 
-/// Drives busy-gating: `ReadOnly` and `Steering` may dispatch mid-turn, while the App refuses
-/// `Mutating` and rejects `Unknown` while a stream is in flight.
-#[derive(Debug, PartialEq, Eq)]
+/// Drives busy-gating: while a stream is in flight, the App runs `ReadOnly` and `Steering` forms
+/// and refuses `Mutating` ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SlashKind {
     /// Pure local read (chat output / modal open).
     ReadOnly,
@@ -100,8 +101,6 @@ pub(crate) enum SlashKind {
     Steering,
     /// Touches session state or forwards an op that races the in-flight client.
     Mutating,
-    /// Returned only by the free dispatcher when the name doesn't resolve.
-    Unknown,
 }
 
 /// One row in the typed-arg autocomplete popup.
@@ -111,7 +110,8 @@ pub(crate) struct ArgCompletion {
     pub(crate) description: Cow<'static, str>,
 }
 
-/// A locally dispatched `/name args` command.
+/// A locally dispatched `/name args` command. Every method that takes `args` receives them
+/// trimmed, as [`command::parse_slash`] leaves them.
 pub(super) trait SlashCommand: Sync {
     fn name(&self) -> &'static str;
 
@@ -122,7 +122,7 @@ pub(super) trait SlashCommand: Sync {
 
     fn description(&self) -> &'static str;
 
-    /// Per-form: `ReadOnly`, `Steering`, or `Mutating`, never `Unknown`.
+    /// The [`SlashKind`] of the form `args`, which decides whether it may run mid-turn.
     fn classify(&self, _args: &str) -> SlashKind {
         SlashKind::ReadOnly
     }
@@ -156,6 +156,7 @@ pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
     &DeleteCmd,
     &DiffCmd,
     &EffortCmd,
+    &ExitCmd,
     &HelpCmd,
     &InitCmd,
     &LoginCmd,
@@ -363,6 +364,25 @@ mod tests {
                 .collect()
         }
 
+        /// Every `(command, args)` form of `kind` reachable from an empty or junk argument or a
+        /// completion.
+        fn forms_of_kind(kind: SlashKind) -> Vec<(&'static dyn SlashCommand, String)> {
+            BUILT_INS
+                .iter()
+                .flat_map(|&cmd| {
+                    let completions = cmd
+                        .complete_arg("")
+                        .into_iter()
+                        .map(|c| c.value.into_owned());
+                    [String::new(), "x".to_owned()]
+                        .into_iter()
+                        .chain(completions)
+                        .filter(move |args| cmd.classify(args) == kind)
+                        .map(move |args| (cmd, args))
+                })
+                .collect()
+        }
+
         #[test]
         fn have_unique_canonical_names() {
             let names: HashSet<_> = BUILT_INS.iter().map(|c| c.name()).collect();
@@ -431,32 +451,45 @@ mod tests {
         }
 
         #[test]
+        fn read_only_forms_never_forward() {
+            let info = test_session_info();
+            let ctx = SlashContext::new(&info, None);
+            let forms = forms_of_kind(SlashKind::ReadOnly);
+            assert!(!forms.is_empty(), "no built-in form is read-only");
+
+            let forwarding: Vec<String> = forms
+                .iter()
+                .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
+                    Ok(SlashOutcome::Forward(action)) => {
+                        Some(format!("/{} {args} forwards {action:?}", cmd.name()))
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(forwarding, [] as [String; 0]);
+        }
+
+        #[test]
         fn steering_forms_forward_only_ops_the_engine_takes_mid_turn() {
             let info = test_session_info();
             let ctx = SlashContext::new(&info, None);
-            let mut steering = 0;
+            let forms = forms_of_kind(SlashKind::Steering);
+            assert!(!forms.is_empty(), "no built-in form steers");
 
-            for cmd in BUILT_INS {
-                let completions = cmd
-                    .complete_arg("")
-                    .into_iter()
-                    .map(|c| c.value.into_owned());
-                let forms = [String::new(), "x".to_owned()]
-                    .into_iter()
-                    .chain(completions);
-                for args in forms.filter(|args| cmd.classify(args) == SlashKind::Steering) {
-                    match cmd.execute(&args, &ctx) {
-                        Ok(SlashOutcome::Forward(
-                            Action::SwapTheme(_) | Action::Op(Op::Queue(_) | Op::SetMode(_)),
-                        ))
-                        | Err(_) => {}
-                        other => panic!("/{} {args} forwards {other:?}", cmd.name()),
-                    }
-                    steering += 1;
-                }
-            }
+            let racing: Vec<String> = forms
+                .iter()
+                .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
+                    Ok(SlashOutcome::Forward(
+                        Action::SwapTheme(_)
+                        | Action::Op(Op::Queue(_) | Op::SetMode(_) | Op::Shutdown),
+                    ))
+                    | Err(_) => None,
+                    other => Some(format!("/{} {args} forwards {other:?}", cmd.name())),
+                })
+                .collect();
 
-            assert!(steering > 0, "no built-in form steers");
+            assert_eq!(racing, [] as [String; 0]);
         }
     }
 }

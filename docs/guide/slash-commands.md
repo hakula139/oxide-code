@@ -15,6 +15,7 @@ After `/effort`, `/init`, `/mode`, `/model`, or `/theme`, type a space to switch
 | `/delete <id-prefix>`                       | Delete a saved session by ID prefix, after a Y / N confirmation.                                                                              |
 | `/diff`                                     | Show the repository's uncommitted git changes and untracked files in chat, capped at 64 KiB.                                                  |
 | `/effort [<level>]`                         | Open the slider, or set the level directly (`low`, `medium`, `high`, `xhigh`, `max`).                                                         |
+| `/exit` (alias `/quit`)                     | Quit oxide-code, even during a turn.                                                                                                          |
 | `/help`                                     | Open a read-only list of available commands.                                                                                                  |
 | `/init [<file>]`                            | Propose edits to an existing `AGENTS.md` or `CLAUDE.md` as a diff to confirm. Without either, pick or name the one to create.                 |
 | `/login`                                    | Sign in to a Claude account in the browser and store the login for oxide-code.                                                                |
@@ -33,8 +34,8 @@ Model, effort, permission mode, and theme choices last for the session. No slash
 
 ## When Commands Run
 
-- **During a turn**, only `/config`, `/diff`, `/help`, `/mode`, `/status`, and `/theme` run. A mode switch applies from the turn's next tool call. Retry other commands after the turn finishes.
-- **In the bare REPL** (`--no-tui`), only `/clear`, `/compact`, `/effort <level>`, `/init [<file>]`, `/mode <mode>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>` run, along with their aliases. `/init` starts a turn like a prompt, and the others print a confirmation to stderr. The REPL has no picker, so a project without an instruction file needs `/init AGENTS.md` or `/init CLAUDE.md`. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
+- **During a turn**, only `/config`, `/diff`, `/exit`, `/help`, `/mode`, `/status`, and `/theme` run. A mode switch applies from the turn's next tool call. Retry other commands after the turn finishes.
+- **In the bare REPL** (`--no-tui`), only `/clear`, `/compact`, `/effort <level>`, `/exit`, `/init [<file>]`, `/mode <mode>`, `/model <id>`, `/rename <title>`, and `/resume <id-prefix>` run, along with their aliases. `/init` starts a turn like a prompt, `/exit` quits, and the others print a confirmation to stderr. The REPL has no picker, so a project without an instruction file needs `/init AGENTS.md` or `/init CLAUDE.md`. The REPL rejects other commands, and a rejected or failed command makes it exit with a failure status at the end of input.
 
 ## Model and Effort
 

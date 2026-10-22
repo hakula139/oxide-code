@@ -6,7 +6,7 @@ How the TUI cancels work on Esc or Ctrl+C, exits on a second Ctrl+C from idle, a
 
 The TUI exposes these controls and behaviors:
 
-- **Cancel and exit.** Esc / Ctrl+C cancels active work. Dual-press Ctrl+C exits from idle, and Ctrl+D exits when idle with an empty input buffer.
+- **Cancel and exit.** Esc / Ctrl+C cancels active work. Dual-press Ctrl+C exits from idle, and Ctrl+D exits when idle with an empty input buffer. `/exit` quits from any state, and a turn in flight ends as a shutdown does.
 - **Queue input.** Enter while busy appends to the app's `PromptQueue`, rendered as a dim preview above the input, and forwards the prompt as `Op::Queue`.
 - **Drain input.** `agent_turn` splices each forwarded prompt into `messages` as a trailing User message at its next round boundary and confirms it with `Event::PromptDrained`, so the model sees new instructions in the next API request without aborting in-flight work. A turn that ends first drops the prompts it still holds, and once it completes or fails the TUI submits the queue head as the next turn. A prompt whose automatic compaction failed was never sent, so the TUI hands it back to the user and leaves the queue waiting. A refused turn that the engine rolled back (`TurnRolledBack`) hands back its prompt and the queued prompts it took in the same way.
 - **Interrupt work.** Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, the bash tool kills the command's process tree, and a dim italic `(interrupted)` marker lands in chat. The transcript then ends on a `[Request interrupted by user]` user message, so the model knows the user abandoned that prompt.

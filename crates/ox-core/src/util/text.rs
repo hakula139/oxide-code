@@ -1,5 +1,5 @@
 //! Text helpers: display-width-aware truncation and padding, count-based pluralization and
-//! abbreviation, sentence joining, blank-edge trimming, and escaping for terminal output.
+//! abbreviation, byte-size labels, sentence joining, blank-edge trimming, and terminal escaping.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -31,6 +31,21 @@ pub fn compact_count(n: u32) -> String {
         format!("{}k", n / 1_000)
     } else {
         n.to_string()
+    }
+}
+
+/// `bytes` in the largest binary unit it reaches, as in `512 B`, `1.5 KiB`, or `10 MiB`. A size
+/// that is not a whole number of its unit shows one decimal, rounded down.
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let exp = (bytes.checked_ilog2().unwrap_or(0) / 10).min(3);
+    let name = UNITS[exp as usize];
+    let unit = 1 << (10 * exp);
+    let (whole, rest) = (bytes / unit, bytes % unit);
+    if rest == 0 {
+        format!("{whole} {name}")
+    } else {
+        format!("{whole}.{} {name}", rest * 10 / unit)
     }
 }
 
@@ -201,6 +216,29 @@ mod tests {
                 (999_999_999, "999M"),
             ] {
                 assert_eq!(compact_count(n), expected);
+            }
+        }
+    }
+
+    mod format_size {
+        use super::*;
+
+        #[test]
+        fn picks_the_largest_unit_and_rounds_down_to_one_decimal() {
+            for (bytes, expected) in [
+                (0, "0 B"),
+                (1023, "1023 B"),
+                (1024, "1 KiB"),
+                (1536, "1.5 KiB"),
+                ((1 << 20) - 1, "1023.9 KiB"),
+                (10 << 20, "10 MiB"),
+                (3 << 19, "1.5 MiB"),
+                ((10 << 20) + 1, "10.0 MiB"),
+                (3 << 30, "3 GiB"),
+                ((5 << 30) / 2, "2.5 GiB"),
+                (5000 << 30, "5000 GiB"),
+            ] {
+                assert_eq!(format_size(bytes), expected);
             }
         }
     }

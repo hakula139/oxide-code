@@ -91,7 +91,7 @@ impl SlashCommand for ResumeCmd {
     }
 
     fn echoes_input(&self, args: &str) -> bool {
-        !args.trim().is_empty()
+        !args.is_empty()
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -99,7 +99,7 @@ impl SlashCommand for ResumeCmd {
     }
 
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        if !args.trim().is_empty() {
+        if !args.is_empty() {
             return Ok(SlashOutcome::Forward(Action::Op(command::resume(args)?)));
         }
         Ok(SlashOutcome::Modal(Box::new(ResumePicker::new(
@@ -933,7 +933,6 @@ mod tests {
             #[test]
             fn is_always_mutating() {
                 assert_eq!(ResumeCmd.classify(""), SlashKind::Mutating);
-                assert_eq!(ResumeCmd.classify("   "), SlashKind::Mutating);
                 assert_eq!(ResumeCmd.classify("ab"), SlashKind::Mutating);
             }
         }

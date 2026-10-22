@@ -113,9 +113,13 @@ mod tests {
             for bad in ["2", "enabled", " true"] {
                 temp_env::with_var(KEY, Some(bad), || {
                     let msg = bool(KEY).unwrap_err().to_string();
-                    assert!(msg.contains(KEY), "msg={msg}");
-                    assert!(msg.contains(&format!("{bad:?}")), "msg={msg}");
-                    assert!(msg.contains("expected one of"), "msg={msg}");
+                    assert_eq!(
+                        msg,
+                        format!(
+                            "invalid {KEY} {bad:?}: \
+                             expected one of 1, true, yes, on, 0, false, no, off"
+                        ),
+                    );
                 });
             }
         }
