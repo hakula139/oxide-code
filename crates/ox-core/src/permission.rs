@@ -344,7 +344,7 @@ impl Access {
     /// no rooted forms, so it never auto-allows. The tool follows native filesystem behavior.
     /// A resolved path that is not valid UTF-8 never auto-allows either, since the input a file
     /// tool opens can only pin its lossy spelling.
-    pub(crate) fn for_path(path: &str, workspace: &Workspace) -> Self {
+    pub(crate) fn for_path(path: impl AsRef<Path>, workspace: &Workspace) -> Self {
         let joined = workspace.cwd().join(path);
         let requested = lexical_normalize(&joined);
         let resolved = resolve(&joined).ok();
@@ -1648,6 +1648,38 @@ mod tests {
     mod access {
         use super::*;
 
+        mod for_command {
+            use super::*;
+
+            #[test]
+            fn reads_a_quoted_tilde_under_the_cwd_as_bash_does() {
+                let (_dir, root) = temp_cwd();
+                let (cwd, home) = (root.join("repo"), root.join("home"));
+                std::fs::create_dir_all(cwd.join("~")).unwrap();
+                std::fs::create_dir(&home).unwrap();
+                std::fs::write(cwd.join(".env"), "").unwrap();
+
+                temp_env::with_var(HOME_VAR, Some(&home), || {
+                    let workspace = Workspace::new(&cwd);
+                    let policy = Policy::resolve(
+                        Mode::Manual,
+                        rules(&[(READ, ".env")]),
+                        Vec::new(),
+                        Vec::new(),
+                        &[],
+                        &workspace,
+                    )
+                    .unwrap();
+                    let run = |command: &str| {
+                        decide(&policy, EXEC, &Access::for_command(command, &workspace))
+                    };
+
+                    assert_eq!(run(r#"cat "~/../.env""#), Decision::Ask);
+                    assert_eq!(run(r#"cat < "~/../.env""#), Decision::Deny);
+                });
+            }
+        }
+
         mod for_path {
             use super::*;
 
@@ -2446,7 +2478,7 @@ mod tests {
                             .unwrap()
                         };
                         let edit =
-                            |path: PathBuf| Access::for_path(&slash_separated(&path), &workspace);
+                            |path: PathBuf| Access::for_path(slash_separated(&path), &workspace);
 
                         for (path, group) in [
                             (config.join("git/config"), Shipped::Git),
@@ -2819,7 +2851,7 @@ mod tests {
                         store.create(&sample_header("s1"), &[]).unwrap();
                         let session_file = store.find_session_path("s1").unwrap();
                         let spill = artifact_dir(&session_file, "s1").join("tool-results/x.txt");
-                        let target = Access::for_path(&slash_separated(&spill), &workspace);
+                        let target = Access::for_path(slash_separated(&spill), &workspace);
 
                         for mode in [Mode::Manual, Mode::Yolo] {
                             let p = Policy::resolve(
@@ -3248,6 +3280,23 @@ mod tests {
                 ] {
                     assert_eq!(decide(&manual, case), Decision::Ask, "{case:?}");
                 }
+            }
+
+            #[test]
+            fn command_rules_hold_the_program_bash_runs_where_the_grammar_splits_its_words() {
+                let yolo = policy(Mode::Yolo, &[(EXEC, "git push *")], &[], &[]);
+
+                for (case, expected) in [
+                    ("gi\\\nt push origin", Decision::Deny),
+                    ("LC_ALL=$ git push origin", Decision::Ask),
+                    ("git status \\  x", Decision::Ask),
+                ] {
+                    assert_eq!(decide(&yolo, EXEC, &command(case)), expected, "{case:?}");
+                }
+
+                let yolo = policy(Mode::Yolo, &[(EXEC, "kubectl delete -f -")], &[], &[]);
+                let case = "kubectl delete -f - <<EOF\nkind: Namespace\nEOF";
+                assert_eq!(decide(&yolo, EXEC, &command(case)), Decision::Deny);
             }
 
             #[test]
@@ -3708,7 +3757,7 @@ mod tests {
                 for (spelled, denied) in [("config", true), ("../outside", false)] {
                     let walk = filter.walk(&outside, Path::new(spelled), &workspace);
                     assert_eq!(walk.withholds(&env), denied, "{spelled}");
-                    let gate = Access::for_path(&format!("{spelled}/.env"), &workspace);
+                    let gate = Access::for_path(format!("{spelled}/.env"), &workspace);
                     assert_eq!(
                         decide(&p, READ, &gate) == Decision::Deny,
                         denied,
