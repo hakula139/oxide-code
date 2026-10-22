@@ -3083,6 +3083,40 @@ mod tests {
             }
 
             #[test]
+            fn command_rules_see_the_words_a_heredoc_passes_to_its_command() {
+                let (_dir, cwd) = temp_cwd();
+                let workspace = Workspace::new(&cwd);
+                let decide = |p: &Policy, case: &str| {
+                    p.decide(EXEC, &Access::for_command(case, &workspace).as_target())
+                };
+                let yolo = policy(Mode::Yolo, &[(EXEC, "git push *")], &[], &[]);
+                let manual = policy(Mode::Manual, &[(READ, ".env")], &[], &[]);
+
+                for case in [
+                    "git <<EOF push --force origin main\nx\nEOF",
+                    "true && git <<EOF push\nx\nEOF",
+                    "ls | git <<EOF push\nx\nEOF",
+                    "! git <<EOF push\nx\nEOF",
+                    "FOO=1 <<EOF git push\nx\nEOF",
+                    "git <<EOF 2>&1 push\nx\nEOF",
+                    "git >/dev/null push",
+                ] {
+                    assert_eq!(decide(&yolo, case), Decision::Deny, "{case:?}");
+                }
+                assert_eq!(
+                    decide(&manual, "cat <<'EOF' README.md\nx\nEOF"),
+                    Decision::Allow
+                );
+                for case in [
+                    "cat <<'EOF' .env\nx\nEOF",
+                    "find <<EOF . -delete\nx\nEOF",
+                    "{ cat; } <<EOF README.md\nx\nEOF",
+                ] {
+                    assert_eq!(decide(&manual, case), Decision::Ask, "{case:?}");
+                }
+            }
+
+            #[test]
             fn command_allow_sees_through_only_wrappers_that_keep_who_runs_it_and_its_arguments() {
                 let p = policy(Mode::Manual, &[], &[], &[(EXEC, "cat *"), (EXEC, "find *")]);
                 for (case, expected) in [

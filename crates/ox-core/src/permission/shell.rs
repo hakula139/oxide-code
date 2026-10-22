@@ -555,7 +555,7 @@ impl Walk<'_> {
 
     fn visit(&mut self, node: Node<'_>, src: &str) {
         match node.kind() {
-            "command" => self.command(node, src),
+            "command" => self.command(node, &[], src),
             "file_redirect" => self.redirect(node, src),
             "variable_assignment" => {
                 self.opaque |= SHELL_VARIABLES.contains(&assigned(&src[node.byte_range()]));
@@ -573,6 +573,7 @@ impl Walk<'_> {
                 });
                 self.visit_children(node, src);
             }
+            "redirected_statement" => self.redirected_statement(node, Vec::new(), src),
             "for_statement" => {
                 self.opaque |= node
                     .child_by_field_name("variable")
@@ -594,31 +595,98 @@ impl Walk<'_> {
         }
     }
 
-    fn command(&mut self, node: Node<'_>, src: &str) {
+    /// Visits a redirected `statement`, whose redirections may carry words bash passes to the
+    /// simple command it runs, followed by the `trailing` words of a statement around it.
+    fn redirected_statement<'t>(
+        &mut self,
+        statement: Node<'t>,
+        trailing: Vec<Node<'t>>,
+        src: &str,
+    ) {
+        let mut cursor = statement.walk();
+        let redirects: Vec<Node<'t>> = statement
+            .children_by_field_name("redirect", &mut cursor)
+            .collect();
+        let words: Vec<Node<'t>> = redirects
+            .iter()
+            .flat_map(|&redirect| redirect_words(redirect))
+            .chain(trailing)
+            .collect();
+        match statement.child_by_field_name("body") {
+            Some(body) => self.statement(body, words, src),
+            None if !words.is_empty() => self.parts(&[], &words, src),
+            None => {}
+        }
+        for redirect in redirects {
+            self.visit(redirect, src);
+        }
+    }
+
+    /// Visits `node`, handing the `trailing` words a redirection carries to the simple command
+    /// bash gives them: the last one of a pipeline or list, the one a `!` negates, or a new one
+    /// after any assignments that stand alone. Under any other statement, which bash rejects, they
+    /// leave the command unknown.
+    fn statement<'t>(&mut self, node: Node<'t>, trailing: Vec<Node<'t>>, src: &str) {
+        if trailing.is_empty() {
+            return self.visit(node, src);
+        }
         let mut cursor = node.walk();
-        let words: Vec<Word<'_>> = node
-            .named_children(&mut cursor)
-            .filter_map(|child| match child.kind() {
-                "command_name" => child.named_child(0),
-                "variable_assignment"
-                | "file_redirect"
-                | "herestring_redirect"
-                | "heredoc_redirect" => None,
-                _ => Some(child),
+        match node.kind() {
+            "command" => self.command(node, &trailing, src),
+            "redirected_statement" => self.redirected_statement(node, trailing, src),
+            "list" | "negated_command" | "pipeline" => {
+                let children: Vec<Node<'t>> = node.named_children(&mut cursor).collect();
+                if let Some((&last, rest)) = children.split_last() {
+                    for &child in rest {
+                        self.visit(child, src);
+                    }
+                    self.statement(last, trailing, src);
+                }
+            }
+            "variable_assignment" => self.parts(&[node], &trailing, src),
+            "variable_assignments" => {
+                let assignments: Vec<Node<'t>> = node.named_children(&mut cursor).collect();
+                self.parts(&assignments, &trailing, src);
+            }
+            _ => {
+                self.opaque = true;
+                self.visit(node, src);
+            }
+        }
+    }
+
+    fn command<'t>(&mut self, node: Node<'t>, trailing: &[Node<'t>], src: &str) {
+        let mut cursor = node.walk();
+        let parts: Vec<Node<'t>> = node.named_children(&mut cursor).collect();
+        self.parts(&parts, trailing, src);
+    }
+
+    /// Records the simple command whose assignments, name, arguments, and redirections are
+    /// `parts`, in source order, followed by the `trailing` words its statement's redirections
+    /// carry.
+    fn parts<'t>(&mut self, parts: &[Node<'t>], trailing: &[Node<'t>], src: &str) {
+        let words: Vec<Word<'t>> = parts
+            .iter()
+            .flat_map(|&part| match part.kind() {
+                "command_name" => part.named_child(0).into_iter().collect(),
+                "file_redirect" | "heredoc_redirect" => redirect_words(part),
+                "variable_assignment" | "herestring_redirect" => Vec::new(),
+                _ => vec![part],
             })
+            .chain(trailing.iter().copied())
             .map(|word| Word::new(word, src))
             .collect();
         let mut assignments = Vec::new();
         let mut unsafe_assignment = None;
-        for child in node.named_children(&mut cursor) {
-            if child.kind() == "variable_assignment" {
-                if !SAFE_VARIABLES.contains(&assigned(&src[child.byte_range()])) {
+        for &part in parts {
+            if part.kind() == "variable_assignment" {
+                if !SAFE_VARIABLES.contains(&assigned(&src[part.byte_range()])) {
                     unsafe_assignment.get_or_insert(assignments.len());
                 }
-                assignments.push(assignment_word(child, src));
-                self.visit_children(child, src);
+                assignments.push(assignment_word(part, src));
+                self.visit_children(part, src);
             } else {
-                self.visit(child, src);
+                self.visit(part, src);
             }
         }
 
@@ -902,10 +970,8 @@ impl Walk<'_> {
         let destinations: Vec<Node<'_>> = node
             .children_by_field_name("destination", &mut cursor)
             .collect();
-        // tree-sitter-bash folds the words after `>&2` into further destinations, which leaves
-        // the command's real arguments unknown.
-        let &[destination] = destinations.as_slice() else {
-            self.opaque = true;
+        // Further destinations are the command's words, which `redirect_words` hands to it.
+        let Some(&destination) = destinations.first() else {
             return;
         };
 
@@ -927,6 +993,32 @@ impl Walk<'_> {
         } else {
             self.writes.push(access);
         }
+    }
+}
+
+/// The words bash passes to the command `redirect` belongs to, which tree-sitter-bash parses as
+/// part of it: the destinations of a file redirection after its first, and the words after a
+/// heredoc operator, with those of a file redirection inside the heredoc, in source order.
+fn redirect_words(redirect: Node<'_>) -> Vec<Node<'_>> {
+    let mut cursor = redirect.walk();
+    match redirect.kind() {
+        "file_redirect" => redirect
+            .children_by_field_name("destination", &mut cursor)
+            .skip(1)
+            .collect(),
+        "heredoc_redirect" => {
+            let mut words: Vec<Node<'_>> = redirect
+                .children_by_field_name("argument", &mut cursor)
+                .collect();
+            words.extend(
+                redirect
+                    .children_by_field_name("redirect", &mut cursor)
+                    .flat_map(redirect_words),
+            );
+            words.sort_by_key(Node::start_byte);
+            words
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -1851,6 +1943,24 @@ mod tests {
             }
 
             #[test]
+            fn hands_the_words_a_redirection_carries_to_the_command_bash_gives_them() {
+                for (command, expected) in [
+                    ("cat <<'EOF' a b\nx\nEOF", &["cat a b"][..]),
+                    ("cat x <<'EOF' a\nx\nEOF", &["cat x a"]),
+                    ("true && cat <<'EOF' a\nx\nEOF", &["true", "cat a"]),
+                    ("ls | cat <<'EOF' a\nx\nEOF", &["ls", "cat a"]),
+                    ("! git <<'EOF' push\nx\nEOF", &["git push"]),
+                    ("FOO=1 <<'EOF' git push\nx\nEOF", &["FOO=1 git push"]),
+                    (">/dev/null <<'EOF' git push\nx\nEOF", &["git push"]),
+                    ("git <<'EOF' 2>&1 push -f\nx\nEOF", &["git push -f"]),
+                    ("git >/dev/null push -f", &["git push -f"]),
+                    ("echo >&2 hi", &["echo hi"]),
+                ] {
+                    assert_eq!(texts(command), expected, "{command:?}");
+                }
+            }
+
+            #[test]
             fn splits_simple_commands_across_every_separator() {
                 for (command, expected) in [
                     ("a; b", &["a", "b"][..]),
@@ -2312,6 +2422,7 @@ mod tests {
                     "env -C /etc echo > hosts",
                     "env --chdir=/etc echo > hosts",
                     "cd / && cat etc/shadow",
+                    "{ cat; } <<'EOF' a\nx\nEOF",
                     "exec sh -c 'ls'",
                     "command eval ls",
                     "builtin . env.sh",
@@ -2538,7 +2649,7 @@ mod tests {
 
             #[test]
             fn to_a_target_it_cannot_place_is_opaque() {
-                for command in ["echo > \"$OUT\"", "echo > *.txt", "echo >&2 hi"] {
+                for command in ["echo > \"$OUT\"", "echo > *.txt"] {
                     assert!(parse(command).is_opaque(), "{command:?}");
                 }
             }
