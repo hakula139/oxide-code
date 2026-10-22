@@ -186,6 +186,7 @@ impl App {
             self.chat
                 .push_system_message(archive_notice(&old_id, ArchiveState::Archived));
         }
+        self.discard_queue();
     }
 
     /// Mid-session resume: rebinds the session and rebuilds chat from the target transcript.
@@ -207,14 +208,19 @@ impl App {
         if let Some(notice) = self.session_info.config.model.unsupported_notice() {
             self.chat.push_system_message(notice);
         }
-        let dropped = self.queue.discard();
+        self.discard_queue();
+        self.clear_modals();
+    }
+
+    /// Drops the prompts queued for the previous session, saying how many.
+    fn discard_queue(&mut self) {
+        let dropped = self.queue.discard_left_behind();
         if dropped > 0 {
             self.chat.push_system_message(format!(
                 "Discarded {dropped} queued {} from the previous session",
                 plural(dropped, "prompt", "prompts"),
             ));
         }
-        self.clear_modals();
     }
 
     /// Rebinds to session `id` titled `title`, clearing the previous session's chat, rules,
@@ -256,12 +262,13 @@ impl App {
         self.clear_modals();
     }
 
-    /// Ends a `/compact`, `/resume`, or `/archive` once the new transcript has reported its state.
-    /// A cancel that lost the race to the swap leaves the queue to the user, and `/clear` never
-    /// leaves idle, so its `SessionReady` changes nothing.
+    /// Ends a `/compact`, `/clear`, `/resume`, or `/archive` once the new transcript has reported
+    /// its state. A cancel that lost the race to the swap leaves the queue to the user.
     fn apply_session_ready(&mut self) {
         match &self.status {
-            Status::Compacting | Status::Resuming | Status::Archiving => self.finalize_idle(),
+            Status::Compacting | Status::Clearing | Status::Resuming | Status::Archiving => {
+                self.finalize_idle();
+            }
             Status::Cancelling => self.enter_idle(),
             _ => {}
         }
@@ -1231,6 +1238,23 @@ mod tests {
         }
 
         #[test]
+        fn session_rolled_discards_the_queue_with_a_notice() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.queue.push("queued before clear".to_owned());
+
+            app.handle_engine_event(Event::SessionRolled {
+                id: "rolled-session".to_owned(),
+                archived: false,
+            });
+
+            assert_eq!(*app.queue.pending(), [] as [&str; 0]);
+            assert_eq!(
+                app.chat.last_system_text(),
+                Some("Discarded 1 queued prompt from the previous session"),
+            );
+        }
+
+        #[test]
         fn session_resumed_replays_transcript_and_clears_pending() {
             let (mut app, _rx, _event_tx) = test_app(Some("Old"));
             app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
@@ -1476,21 +1500,6 @@ mod tests {
                 text.contains("/etc/hosts") && !text.contains("//etc"),
                 "the replay shows the literal text: {text}"
             );
-        }
-
-        #[test]
-        fn session_ready_after_a_roll_keeps_the_queue_waiting() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.queue.push("queued before clear".to_owned());
-
-            app.handle_engine_event(Event::SessionRolled {
-                id: "rolled-session".to_owned(),
-                archived: false,
-            });
-            app.handle_engine_event(Event::SessionReady);
-
-            assert_eq!(*app.queue.pending(), ["queued before clear"]);
-            assert_eq!(rx.try_recv().ok(), None);
         }
 
         #[tokio::test]
