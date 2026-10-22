@@ -342,9 +342,9 @@ impl SessionDataBuilder {
                 timestamp,
             } => self.insert_message(uuid, parent_uuid, message, timestamp, line_no),
             Entry::Rewind { tip, .. } => self.chain.rewind(tip),
-            Entry::Title {
-                title, updated_at, ..
-            } => keep_newer(&mut self.latest_title, TitleInfo { title, updated_at }),
+            Entry::Title { title, updated_at } => {
+                keep_newer(&mut self.latest_title, TitleInfo { title, updated_at });
+            }
             Entry::Archive { archived, .. } => self.archived = archived,
             Entry::ToolResultMetadata {
                 tool_use_id,
@@ -364,7 +364,6 @@ impl SessionDataBuilder {
                 pre_message_count,
                 instructions,
                 tasks,
-                trigger,
                 ..
             } => {
                 self.pending_compact = Some(CompactInfo {
@@ -372,7 +371,6 @@ impl SessionDataBuilder {
                     pre_message_count,
                     instructions,
                     tasks,
-                    trigger,
                 });
             }
             _ => {}
@@ -664,7 +662,6 @@ mod tests {
     use crate::file_tracker::{FileState, LastView};
     use crate::message::ContentBlock;
     use crate::prompt::PromptParts;
-    use crate::protocol::CompactTrigger;
     use crate::tool::tasks::testing::plan;
     use crate::util::path::testing::HOME_VAR;
 
@@ -984,7 +981,6 @@ mod tests {
                 pre_message_count: 1,
                 instructions: None,
                 tasks: Vec::new(),
-                trigger: None,
                 timestamp,
             }
         }
@@ -1328,7 +1324,6 @@ mod tests {
                     pre_message_count: 1,
                     instructions: Some("focus".to_owned()),
                     tasks: plan(),
-                    trigger: Some(CompactTrigger::Auto),
                     timestamp: datetime!(2026-04-16 12:00:02 UTC),
                 }])
                 .unwrap();
@@ -1366,7 +1361,6 @@ mod tests {
                     pre_message_count: 1,
                     instructions: Some("focus".to_owned()),
                     tasks: plan(),
-                    trigger: Some(CompactTrigger::Auto),
                 })
             );
         }

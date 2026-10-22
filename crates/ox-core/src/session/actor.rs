@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use uuid::Uuid;
 
-use super::entry::{CompactBoundary, Entry, TitleSource, UsageRecord};
+use super::entry::{CompactBoundary, Entry, UsageRecord};
 use super::handle::{Checkpoint, CompactOutcome, Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
 use crate::file_tracker::FileSnapshot;
@@ -174,7 +174,6 @@ impl Batch {
                 }
                 self.entries.push(Entry::Title {
                     title,
-                    source: TitleSource::AiGenerated,
                     updated_at: now,
                 });
                 self.acks.push(PendingAck::Outcome(ack));
@@ -186,7 +185,6 @@ impl Batch {
                     Some(title) => {
                         self.entries.push(Entry::Title {
                             title,
-                            source: TitleSource::UserProvided,
                             updated_at: now,
                         });
                         self.acks.push(PendingAck::Outcome(ack));
@@ -365,7 +363,6 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::session::entry::TitleSource;
     use crate::session::handle::testing::boundary;
     use crate::session::state::MAX_UNWRITTEN_BYTES;
     use crate::session::store::SessionWriter;
@@ -598,8 +595,8 @@ mod tests {
             );
             assert_eq!(
                 saved_titles(&entries),
-                [("User-named", TitleSource::UserProvided)],
-                "deferred title replaces FirstPrompt",
+                ["User-named"],
+                "deferred title replaces the first-prompt title",
             );
         }
 
@@ -627,7 +624,7 @@ mod tests {
             let entries = saved_entries(dir.path(), &session_id);
             assert_eq!(
                 saved_titles(&entries),
-                [("Final name", TitleSource::UserProvided)],
+                ["Final name"],
                 "second rename overwrites the first",
             );
         }
@@ -666,10 +663,7 @@ mod tests {
             let entries = saved_entries(dir.path(), &session_id);
             assert_eq!(
                 saved_titles(&entries),
-                [
-                    ("Fix login", TitleSource::FirstPrompt),
-                    ("User-picked title", TitleSource::UserProvided),
-                ],
+                ["Fix login", "User-picked title"],
                 "AI title must not reach disk after a manual override",
             );
         }

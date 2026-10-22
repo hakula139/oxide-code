@@ -12,7 +12,6 @@ use crate::file_tracker::FileTracker;
 use crate::file_tracker::testing::record_tracked_file;
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SessionContext;
-use crate::protocol::CompactTrigger;
 use crate::session::actor::SessionCmd;
 use crate::session::entry::CompactBoundary;
 
@@ -22,7 +21,6 @@ pub(crate) fn boundary(summary: &str) -> CompactBoundary {
         summary: summary.to_owned(),
         instructions: None,
         tasks: Vec::new(),
-        trigger: CompactTrigger::Manual,
         context: SessionContext::default(),
     }
 }

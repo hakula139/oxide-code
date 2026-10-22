@@ -178,7 +178,6 @@ impl ChatView {
                     summary,
                     pre_count,
                     instructions,
-                    ..
                 } => {
                     self.push_compacted_block(pre_count, instructions.as_deref(), summary);
                 }
@@ -588,7 +587,6 @@ mod tests {
     use ratatui::backend::TestBackend;
     use unicode_width::UnicodeWidthStr;
 
-    use ox_core::protocol::CompactTrigger;
     use ox_core::protocol::testing::text_result;
     use ox_core::tool::testing::edit_diff;
     use ox_core::tool::view::{NumberedLine, ToolResultView};
@@ -903,7 +901,6 @@ mod tests {
                     summary: "Kept the important decisions.".to_owned(),
                     pre_count: 4,
                     instructions: Some("focus on auth".to_owned()),
-                    trigger: Some(CompactTrigger::Auto),
                 },
                 Interaction::UserText("hello".to_owned()),
                 Interaction::AssistantText("hi there".to_owned()),

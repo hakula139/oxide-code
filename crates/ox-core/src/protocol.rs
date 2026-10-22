@@ -353,14 +353,12 @@ pub struct ToolResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Interaction {
-    /// The boundary a compaction left, which the rest of the transcript continues from. Renders
-    /// like a live [`Event::SessionCompacted`]. `trigger` is `None` for a boundary written before
-    /// sessions recorded it.
+    /// The boundary a compaction left, which the rest of the transcript continues from.
+    /// Renders like a live [`Event::SessionCompacted`].
     Compacted {
         summary: String,
         pre_count: u32,
         instructions: Option<String>,
-        trigger: Option<CompactTrigger>,
     },
     UserText(String),
     AssistantText(String),
@@ -700,7 +698,6 @@ mod tests {
                     summary: "Summary.".to_owned(),
                     pre_count: 4,
                     instructions: Some("focus".to_owned()),
-                    trigger: Some(CompactTrigger::Manual),
                 },
                 Interaction::UserText("ask".to_owned()),
                 Interaction::AssistantThinking("thinking".to_owned()),
@@ -1008,7 +1005,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn tags_each_compaction_trigger_as_session_files_store_it() {
+        fn tags_each_compaction_trigger_as_headless_output_names_it() {
             let triggers = [
                 CompactTrigger::Manual,
                 CompactTrigger::Auto,

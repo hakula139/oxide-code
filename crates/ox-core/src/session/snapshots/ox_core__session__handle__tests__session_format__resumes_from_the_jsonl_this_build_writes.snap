@@ -20,8 +20,7 @@ expression: recovered
         "content": "Write the tests",
         "status": "pending"
       }
-    ],
-    "trigger": "manual"
+    ]
   },
   "context": {
     "environment": {
