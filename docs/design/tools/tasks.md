@@ -29,7 +29,7 @@ The list has no dedicated entry type. When resuming, the loader uses the last su
 
 ## Compaction
 
-Manual and automatic compaction both pass the engine's list to `replace_session_with_summary`. The `compact` entry records the list because the summary replaces the calls that built it. The synthetic summary message ends with a `<system-reminder>` block listing each task and its status, and asking the model to keep the list current. Since the engine retains the list, the panel and status line stay unchanged across the boundary.
+Manual and automatic compaction both pass the engine's list to `Engine::replace_with_summary`. The `compact` entry records the list because the summary replaces the calls that built it. The synthetic summary message ends with a `<system-reminder>` block listing each task and its status, and asking the model to keep the list current. Since the engine retains the list, the panel and status line stay unchanged across the boundary.
 
 ## Design Decisions
 
@@ -42,10 +42,10 @@ Manual and automatic compaction both pass the engine's list to `replace_session_
 
 ## Sources
 
-- `crates/ox-core/src/engine.rs`: `Engine::tasks`, adopted after each turn, and `emit_restored_tasks`.
-- `crates/ox-core/src/engine/compact_boundary.rs`: `Boundary`, which carries the list into compaction.
-- `crates/ox-core/src/engine/compaction.rs`: `AutoCompact::tasks`, the list passed through automatic compaction.
+- `crates/ox-core/src/engine.rs`: `Engine::tasks`, adopted after each turn.
+- `crates/ox-core/src/engine/compaction.rs`: `Engine::run_compaction`, which carries the list into the compact boundary.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round`, which emits `TasksUpdated` and records `ToolRound::tasks`.
+- `crates/ox-core/src/engine/sessions.rs`: `emit_restored_tasks`.
 - `crates/ox-core/src/engine/turn.rs`: `TurnReport::tasks`.
 - `crates/ox-core/src/protocol.rs`: `Event::TasksUpdated`.
 - `crates/ox-core/src/session/entry.rs`: the `tasks` field in `Entry::Compact`.

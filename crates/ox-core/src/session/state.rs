@@ -9,12 +9,11 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::display::fit_title;
-use super::entry::{CURRENT_VERSION, Entry, Header, TitleSource};
+use super::entry::{CURRENT_VERSION, CompactBoundary, Entry, Header, TitleSource};
 use super::handle::Checkpoint;
 use super::store::{SessionStore, SessionWriter, artifact_dir, encode_lines};
 use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
-use crate::tool::tasks::Task;
 
 /// Retry-queue size in MiB past which a failed flush stops persistence for the rest of the session.
 const MAX_UNWRITTEN_MIB: usize = 8;
@@ -179,20 +178,24 @@ impl SessionState {
     /// Builds the compaction boundary and the synthetic post-compact root message.
     pub(super) fn compact_entries(
         &self,
-        summary: &str,
-        instructions: Option<String>,
-        tasks: Vec<Task>,
+        boundary: CompactBoundary,
         synthetic_message: Message,
         now: OffsetDateTime,
     ) -> (Vec<Entry>, Uuid) {
-        let pre_count = self.message_count;
+        let CompactBoundary {
+            summary,
+            instructions,
+            tasks,
+            trigger,
+        } = boundary;
         let synthetic_uuid = Uuid::new_v4();
         let entries = vec![
             Entry::Compact {
-                summary: summary.to_owned(),
-                pre_message_count: pre_count,
+                summary,
+                pre_message_count: self.message_count,
                 instructions,
                 tasks,
+                trigger: Some(trigger),
                 timestamp: now,
             },
             Entry::Message {
@@ -350,6 +353,8 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::file_tracker::{FileTracker, LastView};
+    use crate::protocol::CompactTrigger;
+    use crate::session::handle::testing::boundary;
     use crate::session::store::load_session_data_from_path;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{isolated_store, test_project_dir, test_store};
@@ -444,11 +449,7 @@ mod tests {
             let now = OffsetDateTime::now_utc();
             let msg = Message {
                 role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t".to_owned(),
-                    content: "out".to_owned(),
-                    is_error: false,
-                }],
+                content: vec![ContentBlock::tool_result("t", "out", false)],
             };
 
             let (entries, seed) = state.queue_message_entries(&msg, now, false);
@@ -532,9 +533,12 @@ mod tests {
             assert_eq!(state.message_count(), 2);
 
             let (entries, synthetic_uuid) = state.compact_entries(
-                "summary body",
-                Some("focus on auth".to_owned()),
-                plan(),
+                CompactBoundary {
+                    summary: "summary body".to_owned(),
+                    instructions: Some("focus on auth".to_owned()),
+                    tasks: plan(),
+                    trigger: CompactTrigger::Auto,
+                },
                 Message::user("post-compact"),
                 now,
             );
@@ -548,11 +552,12 @@ mod tests {
                         pre_message_count: 2,
                         instructions: Some(i),
                         tasks,
+                        trigger: Some(CompactTrigger::Auto),
                         ..
                     } if summary == "summary body" && i == "focus on auth" && *tasks == plan()
                 ),
-                "boundary entry must carry summary, pre-count, instructions, and tasks verbatim: \
-                 {:?}",
+                "boundary entry must carry summary, pre-count, instructions, tasks, and trigger \
+                 verbatim: {:?}",
                 entries[0],
             );
             assert!(
@@ -581,8 +586,7 @@ mod tests {
             let state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
 
-            let (entries, _) =
-                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+            let (entries, _) = state.compact_entries(boundary("s"), Message::user("synth"), now);
 
             assert!(matches!(
                 &entries[0],
@@ -608,7 +612,7 @@ mod tests {
             state.flush_entries(rec).unwrap();
 
             let (_, synthetic_uuid) =
-                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+                state.compact_entries(boundary("s"), Message::user("synth"), now);
             state.commit_compact(synthetic_uuid);
 
             assert_eq!(state.last_message_uuid, Some(synthetic_uuid));
@@ -622,7 +626,7 @@ mod tests {
             let now = OffsetDateTime::now_utc();
 
             let (_, synthetic_uuid) =
-                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+                state.compact_entries(boundary("s"), Message::user("synth"), now);
             state.commit_compact(synthetic_uuid);
 
             assert!(state.first_user_prompt_seen);
@@ -639,7 +643,7 @@ mod tests {
             let now = OffsetDateTime::now_utc();
 
             let (_, synthetic_uuid) =
-                state.compact_entries("s", None, Vec::new(), Message::user("synth"), now);
+                state.compact_entries(boundary("s"), Message::user("synth"), now);
             state.commit_compact(synthetic_uuid);
 
             assert_eq!(state.initial_message_count, 0);
@@ -766,7 +770,11 @@ mod tests {
                 true,
             );
             let (entries, _) = state.queue_message_entries(&Message::user("second"), now, false);
-            assert!(state.flush_entries(entries).is_err());
+            let err = state.flush_entries(entries).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("failed to write {}", copied.display())
+            );
             let (entries, _) =
                 state.queue_message_entries(&Message::assistant("third"), now, false);
             state.flush_entries(entries).unwrap();
@@ -800,17 +808,20 @@ mod tests {
             let project_dir = test_project_dir(dir.path());
             std::fs::remove_dir_all(&project_dir).unwrap();
             let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
-            assert!(
-                state.flush_entries(entries).is_err(),
-                "create must fail with project dir gone",
-            );
+            let err = state.flush_entries(entries).unwrap_err();
+
             let WriterStatus::Pending {
+                header,
                 deferred_title: Some(restored),
-                ..
             } = &state.writer_status
             else {
                 panic!("create failure must leave Pending with deferred title intact");
             };
+            let path = state.store.session_file(&session_id, header.created_at);
+            assert_eq!(
+                err.to_string(),
+                format!("failed to create {}", path.display())
+            );
             assert_eq!(restored, "Survives rollback");
 
             std::fs::create_dir_all(&project_dir).unwrap();
@@ -875,11 +886,7 @@ mod tests {
 
         #[test]
         fn selects_first_nonempty_user_text() {
-            let tool_result = ContentBlock::ToolResult {
-                tool_use_id: "t1".to_owned(),
-                content: "output".to_owned(),
-                is_error: false,
-            };
+            let tool_result = ContentBlock::tool_result("t1", "output", false);
             let user_with_only_blank = Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text {

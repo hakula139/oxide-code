@@ -1,6 +1,5 @@
 //! Test fixtures, shared with other crates' tests, that build [`Engine`]s and mock API replies.
 
-use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::pin::Pin;
@@ -11,17 +10,13 @@ use tokio::sync::mpsc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
-use super::compaction::AutoCompactFailures;
-use super::{Engine, EngineHandle, EnginePanic, EngineTask};
-use crate::client::anthropic::Client;
+use super::{Engine, EngineHandle, EnginePanic, EngineTask, SessionParts};
 use crate::client::anthropic::testing::{
     DEVICE_ID, api_key, sse_response, test_config, text_stream_body, tool_use_stream_body,
 };
 use crate::config::oauth::ClaudeCodeKeychain;
-use crate::model::ModelSpec;
 use crate::permission::Workspace;
-use crate::prompt;
-use crate::session::handle;
+use crate::session::handle::{self, LoadedTranscript};
 use crate::session::store::SessionStore;
 use crate::tool::ToolRegistry;
 use crate::util::path::testing::pinned_home;
@@ -37,47 +32,20 @@ pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</syst
 /// rebuilt one. Pass an empty directory, and run under [`with_pinned_home`], so the context never
 /// reads the developer's instruction files or git state.
 pub async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engine {
-    let (mut prompt, instruction_warnings) =
-        prompt::build_prompt(&ModelSpec::resolve(MODEL), cwd).await;
-    SESSION_CONTEXT.clone_into(&mut prompt.user_context);
-    let config = test_config(base_url, api_key(), MODEL);
-    let session = handle::start(store, MODEL, None);
-    Engine {
-        client: Client::new(
-            &config,
-            NoRoots,
-            Some(session.session_id().to_owned()),
-            DEVICE_ID.to_owned(),
-        )
-        .expect("the test client builds"),
-        oauth_token_url: "http://127.0.0.1:9/token".to_owned(),
-        claude_code_keychain: ClaudeCodeKeychain::NONE,
-        retry_login: false,
-        tools: Arc::new(ToolRegistry::new(Vec::new())),
+    let mut config = test_config(base_url, api_key(), MODEL);
+    config.workspace = Workspace::new(cwd);
+    let session = SessionParts {
         store: store.clone(),
-        session,
-        messages: Vec::new(),
-        compact: None,
-        tool_metadata: HashMap::new(),
-        tasks: Vec::new(),
-        prompt,
-        prompt_unrecorded: true,
-        startup_notices: Vec::new(),
-        instruction_warnings,
-        file_tracker: Arc::default(),
-        drifted: Vec::new(),
-        shells: Arc::default(),
-        policy: config.permission,
-        max_tool_rounds: config.max_tool_rounds,
-        compaction: config.compaction,
-        workspace: Arc::new(Workspace::new(cwd)),
-        interactive: false,
-        auto_compaction_failures: AutoCompactFailures::default(),
-        last_usage: None,
-        displayed_usage: None,
-        total_estimated_cost_usd: 0.0,
-        title_usage: None,
-    }
+        handle: handle::start(store, MODEL, None),
+        transcript: LoadedTranscript::default(),
+    };
+    let mut engine = Engine::new(&config, NoRoots, DEVICE_ID.to_owned(), session, false)
+        .await
+        .expect("the test engine builds");
+    SESSION_CONTEXT.clone_into(&mut engine.prompt.user_context);
+    "http://127.0.0.1:9/token".clone_into(&mut engine.oauth_token_url);
+    engine.claude_code_keychain = ClaudeCodeKeychain::NONE;
+    engine.with_tools(ToolRegistry::new(Vec::new()))
 }
 
 impl Engine {

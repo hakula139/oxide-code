@@ -3,14 +3,14 @@
 mod line;
 
 use std::borrow::Cow;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, Time};
 
 use ox_core::client::RateLimits;
 use ox_core::config::{Effort, StatusLineSegment};
@@ -24,7 +24,7 @@ use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
 use crate::glyphs::SPINNER_FRAMES;
 use crate::theme::Theme;
 
-pub(crate) const TICKS_PER_FRAME: usize = 5;
+pub(crate) const SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(80);
 
 // ── Hyperlinks ──
 
@@ -51,7 +51,9 @@ pub(crate) enum Status {
     ToolRunning { name: String },
     Compacting,
     SigningIn,
+    SigningOut,
     Resuming,
+    Archiving,
     Cancelling,
     ExitArmed { until: Instant },
 }
@@ -70,7 +72,9 @@ impl Status {
                 | Self::ToolRunning { .. }
                 | Self::Compacting
                 | Self::SigningIn
+                | Self::SigningOut
                 | Self::Resuming
+                | Self::Archiving
                 | Self::Cancelling,
         )
     }
@@ -82,7 +86,9 @@ impl Status {
             Self::ToolRunning { name } => format!("Running {name} · Esc to interrupt").into(),
             Self::Compacting => "Compacting · Esc to interrupt".into(),
             Self::SigningIn => "Signing in · Esc to cancel".into(),
+            Self::SigningOut => "Signing out".into(),
             Self::Resuming => "Resuming".into(),
+            Self::Archiving => "Archiving".into(),
             Self::Cancelling => "Cancelling".into(),
             Self::ExitArmed { .. } => "Press Ctrl+C again to exit".into(),
         }
@@ -112,7 +118,7 @@ pub(crate) struct StatusBar {
     theme_name: String,
     status: Status,
     spinner_frame: usize,
-    tick_counter: usize,
+    next_spinner_frame: Instant,
     /// Hyperlink cells captured during the most recent render.
     pending_hyperlinks: Vec<StatusHyperlink>,
 }
@@ -161,7 +167,7 @@ impl StatusBar {
             theme_name: String::new(),
             status: Status::Idle,
             spinner_frame: 0,
-            tick_counter: 0,
+            next_spinner_frame: crate::now(),
             pending_hyperlinks: Vec::new(),
         }
     }
@@ -231,7 +237,7 @@ impl StatusBar {
     pub(crate) fn set_status(&mut self, status: Status) {
         if status != self.status {
             self.spinner_frame = 0;
-            self.tick_counter = 0;
+            self.next_spinner_frame = crate::now() + SPINNER_FRAME_INTERVAL;
         }
         self.status = status;
     }
@@ -265,20 +271,38 @@ impl StatusBar {
         self.rate_limits
     }
 
-    /// Returns `true` when the time, the usage limits, or the animation changed and the caller
+    /// Returns `true` when the time, the usage limits, or the spinner changed and the caller
     /// should repaint.
-    pub(crate) fn tick(&mut self) -> bool {
+    pub(crate) fn tick(&mut self, now: Instant) -> bool {
         let mut dirty = self.refresh_current_time();
         dirty |= self.expire_rate_limits();
-        if self.status.is_busy() {
-            self.tick_counter += 1;
-            if self.tick_counter >= TICKS_PER_FRAME {
-                self.tick_counter = 0;
-                self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
-                dirty = true;
-            }
+        if self.status.is_busy() && now >= self.next_spinner_frame {
+            self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+            self.next_spinner_frame = now + SPINNER_FRAME_INTERVAL;
+            dirty = true;
         }
         dirty
+    }
+
+    /// When [`Self::tick`] next changes the bar, on the event loop's clock: the next spinner
+    /// frame while busy, the next minute the current-time segment shows, or the next usage-limit
+    /// reset.
+    pub(crate) fn next_tick(&self, now: Instant) -> Option<Instant> {
+        let spinner = self.status.is_busy().then_some(self.next_spinner_frame);
+        let minute = self
+            .current_minute
+            .map(|_| now + until_next_minute(now_local().time()));
+        let unix_now = OffsetDateTime::now_utc().unix_timestamp();
+        let reset = self.rate_limits.iter().flat_map(|limits| {
+            [limits.five_hour, limits.seven_day]
+                .into_iter()
+                .flatten()
+                .map(|window| {
+                    let wait = u64::try_from(window.resets_at - unix_now).unwrap_or(0);
+                    now + Duration::from_secs(wait)
+                })
+        });
+        spinner.into_iter().chain(minute).chain(reset).min()
     }
 
     fn refresh_current_time(&mut self) -> bool {
@@ -391,6 +415,11 @@ fn local_minute() -> u16 {
     u16::from(now.hour()) * 60 + u16::from(now.minute())
 }
 
+fn until_next_minute(time: Time) -> Duration {
+    let into_minute = Duration::new(u64::from(time.second()), time.nanosecond());
+    Duration::from_mins(1).saturating_sub(into_minute)
+}
+
 // ── Testing ──
 
 #[cfg(test)]
@@ -413,6 +442,7 @@ pub(crate) mod testing {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use time::macros::time;
 
     use ox_core::client::RateLimitWindow;
 
@@ -467,6 +497,13 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_owned()
+    }
+
+    /// Ticks the busy bar at each of its next `frames` spinner frames.
+    fn advance_spinner(bar: &mut StatusBar, frames: usize) {
+        for _ in 0..frames {
+            assert!(bar.tick(bar.next_spinner_frame));
+        }
     }
 
     mod set_title {
@@ -550,46 +587,36 @@ mod tests {
         fn resets_spinner_on_transition() {
             let mut bar = test_bar();
             bar.set_status(Status::Streaming);
-
-            for _ in 0..TICKS_PER_FRAME * 3 {
-                bar.tick();
-            }
-            assert_eq!(bar.spinner_frame, 3);
+            advance_spinner(&mut bar, 3);
 
             bar.set_status(Status::ToolRunning {
                 name: "bash".to_owned(),
             });
+
             assert_eq!(bar.spinner_frame, 0);
-            assert_eq!(bar.tick_counter, 0);
         }
 
         #[test]
         fn same_status_preserves_spinner() {
             let mut bar = test_bar();
             bar.set_status(Status::Streaming);
-
-            for _ in 0..TICKS_PER_FRAME * 2 {
-                bar.tick();
-            }
-            let frame_before = bar.spinner_frame;
+            advance_spinner(&mut bar, 2);
 
             bar.set_status(Status::Streaming);
-            assert_eq!(bar.spinner_frame, frame_before);
+
+            assert_eq!(bar.spinner_frame, 2);
         }
 
         #[test]
         fn to_idle_resets_spinner() {
             let mut bar = test_bar();
             bar.set_status(Status::Streaming);
-
-            for _ in 0..TICKS_PER_FRAME * 2 {
-                bar.tick();
-            }
+            advance_spinner(&mut bar, 2);
 
             bar.set_status(Status::Idle);
+
             assert_eq!(bar.spinner_frame, 0);
-            assert_eq!(bar.tick_counter, 0);
-            assert!(!bar.tick());
+            assert!(!bar.tick(bar.next_spinner_frame));
         }
     }
 
@@ -601,9 +628,7 @@ mod tests {
             let mut bar = test_bar();
             bar.set_status(Status::Streaming);
 
-            for _ in 0..TICKS_PER_FRAME * 3 {
-                bar.tick();
-            }
+            advance_spinner(&mut bar, 3);
 
             assert_eq!(bar.spinner(), SPINNER_FRAMES[3]);
         }
@@ -615,9 +640,9 @@ mod tests {
         #[test]
         fn idle_needs_no_repaint() {
             let mut bar = test_bar();
-            assert!(!bar.tick());
+
+            assert!(!bar.tick(bar.next_spinner_frame));
             assert_eq!(bar.spinner_frame, 0);
-            assert_eq!(bar.tick_counter, 0);
         }
 
         #[test]
@@ -628,7 +653,7 @@ mod tests {
             ]));
 
             assert_eq!(bar.current_minute, None);
-            assert!(!bar.tick());
+            assert!(!bar.tick(crate::now()));
             assert_eq!(bar.current_minute, None);
         }
 
@@ -638,9 +663,9 @@ mod tests {
             let current = local_minute();
             bar.current_minute = Some((current + 1) % 1440);
 
-            assert!(bar.tick());
+            assert!(bar.tick(crate::now()));
             assert_eq!(bar.current_minute, Some(current));
-            assert!(!bar.tick());
+            assert!(!bar.tick(crate::now()));
             assert_eq!(bar.spinner_frame, 0);
         }
 
@@ -658,7 +683,7 @@ mod tests {
                 seven_day: window(FUTURE_RESET),
             }));
 
-            assert!(bar.tick());
+            assert!(bar.tick(crate::now()));
             assert_eq!(
                 bar.rate_limits(),
                 Some(RateLimits {
@@ -666,32 +691,28 @@ mod tests {
                     seven_day: window(FUTURE_RESET),
                 }),
             );
-            assert!(!bar.tick(), "the open window stays");
+            assert!(!bar.tick(crate::now()), "the open window stays");
         }
 
         #[test]
-        fn streaming_before_threshold_does_not_advance_spinner_frame() {
+        fn streaming_keeps_the_frame_until_the_frame_interval_passes() {
             let mut bar = test_bar();
             bar.set_status(Status::Streaming);
+            let before = bar.next_spinner_frame.checked_sub(Duration::from_millis(1));
 
-            for _ in 0..TICKS_PER_FRAME - 1 {
-                assert!(!bar.tick());
-            }
-            assert_eq!(bar.tick_counter, TICKS_PER_FRAME - 1);
+            assert!(!bar.tick(before.unwrap()));
             assert_eq!(bar.spinner_frame, 0);
         }
 
         #[test]
-        fn streaming_advances_frame_at_threshold() {
+        fn streaming_advances_the_frame_once_the_interval_passes() {
             let mut bar = test_bar();
             bar.set_status(Status::Streaming);
+            let due = bar.next_spinner_frame;
 
-            for _ in 0..TICKS_PER_FRAME - 1 {
-                bar.tick();
-            }
-            assert!(bar.tick());
+            assert!(bar.tick(due));
             assert_eq!(bar.spinner_frame, 1);
-            assert_eq!(bar.tick_counter, 0);
+            assert_eq!(bar.next_spinner_frame, due + SPINNER_FRAME_INTERVAL);
         }
 
         #[test]
@@ -701,10 +722,67 @@ mod tests {
                 name: "bash".to_owned(),
             });
 
-            for _ in 0..SPINNER_FRAMES.len() * TICKS_PER_FRAME {
-                bar.tick();
-            }
+            advance_spinner(&mut bar, SPINNER_FRAMES.len());
+
             assert_eq!(bar.spinner_frame, 0);
+        }
+    }
+
+    mod next_tick {
+        use super::*;
+
+        fn bar_with(segments: Vec<StatusLineSegment>) -> StatusBar {
+            StatusBar::new(status_bar_init(segments))
+        }
+
+        #[test]
+        fn is_the_next_spinner_frame_while_busy() {
+            let mut bar = bar_with(vec![StatusLineSegment::CurrentTime]);
+            bar.set_status(Status::Streaming);
+
+            assert_eq!(bar.next_tick(crate::now()), Some(bar.next_spinner_frame));
+        }
+
+        #[test]
+        fn is_the_next_minute_for_the_current_time_segment() {
+            let bar = bar_with(vec![StatusLineSegment::CurrentTime]);
+            let now = Instant::now();
+
+            let due = bar.next_tick(now).unwrap();
+
+            assert!(due > now && due <= now + Duration::from_mins(1), "{due:?}");
+        }
+
+        #[test]
+        fn is_the_earliest_usage_limit_reset() {
+            let mut bar = bar_with(vec![StatusLineSegment::Model]);
+            let unix_now = OffsetDateTime::now_utc().unix_timestamp();
+            let window = |resets_at| {
+                Some(RateLimitWindow {
+                    utilization: 0.5,
+                    resets_at,
+                })
+            };
+            bar.set_rate_limits(Some(RateLimits {
+                five_hour: window(unix_now + 120),
+                seven_day: window(FUTURE_RESET),
+            }));
+            let now = Instant::now();
+
+            let due = bar.next_tick(now).unwrap();
+
+            let wait = due - now;
+            assert!(
+                (Duration::from_secs(119)..=Duration::from_secs(120)).contains(&wait),
+                "{wait:?}"
+            );
+        }
+
+        #[test]
+        fn never_changes_an_idle_bar_without_a_clock_or_usage_limits() {
+            let bar = bar_with(vec![StatusLineSegment::Model]);
+
+            assert_eq!(bar.next_tick(Instant::now()), None);
         }
     }
 
@@ -1047,7 +1125,9 @@ mod tests {
                 ),
                 (Status::Compacting, "Compacting · Esc to interrupt"),
                 (Status::SigningIn, "Signing in · Esc to cancel"),
+                (Status::SigningOut, "Signing out"),
                 (Status::Resuming, "Resuming"),
+                (Status::Archiving, "Archiving"),
                 (Status::Cancelling, "Cancelling"),
             ];
             for (status, label) in cases {
@@ -1076,6 +1156,23 @@ mod tests {
                 bar.status_span(&Theme::default()),
                 Span::styled("Press Ctrl+C again to exit", Theme::default().warning())
             );
+        }
+    }
+
+    mod until_next_minute {
+        use super::*;
+
+        #[test]
+        fn is_the_rest_of_the_current_minute() {
+            assert_eq!(
+                until_next_minute(time!(09:05:59.250)),
+                Duration::from_millis(750)
+            );
+        }
+
+        #[test]
+        fn is_a_whole_minute_on_the_minute() {
+            assert_eq!(until_next_minute(time!(09:05:00)), Duration::from_mins(1));
         }
     }
 }

@@ -6,16 +6,17 @@ pub(crate) mod testing;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use super::actor::{self, SessionCmd};
-use super::entry::{CompactInfo, UsageRecord};
+use super::entry::{CompactBoundary, CompactInfo, UsageRecord};
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
 use super::state::{SessionState, extract_user_text};
@@ -41,8 +42,8 @@ pub struct SessionHandle {
     artifact_dir: Arc<Path>,
     shared: Arc<SharedState>,
     /// Taken by the first `shutdown` among the clones.
-    actor_join: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
-    title_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
+    actor_join: Arc<Mutex<Option<JoinHandle<()>>>>,
+    title_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 /// State the actor and every handle clone share. Each `surface_first_*` method returns `true` on
@@ -58,7 +59,7 @@ pub(super) struct SharedState {
     /// land in between.
     manual_title_set: AtomicBool,
     /// Most recent flush error, threaded into actor-gone messages so the user sees the I/O cause.
-    last_flush_failure: std::sync::Mutex<Option<String>>,
+    last_flush_failure: Mutex<Option<String>>,
 }
 
 impl SharedState {
@@ -96,7 +97,7 @@ fn surface_once(surfaced: &AtomicBool) -> bool {
 }
 
 /// A point in the active branch that [`SessionHandle::rewind`] can move the tip back to.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Checkpoint {
     /// The message the next one chains from, `None` before the first.
     pub(super) tip: Option<Uuid>,
@@ -106,6 +107,7 @@ pub(crate) struct Checkpoint {
 }
 
 /// Ack from [`SessionHandle::record_message`].
+#[derive(Debug)]
 pub(crate) struct RecordOutcome {
     /// The branch point the message chained from, `None` when the actor is gone.
     pub(crate) checkpoint: Option<Checkpoint>,
@@ -117,12 +119,14 @@ pub(crate) struct RecordOutcome {
 
 /// Ack from the other write cmds, with the same failure surface as [`RecordOutcome`], except
 /// [`SessionHandle::archive`]'s, which reports every failure.
+#[derive(Debug)]
 pub(crate) struct Outcome {
     pub(crate) failure: Option<String>,
 }
 
 /// Ack from [`SessionHandle::compact`]. `pre_count` is the message count when the request reached
 /// the actor.
+#[derive(Debug)]
 pub(crate) struct CompactOutcome {
     pub(crate) pre_count: u32,
     /// Whether the boundary took effect: on disk, or in memory alone once persistence stopped.
@@ -220,20 +224,16 @@ impl SessionHandle {
     }
 
     /// Writes the compaction boundary and the synthetic post-compact message, then resets the chain
-    /// anchor. `tasks` is the task list the summarized transcript leaves. The caller swaps in the
-    /// summary only once [`CompactOutcome::committed`] says the boundary took effect.
+    /// anchor. The caller swaps in the summary only once [`CompactOutcome::committed`] says the
+    /// boundary took effect.
     pub(crate) async fn compact(
         &self,
-        summary: String,
-        instructions: Option<String>,
-        tasks: Vec<Task>,
+        boundary: CompactBoundary,
         synthetic_message: Message,
     ) -> CompactOutcome {
         let (ack, rx) = oneshot::channel();
         let cmd = SessionCmd::Compact {
-            summary,
-            instructions,
-            tasks,
+            boundary,
             synthetic_message,
             ack,
         };
@@ -283,7 +283,7 @@ impl SessionHandle {
             if let Err(e) = task.await
                 && e.is_panic()
             {
-                tracing::error!("title generation panicked: {e}");
+                error!("title generation panicked: {e}");
             }
         }
     }
@@ -304,9 +304,9 @@ impl SessionHandle {
             && let Err(e) = j.await
         {
             if e.is_panic() {
-                tracing::error!("session actor panicked: {e}");
+                error!("session actor panicked: {e}");
             } else {
-                tracing::warn!("session actor task cancelled: {e}");
+                warn!("session actor task cancelled: {e}");
             }
         }
     }
@@ -334,7 +334,7 @@ impl SessionHandle {
         if !self.shared.surface_first_actor_gone() {
             return None;
         }
-        tracing::warn!("session actor task is gone, so the recording was dropped");
+        warn!("session actor task is gone, so the recording was dropped");
         let cause = self.shared.last_flush_failure();
         let msg = match cause {
             Some(io_err) => format!(
@@ -524,7 +524,7 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
         session_id,
         artifact_dir,
         shared,
-        actor_join: Arc::new(std::sync::Mutex::new(Some(join))),
+        actor_join: Arc::new(Mutex::new(Some(join))),
         title_task: Arc::default(),
     }
 }
@@ -544,15 +544,24 @@ mod tests {
     };
     use crate::message::{ContentBlock, Replay, Role};
     use crate::prompt::PromptParts;
-    use crate::session::entry::{Entry, SessionInfo};
+    use crate::session::entry::{Entry, SessionInfo, TitleSource};
     use crate::session::handle::testing::record_write_call;
     use crate::session::store::listing::ProjectScope;
-    use crate::session::store::local_testing::test_session_file;
+    use crate::session::store::local_testing::{
+        saved_entries, saved_snapshot_paths, saved_titles, test_session_file,
+    };
     use crate::session::store::testing::{
         TEST_PROJECT, isolated_store, seed_test_session, test_project_dir, test_store,
     };
     use crate::tool::tasks::testing::plan;
     use crate::tool::view::{DiffChunk, EditDiff, NumberedLine};
+
+    /// The failure the first write after the actor stops reports.
+    const STOPPED: &str =
+        "session writer task has stopped. Conversation history may be incomplete.";
+
+    /// The failure every later write reports once [`STOPPED`] was surfaced.
+    const STOPPED_AGAIN: &str = "session writer task has stopped";
 
     /// Resumes the session whose file name carries `session_id`.
     fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
@@ -561,24 +570,6 @@ mod tests {
 
     mod record_message {
         use super::*;
-
-        #[tokio::test]
-        async fn writes_title_before_first_user_message() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let handle = start(&store, "m", None);
-            let sid = handle.session_id().to_owned();
-
-            handle.record_message(Message::user("First prompt")).await;
-            handle.finish(Vec::new()).await;
-            drop(handle);
-
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
-            let lines: Vec<&str> = content.lines().collect();
-            assert!(lines[0].contains(r#""type":"header""#));
-            assert!(lines[1].contains(r#""type":"title""#));
-            assert!(lines[2].contains(r#""type":"message""#));
-        }
 
         #[tokio::test]
         async fn seeds_ai_title_only_for_first_user_text() {
@@ -605,8 +596,8 @@ mod tests {
             let first = handle.record_message(Message::user("a")).await;
             let second = handle.record_message(Message::user("b")).await;
 
-            assert!(first.failure.is_some());
-            assert!(second.failure.is_none());
+            assert_eq!(first.failure.as_deref(), Some(STOPPED),);
+            assert_eq!(second.failure, None);
         }
 
         #[tokio::test]
@@ -618,10 +609,12 @@ mod tests {
 
             let first = handle.record_message(Message::user("a")).await;
 
-            let msg = first.failure.expect("actor-gone surfaces on first call");
-            assert!(
-                msg.contains("after I/O error: permission denied"),
-                "underlying flush error should be carried: {msg}",
+            assert_eq!(
+                first.failure.as_deref(),
+                Some(
+                    "session writer task has stopped after I/O error: \
+                     permission denied: /readonly/path. Conversation history may be incomplete."
+                ),
             );
         }
 
@@ -633,7 +626,13 @@ mod tests {
 
             let first = handle.record_message(Message::user("a")).await;
 
-            assert!(first.failure.is_some());
+            assert_eq!(
+                first.failure.as_deref(),
+                Some(
+                    "session writer task has stopped after I/O error: disk full. \
+                     Conversation history may be incomplete."
+                ),
+            );
         }
 
         #[tokio::test]
@@ -754,49 +753,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn all_default_acks_without_writing() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let handle = start(&store, "m", None);
-            let sid = handle.session_id().to_owned();
-            handle.record_message(Message::user("trigger")).await;
-
-            let outcome = handle
-                .record_tool_metadata_batch(vec![
-                    ("t1".to_owned(), ToolMetadata::default()),
-                    ("t2".to_owned(), ToolMetadata::default()),
-                ])
-                .await;
-            handle.finish(Vec::new()).await;
-            drop(handle);
-
-            assert!(outcome.failure.is_none());
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
-            assert!(
-                !content.contains(r#""type":"tool_result_metadata""#),
-                "all-default batch writes nothing: {content}",
-            );
-        }
-
-        #[tokio::test]
-        async fn actor_gone_surfaces_failure_once_then_silences() {
-            let handle = testing::dead("dead");
-            let item = (
-                "t1".to_owned(),
-                ToolMetadata {
-                    title: Some("f.rs".to_owned()),
-                    ..ToolMetadata::default()
-                },
-            );
-
-            let first = handle.record_tool_metadata_batch(vec![item.clone()]).await;
-            let second = handle.record_tool_metadata_batch(vec![item]).await;
-
-            assert!(first.failure.is_some(), "first call must surface failure");
-            assert!(second.failure.is_none(), "subsequent calls must be silent");
-        }
-
-        #[tokio::test]
         async fn actor_drops_ack_surfaces_actor_gone_failure() {
             // Five healthy acks cover each cmd `dispatch_outcome` sends. The actor drops the sixth.
             let handle = testing::acks_then_drops("acks-then-drops", 5);
@@ -827,8 +783,9 @@ mod tests {
                 batch_ok.failure.is_none(),
                 "ToolMetadata is acked healthily"
             );
-            assert!(
-                batch_dropped.failure.is_some(),
+            assert_eq!(
+                batch_dropped.failure.as_deref(),
+                Some(STOPPED),
                 "dropped ack surfaces actor-gone",
             );
 
@@ -859,17 +816,6 @@ mod tests {
                 session.title.as_ref().unwrap().title,
                 "Fix auth flow for mobile",
             );
-        }
-
-        #[tokio::test]
-        async fn actor_gone_surfaces_failure_once_then_silences() {
-            let handle = testing::dead("dead");
-
-            let first = handle.append_ai_title("Fix auth".to_owned()).await;
-            let second = handle.append_ai_title("Fix auth".to_owned()).await;
-
-            assert!(first.failure.is_some(), "first call must surface failure");
-            assert!(second.failure.is_none(), "subsequent calls must be silent");
         }
     }
 
@@ -1104,9 +1050,10 @@ mod tests {
 
             let outcome = handle
                 .compact(
-                    "synth summary".to_owned(),
-                    Some("focus".to_owned()),
-                    Vec::new(),
+                    CompactBoundary {
+                        instructions: Some("focus".to_owned()),
+                        ..testing::boundary("synth summary")
+                    },
                     Message::user("post"),
                 )
                 .await;
@@ -1117,14 +1064,11 @@ mod tests {
             handle.finish(Vec::new()).await;
             drop(handle);
 
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
             assert!(
-                content.contains(r#""type":"compact""#),
-                "boundary line on disk: {content}",
-            );
-            assert!(
-                content.contains(r#""summary":"synth summary""#),
-                "summary text on disk: {content}",
+                saved_entries(dir.path(), &sid)
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Compact { .. })),
+                "the committed boundary is on disk",
             );
         }
 
@@ -1132,29 +1076,23 @@ mod tests {
         async fn reports_every_failure_to_reach_the_actor() {
             async fn compact(handle: &SessionHandle) -> CompactOutcome {
                 handle
-                    .compact("s".to_owned(), None, Vec::new(), Message::user("synth"))
+                    .compact(testing::boundary("s"), Message::user("synth"))
                     .await
             }
 
             let dead = testing::dead("dead");
-            for _ in 0..2 {
+            for expected in [STOPPED, STOPPED_AGAIN] {
                 let outcome = compact(&dead).await;
                 assert_eq!(outcome.pre_count, 0, "no actor means no pre-count signal");
                 assert!(!outcome.committed);
-                assert!(
-                    outcome.failure.is_some(),
-                    "a later failure must not read as success once actor-gone was surfaced",
-                );
+                assert_eq!(outcome.failure.as_deref(), Some(expected));
             }
 
             let stalled = testing::acks_then_drops("stalled", 1);
             assert!(compact(&stalled).await.committed);
             let dropped = compact(&stalled).await;
             assert!(!dropped.committed);
-            assert!(
-                dropped.failure.is_some(),
-                "a dropped ack must surface as a failure",
-            );
+            assert_eq!(dropped.failure.as_deref(), Some(STOPPED));
             stalled.shutdown().await;
         }
     }
@@ -1184,11 +1122,16 @@ mod tests {
             let again = resume_id(&store, &session_id).unwrap();
             assert!(!again.unarchived);
             again.handle.shutdown().await;
-            let jsonl =
-                std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
+            let archive_states: Vec<_> = saved_entries(dir.path(), &session_id)
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Archive { archived, .. } => Some(*archived),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(
-                jsonl.matches(r#"{"type":"archive""#).count(),
-                2,
+                archive_states,
+                [true, false],
                 "resuming an active session appends no archive entry",
             );
         }
@@ -1196,15 +1139,16 @@ mod tests {
         #[tokio::test]
         async fn reports_every_failure_to_reach_the_actor() {
             let dead = testing::dead("dead");
-            assert!(dead.archive().await.failure.is_some());
-            assert!(
-                dead.archive().await.failure.is_some(),
+            assert_eq!(dead.archive().await.failure.as_deref(), Some(STOPPED));
+            assert_eq!(
+                dead.archive().await.failure.as_deref(),
+                Some(STOPPED_AGAIN),
                 "a second failure must not read as success once actor-gone was surfaced",
             );
 
             let stalled = testing::acks_then_drops("stalled", 1);
-            assert!(stalled.archive().await.failure.is_none());
-            assert!(stalled.archive().await.failure.is_some());
+            assert_eq!(stalled.archive().await.failure, None);
+            assert_eq!(stalled.archive().await.failure.as_deref(), Some(STOPPED));
             stalled.shutdown().await;
         }
     }
@@ -1235,7 +1179,6 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let handle = start(&store, "m", None);
-            let _sid = handle.session_id().to_owned();
             handle.finish(Vec::new()).await;
             drop(handle);
 
@@ -1264,11 +1207,10 @@ mod tests {
             resumed.finish(Vec::new()).await;
             drop(resumed);
 
-            let content =
-                std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
-            let summary_count = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"summary""#))
+            let entries = saved_entries(dir.path(), &session_id);
+            let summary_count = entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Summary { .. }))
                 .count();
             assert_eq!(summary_count, 1);
         }
@@ -1280,8 +1222,8 @@ mod tests {
             let first = handle.finish(Vec::new()).await;
             let second = handle.finish(Vec::new()).await;
 
-            assert!(first.failure.is_some(), "first call must surface failure");
-            assert!(second.failure.is_none(), "subsequent calls must be silent");
+            assert_eq!(first.failure.as_deref(), Some(STOPPED),);
+            assert_eq!(second.failure, None);
         }
 
         #[tokio::test]
@@ -1307,15 +1249,14 @@ mod tests {
             handle.finish(tracker.snapshot_all()).await;
             drop(handle);
 
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
-            let snapshot_paths: std::collections::HashSet<std::path::PathBuf> = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"file_snapshot""#))
-                .map(|l| {
-                    let v: serde_json::Value = serde_json::from_str(l).unwrap();
-                    std::path::PathBuf::from(v["path"].as_str().unwrap())
-                })
-                .collect();
+            let snapshot_paths: std::collections::HashSet<std::path::PathBuf> =
+                saved_entries(dir.path(), &sid)
+                    .into_iter()
+                    .filter_map(|entry| match entry {
+                        Entry::FileSnapshot { snapshot } => Some(snapshot.path),
+                        _ => None,
+                    })
+                    .collect();
             assert_eq!(
                 snapshot_paths, expected_paths,
                 "every tracked file lands as its own FileSnapshot",
@@ -1337,18 +1278,26 @@ mod tests {
             let failure = handle.finalize(Vec::new()).await;
 
             assert!(failure.is_none(), "healthy finalize reports no failure");
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+            let entries = saved_entries(dir.path(), &sid);
             assert!(
-                content.contains(r#""type":"summary""#),
-                "summary lands on disk: {content}",
+                matches!(
+                    entries.last(),
+                    Some(Entry::Summary {
+                        message_count: 1,
+                        ..
+                    })
+                ),
+                "summary lands on disk: {entries:?}",
             );
         }
 
         #[tokio::test]
         async fn fails_when_actor_dead() {
             let handle = testing::dead("dead");
+
             let failure = handle.finalize(Vec::new()).await;
-            assert!(failure.is_some(), "dead handle finalize surfaces failure");
+
+            assert_eq!(failure.as_deref(), Some(STOPPED));
         }
 
         #[tokio::test]
@@ -1387,10 +1336,16 @@ mod tests {
             let failure = handle.finalize(Vec::new()).await;
 
             assert_eq!(failure, None);
-            let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+            let entries = saved_entries(dir.path(), &sid);
             assert!(
-                content.contains(r#""type":"summary""#),
-                "summary lands on disk: {content}",
+                matches!(
+                    entries.last(),
+                    Some(Entry::Summary {
+                        message_count: 1,
+                        ..
+                    })
+                ),
+                "summary lands on disk: {entries:?}",
             );
         }
     }
@@ -1408,11 +1363,12 @@ mod tests {
             handle.record_message(Message::user("hello")).await;
             handle.shutdown().await;
 
-            let path = test_session_file(dir.path(), &sid);
-            let content = std::fs::read_to_string(path).unwrap();
+            let entries = saved_entries(dir.path(), &sid);
             assert!(
-                content.contains(r#""type":"message""#),
-                "actor must have flushed before shutdown returned: {content}",
+                entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Message { .. })),
+                "actor must have flushed before shutdown returned: {entries:?}",
             );
         }
 
@@ -1511,24 +1467,20 @@ mod tests {
                 "healthy roll reports no failure",
             );
 
-            let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
-                .expect("old session file lands on disk");
+            let old = saved_entries(dir.path(), &original_id);
             assert!(
-                old_jsonl.contains(r#""type":"summary""#),
-                "old JSONL gets a summary entry: {old_jsonl}",
-            );
-            assert!(
-                old_jsonl.contains(&original_id),
-                "old JSONL header carries the original id: {old_jsonl}",
+                matches!(&old[..], [Entry::Header(header), .., Entry::Summary { .. }]
+                    if header.session_id == original_id),
+                "old JSONL keeps its header and gets a summary entry: {old:?}",
             );
 
             session.record_message(Message::user("rolled")).await;
             session.finish(Vec::new()).await;
-            let new_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &outcome.new_id))
-                .expect("new session file lands on disk");
+            let new = saved_entries(dir.path(), &outcome.new_id);
             assert!(
-                new_jsonl.contains(r#""git_branch":"feat/x""#),
-                "new JSONL header records the branch: {new_jsonl}",
+                matches!(new.first(), Some(Entry::Header(header))
+                    if header.git_branch.as_deref() == Some("feat/x")),
+                "new JSONL header records the branch: {new:?}",
             );
         }
 
@@ -1554,11 +1506,10 @@ mod tests {
             .await;
 
             assert_eq!(outcome.finalize_failure, None);
-            let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
-                .expect("old session file lands on disk");
-            assert!(
-                old_jsonl.contains("seed.txt"),
-                "snapshot survived into old JSONL: {old_jsonl}",
+            assert_eq!(
+                saved_snapshot_paths(&saved_entries(dir.path(), &original_id)),
+                [seed.as_path()],
+                "snapshot survived into the old JSONL",
             );
         }
     }
@@ -1595,8 +1546,11 @@ mod tests {
                 "handle now points at target"
             );
             assert_eq!(
-                outcome.transcript.messages.len(),
-                2,
+                outcome.transcript.messages,
+                [
+                    Message::user("target prompt"),
+                    Message::assistant("target reply")
+                ],
                 "resumed payload carries the target's transcript",
             );
             assert!(
@@ -1604,11 +1558,16 @@ mod tests {
                 "healthy roll_into reports no finalize failure",
             );
 
-            let live_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
-                .expect("old (live) session file lands on disk");
+            let entries = saved_entries(dir.path(), &original_id);
             assert!(
-                live_jsonl.contains(r#""type":"summary""#),
-                "old JSONL gets a summary: {live_jsonl}",
+                matches!(
+                    entries.last(),
+                    Some(Entry::Summary {
+                        message_count: 1,
+                        ..
+                    })
+                ),
+                "old JSONL gets a summary: {entries:?}",
             );
         }
 
@@ -1621,8 +1580,14 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let missing = dir.path().join("missing-target.jsonl");
-            let result = roll_into(&mut session, &store, Vec::new(), &missing).await;
-            assert!(result.is_err(), "missing target file must error");
+            let err = roll_into(&mut session, &store, Vec::new(), &missing)
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                format!("failed to open {}", missing.display())
+            );
             assert_eq!(
                 session.session_id(),
                 original_id,
@@ -1677,11 +1642,10 @@ mod tests {
                 .await
                 .expect("roll_into must succeed");
 
-            let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
-                .expect("old session file persists");
-            assert!(
-                old_jsonl.contains("live.txt"),
-                "live tracker snapshot drains into old JSONL: {old_jsonl}",
+            assert_eq!(
+                saved_snapshot_paths(&saved_entries(dir.path(), &original_id)),
+                [live_seed.as_path()],
+                "live tracker snapshot drains into the old JSONL",
             );
             let loaded: Vec<_> = outcome
                 .transcript
@@ -1772,30 +1736,17 @@ mod tests {
             resumed.handle.finish(Vec::new()).await;
             resumed.handle.shutdown().await;
 
-            let content =
-                std::fs::read_to_string(test_session_file(dir.path(), session_id)).unwrap();
-            let title_lines: Vec<&str> = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"title""#))
-                .collect();
+            let entries = saved_entries(dir.path(), session_id);
             assert_eq!(
-                title_lines.len(),
-                1,
-                "next message must NOT add a FirstPrompt title \
-                 alongside the existing one: {content}",
+                saved_titles(&entries),
+                [("User-named", TitleSource::UserProvided)],
+                "next message must not add a FirstPrompt title alongside the existing one",
             );
-            assert!(
-                title_lines[0].contains("user_provided") && title_lines[0].contains("User-named"),
-                "the lone title is the original UserProvided one: {content}",
-            );
-            let message_count = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"message""#))
+            let message_count = entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Message { .. }))
                 .count();
-            assert_eq!(
-                message_count, 1,
-                "the resumed message must reach disk: {content}",
-            );
+            assert_eq!(message_count, 1, "the resumed message must reach disk");
         }
 
         #[tokio::test]
@@ -1806,7 +1757,11 @@ mod tests {
             original.finish(Vec::new()).await;
             drop(original);
 
-            assert!(resume_id(&store, &session_id).is_err());
+            let err = resume_id(&store, &session_id)
+                .err()
+                .expect("a session with no messages must not resume");
+
+            assert_eq!(err.to_string(), format!("session not found: {session_id}"));
         }
 
         #[tokio::test]
@@ -1818,11 +1773,11 @@ mod tests {
             original
                 .record_message(Message {
                     role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "unresolved".to_owned(),
-                        name: "bash".to_owned(),
-                        input: serde_json::Value::Null,
-                    }],
+                    content: vec![ContentBlock::tool_use(
+                        "unresolved",
+                        "bash",
+                        serde_json::Value::Null,
+                    )],
                 })
                 .await;
             drop(original);
@@ -1846,22 +1801,22 @@ mod tests {
             original
                 .record_message(Message {
                     role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "unresolved".to_owned(),
-                        name: "bash".to_owned(),
-                        input: serde_json::Value::Null,
-                    }],
+                    content: vec![ContentBlock::tool_use(
+                        "unresolved",
+                        "bash",
+                        serde_json::Value::Null,
+                    )],
                 })
                 .await;
             original.shutdown().await;
 
             let ResumedSession { transcript, .. } = resume_id(&store, &session_id).unwrap();
+
             assert_eq!(
-                transcript.messages.len(),
-                1,
-                "assistant-only-tool-use should be dropped"
+                transcript.messages,
+                [Message::user("do X")],
+                "assistant-only-tool-use should be dropped",
             );
-            assert_eq!(transcript.messages[0].role, Role::User);
         }
 
         #[tokio::test]
@@ -1880,12 +1835,7 @@ mod tests {
             resumed.finish(Vec::new()).await;
             drop(resumed);
 
-            let content =
-                std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
-            let entries: Vec<Entry> = content
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
+            let entries = saved_entries(dir.path(), &session_id);
 
             let msg_uuids: Vec<_> = entries
                 .iter()
@@ -2005,6 +1955,7 @@ mod tests {
 
     mod session_format {
         use super::*;
+        use crate::protocol::CompactTrigger;
 
         /// Writes a session holding every entry type and content block, with messages, contexts,
         /// and sidecars after its compaction, since a resume drops those from before it. Returns
@@ -2034,9 +1985,12 @@ mod tests {
             session.record_usage(vec![usage("1h", 2)]).await;
             session
                 .compact(
-                    "Asked to edit f.rs.".to_owned(),
-                    Some("focus on f.rs".to_owned()),
-                    plan(),
+                    CompactBoundary {
+                        summary: "Asked to edit f.rs.".to_owned(),
+                        instructions: Some("focus on f.rs".to_owned()),
+                        tasks: plan(),
+                        trigger: CompactTrigger::Manual,
+                    },
                     Message::user("Summary: asked to edit f.rs."),
                 )
                 .await;
@@ -2106,43 +2060,32 @@ mod tests {
             session
                 .record_message(Message {
                     role: Role::User,
-                    content: vec![tool_result("t1", "Edited f.rs.", false)],
+                    content: vec![ContentBlock::tool_result("t1", "Edited f.rs.", false)],
                 })
                 .await;
             session
-                .record_tool_metadata_batch(vec![(
-                    "t1".to_owned(),
-                    ToolMetadata {
-                        title: Some("Edited f.rs".to_owned()),
-                        diff: Some(EditDiff {
-                            chunk: DiffChunk {
-                                old: vec![NumberedLine {
-                                    number: 1,
-                                    text: "fn main() {}".to_owned(),
-                                }],
-                                new: vec![NumberedLine {
-                                    number: 1,
-                                    text: "fn run() {}".to_owned(),
-                                }],
-                            },
-                            locations: vec![1],
-                        }),
-                        ..ToolMetadata::default()
-                    },
-                )])
+                .record_tool_metadata_batch(vec![("t1".to_owned(), edit_metadata())])
                 .await;
             session
                 .record_message(Message {
                     role: Role::Assistant,
                     content: vec![
-                        tool_use(
+                        ContentBlock::tool_use(
                             "t2",
                             "read",
                             serde_json::json!({ "file_path": "g.rs", "limit": 20 }),
                         ),
-                        tool_use("t3", "glob", serde_json::json!({ "pattern": "*.rs" })),
-                        tool_use("t4", "bash", serde_json::json!({ "command": "cargo test" })),
-                        tool_use(
+                        ContentBlock::tool_use(
+                            "t3",
+                            "glob",
+                            serde_json::json!({ "pattern": "*.rs" }),
+                        ),
+                        ContentBlock::tool_use(
+                            "t4",
+                            "bash",
+                            serde_json::json!({ "command": "cargo test" }),
+                        ),
+                        ContentBlock::tool_use(
                             "t5",
                             "tasks",
                             serde_json::json!({ "tasks": [
@@ -2157,10 +2100,14 @@ mod tests {
                 .record_message(Message {
                     role: Role::User,
                     content: vec![
-                        tool_result("t2", "fn main() {}", false),
-                        tool_result("t3", "g.rs", false),
-                        tool_result("t4", "test result: FAILED", true),
-                        tool_result("t5", "Updated the task list: 1 of 2 completed.", false),
+                        ContentBlock::tool_result("t2", "fn main() {}", false),
+                        ContentBlock::tool_result("t3", "g.rs", false),
+                        ContentBlock::tool_result("t4", "test result: FAILED", true),
+                        ContentBlock::tool_result(
+                            "t5",
+                            "Updated the task list: 1 of 2 completed.",
+                            false,
+                        ),
                     ],
                 })
                 .await;
@@ -2183,6 +2130,26 @@ mod tests {
                     ),
                 ])
                 .await;
+        }
+
+        fn edit_metadata() -> ToolMetadata {
+            ToolMetadata {
+                title: Some("Edited f.rs".to_owned()),
+                diff: Some(EditDiff {
+                    chunk: DiffChunk {
+                        old: vec![NumberedLine {
+                            number: 1,
+                            text: "fn main() {}".to_owned(),
+                        }],
+                        new: vec![NumberedLine {
+                            number: 1,
+                            text: "fn run() {}".to_owned(),
+                        }],
+                    },
+                    locations: vec![1],
+                }),
+                ..ToolMetadata::default()
+            }
         }
 
         fn assistant_with_every_block() -> Message {
@@ -2216,24 +2183,12 @@ mod tests {
                     ContentBlock::Text {
                         text: "Renaming main.".to_owned(),
                     },
-                    tool_use("t1", "edit", serde_json::json!({ "file_path": "f.rs" })),
+                    ContentBlock::tool_use(
+                        "t1",
+                        "edit",
+                        serde_json::json!({ "file_path": "f.rs" }),
+                    ),
                 ],
-            }
-        }
-
-        fn tool_use(id: &str, name: &str, input: serde_json::Value) -> ContentBlock {
-            ContentBlock::ToolUse {
-                id: id.to_owned(),
-                name: name.to_owned(),
-                input,
-            }
-        }
-
-        fn tool_result(tool_use_id: &str, content: &str, is_error: bool) -> ContentBlock {
-            ContentBlock::ToolResult {
-                tool_use_id: tool_use_id.to_owned(),
-                content: content.to_owned(),
-                is_error,
             }
         }
 
@@ -2308,6 +2263,7 @@ mod tests {
                     "pre_message_count": compact.pre_message_count,
                     "instructions": compact.instructions,
                     "tasks": compact.tasks,
+                    "trigger": compact.trigger,
                 })),
                 "context": transcript.context,
                 "messages": transcript.messages,

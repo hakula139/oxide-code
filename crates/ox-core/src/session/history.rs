@@ -31,6 +31,7 @@ pub(crate) fn interactions(
         summary: info.summary.clone(),
         pre_count: info.pre_message_count,
         instructions: info.instructions.clone(),
+        trigger: info.trigger,
     }];
     out.extend(walk_transcript(
         &post_compact_messages(messages),
@@ -200,7 +201,7 @@ mod tests {
 
     use super::*;
     use crate::message::Replay;
-    use crate::protocol::testing;
+    use crate::protocol::{CompactTrigger, testing};
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::DEFAULT_TOOL_ICON;
     use crate::tool::edit::EditTool;
@@ -221,6 +222,7 @@ mod tests {
                 pre_message_count: 4,
                 instructions: Some("focus on auth".to_owned()),
                 tasks: plan(),
+                trigger: Some(CompactTrigger::Auto),
             }
         }
 
@@ -229,6 +231,7 @@ mod tests {
                 summary: "Kept the important decisions.".to_owned(),
                 pre_count: 4,
                 instructions: Some("focus on auth".to_owned()),
+                trigger: Some(CompactTrigger::Auto),
             }
         }
 
@@ -304,22 +307,6 @@ mod tests {
 
         fn walk(messages: &[Message]) -> Vec<Interaction> {
             walk_transcript(messages, &HashMap::new(), &tools(), Path::new("/repo"))
-        }
-
-        fn tool_use(id: &str, name: &str, input: serde_json::Value) -> ContentBlock {
-            ContentBlock::ToolUse {
-                id: id.to_owned(),
-                name: name.to_owned(),
-                input,
-            }
-        }
-
-        fn tool_result_block(id: &str, content: &str, is_error: bool) -> ContentBlock {
-            ContentBlock::ToolResult {
-                tool_use_id: id.to_owned(),
-                content: content.to_owned(),
-                is_error,
-            }
         }
 
         fn call(
@@ -440,12 +427,16 @@ mod tests {
                 },
                 Message {
                     role: Role::Assistant,
-                    content: vec![tool_use("t1", "bash", serde_json::json!({"command": "ls"}))],
+                    content: vec![ContentBlock::tool_use(
+                        "t1",
+                        "bash",
+                        serde_json::json!({"command": "ls"}),
+                    )],
                 },
                 Message {
                     role: Role::User,
                     content: vec![
-                        tool_result_block("t1", "interrupted", true),
+                        ContentBlock::tool_result("t1", "interrupted", true),
                         text(INTERRUPTION_MARKER),
                         text("what is 7 times 6?"),
                     ],
@@ -476,11 +467,15 @@ mod tests {
                 Message::user("ask"),
                 Message {
                     role: Role::Assistant,
-                    content: vec![tool_use("t1", "bash", serde_json::json!({"command": "ls"}))],
+                    content: vec![ContentBlock::tool_use(
+                        "t1",
+                        "bash",
+                        serde_json::json!({"command": "ls"}),
+                    )],
                 },
                 Message {
                     role: Role::User,
-                    content: vec![tool_result_block("t1", "output", false)],
+                    content: vec![ContentBlock::tool_result("t1", "output", false)],
                 },
                 Message::assistant("reply"),
             ];
@@ -501,15 +496,15 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     content: vec![
-                        tool_use("t1", "bash", serde_json::json!({"command": "ls"})),
-                        tool_use("t2", "bash", serde_json::json!({"command": "pwd"})),
+                        ContentBlock::tool_use("t1", "bash", serde_json::json!({"command": "ls"})),
+                        ContentBlock::tool_use("t2", "bash", serde_json::json!({"command": "pwd"})),
                     ],
                 },
                 Message {
                     role: Role::User,
                     content: vec![
-                        tool_result_block("t1", "file a", false),
-                        tool_result_block("t2", "/repo", false),
+                        ContentBlock::tool_result("t1", "file a", false),
+                        ContentBlock::tool_result("t2", "/repo", false),
                     ],
                 },
             ];
@@ -548,11 +543,11 @@ mod tests {
             let messages = [
                 Message {
                     role: Role::Assistant,
-                    content: vec![tool_use("e1", "edit", input)],
+                    content: vec![ContentBlock::tool_use("e1", "edit", input)],
                 },
                 Message {
                     role: Role::User,
-                    content: vec![tool_result_block("e1", "Edited.", false)],
+                    content: vec![ContentBlock::tool_result("e1", "Edited.", false)],
                 },
             ];
             let metadata = HashMap::from([(
@@ -584,13 +579,17 @@ mod tests {
             let messages = [
                 Message {
                     role: Role::Assistant,
-                    content: vec![tool_use("t1", "bash", serde_json::json!({"command": "ls"}))],
+                    content: vec![ContentBlock::tool_use(
+                        "t1",
+                        "bash",
+                        serde_json::json!({"command": "ls"}),
+                    )],
                 },
                 Message {
                     role: Role::User,
                     content: vec![
-                        tool_result_block("t1", "file a", false),
-                        tool_result_block("ghost", "stale", true),
+                        ContentBlock::tool_result("t1", "file a", false),
+                        ContentBlock::tool_result("ghost", "stale", true),
                     ],
                 },
             ];
@@ -609,7 +608,7 @@ mod tests {
             // Sanitizing drops such a message on resume, but the projection still renders one.
             let messages = [Message {
                 role: Role::User,
-                content: vec![tool_result_block("missing", "stderr", true)],
+                content: vec![ContentBlock::tool_result("missing", "stderr", true)],
             }];
             let metadata = HashMap::from([(
                 "missing".to_owned(),
@@ -640,7 +639,11 @@ mod tests {
             let messages = [Message {
                 role: Role::Assistant,
                 content: vec![
-                    tool_use("c1", "custom_tool", serde_json::json!({"arg": "value"})),
+                    ContentBlock::tool_use(
+                        "c1",
+                        "custom_tool",
+                        serde_json::json!({"arg": "value"}),
+                    ),
                     ContentBlock::ServerToolUse {
                         id: "srv1".to_owned(),
                         name: "web_search".to_owned(),
@@ -715,7 +718,7 @@ mod tests {
                     ContentBlock::Text {
                         text: "Let me check".to_owned(),
                     },
-                    tool_use("t1", "bash", serde_json::json!({"command": "ls"})),
+                    ContentBlock::tool_use("t1", "bash", serde_json::json!({"command": "ls"})),
                     ContentBlock::Text {
                         text: "Done".to_owned(),
                     },
@@ -786,7 +789,11 @@ mod tests {
                         thinking: "Running the suite.".to_owned(),
                         replay: Replay::with_model(MODEL, "sig"),
                     },
-                    tool_use("t1", "bash", serde_json::json!({"command": "cargo test"})),
+                    ContentBlock::tool_use(
+                        "t1",
+                        "bash",
+                        serde_json::json!({"command": "cargo test"}),
+                    ),
                 ],
             }];
             assert_eq!(

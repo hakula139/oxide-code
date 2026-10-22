@@ -88,11 +88,10 @@ mod tests {
         #[test]
         fn truncates_long_paths_with_stable_hash_suffix() {
             let long = "/".to_owned() + &"a".repeat(200);
+
             let out = project_dir_name(Path::new(&long));
-            assert_eq!(out.chars().count(), MAX_PROJECT_DIR_LEN);
-            let suffix = &out[out.len() - (HASH_SUFFIX_HEX_LEN + 1)..];
-            assert!(suffix.starts_with('-'));
-            assert!(suffix[1..].chars().all(|c| c.is_ascii_hexdigit()));
+
+            assert_eq!(out, format!("{}-2067408b9eac3941", "a".repeat(63)));
         }
 
         #[test]
@@ -101,12 +100,6 @@ mod tests {
             let a = project_dir_name(Path::new(&(base.clone() + "/alpha")));
             let b = project_dir_name(Path::new(&(base + "/beta")));
             assert_ne!(a, b, "hash suffix must disambiguate");
-        }
-
-        #[test]
-        fn is_deterministic() {
-            let p = Path::new("/some/deterministic/path");
-            assert_eq!(project_dir_name(p), project_dir_name(p));
         }
 
         #[cfg(unix)]

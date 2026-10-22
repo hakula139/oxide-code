@@ -45,11 +45,20 @@ pub(crate) trait Modal: Send {
     /// no-op. Pickers override it to refresh state the nested modal changed.
     fn on_focus_regained(&mut self) {}
 
-    /// Fires on every frame tick while the modal is on top, for state that changes with time, such
-    /// as a notice that expires or rows loading in the background. Returns whether the modal needs
-    /// a repaint. Default no-op.
+    /// Fires on frame ticks while the modal is on top, for state that changes with time, such as a
+    /// notice that expires or rows loading in the background.
+    /// Returns whether the modal needs a repaint.
+    /// An override reports when it next has work through [`Self::next_tick`], since an idle loop
+    /// ticks only then.
+    /// Default no-op.
     fn tick(&mut self, _now: Instant) -> bool {
         false
+    }
+
+    /// When [`Self::tick`] next has work, or `None` when only input changes the modal.
+    /// A time at or before `now` asks for a tick every frame.
+    fn next_tick(&self, _now: Instant) -> Option<Instant> {
+        None
     }
 
     /// Fires when the modal leaves the stack without submitting: universal-cancel (Esc / Ctrl+C),
@@ -226,6 +235,11 @@ impl ModalStack {
         self.stack.last_mut().is_some_and(|top| top.tick(now))
     }
 
+    /// When the top modal next needs a tick. See [`Modal::next_tick`].
+    pub(crate) fn next_tick(&self, now: Instant) -> Option<Instant> {
+        self.stack.last()?.next_tick(now)
+    }
+
     /// Pops the top entry and notifies the new top through [`Modal::on_focus_regained`].
     fn pop_and_notify(&mut self) {
         self.stack.pop();
@@ -316,6 +330,8 @@ pub(crate) mod testing {
         pub(crate) focus_regained_count: Arc<AtomicU32>,
         /// Ticks received, shared like `focus_regained_count`. Each tick asks for a repaint.
         pub(crate) tick_count: Arc<AtomicU32>,
+        /// Deadline returned from [`Modal::next_tick`].
+        pub(crate) next_tick: Option<Instant>,
     }
 
     impl ScriptedModal {
@@ -334,6 +350,7 @@ pub(crate) mod testing {
                 declared_height: 3,
                 focus_regained_count: Arc::new(AtomicU32::new(0)),
                 tick_count: Arc::new(AtomicU32::new(0)),
+                next_tick: None,
             }
         }
     }
@@ -374,6 +391,10 @@ pub(crate) mod testing {
             true
         }
 
+        fn next_tick(&self, _now: Instant) -> Option<Instant> {
+            self.next_tick
+        }
+
         fn on_cancel(&mut self) -> Option<ModalAction> {
             self.cancel_action.take()
         }
@@ -392,6 +413,7 @@ pub(crate) mod testing {
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     use crossterm::event::KeyModifiers;
 
@@ -900,6 +922,25 @@ mod tests {
 
             stack.push(Box::new(BareModal));
             assert!(!stack.tick(Instant::now()));
+        }
+    }
+
+    mod next_tick {
+        use super::*;
+
+        #[test]
+        fn follows_only_the_top_modal() {
+            let now = Instant::now();
+            let mut bottom = ScriptedModal::new(ModalAction::Cancelled);
+            bottom.next_tick = Some(now + Duration::from_secs(3));
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(bottom));
+            stack.push(Box::new(BareModal));
+            assert_eq!(stack.next_tick(now), None);
+
+            stack.pop_and_notify();
+
+            assert_eq!(stack.next_tick(now), Some(now + Duration::from_secs(3)));
         }
     }
 }

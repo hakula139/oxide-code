@@ -10,14 +10,15 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use uuid::Uuid;
 
-use super::entry::{Entry, TitleSource, UsageRecord};
+use super::entry::{CompactBoundary, Entry, TitleSource, UsageRecord};
 use super::handle::{Checkpoint, CompactOutcome, Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
-use crate::tool::tasks::Task;
+
+// ── SessionCmd ──
 
 /// Cross-task protocol for [`super::handle::SessionHandle`]. Acks fire after the batch flush.
 pub(super) enum SessionCmd {
@@ -61,9 +62,7 @@ pub(super) enum SessionCmd {
     /// Writes a compaction boundary and the synthetic post-compact message, ends its batch, and
     /// acks the pre-compact message count.
     Compact {
-        summary: String,
-        instructions: Option<String>,
-        tasks: Vec<Task>,
+        boundary: CompactBoundary,
         synthetic_message: Message,
         ack: oneshot::Sender<CompactOutcome>,
     },
@@ -71,6 +70,8 @@ pub(super) enum SessionCmd {
     /// waiting for orphaned clones to drop.
     Shutdown { ack: oneshot::Sender<()> },
 }
+
+// ── Actor Loop ──
 
 /// Pending ack for one absorbed cmd, fired once the batch flush returns.
 enum PendingAck {
@@ -207,15 +208,13 @@ impl Batch {
                 BatchFlow::Continue
             }
             SessionCmd::Compact {
-                summary,
-                instructions,
-                tasks,
+                boundary,
                 synthetic_message,
                 ack,
             } => {
                 let pre_count = state.message_count();
                 let (compact_entries, synthetic_uuid) =
-                    state.compact_entries(&summary, instructions, tasks, synthetic_message, now);
+                    state.compact_entries(boundary, synthetic_message, now);
                 self.entries.extend(compact_entries);
                 self.acks.push(PendingAck::Compact {
                     ack,
@@ -364,9 +363,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::session::entry::TitleSource;
+    use crate::session::handle::testing::boundary;
     use crate::session::state::MAX_UNWRITTEN_BYTES;
     use crate::session::store::SessionWriter;
-    use crate::session::store::local_testing::test_session_file;
+    use crate::session::store::local_testing::{saved_entries, saved_titles, test_session_file};
     use crate::session::store::testing::{test_project_dir, test_store};
 
     mod run {
@@ -434,12 +435,7 @@ mod tests {
 
             drive(state, vec![rec, fin]).await;
 
-            let path = test_session_file(dir.path(), &session_id);
-            let content = std::fs::read_to_string(path).unwrap();
-            let entries: Vec<Entry> = content
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
+            let entries = saved_entries(dir.path(), &session_id);
             assert!(
                 matches!(
                     entries.as_slice(),
@@ -453,7 +449,7 @@ mod tests {
                         },
                     ]
                 ),
-                "{content}",
+                "{entries:?}",
             );
         }
 
@@ -506,11 +502,12 @@ mod tests {
 
             let outcome = meta_rx.await.unwrap();
             assert!(outcome.failure.is_none());
-            let path = test_session_file(dir.path(), &session_id);
-            let content = std::fs::read_to_string(path).unwrap();
+            let entries = saved_entries(dir.path(), &session_id);
             assert!(
-                !content.contains(r#""type":"tool_result_metadata""#),
-                "default metadata must not be written: {content}",
+                !entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::ToolResultMetadata { .. })),
+                "default metadata must not be written: {entries:?}",
             );
         }
 
@@ -584,37 +581,23 @@ mod tests {
 
             drive_with(state, renamed(), vec![manual_cmd, rec, fin]).await;
 
-            let path = test_session_file(dir.path(), &session_id);
-            let content = std::fs::read_to_string(path).unwrap();
-            let lines: Vec<&str> = content.lines().collect();
-            let header_idx = lines
-                .iter()
-                .position(|l| l.contains(r#""type":"header""#))
-                .expect("header line");
-            let title_idx = lines
-                .iter()
-                .position(|l| l.contains(r#""type":"title""#))
-                .expect("title line");
-            let message_idx = lines
-                .iter()
-                .position(|l| l.contains(r#""type":"message""#))
-                .expect("message line");
+            let entries = saved_entries(dir.path(), &session_id);
             assert!(
-                header_idx < title_idx && title_idx < message_idx,
-                "deferred title must flush AFTER header and BEFORE message: {content}",
+                matches!(
+                    entries[..],
+                    [
+                        Entry::Header(_),
+                        Entry::Title { .. },
+                        Entry::Message { .. },
+                        ..
+                    ]
+                ),
+                "deferred title must flush after the header and before the message: {entries:?}",
             );
-            let title_count = lines
-                .iter()
-                .filter(|l| l.contains(r#""type":"title""#))
-                .count();
             assert_eq!(
-                title_count, 1,
-                "deferred title replaces FirstPrompt: {content}"
-            );
-            assert!(
-                lines[title_idx].contains("user_provided")
-                    && lines[title_idx].contains("User-named"),
-                "the lone title is the user-provided one: {content}",
+                saved_titles(&entries),
+                [("User-named", TitleSource::UserProvided)],
+                "deferred title replaces FirstPrompt",
             );
         }
 
@@ -639,24 +622,11 @@ mod tests {
 
             drive_with(state, renamed(), vec![a, b, rec, fin]).await;
 
-            let path = test_session_file(dir.path(), &session_id);
-            let content = std::fs::read_to_string(path).unwrap();
-            let title_lines: Vec<&str> = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"title""#))
-                .collect();
+            let entries = saved_entries(dir.path(), &session_id);
             assert_eq!(
-                title_lines.len(),
-                1,
-                "second rename overwrites the first: {content}"
-            );
-            assert!(
-                title_lines[0].contains("Final name"),
-                "last-wins semantic: {content}",
-            );
-            assert!(
-                !content.contains("First name"),
-                "earlier rename must not reach disk: {content}",
+                saved_titles(&entries),
+                [("Final name", TitleSource::UserProvided)],
+                "second rename overwrites the first",
             );
         }
 
@@ -691,26 +661,14 @@ mod tests {
             drop(tx);
             actor.await.unwrap();
 
-            let path = test_session_file(dir.path(), &session_id);
-            let content = std::fs::read_to_string(path).unwrap();
-            let title_lines: Vec<&str> = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"title""#))
-                .collect();
+            let entries = saved_entries(dir.path(), &session_id);
             assert_eq!(
-                title_lines.len(),
-                2,
-                "FirstPrompt + UserProvided, so AI must not append a third: {content}",
-            );
-            assert!(
-                title_lines
-                    .iter()
-                    .any(|l| l.contains("user_provided") && l.contains("User-picked title")),
-                "manual title must persist with `user_provided` source: {content}",
-            );
-            assert!(
-                !content.contains("AI title that should lose"),
-                "AI title must not appear on disk after manual override: {content}",
+                saved_titles(&entries),
+                [
+                    ("Fix login", TitleSource::FirstPrompt),
+                    ("User-picked title", TitleSource::UserProvided),
+                ],
+                "AI title must not reach disk after a manual override",
             );
         }
 
@@ -762,11 +720,9 @@ mod tests {
 
             drive(state, vec![rec, f1, f2]).await;
 
-            let path = test_session_file(dir.path(), &session_id);
-            let content = std::fs::read_to_string(path).unwrap();
-            let summary_count = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"summary""#))
+            let summary_count = saved_entries(dir.path(), &session_id)
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Summary { .. }))
                 .count();
             assert_eq!(summary_count, 1, "second finish must not duplicate");
         }
@@ -781,37 +737,42 @@ mod tests {
             let (rec_b, _) = record_cmd("user two");
             let (compact_ack, _compact_rx) = oneshot::channel();
             let compact_cmd = SessionCmd::Compact {
-                summary: "synth summary".to_owned(),
-                instructions: Some("focus on auth".to_owned()),
-                tasks: Vec::new(),
+                boundary: CompactBoundary {
+                    instructions: Some("focus on auth".to_owned()),
+                    ..boundary("synth summary")
+                },
                 synthetic_message: Message::user("post"),
                 ack: compact_ack,
             };
 
             drive(state, vec![rec_a, rec_b, compact_cmd]).await;
 
-            let path = test_session_file(dir.path(), &session_id);
-            let content = std::fs::read_to_string(path).unwrap();
-            let compact_count = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"compact""#))
-                .count();
-            let message_count = content
-                .lines()
-                .filter(|l| l.contains(r#""type":"message""#))
-                .count();
-            assert_eq!(compact_count, 1, "exactly one boundary written: {content}");
-            assert_eq!(
-                message_count, 3,
-                "two recorded + one synthetic continuation: {content}",
-            );
+            let entries = saved_entries(dir.path(), &session_id);
+            let boundaries: Vec<_> = entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Compact {
+                        summary,
+                        instructions,
+                        ..
+                    } => Some((summary.as_str(), instructions.as_deref())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(boundaries, [("synth summary", Some("focus on auth"))]);
             assert!(
-                content.contains(r#""summary":"synth summary""#),
-                "boundary carries the summary text: {content}",
-            );
-            assert!(
-                content.contains(r#""instructions":"focus on auth""#),
-                "boundary carries the focus instructions: {content}",
+                matches!(
+                    entries[..],
+                    [
+                        Entry::Header(_),
+                        Entry::Title { .. },
+                        Entry::Message { .. },
+                        Entry::Message { .. },
+                        Entry::Compact { .. },
+                        Entry::Message { .. },
+                    ]
+                ),
+                "the synthetic continuation follows its boundary: {entries:?}",
             );
         }
 
@@ -824,9 +785,7 @@ mod tests {
             let (rec_b, _) = record_cmd("two");
             let (compact_ack, compact_rx) = oneshot::channel();
             let compact_cmd = SessionCmd::Compact {
-                summary: "s".to_owned(),
-                instructions: None,
-                tasks: Vec::new(),
+                boundary: boundary("s"),
                 synthetic_message: Message::user("synth"),
                 ack: compact_ack,
             };
@@ -850,9 +809,7 @@ mod tests {
             let (rec_before, _) = record_cmd("before compact");
             let (compact_ack, _compact_rx) = oneshot::channel();
             let compact_cmd = SessionCmd::Compact {
-                summary: "s".to_owned(),
-                instructions: None,
-                tasks: Vec::new(),
+                boundary: boundary("s"),
                 synthetic_message: Message::user("synthetic summary"),
                 ack: compact_ack,
             };
@@ -888,9 +845,7 @@ mod tests {
             assert!(rec_rx.await.unwrap().failure.is_some());
             let (compact_ack, compact_rx) = oneshot::channel();
             tx.send(SessionCmd::Compact {
-                summary: "s".to_owned(),
-                instructions: None,
-                tasks: Vec::new(),
+                boundary: boundary("s"),
                 synthetic_message: Message::user("synthetic summary"),
                 ack: compact_ack,
             })
@@ -926,9 +881,7 @@ mod tests {
             async fn compact(tx: &mpsc::Sender<SessionCmd>) -> CompactOutcome {
                 let (ack, rx) = oneshot::channel();
                 tx.send(SessionCmd::Compact {
-                    summary: "s".to_owned(),
-                    instructions: None,
-                    tasks: Vec::new(),
+                    boundary: boundary("s"),
                     synthetic_message: Message::user("synthetic summary"),
                     ack,
                 })

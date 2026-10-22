@@ -158,171 +158,6 @@ pub(super) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     Ok(builder.finish(header.session_id))
 }
 
-/// The messages of a compaction's tail, the chain since its boundary.
-struct CompactTail {
-    uuids: HashSet<Uuid>,
-    /// Whether the last message joined the tail, so the sidecars that follow it belong to it.
-    accepts_sidecars: bool,
-}
-
-#[derive(Default)]
-struct SessionDataBuilder {
-    chain: ChainBuilder,
-    /// The last context entry and its timestamp, awaiting the message entry it belongs to.
-    pending_context: Option<(OffsetDateTime, Box<SessionContext>)>,
-    compact: Option<CompactInfo>,
-    /// A compact boundary that takes effect only once its post-compact root follows it.
-    pending_compact: Option<CompactInfo>,
-    latest_title: Option<TitleInfo>,
-    archived: bool,
-    /// Set once a compaction takes effect.
-    compact_tail: Option<CompactTail>,
-    tool_result_metadata: HashMap<String, ToolMetadata>,
-    usage: Vec<UsageRecord>,
-    usage_uuids: HashSet<Uuid>,
-    file_snapshots: Vec<FileSnapshot>,
-}
-
-impl SessionDataBuilder {
-    fn apply_entry(&mut self, entry: Entry, line_no: u32) {
-        match entry {
-            Entry::Context { context, timestamp } => {
-                self.pending_context = Some((timestamp, context));
-            }
-            Entry::Message {
-                uuid,
-                parent_uuid,
-                message,
-                timestamp,
-            } => self.insert_message(uuid, parent_uuid, message, timestamp, line_no),
-            Entry::Rewind { tip, .. } => self.chain.rewind(tip),
-            Entry::Title {
-                title, updated_at, ..
-            } => keep_newer(&mut self.latest_title, TitleInfo { title, updated_at }),
-            Entry::Archive { archived, .. } => self.archived = archived,
-            Entry::ToolResultMetadata {
-                tool_use_id,
-                metadata,
-                ..
-            } if self.accepts_sidecar() => {
-                self.tool_result_metadata.insert(tool_use_id, metadata);
-            }
-            Entry::Usage { uuid, usage, .. } if self.usage_uuids.insert(uuid) => {
-                self.usage.push(usage);
-            }
-            Entry::FileSnapshot { snapshot } if self.accepts_sidecar() => {
-                self.file_snapshots.push(snapshot);
-            }
-            Entry::Compact {
-                summary,
-                pre_message_count,
-                instructions,
-                tasks,
-                ..
-            } => {
-                self.pending_compact = Some(CompactInfo {
-                    summary,
-                    pre_message_count,
-                    instructions,
-                    tasks,
-                });
-            }
-            _ => {}
-        }
-    }
-
-    fn insert_message(
-        &mut self,
-        uuid: Uuid,
-        parent_uuid: Option<Uuid>,
-        message: Message,
-        timestamp: OffsetDateTime,
-        line_no: u32,
-    ) {
-        // A context shares its message's timestamp, so a context stranded by a torn batch never
-        // binds to the next writer's message.
-        let context = self
-            .pending_context
-            .take()
-            .and_then(|(at, context)| (at == timestamp).then_some(context));
-        if let Some(compact) = self.pending_compact.take() {
-            if parent_uuid.is_none() {
-                self.reset_at_compact(compact);
-            } else {
-                warn!("skipping compact boundary without its post-compact root at line {line_no}");
-            }
-        }
-        let accepted = self.accepts_compact_tail_message(uuid, parent_uuid);
-        if let Some(tail) = &mut self.compact_tail {
-            tail.accepts_sidecars = accepted;
-        }
-        if !accepted {
-            warn!("skipping pre-compact branch append at line {line_no}");
-            return;
-        }
-        if parent_uuid.is_none() {
-            self.clear_sidecars();
-        }
-        self.chain
-            .insert(uuid, parent_uuid, message, timestamp, context);
-    }
-
-    fn accepts_compact_tail_message(&mut self, uuid: Uuid, parent_uuid: Option<Uuid>) -> bool {
-        let Some(CompactTail { uuids, .. }) = &mut self.compact_tail else {
-            return true;
-        };
-        let accepted = match parent_uuid {
-            None => uuids.is_empty(),
-            Some(parent) => uuids.contains(&parent),
-        };
-        if accepted {
-            uuids.insert(uuid);
-        }
-        accepted
-    }
-
-    fn accepts_sidecar(&self) -> bool {
-        self.compact_tail
-            .as_ref()
-            .is_none_or(|tail| tail.accepts_sidecars)
-    }
-
-    fn reset_at_compact(&mut self, compact: CompactInfo) {
-        self.chain = ChainBuilder::default();
-        self.compact = Some(compact);
-        self.compact_tail = Some(CompactTail {
-            uuids: HashSet::new(),
-            accepts_sidecars: false,
-        });
-        self.clear_sidecars();
-    }
-
-    fn clear_sidecars(&mut self) {
-        self.tool_result_metadata.clear();
-        self.file_snapshots.clear();
-    }
-
-    fn finish(self, session_id: String) -> SessionData {
-        let Chain {
-            messages,
-            tip,
-            context,
-        } = self.chain.resolve();
-        SessionData {
-            session_id,
-            messages,
-            last_uuid: tip,
-            context: context.map(|context| *context),
-            compact: self.compact,
-            title: self.latest_title,
-            archived: self.archived,
-            tool_result_metadata: self.tool_result_metadata,
-            usage: self.usage,
-            file_snapshots: self.file_snapshots,
-        }
-    }
-}
-
 /// Reads just the `session_id` from a session file's header line.
 pub(super) fn read_session_id_from_path(path: &Path) -> Result<String> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
@@ -330,9 +165,9 @@ pub(super) fn read_session_id_from_path(path: &Path) -> Result<String> {
     Ok(header.session_id)
 }
 
-/// The directory beside `session_file` that holds the artifacts of session `session_id`, such as
-/// spilled tool output. Nothing creates it until the session writes an artifact, and [`delete_at`]
-/// removes it with the file.
+/// The directory beside `session_file` that holds the artifacts of session `session_id`,
+/// such as spilled tool output.
+/// It exists only once the session writes an artifact, and [`delete_at`] removes it with the file.
 pub(crate) fn artifact_dir(session_file: &Path, session_id: &str) -> PathBuf {
     session_file.with_file_name(session_id)
 }
@@ -356,8 +191,9 @@ pub(crate) fn delete_at(path: &Path) -> Result<()> {
         .with_context(|| format!("failed to remove session file {}", path.display()))
 }
 
-/// Sets the archive state of the session file at `path`. The file keeps its mtime, since listings
-/// order sessions by activity and toggling the state is not activity.
+/// Sets the archive state of the session file at `path`.
+/// The file keeps its mtime, since listings order sessions by activity and toggling the state is
+/// not activity.
 pub(super) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
     let mut writer = open_append_at(path)?;
     let modified = fs::metadata(path)
@@ -464,6 +300,175 @@ pub(crate) struct SessionData {
     /// Every billed request in the file, on any branch and across compactions.
     pub(crate) usage: Vec<UsageRecord>,
     pub(crate) file_snapshots: Vec<FileSnapshot>,
+}
+
+// ── Loader ──
+
+/// The messages of a compaction's tail, the chain since its boundary.
+struct CompactTail {
+    uuids: HashSet<Uuid>,
+    /// Whether the last message joined the tail, so the sidecars that follow it belong to it.
+    accepts_sidecars: bool,
+}
+
+#[derive(Default)]
+struct SessionDataBuilder {
+    chain: ChainBuilder,
+    /// The last context entry and its timestamp, awaiting the message entry it belongs to.
+    pending_context: Option<(OffsetDateTime, Box<SessionContext>)>,
+    compact: Option<CompactInfo>,
+    /// A compact boundary that takes effect only once its post-compact root follows it.
+    pending_compact: Option<CompactInfo>,
+    latest_title: Option<TitleInfo>,
+    archived: bool,
+    /// Set once a compaction takes effect.
+    compact_tail: Option<CompactTail>,
+    tool_result_metadata: HashMap<String, ToolMetadata>,
+    usage: Vec<UsageRecord>,
+    usage_uuids: HashSet<Uuid>,
+    file_snapshots: Vec<FileSnapshot>,
+}
+
+impl SessionDataBuilder {
+    fn apply_entry(&mut self, entry: Entry, line_no: u32) {
+        match entry {
+            Entry::Context { context, timestamp } => {
+                self.pending_context = Some((timestamp, context));
+            }
+            Entry::Message {
+                uuid,
+                parent_uuid,
+                message,
+                timestamp,
+            } => self.insert_message(uuid, parent_uuid, message, timestamp, line_no),
+            Entry::Rewind { tip, .. } => self.chain.rewind(tip),
+            Entry::Title {
+                title, updated_at, ..
+            } => keep_newer(&mut self.latest_title, TitleInfo { title, updated_at }),
+            Entry::Archive { archived, .. } => self.archived = archived,
+            Entry::ToolResultMetadata {
+                tool_use_id,
+                metadata,
+                ..
+            } if self.accepts_sidecar() => {
+                self.tool_result_metadata.insert(tool_use_id, metadata);
+            }
+            Entry::Usage { uuid, usage, .. } if self.usage_uuids.insert(uuid) => {
+                self.usage.push(usage);
+            }
+            Entry::FileSnapshot { snapshot } if self.accepts_sidecar() => {
+                self.file_snapshots.push(snapshot);
+            }
+            Entry::Compact {
+                summary,
+                pre_message_count,
+                instructions,
+                tasks,
+                trigger,
+                ..
+            } => {
+                self.pending_compact = Some(CompactInfo {
+                    summary,
+                    pre_message_count,
+                    instructions,
+                    tasks,
+                    trigger,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn insert_message(
+        &mut self,
+        uuid: Uuid,
+        parent_uuid: Option<Uuid>,
+        message: Message,
+        timestamp: OffsetDateTime,
+        line_no: u32,
+    ) {
+        // A context shares its message's timestamp, so a context stranded by a torn batch never
+        // binds to the next writer's message.
+        let context = self
+            .pending_context
+            .take()
+            .and_then(|(at, context)| (at == timestamp).then_some(context));
+        if let Some(compact) = self.pending_compact.take() {
+            if parent_uuid.is_none() {
+                self.reset_at_compact(compact);
+            } else {
+                warn!("skipping compact boundary without its post-compact root at line {line_no}");
+            }
+        }
+        let accepted = self.accepts_compact_tail_message(uuid, parent_uuid);
+        if let Some(tail) = &mut self.compact_tail {
+            tail.accepts_sidecars = accepted;
+        }
+        if !accepted {
+            warn!("skipping pre-compact branch append at line {line_no}");
+            return;
+        }
+        if parent_uuid.is_none() {
+            self.clear_sidecars();
+        }
+        self.chain
+            .insert(uuid, parent_uuid, message, timestamp, context);
+    }
+
+    fn accepts_compact_tail_message(&mut self, uuid: Uuid, parent_uuid: Option<Uuid>) -> bool {
+        let Some(CompactTail { uuids, .. }) = &mut self.compact_tail else {
+            return true;
+        };
+        let accepted = match parent_uuid {
+            None => uuids.is_empty(),
+            Some(parent) => uuids.contains(&parent),
+        };
+        if accepted {
+            uuids.insert(uuid);
+        }
+        accepted
+    }
+
+    fn accepts_sidecar(&self) -> bool {
+        self.compact_tail
+            .as_ref()
+            .is_none_or(|tail| tail.accepts_sidecars)
+    }
+
+    fn reset_at_compact(&mut self, compact: CompactInfo) {
+        self.chain = ChainBuilder::default();
+        self.compact = Some(compact);
+        self.compact_tail = Some(CompactTail {
+            uuids: HashSet::new(),
+            accepts_sidecars: false,
+        });
+        self.clear_sidecars();
+    }
+
+    fn clear_sidecars(&mut self) {
+        self.tool_result_metadata.clear();
+        self.file_snapshots.clear();
+    }
+
+    fn finish(self, session_id: String) -> SessionData {
+        let Chain {
+            messages,
+            tip,
+            context,
+        } = self.chain.resolve();
+        SessionData {
+            session_id,
+            messages,
+            last_uuid: tip,
+            context: context.map(|context| *context),
+            compact: self.compact,
+            title: self.latest_title,
+            archived: self.archived,
+            tool_result_metadata: self.tool_result_metadata,
+            usage: self.usage,
+            file_snapshots: self.file_snapshots,
+        }
+    }
 }
 
 // ── File Opening ──
@@ -659,6 +664,7 @@ mod tests {
     use crate::file_tracker::{FileState, LastView};
     use crate::message::ContentBlock;
     use crate::prompt::PromptParts;
+    use crate::protocol::CompactTrigger;
     use crate::tool::tasks::testing::plan;
     use crate::util::path::testing::HOME_VAR;
 
@@ -701,23 +707,22 @@ mod tests {
     mod open {
         use super::*;
 
-        async fn open_in_isolated_env(xdg: &Path) -> SessionStore {
+        fn open_in_isolated_env(xdg: &Path) -> SessionStore {
             let home = tempfile::tempdir().unwrap();
-            temp_env::async_with_vars(
+            temp_env::with_vars(
                 [
                     ("XDG_DATA_HOME", Some(xdg.to_string_lossy().into_owned())),
                     (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
                 ],
-                async { SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")) },
+                || SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")),
             )
-            .await
             .unwrap()
         }
 
-        #[tokio::test]
-        async fn uses_xdg_data_home_when_set() {
+        #[test]
+        fn uses_xdg_data_home_when_set() {
             let xdg = tempfile::tempdir().unwrap();
-            let store = open_in_isolated_env(xdg.path()).await;
+            let store = open_in_isolated_env(xdg.path());
             let sessions = xdg.path().join("ox").join(SESSIONS_DIR);
             assert_eq!(store.sessions_dir, sessions);
             assert_eq!(
@@ -727,17 +732,16 @@ mod tests {
             assert!(store.project_dir.is_dir(), "project dir created");
         }
 
-        #[tokio::test]
-        async fn falls_back_to_home_local_share_when_xdg_unset() {
+        #[test]
+        fn falls_back_to_home_local_share_when_xdg_unset() {
             let home = tempfile::tempdir().unwrap();
-            let store = temp_env::async_with_vars(
+            let store = temp_env::with_vars(
                 [
                     ("XDG_DATA_HOME", None),
                     (HOME_VAR, Some(home.path().to_string_lossy().into_owned())),
                 ],
-                async { SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")) },
+                || SessionStore::open(Path::new("/work/proj"), Path::new("/work/proj")),
             )
-            .await
             .unwrap();
             let expected = home
                 .path()
@@ -748,12 +752,12 @@ mod tests {
         }
 
         #[cfg(unix)]
-        #[tokio::test]
-        async fn creates_private_dirs_with_mode_0o700_on_unix() {
+        #[test]
+        fn creates_private_dirs_with_mode_0o700_on_unix() {
             use std::os::unix::fs::PermissionsExt;
 
             let xdg = tempfile::tempdir().unwrap();
-            let store = open_in_isolated_env(xdg.path()).await;
+            let store = open_in_isolated_env(xdg.path());
             for dir in [&store.sessions_dir, &store.project_dir] {
                 let mode = fs::metadata(dir).unwrap().permissions().mode() & 0o777;
                 assert_eq!(mode, 0o700, "{dir:?} must be 0o700, got {mode:o}");
@@ -764,8 +768,8 @@ mod tests {
     mod create {
         use super::*;
 
-        #[tokio::test]
-        async fn writes_the_header_then_the_given_lines() {
+        #[test]
+        fn writes_the_header_then_the_given_lines() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let uuid = Uuid::new_v4();
@@ -790,20 +794,31 @@ mod tests {
             );
         }
 
-        #[tokio::test]
-        async fn fails_when_file_already_exists() {
+        #[test]
+        fn fails_when_file_already_exists() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let header = sample_header("existing");
             let created_at = header.created_at;
             let taken = test_project_path(dir.path(), &session_filename("existing", created_at));
-            fs::write(taken, "{}").unwrap();
-            assert!(store.create(&header, &[]).is_err());
+            fs::write(&taken, "{}").unwrap();
+
+            let err = store.create(&header, &[]).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                format!("failed to create {}", taken.display())
+            );
+            assert_eq!(
+                fs::read_to_string(&taken).unwrap(),
+                "{}",
+                "the file is left as it was"
+            );
         }
 
         #[cfg(unix)]
-        #[tokio::test]
-        async fn sets_user_only_file_permissions_on_unix() {
+        #[test]
+        fn sets_user_only_file_permissions_on_unix() {
             use std::os::unix::fs::PermissionsExt;
 
             let dir = tempfile::tempdir().unwrap();
@@ -818,8 +833,8 @@ mod tests {
     mod open_append_at {
         use super::*;
 
-        #[tokio::test]
-        async fn writes_to_existing_file() {
+        #[test]
+        fn writes_to_existing_file() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let mut writer = store.create(&sample_header("append-test"), &[]).unwrap();
@@ -962,8 +977,35 @@ mod tests {
             }
         }
 
-        #[tokio::test]
-        async fn includes_only_messages_with_last_uuid() {
+        /// A boundary compacting one message, with no focus instructions or tasks.
+        fn sample_compact(timestamp: OffsetDateTime) -> Entry {
+            Entry::Compact {
+                summary: "summary".to_owned(),
+                pre_message_count: 1,
+                instructions: None,
+                tasks: Vec::new(),
+                trigger: None,
+                timestamp,
+            }
+        }
+
+        fn sample_tool_metadata(
+            tool_use_id: &str,
+            title: &str,
+            timestamp: OffsetDateTime,
+        ) -> Entry {
+            Entry::ToolResultMetadata {
+                tool_use_id: tool_use_id.to_owned(),
+                metadata: ToolMetadata {
+                    title: Some(title.to_owned()),
+                    ..ToolMetadata::default()
+                },
+                timestamp,
+            }
+        }
+
+        #[test]
+        fn includes_only_messages_with_last_uuid() {
             let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("load-test"), &[]).unwrap();
 
@@ -1021,24 +1063,15 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "pre-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("pre metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:02 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "pre-tool",
+                    "pre metadata",
+                    datetime!(2026-04-16 12:00:02 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("pre.txt")]).unwrap();
             writer
-                .append(&[Entry::Compact {
-                    summary: "summary".to_owned(),
-                    pre_message_count: 1,
-                    instructions: None,
-                    tasks: Vec::new(),
-                    timestamp: datetime!(2026-04-16 12:00:03 UTC),
-                }])
+                .append(&[sample_compact(datetime!(2026-04-16 12:00:03 UTC))])
                 .unwrap();
 
             let post = Uuid::new_v4();
@@ -1051,14 +1084,11 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "post-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("post metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:05 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "post-tool",
+                    "post metadata",
+                    datetime!(2026-04-16 12:00:05 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("post.txt")]).unwrap();
             drop(writer);
@@ -1108,13 +1138,7 @@ mod tests {
             assert_eq!(load(), Some(session_context("2026-04-17")));
 
             writer
-                .append(&[Entry::Compact {
-                    summary: "summary".to_owned(),
-                    pre_message_count: 1,
-                    instructions: None,
-                    tasks: Vec::new(),
-                    timestamp: datetime!(2026-04-17 12:00:00 UTC),
-                }])
+                .append(&[sample_compact(datetime!(2026-04-17 12:00:00 UTC))])
                 .unwrap();
             assert_eq!(
                 load(),
@@ -1192,13 +1216,7 @@ mod tests {
             writer
                 .append(&[
                     sample_message_at(pre, None, datetime!(2026-04-16 12:00:01 UTC), "pre"),
-                    Entry::Compact {
-                        summary: "summary".to_owned(),
-                        pre_message_count: 1,
-                        instructions: None,
-                        tasks: Vec::new(),
-                        timestamp: datetime!(2026-04-16 12:00:02 UTC),
-                    },
+                    sample_compact(datetime!(2026-04-16 12:00:02 UTC)),
                     sample_message_at(
                         synthetic,
                         None,
@@ -1310,6 +1328,7 @@ mod tests {
                     pre_message_count: 1,
                     instructions: Some("focus".to_owned()),
                     tasks: plan(),
+                    trigger: Some(CompactTrigger::Auto),
                     timestamp: datetime!(2026-04-16 12:00:02 UTC),
                 }])
                 .unwrap();
@@ -1347,6 +1366,7 @@ mod tests {
                     pre_message_count: 1,
                     instructions: Some("focus".to_owned()),
                     tasks: plan(),
+                    trigger: Some(CompactTrigger::Auto),
                 })
             );
         }
@@ -1364,14 +1384,8 @@ mod tests {
                     "pre-compact",
                 )])
                 .unwrap();
-            let mut torn = encode_lines(&[Entry::Compact {
-                summary: "summary".to_owned(),
-                pre_message_count: 1,
-                instructions: None,
-                tasks: Vec::new(),
-                timestamp: datetime!(2026-04-16 12:00:02 UTC),
-            }])
-            .unwrap();
+            let mut torn =
+                encode_lines(&[sample_compact(datetime!(2026-04-16 12:00:02 UTC))]).unwrap();
             torn.extend_from_slice(br#"{"type":"message","uuid":"#);
             writer.append_lines(&torn).unwrap();
 
@@ -1408,13 +1422,7 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::Compact {
-                    summary: "summary".to_owned(),
-                    pre_message_count: 1,
-                    instructions: None,
-                    tasks: Vec::new(),
-                    timestamp: datetime!(2026-04-16 12:00:02 UTC),
-                }])
+                .append(&[sample_compact(datetime!(2026-04-16 12:00:02 UTC))])
                 .unwrap();
 
             let synthetic = Uuid::new_v4();
@@ -1435,14 +1443,11 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "stale-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("stale metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:05 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "stale-tool",
+                    "stale metadata",
+                    datetime!(2026-04-16 12:00:05 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("stale.txt")]).unwrap();
 
@@ -1456,14 +1461,11 @@ mod tests {
                 )])
                 .unwrap();
             writer
-                .append(&[Entry::ToolResultMetadata {
-                    tool_use_id: "valid-tool".to_owned(),
-                    metadata: ToolMetadata {
-                        title: Some("valid metadata".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                    timestamp: datetime!(2026-04-16 12:00:08 UTC),
-                }])
+                .append(&[sample_tool_metadata(
+                    "valid-tool",
+                    "valid metadata",
+                    datetime!(2026-04-16 12:00:08 UTC),
+                )])
                 .unwrap();
             writer.append(&[sample_snapshot("valid.txt")]).unwrap();
             drop(writer);
@@ -1562,8 +1564,8 @@ mod tests {
             assert_eq!(format!("{err:#}"), open_failure(&path));
         }
 
-        #[tokio::test]
-        async fn resolves_transcript_through_newest_chain_leaf() {
+        #[test]
+        fn resolves_transcript_through_newest_chain_leaf() {
             let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("fork"), &[]).unwrap();
 
@@ -1918,8 +1920,8 @@ mod tests {
         mod append_lines {
             use super::*;
 
-            #[tokio::test]
-            async fn writes_multiple_entries() {
+            #[test]
+            fn writes_multiple_entries() {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut writer = store.create(&sample_header("multi"), &[]).unwrap();

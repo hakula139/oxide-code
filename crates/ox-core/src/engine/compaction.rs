@@ -1,6 +1,5 @@
-//! Conversation compaction: the auto-compaction trigger and the summarization request, which forks
-//! the live conversation to read its prompt cache. `compact_session` leaves the session untouched,
-//! and its callers swap in the summary through `compact_boundary` once it succeeds.
+//! Conversation compaction: the engine's `/compact` and auto-compaction, and the summarization
+//! request, which forks the live conversation to read its prompt cache.
 
 use std::collections::HashSet;
 use std::iter;
@@ -12,19 +11,16 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
-use super::compact_boundary::{self, Boundary};
 use super::turn::collect_response;
+use super::{Engine, TurnEnd, report_abort};
 use crate::client::{PromptTooLong, Response, ResponseEvent, StopReason, Wire};
-use crate::config::compaction::AutoCompactionConfig;
-use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::TokenUsage;
 use crate::prompt::PromptParts;
-use crate::protocol::{Event, EventSink, Op};
-use crate::session::handle::SessionHandle;
+use crate::protocol::{CompactTrigger, Event, EventSink, Op};
+use crate::session::entry::CompactBoundary;
+use crate::session::post_compact::synthesize_post_compact_message;
 use crate::tool::ToolDefinition;
-use crate::tool::bash::background::BackgroundShells;
-use crate::tool::tasks::Task;
 use crate::util::text::join_sentences;
 
 const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
@@ -64,6 +60,8 @@ const SUMMARIZATION_USER_RUBRIC: &str = indoc! {"
     questions. Do not call any tools while writing this summary. Respond with text only."
 };
 
+// ── Auto-Compaction Failures ──
+
 /// Automatic compaction failures in a row. Auto-compaction pauses at [`MAX_AUTO_COMPACT_FAILURES`]
 /// until a reset.
 #[derive(Clone, Copy, Default)]
@@ -80,15 +78,30 @@ impl AutoCompactFailures {
         self.0 >= MAX_AUTO_COMPACT_FAILURES
     }
 
-    /// Counts a failure and reports [`Event::AutoCompactionPaused`] if it pauses auto-compaction.
-    fn record(&mut self, sink: &dyn EventSink) {
+    /// Counts a failed attempt, reporting [`Event::AutoCompactionPaused`] if it pauses
+    /// auto-compaction, and returns the abort that fails the unsent prompt. `cause` is why the
+    /// summary failed, and `None` means the summary succeeded but its boundary was not saved.
+    fn fail(&mut self, sink: &dyn EventSink, cause: Option<&anyhow::Error>) -> TurnAbort {
         self.0 += 1;
-        if self.is_paused() {
+        let next = if self.is_paused() {
             sink.emit(
                 Event::AutoCompactionPaused { failures: self.0 },
                 "auto-compaction-paused",
             );
-        }
+            format!(
+                "The prompt was not sent, and auto-compaction is paused \
+                 after {MAX_AUTO_COMPACT_FAILURES} failures in a row. \
+                 Send the prompt again to run it without compaction, \
+                 or run `/compact` to retry compaction first."
+            )
+        } else {
+            "The prompt was not sent, so send it again to retry.".to_owned()
+        };
+        let message = match cause {
+            Some(e) => join_sentences(&format!("Auto-compaction failed: {e:#}"), &next),
+            None => format!("Auto-compaction was not saved. {next}"),
+        };
+        TurnAbort::Failed(anyhow!(message))
     }
 
     /// Clears the count and reports [`Event::AutoCompactionResumed`] if auto-compaction was paused.
@@ -99,114 +112,186 @@ impl AutoCompactFailures {
     }
 }
 
-/// What auto-compaction reads from the engine and the state it updates.
-pub(super) struct AutoCompact<'a> {
-    pub(super) config: AutoCompactionConfig,
-    /// The latest turn's last round usage, whose total the threshold checks.
-    pub(super) usage: Option<TokenUsage>,
-    pub(super) failures: &'a mut AutoCompactFailures,
-    pub(super) file_tracker: &'a FileTracker,
-    /// The conversation's request prefix, which the summarizer reuses to read its prompt cache.
-    pub(super) prompt: &'a PromptParts,
-    pub(super) tools: &'a [ToolDefinition],
-    /// The task list the summary message carries over.
-    pub(super) tasks: &'a [Task],
-    /// The background shells whose open ones the summary message lists.
-    pub(super) shells: &'a BackgroundShells,
-    /// Each summary request's usage, recorded even when the summary fails or the user cancels it.
-    pub(super) spent: &'a mut Vec<TokenUsage>,
+// ── Compaction ──
+
+/// Why a compaction left the transcript unchanged.
+enum CompactFailure {
+    /// The user cancelled the summary, or the engine shut down.
+    Aborted(TurnAbort),
+    /// The summary request failed.
+    Summary(anyhow::Error),
+    /// The summary succeeded but its boundary was not saved.
+    NotSaved,
 }
 
-/// Compacts `messages` when the usage in `auto` crosses the threshold, returning whether it did.
-/// Skips while [`AutoCompactFailures`] has paused auto-compaction or the transcript is too short to
-/// shrink. A failed summary or an uncommitted boundary counts as a failure and fails the unsent
-/// prompt.
-pub(super) async fn auto_compact_if_needed(
-    client: &dyn Wire,
-    session: &SessionHandle,
-    messages: &mut Vec<Message>,
-    sink: &dyn EventSink,
-    ops: &mut mpsc::Receiver<Op>,
-    inbox: &mut Inbox,
-    auto: &mut AutoCompact<'_>,
-) -> AbortResult<bool> {
-    let Some(usage) = auto.usage else {
-        return Ok(false);
-    };
-    if auto.failures.is_paused()
-        || !auto.config.should_trigger(usage.total_tokens())
-        || transcript_tokens(messages) < MIN_TOKENS_FOR_COMPACT
-    {
-        return Ok(false);
-    }
-
-    sink.emit(Event::AutoCompactionStarted, "auto-compaction-started");
-    let summary = match await_unless_aborted(
-        compact_session(
-            client,
-            auto.prompt,
-            auto.tools,
-            messages,
-            None,
-            sink,
-            auto.spent,
-        ),
-        ops,
-        inbox,
-        sink,
-    )
-    .await?
-    {
-        Ok(summary) => summary,
-        Err(e) => {
-            warn!("auto-compaction failed: {e:#}");
-            return Err(record_auto_compact_failure(auto, sink, Some(&e)));
+impl Engine {
+    /// Compacts the transcript ahead of a prompt once the latest usage crosses the threshold.
+    /// Skips while [`AutoCompactFailures`] has paused auto-compaction or the transcript is too
+    /// short to shrink. A failure counts toward the pause and fails the unsent prompt.
+    pub(super) async fn auto_compact(
+        &mut self,
+        sink: &dyn EventSink,
+        ops: &mut mpsc::Receiver<Op>,
+        inbox: &mut Inbox,
+    ) -> AbortResult<()> {
+        let due = self
+            .last_usage
+            .is_some_and(|usage| self.compaction.auto.should_trigger(usage.total_tokens()));
+        if !due
+            || self.auto_compaction_failures.is_paused()
+            || transcript_tokens(&self.messages) < MIN_TOKENS_FOR_COMPACT
+        {
+            return Ok(());
         }
-    };
-    let compacted = compact_boundary::replace_session_with_summary(
-        session,
-        auto.file_tracker,
-        messages,
-        sink,
-        Boundary {
-            summary,
-            instructions: None,
-            tasks: auto.tasks.to_vec(),
-            shells: auto.shells.list(),
-            automatic: true,
-        },
-    )
-    .await;
-    if !compacted {
-        return Err(record_auto_compact_failure(auto, sink, None));
+
+        sink.emit(Event::AutoCompactionStarted, "auto-compaction-started");
+        let cause = match self
+            .run_compaction(sink, ops, inbox, None, CompactTrigger::Auto)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(CompactFailure::Aborted(abort)) => return Err(abort),
+            Err(CompactFailure::Summary(e)) => {
+                warn!(error = %format_args!("{e:#}"), "auto-compaction failed");
+                Some(e)
+            }
+            Err(CompactFailure::NotSaved) => None,
+        };
+        Err(self.auto_compaction_failures.fail(sink, cause.as_ref()))
     }
-    Ok(true)
+
+    /// Replaces the transcript with a summary steered by `instructions`. Failures leave it intact.
+    pub(super) async fn compact(
+        &mut self,
+        sink: &dyn EventSink,
+        ops: &mut mpsc::Receiver<Op>,
+        instructions: Option<String>,
+    ) -> TurnEnd {
+        let mut inbox = Inbox::default();
+        if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
+            self.adopt_mode(&mut inbox);
+            return report_abort(sink, abort, "compact-failed");
+        }
+        let compacted = self
+            .run_compaction(sink, ops, &mut inbox, instructions, CompactTrigger::Manual)
+            .await;
+        self.adopt_mode(&mut inbox);
+        let abort = match compacted {
+            Ok(()) => {
+                sink.emit(Event::SessionReady, "session-ready");
+                return TurnEnd::Completed;
+            }
+            Err(CompactFailure::Aborted(abort)) => abort,
+            Err(CompactFailure::Summary(e)) => TurnAbort::Failed(e.context("Compaction failed")),
+            Err(CompactFailure::NotSaved) => TurnAbort::Failed(anyhow!(
+                "Compaction was not saved, so the transcript is unchanged"
+            )),
+        };
+        report_abort(sink, abort, "compact-failed")
+    }
+
+    /// Summarizes the transcript and swaps the summary in once its boundary is saved, starting
+    /// the new transcript from a fresh user context. Bills each summary request and shows the
+    /// usage once any request reported it or the transcript changed.
+    async fn run_compaction(
+        &mut self,
+        sink: &dyn EventSink,
+        ops: &mut mpsc::Receiver<Op>,
+        inbox: &mut Inbox,
+        instructions: Option<String>,
+        trigger: CompactTrigger,
+    ) -> Result<(), CompactFailure> {
+        let tools = self.tools.definitions();
+        let mut spent = Vec::new();
+        let summary = await_unless_aborted(
+            request_summary(
+                &self.client,
+                &self.prompt,
+                &tools,
+                &self.messages,
+                instructions.as_deref(),
+                sink,
+                &mut spent,
+            ),
+            ops,
+            inbox,
+            sink,
+        )
+        .await;
+        let compacted = match summary {
+            Ok(Ok(summary)) => {
+                let boundary = CompactBoundary {
+                    summary,
+                    instructions,
+                    tasks: self.tasks.clone(),
+                    trigger,
+                };
+                if self.replace_with_summary(sink, boundary).await {
+                    Ok(())
+                } else {
+                    Err(CompactFailure::NotSaved)
+                }
+            }
+            Ok(Err(e)) => Err(CompactFailure::Summary(e)),
+            Err(abort) => Err(CompactFailure::Aborted(abort)),
+        };
+        // Bills after the boundary, so a write error it surfaces follows the compaction event
+        // that clears the TUI's chat.
+        self.bill(sink, &spent).await;
+        if compacted.is_ok() {
+            let fresh = self.load_user_context(sink).await;
+            self.prompt.refresh(fresh);
+            self.prompt_unrecorded = true;
+            self.reset_context_usage(sink);
+        }
+        if compacted.is_ok() || !spent.is_empty() {
+            self.emit_usage_update(sink);
+        }
+        compacted
+    }
+
+    /// Saves the compaction boundary and swaps the transcript to the summary message, which lists
+    /// the open background shells, then clears the file tracker. A failed write discards the
+    /// streamed summary and leaves the transcript unchanged, unless persistence has stopped, when
+    /// the swap happens in memory alone.
+    async fn replace_with_summary(
+        &mut self,
+        sink: &dyn EventSink,
+        boundary: CompactBoundary,
+    ) -> bool {
+        let synthetic = synthesize_post_compact_message(
+            &boundary.summary,
+            &boundary.tasks,
+            &self.shells.list(),
+        );
+        let summary = boundary.summary.clone();
+        let instructions = boundary.instructions.clone();
+        let trigger = boundary.trigger;
+        let outcome = self.session.compact(boundary, synthetic.clone()).await;
+        if !outcome.committed {
+            sink.emit(Event::SummaryDiscarded, "summary-discarded");
+            sink.session_write_error(outcome.failure.as_deref());
+            return false;
+        }
+
+        self.file_tracker.clear();
+        self.messages = vec![synthetic];
+        sink.emit(
+            Event::SessionCompacted {
+                summary,
+                pre_count: outcome.pre_count,
+                instructions,
+                trigger,
+            },
+            "session-compacted",
+        );
+        // Reports the write error after the compaction event, which clears the TUI's chat.
+        sink.session_write_error(outcome.failure.as_deref());
+        true
+    }
 }
 
-/// Counts a failed attempt and returns the abort that fails the unsent prompt. `cause` is why the
-/// summary failed, and `None` means the summary succeeded but its boundary was not saved.
-fn record_auto_compact_failure(
-    auto: &mut AutoCompact<'_>,
-    sink: &dyn EventSink,
-    cause: Option<&anyhow::Error>,
-) -> TurnAbort {
-    auto.failures.record(sink);
-    let next = if auto.failures.is_paused() {
-        format!(
-            "The prompt was not sent, \
-             and auto-compaction is paused after {MAX_AUTO_COMPACT_FAILURES} failures in a row. \
-             Send the prompt again to run it without compaction, \
-             or run `/compact` to retry compaction first."
-        )
-    } else {
-        "The prompt was not sent, so send it again to retry.".to_owned()
-    };
-    let message = match cause {
-        Some(e) => join_sentences(&format!("Auto-compaction failed: {e:#}"), &next),
-        None => format!("Auto-compaction was not saved. {next}"),
-    };
-    TurnAbort::Failed(anyhow!(message))
-}
+// ── Summary Request ──
 
 /// Drives the summarization request and returns the trimmed summary. `prompt` and `tools` must be
 /// the ones the conversation's own requests send. `spent` receives the usage of every request, even
@@ -218,7 +303,7 @@ fn record_auto_compact_failure(
 ///
 /// Errors when the transcript is too short to compact, a request fails, or the reply is empty or
 /// stops before the summary finishes.
-pub(super) async fn compact_session(
+async fn request_summary(
     client: &dyn Wire,
     prompt: &PromptParts,
     tools: &[ToolDefinition],
@@ -365,6 +450,8 @@ impl Drop for RequestUsage<'_> {
     }
 }
 
+// ── Overflow Retries ──
+
 /// Tokens a summary request ran over the context window by, or `Some(0)` when the API did not
 /// say. `None` when the request fit.
 fn overflow_tokens(result: &Result<Response>) -> Option<u32> {
@@ -478,6 +565,8 @@ fn retry_request(kept: &[Message], rubric: &Message) -> Vec<Message> {
         .collect()
 }
 
+// ── Rubric ──
+
 /// Composes the rubric plus optional user-supplied focus instructions.
 fn build_user_message(instructions: Option<&str>) -> String {
     match instructions.map(str::trim).filter(|s| !s.is_empty()) {
@@ -494,53 +583,39 @@ fn build_user_message(instructions: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::pin::pin;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     use serde_json::json;
-    use tokio::sync::Notify;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::*;
     use crate::client::anthropic::Client;
     use crate::client::anthropic::local_testing::test_client;
-    use crate::client::anthropic::testing::{api_key, sse_body, sse_response};
+    use crate::client::anthropic::testing::{api_key, sse_body, sse_response, text_stream_body};
     use crate::client::testing::five_hour_limit;
-    use crate::engine::local_testing::{
-        FakeClient, dead_test_session, empty_prompt, inert_ops, test_session, text_turn,
-        tool_heavy_transcript, with_stop,
+    use crate::config::compaction::CompactionConfig;
+    use crate::engine::local_testing::{dead_test_session, inert_ops, tool_heavy_transcript};
+    use crate::engine::testing::{
+        MODEL, SESSION_CONTEXT, engine, mount_reply, request_bodies, with_pinned_home,
     };
-    use crate::engine::testing::MODEL;
+    use crate::file_tracker::testing::seed_full_read;
     use crate::message::Replay;
+    use crate::permission::Mode;
     use crate::prompt::SystemPrompt;
+    use crate::protocol::notice::session_write_failed;
     use crate::protocol::testing::CapturingSink;
-    use crate::session::post_compact::synthesize_post_compact_message;
+    use crate::protocol::{ResumeTarget, UsageSnapshot};
+    use crate::session::handle;
+    use crate::session::store::testing::{test_project_dir, test_store};
+    use crate::tool::bash::background::ShellState;
+    use crate::tool::bash::background::local_testing::start_shell;
+    use crate::tool::bash::background::testing::shell;
+    use crate::tool::tasks::Task;
     use crate::tool::tasks::testing::plan;
-
-    /// Auto-compaction at `threshold` tokens after a turn whose last round reported `usage`,
-    /// counting into `failures`. Its file tracker, tools, task list, shells, and spend start empty.
-    fn auto_compact(
-        threshold: u32,
-        usage: Option<TokenUsage>,
-        failures: &mut AutoCompactFailures,
-    ) -> AutoCompact<'_> {
-        AutoCompact {
-            config: AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: Some(threshold),
-            },
-            usage,
-            failures,
-            file_tracker: Box::leak(Box::default()),
-            prompt: empty_prompt(),
-            tools: &[],
-            tasks: &[],
-            shells: Box::leak(Box::default()),
-            spent: Box::leak(Box::default()),
-        }
-    }
 
     fn to_json(messages: &[Message]) -> Vec<serde_json::Value> {
         messages
@@ -551,6 +626,59 @@ mod tests {
 
     mod auto_compact_failures {
         use super::*;
+
+        mod fail {
+            use super::*;
+
+            #[test]
+            fn keeps_the_cause_verbatim_before_the_next_step() {
+                for (cause, expected) in [
+                    (
+                        Some(anyhow!("upstream timed out...")),
+                        "Auto-compaction failed: upstream timed out... \
+                         The prompt was not sent, so send it again to retry.",
+                    ),
+                    (
+                        Some(anyhow!("upstream timed out")),
+                        "Auto-compaction failed: upstream timed out. \
+                         The prompt was not sent, so send it again to retry.",
+                    ),
+                    (
+                        None,
+                        "Auto-compaction was not saved. \
+                         The prompt was not sent, so send it again to retry.",
+                    ),
+                ] {
+                    let mut failures = AutoCompactFailures::default();
+
+                    let e = failures
+                        .fail(&CapturingSink::default(), cause.as_ref())
+                        .into_failure();
+
+                    assert_eq!(e.to_string(), expected);
+                    assert_eq!(failures, AutoCompactFailures::new(1));
+                }
+            }
+
+            #[test]
+            fn third_failure_pauses_auto_compaction_and_says_so() {
+                let sink = CapturingSink::default();
+                let mut failures = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
+
+                let e = failures.fail(&sink, None).into_failure();
+
+                assert_eq!(
+                    e.to_string(),
+                    "Auto-compaction was not saved. \
+                     The prompt was not sent, \
+                     and auto-compaction is paused after 3 failures in a row. \
+                     Send the prompt again to run it without compaction, \
+                     or run `/compact` to retry compaction first.",
+                );
+                assert!(failures.is_paused());
+                assert_eq!(sink.events(), [Event::AutoCompactionPaused { failures: 3 }]);
+            }
+        }
 
         mod reset {
             use super::*;
@@ -573,429 +701,746 @@ mod tests {
         }
     }
 
-    mod auto_compact_if_needed {
+    mod auto_compact {
         use super::*;
 
-        struct CountingFailingClient {
-            calls: AtomicUsize,
+        /// Engine on a fresh session in `dir` that auto-compacts at 50,000 tokens, whose last turn
+        /// reported `usage` on `transcript`.
+        async fn auto_engine(
+            server: &MockServer,
+            dir: &Path,
+            usage: Option<TokenUsage>,
+            transcript: Vec<Message>,
+        ) -> Engine {
+            let mut engine = engine(server.uri(), &test_store(dir), dir).await;
+            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+            engine.last_usage = usage;
+            engine.messages = transcript;
+            engine
         }
 
-        impl CountingFailingClient {
-            fn new() -> Self {
-                Self {
-                    calls: AtomicUsize::new(0),
+        #[tokio::test]
+        async fn skips_without_usage_below_the_threshold_or_for_a_short_transcript() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let short = vec![Message::user("hi"), Message::assistant("hello")];
+                let over = Some(TokenUsage::new(50_000, 1));
+                let under = Some(TokenUsage::new(20_000, 1));
+                for (usage, transcript) in [
+                    (None, tool_heavy_transcript()),
+                    (under, tool_heavy_transcript()),
+                    (over, short),
+                ] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let mut engine =
+                        auto_engine(&server, dir.path(), usage, transcript.clone()).await;
+                    let sink = CapturingSink::default();
+
+                    let compacted = engine
+                        .auto_compact(&sink, &mut inert_ops(), &mut Inbox::default())
+                        .await;
+
+                    assert!(compacted.is_ok(), "{compacted:?}");
+                    assert_eq!(engine.messages, transcript);
+                    assert_eq!(sink.events(), []);
                 }
-            }
-
-            fn calls(&self) -> usize {
-                self.calls.load(Ordering::SeqCst)
-            }
-        }
-
-        impl Wire for CountingFailingClient {
-            fn stream_message(
-                &self,
-                _messages: &[Message],
-                _system: &SystemPrompt,
-                _user_context: Option<&str>,
-                _tools: &[ToolDefinition],
-            ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                Err(anyhow!("the summarizer is unavailable. Retry in a minute."))
-            }
-        }
-
-        struct DelayedSummaryClient {
-            started: Arc<Notify>,
-            release: Arc<Notify>,
-        }
-
-        impl Wire for DelayedSummaryClient {
-            fn stream_message(
-                &self,
-                _messages: &[Message],
-                _system: &SystemPrompt,
-                _user_context: Option<&str>,
-                _tools: &[ToolDefinition],
-            ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-                let (tx, rx) = mpsc::channel(8);
-                let started = self.started.clone();
-                let release = self.release.clone();
-                tokio::spawn(async move {
-                    started.notify_one();
-                    release.notified().await;
-                    for event in text_turn("auto summary") {
-                        tx.send(Ok(event)).await.expect("test receiver alive");
-                    }
-                });
-                Ok(rx)
-            }
-        }
-
-        #[tokio::test]
-        async fn skips_without_usage_or_below_the_threshold() {
-            let dir = tempfile::tempdir().unwrap();
-            let session = test_session(dir.path());
-            let client = FakeClient::new(Vec::new());
-            let sink = CapturingSink::default();
-            let mut messages = tool_heavy_transcript();
-            let mut inbox = Inbox::default();
-            let mut failures = AutoCompactFailures::default();
-
-            let missing_usage = auto_compact_if_needed(
-                &client,
-                &session,
-                &mut messages,
-                &sink,
-                &mut inert_ops(),
-                &mut inbox,
-                &mut auto_compact(10, None, &mut failures),
-            )
-            .await
-            .unwrap();
-            assert!(!missing_usage);
-
-            let below_threshold = auto_compact_if_needed(
-                &client,
-                &session,
-                &mut messages,
-                &sink,
-                &mut inert_ops(),
-                &mut inbox,
-                &mut auto_compact(100, Some(TokenUsage::new(20, 1)), &mut failures),
-            )
-            .await
-            .unwrap();
-            assert!(!below_threshold);
-            assert_eq!(messages, tool_heavy_transcript());
-            assert_eq!(failures, AutoCompactFailures::default());
-        }
-
-        #[tokio::test]
-        async fn skips_a_transcript_too_short_to_shrink() {
-            let dir = tempfile::tempdir().unwrap();
-            let session = test_session(dir.path());
-            let client = FakeClient::new(Vec::new());
-            let sink = CapturingSink::default();
-            let short = vec![Message::user("hi"), Message::assistant("hello")];
-            let mut messages = short.clone();
-            let mut failures = AutoCompactFailures::default();
-
-            let compacted = auto_compact_if_needed(
-                &client,
-                &session,
-                &mut messages,
-                &sink,
-                &mut inert_ops(),
-                &mut Inbox::default(),
-                &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
-            )
+                assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
+            })
             .await;
-
-            assert!(
-                matches!(compacted, Ok(false)),
-                "a prefix-heavy context goes out without compaction: {compacted:?}"
-            );
-            assert_eq!(messages, short);
-            assert_eq!(failures, AutoCompactFailures::default());
-            assert_eq!(sink.events(), []);
-            assert_eq!(client.requests(), [] as [Vec<Message>; 0]);
         }
 
         #[tokio::test]
-        async fn fails_the_prompt_when_the_summary_fails() {
-            let dir = tempfile::tempdir().unwrap();
-            let session = test_session(dir.path());
-            let sink = CapturingSink::default();
-            let mut messages = tool_heavy_transcript();
-            let mut inbox = Inbox::default();
-            let mut failures = AutoCompactFailures::default();
+        async fn skips_once_failures_pause_it() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "   ").await;
+                let dir = tempfile::tempdir().unwrap();
+                let usage = Some(TokenUsage::new(50_000, 1));
+                let mut engine =
+                    auto_engine(&server, dir.path(), usage, tool_heavy_transcript()).await;
+                engine.auto_compaction_failures =
+                    AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
 
-            let compacted = auto_compact_if_needed(
-                &CountingFailingClient::new(),
-                &session,
-                &mut messages,
-                &sink,
-                &mut inert_ops(),
-                &mut inbox,
-                &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
-            )
+                let third = engine
+                    .auto_compact(&sink, &mut ops, &mut Inbox::default())
+                    .await;
+                let fourth = engine
+                    .auto_compact(&sink, &mut ops, &mut Inbox::default())
+                    .await;
+
+                assert!(matches!(third, Err(TurnAbort::Failed(_))), "{third:?}");
+                assert!(
+                    fourth.is_ok(),
+                    "the next prompt goes out without compaction: {fourth:?}"
+                );
+                assert_eq!(request_bodies(&server).await.len(), 1);
+                assert_eq!(engine.messages, tool_heavy_transcript());
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::AutoCompactionStarted,
+                            Event::SummaryToken(_),
+                            Event::SummaryDiscarded,
+                            Event::UsageUpdated(_),
+                            Event::AutoCompactionPaused { failures: 3 },
+                        ]
+                    ),
+                    "{events:?}",
+                );
+            })
             .await;
-
-            let Err(TurnAbort::Failed(error)) = compacted else {
-                panic!("a failed summary fails the prompt: {compacted:?}");
-            };
-            assert_eq!(
-                format!("{error:#}"),
-                "Auto-compaction failed: the summarizer is unavailable. \
-                 Retry in a minute. \
-                 The prompt was not sent, so send it again to retry.",
-            );
-            assert_eq!(failures, AutoCompactFailures::new(1));
-            assert_eq!(messages, tool_heavy_transcript());
-            assert_eq!(sink.events(), [Event::AutoCompactionStarted]);
         }
 
         #[tokio::test]
         async fn fails_the_prompt_when_the_boundary_is_not_saved() {
-            let session = dead_test_session();
-            let client = FakeClient::new(vec![text_turn("auto summary")]);
-            let sink = CapturingSink::default();
-            let mut messages = tool_heavy_transcript();
-            let mut inbox = Inbox::default();
-            let mut failures = AutoCompactFailures::default();
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "auto summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let usage = Some(TokenUsage::new(50_000, 1));
+                let mut engine =
+                    auto_engine(&server, dir.path(), usage, tool_heavy_transcript()).await;
+                engine.session = dead_test_session();
+                let sink = CapturingSink::default();
 
-            let compacted = auto_compact_if_needed(
-                &client,
-                &session,
-                &mut messages,
-                &sink,
-                &mut inert_ops(),
-                &mut inbox,
-                &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
-            )
-            .await;
-
-            let Err(TurnAbort::Failed(error)) = compacted else {
-                panic!("an unsaved boundary fails the prompt: {compacted:?}");
-            };
-            assert_eq!(
-                format!("{error:#}"),
-                "Auto-compaction was not saved. \
-                 The prompt was not sent, so send it again to retry.",
-            );
-            assert_eq!(failures, AutoCompactFailures::new(1));
-            assert_eq!(messages, tool_heavy_transcript());
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [
-                        Event::AutoCompactionStarted,
-                        Event::SummaryToken(summary),
-                        Event::SummaryDiscarded,
-                        Event::Error(message),
-                    ] if summary == "auto summary" && message.starts_with("Session write failed")
-                ),
-                "the unsaved summary is discarded before the write failure: {events:?}",
-            );
-        }
-
-        #[tokio::test]
-        async fn third_failure_turns_auto_compaction_off() {
-            let dir = tempfile::tempdir().unwrap();
-            let session = test_session(dir.path());
-            let client = CountingFailingClient::new();
-            let sink = CapturingSink::default();
-            let mut messages = tool_heavy_transcript();
-            let mut inbox = Inbox::default();
-            let mut failures = AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
-            let usage = Some(TokenUsage::new(50_000, 1));
-            let mut attempt = async || {
-                auto_compact_if_needed(
-                    &client,
-                    &session,
-                    &mut messages,
-                    &sink,
-                    &mut inert_ops(),
-                    &mut inbox,
-                    &mut auto_compact(50_000, usage, &mut failures),
-                )
-                .await
-            };
-
-            let third = attempt().await;
-            let fourth = attempt().await;
-
-            let Err(TurnAbort::Failed(error)) = third else {
-                panic!("the third failure still fails its prompt: {third:?}");
-            };
-            assert_eq!(
-                format!("{error:#}"),
-                "Auto-compaction failed: the summarizer is unavailable. \
-                 Retry in a minute. \
-                 The prompt was not sent, and auto-compaction is paused after 3 failures in a row. \
-                 Send the prompt again to run it without compaction, \
-                 or run `/compact` to retry compaction first.",
-            );
-            assert!(
-                matches!(fourth, Ok(false)),
-                "the next prompt goes out without compaction: {fourth:?}"
-            );
-            assert_eq!(
-                failures,
-                AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES)
-            );
-            assert_eq!(client.calls(), 1);
-            assert_eq!(
-                sink.events(),
-                [
-                    Event::AutoCompactionStarted,
-                    Event::AutoCompactionPaused { failures: 3 },
-                ],
-            );
-        }
-
-        #[tokio::test]
-        async fn queues_submit_and_carries_the_task_list_over() {
-            let dir = tempfile::tempdir().unwrap();
-            let session = test_session(dir.path());
-            let started = Arc::new(Notify::new());
-            let release = Arc::new(Notify::new());
-            let client = DelayedSummaryClient {
-                started: started.clone(),
-                release: release.clone(),
-            };
-            let sink = CapturingSink::default();
-            let mut messages = tool_heavy_transcript();
-            let mut inbox = Inbox::default();
-            let mut failures = AutoCompactFailures::default();
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
-            let mut auto = AutoCompact {
-                tasks: &plan(),
-                ..auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures)
-            };
-
-            let compact = auto_compact_if_needed(
-                &client,
-                &session,
-                &mut messages,
-                &sink,
-                &mut rx,
-                &mut inbox,
-                &mut auto,
-            );
-            let queue_prompt = async {
-                started.notified().await;
-                tx.send(Op::Queue("queued after summary".to_owned()))
+                let e = engine
+                    .auto_compact(&sink, &mut inert_ops(), &mut Inbox::default())
                     .await
-                    .unwrap();
-                tokio::task::yield_now().await;
-                release.notify_one();
-            };
-            let (compacted, ()) = tokio::join!(compact, queue_prompt);
-            let compacted = compacted.unwrap();
+                    .unwrap_err()
+                    .into_failure();
 
-            assert!(compacted);
-            assert_eq!(inbox.prompts, vec!["queued after summary"]);
-            assert_eq!(*auto.failures, AutoCompactFailures::default());
-            assert_eq!(
-                sink.events()
-                    .iter()
-                    .filter(|event| matches!(event, Event::PromptDrained(_)))
-                    .count(),
-                0
-            );
-            assert!(sink.events().iter().any(|event| matches!(
-                event,
-                Event::SessionCompacted {
-                    automatic: true,
-                    ..
-                }
-            )));
-            assert_eq!(
-                messages,
-                [synthesize_post_compact_message(
-                    "auto summary",
-                    &plan(),
-                    &[]
-                )]
-            );
+                assert_eq!(
+                    e.to_string(),
+                    "Auto-compaction was not saved. \
+                     The prompt was not sent, so send it again to retry.",
+                );
+                assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(1));
+                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(
+                    engine.last_usage, usage,
+                    "the transcript the usage measured stays"
+                );
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::AutoCompactionStarted,
+                            Event::SummaryToken(summary),
+                            Event::SummaryDiscarded,
+                            Event::Error(write),
+                            Event::UsageUpdated(_),
+                        ] if summary == "auto summary"
+                            && write == "Session write failed: \
+                                         session writer task has stopped. \
+                                         Conversation history may be incomplete."
+                    ),
+                    "the summary is discarded before the write error, then billed: {events:?}",
+                );
+            })
+            .await;
         }
 
         #[tokio::test]
-        async fn retries_an_overflowing_summary_without_the_oldest_rounds() {
-            let dir = tempfile::tempdir().unwrap();
-            let session = test_session(dir.path());
-            let client = FakeClient::new(vec![
-                with_stop(
-                    text_turn("partial"),
-                    StopReason::ModelContextWindowExceeded,
-                    None,
-                ),
-                text_turn("auto summary"),
-            ]);
-            let sink = CapturingSink::default();
-            let mut messages = tool_heavy_transcript();
-            let mut failures = AutoCompactFailures::default();
+        async fn keeps_the_prompts_queued_during_the_summary_for_the_turn() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "auto summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let usage = Some(TokenUsage::new(50_000, 1));
+                let mut engine =
+                    auto_engine(&server, dir.path(), usage, tool_heavy_transcript()).await;
+                engine.tasks = plan();
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(1);
+                ops_tx
+                    .try_send(Op::Queue("queued after summary".to_owned()))
+                    .unwrap();
+                let mut inbox = Inbox::default();
 
-            let compacted = auto_compact_if_needed(
-                &client,
-                &session,
-                &mut messages,
-                &sink,
-                &mut inert_ops(),
-                &mut Inbox::default(),
-                &mut auto_compact(10, Some(TokenUsage::new(20, 1)), &mut failures),
-            )
-            .await
-            .unwrap();
+                let compacted = engine.auto_compact(&sink, &mut ops, &mut inbox).await;
 
-            assert!(compacted);
-            let rubric = Message::user(SUMMARIZATION_USER_RUBRIC);
-            assert_eq!(
-                client.requests(),
-                [
-                    [tool_heavy_transcript(), vec![rubric.clone()]].concat(),
-                    vec![
-                        Message::user(RETRY_TRUNCATION_MARKER),
-                        Message::assistant("alpha-end, beta-end"),
-                        rubric,
-                    ],
-                ],
-                "the retry keeps only the newest round",
-            );
-            assert!(
-                matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
-            );
-            let events = sink.events();
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [
-                        Event::AutoCompactionStarted,
-                        Event::SummaryToken(overflowed),
-                        Event::SummaryDiscarded,
-                        Event::SummaryToken(retried),
-                        Event::SessionCompacted { automatic: true, .. },
-                    ] if overflowed == "partial" && retried == "auto summary"
-                ),
-                "the overflowed summary is discarded before the retry streams: {events:?}",
-            );
+                assert!(compacted.is_ok(), "{compacted:?}");
+                assert_eq!(inbox.prompts, ["queued after summary"]);
+                assert_eq!(
+                    engine.messages,
+                    [synthesize_post_compact_message(
+                        "auto summary",
+                        &plan(),
+                        &[]
+                    )]
+                );
+                assert!(
+                    sink.events().iter().any(|event| matches!(
+                        event,
+                        Event::SessionCompacted {
+                            trigger: CompactTrigger::Auto,
+                            ..
+                        }
+                    )),
+                    "{:?}",
+                    sink.events(),
+                );
+            })
+            .await;
         }
     }
 
-    mod record_auto_compact_failure {
+    mod compact {
         use super::*;
 
-        #[test]
-        fn keeps_the_cause_verbatim_before_the_next_step() {
-            for (cause, expected) in [
-                (
-                    "upstream timed out...",
-                    "Auto-compaction failed: upstream timed out... \
-                     The prompt was not sent, so send it again to retry.",
-                ),
-                (
-                    "upstream timed out",
-                    "Auto-compaction failed: upstream timed out. \
-                     The prompt was not sent, so send it again to retry.",
-                ),
-            ] {
-                let mut failures = AutoCompactFailures::default();
+        /// Serves one summary that streams `text` and then stalls with the connection open. Returns
+        /// the base URL.
+        async fn serve_stalled_summary(text: &str) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let body = sse_body(&[
+                serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": 1_000, "output_tokens": 0}}}),
+                serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
+            ]);
+            let declared = body.len() + 1;
+            let response = formatdoc! {"
+                HTTP/1.1 200 OK\r
+                content-type: text/event-stream\r
+                content-length: {declared}\r
+                \r
+                {body}"
+            };
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                _ = socket.read(&mut [0; 1024]).await.unwrap();
+                socket.write_all(response.as_bytes()).await.unwrap();
+                std::future::pending::<()>().await;
+            });
+            base_url
+        }
 
-                let abort = record_auto_compact_failure(
-                    &mut auto_compact(10, None, &mut failures),
-                    &CapturingSink::default(),
-                    Some(&anyhow!(cause)),
+        #[tokio::test]
+        async fn replaces_the_transcript_bills_the_summary_and_resumes_auto_compaction() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "manual summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.messages = tool_heavy_transcript();
+                engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
+                engine.total_estimated_cost_usd = 1.23;
+                engine.auto_compaction_failures = AutoCompactFailures::new(3);
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let end = engine
+                    .compact(&sink, &mut ops, Some("focus".to_owned()))
+                    .await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                assert!(matches!(
+                    engine.messages.as_slice(),
+                    [Message { content, .. }] if matches!(
+                        &content[0],
+                        ContentBlock::Text { text } if text.contains("manual summary")
+                    )
+                ));
+                assert_eq!(engine.displayed_usage, None);
+                assert!(
+                    (engine.total_estimated_cost_usd - (1.23 + 0.006)).abs() < 1e-12,
+                    "the session cost keeps earlier turns and adds the summary: {}",
+                    engine.total_estimated_cost_usd,
+                );
+                assert_ne!(
+                    engine.prompt.user_context, SESSION_CONTEXT,
+                    "the compacted transcript starts from a fresh user context"
+                );
+                assert!(engine.prompt_unrecorded);
+                assert_eq!(
+                    engine.auto_compaction_failures,
+                    AutoCompactFailures::default()
+                );
+                let events = sink.events();
+                let [
+                    Event::SummaryToken(streamed),
+                    Event::SessionCompacted {
+                        trigger: CompactTrigger::Manual,
+                        instructions: Some(focus),
+                        ..
+                    },
+                    Event::AutoCompactionResumed,
+                    Event::UsageUpdated(usage),
+                    Event::SessionReady,
+                ] = events.as_slice()
+                else {
+                    panic!(
+                        "expected the summary, compaction, resume, cost, then the end: {events:?}"
+                    );
+                };
+                assert_eq!(streamed, "manual summary");
+                assert_eq!(focus, "focus");
+                assert_eq!(usage.context_tokens, None);
+                assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn carries_the_task_list_into_the_summary_and_through_a_resume() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "manual summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let session_id = engine.session_id().to_owned();
+                engine.messages = tool_heavy_transcript();
+                engine.tasks = plan();
+                let mut ops = inert_ops();
+
+                let end = engine
+                    .compact(&CapturingSink::default(), &mut ops, None)
+                    .await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(
+                    engine.messages,
+                    [synthesize_post_compact_message(
+                        "manual summary",
+                        &plan(),
+                        &[]
+                    )]
+                );
+                assert_eq!(engine.tasks, plan());
+
+                engine.clear(&CapturingSink::default()).await;
+                let compacted = store.find_session_path(&session_id).unwrap();
+                engine
+                    .resume(&CapturingSink::default(), ResumeTarget::Path(compacted))
+                    .await;
+
+                assert_eq!(engine.session_id(), session_id);
+                assert_eq!(engine.tasks, plan());
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn lists_the_open_background_shells_in_the_summary_message() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "manual summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                engine.messages = tool_heavy_transcript();
+                start_shell(&engine.shells, "sleep 30");
+                let mut ops = inert_ops();
+
+                let end = engine
+                    .compact(&CapturingSink::default(), &mut ops, None)
+                    .await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(
+                    engine.messages,
+                    [synthesize_post_compact_message(
+                        "manual summary",
+                        &[],
+                        &[shell("shell-1", "sleep 30", ShellState::Running)],
+                    )]
+                );
+                engine.shells.stop_all().await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn failure_or_cancel_keeps_the_transcript() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.total_estimated_cost_usd = 1.23;
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(1);
+
+                engine.messages = vec![Message::user("too short")];
+                let end = engine.compact(&sink, &mut ops, None).await;
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(engine.messages, [Message::user("too short")]);
+
+                engine.messages = tool_heavy_transcript();
+                ops_tx.send(Op::Interrupt).await.unwrap();
+                let end = engine.compact(&sink, &mut ops, None).await;
+                assert_eq!(end, TurnEnd::Cancelled);
+                assert_eq!(engine.messages, tool_heavy_transcript());
+
+                engine.session = handle::testing::dead("dead");
+                let end = engine.compact(&sink, &mut ops, None).await;
+                assert_eq!(
+                    end,
+                    TurnEnd::Failed,
+                    "an unwritten boundary is a failed compaction"
+                );
+                assert_eq!(engine.messages, tool_heavy_transcript());
+
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::TurnFailed(short),
+                            Event::Cancelled,
+                            Event::SummaryToken(_),
+                            Event::SummaryDiscarded,
+                            Event::Error(boundary_write),
+                            Event::UsageUpdated(UsageSnapshot {
+                                context_tokens: None,
+                                estimated_cost_usd: Some(cost),
+                                ..
+                            }),
+                            Event::TurnFailed(unsaved),
+                        ] if short == "Compaction failed: the conversation has about 15 tokens, \
+                                       below the 1000-token minimum"
+                            && boundary_write == "Session write failed: \
+                                                  session writer task has stopped. \
+                                                  Conversation history may be incomplete."
+                            && (cost - (1.23 + 0.006)).abs() < 1e-12
+                            && unsaved == "Compaction was not saved, so the transcript is unchanged"
+                    ),
+                    "only the failure that sent a request shows its cost: {events:?}",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn shows_the_session_cost_after_a_summary_that_reported_no_usage() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let body = sse_body(&[
+                    json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL}}),
+                    json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                    json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "summary"}}),
+                    json!({"type": "content_block_stop", "index": 0}),
+                    json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+                    json!({"type": "message_stop"}),
+                ]);
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(sse_response(body))
+                    .mount(&server)
+                    .await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.messages = tool_heavy_transcript();
+                engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
+                engine.total_estimated_cost_usd = 1.23;
+                let sink = CapturingSink::default();
+
+                let end = engine.compact(&sink, &mut inert_ops(), None).await;
+
+                assert_eq!(end, TurnEnd::Completed);
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::SummaryToken(_),
+                            Event::SessionCompacted { .. },
+                            Event::UsageUpdated(UsageSnapshot {
+                                context_tokens: None,
+                                estimated_cost_usd: Some(cost),
+                                ..
+                            }),
+                            Event::SessionReady,
+                        ] if (cost - 1.23).abs() < 1e-12
+                    ),
+                    "the cleared context shows beside the unchanged cost: {events:?}",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn fails_while_signed_out_without_sending_a_request() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.client.set_auth(None);
+                engine.messages = tool_heavy_transcript();
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let end = engine.compact(&sink, &mut ops, None).await;
+
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Event::TurnFailed(msg)] if msg == "Not signed in. Run `/login` to sign in."
+                    ),
+                    "{events:?}"
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn keeps_a_mode_switch_sent_before_a_cancel() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.messages = tool_heavy_transcript();
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(2);
+                ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+                ops_tx.try_send(Op::Interrupt).unwrap();
+
+                let end = engine.compact(&sink, &mut ops, None).await;
+
+                assert_eq!(end, TurnEnd::Cancelled);
+                assert_eq!(engine.policy.mode(), Mode::Plan);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn cancelled_mid_summary_discards_it_before_the_cancel() {
+            with_pinned_home(async {
+                let base_url = serve_stalled_summary("partial").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(base_url, &test_store(dir.path()), dir.path()).await;
+                engine.messages = tool_heavy_transcript();
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = mpsc::channel(1);
+                let interrupt_once_streaming = async {
+                    while sink.events().is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                    ops_tx.send(Op::Interrupt).await.unwrap();
+                };
+
+                let (end, ()) = tokio::join!(
+                    engine.compact(&sink, &mut ops, None),
+                    interrupt_once_streaming,
                 );
 
-                assert_eq!(abort.to_string(), expected);
-            }
+                assert_eq!(end, TurnEnd::Cancelled);
+                assert_eq!(engine.messages, tool_heavy_transcript());
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            Event::SummaryToken(partial),
+                            Event::SummaryDiscarded,
+                            Event::UsageUpdated(_),
+                            Event::Cancelled,
+                        ] if partial == "partial"
+                    ),
+                    "{events:?}",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn failure_bills_and_shows_the_summary_cost() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(sse_response(
+                        text_stream_body("", "partial").replace("end_turn", "max_tokens"),
+                    ))
+                    .mount(&server)
+                    .await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.messages = tool_heavy_transcript();
+                engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
+                engine.total_estimated_cost_usd = 1.23;
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+
+                let end = engine.compact(&sink, &mut ops, None).await;
+
+                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(engine.displayed_usage, Some(TokenUsage::new(50_000, 1)));
+                let expected = 1.23 + 0.006;
+                assert!(
+                    (engine.total_estimated_cost_usd - expected).abs() < 1e-12,
+                    "a rejected summary is still billed: {}",
+                    engine.total_estimated_cost_usd,
+                );
+                let events = sink.events();
+                let [
+                    Event::SummaryToken(partial),
+                    Event::SummaryDiscarded,
+                    Event::UsageUpdated(usage),
+                    Event::TurnFailed(msg),
+                ] = events.as_slice()
+                else {
+                    panic!(
+                        "expected the discarded summary and its cost before the failure: {events:?}"
+                    );
+                };
+                assert_eq!(partial, "partial");
+                assert_eq!(usage.context_tokens, Some(50_000));
+                assert!((usage.estimated_cost_usd.unwrap() - expected).abs() < 1e-12);
+                assert!(
+                    msg.starts_with("Compaction failed") && msg.contains("max_tokens"),
+                    "{msg}"
+                );
+            })
+            .await;
         }
     }
 
-    mod compact_session {
+    mod replace_with_summary {
+        use super::*;
+
+        fn boundary(tasks: Vec<Task>) -> CompactBoundary {
+            CompactBoundary {
+                summary: "fixed login bug".to_owned(),
+                instructions: None,
+                tasks,
+                trigger: CompactTrigger::Auto,
+            }
+        }
+
+        #[tokio::test]
+        async fn clears_the_tracker_and_carries_the_task_list_over() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let session_id = engine.session_id().to_owned();
+                engine.messages = tool_heavy_transcript();
+                let read = dir.path().join("read.txt");
+                std::fs::write(&read, "read").unwrap();
+                seed_full_read(&engine.file_tracker, &read);
+                let sink = CapturingSink::default();
+
+                let compacted = engine.replace_with_summary(&sink, boundary(plan())).await;
+
+                assert!(compacted);
+                assert_eq!(engine.file_tracker.snapshot_all(), []);
+                let summary = synthesize_post_compact_message("fixed login bug", &plan(), &[]);
+                assert_eq!(engine.messages, [summary]);
+                assert!(
+                    matches!(
+                        sink.events().as_slice(),
+                        [Event::SessionCompacted {
+                            summary,
+                            trigger: CompactTrigger::Auto,
+                            ..
+                        }] if summary == "fixed login bug"
+                    ),
+                    "{:?}",
+                    sink.events(),
+                );
+                engine.session.shutdown().await;
+                let saved = store.load_session_data(&session_id).unwrap();
+                assert_eq!(saved.compact.map(|compact| compact.tasks), Some(plan()));
+                assert_eq!(saved.messages, engine.messages);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn keeps_the_transcript_and_tracker_when_the_write_fails() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.session = dead_test_session();
+                engine.messages = tool_heavy_transcript();
+                let read = dir.path().join("read.txt");
+                std::fs::write(&read, "read").unwrap();
+                seed_full_read(&engine.file_tracker, &read);
+                let tracked = engine.file_tracker.snapshot_all();
+                let sink = CapturingSink::default();
+
+                let compacted = engine
+                    .replace_with_summary(&sink, boundary(Vec::new()))
+                    .await;
+
+                assert!(!compacted);
+                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(engine.file_tracker.snapshot_all(), tracked);
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Event::SummaryDiscarded, Event::Error(message)]
+                            if message == "Session write failed: \
+                                           session writer task has stopped. \
+                                           Conversation history may be incomplete."
+                    ),
+                    "the unsaved summary is discarded before the write error: {events:?}",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn swaps_in_memory_once_its_write_stops_persistence() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
+                let unsaved = engine
+                    .session
+                    .record_message(Message::user("x".repeat(5 << 20)))
+                    .await;
+                assert!(unsaved.failure.is_some());
+                engine.messages = tool_heavy_transcript();
+                let summary = "s".repeat(2 << 20);
+                let mut large = boundary(Vec::new());
+                large.summary.clone_from(&summary);
+                let sink = CapturingSink::default();
+
+                let compacted = engine.replace_with_summary(&sink, large).await;
+
+                assert!(compacted);
+                assert_eq!(
+                    engine.messages,
+                    [synthesize_post_compact_message(&summary, &[], &[])]
+                );
+                let stop = session_write_failed(
+                    "session persistence stopped after more than 8 MiB of entries failed to \
+                     write: failed to create ",
+                );
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Event::SessionCompacted { .. }, Event::Error(message)]
+                            if message.starts_with(&stop)
+                    ),
+                    "expected the compaction, then the stop: {events:?}",
+                );
+                engine.session.shutdown().await;
+            })
+            .await;
+        }
+    }
+
+    mod request_summary {
         use super::*;
 
         fn streamed_summary_body(text: &str) -> String {
@@ -1047,7 +1492,7 @@ mod tests {
             transcript: &[Message],
         ) -> (Result<String>, Vec<Event>) {
             let sink = CapturingSink::default();
-            let summary = compact_session(
+            let summary = request_summary(
                 client,
                 &parent_prompt(),
                 &[],
@@ -1252,7 +1697,7 @@ mod tests {
                 )
                 .unwrap();
             while rx.recv().await.is_some() {}
-            compact_session(
+            request_summary(
                 &client,
                 &prompt,
                 &tools,
@@ -1299,7 +1744,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut spent = Vec::new();
 
-            let summary = compact_session(
+            let summary = request_summary(
                 &client,
                 &parent_prompt(),
                 &[],
@@ -1467,7 +1912,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut spent = Vec::new();
 
-            let err = compact_session(
+            let err = request_summary(
                 &client,
                 &parent_prompt(),
                 &[],
@@ -1580,7 +2025,7 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut spent = Vec::new();
 
-                let err = compact_session(
+                let err = request_summary(
                     &client,
                     &parent_prompt(),
                     &[],
@@ -1617,7 +2062,7 @@ mod tests {
             let mut spent = Vec::new();
 
             {
-                let mut compaction = pin!(compact_session(
+                let mut compaction = pin!(request_summary(
                     &client,
                     &prompt,
                     &[],
@@ -1654,7 +2099,7 @@ mod tests {
             let client = HeldStreamClient(Mutex::new(Some(rx)));
             let sink = CapturingSink::default();
 
-            let summary = compact_session(
+            let summary = request_summary(
                 &client,
                 &parent_prompt(),
                 &[],

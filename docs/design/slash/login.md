@@ -54,9 +54,10 @@ A refresh required by a request, whether for an expired token or after a 401, re
 - `crates/ox-core/src/config/auth.rs`: `AuthSource`, resolution order, the stored-login search, and `Auth::credential`, which refreshes a stored login before a request.
 - `crates/ox-core/src/config/login.rs`: PKCE, the loopback listener, and code exchange.
 - `crates/ox-core/src/config/oauth.rs`: credential stores, refresh, write-back, and `SessionLogin`, the token a session holds.
-- `crates/ox-core/src/engine.rs`: `Engine::ensure_signed_in`, which retries a stored login after a transient sign-out, `Engine::login` and `Engine::logout`, which swap the client's credential, and `Engine::finalize`, which waits at exit for the reloads in flight.
+- `crates/ox-core/src/engine.rs`: `Engine::finalize`, which waits at exit for the reloads in flight.
+- `crates/ox-core/src/engine/login.rs`: `Engine::ensure_signed_in`, which retries a stored login after a transient sign-out, and `Engine::login` and `Engine::logout`, which swap the client's credential.
 - `crates/ox-core/src/protocol.rs`: `Op::Login`, `Op::Logout`, `Event::LoginStarted`, `Event::SignedIn`, `Event::LoginRestored`, and `Event::SignedOut`.
 - `crates/ox-core/src/util/path.rs`: `claude_config_var` and `claude_dir`, which follow `CLAUDE_CONFIG_DIR` to Claude Code's config directory.
 - `crates/ox-tui/src/app/events.rs`: browser launch and sign-in messages.
-- `crates/ox-tui/src/components/status.rs`: `Status::SigningIn`, the status line while the browser is out.
+- `crates/ox-tui/src/components/status.rs`: `Status::SigningIn`, the status line while the browser is out, and `Status::SigningOut`.
 - `crates/ox-tui/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.

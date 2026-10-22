@@ -11,6 +11,7 @@ use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::model::TokenUsage;
 use crate::prompt::SessionContext;
+use crate::protocol::CompactTrigger;
 use crate::tool::ToolMetadata;
 use crate::tool::tasks::Task;
 
@@ -40,15 +41,18 @@ pub(crate) struct Header {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Entry {
     Header(Header),
-    /// Prompt state a resume rebuilds the request prefix from. Written in one batch ahead of the
-    /// user message that first carries it, with the same timestamp, and bound to the next message
-    /// entry whose timestamp matches. Resume applies the latest one on the chain it resolves.
+    /// Prompt state a resume rebuilds the request prefix from.
+    /// Written in one batch ahead of the user message that first carries it, with the same
+    /// timestamp, and bound to the next message entry whose timestamp matches.
+    /// Resume applies the latest one on the chain it resolves.
     Context {
         #[serde(flatten)]
         context: Box<SessionContext>,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
+    /// A transcript message, linked through `parent_uuid` to the message it follows.
+    /// Resume rebuilds the transcript along that chain.
     Message {
         uuid: Uuid,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,28 +61,33 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
-    /// Moves the active branch's tip back to the message `tip` names, or to an empty transcript
-    /// when `None`. The messages it abandons stay in the file. Resume follows a rewind until a
-    /// message line follows it in the file.
+    /// Moves the active branch's tip back to the message `tip` names,
+    /// or to an empty transcript when `None`.
+    /// The messages it abandons stay in the file.
+    /// Resume follows a rewind until a message line follows it in the file.
     Rewind {
         #[serde(skip_serializing_if = "Option::is_none")]
         tip: Option<Uuid>,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
+    /// The session's display title.
+    /// The newest `updated_at` wins.
     Title {
         title: String,
         source: TitleSource,
         #[serde(with = "time::serde::rfc3339")]
         updated_at: OffsetDateTime,
     },
-    /// Sets whether default listings and `--continue` skip the session. The last one in the
-    /// file wins.
+    /// Sets whether default listings and `--continue` skip the session.
+    /// The last one in the file wins.
     Archive {
         archived: bool,
         #[serde(with = "time::serde::rfc3339")]
         at: OffsetDateTime,
     },
+    /// The message count listings show, written when a session that gained messages finishes.
+    /// The newest `updated_at` wins.
     Summary {
         message_count: u32,
         #[serde(with = "time::serde::rfc3339")]
@@ -91,8 +100,8 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
-    /// One billed request, whatever branch or compaction it belongs to. Resume sums the cost of
-    /// each `uuid` once, since a retried write can repeat a line.
+    /// One billed request, whatever branch or compaction it belongs to.
+    /// Resume sums the cost of each `uuid` once, since a retried write can repeat a line.
     Usage {
         uuid: Uuid,
         #[serde(flatten)]
@@ -100,13 +109,16 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
+    /// A tracked file's state, written at finish just ahead of the summary.
     FileSnapshot {
         #[serde(flatten)]
         snapshot: FileSnapshot,
     },
-    /// Compaction boundary, written just before the synthetic post-compact `Message`. Carries the
-    /// pre-compact message count the resumed chat shows, and the task list the summarized
-    /// transcript left, which applies on resume until a later `tasks` call replaces it.
+    /// Compaction boundary, written just before the synthetic post-compact `Message`.
+    /// Carries the pre-compact message count the resumed chat shows,
+    /// and the task list the summarized transcript left,
+    /// which applies on resume until a later `tasks` call replaces it.
+    /// `trigger` is absent from boundaries that 0.1.0-alpha.5 and earlier wrote.
     Compact {
         summary: String,
         pre_message_count: u32,
@@ -114,6 +126,8 @@ pub(crate) enum Entry {
         instructions: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tasks: Vec<Task>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<CompactTrigger>,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
@@ -167,12 +181,24 @@ pub(super) fn keep_newer<T: Updated>(slot: &mut Option<T>, record: T) {
     }
 }
 
+/// A finished summary and what its compaction boundary records beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompactBoundary {
+    pub(crate) summary: String,
+    /// The `/compact` focus the summary followed.
+    pub(crate) instructions: Option<String>,
+    /// The task list the summarized transcript left, which the summary message carries over.
+    pub(crate) tasks: Vec<Task>,
+    pub(crate) trigger: CompactTrigger,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompactInfo {
     pub(crate) summary: String,
     pub(crate) pre_message_count: u32,
     pub(crate) instructions: Option<String>,
     pub(crate) tasks: Vec<Task>,
+    pub(crate) trigger: Option<CompactTrigger>,
 }
 
 /// One billed request's token usage, with the model and prompt-cache TTL that price it.
@@ -537,6 +563,7 @@ mod tests {
             pre_message_count: 42,
             instructions: Some("focus on the build error".to_owned()),
             tasks: plan(),
+            trigger: Some(CompactTrigger::Auto),
             timestamp: datetime!(2026-04-16 13:00:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -545,6 +572,7 @@ mod tests {
         assert_eq!(json["pre_message_count"], 42);
         assert_eq!(json["instructions"], "focus on the build error");
         assert_eq!(json["tasks"], serde_json::to_value(plan()).unwrap());
+        assert_eq!(json["trigger"], "auto");
         assert_eq!(json["timestamp"], "2026-04-16T13:00:00Z");
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
@@ -553,6 +581,7 @@ mod tests {
             pre_message_count,
             instructions,
             tasks,
+            trigger,
             timestamp,
         } = parsed
         else {
@@ -562,26 +591,30 @@ mod tests {
         assert_eq!(pre_message_count, 42);
         assert_eq!(instructions.as_deref(), Some("focus on the build error"));
         assert_eq!(tasks, plan());
+        assert_eq!(trigger, Some(CompactTrigger::Auto));
         assert_eq!(timestamp, datetime!(2026-04-16 13:00:00 UTC));
     }
 
     #[test]
-    fn compact_omits_absent_instructions_and_tasks_and_reads_them_back_empty() {
+    fn compact_omits_absent_instructions_tasks_and_trigger_and_reads_them_back_empty() {
         let entry = Entry::Compact {
             summary: "s".to_owned(),
             pre_message_count: 4,
             instructions: None,
             tasks: Vec::new(),
+            trigger: None,
             timestamp: datetime!(2026-04-16 13:00:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json.get("instructions"), None);
         assert_eq!(json.get("tasks"), None);
+        assert_eq!(json.get("trigger"), None);
 
         let parsed: Entry = serde_json::from_value(json).unwrap();
         let Entry::Compact {
             instructions,
             tasks,
+            trigger,
             ..
         } = parsed
         else {
@@ -589,6 +622,7 @@ mod tests {
         };
         assert_eq!(instructions, None);
         assert_eq!(tasks, []);
+        assert_eq!(trigger, None);
     }
 
     #[test]
