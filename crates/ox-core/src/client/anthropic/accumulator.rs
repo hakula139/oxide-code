@@ -15,10 +15,10 @@ use crate::model::TokenUsage;
 /// What a request asked its reply to carry.
 #[derive(Debug, Clone)]
 pub(super) struct ReplySpec {
-    /// The model the request names, the only one its reasoning blocks replay to.
+    /// The model the request names, which the reply's reasoning blocks record as their producer.
     pub(super) model: String,
     /// Whether the request asked for thinking text. Text it did not ask for, which an upstream
-    /// may still send, stays in the reply for replay but reaches no consumer.
+    /// may still send, stays in the reply's blocks but is not streamed.
     pub(super) thinking_text: bool,
 }
 

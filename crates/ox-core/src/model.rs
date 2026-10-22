@@ -124,6 +124,12 @@ pub(crate) fn replacement_for(id: &str) -> Option<&'static ModelInfo> {
     })
 }
 
+/// Returns whether `id` names a catalog model that writes no progress updates, so none of its
+/// reasoning text is a progress note.
+pub(crate) fn lacks_progress_updates(id: &str) -> bool {
+    lookup(id).is_some_and(|info| !info.progress_updates)
+}
+
 /// The catalog rates for `id`, or `None` for an id outside the catalog.
 pub(crate) fn cost_rates(id: &str) -> Option<TokenCostRates> {
     lookup(id).map(|info| info.cost_rates)
@@ -264,8 +270,8 @@ pub(crate) enum ThinkingConfig {
 }
 
 impl ThinkingConfig {
-    /// Whether the reply carries thinking text, as summaries or progress notes.
-    pub(crate) fn returns_text(&self) -> bool {
+    /// Returns whether the request asks for thinking text, as summaries or progress notes.
+    pub(crate) fn asks_for_text(&self) -> bool {
         match self {
             Self::Adaptive { display, .. } => *display != ThinkingDisplay::Omitted,
         }

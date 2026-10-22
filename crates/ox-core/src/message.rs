@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::lacks_progress_updates;
+
 // ── Role ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,9 +158,11 @@ pub(crate) const INTERRUPTION_MARKER: &str = "[Request interrupted by user]";
 
 // ── Progress Updates ──
 
-/// The progress note introducing the tool use at `blocks[index]`. See [`progress_note`].
+/// The progress note introducing the tool use at `blocks[index]`. See [`progress_note`]. Reasoning
+/// from a catalog model that writes no progress updates counts as empty.
 pub(crate) fn progress_update_before(blocks: &[ContentBlock], index: usize) -> Option<&str> {
     progress_note(blocks[..index].iter().map(|block| match block {
+        ContentBlock::Thinking { replay, .. } if lacks_progress_updates(&replay.model) => Some(""),
         ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
         ContentBlock::RedactedThinking { .. } => Some(""),
         _ => None,
@@ -462,6 +466,23 @@ mod tests {
                 tool_use(),
             ];
             assert_eq!(progress_update_before(&blocks, 2), Some("note"));
+        }
+
+        #[test]
+        fn skips_reasoning_from_a_model_without_progress_updates() {
+            let haiku = ContentBlock::Thinking {
+                thinking: "Summarized reasoning.".to_owned(),
+                replay: Replay::with_model("claude-haiku-5-5", "sig"),
+            };
+
+            assert_eq!(
+                progress_update_before(&[haiku.clone(), tool_use()], 1),
+                None
+            );
+            assert_eq!(
+                progress_update_before(&[thinking("note"), haiku, tool_use()], 2),
+                Some("note")
+            );
         }
     }
 }

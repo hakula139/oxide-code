@@ -53,8 +53,7 @@ async fn forward_sse(
 
 /// Drives the streaming `/v1/messages` request and forwards its [`ResponseEvent`]s on `tx`,
 /// retrying an attempt that fails before any content block arrives. Each retry forwards a
-/// [`ResponseEvent::Retrying`] notice first. `spec` says what the request asked the reply to
-/// carry.
+/// [`ResponseEvent::Retrying`] notice first.
 ///
 /// Returns `Ok(())` once the completed reply is forwarded or the receiver drops. Returns `Err`
 /// for transport / HTTP failures, an in-band `error` event, a stream that ends before
