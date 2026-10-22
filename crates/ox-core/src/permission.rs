@@ -740,6 +740,9 @@ pub enum Basis {
     /// A command ox could not parse, so the rules may not see everything it runs. It asks even in
     /// `yolo` unless a deny rule holds it.
     Unparsed,
+    /// A command that sets a variable bash reads to find, start, or expand commands, so the rules
+    /// may not see what it runs. It asks even in `yolo` unless a deny rule holds it.
+    ShellVariable,
 }
 
 impl Basis {
@@ -750,6 +753,10 @@ impl Basis {
             Self::Mode(_) => None,
             Self::Unparsed => Some(
                 "ox could not parse this command, so the permission rules may not see everything it runs"
+                    .to_owned(),
+            ),
+            Self::ShellVariable => Some(
+                "This command sets a variable bash reads to find or expand commands, so the permission rules may not see what it runs"
                     .to_owned(),
             ),
             basis => Some(format!("Asks because of {basis}")),
@@ -789,6 +796,9 @@ impl fmt::Display for Basis {
                 Ok(())
             }
             Self::Unparsed => f.write_str("a command ox could not parse"),
+            Self::ShellVariable => {
+                f.write_str("a command that sets a variable bash reads to find or expand commands")
+            }
         }
     }
 }
@@ -1043,7 +1053,7 @@ impl Policy {
     }
 
     /// What holds the call in the ask tier: an ask rule, the protected group of a path the call
-    /// edits or a command writes, a command that failed to parse, the
+    /// edits or a command writes, a command that failed to parse or sets a shell variable, the
     /// [`read` rule](Self::read_holder) for a file a reader opens, or the `rm` group for a
     /// [forced recursive delete](Segment::removes_recursively_by_force).
     fn asks(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
@@ -1060,6 +1070,9 @@ impl Policy {
         };
         if command.is_unparsed() {
             return Some(Basis::Unparsed);
+        }
+        if command.sets_shell_variable() {
+            return Some(Basis::ShellVariable);
         }
         command
             .writes()
@@ -2291,6 +2304,10 @@ mod tests {
                     "a known-safe read, the session `allow.exec` pattern `make *`",
                 ),
                 (Basis::Unparsed, "a command ox could not parse"),
+                (
+                    Basis::ShellVariable,
+                    "a command that sets a variable bash reads to find or expand commands",
+                ),
             ] {
                 assert_eq!(basis.to_string(), expected);
             }
@@ -2312,6 +2329,16 @@ mod tests {
                     Some("Asks because of the built-in `git` rule"),
                 );
                 assert_eq!(Basis::Mode(Mode::Manual).reason(), None);
+            }
+
+            #[test]
+            fn says_that_a_command_sets_a_variable_bash_finds_commands_by() {
+                assert_eq!(
+                    Basis::ShellVariable.reason().as_deref(),
+                    Some(
+                        "This command sets a variable bash reads to find or expand commands, so the permission rules may not see what it runs"
+                    ),
+                );
             }
 
             #[test]
@@ -3207,6 +3234,61 @@ mod tests {
                 assert_eq!(
                     decide(&p, EXEC, &command("echo x | xargs")),
                     Decision::Allow
+                );
+            }
+
+            #[test]
+            fn command_asks_even_in_yolo_when_it_sets_a_variable_bash_finds_commands_by() {
+                let cases = [
+                    "BASH_CMDS[ls]=/bin/rm; ls -rf x",
+                    "BASH_CMDS+=([ls]=/bin/rm); ls -rf x",
+                    "POSIXLY_CORRECT=1\nBASH_ALIASES[ls]=rm\nls -rf x",
+                    "PATH=/tmp ls",
+                    "builtin declare \"BASH_CMDS[ls]=/bin/rm\"; ls -rf x",
+                ];
+                for mode in [Mode::Manual, Mode::Yolo] {
+                    let p = policy(mode, &[(EXEC, "rm *")], &[], &[]);
+                    for case in cases {
+                        let verdict = p.verdict(EXEC, &command(case).as_target());
+                        assert_eq!(
+                            (verdict.decision, verdict.basis),
+                            (Decision::Ask, Basis::ShellVariable),
+                            "{mode} {case:?}"
+                        );
+                    }
+                    assert_eq!(
+                        decide(&p, EXEC, &command("PATH=/tmp rm -rf x")),
+                        Decision::Deny,
+                        "{mode}"
+                    );
+                }
+            }
+
+            #[test]
+            fn an_allow_rule_cannot_allow_a_command_that_hides_a_program_from_the_rules() {
+                let allow = &[
+                    (EXEC, "git commit *"),
+                    (EXEC, "cargo build *"),
+                    (EXEC, "cat *"),
+                ];
+                let p = policy(Mode::Manual, &[], &[], allow);
+                for case in [
+                    "GIT_EDITOR='rm -rf y'; git commit --amend",
+                    "cargo build ${x:n}",
+                    "cat ${!n}",
+                ] {
+                    assert_eq!(decide(&p, EXEC, &command(case)), Decision::Ask, "{case}");
+                }
+
+                let denied = policy(Mode::Yolo, &[(EXEC, "git *")], &[], allow);
+                assert_eq!(
+                    decide(&denied, EXEC, &command("GIT_EDITOR=x; git commit --amend")),
+                    Decision::Deny,
+                );
+
+                assert_eq!(
+                    decide(&p, EXEC, &command("cargo build ${profile:-release}")),
+                    Decision::Allow,
                 );
             }
 
