@@ -370,8 +370,14 @@ impl CommandTarget {
             opaque: false,
             changes_dir: false,
             relative_path: false,
+            expands: false,
         };
         walk.script(command);
+        if walk.expands {
+            for segment in &mut walk.segments {
+                segment.safe = false;
+            }
+        }
         Self {
             segments: walk.segments,
             writes: walk.writes,
@@ -414,7 +420,8 @@ pub(super) struct Segment {
     /// Whether one of [`READERS`] takes a word whose files the analysis cannot list, such as one
     /// that expands a variable, so it may read any file.
     reads_anything: bool,
-    /// Whether it is a shipped known-safe read-only command, whose `reads` are all it reads.
+    /// Whether it is a shipped known-safe read-only command, whose `reads` are all it reads, in a
+    /// command that expands no variable anywhere.
     safe: bool,
 }
 
@@ -520,6 +527,10 @@ impl ShellWord {
 // ── Walk ──
 
 /// What one command and the scripts nested in it run and write, gathered over its syntax tree.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool records an independent fact the walk finds anywhere in the tree"
+)]
 struct Walk<'a> {
     workspace: &'a Workspace,
     segments: Vec<Segment>,
@@ -530,6 +541,8 @@ struct Walk<'a> {
     changes_dir: bool,
     /// Whether some redirection or known-safe read names a relative path.
     relative_path: bool,
+    /// Whether any part of the command expands a variable at run time, wherever the value ends up.
+    expands: bool,
 }
 
 impl Walk<'_> {
@@ -568,6 +581,7 @@ impl Walk<'_> {
             }
             _ => {
                 self.opaque |= runs_hidden_code(node);
+                self.expands |= matches!(node.kind(), "expansion" | "simple_expansion");
                 self.visit_children(node, src);
             }
         }
@@ -1591,9 +1605,6 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
 /// `None` when `name` is no such command or `args` take it out of the safe set. Every argument
 /// must be literal and free of globs, so each file it reads is one the gate can check.
 fn safe_operands(name: &str, args: &[Word<'_>]) -> Option<Vec<String>> {
-    if matches!(name, "echo" | "false" | "pwd" | "true") {
-        return Some(Vec::new());
-    }
     let values = args
         .iter()
         .map(|word| word.value.as_deref().filter(|_| !word.glob))
@@ -1605,6 +1616,7 @@ fn safe_operands(name: &str, args: &[Word<'_>]) -> Option<Vec<String>> {
             .collect()
     };
     match name {
+        "echo" | "false" | "pwd" | "true" => Some(Vec::new()),
         "cat" | "head" | "ls" | "tail" | "wc" => Some(files()),
         "find" if !values.iter().any(|value| FIND_ACTIONS.contains(value)) => Some(files()),
         "grep" if !values.iter().any(|value| is_recursive_grep(value)) => Some(files()),
@@ -2402,6 +2414,48 @@ mod tests {
     mod walk {
         use super::*;
 
+        mod visit {
+            use super::*;
+
+            #[test]
+            fn withholds_safety_from_every_segment_once_anything_expands_a_variable() {
+                let safety = |command: &str| -> Vec<bool> {
+                    parse(command)
+                        .segments
+                        .iter()
+                        .map(|segment| segment.safe_reads().is_some())
+                        .collect()
+                };
+                for (literal, expanding) in [
+                    ("cat <<< 'key=$TOKEN'", "cat <<< \"key=$TOKEN\""),
+                    ("cat <<< TOKEN", "cat <<< ${TOKEN}"),
+                    ("cat <<'EOF'\n$TOKEN\nEOF", "cat <<EOF\n$TOKEN\nEOF"),
+                    (
+                        "cat <<'EOF' | head\n$TOKEN\nEOF",
+                        "cat <<EOF | head\n$TOKEN\nEOF",
+                    ),
+                    ("echo hi; cat <<< '$TOKEN'", "echo hi; cat <<< $TOKEN"),
+                    (
+                        "case a in a*) echo a;; esac",
+                        "case $TOKEN in a*) echo a;; esac",
+                    ),
+                    ("LC_ALL=C true", "LC_ALL=$TOKEN true"),
+                    ("LC_ALL=C; echo hi", "LC_ALL=$TOKEN; echo hi"),
+                    (
+                        "for t in a; do echo; done",
+                        "for t in $TOKEN; do echo; done",
+                    ),
+                ] {
+                    let safe = safety(literal);
+                    assert!(
+                        !safe.is_empty() && safe.iter().all(|&safe| safe),
+                        "{literal:?}"
+                    );
+                    assert_eq!(safety(expanding), vec![false; safe.len()], "{expanding:?}");
+                }
+            }
+        }
+
         mod redirect {
             use super::*;
 
@@ -2577,10 +2631,7 @@ mod tests {
                 command.segments[0].safe_reads(),
                 Some(&[at("pats"), at("more"), at("x"), at("-y"), at("src")][..])
             );
-            assert_eq!(
-                parse("echo $HOME *").segments[0].safe_reads(),
-                Some(&[][..])
-            );
+            assert_eq!(parse("echo done").segments[0].safe_reads(), Some(&[][..]));
         }
 
         #[test]
@@ -2592,6 +2643,7 @@ mod tests {
                 "wc -l a",
                 "pwd",
                 "true",
+                "echo 'a $b'",
             ] {
                 assert!(is_safe(command), "{command:?}");
             }
@@ -2599,6 +2651,10 @@ mod tests {
                 "cat *.rs",
                 "cat $F",
                 "cat {a,b}",
+                "echo $HOME *",
+                "echo $TOKEN",
+                "echo \"${TOKEN}\"",
+                "echo *",
                 "rm a",
                 "./cat a",
                 "git status",
