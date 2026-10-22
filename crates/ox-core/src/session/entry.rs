@@ -40,9 +40,10 @@ pub(crate) struct Header {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Entry {
     Header(Header),
-    /// Prompt state a resume rebuilds the request prefix from. Written in one batch ahead of the
-    /// user message that first carries it, with the same timestamp, and bound to the next message
-    /// entry whose timestamp matches. Resume applies the latest one on the chain it resolves.
+    /// Prompt state a resume rebuilds the request prefix from.
+    /// Written in one batch ahead of the user message that first carries it, with the same
+    /// timestamp, and bound to the next message entry whose timestamp matches.
+    /// Resume applies the latest one on the chain it resolves.
     Context {
         #[serde(flatten)]
         context: Box<SessionContext>,
@@ -59,9 +60,10 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
-    /// Moves the active branch's tip back to the message `tip` names, or to an empty transcript
-    /// when `None`. The messages it abandons stay in the file. Resume follows a rewind until a
-    /// message line follows it in the file.
+    /// Moves the active branch's tip back to the message `tip` names,
+    /// or to an empty transcript when `None`.
+    /// The messages it abandons stay in the file.
+    /// Resume follows a rewind until a message line follows it in the file.
     Rewind {
         #[serde(skip_serializing_if = "Option::is_none")]
         tip: Option<Uuid>,
@@ -76,14 +78,14 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         updated_at: OffsetDateTime,
     },
-    /// Sets whether default listings and `--continue` skip the session. The last one in the
-    /// file wins.
+    /// Sets whether default listings and `--continue` skip the session.
+    /// The last one in the file wins.
     Archive {
         archived: bool,
         #[serde(with = "time::serde::rfc3339")]
         at: OffsetDateTime,
     },
-    /// Written when a session that gained messages finishes, with the count listings show.
+    /// The message count listings show, written when a session that gained messages finishes.
     /// The newest `updated_at` wins.
     Summary {
         message_count: u32,
@@ -97,8 +99,8 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
-    /// One billed request, whatever branch or compaction it belongs to. Resume sums the cost of
-    /// each `uuid` once, since a retried write can repeat a line.
+    /// One billed request, whatever branch or compaction it belongs to.
+    /// Resume sums the cost of each `uuid` once, since a retried write can repeat a line.
     Usage {
         uuid: Uuid,
         #[serde(flatten)]
@@ -111,9 +113,10 @@ pub(crate) enum Entry {
         #[serde(flatten)]
         snapshot: FileSnapshot,
     },
-    /// Compaction boundary, written just before the synthetic post-compact `Message`. Carries the
-    /// pre-compact message count the resumed chat shows, and the task list the summarized
-    /// transcript left, which applies on resume until a later `tasks` call replaces it.
+    /// Compaction boundary, written just before the synthetic post-compact `Message`.
+    /// Carries the pre-compact message count the resumed chat shows,
+    /// and the task list the summarized transcript left,
+    /// which applies on resume until a later `tasks` call replaces it.
     Compact {
         summary: String,
         pre_message_count: u32,

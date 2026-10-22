@@ -165,9 +165,9 @@ pub(super) fn read_session_id_from_path(path: &Path) -> Result<String> {
     Ok(header.session_id)
 }
 
-/// The directory beside `session_file` that holds the artifacts of session `session_id`, such as
-/// spilled tool output. Nothing creates it until the session writes an artifact, and [`delete_at`]
-/// removes it with the file.
+/// The directory beside `session_file` that holds the artifacts of session `session_id`,
+/// such as spilled tool output.
+/// It exists only once the session writes an artifact, and [`delete_at`] removes it with the file.
 pub(crate) fn artifact_dir(session_file: &Path, session_id: &str) -> PathBuf {
     session_file.with_file_name(session_id)
 }
@@ -191,8 +191,9 @@ pub(crate) fn delete_at(path: &Path) -> Result<()> {
         .with_context(|| format!("failed to remove session file {}", path.display()))
 }
 
-/// Sets the archive state of the session file at `path`. The file keeps its mtime, since listings
-/// order sessions by activity and toggling the state is not activity.
+/// Sets the archive state of the session file at `path`.
+/// The file keeps its mtime, since listings order sessions by activity and toggling the state is
+/// not activity.
 pub(super) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
     let mut writer = open_append_at(path)?;
     let modified = fs::metadata(path)

@@ -1,6 +1,6 @@
 # Session Persistence
 
-How `ox` stores each session as an append-only JSONL file, writes it through a single actor task, and rebuilds the transcript on resume.
+`ox` stores each session as an append-only JSONL file, writes it through a single actor task, and rebuilds the transcript on resume.
 
 ## Storage Format
 
@@ -88,7 +88,7 @@ Starting a session stages the header in memory. The on-disk file is created by t
 
 ### Resume and Sanitization
 
-`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. A `rewind` entry moves the tip to the message it names and abandons the other leaves, so the newest-leaf rule skips them from then on. Its tip ends the chain until another message line follows it in the file. A rewind naming a message the loader has not read, such as one before the last compaction, is ignored. The sanitization pipeline then drops tool calls without results and results without calls, merges adjacent same-role survivors, and injects head / tail sentinels. A client call pairs with a user `tool_result`, and a server call with the result block in the same or a later reply. A server call that a `pause_turn` left waiting is dropped, because the next prompt closes the turn and the API rejects a call without its result.
+`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. A `rewind` entry moves the tip to the message it names and abandons the other leaves, so the newest-leaf rule skips them from then on. Its tip ends the chain until another message line follows it in the file. A rewind naming a message the loader has not read, such as one before the last compaction, is ignored. The sanitization pipeline then drops tool calls without results and results without calls, merges adjacent same-role survivors, and injects head / tail sentinels, so the resumed transcript stays valid for the API. A client call pairs with a user `tool_result`, and a server call with the result block in the same or a later reply. A server call that a `pause_turn` left waiting is dropped, because the next prompt closes the turn and the API rejects a call without its result.
 
 ### Refused Turns
 
@@ -159,11 +159,9 @@ Listings sort rows and render them as follows:
 
 1. **JSONL, append-only, one file per session.** A process crash loses at most the batch in progress, and readers can stream the file line by line.
 2. **Per-project subdirectory keyed by the project root.** Listings stay scoped, `--all` opts into cross-project view, and the header's `project_root` keeps a colliding directory name from mixing projects. Older files stay where they are, since a listing reads both subdirectories.
-3. **Best-effort AI titles scoped to their session.** A one-shot Haiku call logs a warning on failure, and finalizing the session aborts it. The title with the newest `updated_at` wins.
-4. **First-failure-only write-error surfacing.** One `Event::Error` per failure kind plus warn-logs gives visibility without spam.
-5. **Listing scan with message pre-filter, mtime sort.** Titles and summaries can appear anywhere in the file, so the scan reads every line and the prefix check keeps message lines out of JSON parsing.
-6. **Archive state as an appended entry.** A session keeps the same path whether it is archived or active. Because filtering listings by archive state requires parsing files, listings indicate whether more sessions follow the current page without counting them.
-7. **Result views derive from the result text.** The `tool_result_metadata` sidecar records only what the result text does not carry: a call's title, an edit's diff, and a search's uncapped total. The `read`, `glob`, and `grep` views parse the text the model received, so a resumed session shows the view the live call showed and the session file holds each result once. A stored view would repeat up to 128 KiB per call, and it would have to drop the rows the output cap cut. Parsing has two costs. A path with a line break or trailing whitespace, or a `grep` row whose path contains `:<digits>:` or `:<digits>-`, splits in the wrong place, so the view shows the wrong file or line where the model saw an ambiguous row. Each tool's text format also becomes part of the session format, since a parser that no longer recognizes an older result shows it as plain text.
+3. **First-failure-only write-error surfacing.** One `Event::Error` per failure kind plus warn-logs gives visibility without spam.
+4. **Listing scan with message pre-filter, mtime sort.** Titles and summaries can appear anywhere in the file, so the scan reads every line and the prefix check keeps message lines out of JSON parsing.
+5. **Result views derive from the result text.** The `tool_result_metadata` sidecar records only what the result text does not carry: a call's title, an edit's diff, and a search's uncapped total. The `read`, `glob`, and `grep` views parse the text the model received, so a resumed session shows the view the live call showed and the session file holds each result once. A stored view would repeat up to 128 KiB per call, and it would have to drop the rows the output cap cut. Parsing has two costs. A path with a line break or trailing whitespace, or a `grep` row whose path contains `:<digits>:` or `:<digits>-`, splits in the wrong place, so the view shows the wrong file or line where the model saw an ambiguous row. Each tool's text format also becomes part of the session format, since a parser that no longer recognizes an older result shows it as plain text.
 
 ## Sources
 
