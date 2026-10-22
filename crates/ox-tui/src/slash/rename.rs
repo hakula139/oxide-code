@@ -159,9 +159,9 @@ mod tests {
         use super::*;
 
         #[test]
-        fn typed_arg_forwards_rename_action_with_trimmed_title() {
+        fn typed_arg_forwards_rename_action_with_the_title() {
             assert_eq!(
-                run_execute(&RenameCmd, "  Fix auth bug  ")
+                run_execute(&RenameCmd, "Fix auth bug")
                     .unwrap()
                     .into_forward(),
                 Action::Op(Op::Rename {

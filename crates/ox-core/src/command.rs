@@ -18,8 +18,8 @@ use crate::protocol::{ConfigPick, Op, ResumeTarget};
 use crate::session::display::fit_title;
 
 /// Canonical names of the commands [`typed_op`] parses, without their leading `/`.
-pub const NAMES: [&str; 8] = [
-    "clear", "compact", "effort", "init", "mode", "model", "rename", "resume",
+pub const NAMES: [&str; 9] = [
+    "clear", "compact", "effort", "exit", "init", "mode", "model", "rename", "resume",
 ];
 
 /// Each command's aliases, keyed by its canonical name.
@@ -61,6 +61,7 @@ fn parse(name: &str, args: &str, project_root: &Path) -> Option<Result<Op, Strin
         "clear" => Ok(Op::Clear),
         "compact" => Ok(compact(args)),
         "effort" => effort(args),
+        "exit" => Ok(Op::Shutdown),
         "init" => init::parse(args, project_root),
         "mode" => mode(args),
         "model" => model(args),
@@ -296,6 +297,7 @@ mod tests {
                 ("clear", "", Op::Clear),
                 ("compact", "auth", compact("auth")),
                 ("effort", "low", set_effort(Effort::Low)),
+                ("exit", "", Op::Shutdown),
                 (
                     "init",
                     "AGENTS.md",

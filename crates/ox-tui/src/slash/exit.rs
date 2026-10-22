@@ -1,4 +1,4 @@
-//! `/exit` forwards [`Op::Shutdown`], which quits `ox` as Ctrl+D on an empty input does.
+//! `/exit` forwards [`Op::Shutdown`], which quits `ox` as Ctrl+D on an empty idle input does.
 
 use ox_core::protocol::Op;
 
@@ -21,10 +21,6 @@ impl SlashCommand for ExitCmd {
 
     fn classify(&self, _args: &str) -> SlashKind {
         SlashKind::Steering
-    }
-
-    fn echoes_input(&self, _args: &str) -> bool {
-        false
     }
 
     fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {

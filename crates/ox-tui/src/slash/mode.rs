@@ -167,6 +167,7 @@ mod tests {
 
         #[test]
         fn opens_the_picker_read_only_and_steers_with_a_mode() {
+            assert_eq!(ModeCmd.classify(""), SlashKind::ReadOnly);
             assert_eq!(ModeCmd.classify("plan"), SlashKind::Steering);
         }
     }

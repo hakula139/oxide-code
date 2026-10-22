@@ -274,17 +274,17 @@ mod tests {
         }
 
         #[test]
-        fn unknown_command_has_no_kind() {
-            let parsed = parsed("no-such-thing", "");
-            assert_eq!(classify(&parsed), None);
-        }
-
-        #[test]
         fn exit_and_its_alias_steer() {
             for name in ["exit", "quit"] {
                 let parsed = parsed(name, "");
                 assert_eq!(classify(&parsed), Some(SlashKind::Steering), "{name}");
             }
+        }
+
+        #[test]
+        fn unknown_command_has_no_kind() {
+            let parsed = parsed("no-such-thing", "");
+            assert_eq!(classify(&parsed), None);
         }
     }
 }

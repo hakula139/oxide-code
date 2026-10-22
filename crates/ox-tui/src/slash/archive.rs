@@ -275,6 +275,7 @@ mod tests {
             #[test]
             fn only_with_a_prefix() {
                 assert!(UnarchiveCmd.echoes_input("ab"));
+                assert!(!UnarchiveCmd.echoes_input(""), "bare form stands alone");
             }
         }
 

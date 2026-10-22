@@ -90,8 +90,8 @@ impl SlashOutcome {
     }
 }
 
-/// Drives busy-gating: `ReadOnly` and `Steering` may dispatch mid-turn, while the App refuses
-/// `Mutating` while a stream is in flight.
+/// Drives busy-gating: while a stream is in flight, the App runs `ReadOnly` and `Steering` forms
+/// and refuses `Mutating` ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SlashKind {
     /// Pure local read (chat output / modal open).
@@ -122,7 +122,7 @@ pub(super) trait SlashCommand: Sync {
 
     fn description(&self) -> &'static str;
 
-    /// Whether the form `args` may run mid-turn.
+    /// The [`SlashKind`] of the form `args`, which decides whether it may run mid-turn.
     fn classify(&self, _args: &str) -> SlashKind {
         SlashKind::ReadOnly
     }
@@ -364,6 +364,25 @@ mod tests {
                 .collect()
         }
 
+        /// Every `(command, args)` form of `kind` reachable from an empty or junk argument or a
+        /// completion.
+        fn forms_of_kind(kind: SlashKind) -> Vec<(&'static dyn SlashCommand, String)> {
+            BUILT_INS
+                .iter()
+                .flat_map(|&cmd| {
+                    let completions = cmd
+                        .complete_arg("")
+                        .into_iter()
+                        .map(|c| c.value.into_owned());
+                    [String::new(), "x".to_owned()]
+                        .into_iter()
+                        .chain(completions)
+                        .filter(move |args| cmd.classify(args) == kind)
+                        .map(move |args| (cmd, args))
+                })
+                .collect()
+        }
+
         #[test]
         fn have_unique_canonical_names() {
             let names: HashSet<_> = BUILT_INS.iter().map(|c| c.name()).collect();
@@ -431,36 +450,24 @@ mod tests {
             assert_eq!(empty_metadata_offenders(&[&empty]), vec!["no-desc"]);
         }
 
-        /// Every `(command, args)` form reachable from an empty or junk argument or a completion.
-        fn forms_of_kind(kind: SlashKind) -> Vec<(&'static dyn SlashCommand, String)> {
-            BUILT_INS
-                .iter()
-                .flat_map(|&cmd| {
-                    let completions = cmd
-                        .complete_arg("")
-                        .into_iter()
-                        .map(|c| c.value.into_owned());
-                    [String::new(), "x".to_owned()]
-                        .into_iter()
-                        .chain(completions)
-                        .filter(move |args| cmd.classify(args) == kind)
-                        .map(move |args| (cmd, args))
-                })
-                .collect()
-        }
-
         #[test]
         fn read_only_forms_never_forward() {
             let info = test_session_info();
             let ctx = SlashContext::new(&info, None);
             let forms = forms_of_kind(SlashKind::ReadOnly);
-
-            for (cmd, args) in &forms {
-                if let Ok(SlashOutcome::Forward(action)) = cmd.execute(args, &ctx) {
-                    panic!("/{} {args} forwards {action:?}", cmd.name());
-                }
-            }
             assert!(!forms.is_empty(), "no built-in form is read-only");
+
+            let forwarding: Vec<String> = forms
+                .iter()
+                .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
+                    Ok(SlashOutcome::Forward(action)) => {
+                        Some(format!("/{} {args} forwards {action:?}", cmd.name()))
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(forwarding, [] as [String; 0]);
         }
 
         #[test]
@@ -468,18 +475,21 @@ mod tests {
             let info = test_session_info();
             let ctx = SlashContext::new(&info, None);
             let forms = forms_of_kind(SlashKind::Steering);
+            assert!(!forms.is_empty(), "no built-in form steers");
 
-            for (cmd, args) in &forms {
-                match cmd.execute(args, &ctx) {
+            let racing: Vec<String> = forms
+                .iter()
+                .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
                     Ok(SlashOutcome::Forward(
                         Action::SwapTheme(_)
                         | Action::Op(Op::Queue(_) | Op::SetMode(_) | Op::Shutdown),
                     ))
-                    | Err(_) => {}
-                    other => panic!("/{} {args} forwards {other:?}", cmd.name()),
-                }
-            }
-            assert!(!forms.is_empty(), "no built-in form steers");
+                    | Err(_) => None,
+                    other => Some(format!("/{} {args} forwards {other:?}", cmd.name())),
+                })
+                .collect();
+
+            assert_eq!(racing, [] as [String; 0]);
         }
     }
 }
