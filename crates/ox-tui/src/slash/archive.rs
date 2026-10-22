@@ -63,12 +63,12 @@ impl SlashCommand for UnarchiveCmd {
         SlashKind::Mutating
     }
 
-    fn echoes_input(&self, args: &str) -> bool {
-        !args.is_empty()
-    }
-
     fn usage(&self) -> Option<&'static str> {
         Some("<id-prefix>")
+    }
+
+    fn echoes_input(&self, args: &str) -> bool {
+        !args.is_empty()
     }
 
     fn execute(&self, prefix: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -129,7 +129,8 @@ mod tests {
     };
 
     use super::*;
-    use crate::slash::testing::test_session_info;
+    use crate::slash::registry::testing::run_execute;
+    use crate::slash::testing::{make_read_only, test_session_info};
 
     fn seed_saved(store: &SessionStore, session_id: &str) {
         seed_test_session(
@@ -139,13 +140,6 @@ mod tests {
             Some(1),
             datetime!(2026-04-18 09:00:00 UTC),
         );
-    }
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(ArchiveCmd.name(), "archive");
-        assert_ne!(ArchiveCmd.description(), "");
-        assert_eq!(ArchiveCmd.usage(), Some("[<id-prefix>]"));
     }
 
     mod classify {
@@ -163,10 +157,7 @@ mod tests {
 
         #[test]
         fn bare_forwards_the_archive_action() {
-            let info = test_session_info();
-            let outcome = ArchiveCmd
-                .execute("", &SlashContext::new(&info, None))
-                .unwrap();
+            let outcome = run_execute(&ArchiveCmd, "").unwrap();
             assert_eq!(outcome.into_forward(), Action::Op(Op::Archive));
         }
 
@@ -176,17 +167,15 @@ mod tests {
                 let store = open_store(&test_session_info()).unwrap();
                 let target_id = stamped_id(0xab);
                 seed_saved(&store, &target_id);
-                let info = test_session_info();
-                let ctx = SlashContext::new(&info, None);
 
-                let note = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
+                let note = run_execute(&ArchiveCmd, &target_id[..4]).unwrap();
                 assert_eq!(
                     note.into_system_message(),
                     archive_notice(&target_id, ArchiveState::Archived)
                 );
                 assert_eq!(listed_ids(&store, ArchiveState::Active), [] as [String; 0]);
 
-                let again = ArchiveCmd.execute(&target_id[..4], &ctx).unwrap();
+                let again = run_execute(&ArchiveCmd, &target_id[..4]).unwrap();
                 assert_eq!(
                     again.into_system_message(),
                     "Session abababab is already archived"
@@ -199,10 +188,8 @@ mod tests {
             with_isolated_xdg(|_| {
                 let store = open_store(&test_session_info()).unwrap();
                 seed_saved(&store, "test-session");
-                let info = test_session_info();
-                let ctx = SlashContext::new(&info, None);
 
-                let err = ArchiveCmd.execute("test-", &ctx).unwrap_err();
+                let err = run_execute(&ArchiveCmd, "test-").unwrap_err();
                 assert_eq!(
                     err,
                     "Session prefix `test-` matches the live session. \
@@ -215,34 +202,25 @@ mod tests {
         #[test]
         fn unknown_prefix_reports_no_match() {
             with_isolated_xdg(|_| {
-                let info = test_session_info();
-                let err = ArchiveCmd
-                    .execute("zzzz", &SlashContext::new(&info, None))
-                    .unwrap_err();
+                let err = run_execute(&ArchiveCmd, "zzzz").unwrap_err();
                 assert_eq!(err, "No session matching `zzzz`");
             });
         }
 
-        #[cfg(unix)]
         #[test]
         fn prefix_reports_a_failed_write() {
-            use std::os::unix::fs::PermissionsExt;
-
             with_isolated_xdg(|_| {
                 let store = open_store(&test_session_info()).unwrap();
                 let target_id = stamped_id(0xab);
                 seed_saved(&store, &target_id);
                 let path = store.find_session_path(&target_id).unwrap();
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+                make_read_only(&path);
                 let cause = std::fs::OpenOptions::new()
                     .append(true)
                     .open(&path)
                     .unwrap_err();
-                let info = test_session_info();
 
-                let err = ArchiveCmd
-                    .execute(&target_id[..4], &SlashContext::new(&info, None))
-                    .unwrap_err();
+                let err = run_execute(&ArchiveCmd, &target_id[..4]).unwrap_err();
 
                 assert_eq!(
                     err,
@@ -257,13 +235,6 @@ mod tests {
 
     mod unarchive_cmd {
         use super::*;
-
-        #[test]
-        fn name_and_metadata_match_built_ins_contract() {
-            assert_eq!(UnarchiveCmd.name(), "unarchive");
-            assert_ne!(UnarchiveCmd.description(), "");
-            assert_eq!(UnarchiveCmd.usage(), Some("<id-prefix>"));
-        }
 
         mod classify {
             use super::*;
@@ -289,10 +260,7 @@ mod tests {
 
             #[test]
             fn bare_points_to_the_archived_picker() {
-                let info = test_session_info();
-                let err = UnarchiveCmd
-                    .execute("", &SlashContext::new(&info, None))
-                    .unwrap_err();
+                let err = run_execute(&UnarchiveCmd, "").unwrap_err();
                 assert_eq!(
                     err,
                     "Missing session ID. \
@@ -308,10 +276,8 @@ mod tests {
                     let target_id = stamped_id(0xab);
                     seed_saved(&store, &target_id);
                     archive_test_session(&store, &target_id);
-                    let info = test_session_info();
-                    let ctx = SlashContext::new(&info, None);
 
-                    let note = UnarchiveCmd.execute(&target_id[..4], &ctx).unwrap();
+                    let note = run_execute(&UnarchiveCmd, &target_id[..4]).unwrap();
                     assert_eq!(
                         note.into_system_message(),
                         archive_notice(&target_id, ArchiveState::Active)
@@ -321,7 +287,7 @@ mod tests {
                         [target_id.as_str()]
                     );
 
-                    let again = UnarchiveCmd.execute(&target_id[..4], &ctx).unwrap();
+                    let again = run_execute(&UnarchiveCmd, &target_id[..4]).unwrap();
                     assert_eq!(
                         again.into_system_message(),
                         "Session abababab is not archived"
@@ -332,10 +298,7 @@ mod tests {
             #[test]
             fn live_session_prefix_is_a_no_op_note() {
                 with_isolated_xdg(|_| {
-                    let info = test_session_info();
-                    let note = UnarchiveCmd
-                        .execute("test-", &SlashContext::new(&info, None))
-                        .unwrap();
+                    let note = run_execute(&UnarchiveCmd, "test-").unwrap();
                     assert_eq!(
                         note.into_system_message(),
                         "The live session is not archived"
@@ -346,10 +309,7 @@ mod tests {
             #[test]
             fn unknown_prefix_reports_no_match() {
                 with_isolated_xdg(|_| {
-                    let info = test_session_info();
-                    let err = UnarchiveCmd
-                        .execute("zzzz", &SlashContext::new(&info, None))
-                        .unwrap_err();
+                    let err = run_execute(&UnarchiveCmd, "zzzz").unwrap_err();
                     assert_eq!(err, "No session matching `zzzz`");
                 });
             }

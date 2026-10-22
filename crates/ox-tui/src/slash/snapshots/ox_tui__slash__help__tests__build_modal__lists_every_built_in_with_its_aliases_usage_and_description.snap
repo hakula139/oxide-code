@@ -1,0 +1,29 @@
+---
+source: crates/ox-tui/src/slash/help.rs
+expression: "render_rows(&modal, 100, modal.height(100, u16::MAX))"
+---
+[
+    "Help                                                                                                ",
+    "                                                                                                    ",
+    "/archive [<id-prefix>]            Archive this session or a saved one                               ",
+    "/clear (new, reset)               Reset the conversation context                                    ",
+    "/compact [<instructions>]         Compress conversation context into a summary                      ",
+    "/config                           Show resolved config                                              ",
+    "/delete <id-prefix>               Delete a saved session                                            ",
+    "/diff                             Show uncommitted working-tree changes                             ",
+    "/effort [<level>]                 Adjust reasoning effort                                           ",
+    "/exit (quit)                      Quit ox                                                           ",
+    "/help                             List slash commands                                               ",
+    "/init [<file>]                    Create or update AGENTS.md / CLAUDE.md                            ",
+    "/login                            Sign in to a Claude account                                       ",
+    "/logout                           Sign out of the oxide-code login                                  ",
+    "/mode [<mode>]                    Switch the permission mode                                        ",
+    "/model [<id>]                     Switch the model                                                  ",
+    "/rename [<title>]                 Rename the current session                                        ",
+    "/resume (continue) [<id-prefix>]  Resume a previous session                                         ",
+    "/status                           Show current session info                                         ",
+    "/theme [<name>]                   Change the theme                                                  ",
+    "/unarchive <id-prefix>            Unarchive a saved session                                         ",
+    "                                                                                                    ",
+    "Esc to close                                                                                        ",
+]

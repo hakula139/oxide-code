@@ -90,12 +90,12 @@ impl SlashCommand for ResumeCmd {
         SlashKind::Mutating
     }
 
-    fn echoes_input(&self, args: &str) -> bool {
-        !args.is_empty()
-    }
-
     fn usage(&self) -> Option<&'static str> {
         Some("[<id-prefix>]")
+    }
+
+    fn echoes_input(&self, args: &str) -> bool {
+        !args.is_empty()
     }
 
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -164,12 +164,6 @@ impl Column {
             Self::When => Some(SHORT_RELATIVE_TIME_WIDTH),
         }
     }
-}
-
-/// Columns besides the title and the gaps between all of `columns`.
-fn fixed_width(columns: &[Column]) -> usize {
-    let gaps = COLUMN_GAP * columns.len().saturating_sub(1);
-    columns.iter().filter_map(|c| c.width()).sum::<usize>() + gaps
 }
 
 impl SessionRow {
@@ -254,6 +248,12 @@ impl SessionRow {
             }
         }
     }
+}
+
+/// Columns besides the title and the gaps between all of `columns`.
+fn fixed_width(columns: &[Column]) -> usize {
+    let gaps = COLUMN_GAP * columns.len().saturating_sub(1);
+    columns.iter().filter_map(|c| c.width()).sum::<usize>() + gaps
 }
 
 impl SearchableItem for SessionRow {
@@ -471,7 +471,7 @@ fn read_page(walk: &mut SessionWalk, cancel: &AtomicBool) -> Vec<SessionInfo> {
 // ── ResumePicker ──
 
 /// What Esc does to the picker.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dismissal {
     /// Closes the picker and keeps the live session.
     Cancel,
@@ -824,7 +824,6 @@ mod tests {
     use crossterm::event::KeyModifiers;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use time::OffsetDateTime;
     use time::macros::datetime;
 
     use ox_core::session::display::UNTITLED_MARKER;
@@ -836,23 +835,29 @@ mod tests {
 
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
     use super::*;
+    use crate::modal::ModalStack;
     use crate::modal::chrome::HINT_SEPARATOR;
     use crate::modal::testing::{render_rows, rendered_text};
-    use crate::slash::testing::test_session_info;
+    use crate::slash::registry::testing::run_execute;
+    use crate::slash::testing::make_read_only;
 
-    fn seed_session(
-        store: &SessionStore,
-        id: &str,
-        title: Option<&str>,
-        msg_count: u32,
-        created_at: OffsetDateTime,
-    ) {
-        seed_test_session(store, id, title, Some(msg_count), created_at);
+    /// Seeds one titled session per `(byte, title)` under [`stamped_id`],
+    /// each last active `byte` seconds after a fixed time, so a higher byte sorts newer.
+    fn seed_titled(store: &SessionStore, sessions: &[(u8, &str)]) {
+        for &(byte, title) in sessions {
+            seed_test_session(
+                store,
+                &stamped_id(byte),
+                Some(title),
+                Some(1),
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
+            );
+        }
     }
 
-    /// Seeds active sessions `0x11` and `0x22`, then archived sessions `0x33` and `0x44`, each last
-    /// active a day before the previous one. The fixed dates fall outside the relative-time window,
-    /// so each row reads the same on every run.
+    /// Seeds active sessions `0x11` and `0x22`, then archived sessions `0x33` and `0x44`,
+    /// each last active a day before the previous one.
+    /// The fixed dates fall outside the relative-time window, so each row reads the same every run.
     fn seed_active_and_archived(store: &SessionStore) {
         let sessions = [
             (0x11, "Fix login redirect", 12, false),
@@ -869,7 +874,7 @@ mod tests {
             let id = stamped_id(byte);
             let last_active_at =
                 datetime!(2026-04-18 09:00:00 UTC) - time::Duration::days(days_ago);
-            seed_session(store, &id, Some(title), msg_count, last_active_at);
+            seed_test_session(store, &id, Some(title), Some(msg_count), last_active_at);
             if archived {
                 archive_test_session(store, &id);
             }
@@ -887,11 +892,11 @@ mod tests {
         let mut ids: Vec<_> = (1..=count)
             .map(|i| {
                 let id = stamped_id(u8::try_from(i).unwrap());
-                seed_session(
+                seed_test_session(
                     store,
                     &id,
                     Some("session"),
-                    1,
+                    Some(1),
                     datetime!(2026-04-18 09:00:00 UTC)
                         + time::Duration::seconds(i64::try_from(i).unwrap()),
                 );
@@ -920,13 +925,6 @@ mod tests {
     mod resume_cmd {
         use super::*;
 
-        #[test]
-        fn name_and_metadata_match_built_ins_contract() {
-            assert_eq!(ResumeCmd.name(), "resume");
-            assert_ne!(ResumeCmd.description(), "");
-            assert_eq!(ResumeCmd.usage(), Some("[<id-prefix>]"));
-        }
-
         mod classify {
             use super::*;
 
@@ -953,19 +951,14 @@ mod tests {
             #[test]
             fn bare_opens_the_picker() {
                 with_isolated_xdg(|_| {
-                    let info = test_session_info();
-                    let outcome = ResumeCmd.execute("", &SlashContext::new(&info, None));
+                    let outcome = run_execute(&ResumeCmd, "");
                     outcome.unwrap().into_modal();
                 });
             }
 
             #[test]
             fn typed_arg_forwards_the_prefix_for_the_engine_to_resolve() {
-                let info = test_session_info();
-
-                let outcome = ResumeCmd
-                    .execute(" ab12 ", &SlashContext::new(&info, None))
-                    .unwrap();
+                let outcome = run_execute(&ResumeCmd, " ab12 ").unwrap();
 
                 assert_eq!(
                     outcome.into_forward(),
@@ -1025,7 +1018,7 @@ mod tests {
             use super::*;
 
             #[test]
-            fn handles_titled_and_untitled_sessions() {
+            fn shows_the_title_or_the_untitled_marker() {
                 let absent = raw_session_info(&stamped_id(0xab), "/work/oxide", None, None, None);
                 let row = SessionRow::from_info(absent, LISTED_AT, true);
                 assert_eq!(row.title, UNTITLED_MARKER);
@@ -1283,18 +1276,18 @@ mod tests {
         #[test]
         fn loads_current_project_rows_into_searchable_list() {
             let (_dir, store) = isolated_store();
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("First"),
-                3,
+                Some(3),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x22),
                 Some("Second"),
-                5,
+                Some(5),
                 datetime!(2026-04-18 09:05:00 UTC),
             );
             let picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1305,18 +1298,18 @@ mod tests {
         fn filters_out_live_session_to_block_self_resume() {
             let (_dir, store) = isolated_store();
             let live_id = stamped_id(0x11);
-            seed_session(
+            seed_test_session(
                 &store,
                 &live_id,
                 Some("live"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x22),
                 Some("other"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:01:00 UTC),
             );
             let picker = opened(ResumePicker::new(store, live_id.clone()));
@@ -1332,11 +1325,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-            seed_session(
+            seed_test_session(
                 &other,
                 &stamped_id(0x22),
                 Some("foreign"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
 
@@ -1397,11 +1390,11 @@ mod tests {
         #[test]
         fn enter_with_selection_emits_resume_action() {
             let (_dir, store) = isolated_store();
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("only"),
-                3,
+                Some(3),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let expected = store.find_session_path(&stamped_id(0x11)).unwrap();
@@ -1438,11 +1431,11 @@ mod tests {
         #[test]
         fn follow_esc_with_the_scope_and_hide_row_actions_without_rows() {
             let (_dir, store) = isolated_store();
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("only"),
-                3,
+                Some(3),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1477,15 +1470,7 @@ mod tests {
         #[test]
         fn offer_to_clear_an_active_query() {
             let (_dir, store) = isolated_store();
-            for (byte, title) in [(0x11_u8, "auth fix"), (0x22, "ui tweak")] {
-                seed_session(
-                    &store,
-                    &stamped_id(byte),
-                    Some(title),
-                    1,
-                    datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
-                );
-            }
+            seed_titled(&store, &[(0x11, "auth fix"), (0x22, "ui tweak")]);
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
 
             picker.handle_paste("fix");
@@ -1581,11 +1566,11 @@ mod tests {
         #[test]
         fn keeps_the_resume_and_cancel_hints_on_a_narrow_footer() {
             let (_dir, store) = isolated_store();
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("Auth"),
-                3,
+                Some(3),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1633,11 +1618,11 @@ mod tests {
             let store = test_store(dir.path());
             let local = seed_many(&store, 1);
             let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-            seed_session(
+            seed_test_session(
                 &other,
                 &stamped_id(0x99),
                 Some("foreign"),
-                1,
+                Some(1),
                 datetime!(2026-04-19 09:00:00 UTC),
             );
             let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
@@ -1651,18 +1636,18 @@ mod tests {
         #[test]
         fn typing_or_pasting_filters_rows_via_searchable_list() {
             let (_dir, store) = isolated_store();
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("Auth fix"),
-                3,
+                Some(3),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x22),
                 Some("Refactor pass"),
-                5,
+                Some(5),
                 datetime!(2026-04-18 09:05:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1684,11 +1669,11 @@ mod tests {
         #[test]
         fn backspace_pops_one_char_from_query() {
             let (_dir, store) = isolated_store();
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("Auth"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1702,11 +1687,11 @@ mod tests {
         #[test]
         fn ctrl_u_clears_query() {
             let (_dir, store) = isolated_store();
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("Auth"),
-                3,
+                Some(3),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1724,11 +1709,11 @@ mod tests {
         fn navigation_keys_move_cursor_within_visible_set() {
             let (_dir, store) = isolated_store();
             for i in 0..3 {
-                seed_session(
+                seed_test_session(
                     &store,
                     &stamped_id(0x10 + i),
                     Some(&format!("row-{i}")),
-                    1,
+                    Some(1),
                     datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(i)),
                 );
             }
@@ -1752,11 +1737,11 @@ mod tests {
         #[test]
         fn tab_toggles_scope_and_reloads_rows() {
             let (_dir, store) = isolated_store();
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("only"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1783,27 +1768,27 @@ mod tests {
             // The live session stays out of the widened rows.
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("local"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-            seed_session(
+            seed_test_session(
                 &other,
                 &stamped_id(0x22),
                 Some("foreign"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:01:00 UTC),
             );
             let live_id = stamped_id(0x33);
-            seed_session(
+            seed_test_session(
                 &other,
                 &live_id,
                 Some("live-foreign"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:02:00 UTC),
             );
 
@@ -1865,11 +1850,11 @@ mod tests {
         #[test]
         fn unrecognized_keys_are_consumed_without_side_effects() {
             let (_dir, store) = isolated_store();
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("only"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1886,11 +1871,11 @@ mod tests {
         #[test]
         fn ctrl_d_pushes_the_confirm_modal_for_the_cursor_row_while_delete_edits_the_query() {
             let (_dir, store) = isolated_store();
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("Fix auth"),
-                3,
+                Some(3),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1931,20 +1916,12 @@ mod tests {
         #[test]
         fn ctrl_d_then_y_deletes_the_cursor_session_through_the_modal_stack() {
             let (_dir, store) = isolated_store();
-            for (byte, title) in [(0x11_u8, "first"), (0x22, "second")] {
-                seed_session(
-                    &store,
-                    &stamped_id(byte),
-                    Some(title),
-                    1,
-                    datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
-                );
-            }
+            seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
             let picker = opened(ResumePicker::new(
                 store.clone(),
                 "live-session-id".to_owned(),
             ));
-            let mut stack = crate::modal::ModalStack::default();
+            let mut stack = ModalStack::default();
             stack.push(Box::new(picker));
             let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
 
@@ -1975,20 +1952,15 @@ mod tests {
         #[test]
         fn ctrl_x_archives_the_cursor_row_and_keeps_the_filter_and_scope() {
             let (_dir, store) = isolated_store();
-            for (byte, title) in [
-                (0x11_u8, "fix one"),
-                (0x22, "fix two"),
-                (0x33, "fix three"),
-                (0x44, "docs"),
-            ] {
-                seed_session(
-                    &store,
-                    &stamped_id(byte),
-                    Some(title),
-                    1,
-                    datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
-                );
-            }
+            seed_titled(
+                &store,
+                &[
+                    (0x11, "fix one"),
+                    (0x22, "fix two"),
+                    (0x33, "fix three"),
+                    (0x44, "docs"),
+                ],
+            );
             let mut picker = opened(ResumePicker::new(
                 store.clone(),
                 "live-session-id".to_owned(),
@@ -2037,11 +2009,11 @@ mod tests {
         fn ctrl_x_keeps_the_visible_rows_in_place() {
             let (_dir, store) = isolated_store();
             for i in 0..20_u8 {
-                seed_session(
+                seed_test_session(
                     &store,
                     &stamped_id(i + 1),
                     Some(&format!("row-{i}")),
-                    1,
+                    Some(1),
                     datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(i)),
                 );
             }
@@ -2071,16 +2043,9 @@ mod tests {
         #[test]
         fn ctrl_x_in_the_archived_view_unarchives_the_last_row_and_lands_above_it() {
             let (_dir, store) = isolated_store();
-            for (byte, title) in [(0x11_u8, "first"), (0x22, "second")] {
-                let id = stamped_id(byte);
-                seed_session(
-                    &store,
-                    &id,
-                    Some(title),
-                    1,
-                    datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
-                );
-                archive_test_session(&store, &id);
+            seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
+            for byte in [0x11, 0x22] {
+                archive_test_session(&store, &stamped_id(byte));
             }
             let mut picker = opened(ResumePicker::new(
                 store.clone(),
@@ -2106,11 +2071,11 @@ mod tests {
             // session layer's refusal.
             let (_dir, store) = isolated_store();
             let id = stamped_id(0x11);
-            seed_session(
+            seed_test_session(
                 &store,
                 &id,
                 Some("only"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(
@@ -2148,22 +2113,19 @@ mod tests {
             assert!(picker.notice.is_none(), "no row, so nothing to archive");
         }
 
-        #[cfg(unix)]
         #[test]
         fn ctrl_x_shows_a_failed_write_and_keeps_the_row() {
-            use std::os::unix::fs::PermissionsExt;
-
             let (_dir, store) = isolated_store();
             let id = stamped_id(0x11);
-            seed_session(
+            seed_test_session(
                 &store,
                 &id,
                 Some("only"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let path = store.find_session_path(&id).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+            make_read_only(&path);
             let failure = saved_error_message(
                 saved::set_archived(&path, &id, ArchiveState::Archived, "live-session-id")
                     .unwrap_err(),
@@ -2198,15 +2160,7 @@ mod tests {
         #[test]
         fn clears_the_notice() {
             let (_dir, store) = isolated_store();
-            for (byte, title) in [(0x11_u8, "first"), (0x22, "second")] {
-                seed_session(
-                    &store,
-                    &stamped_id(byte),
-                    Some(title),
-                    1,
-                    datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
-                );
-            }
+            seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
             picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
             assert_eq!(footer_row(&picker, 80), "Archived session 22222222: second");
@@ -2230,11 +2184,11 @@ mod tests {
             let id_a = stamped_id(0x11);
             let id_b = stamped_id(0x22);
             for (id, title) in [(&id_a, "first"), (&id_b, "second")] {
-                seed_session(
+                seed_test_session(
                     &store,
                     id,
                     Some(title),
-                    1,
+                    Some(1),
                     datetime!(2026-04-18 09:00:00 UTC),
                 );
             }
@@ -2252,15 +2206,10 @@ mod tests {
         #[test]
         fn preserves_cursor_when_row_is_still_present() {
             let (_dir, store) = isolated_store();
-            for (byte, title) in [(0x11_u8, "first"), (0x22, "second"), (0x33, "third")] {
-                seed_session(
-                    &store,
-                    &stamped_id(byte),
-                    Some(title),
-                    1,
-                    datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
-                );
-            }
+            seed_titled(
+                &store,
+                &[(0x11, "first"), (0x22, "second"), (0x33, "third")],
+            );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
             picker.handle_key(&KeyEvent::from(KeyCode::Down));
             let pinned = picker.list.selected().unwrap().session_id.clone();
@@ -2276,15 +2225,10 @@ mod tests {
         #[test]
         fn moves_to_the_next_row_when_the_selected_row_was_deleted() {
             let (_dir, store) = isolated_store();
-            for (byte, title) in [(0x11_u8, "first"), (0x22, "doomed"), (0x33, "third")] {
-                seed_session(
-                    &store,
-                    &stamped_id(byte),
-                    Some(title),
-                    1,
-                    datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
-                );
-            }
+            seed_titled(
+                &store,
+                &[(0x11, "first"), (0x22, "doomed"), (0x33, "third")],
+            );
             let target = stamped_id(0x22);
             let mut picker = opened(ResumePicker::new(
                 store.clone(),
@@ -2312,11 +2256,11 @@ mod tests {
         #[tokio::test(start_paused = true)]
         async fn restores_the_hints_once_the_archive_notice_expires() {
             let (_dir, store) = isolated_store();
-            seed_session(
+            seed_test_session(
                 &store,
                 &stamped_id(0x11),
                 Some("only"),
-                1,
+                Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -2409,7 +2353,7 @@ mod tests {
         #[test]
         fn quits_from_the_startup_picker_only() {
             let (_dir, store) = isolated_store();
-            let mut stack = crate::modal::ModalStack::default();
+            let mut stack = ModalStack::default();
             stack.push(Box::new(ResumePicker::at_startup(
                 store.clone(),
                 "live-session-id".to_owned(),

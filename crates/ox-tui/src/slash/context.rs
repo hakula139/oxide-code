@@ -61,7 +61,6 @@ pub(crate) mod testing {
 
     /// Fully-populated `LiveSessionInfo` that the slash command, welcome, and TUI app tests share.
     pub(crate) fn test_session_info() -> LiveSessionInfo {
-        // Real MODELS row so the display name resolves to a known label.
         LiveSessionInfo {
             cwd: "~/test".to_owned(),
             working_dir: Some(PathBuf::from("/repo")),

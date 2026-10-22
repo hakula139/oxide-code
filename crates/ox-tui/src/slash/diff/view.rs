@@ -386,25 +386,25 @@ mod tests {
     use super::testing::{added, context, removed};
     use super::*;
 
-    const HINT: &str = "`git diff HEAD`";
-
-    fn file(label: &str) -> DiffRow {
-        DiffRow::File(label.to_owned())
-    }
-
-    fn hunk(header: &str) -> DiffRow {
-        DiffRow::Hunk(header.to_owned())
-    }
-
-    fn rows_of(diff: &str) -> Vec<DiffRow> {
-        WorkingTreeDiff::new(&[diff], "", HINT).rows
-    }
-
     mod working_tree_diff {
         use super::*;
 
+        const HINT: &str = "`git diff HEAD`";
+
         mod new {
             use super::*;
+
+            fn file(label: &str) -> DiffRow {
+                DiffRow::File(label.to_owned())
+            }
+
+            fn hunk(header: &str) -> DiffRow {
+                DiffRow::Hunk(header.to_owned())
+            }
+
+            fn rows_of(diff: &str) -> Vec<DiffRow> {
+                WorkingTreeDiff::new(&[diff], "", HINT).rows
+            }
 
             #[test]
             fn reads_files_hunks_and_numbered_lines() {

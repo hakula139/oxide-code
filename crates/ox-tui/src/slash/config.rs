@@ -40,6 +40,8 @@ impl SlashCommand for ConfigCmd {
     }
 }
 
+// ── Helpers ──
+
 fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
     let cfg = &info.config;
     let sources = &cfg.provenance;
@@ -159,21 +161,15 @@ mod tests {
     use super::*;
     use crate::modal::Modal;
     use crate::modal::testing::rendered_text;
+    use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::test_session_info;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(ConfigCmd.name(), "config");
-        assert_ne!(ConfigCmd.description(), "");
-    }
 
     mod execute {
         use super::*;
 
         #[test]
         fn opens_the_overview_modal() {
-            let info = test_session_info();
-            let outcome = ConfigCmd.execute("", &SlashContext::new(&info, None));
+            let outcome = run_execute(&ConfigCmd, "");
             outcome.unwrap().into_modal();
         }
     }

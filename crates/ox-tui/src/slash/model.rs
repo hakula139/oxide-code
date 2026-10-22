@@ -11,6 +11,8 @@ use super::picker::ModelEffortPicker;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::action::Action;
 
+// ── ModelCmd ──
+
 pub(super) struct ModelCmd;
 
 impl SlashCommand for ModelCmd {
@@ -26,10 +28,6 @@ impl SlashCommand for ModelCmd {
         SlashKind::Mutating
     }
 
-    fn echoes_input(&self, args: &str) -> bool {
-        !args.is_empty()
-    }
-
     fn usage(&self) -> Option<&'static str> {
         Some("[<id>]")
     }
@@ -42,6 +40,10 @@ impl SlashCommand for ModelCmd {
                 description: Cow::Borrowed(info.display_name),
             })
             .collect()
+    }
+
+    fn echoes_input(&self, args: &str) -> bool {
+        !args.is_empty()
     }
 
     fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -61,13 +63,6 @@ mod tests {
 
     use super::*;
     use crate::slash::registry::testing::run_execute;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(ModelCmd.name(), "model");
-        assert_ne!(ModelCmd.description(), "");
-        assert_eq!(ModelCmd.usage(), Some("[<id>]"));
-    }
 
     mod classify {
         use super::*;
