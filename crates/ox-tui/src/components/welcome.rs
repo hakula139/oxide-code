@@ -19,8 +19,8 @@ use crate::theme::Theme;
 // ── Content Pools ──
 
 /// Built-ins a new session cannot run bare: `/delete` and `/unarchive` need an ID, `/archive` has
-/// nothing to archive yet, and `/logout` only undoes a `/login`.
-const NOT_STARTERS: &[&str] = &["archive", "delete", "logout", "unarchive"];
+/// nothing to archive yet, `/exit` ends the session, and `/logout` only undoes a `/login`.
+const NOT_STARTERS: &[&str] = &["archive", "delete", "exit", "logout", "unarchive"];
 
 const TIP_POOL: &[&str] = &[
     "click #NN in the status bar to open the PR",

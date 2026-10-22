@@ -18,12 +18,16 @@ use crate::protocol::{ConfigPick, Op, ResumeTarget};
 use crate::session::display::fit_title;
 
 /// Canonical names of the commands [`typed_op`] parses, without their leading `/`.
-pub const NAMES: [&str; 8] = [
-    "clear", "compact", "effort", "init", "mode", "model", "rename", "resume",
+pub const NAMES: [&str; 9] = [
+    "clear", "compact", "effort", "exit", "init", "mode", "model", "rename", "resume",
 ];
 
 /// Each command's aliases, keyed by its canonical name.
-const ALIASES: [(&str, &[&str]); 2] = [("clear", &["new", "reset"]), ("resume", &["continue"])];
+const ALIASES: [(&str, &[&str]); 3] = [
+    ("clear", &["new", "reset"]),
+    ("exit", &["quit"]),
+    ("resume", &["continue"]),
+];
 
 /// The op the typed form of `parsed` runs at `project_root`, with an alias resolved to its command
 /// and an error prefixed by the name the user typed. `None` when the command has no typed form.
@@ -57,6 +61,7 @@ fn parse(name: &str, args: &str, project_root: &Path) -> Option<Result<Op, Strin
         "clear" => Ok(Op::Clear),
         "compact" => Ok(compact(args)),
         "effort" => effort(args),
+        "exit" => Ok(Op::Shutdown),
         "init" => init::parse(args, project_root),
         "mode" => mode(args),
         "model" => model(args),
@@ -251,7 +256,12 @@ mod tests {
 
         #[test]
         fn resolves_each_alias_to_its_command() {
-            for (alias, name) in [("new", "clear"), ("reset", "clear"), ("continue", "resume")] {
+            for (alias, name) in [
+                ("new", "clear"),
+                ("reset", "clear"),
+                ("quit", "exit"),
+                ("continue", "resume"),
+            ] {
                 assert_eq!(canonical(alias), name, "{alias}");
             }
         }
@@ -287,6 +297,7 @@ mod tests {
                 ("clear", "", Op::Clear),
                 ("compact", "auth", compact("auth")),
                 ("effort", "low", set_effort(Effort::Low)),
+                ("exit", "", Op::Shutdown),
                 (
                     "init",
                     "AGENTS.md",
