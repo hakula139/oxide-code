@@ -45,7 +45,6 @@ pub(crate) enum InputOutcome {
 
 /// Multi-line input area with dynamic height and slash-command popup.
 pub(crate) struct InputArea {
-    theme: Theme,
     textarea: TextArea<'static>,
     popup: SlashPopup,
     /// Textarea width at the last render, which sets the wrap layout.
@@ -57,26 +56,17 @@ pub(crate) struct InputArea {
 // ── Public API ──
 
 impl InputArea {
-    pub(crate) fn new(theme: &Theme) -> Self {
+    pub(crate) fn new() -> Self {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
-        textarea.set_style(theme.text());
         textarea.set_wrap_mode(WrapMode::WordOrGlyph);
 
         Self {
-            theme: theme.clone(),
             textarea,
-            popup: SlashPopup::new(theme),
+            popup: SlashPopup::default(),
             rendered_width: Cell::new(0),
             visual_lines: Cell::new(None),
         }
-    }
-
-    /// Re-skins every subsequent render, including the textarea's cached text style.
-    pub(crate) fn set_theme(&mut self, theme: &Theme) {
-        self.theme = theme.clone();
-        self.textarea.set_style(theme.text());
-        self.popup.set_theme(theme);
     }
 
     #[cfg(test)]
@@ -112,8 +102,8 @@ impl InputArea {
         self.popup.height()
     }
 
-    pub(crate) fn render_popup(&self, frame: &mut Frame<'_>, area: Rect) {
-        self.popup.render(frame, area);
+    pub(crate) fn render_popup(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        self.popup.render(frame, area, theme);
     }
 }
 
@@ -132,16 +122,16 @@ impl InputArea {
     }
 
     /// Draws the input in `area`, with its rules in the accent color while `busy`.
-    pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, busy: bool) {
+    pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, busy: bool, theme: &Theme) {
         let rule_style = if busy {
-            self.theme.accent()
+            theme.accent()
         } else {
-            self.theme.border_focused()
+            theme.border_focused()
         };
         let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(rule_style)
-            .style(self.theme.surface());
+            .style(theme.surface());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -152,10 +142,7 @@ impl InputArea {
         .areas(inner);
 
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                USER_PROMPT_PREFIX,
-                self.theme.user(),
-            ))),
+            Paragraph::new(Line::from(Span::styled(USER_PROMPT_PREFIX, theme.user()))),
             prompt_area,
         );
 
@@ -163,6 +150,8 @@ impl InputArea {
         if textarea_area.is_empty() {
             return;
         }
+        // The textarea keeps its default style and takes the text slot from the cells under it.
+        frame.render_widget(Block::default().style(theme.text()), textarea_area);
         frame.render_widget(&self.textarea, textarea_area);
         if self.rendered_width.replace(textarea_area.width) != textarea_area.width {
             self.visual_lines.set(None);
@@ -183,7 +172,7 @@ impl InputArea {
             if width > 0 {
                 let area = Rect::new(ghost_x, cursor_y, width, 1);
                 frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled(token, self.theme.dim()))),
+                    Paragraph::new(Line::from(Span::styled(token, theme.dim()))),
                     area,
                 );
             }
@@ -363,7 +352,7 @@ mod tests {
     use super::*;
 
     fn test_input() -> InputArea {
-        InputArea::new(&Theme::default())
+        InputArea::new()
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -386,7 +375,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
-                input.render(frame, frame.area(), busy);
+                input.render(frame, frame.area(), busy, &Theme::default());
             })
             .unwrap();
         terminal.backend().clone()
@@ -718,7 +707,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(10, 2)).unwrap();
 
             terminal
-                .draw(|frame| input.render(frame, Rect::new(0, 0, 10, 0), false))
+                .draw(|frame| input.render(frame, Rect::new(0, 0, 10, 0), false, &Theme::default()))
                 .unwrap();
 
             let buffer = terminal.backend().buffer();
@@ -742,7 +731,7 @@ mod tests {
         fn busy_state_keeps_text_styled_normally() {
             // Composing mid-turn for the queue looks the same as composing idle, as in Claude Code.
             let theme = Theme::default();
-            let mut input = InputArea::new(&theme);
+            let mut input = InputArea::new();
             type_text(&mut input, "pending");
 
             let text_fg = |busy| {
@@ -761,7 +750,7 @@ mod tests {
         fn prompt_marker_always_uses_user_color() {
             // The chevron keeps the user accent while busy, since composing mid-turn is allowed.
             let theme = Theme::default();
-            let input = InputArea::new(&theme);
+            let input = InputArea::new();
             let marker_fg = |busy| {
                 render_in_state(&input, 60, 3, busy)
                     .buffer()
@@ -777,7 +766,7 @@ mod tests {
         #[test]
         fn rules_rest_in_border_focused_and_take_the_accent_while_busy() {
             let theme = Theme::default();
-            let input = InputArea::new(&theme);
+            let input = InputArea::new();
             let rule_styles = |busy| {
                 let backend = render_in_state(&input, 60, 3, busy);
                 [0, 2].map(|row| {
@@ -825,7 +814,9 @@ mod tests {
             type_text(&mut input, "/model ");
             input.refresh_popup();
             let mut terminal = Terminal::new(TestBackend::new(60, 3)).unwrap();
-            terminal.draw(|f| input.render(f, f.area(), false)).unwrap();
+            terminal
+                .draw(|f| input.render(f, f.area(), false, &Theme::default()))
+                .unwrap();
 
             let buf = terminal.backend().buffer();
             let row: String = (0..60).map(|x| buf[(x, 1)].symbol()).collect();
