@@ -31,7 +31,7 @@ In scope:
 
 Out of scope:
 
-- Tool calls in `yolo` mode that no `deny` rule covers, calls you approved as shown in the prompt, and calls matched by your allow rules as documented
+- Calls you approved as shown in the prompt, calls matched by your allow rules as documented, and tool calls in `yolo` mode that no `deny` rule covers, other than a `bash` command `ox` cannot parse, which still asks
 - Secrets that an allowed read, grep, or glob call returns, which the session transcript then records
 - Prompt injection when the resulting tool calls still pass through the permission gate as configured
 - Attacks that require prior write access outside the repository, such as access to your user config, environment, or shell startup files
