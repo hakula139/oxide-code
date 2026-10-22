@@ -2549,6 +2549,15 @@ mod tests {
             }
 
             #[test]
+            fn suggests_a_rule_that_still_matches_a_word_the_grammar_reads_as_an_operator() {
+                let p = policy(Mode::Manual, &[], &[], &[]);
+
+                let grant = p.session_grant(EXEC, &command("cat == x")).unwrap();
+
+                assert_eq!(grant.suggested().pattern(), "cat == x");
+            }
+
+            #[test]
             fn declines_a_call_that_no_allow_rule_can_let_through() {
                 let (_dir, cwd) = temp_cwd();
                 std::fs::create_dir(cwd.join(".git")).unwrap();
@@ -3117,7 +3126,7 @@ mod tests {
             }
 
             #[test]
-            fn command_rules_see_a_bare_comparison_operator_as_a_word() {
+            fn command_rules_see_the_program_a_runner_starts_past_an_operator_or_dollar_word() {
                 let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
                 let manual = policy(Mode::Manual, &[], &[], &[(EXEC, "git status")]);
 
@@ -3125,7 +3134,10 @@ mod tests {
                     "xargs -I == rm -rf x",
                     "xargs -I =~ rm -rf x",
                     r#"xargs -I =="x" rm -rf x"#,
+                    "xargs -I =~'x' rm -rf x",
+                    "xargs -I ==$x rm -rf x",
                     r#"xargs -I $"x" rm -rf x"#,
+                    r#"xargs -I$"x" rm -rf x"#,
                 ] {
                     assert_eq!(
                         decide(&yolo, EXEC, &command(case)),
@@ -3133,12 +3145,13 @@ mod tests {
                         "{case}"
                     );
                 }
-                assert_eq!(
-                    decide(&manual, EXEC, &command("git == status")),
-                    Decision::Ask
-                );
-                let grant = manual.session_grant(EXEC, &command("cat == x")).unwrap();
-                assert_eq!(grant.suggested().pattern(), "cat == x");
+                for case in ["git == status", r#"exec -a =="echo" rm -rf x"#] {
+                    assert_eq!(
+                        decide(&manual, EXEC, &command(case)),
+                        Decision::Ask,
+                        "{case}"
+                    );
+                }
             }
 
             #[test]

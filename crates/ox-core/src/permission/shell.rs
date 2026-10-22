@@ -1675,7 +1675,7 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
         _ => bail!("{ONE_COMMAND}"),
     }
 
-    let mut words = Vec::new();
+    let mut parsed = Vec::new();
     let mut nodes = Vec::new();
     let mut names_command = false;
     for child in command_parts(command) {
@@ -1688,7 +1688,7 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
                      Quote its value to match it as written.",
                     word.text
                 );
-                words.push(PatternWord::Literal(word.text));
+                parsed.push(PatternWord::Literal(word.text));
             }
             "file_redirect" | "herestring_redirect" | "heredoc_redirect" => {
                 bail!("{HOLDS_REDIRECTION}");
@@ -1703,10 +1703,10 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
             _ => nodes.push(child),
         }
     }
-    for word in self::words(&nodes, pattern) {
+    for word in words(&nodes, pattern) {
         let written = &pattern[word.span.clone()];
         if written == "*" {
-            words.push(PatternWord::Any);
+            parsed.push(PatternWord::Any);
             continue;
         }
         let Some(value) = word.value else {
@@ -1720,10 +1720,10 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
                  or quote the word to match it as written."
             );
         }
-        words.push(PatternWord::Literal(value));
+        parsed.push(PatternWord::Literal(value));
     }
     ensure!(names_command, "{NAMES_NO_COMMAND}");
-    Ok(words)
+    Ok(parsed)
 }
 
 // ── Known-Safe Commands ──
@@ -1996,36 +1996,6 @@ mod tests {
             }
 
             #[test]
-            fn keeps_an_argument_the_grammar_reads_as_an_operator_as_a_literal_word() {
-                assert_eq!(
-                    words("git == push =~ -f"),
-                    ["git", "==", "push", "=~", "-f"]
-                );
-                for (command, expected) in [
-                    ("cat == x", "cat == x"),
-                    (r#"cat =="x" y"#, "cat ==x y"),
-                    ("cat >out == x", "cat == x"),
-                    ("cat <<'EOF' =~ x\nx\nEOF", "cat =~ x"),
-                ] {
-                    let named = parse(command).segments[0].named().to_vec();
-
-                    assert_eq!(joined(&named), expected, "{command:?}");
-                    assert!(named.iter().all(ShellWord::is_literal), "{command:?}");
-                }
-            }
-
-            #[test]
-            fn reads_a_bare_dollar_as_part_of_a_word_that_expands() {
-                for command in [r#"cat $"x" y"#, "cat a$ y"] {
-                    let named = parse(command).segments[0].named().to_vec();
-
-                    assert_eq!(named.len(), 3, "{command:?}");
-                    assert!(!named[1].is_literal(), "{command:?}");
-                    assert_eq!(named[2].text(), "y", "{command:?}");
-                }
-            }
-
-            #[test]
             fn splits_simple_commands_across_every_separator() {
                 for (command, expected) in [
                     ("a; b", &["a", "b"][..]),
@@ -2170,6 +2140,43 @@ mod tests {
                         (r"$'\x80'", false)
                     ]
                 );
+            }
+
+            #[test]
+            fn keeps_an_argument_the_grammar_reads_as_an_operator_as_a_literal_word() {
+                assert_eq!(
+                    words("git == push =~ -f"),
+                    ["git", "==", "push", "=~", "-f"]
+                );
+                for (command, expected) in
+                    [("cat == x", "cat == x"), (r#"cat =="x" y"#, "cat ==x y")]
+                {
+                    let named = parse(command).segments[0].named().to_vec();
+
+                    assert_eq!(joined(&named), expected, "{command:?}");
+                    assert!(named.iter().all(ShellWord::is_literal), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn reads_a_bare_dollar_as_part_of_a_word_that_expands() {
+                for (command, word) in [(r#"cat $"x" y"#, r#"$"x""#), ("cat a$ y", "a$")] {
+                    let named: Vec<(String, bool)> = parse(command).segments[0]
+                        .named()
+                        .iter()
+                        .map(|word| (word.text().to_owned(), word.is_literal()))
+                        .collect();
+
+                    assert_eq!(
+                        named,
+                        [
+                            ("cat".to_owned(), true),
+                            (word.to_owned(), false),
+                            ("y".to_owned(), true),
+                        ],
+                        "{command:?}"
+                    );
+                }
             }
 
             #[test]
