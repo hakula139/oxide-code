@@ -1,13 +1,14 @@
-//! Error bodies from HTTP servers, reduced to the details a one-line diagnostic can carry.
+//! HTTP error responses, reduced to the status and details a one-line diagnostic can carry.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
+use reqwest::StatusCode;
 
 use crate::util::text::truncate_to_width;
 
 /// Most terminal columns [`condense`] keeps, so a verbose body cannot bury the advice after it.
-pub(crate) const MAX_DETAILS_WIDTH: usize = 300;
+const MAX_DETAILS_WIDTH: usize = 300;
 
 static HTML_TITLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?is)<title[^>]*>(.*?)</title>").expect("the title pattern is a valid regex")
@@ -25,6 +26,15 @@ pub(crate) fn body_details(body: &str) -> Option<String> {
     condense(text)
 }
 
+/// `HTTP 502 Bad Gateway`, or `HTTP 522` for a code without a standard reason phrase, such as a
+/// CDN's.
+pub(crate) fn http_status(status: StatusCode) -> String {
+    match status.canonical_reason() {
+        Some(reason) => format!("HTTP {} {reason}", status.as_u16()),
+        None => format!("HTTP {}", status.as_u16()),
+    }
+}
+
 /// Server text on one line of at most [`MAX_DETAILS_WIDTH`] columns, with its punctuation as sent.
 /// `None` when the text is blank.
 pub(crate) fn condense(text: &str) -> Option<String> {
@@ -37,6 +47,16 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+
+    mod http_status {
+        use super::*;
+
+        #[test]
+        fn adds_the_reason_phrase_only_when_the_code_has_one() {
+            assert_eq!(http_status(StatusCode::BAD_GATEWAY), "HTTP 502 Bad Gateway");
+            assert_eq!(http_status(StatusCode::from_u16(522).unwrap()), "HTTP 522");
+        }
+    }
 
     mod body_details {
         use super::*;

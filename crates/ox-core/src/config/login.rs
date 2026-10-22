@@ -416,7 +416,7 @@ mod tests {
 
             assert_eq!(
                 format!("{:#}", auth.unwrap_err()),
-                "token exchange failed with 400 Bad Request: invalid_grant",
+                "token exchange failed with HTTP 400 Bad Request: invalid_grant",
             );
             assert!(
                 reply.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),

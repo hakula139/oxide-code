@@ -17,7 +17,7 @@ use super::Client;
 use super::wire::{ApiError, ErrorResponse};
 use crate::client::{PromptTooLong, RateLimitWindow, RateLimits};
 use crate::config::auth::{self, Auth, AuthSource, Credential};
-use crate::util::response::{self, condense};
+use crate::util::response::{self, condense, http_status};
 use crate::util::text::join_sentences;
 use crate::util::tls::Trust;
 
@@ -341,14 +341,6 @@ fn status_cause(status: StatusCode, error: Option<&ApiError>) -> String {
     }
 }
 
-/// `HTTP 502 Bad Gateway`, or `HTTP 529` for a code without a standard reason phrase.
-fn http_status(status: StatusCode) -> String {
-    match status.canonical_reason() {
-        Some(reason) => format!("HTTP {} {reason}", status.as_u16()),
-        None => format!("HTTP {}", status.as_u16()),
-    }
-}
-
 /// Accepts the delay-seconds form. An HTTP-date falls back to the computed backoff.
 fn parse_retry_after(value: &str) -> Option<Duration> {
     value.trim().parse().ok().map(Duration::from_secs)
@@ -387,17 +379,17 @@ fn format_api_error(
             Some(auth.rejection_hint().to_owned()),
         ),
         403 => (
-            format!(
-                "Anthropic API refused the request ({})",
-                http_status(status)
-            ),
-            Some("Check that the credential may use this model and endpoint.".to_owned()),
+            "Anthropic API refused the request (HTTP 403)".to_owned(),
+            Some(format!(
+                "Check that the credential can use this model and endpoint. {}",
+                auth.rejection_hint()
+            )),
         ),
         404 => (
-            format!("Anthropic API endpoint not found ({})", http_status(status)),
+            "Anthropic API found no such endpoint or model (HTTP 404)".to_owned(),
             Some(
-                "Check that the base URL and `client.model` name an endpoint and a model \
-                 this server serves."
+                "Check that the base URL is right and that this server serves the model. \
+                 `/config` shows where each is set."
                     .to_owned(),
             ),
         ),
@@ -502,7 +494,6 @@ mod tests {
         messages_request, plain_http, retry_counts, serve,
     };
     use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
-    use crate::util::response::MAX_DETAILS_WIDTH;
 
     mod post_messages {
         use super::*;
@@ -1072,6 +1063,21 @@ mod tests {
                      Generate a new one with `claude setup-token`.",
                 ),
                 (
+                    403,
+                    None,
+                    "Anthropic API refused the request (HTTP 403): boom. \
+                     Check that the credential can use this model and endpoint. \
+                     CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+                     Generate a new one with `claude setup-token`.",
+                ),
+                (
+                    404,
+                    None,
+                    "Anthropic API found no such endpoint or model (HTTP 404): boom. \
+                     Check that the base URL is right and that this server serves the model. \
+                     `/config` shows where each is set.",
+                ),
+                (
                     429,
                     secs,
                     "Anthropic API rate limited (HTTP 429): boom. Retry after 42 s.",
@@ -1101,19 +1107,6 @@ mod tests {
                     400,
                     secs,
                     "Anthropic API error (HTTP 400 Bad Request): boom",
-                ),
-                (
-                    403,
-                    None,
-                    "Anthropic API refused the request (HTTP 403 Forbidden): boom. \
-                     Check that the credential may use this model and endpoint.",
-                ),
-                (
-                    404,
-                    None,
-                    "Anthropic API endpoint not found (HTTP 404 Not Found): boom. \
-                     Check that the base URL and `client.model` name an endpoint and a model \
-                     this server serves.",
                 ),
             ] {
                 let status = StatusCode::from_u16(status).unwrap();
@@ -1151,7 +1144,6 @@ mod tests {
 
         #[test]
         fn keeps_the_details_as_sent_and_ends_each_sentence_once() {
-            let truncated = body_details(&"x".repeat(MAX_DETAILS_WIDTH + 1), None).unwrap();
             for (status, details, expected) in [
                 (
                     StatusCode::BAD_GATEWAY,
@@ -1162,12 +1154,10 @@ mod tests {
                 ),
                 (
                     StatusCode::BAD_GATEWAY,
-                    truncated.as_str(),
-                    format!(
-                        "Anthropic API server error (HTTP 502 Bad Gateway): {}... \
-                         Retry in a few seconds.",
-                        "x".repeat(MAX_DETAILS_WIDTH - 3),
-                    ),
+                    "Upstream is down...",
+                    "Anthropic API server error (HTTP 502 Bad Gateway): Upstream is down... \
+                     Retry in a few seconds."
+                        .to_owned(),
                 ),
                 (
                     StatusCode::BAD_GATEWAY,
