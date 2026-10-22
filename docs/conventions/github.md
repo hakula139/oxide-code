@@ -41,6 +41,7 @@ Conventions for commits, branches, pull requests, and issues.
 
 - Open one issue for each actionable outcome using the forms in `.github/ISSUE_TEMPLATE/`, and include acceptance criteria. Label it like a PR.
 - Use open issues to track planned work. For a theme spanning several issues, create an `epic` parent with native sub-issues.
+- Before starting new feature work, audit open issues and their epics for unmet acceptance criteria and unfinished sub-issues, and resolve those first. During a milestone wrap-up the maintainer calls, start nothing new: let open PRs finish, merge them to a stable checkpoint, cut the planned release, and clean up branches and worktrees.
 - If an issue depends on another landing first, record that order with a native blocked-by dependency.
 - Label open design questions `design`, and close them once the decision is documented in `docs/design/`.
 - Close out-of-scope requests as not planned, pointing to the Scope section of `README.md`.
