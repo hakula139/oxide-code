@@ -24,7 +24,7 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 Download the archive for your platform from [Releases](https://github.com/hakula139/oxide-code/releases), extract it, and move the `ox` binary to a directory on your `PATH`. Set `VERSION` to the newest tag listed on that page:
 
 ```bash
-VERSION=v0.1.0-alpha.5
+VERSION=v0.1.0-alpha.6
 
 # macOS aarch64 (Apple Silicon)
 curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
