@@ -116,7 +116,7 @@ impl fmt::Display for CopyError {
         match self {
             Self::TooLarge(bytes) => write!(
                 f,
-                "Not copied: the selection is {} KB, over the {} KB limit",
+                "Not copied: the selection is {} kB, over the {} kB limit",
                 bytes.div_ceil(1000),
                 MAX_TERMINAL_COPY_BYTES / 1000,
             ),
@@ -494,7 +494,7 @@ mod tests {
         fn messages_name_the_cause() {
             assert_eq!(
                 CopyError::TooLarge(MAX_TERMINAL_COPY_BYTES + 1).to_string(),
-                "Not copied: the selection is 101 KB, over the 100 KB limit",
+                "Not copied: the selection is 101 kB, over the 100 kB limit",
             );
             assert_eq!(
                 CopyError::Unsupported(Terminal::LinuxConsole).to_string(),

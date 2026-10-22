@@ -17,7 +17,7 @@ use super::view::{GrepFileGroup, GrepMatchLine, ToolResultView};
 use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
-use crate::util::text::plural;
+use crate::util::text::{format_size, plural};
 
 const NO_MATCHES_FOUND: &str = "No matches found";
 const RESULTS_LIMIT_PREFIX: &str = "(Results limited to ";
@@ -387,9 +387,9 @@ fn read_text(path: &Path, size_limit: u64) -> io::Result<Option<String>> {
         return Err(io::Error::other("not a regular file"));
     }
     if metadata.len() > size_limit {
-        let limit_mb = size_limit / (1024 * 1024);
+        let limit = format_size(size_limit);
         return Err(io::Error::other(format!(
-            "grew past the {limit_mb} MB size limit"
+            "grew past the {limit} size limit"
         )));
     }
 
@@ -402,15 +402,15 @@ fn read_text(path: &Path, size_limit: u64) -> io::Result<Option<String>> {
 }
 
 fn push_skipped_note(output: &mut String, skipped: &[(PathBuf, u64)], limit: u64, cwd: &Path) {
-    let limit_mb = limit / (1024 * 1024);
     let lines: Vec<String> = skipped
         .iter()
         .map(|(path, size)| {
-            let mb = super::file::bytes_to_mb(*size);
-            format!("{} ({mb:.1} MB)", super::display_path(path, cwd))
+            let (path, size) = (super::display_path(path, cwd), format_size(*size));
+            format!("{path} ({size})")
         })
         .collect();
-    let header = format!("Skipped (exceeds {limit_mb} MB size limit):");
+    let limit = format_size(limit);
+    let header = format!("Skipped (exceeds {limit} size limit):");
     super::search::push_path_note(output, &header, &lines);
 }
 
@@ -492,7 +492,8 @@ impl Rows {
             self.kept.truncate(self.head_limit);
             Some(format!("{} lines", self.head_limit))
         } else if self.bytes >= MAX_SPILL_BYTES {
-            Some(format!("{} MiB of output", MAX_SPILL_BYTES >> 20))
+            let size = format_size(MAX_SPILL_BYTES);
+            Some(format!("{size} of output"))
         } else {
             None
         };
@@ -1248,8 +1249,8 @@ mod tests {
                 indoc! {"
                     small.txt:1:match here
 
-                    Skipped (exceeds 1 MB size limit):
-                      large.txt (1.0 MB)"
+                    Skipped (exceeds 1 MiB size limit):
+                      large.txt (1.0 MiB)"
                 }
             );
         }
@@ -1427,8 +1428,8 @@ mod tests {
                 indoc! {"
                     No matches found
 
-                    Skipped (exceeds 10 MB size limit):
-                      large.txt (10.0 MB)"
+                    Skipped (exceeds 10 MiB size limit):
+                      large.txt (10.0 MiB)"
                 }
             );
         }
@@ -1776,7 +1777,7 @@ mod tests {
 
             let err = read_text(&path, limit).unwrap_err();
 
-            assert_eq!(err.to_string(), "grew past the 1 MB size limit");
+            assert_eq!(err.to_string(), "grew past the 1 MiB size limit");
         }
 
         #[test]
@@ -2012,14 +2013,14 @@ mod tests {
                 indoc! {"
                     src/main.rs:1:hit
 
-                    Skipped (exceeds 1 MB size limit):
-                      big.txt (5.0 MB)"
+                    Skipped (exceeds 1 MiB size limit):
+                      big.txt (5 MiB)"
                 },
                 indoc! {"
                     No matches found
 
-                    Skipped (exceeds 1 MB size limit):
-                      big.txt (5.0 MB)"
+                    Skipped (exceeds 1 MiB size limit):
+                      big.txt (5 MiB)"
                 },
             ] {
                 assert_eq!(parse_content_view(content), None, "{content}");

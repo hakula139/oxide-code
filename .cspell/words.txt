@@ -48,6 +48,7 @@ GOEXPERIMENT
 hakula
 idna
 illumos
+ilog
 impls
 indoc
 insta
