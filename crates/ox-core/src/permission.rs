@@ -2527,6 +2527,69 @@ mod tests {
                     assert_eq!(decide(&p, READ, &target), decision, "{raw}");
                 }
             }
+
+            #[cfg(unix)]
+            #[test]
+            fn denies_reading_a_process_environment_until_credentials_are_off() {
+                let (_dir, cwd) = temp_cwd();
+                let workspace = Workspace::new(&cwd);
+                let resolve = |disabled: &[Shipped]| {
+                    Policy::resolve(
+                        Mode::Manual,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        disabled,
+                        &workspace,
+                    )
+                    .unwrap()
+                };
+
+                for path in ["/proc/1/environ", "/proc/1/task/2/environ"] {
+                    assert_eq!(
+                        decide(&resolve(&[]), READ, &outside(path)),
+                        Decision::Deny,
+                        "{path}"
+                    );
+                    assert_eq!(
+                        decide(&resolve(&[Shipped::Credentials]), READ, &outside(path)),
+                        Decision::Allow,
+                        "{path}"
+                    );
+                }
+                assert_eq!(
+                    decide(&resolve(&[]), READ, &outside("/proc/1/status")),
+                    Decision::Allow
+                );
+            }
+
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn holds_back_a_process_environment_reached_through_a_link() {
+                let (_dir, cwd) = temp_cwd();
+                symlink_file(Path::new("/proc/self/environ"), &cwd.join("env"));
+                symlink_file(
+                    Path::new("/proc/thread-self/environ"),
+                    &cwd.join("thread-env"),
+                );
+                let workspace = Workspace::new(&cwd);
+                let p = Policy::resolve(
+                    Mode::Manual,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    &[],
+                    &workspace,
+                )
+                .unwrap();
+
+                for name in ["env", "thread-env"] {
+                    let target = Access::for_path(name, &workspace);
+                    assert_eq!(decide(&p, READ, &target), Decision::Deny, "{name}");
+                }
+                let cat = Access::for_command("cat env", &workspace);
+                assert_eq!(decide(&p, EXEC, &cat), Decision::Ask);
+            }
         }
 
         mod session_grant {
@@ -2546,6 +2609,15 @@ mod tests {
                     p.session_grant(EXEC, &command("cargo test && git push"))
                         .is_none()
                 );
+            }
+
+            #[test]
+            fn suggests_a_rule_that_still_matches_a_word_the_grammar_reads_as_an_operator() {
+                let p = policy(Mode::Manual, &[], &[], &[]);
+
+                let grant = p.session_grant(EXEC, &command("cat == x")).unwrap();
+
+                assert_eq!(grant.suggested().pattern(), "cat == x");
             }
 
             #[test]
@@ -3080,6 +3152,69 @@ mod tests {
                     decide(&p, EXEC, &command("echo x | xargs")),
                     Decision::Allow
                 );
+            }
+
+            #[test]
+            fn command_rules_see_the_words_a_heredoc_passes_to_its_command() {
+                let (_dir, cwd) = temp_cwd();
+                let workspace = Workspace::new(&cwd);
+                let decide = |p: &Policy, case: &str| {
+                    p.decide(EXEC, &Access::for_command(case, &workspace).as_target())
+                };
+                let yolo = policy(Mode::Yolo, &[(EXEC, "git push *")], &[], &[]);
+                let manual = policy(Mode::Manual, &[(READ, ".env")], &[], &[]);
+
+                for case in [
+                    "git <<EOF push --force origin main\nx\nEOF",
+                    "true && git <<EOF push\nx\nEOF",
+                    "ls | git <<EOF push\nx\nEOF",
+                    "! git <<EOF push\nx\nEOF",
+                    "FOO=1 <<EOF git push\nx\nEOF",
+                    "git <<EOF 2>&1 push\nx\nEOF",
+                    "git >/dev/null push",
+                ] {
+                    assert_eq!(decide(&yolo, case), Decision::Deny, "{case:?}");
+                }
+                assert_eq!(
+                    decide(&manual, "cat <<'EOF' README.md\nx\nEOF"),
+                    Decision::Allow
+                );
+                for case in [
+                    "cat <<'EOF' .env\nx\nEOF",
+                    "find <<EOF . -delete\nx\nEOF",
+                    "{ cat; } <<EOF README.md\nx\nEOF",
+                ] {
+                    assert_eq!(decide(&manual, case), Decision::Ask, "{case:?}");
+                }
+            }
+
+            #[test]
+            fn command_rules_see_the_program_a_runner_starts_past_an_operator_or_dollar_word() {
+                let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
+                let manual = policy(Mode::Manual, &[], &[], &[(EXEC, "git status")]);
+
+                for case in [
+                    "xargs -I == rm -rf x",
+                    "xargs -I =~ rm -rf x",
+                    r#"xargs -I =="x" rm -rf x"#,
+                    "xargs -I =~'x' rm -rf x",
+                    "xargs -I ==$x rm -rf x",
+                    r#"xargs -I $"x" rm -rf x"#,
+                    r#"xargs -I$"x" rm -rf x"#,
+                ] {
+                    assert_eq!(
+                        decide(&yolo, EXEC, &command(case)),
+                        Decision::Deny,
+                        "{case}"
+                    );
+                }
+                for case in ["git == status", r#"exec -a =="echo" rm -rf x"#] {
+                    assert_eq!(
+                        decide(&manual, EXEC, &command(case)),
+                        Decision::Ask,
+                        "{case}"
+                    );
+                }
             }
 
             #[test]
