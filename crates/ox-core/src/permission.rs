@@ -3121,7 +3121,12 @@ mod tests {
                 let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
                 let manual = policy(Mode::Manual, &[], &[], &[(EXEC, "git status")]);
 
-                for case in ["xargs -I == rm -rf x", "xargs -I =~ rm -rf x"] {
+                for case in [
+                    "xargs -I == rm -rf x",
+                    "xargs -I =~ rm -rf x",
+                    r#"xargs -I =="x" rm -rf x"#,
+                    r#"xargs -I $"x" rm -rf x"#,
+                ] {
                     assert_eq!(
                         decide(&yolo, EXEC, &command(case)),
                         Decision::Deny,
@@ -3132,6 +3137,8 @@ mod tests {
                     decide(&manual, EXEC, &command("git == status")),
                     Decision::Ask
                 );
+                let grant = manual.session_grant(EXEC, &command("cat == x")).unwrap();
+                assert_eq!(grant.suggested().pattern(), "cat == x");
             }
 
             #[test]

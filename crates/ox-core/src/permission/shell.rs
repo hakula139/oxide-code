@@ -4,6 +4,7 @@
 //! the analysis cannot vouch for is opaque: rules may deny it or leave it to ask, but never allow
 //! it. `exec` patterns parse here too, so they read words the way commands do.
 
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -656,24 +657,14 @@ impl Walk<'_> {
     }
 
     fn command<'t>(&mut self, node: Node<'t>, trailing: &[Node<'t>], src: &str) {
-        let mut cursor = node.walk();
-        // An argument can be an anonymous token, such as a bare `==`, which bash passes as a word.
-        let parts: Vec<Node<'t>> = node
-            .children(&mut cursor)
-            .zip(0..)
-            .filter(|&(part, index)| {
-                part.is_named() || node.field_name_for_child(index) == Some("argument")
-            })
-            .map(|(part, _)| part)
-            .collect();
-        self.parts(&parts, trailing, src);
+        self.parts(&command_parts(node), trailing, src);
     }
 
     /// Records the simple command whose assignments, name, arguments, and redirections are
     /// `parts`, in source order, followed by the `trailing` words its statement's redirections
     /// carry.
     fn parts<'t>(&mut self, parts: &[Node<'t>], trailing: &[Node<'t>], src: &str) {
-        let words: Vec<Word<'t>> = parts
+        let nodes: Vec<Node<'t>> = parts
             .iter()
             .flat_map(|&part| match part.kind() {
                 "command_name" => part.named_child(0).into_iter().collect(),
@@ -682,8 +673,8 @@ impl Walk<'_> {
                 _ => vec![part],
             })
             .chain(trailing.iter().copied())
-            .map(|word| Word::new(word, src))
             .collect();
+        let words = words(&nodes, src);
         let mut assignments = Vec::new();
         let mut unsafe_assignment = None;
         for &part in parts {
@@ -707,7 +698,7 @@ impl Walk<'_> {
     /// path it finds, for the command of a `find` action.
     fn simple_command(
         &mut self,
-        all: &[Word<'_>],
+        all: &[Word],
         mut assignments: Vec<ShellWord>,
         unsafe_assignment: Option<usize>,
         found: Option<Placeholder>,
@@ -801,7 +792,7 @@ impl Walk<'_> {
     }
 
     /// Weighs the program `name` runs: a shell or builtin that runs code, or a directory change.
-    fn program(&mut self, name: &str, args: &[Word<'_>], src: &str) {
+    fn program(&mut self, name: &str, args: &[Word], src: &str) {
         let base = basename(name);
         let folded = fold_name(base);
         let runner = [base, folded.as_str()]
@@ -821,7 +812,7 @@ impl Walk<'_> {
     /// spelled with a directory, since `./nice` may be any program. A wrapper option the analysis
     /// does not know hides where the command starts, so it turns the command opaque, and the
     /// program may then start at any later word.
-    fn unwrap(&mut self, words: &[Word<'_>]) -> Unwrapped {
+    fn unwrap(&mut self, words: &[Word]) -> Unwrapped {
         let mut unwrapped = Unwrapped::default();
         let mut pending = vec![0];
         // Every word from here on has been pending, so an unknown option past it adds none.
@@ -893,7 +884,7 @@ impl Walk<'_> {
     /// Records the commands `find`'s `-exec`, `-execdir`, `-ok`, and `-okdir` actions run, each up
     /// to its `;`, or its `+` after `{}`. A word that expands may be such an action, so it turns
     /// the command opaque.
-    fn find_actions(&mut self, args: &[Word<'_>], src: &str) {
+    fn find_actions(&mut self, args: &[Word], src: &str) {
         self.opaque |= args.iter().any(|word| word.value.is_none());
         let mut rest = args;
         while let Some(at) = rest.iter().position(|word| {
@@ -926,7 +917,7 @@ impl Walk<'_> {
 
     /// Walks the literal script a shell's `-c` or `--command` option or `eval` runs, and the
     /// command `runuser -u` runs without a shell, so deny rules see the commands inside them.
-    fn nested_script(&mut self, runner: &str, args: &[Word<'_>], src: &str) {
+    fn nested_script(&mut self, runner: &str, args: &[Word], src: &str) {
         if runner == "runuser"
             && let Ok(run) = RUNUSER.invocation(args)
             && args[..run.start].iter().any(|word| {
@@ -983,7 +974,7 @@ impl Walk<'_> {
             return;
         };
 
-        let word = Word::new(destination, src);
+        let word = Word::new(&[destination], src);
         let Some(path) = word.value.filter(|_| !word.glob) else {
             self.opaque = true;
             return;
@@ -1002,6 +993,29 @@ impl Walk<'_> {
             self.writes.push(access);
         }
     }
+}
+
+/// The children of `command` that make up its simple command: assignments, name, redirections,
+/// and arguments, including an argument the grammar reads as an anonymous token, such as a bare
+/// `==`, which bash passes as a word.
+fn command_parts(command: Node<'_>) -> Vec<Node<'_>> {
+    let mut cursor = command.walk();
+    command
+        .children(&mut cursor)
+        .zip(0..)
+        .filter(|&(part, index)| {
+            part.is_named() || command.field_name_for_child(index) == Some("argument")
+        })
+        .map(|(part, _)| part)
+        .collect()
+}
+
+/// The words bash reads from `nodes`, in source order, joining nodes with no blank between them.
+fn words(nodes: &[Node<'_>], src: &str) -> Vec<Word> {
+    nodes
+        .chunk_by(|left, right| left.end_byte() == right.start_byte())
+        .map(|parts| Word::new(parts, src))
+        .collect()
 }
 
 /// The words bash passes to the command `redirect` belongs to, which tree-sitter-bash parses as
@@ -1100,7 +1114,7 @@ impl Wrapper {
 
     /// Parses the options that lead `args`, or returns the index of the first word that hides
     /// where the command starts: an option the grammar does not know, or one that expands.
-    fn invocation(&self, args: &[Word<'_>]) -> Result<Invocation, usize> {
+    fn invocation(&self, args: &[Word]) -> Result<Invocation, usize> {
         let mut run = Invocation {
             start: args.len(),
             elsewhere: self.elsewhere,
@@ -1280,7 +1294,7 @@ enum Arg {
 }
 
 impl Arg {
-    fn of(word: &Word<'_>) -> Self {
+    fn of(word: &Word) -> Self {
         word.value.clone().map_or(Self::Expands, Self::Literal)
     }
 }
@@ -1411,8 +1425,9 @@ fn is_assignment(arg: &str) -> bool {
 // ── Word ──
 
 /// One word of a simple command.
-struct Word<'t> {
-    node: Node<'t>,
+struct Word {
+    /// Where the word is written in the source.
+    span: Range<usize>,
     /// The value the shell gives the word after tilde expansion and quote removal, or `None`
     /// when part of it expands at run time.
     value: Option<String>,
@@ -1420,11 +1435,13 @@ struct Word<'t> {
     glob: bool,
 }
 
-impl<'t> Word<'t> {
-    fn new(node: Node<'t>, src: &str) -> Self {
-        let (value, glob) = unquote(node, src, true).unzip();
+impl Word {
+    /// The word bash reads from `parts`, which the grammar may split one word into with no blank
+    /// between them, as in `=="x"`.
+    fn new(parts: &[Node<'_>], src: &str) -> Self {
+        let (value, glob) = unquote_parts(parts.iter().copied(), src, true).unzip();
         Self {
-            node,
+            span: parts[0].start_byte()..parts[parts.len() - 1].end_byte(),
             value,
             glob: glob.unwrap_or(false),
         }
@@ -1435,7 +1452,7 @@ impl<'t> Word<'t> {
             text: self
                 .value
                 .clone()
-                .unwrap_or_else(|| src[self.node.byte_range()].to_owned()),
+                .unwrap_or_else(|| src[self.span.clone()].to_owned()),
             literal: self.value.is_some() && !self.glob,
         }
     }
@@ -1476,7 +1493,7 @@ fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
     let text = &src[node.byte_range()];
     match node.kind() {
         "word" => unquote_word(text, leading),
-        "number" => Some((text.to_owned(), false)),
+        "number" | "==" | "=~" => Some((text.to_owned(), false)),
         "raw_string" => Some((text.get(1..text.len() - 1)?.to_owned(), false)),
         "ansi_c_string" => Some((unquote_ansi_c(text.get(2..text.len() - 1)?)?, false)),
         "string" => {
@@ -1491,18 +1508,27 @@ fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
         }
         "concatenation" => {
             let mut cursor = node.walk();
-            let mut value = String::new();
-            let mut glob = false;
-            for (i, part) in node.named_children(&mut cursor).enumerate() {
-                let (part, part_glob) = unquote(part, src, leading && i == 0)?;
-                value.push_str(&part);
-                glob |= part_glob;
-            }
-            Some((value, glob))
+            unquote_parts(node.children(&mut cursor), src, leading)
         }
-        _ if !node.is_named() => Some((text.to_owned(), false)),
         _ => None,
     }
+}
+
+/// The value and glob flag of the one word `parts` spell in order, each read as [`unquote`] reads
+/// it, or `None` when any part has none.
+fn unquote_parts<'t>(
+    parts: impl IntoIterator<Item = Node<'t>>,
+    src: &str,
+    leading: bool,
+) -> Option<(String, bool)> {
+    let mut value = String::new();
+    let mut glob = false;
+    for (i, part) in parts.into_iter().enumerate() {
+        let (part, part_glob) = unquote(part, src, leading && i == 0)?;
+        value.push_str(&part);
+        glob |= part_glob;
+    }
+    Some((value, glob))
 }
 
 /// An unquoted word's value, with backslash escapes removed and a leading `~` expanded.
@@ -1650,10 +1676,10 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
     }
 
     let mut words = Vec::new();
+    let mut nodes = Vec::new();
     let mut names_command = false;
-    let mut cursor = command.walk();
-    for child in command.named_children(&mut cursor) {
-        let node = match child.kind() {
+    for child in command_parts(command) {
+        match child.kind() {
             "variable_assignment" => {
                 let word = assignment_word(child, pattern);
                 ensure!(
@@ -1663,7 +1689,6 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
                     word.text
                 );
                 words.push(PatternWord::Literal(word.text));
-                continue;
             }
             "file_redirect" | "herestring_redirect" | "heredoc_redirect" => {
                 bail!("{HOLDS_REDIRECTION}");
@@ -1671,18 +1696,19 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
             "command_name" => {
                 names_command = true;
                 match child.named_child(0) {
-                    Some(name) => name,
+                    Some(name) => nodes.push(name),
                     None => bail!("{NAMES_NO_COMMAND}"),
                 }
             }
-            _ => child,
-        };
-        let written = &pattern[node.byte_range()];
-        if node.kind() == "word" && written == "*" {
+            _ => nodes.push(child),
+        }
+    }
+    for word in self::words(&nodes, pattern) {
+        let written = &pattern[word.span.clone()];
+        if written == "*" {
             words.push(PatternWord::Any);
             continue;
         }
-        let word = Word::new(node, pattern);
         let Some(value) = word.value else {
             bail!("the word {written:?} expands at run time. Quote it to match it as written.");
         };
@@ -1705,7 +1731,7 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
 /// The words that may name a file read by the shipped known-safe read-only command `name`, or
 /// `None` when `name` is no such command or `args` take it out of the safe set. Every argument
 /// must be literal and free of globs, so each file it reads is one the gate can check.
-fn safe_operands(name: &str, args: &[Word<'_>]) -> Option<Vec<String>> {
+fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<String>> {
     let values = args
         .iter()
         .map(|word| word.value.as_deref().filter(|_| !word.glob))
@@ -1826,7 +1852,7 @@ fn long_option(arg: &str) -> Option<&str> {
 /// may name a file, with each globbing one also expanded in `cwd` as bash expands it. The second
 /// value is whether a word expands a variable or globs to files [`expand_glob`] cannot list, which
 /// leaves what it reads unknown.
-fn reader_operands(args: &[Word<'_>], cwd: &Path) -> (Vec<String>, bool) {
+fn reader_operands(args: &[Word], cwd: &Path) -> (Vec<String>, bool) {
     let known: Vec<(&str, bool)> = args
         .iter()
         .filter_map(|word| Some((word.value.as_deref()?, word.glob)))
@@ -1977,6 +2003,7 @@ mod tests {
                 );
                 for (command, expected) in [
                     ("cat == x", "cat == x"),
+                    (r#"cat =="x" y"#, "cat ==x y"),
                     ("cat >out == x", "cat == x"),
                     ("cat <<'EOF' =~ x\nx\nEOF", "cat =~ x"),
                 ] {
@@ -1984,6 +2011,17 @@ mod tests {
 
                     assert_eq!(joined(&named), expected, "{command:?}");
                     assert!(named.iter().all(ShellWord::is_literal), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn reads_a_bare_dollar_as_part_of_a_word_that_expands() {
+                for command in [r#"cat $"x" y"#, "cat a$ y"] {
+                    let named = parse(command).segments[0].named().to_vec();
+
+                    assert_eq!(named.len(), 3, "{command:?}");
+                    assert!(!named[1].is_literal(), "{command:?}");
+                    assert_eq!(named[2].text(), "y", "{command:?}");
                 }
             }
 
