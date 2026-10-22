@@ -1,3 +1,7 @@
+# A replaced function body leaves its parameters unused, which the denied workspace warnings turn
+# into a build failure, so cargo-mutants would skip the mutant untested.
+additional_cargo_args = ["--config", "build.warnings='warn'"]
+
 # Frontend tests also exercise core code, so each mutant faces every crate's tests.
 test_workspace = true
 

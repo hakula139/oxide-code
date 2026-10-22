@@ -1989,7 +1989,6 @@ dependencies = [
  "tracing",
  "unicode-segmentation",
  "unicode-width",
- "uuid",
  "xxhash-rust",
 ]
 

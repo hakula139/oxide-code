@@ -17,7 +17,9 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::chain::{Chain, ChainBuilder};
-use super::entry::{CURRENT_VERSION, CompactInfo, Entry, TitleInfo, UsageRecord};
+use super::entry::{
+    CURRENT_VERSION, CompactInfo, Entry, Header, TitleInfo, UsageRecord, keep_newer,
+};
 use super::path::project_dir_name;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
@@ -108,20 +110,12 @@ impl SessionStore {
 
     /// Creates the file (`0600`, `O_EXCL`) and writes the header, then the JSONL `lines`, in one
     /// write that unlinks the file on failure.
-    pub(crate) fn create(&self, header: &Entry, lines: &[u8]) -> Result<SessionWriter> {
-        let Entry::Header {
-            session_id,
-            created_at,
-            ..
-        } = header
-        else {
-            bail!("expected Header entry");
-        };
-        validate_session_id(session_id)?;
+    pub(crate) fn create(&self, header: &Header, lines: &[u8]) -> Result<SessionWriter> {
+        validate_session_id(&header.session_id)?;
 
-        let mut buf = encode_lines([header])?;
+        let mut buf = encode_lines([&Entry::Header(header.clone())])?;
         buf.extend_from_slice(lines);
-        let path = self.session_file(session_id, *created_at);
+        let path = self.session_file(&header.session_id, header.created_at);
         let file = create_written(&path, |file| Appender(file).write_all(&buf))?;
         Ok(SessionWriter {
             path,
@@ -133,7 +127,7 @@ impl SessionStore {
 // ── Path-Keyed Primitives ──
 
 /// Opens an existing session file in append mode by explicit path.
-pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
+pub(super) fn open_append_at(path: &Path) -> Result<SessionWriter> {
     Ok(SessionWriter {
         path: path.to_owned(),
         file: Some(open_append_file(path)?),
@@ -141,25 +135,37 @@ pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
 }
 
 /// Loads session data from an explicit path with DAG-based chain resolution.
-pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
+/// The file must begin with a header in a format version this build reads.
+pub(super) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut lines = JsonlLines::new(BufReader::new(file));
-    let mut builder = SessionDataBuilder::new();
-
-    while let Some((line_no, line)) = lines.next_line()? {
-        let entry: Entry = match serde_json::from_str(line) {
-            Ok(e) => e,
-            Err(e) => {
-                warn!("skipping malformed entry at line {line_no}: {e}");
-                continue;
-            }
-        };
-        builder.apply_entry(entry, line_no)?;
+    let header = read_header(&mut lines, path)?;
+    if header.version > CURRENT_VERSION {
+        bail!(
+            "session format version {} is newer than supported ({CURRENT_VERSION}). \
+             Upgrade oxide-code to open it.",
+            header.version,
+        );
     }
 
-    Ok(builder.finish())
+    let mut builder = SessionDataBuilder::default();
+    while let Some((line_no, line)) = lines.next_line()? {
+        match serde_json::from_str(line) {
+            Ok(entry) => builder.apply_entry(entry, line_no),
+            Err(e) => warn!("skipping malformed entry at line {line_no}: {e}"),
+        }
+    }
+    Ok(builder.finish(header.session_id))
 }
 
+/// The messages of a compaction's tail, the chain since its boundary.
+struct CompactTail {
+    uuids: HashSet<Uuid>,
+    /// Whether the last message joined the tail, so the sidecars that follow it belong to it.
+    accepts_sidecars: bool,
+}
+
+#[derive(Default)]
 struct SessionDataBuilder {
     chain: ChainBuilder,
     /// The last context entry and its timestamp, awaiting the message entry it belongs to.
@@ -169,8 +175,8 @@ struct SessionDataBuilder {
     pending_compact: Option<CompactInfo>,
     latest_title: Option<TitleInfo>,
     archived: bool,
-    compact_tail_uuids: Option<HashSet<Uuid>>,
-    compact_tail_accepts_sidecars: bool,
+    /// Set once a compaction takes effect.
+    compact_tail: Option<CompactTail>,
     tool_result_metadata: HashMap<String, ToolMetadata>,
     usage: Vec<UsageRecord>,
     usage_uuids: HashSet<Uuid>,
@@ -178,31 +184,8 @@ struct SessionDataBuilder {
 }
 
 impl SessionDataBuilder {
-    fn new() -> Self {
-        Self {
-            chain: ChainBuilder::default(),
-            pending_context: None,
-            compact: None,
-            pending_compact: None,
-            latest_title: None,
-            archived: false,
-            compact_tail_uuids: None,
-            compact_tail_accepts_sidecars: true,
-            tool_result_metadata: HashMap::new(),
-            usage: Vec::new(),
-            usage_uuids: HashSet::new(),
-            file_snapshots: Vec::new(),
-        }
-    }
-
-    fn apply_entry(&mut self, entry: Entry, line_no: u32) -> Result<()> {
+    fn apply_entry(&mut self, entry: Entry, line_no: u32) {
         match entry {
-            Entry::Header { version, .. } if version > CURRENT_VERSION => {
-                bail!(
-                    "session format version {version} is newer than supported ({CURRENT_VERSION}). \
-                     Upgrade oxide-code to open it."
-                );
-            }
             Entry::Context { context, timestamp } => {
                 self.pending_context = Some((timestamp, context));
             }
@@ -215,13 +198,7 @@ impl SessionDataBuilder {
             Entry::Rewind { tip, .. } => self.chain.rewind(tip),
             Entry::Title {
                 title, updated_at, ..
-            } if self
-                .latest_title
-                .as_ref()
-                .is_none_or(|cur| updated_at > cur.updated_at) =>
-            {
-                self.latest_title = Some(TitleInfo { title, updated_at });
-            }
+            } => keep_newer(&mut self.latest_title, TitleInfo { title, updated_at }),
             Entry::Archive { archived, .. } => self.archived = archived,
             Entry::ToolResultMetadata {
                 tool_use_id,
@@ -252,7 +229,6 @@ impl SessionDataBuilder {
             }
             _ => {}
         }
-        Ok(())
     }
 
     fn insert_message(
@@ -277,8 +253,8 @@ impl SessionDataBuilder {
             }
         }
         let accepted = self.accepts_compact_tail_message(uuid, parent_uuid);
-        if self.compact_tail_uuids.is_some() {
-            self.compact_tail_accepts_sidecars = accepted;
+        if let Some(tail) = &mut self.compact_tail {
+            tail.accepts_sidecars = accepted;
         }
         if !accepted {
             warn!("skipping pre-compact branch append at line {line_no}");
@@ -292,28 +268,32 @@ impl SessionDataBuilder {
     }
 
     fn accepts_compact_tail_message(&mut self, uuid: Uuid, parent_uuid: Option<Uuid>) -> bool {
-        let Some(tail_uuids) = &mut self.compact_tail_uuids else {
+        let Some(CompactTail { uuids, .. }) = &mut self.compact_tail else {
             return true;
         };
         let accepted = match parent_uuid {
-            None => tail_uuids.is_empty(),
-            Some(parent) => tail_uuids.contains(&parent),
+            None => uuids.is_empty(),
+            Some(parent) => uuids.contains(&parent),
         };
         if accepted {
-            tail_uuids.insert(uuid);
+            uuids.insert(uuid);
         }
         accepted
     }
 
     fn accepts_sidecar(&self) -> bool {
-        self.compact_tail_uuids.is_none() || self.compact_tail_accepts_sidecars
+        self.compact_tail
+            .as_ref()
+            .is_none_or(|tail| tail.accepts_sidecars)
     }
 
     fn reset_at_compact(&mut self, compact: CompactInfo) {
         self.chain = ChainBuilder::default();
         self.compact = Some(compact);
-        self.compact_tail_uuids = Some(HashSet::new());
-        self.compact_tail_accepts_sidecars = false;
+        self.compact_tail = Some(CompactTail {
+            uuids: HashSet::new(),
+            accepts_sidecars: false,
+        });
         self.clear_sidecars();
     }
 
@@ -322,13 +302,14 @@ impl SessionDataBuilder {
         self.file_snapshots.clear();
     }
 
-    fn finish(self) -> SessionData {
+    fn finish(self, session_id: String) -> SessionData {
         let Chain {
             messages,
             tip,
             context,
         } = self.chain.resolve();
         SessionData {
+            session_id,
             messages,
             last_uuid: tip,
             context: context.map(|context| *context),
@@ -343,7 +324,7 @@ impl SessionDataBuilder {
 }
 
 /// Reads just the `session_id` from a session file's header line.
-pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
+pub(super) fn read_session_id_from_path(path: &Path) -> Result<String> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let header = read_header(&mut JsonlLines::new(BufReader::new(file)), path)?;
     Ok(header.session_id)
@@ -377,7 +358,7 @@ pub(crate) fn delete_at(path: &Path) -> Result<()> {
 
 /// Sets the archive state of the session file at `path`. The file keeps its mtime, since listings
 /// order sessions by activity and toggling the state is not activity.
-pub(crate) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
+pub(super) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
     let mut writer = open_append_at(path)?;
     let modified = fs::metadata(path)
         .and_then(|meta| meta.modified())
@@ -469,6 +450,8 @@ pub(super) fn encode_lines<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> 
 /// Data loaded from a session file on resume.
 #[derive(Debug)]
 pub(crate) struct SessionData {
+    /// The ID the file's header records.
+    pub(crate) session_id: String,
     pub(crate) messages: Vec<Message>,
     pub(crate) last_uuid: Option<Uuid>,
     /// Prompt state recorded on the resolved chain, `None` for a transcript that predates
@@ -642,15 +625,8 @@ impl<R: BufRead> JsonlLines<R> {
     }
 }
 
-struct HeaderInfo {
-    session_id: String,
-    cwd: String,
-    project_root: Option<String>,
-    git_branch: Option<String>,
-}
-
 /// Parses the first non-empty line as the session header and validates its ID.
-fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<HeaderInfo> {
+fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<Header> {
     let not_a_session = |reason| {
         format!(
             "{} is not an oxide-code session file: {reason}",
@@ -661,23 +637,11 @@ fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<Hea
     let Some((_, line)) = lines.next_line()? else {
         bail!(not_a_session("it is empty"));
     };
-    let Entry::Header {
-        session_id,
-        cwd,
-        project_root,
-        git_branch,
-        ..
-    } = serde_json::from_str(line).with_context(no_header)?
-    else {
+    let Entry::Header(header) = serde_json::from_str(line).with_context(no_header)? else {
         bail!(no_header());
     };
-    validate_session_id(&session_id)?;
-    Ok(HeaderInfo {
-        session_id,
-        cwd,
-        project_root,
-        git_branch,
-    })
+    validate_session_id(&header.session_id)?;
+    Ok(header)
 }
 
 #[cfg(test)]
@@ -689,7 +653,7 @@ mod tests {
         sample_header, sample_message_at, sample_message_entry, sample_summary_entry,
         sample_title_entry, test_session_file,
     };
-    use super::testing::{TEST_PROJECT, test_store};
+    use super::testing::{TEST_PROJECT, isolated_store, test_store};
     use super::*;
     use crate::config::PromptCacheTtl;
     use crate::file_tracker::{FileState, LastView};
@@ -818,7 +782,7 @@ mod tests {
                 matches!(
                     entries.as_slice(),
                     [
-                        Entry::Header { session_id, version, .. },
+                        Entry::Header(Header { session_id, version, .. }),
                         Entry::Message { uuid: written, .. },
                     ] if session_id == "test-id" && *version == CURRENT_VERSION && *written == uuid
                 ),
@@ -827,22 +791,11 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn rejects_non_header_entry() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let entry = sample_message_entry(Uuid::new_v4(), "hi");
-
-            assert!(store.create(&entry, &[]).is_err());
-        }
-
-        #[tokio::test]
         async fn fails_when_file_already_exists() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let header = sample_header("existing");
-            let Entry::Header { created_at, .. } = header else {
-                unreachable!()
-            };
+            let created_at = header.created_at;
             let taken = test_project_path(dir.path(), &session_filename("existing", created_at));
             fs::write(taken, "{}").unwrap();
             assert!(store.create(&header, &[]).is_err());
@@ -956,7 +909,7 @@ mod tests {
             let message_uuids: Vec<Option<Uuid>> = content
                 .lines()
                 .map(|line| match serde_json::from_str(line).unwrap() {
-                    Entry::Header { .. } => None,
+                    Entry::Header(_) => None,
                     Entry::Message { uuid, .. } => Some(uuid),
                     entry => panic!("unexpected entry: {entry:?}"),
                 })
@@ -1011,8 +964,7 @@ mod tests {
 
         #[tokio::test]
         async fn includes_only_messages_with_last_uuid() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("load-test"), &[]).unwrap();
 
             let u1 = Uuid::new_v4();
@@ -1054,8 +1006,7 @@ mod tests {
 
         #[test]
         fn resets_sidecars_at_compact_boundary() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store
                 .create(&sample_header("compact-sidecars"), &[])
                 .unwrap();
@@ -1129,8 +1080,7 @@ mod tests {
 
         #[test]
         fn takes_the_latest_context_since_the_last_compact_boundary() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store
                 .create(&sample_header("compact-context"), &[])
                 .unwrap();
@@ -1197,8 +1147,7 @@ mod tests {
 
         #[test]
         fn drops_a_context_whose_message_was_torn_off() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("torn-context"), &[]).unwrap();
             let root = Uuid::new_v4();
             writer
@@ -1234,8 +1183,7 @@ mod tests {
 
         #[test]
         fn drops_the_context_of_a_rejected_pre_compact_append() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store
                 .create(&sample_header("rejected-context"), &[])
                 .unwrap();
@@ -1289,8 +1237,7 @@ mod tests {
 
         #[test]
         fn replays_the_context_recorded_on_the_resolved_branch() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("fork-context"), &[]).unwrap();
             let load = || store.load_session_data("fork-context").unwrap().context;
 
@@ -1343,8 +1290,7 @@ mod tests {
 
         #[test]
         fn ignores_newer_old_chain_messages_after_compact() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store
                 .create(&sample_header("compact-generation"), &[])
                 .unwrap();
@@ -1407,8 +1353,7 @@ mod tests {
 
         #[test]
         fn ignores_a_compact_whose_root_never_landed() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("torn-compact"), &[]).unwrap();
             let pre = Uuid::new_v4();
             writer
@@ -1448,8 +1393,7 @@ mod tests {
 
         #[test]
         fn skips_sidecars_after_rejected_compact_tail_message() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store
                 .create(&sample_header("compact-stale-sidecars"), &[])
                 .unwrap();
@@ -1620,8 +1564,7 @@ mod tests {
 
         #[tokio::test]
         async fn resolves_transcript_through_newest_chain_leaf() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("fork"), &[]).unwrap();
 
             let root = Uuid::new_v4();
@@ -1743,6 +1686,32 @@ mod tests {
                     "session format version {future_version} \
                      is newer than supported ({CURRENT_VERSION}). \
                      Upgrade oxide-code to open it."
+                ),
+            );
+        }
+
+        #[test]
+        fn returns_the_header_id_and_refuses_a_file_without_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            store.create(&sample_header("headed"), &[]).unwrap();
+            let headed = test_session_file(dir.path(), "headed");
+            let headless = dir.path().join("headless.jsonl");
+            fs::write(
+                &headless,
+                encode_lines([&sample_title_entry("Orphan")]).unwrap(),
+            )
+            .unwrap();
+
+            let data = load_session_data_from_path(&headed).unwrap();
+            let err = load_session_data_from_path(&headless).unwrap_err();
+
+            assert_eq!(data.session_id, "headed");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "{} is not an oxide-code session file: its first line is not a session header",
+                    headless.display(),
                 ),
             );
         }
@@ -1972,7 +1941,7 @@ mod tests {
                     matches!(
                         entries.as_slice(),
                         [
-                            Entry::Header { .. },
+                            Entry::Header(_),
                             Entry::Message { uuid: first, .. },
                             Entry::Message { uuid: second, .. },
                         ] if *first == hello && *second == world

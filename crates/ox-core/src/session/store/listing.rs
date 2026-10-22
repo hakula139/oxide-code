@@ -9,8 +9,10 @@ use anyhow::{Context, Result};
 use time::OffsetDateTime;
 use tracing::warn;
 
-use super::{HeaderInfo, JsonlLines, Project, SessionStore, file_session_id, read_header};
-use crate::session::entry::{Entry, ExitInfo, SessionInfo, TitleInfo};
+use super::{JsonlLines, Project, SessionStore, file_session_id, read_header};
+use crate::session::entry::{
+    ArchiveState, Entry, ExitInfo, Header, SessionInfo, TitleInfo, keep_newer,
+};
 
 pub const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
 
@@ -19,8 +21,35 @@ pub const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
 /// Which sessions a listing walks: the home project or every project, and active or archived ones.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListScope {
-    pub all: bool,
-    pub archived: bool,
+    pub projects: ProjectScope,
+    pub archive: ArchiveState,
+}
+
+/// Which projects a listing or lookup covers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProjectScope {
+    /// The project the store was opened for.
+    #[default]
+    Current,
+    Every,
+}
+
+impl ProjectScope {
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Current => Self::Every,
+            Self::Every => Self::Current,
+        }
+    }
+
+    /// Where a listing in this scope looks, as error messages name it.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Current => "this project",
+            Self::Every => "all projects",
+        }
+    }
 }
 
 // ── ListPage ──
@@ -54,7 +83,7 @@ impl ListPage {
 /// after that.
 pub struct SessionWalk {
     paths: vec::IntoIter<(PathBuf, OffsetDateTime)>,
-    archived: bool,
+    archive: ArchiveState,
     /// The project a home-project walk keeps, `None` for a walk of every project.
     project: Option<Project>,
 }
@@ -71,7 +100,7 @@ impl SessionWalk {
         while !stop() {
             let (path, modified) = self.paths.next()?;
             if let Some(info) = read_readable(&path, modified, self.project.as_ref())
-                && info.archived == self.archived
+                && info.archive_state() == self.archive
             {
                 return Some(info);
             }
@@ -91,13 +120,12 @@ impl Iterator for SessionWalk {
 // ── Listing ──
 
 impl SessionStore {
-    /// Walks the sessions matching `scope`. `scope.all` widens the walk from the home project to
-    /// every project.
+    /// Walks the sessions matching `scope`.
     pub fn walk(&self, scope: ListScope) -> Result<SessionWalk> {
         Ok(SessionWalk {
-            paths: self.session_paths(scope.all)?.into_iter(),
-            archived: scope.archived,
-            project: self.scope_project(scope.all),
+            paths: self.session_paths(scope.projects)?.into_iter(),
+            archive: scope.archive,
+            project: self.scope_project(scope.projects),
         })
     }
 
@@ -112,42 +140,47 @@ impl SessionStore {
     }
 
     /// The most recently active readable unarchived session.
-    pub(crate) fn latest(&self, all: bool) -> Result<Option<SessionInfo>> {
+    pub(crate) fn latest(&self, projects: ProjectScope) -> Result<Option<SessionInfo>> {
         let scope = ListScope {
-            all,
-            archived: false,
+            projects,
+            archive: ArchiveState::Active,
         };
         Ok(self.walk(scope)?.next())
     }
 
     /// Readable sessions whose ID starts with `prefix`, most recently active first. IDs are
     /// matched on file names, so only the matching files are parsed.
-    pub(crate) fn list_matching(&self, prefix: &str, all: bool) -> Result<Vec<SessionInfo>> {
-        let mut paths = self.session_paths(all)?;
+    pub(crate) fn list_matching(
+        &self,
+        prefix: &str,
+        projects: ProjectScope,
+    ) -> Result<Vec<SessionInfo>> {
+        let mut paths = self.session_paths(projects)?;
         paths.retain(|(path, _)| file_session_id(path).is_some_and(|id| id.starts_with(prefix)));
-        let project = self.scope_project(all);
+        let project = self.scope_project(projects);
         Ok(paths
             .into_iter()
             .filter_map(|(path, modified)| read_readable(&path, modified, project.as_ref()))
             .collect())
     }
 
-    /// The project a walk of the home project keeps, or `None` when `all` widens it.
-    fn scope_project(&self, all: bool) -> Option<Project> {
-        (!all).then(|| self.project.clone())
+    /// The project a walk of the home project keeps, or `None` for every project.
+    fn scope_project(&self, projects: ProjectScope) -> Option<Project> {
+        (projects == ProjectScope::Current).then(|| self.project.clone())
     }
 
     /// Session files paired with their mtimes, most recently active first. The home project's
     /// files are in its own directory and, for older sessions, the launch directory's.
-    fn session_paths(&self, all: bool) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
-        let mut paths = if all {
-            self.collect_paths_all_projects()?
-        } else {
-            let mut paths = collect_session_paths(&self.project_dir)?;
-            if let Some(cwd_dir) = self.cwd_dir.as_ref().filter(|dir| dir.is_dir()) {
-                paths.append(&mut collect_session_paths(cwd_dir)?);
+    fn session_paths(&self, projects: ProjectScope) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
+        let mut paths = match projects {
+            ProjectScope::Current => {
+                let mut paths = collect_session_paths(&self.project_dir)?;
+                if let Some(cwd_dir) = self.cwd_dir.as_ref().filter(|dir| dir.is_dir()) {
+                    paths.append(&mut collect_session_paths(cwd_dir)?);
+                }
+                paths
             }
-            paths
+            ProjectScope::Every => self.collect_paths_all_projects()?,
         };
         sort_paths_recent_first(&mut paths);
         Ok(paths)
@@ -229,11 +262,12 @@ fn read_session_info(
 ) -> Result<Option<SessionInfo>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut lines = JsonlLines::new(BufReader::new(&file));
-    let HeaderInfo {
+    let Header {
         session_id,
         cwd,
         project_root,
         git_branch,
+        ..
     } = read_header(&mut lines, path)?;
     if project.is_some_and(|project| !project.owns(&cwd, project_root.as_deref())) {
         return Ok(None);
@@ -249,23 +283,27 @@ fn read_session_info(
                 updated_at,
                 ..
             }) = serde_json::from_str(line)
-            && title.as_ref().is_none_or(|cur| updated_at > cur.updated_at)
         {
-            title = Some(TitleInfo {
-                title: text,
-                updated_at,
-            });
+            keep_newer(
+                &mut title,
+                TitleInfo {
+                    title: text,
+                    updated_at,
+                },
+            );
         } else if line.starts_with(SUMMARY_LINE_PREFIX)
             && let Ok(Entry::Summary {
                 message_count,
                 updated_at,
             }) = serde_json::from_str(line)
-            && exit.as_ref().is_none_or(|cur| updated_at > cur.updated_at)
         {
-            exit = Some(ExitInfo {
-                message_count,
-                updated_at,
-            });
+            keep_newer(
+                &mut exit,
+                ExitInfo {
+                    message_count,
+                    updated_at,
+                },
+            );
         } else if line.starts_with(ARCHIVE_LINE_PREFIX)
             && let Ok(Entry::Archive {
                 archived: state, ..
@@ -301,7 +339,8 @@ mod tests {
     };
     use crate::session::store::set_archived_at;
     use crate::session::store::testing::{
-        listed_ids, seed_test_session, set_modified, test_header, test_project_dir, test_store,
+        isolated_store, listed_ids, seed_test_session, set_modified, test_header, test_project_dir,
+        test_store,
     };
     use crate::util::path::testing::HOME_VAR;
 
@@ -358,8 +397,8 @@ mod tests {
         use crate::session::entry::CURRENT_VERSION;
 
         /// A header that records `cwd` and, from releases that record one, `project_root`.
-        fn header_in(session_id: &str, cwd: &str, project_root: Option<&str>) -> Entry {
-            Entry::Header {
+        fn header_in(session_id: &str, cwd: &str, project_root: Option<&str>) -> Header {
+            Header {
                 session_id: session_id.to_owned(),
                 cwd: cwd.to_owned(),
                 project_root: project_root.map(str::to_owned),
@@ -385,8 +424,7 @@ mod tests {
 
         #[test]
         fn leaves_out_another_project_whose_directory_name_collides() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             seed_test_session(
                 &store,
                 "home",
@@ -403,15 +441,15 @@ mod tests {
 
             let mut all: Vec<_> = store
                 .walk(ListScope {
-                    all: true,
-                    archived: false,
+                    projects: ProjectScope::Every,
+                    archive: ArchiveState::Active,
                 })
                 .unwrap()
                 .map(|info| info.session_id)
                 .collect();
             all.sort_unstable();
 
-            assert_eq!(listed_ids(&store, false), ["home"]);
+            assert_eq!(listed_ids(&store, ArchiveState::Active), ["home"]);
             assert_eq!(all, ["home", "older", "recorded"]);
         }
 
@@ -433,9 +471,12 @@ mod tests {
                     datetime!(2026-04-16 10:00:00 UTC),
                 );
 
-                assert_eq!(listed_ids(&store, false), ["newer", "older"]);
+                assert_eq!(listed_ids(&store, ArchiveState::Active), ["newer", "older"]);
                 assert_eq!(
-                    listed_ids(&SessionStore::open(root, root).unwrap(), false),
+                    listed_ids(
+                        &SessionStore::open(root, root).unwrap(),
+                        ArchiveState::Active
+                    ),
                     ["newer"],
                     "the root alone has no launch directory to read older sessions from",
                 );
@@ -456,7 +497,7 @@ mod tests {
 
                 let store = SessionStore::open(Path::new("/repo/sub"), root).unwrap();
 
-                assert_eq!(listed_ids(&store, false), ["at-root"]);
+                assert_eq!(listed_ids(&store, ArchiveState::Active), ["at-root"]);
             });
         }
     }
@@ -466,8 +507,7 @@ mod tests {
 
         #[tokio::test]
         async fn orders_sessions_by_mtime_newest_first() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
 
             let mut wa = store
                 .create(
@@ -499,8 +539,7 @@ mod tests {
 
         #[tokio::test]
         async fn mtime_overrides_header_created_at_order() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
 
             let mut w_old = store
                 .create(
@@ -535,8 +574,7 @@ mod tests {
 
         #[tokio::test]
         async fn picks_latest_title_when_re_appended() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("retitled"), &[]).unwrap();
             writer
                 .append(&[Entry::Title {
@@ -558,10 +596,28 @@ mod tests {
             assert_eq!(title.title, "AI generated");
         }
 
+        #[test]
+        fn keeps_the_newest_summary_whatever_its_place_in_the_file() {
+            let (_dir, store) = isolated_store();
+            let mut writer = store.create(&sample_header("resumed"), &[]).unwrap();
+            writer
+                .append(&[
+                    sample_summary_entry(4),
+                    Entry::Summary {
+                        message_count: 2,
+                        updated_at: datetime!(2026-04-16 12:00:00 UTC),
+                    },
+                ])
+                .unwrap();
+
+            let sessions = store.list().unwrap();
+
+            assert_eq!(sessions[0].exit.as_ref().unwrap().message_count, 4);
+        }
+
         #[tokio::test]
         async fn finds_ai_title_buried_between_head_and_tail() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("buried"), &[]).unwrap();
             writer
                 .append(&[Entry::Title {
@@ -595,8 +651,7 @@ mod tests {
 
         #[tokio::test]
         async fn leaves_absent_title_and_exit_fields_unset() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let _writer = store.create(&sample_header("bare"), &[]).unwrap();
 
             let sessions = store.list().unwrap();
@@ -669,8 +724,7 @@ mod tests {
 
         #[tokio::test]
         async fn caps_at_limit_keeping_most_recent() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             seed_n_sessions(&store, 10);
 
             let page = store.list_paged(Some(3), ListScope::default()).unwrap();
@@ -682,8 +736,7 @@ mod tests {
 
         #[tokio::test]
         async fn unbounded_includes_every_session_without_more() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             seed_n_sessions(&store, 4);
 
             let page = store.list_paged(None, ListScope::default()).unwrap();
@@ -715,7 +768,7 @@ mod tests {
                 .list_paged(
                     None,
                     ListScope {
-                        all: true,
+                        projects: ProjectScope::Every,
                         ..ListScope::default()
                     },
                 )
@@ -736,12 +789,12 @@ mod tests {
             set_archived_at(&path("session-0002"), true).unwrap();
             set_archived_at(&path("session-0003"), true).unwrap();
             set_archived_at(&path("session-0003"), false).unwrap();
-            let ids = |archived: bool| -> Vec<String> {
+            let ids = |archive: ArchiveState| -> Vec<String> {
                 let mut ids: Vec<_> = store
                     .list_paged(
                         None,
                         ListScope {
-                            archived,
+                            archive,
                             ..ListScope::default()
                         },
                     )
@@ -754,14 +807,17 @@ mod tests {
                 ids
             };
 
-            assert_eq!(ids(false), ["session-0000", "session-0003"]);
-            assert_eq!(ids(true), ["session-0001", "session-0002"]);
+            assert_eq!(ids(ArchiveState::Active), ["session-0000", "session-0003"]);
+            assert_eq!(
+                ids(ArchiveState::Archived),
+                ["session-0001", "session-0002"]
+            );
             assert!(
                 store
                     .list_paged(
                         Some(1),
                         ListScope {
-                            archived: true,
+                            archive: ArchiveState::Archived,
                             ..ListScope::default()
                         }
                     )
@@ -773,7 +829,7 @@ mod tests {
                     .list_paged(
                         Some(2),
                         ListScope {
-                            archived: true,
+                            archive: ArchiveState::Archived,
                             ..ListScope::default()
                         }
                     )
@@ -810,8 +866,7 @@ mod tests {
         #[tokio::test]
         async fn zero_limit_yields_no_rows_but_flags_more() {
             // The CLI maps `--limit 0` to `None`, so `Some(0)` reaching the store means zero rows.
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             seed_n_sessions(&store, 3);
 
             let page = store.list_paged(Some(0), ListScope::default()).unwrap();
@@ -835,7 +890,7 @@ mod tests {
             let page = store.list_paged(
                 None,
                 ListScope {
-                    all: true,
+                    projects: ProjectScope::Every,
                     ..ListScope::default()
                 },
             );
@@ -859,7 +914,12 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             seed_n_sessions(&store, 2);
-            let latest_id = || store.latest(false).unwrap().map(|s| s.session_id);
+            let latest_id = || {
+                store
+                    .latest(ProjectScope::Current)
+                    .unwrap()
+                    .map(|s| s.session_id)
+            };
             assert_eq!(latest_id().as_deref(), Some("session-0001"));
 
             set_archived_at(&test_session_file(dir.path(), "session-0001"), true).unwrap();
@@ -875,8 +935,7 @@ mod tests {
 
         #[test]
         fn leaves_out_another_project_whose_directory_name_collides() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             seed_test_session(
                 &store,
                 "abcd-home",
@@ -885,17 +944,12 @@ mod tests {
                 datetime!(2026-04-15 10:00:00 UTC),
             );
             let mut foreign = sample_header("abcd-coll");
-            if let Entry::Header {
-                cwd, project_root, ..
-            } = &mut foreign
-            {
-                *cwd = "/work/test project".to_owned();
-                *project_root = Some(cwd.clone());
-            }
+            foreign.cwd = "/work/test project".to_owned();
+            foreign.project_root = Some(foreign.cwd.clone());
             store.create(&foreign, &[]).unwrap();
 
             let ids: Vec<_> = store
-                .list_matching("abcd", false)
+                .list_matching("abcd", ProjectScope::Current)
                 .unwrap()
                 .into_iter()
                 .map(|s| s.session_id)
@@ -906,8 +960,7 @@ mod tests {
 
         #[test]
         fn matches_the_id_part_of_file_names_newest_first() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             for (id, created_at) in [
                 ("abc-older", datetime!(2026-04-16 12:00:00 UTC)),
                 ("abd-newer", datetime!(2026-04-16 12:00:01 UTC)),
@@ -916,7 +969,7 @@ mod tests {
                 seed_test_session(&store, id, None, None, created_at);
             }
             let ids = |prefix: &str| -> Vec<String> {
-                let sessions = store.list_matching(prefix, false).unwrap();
+                let sessions = store.list_matching(prefix, ProjectScope::Current).unwrap();
                 sessions.into_iter().map(|s| s.session_id).collect()
             };
 
@@ -946,7 +999,7 @@ mod tests {
             write_newest_corrupt_session(dir.path());
 
             let ids: Vec<_> = store
-                .list_matching("corrupt", false)
+                .list_matching("corrupt", ProjectScope::Current)
                 .unwrap()
                 .into_iter()
                 .map(|s| s.session_id)

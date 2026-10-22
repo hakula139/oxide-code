@@ -12,7 +12,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 
 - The picker's named actions come from `ACTIONS`, a [`Keymap`](modals.md) that pairs each action with its key and footer label, and the footer renders its hints from the same entries. Up / Down and PageUp / PageDown, which move the cursor, are handled outside the table, and other keys edit the query through the shared `LineEditor`.
 - A query matches each row's ID and title, plus the project when the all-projects view shows it.
-- Each row is one line of columns: the ID prefix, the title, the branch, the project (only in the all-projects view), the message count, abbreviated past 999 as in `12k msgs`, and the relative time, abbreviated as in `3h ago`. The title takes the width the fixed-width columns leave and truncates with an ellipsis. When the title would drop below 24 columns, the ID goes first, then the branch, the project, and the message count, so an 80-column all-projects row keeps the title, project, count, and time, and a narrow row keeps only the title and the time. Below a 12-column title the time drops too, so the title always shows.
+- Each row is one line of columns: the ID prefix, the title, the branch, the project (only in the all-projects view), the message count, abbreviated past 999 as in `12k msgs`, and the relative time, abbreviated as in `3h ago`. The title takes the width the fixed-width columns leave and truncates with an ellipsis. When the title would drop below 24 columns, the ID goes first, then the branch, the project, and the message count, so an 80-column all-projects row keeps the title, project, count, and time, and a narrow row keeps only the title and the time. Below a 12-column title the time drops too, so the title always shows. Relative times count from when the listing last started, on open or on a Tab or Ctrl+A reload, so later pages age with the first one, while the Ctrl+D confirmation counts from when it opens.
 - Rows load in pages of 30 from a `SessionWalk` on a worker thread, which hands each page back to the picker's `Modal::tick`. The picker asks for the next page after each key while fewer than one viewport of rows passing the filter sits below the cursor, so it loads ahead and typical scrolling never waits on the store, and a query keeps loading pages until it fills the viewport with matches or the walk ends. While pages remain, the cursor stops at the last row in place of wrapping, and a query without matches reads `Searching for ...`. A worker that dies without a page, which only a panic does, shows as a load error in the footer.
 - Tab toggles current-project ↔ all-projects, and Ctrl+A toggles the active ↔ archived view, retitling the header to `Resume archived session`. Both restart the walk while preserving the typed query. Dropping the old view's worker handle tells the worker to stop before its next file, and its page is discarded.
 - Enter on a focused row submits, while Enter with no selection keeps the picker open so the user can Tab the scope or Esc out.
@@ -87,12 +87,11 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 - `crates/ox-core/src/command.rs`: `resume`, the typed form shared with the bare REPL.
 - `crates/ox-core/src/engine.rs`: `Engine::resume`, `Engine::roll_into`, `Engine::take_history`, `format_drift_warning`.
 - `crates/ox-core/src/protocol.rs`: `Op::Resume`, `ResumeTarget`, `Event::SessionResumed`, `Interaction`.
-- `crates/ox-core/src/session/display.rs`: `format_short_relative_time` for the picker row's time column, and `format_metadata_line` for the delete confirmation.
 - `crates/ox-core/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
 - `crates/ox-core/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_saved_prefix`, shared by `Engine::roll_into`, `/archive`, `/unarchive`, and `/delete`, and the `resolve_prefix_to_info` lookup it wraps.
 - `crates/ox-core/src/session/saved.rs`: `set_archived` behind Ctrl+X, and `delete` behind the confirm-delete modal.
-- `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`.
+- `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`, `ProjectScope`.
 - `crates/ox-core/src/util/text.rs`: `compact_count`, which abbreviates the message count, shared with the status line's token counts.
 - `crates/ox-tui/src/app.rs`: `push_modal`.
 - `crates/ox-tui/src/app/events.rs`: `apply_session_resumed`.
@@ -103,6 +102,7 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 - `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
 - `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, `Pages`, and `SessionRow` with its `Column` layout.
+- `crates/ox-tui/src/slash/sessions.rs`: `format_short_relative_time` for the picker row's time column, and `format_metadata_line` for the delete confirmation.
 - `crates/ox/src/driver/stdio.rs`: `StdioSink`, which confirms a resume on stderr.
 - `crates/ox/src/main.rs`: `Cli::archived`, `Cli::limit`, `Cli::resume`.
 - `crates/ox/src/session_list.rs`: the `ox --list` table over `list_paged`.

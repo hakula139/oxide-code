@@ -116,24 +116,8 @@ fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> Sla
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use std::path::Path;
-
     pub(crate) use super::context::testing::test_session_info;
     pub(crate) use super::diff::testing::{added, context, removed};
-
-    /// Session ID with every byte set to `byte`, in the hyphenated UUID form real session IDs use.
-    pub(super) fn stamped_id(byte: u8) -> String {
-        uuid::Uuid::from_bytes([byte; 16]).to_string()
-    }
-
-    /// Runs `f` with `XDG_DATA_HOME` set to a fresh temp dir, so `SessionStore::open` lands there,
-    /// and passes `f` the dir so it can add stores beneath it.
-    pub(super) fn with_isolated_xdg<R>(f: impl FnOnce(&Path) -> R) -> R {
-        let dir = tempfile::tempdir().unwrap();
-        temp_env::with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
-            f(dir.path())
-        })
-    }
 }
 
 #[cfg(test)]

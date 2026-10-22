@@ -19,10 +19,7 @@ use super::entry::{CompactInfo, UsageRecord};
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
 use super::state::{SessionState, extract_user_text};
-use super::store::{
-    SessionData, SessionStore, SessionWriter, load_session_data_from_path, open_append_at,
-    read_session_id_from_path,
-};
+use super::store::{SessionData, SessionStore, load_session_data_from_path, open_append_at};
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
@@ -77,7 +74,7 @@ impl SharedState {
         surface_once(&self.persistence_stop_surfaced)
     }
 
-    pub(super) fn surface_first_actor_gone(&self) -> bool {
+    fn surface_first_actor_gone(&self) -> bool {
         surface_once(&self.actor_gone_surfaced)
     }
 
@@ -89,7 +86,7 @@ impl SharedState {
         self.manual_title_set.load(Ordering::Acquire)
     }
 
-    pub(super) fn last_flush_failure(&self) -> Option<String> {
+    fn last_flush_failure(&self) -> Option<String> {
         lock_or_recover(&self.last_flush_failure, "last_flush_failure").clone()
     }
 }
@@ -203,7 +200,7 @@ impl SessionHandle {
     }
 
     /// Appends an AI-generated session title (supersedes the first-prompt title).
-    pub(crate) async fn append_ai_title(&self, title: String) -> Outcome {
+    pub(super) async fn append_ai_title(&self, title: String) -> Outcome {
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::AppendAiTitle { title, ack }, rx)
             .await
@@ -434,7 +431,8 @@ pub(crate) async fn roll_into(
     snapshots: Vec<FileSnapshot>,
     target: &Path,
 ) -> Result<RollIntoOutcome> {
-    if read_session_id_from_path(target)? == session.session_id() {
+    let data = load_session_data_from_path(target)?;
+    if data.session_id == session.session_id() {
         return Err(SavedError::live(session.session_id()).into());
     }
     let ResumedSession {
@@ -442,7 +440,7 @@ pub(crate) async fn roll_into(
         transcript,
         title,
         unarchived,
-    } = resume_from_path(store, target)?;
+    } = resume_loaded(store, target, data)?;
 
     let old_session = std::mem::replace(session, target_handle);
     let finalize_failure = old_session.finalize(snapshots).await;
@@ -456,19 +454,18 @@ pub(crate) async fn roll_into(
 
 /// Resumes the session file at `path`: loads, sanitizes, opens it for append, unarchives it, and
 /// spawns the actor.
-pub(crate) fn resume_from_path(store: &SessionStore, path: &Path) -> Result<ResumedSession> {
-    let session_id = read_session_id_from_path(path)?;
-    let data = load_session_data_from_path(path)?;
-    let writer = open_append_at(path)?;
-    from_resumed_data(store, session_id, data, writer)
+pub(super) fn resume_from_path(store: &SessionStore, path: &Path) -> Result<ResumedSession> {
+    resume_loaded(store, path, load_session_data_from_path(path)?)
 }
 
-fn from_resumed_data(
+/// [`resume_from_path`] for the `data` already loaded from `path`.
+fn resume_loaded(
     store: &SessionStore,
-    session_id: String,
+    path: &Path,
     mut data: SessionData,
-    mut writer: SessionWriter,
 ) -> Result<ResumedSession> {
+    let session_id = data.session_id;
+    let mut writer = open_append_at(path)?;
     let pre_sanitize_len = data.messages.len();
     sanitize_resumed_messages(&mut data.messages);
     // Bail only when sanitize wipes a non-empty list, since chaining onto a dropped
@@ -549,9 +546,10 @@ mod tests {
     use crate::prompt::PromptParts;
     use crate::session::entry::{Entry, SessionInfo};
     use crate::session::handle::testing::record_write_call;
+    use crate::session::store::listing::ProjectScope;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{
-        TEST_PROJECT, seed_test_session, test_project_dir, test_store,
+        TEST_PROJECT, isolated_store, seed_test_session, test_project_dir, test_store,
     };
     use crate::tool::tasks::testing::plan;
     use crate::tool::view::{DiffChunk, EditDiff, NumberedLine};
@@ -584,8 +582,7 @@ mod tests {
 
         #[tokio::test]
         async fn seeds_ai_title_only_for_first_user_text() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
 
             let outcome_first = handle.record_message(Message::user("Fix login bug")).await;
@@ -641,8 +638,7 @@ mod tests {
 
         #[tokio::test]
         async fn resumed_session_does_not_seed_ai_title() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original.record_message(Message::user("hello")).await;
@@ -709,8 +705,7 @@ mod tests {
 
         #[tokio::test]
         async fn writes_all_non_default_in_one_cmd() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let sid = handle.session_id().to_owned();
             handle.record_message(Message::user("trigger")).await;
@@ -847,8 +842,7 @@ mod tests {
 
         #[tokio::test]
         async fn writes_title_entry_and_supersedes_first_prompt_on_list() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let sid = handle.session_id().to_owned();
             handle.record_message(Message::user("Fix login bug")).await;
@@ -977,8 +971,7 @@ mod tests {
 
         #[tokio::test]
         async fn writes_user_provided_title_and_latches_shared_flag() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let sid = handle.session_id().to_owned();
 
@@ -1221,8 +1214,7 @@ mod tests {
 
         #[tokio::test]
         async fn writes_summary_with_count() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let sid = handle.session_id().to_owned();
 
@@ -1361,8 +1353,7 @@ mod tests {
 
         #[tokio::test]
         async fn ends_the_title_task_before_it_returns() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let (started_tx, started) = oneshot::channel();
             let (alive, mut ended) = oneshot::channel::<()>();
@@ -1433,21 +1424,14 @@ mod tests {
 
         #[tokio::test]
         async fn actor_panic_completes_without_panicking() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            for handle in [
-                start(&store, "m", None),
-                testing::acks_then_drops("test", 1),
-            ] {
-                handle.cmd_tx.send(SessionCmd::Panic).await.unwrap();
-                handle.shutdown().await;
-            }
+            let handle = testing::panicked("panicked");
+
+            handle.shutdown().await;
         }
 
         #[tokio::test]
         async fn cancelled_actor_completes_without_panicking() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             if let Some(j) = handle.actor_join.lock().unwrap().as_ref() {
                 j.abort();
@@ -1714,8 +1698,7 @@ mod tests {
 
         #[tokio::test]
         async fn loads_messages_and_keeps_session_id() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original.record_message(Message::user("hello")).await;
@@ -1755,8 +1738,7 @@ mod tests {
 
         #[tokio::test]
         async fn works_on_unfinished_session() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original.record_message(Message::user("hello")).await;
@@ -1818,8 +1800,7 @@ mod tests {
 
         #[tokio::test]
         async fn empty_session_errors() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original.finish(Vec::new()).await;
@@ -1831,8 +1812,7 @@ mod tests {
         #[tokio::test]
         async fn all_messages_sanitized_errors() {
             // Sanitize drops the lone unresolved tool_use, so the empty chain makes resume bail.
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original
@@ -1859,8 +1839,7 @@ mod tests {
 
         #[tokio::test]
         async fn drops_assistant_message_with_only_unresolved_tool_use() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id().to_owned();
             original.record_message(Message::user("do X")).await;
@@ -2308,8 +2287,11 @@ mod tests {
             let path = test_project_dir(dir.path()).join("0-fixture.jsonl");
             std::fs::write(&path, unmask(fixture)).unwrap();
 
-            let [listed]: [SessionInfo; 1] =
-                store.list_matching("", false).unwrap().try_into().unwrap();
+            let [listed]: [SessionInfo; 1] = store
+                .list_matching("", ProjectScope::Current)
+                .unwrap()
+                .try_into()
+                .unwrap();
             let resumed = resume_from_path(&store, &path).unwrap();
             let transcript = &resumed.transcript;
             let recovered = serde_json::json!({

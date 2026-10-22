@@ -21,10 +21,11 @@ use ox_core::config::Config;
 use ox_core::engine::{Engine, EnginePanic, SessionParts};
 use ox_core::permission::Mode;
 use ox_core::session::display::archive_notice;
+use ox_core::session::entry::ArchiveState;
 use ox_core::session::handle::ResumedSession;
 use ox_core::session::resolver::{SessionTarget, resolve_session};
 use ox_core::session::store::SessionStore;
-use ox_core::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope};
+use ox_core::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope, ProjectScope};
 use ox_core::util;
 use ox_core::util::tls::PlatformTrust;
 use ox_tui::Startup;
@@ -210,6 +211,27 @@ impl Cli {
         Ok(Some(prompt))
     }
 
+    /// The projects `--list`, `--continue`, `--resume`, and the picker search.
+    fn projects(&self) -> ProjectScope {
+        if self.all {
+            ProjectScope::Every
+        } else {
+            ProjectScope::Current
+        }
+    }
+
+    /// The listing `--list` prints, from `--all` and `--archived`.
+    fn list_scope(&self) -> ListScope {
+        ListScope {
+            projects: self.projects(),
+            archive: if self.archived {
+                ArchiveState::Archived
+            } else {
+                ArchiveState::Active
+            },
+        }
+    }
+
     /// The saved session to continue, or `None` for a new session, which the picker also starts.
     fn session_target(&self) -> Option<SessionTarget<'_>> {
         match &self.resume {
@@ -306,10 +328,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         session_list::write(
             &mut io::stdout().lock(),
             &store,
-            ListScope {
-                all: cli.all,
-                archived: cli.archived,
-            },
+            cli.list_scope(),
             cli.limit,
             terminal::stdout_width(),
         )?;
@@ -337,18 +356,22 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         config.model.id(),
         git_branch.clone(),
         cli.session_target(),
-        cli.all,
+        cli.projects(),
     )?;
     if unarchived && !tui_mode {
         _ = writeln!(
             io::stderr(),
             "{}",
-            archive_notice(handle.session_id(), false)
+            archive_notice(handle.session_id(), ArchiveState::Active)
         );
     }
-    let picker = cli
-        .opens_picker()
-        .then(|| ResumePicker::at_startup(store.clone(), handle.session_id().to_owned(), cli.all));
+    let picker = cli.opens_picker().then(|| {
+        ResumePicker::at_startup(
+            store.clone(),
+            handle.session_id().to_owned(),
+            cli.projects(),
+        )
+    });
 
     let engine = Engine::new(
         &config,
@@ -620,6 +643,39 @@ mod tests {
                     "the picker starts a new session",
                 );
                 assert_eq!(parse(&["ox"]).session_target(), None);
+            }
+        }
+
+        mod projects {
+            use super::*;
+
+            #[test]
+            fn all_widens_lookups_to_every_project() {
+                let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap();
+
+                assert_eq!(parse(&["ox", "-c"]).projects(), ProjectScope::Current);
+                assert_eq!(parse(&["ox", "-c", "-a"]).projects(), ProjectScope::Every);
+                assert_eq!(
+                    parse(&["ox", "-r", "--all"]).projects(),
+                    ProjectScope::Every
+                );
+            }
+        }
+
+        mod list_scope {
+            use super::*;
+
+            #[test]
+            fn archived_lists_the_archive_in_the_current_project() {
+                let cli = Cli::try_parse_from(["ox", "--list", "--archived"]).unwrap();
+
+                assert_eq!(
+                    cli.list_scope(),
+                    ListScope {
+                        projects: ProjectScope::Current,
+                        archive: ArchiveState::Archived,
+                    },
+                );
             }
         }
     }
