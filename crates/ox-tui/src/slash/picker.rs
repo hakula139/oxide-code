@@ -11,7 +11,6 @@ use ox_core::config::{DEFAULT_MODEL, Effort};
 use ox_core::model::{MODELS, ModelInfo, ResolvedModelId};
 use ox_core::protocol::{ConfigPick, Op};
 
-use super::context::LiveSessionInfo;
 use super::effort_slider::{Direction, level_color, step_level};
 use crate::action::Action;
 use crate::glyphs::RADIO_SELECTED;
@@ -20,6 +19,7 @@ use crate::modal::chrome::{
 };
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
+use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
 
 // ── Constants ──
@@ -197,7 +197,7 @@ mod tests {
 
     use super::*;
     use crate::modal::testing::render_rows;
-    use crate::slash::testing::test_session_info;
+    use crate::session_info::testing::test_session_info;
 
     /// `test_session_info` ships Opus 5.5 active at `high`.
     fn picker() -> ModelEffortPicker {

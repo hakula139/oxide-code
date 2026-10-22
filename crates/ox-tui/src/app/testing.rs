@@ -21,7 +21,8 @@ use super::{App, AppHistory};
 use crate::clipboard::{self, Clipboard, Environment};
 use crate::modal::approval::ApprovalModal;
 use crate::modal::{Modal, ModalKey};
-use crate::slash::{self, LiveSessionInfo};
+use crate::session_info::LiveSessionInfo;
+use crate::session_info::testing::test_session_info;
 use crate::testing::buffer_rows;
 use crate::theme::{Theme, ThemeOverrides};
 
@@ -32,7 +33,7 @@ pub(super) const OP_CHANNEL_CAPACITY: usize = 8;
 pub(super) fn test_app(
     title: Option<&str>,
 ) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
-    test_app_with(test_session_info(), title)
+    test_app_with(unknown_model_session_info(), title)
 }
 
 /// [`test_app`] started on `session_info`.
@@ -67,10 +68,10 @@ pub(super) fn test_app_with(
     (app, op_rx, event_tx)
 }
 
-/// The slash fixture on `test-model`, an unknown ID whose display name falls back to the literal
-/// ID, keeping insta snapshots stable.
-pub(super) fn test_session_info() -> LiveSessionInfo {
-    let mut info = slash::testing::test_session_info();
+/// The shared session fixture on `test-model`, an unknown ID whose display name falls back to the
+/// literal ID, keeping insta snapshots stable.
+pub(super) fn unknown_model_session_info() -> LiveSessionInfo {
+    let mut info = test_session_info();
     info.config.model = ModelSpec::resolve("test-model");
     info
 }

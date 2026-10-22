@@ -27,7 +27,7 @@ mod sessions;
 mod status;
 mod theme;
 
-pub(crate) use context::{LiveSessionInfo, SlashContext};
+pub(crate) use context::SlashContext;
 pub(crate) use diff::{DiffRow, WorkingTreeDiff};
 pub(crate) use matcher::MatchedCommand;
 pub(crate) use registry::{ArgCompletion, ChatOutput, SlashKind, SlashOutcome};
@@ -111,7 +111,6 @@ pub(crate) fn classify(parsed: &Parsed) -> Option<SlashKind> {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    pub(crate) use super::context::testing::test_session_info;
     pub(crate) use super::diff::testing::{added, context, removed};
 
     /// Marks the file at `path` read-only, so appending to it fails on every platform.
@@ -124,8 +123,8 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::test_session_info;
     use super::*;
+    use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::FakeCmd;
 
     fn parsed(name: &str, args: &str) -> Parsed {

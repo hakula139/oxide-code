@@ -80,8 +80,8 @@ mod tests {
     use ox_core::protocol::{ConfigPick, Op};
 
     use super::*;
+    use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
-    use crate::slash::testing::test_session_info;
 
     mod classify {
         use super::*;

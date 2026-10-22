@@ -166,7 +166,7 @@ mod tests {
     use ox_core::util::git::testing::{isolated_git, with_isolated_git_env_async};
 
     use super::*;
-    use crate::slash::testing::test_session_info;
+    use crate::session_info::testing::test_session_info;
 
     fn git_setup(cwd: &Path, args: &[&str]) {
         let out = isolated_git(cwd)

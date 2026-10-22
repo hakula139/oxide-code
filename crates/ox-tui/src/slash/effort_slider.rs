@@ -10,11 +10,11 @@ use ratatui::widgets::Paragraph;
 use ox_core::config::Effort;
 use ox_core::protocol::{ConfigPick, Op};
 
-use super::context::LiveSessionInfo;
 use crate::action::Action;
 use crate::glyphs::{HORIZONTAL_RULE, RADIO_SELECTED, RADIO_UNSELECTED};
 use crate::modal::chrome::{CONFIRM_HINTS, HINT_SEPARATOR, KEY_LEFT_RIGHT};
 use crate::modal::{Modal, ModalAction, ModalKey};
+use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
 
 // ── Constants ──
@@ -199,7 +199,7 @@ mod tests {
 
     use super::*;
     use crate::modal::testing::render_rows;
-    use crate::slash::testing::test_session_info;
+    use crate::session_info::testing::test_session_info;
 
     fn slider_for(model_id: &str, effort: Option<Effort>) -> EffortSlider {
         let mut info = test_session_info();
