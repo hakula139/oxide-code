@@ -4,7 +4,7 @@ pub(crate) mod builtin;
 mod color;
 mod loader;
 
-pub use loader::{ResolvedTheme, ThemeOverrides, resolve_theme};
+pub use self::loader::{ResolvedTheme, ThemeOverrides, resolve_theme};
 
 use std::sync::LazyLock;
 

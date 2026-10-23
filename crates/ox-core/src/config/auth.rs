@@ -52,6 +52,7 @@ impl AuthKind {
 
 /// Where the active credential came from, listed in resolution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(strum::VariantArray))]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AuthSource {
     AuthTokenEnv,
@@ -464,21 +465,14 @@ async fn load_login(
 mod tests {
     use std::path::Path;
 
+    use strum::VariantArray as _;
+
     use super::*;
     use crate::config::oauth::testing::{ox_login_in, write_creds};
     use crate::util::path::local_testing::abs;
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::local_testing::no_roots;
     use crate::util::tls::testing::NoRoots;
-
-    const ALL_SOURCES: [AuthSource; 6] = [
-        AuthSource::AuthTokenEnv,
-        AuthSource::ApiKeyEnv,
-        AuthSource::ApiKeyFile,
-        AuthSource::OAuthTokenEnv,
-        AuthSource::OxLogin,
-        AuthSource::ClaudeCodeLogin,
-    ];
 
     #[test]
     fn debug_omits_secret() {
@@ -490,9 +484,14 @@ mod tests {
     mod auth_source {
         use super::*;
 
+        /// `f` of every source, in resolution order.
+        fn each_source<T>(f: impl Fn(AuthSource) -> T) -> Vec<T> {
+            AuthSource::VARIANTS.iter().copied().map(f).collect()
+        }
+
         #[test]
         fn display_names_kind_and_origin_for_each_source() {
-            let labels = ALL_SOURCES.map(|source| source.to_string());
+            let labels = each_source(|source| source.to_string());
             assert_eq!(
                 labels,
                 [
@@ -511,7 +510,7 @@ mod tests {
 
             #[test]
             fn maps_each_source_to_its_wire_scheme() {
-                let kinds = ALL_SOURCES.map(AuthSource::kind);
+                let kinds = each_source(AuthSource::kind);
                 assert_eq!(
                     kinds,
                     [
@@ -532,7 +531,7 @@ mod tests {
             #[test]
             fn holds_only_for_the_two_logins() {
                 assert_eq!(
-                    ALL_SOURCES.map(AuthSource::is_stored_login),
+                    each_source(AuthSource::is_stored_login),
                     [false, false, false, false, true, true],
                 );
             }
@@ -544,7 +543,7 @@ mod tests {
             #[test]
             fn names_only_environment_sources() {
                 assert_eq!(
-                    ALL_SOURCES.map(AuthSource::env_var),
+                    each_source(AuthSource::env_var),
                     [
                         Some("ANTHROPIC_AUTH_TOKEN"),
                         Some("ANTHROPIC_API_KEY"),
@@ -562,21 +561,18 @@ mod tests {
 
             #[test]
             fn names_where_to_fix_each_source() {
-                for (source, expected) in [
-                    (AuthSource::AuthTokenEnv, "ANTHROPIC_AUTH_TOKEN"),
-                    (AuthSource::ApiKeyEnv, "ANTHROPIC_API_KEY"),
-                    (AuthSource::ApiKeyFile, "client.api_key in your user config"),
-                    (AuthSource::OAuthTokenEnv, "claude setup-token"),
-                    (AuthSource::OxLogin, "Run `/login`"),
-                    (AuthSource::ClaudeCodeLogin, "Run `claude`"),
-                ] {
-                    let hint = source.rejection_hint();
-                    assert!(hint.contains(expected), "{source:?}: {hint}");
-                }
-                assert!(
-                    AuthSource::OAuthTokenEnv
-                        .rejection_hint()
-                        .starts_with("CLAUDE_CODE_OAUTH_TOKEN")
+                assert_eq!(
+                    each_source(AuthSource::rejection_hint),
+                    [
+                        "Check ANTHROPIC_AUTH_TOKEN.",
+                        "Check ANTHROPIC_API_KEY.",
+                        "Check client.api_key in your user config. \
+                         `/config` shows which file sets it.",
+                        "CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+                         Generate a new one with `claude setup-token`.",
+                        "Run `/login` to sign in again.",
+                        "Run `claude` to sign in again.",
+                    ],
                 );
             }
         }
@@ -756,7 +752,7 @@ mod tests {
         use super::*;
 
         fn explicit(present: &[AuthSource]) -> Vec<(AuthSource, Option<String>)> {
-            ALL_SOURCES[..4]
+            AuthSource::EXPLICIT
                 .iter()
                 .map(|&source| {
                     let value = present
@@ -771,10 +767,10 @@ mod tests {
         fn picks_the_highest_precedence_credential() {
             // Each row drops the previous winner, so every adjacent precedence pair is exercised.
             for (present, winner) in [
-                (&ALL_SOURCES[..4], AuthSource::AuthTokenEnv),
-                (&ALL_SOURCES[1..4], AuthSource::ApiKeyEnv),
-                (&ALL_SOURCES[2..4], AuthSource::ApiKeyFile),
-                (&ALL_SOURCES[3..4], AuthSource::OAuthTokenEnv),
+                (&AuthSource::EXPLICIT[..], AuthSource::AuthTokenEnv),
+                (&AuthSource::EXPLICIT[1..], AuthSource::ApiKeyEnv),
+                (&AuthSource::EXPLICIT[2..], AuthSource::ApiKeyFile),
+                (&AuthSource::EXPLICIT[3..], AuthSource::OAuthTokenEnv),
             ] {
                 let auth = first_explicit(explicit(present)).unwrap();
 

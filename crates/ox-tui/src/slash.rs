@@ -27,11 +27,11 @@ mod sessions;
 mod status;
 mod theme;
 
-pub(crate) use context::SlashContext;
-pub(crate) use diff::{DiffRow, WorkingTreeDiff};
-pub(crate) use matcher::MatchedCommand;
-pub(crate) use registry::{ArgCompletion, ChatOutput, SlashKind, SlashOutcome};
-pub use resume::ResumePicker;
+pub(crate) use self::context::SlashContext;
+pub(crate) use self::diff::{DiffRow, WorkingTreeDiff};
+pub(crate) use self::matcher::MatchedCommand;
+pub(crate) use self::registry::{ArgCompletion, ChatOutput, SlashKind, SlashOutcome};
+pub use self::resume::ResumePicker;
 
 use futures::TryFutureExt as _;
 

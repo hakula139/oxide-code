@@ -12,16 +12,16 @@ mod system;
 mod tool;
 mod user;
 
-pub(super) use assistant::{AssistantText, AssistantThinking, ProgressUpdate};
-pub(super) use compacted::CompactedBlock;
-pub(super) use error::ErrorBlock;
-pub(super) use git_diff::GitDiffBlock;
-pub(super) use interrupted::InterruptedMarker;
-pub(super) use notice::NoticeBlock;
-pub(super) use streaming::StreamingAssistant;
-pub(super) use system::SystemMessageBlock;
-pub(super) use tool::{ToolCallBlock, ToolResultBlock};
-pub(super) use user::UserMessage;
+pub(super) use self::assistant::{AssistantText, AssistantThinking, ProgressUpdate};
+pub(super) use self::compacted::CompactedBlock;
+pub(super) use self::error::ErrorBlock;
+pub(super) use self::git_diff::GitDiffBlock;
+pub(super) use self::interrupted::InterruptedMarker;
+pub(super) use self::notice::NoticeBlock;
+pub(super) use self::streaming::StreamingAssistant;
+pub(super) use self::system::SystemMessageBlock;
+pub(super) use self::tool::{ToolCallBlock, ToolResultBlock};
+pub(super) use self::user::UserMessage;
 
 use std::ops::Range;
 

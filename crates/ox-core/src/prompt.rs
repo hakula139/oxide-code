@@ -9,12 +9,12 @@ use std::path::Path;
 use indoc::formatdoc;
 use serde::{Deserialize, Serialize};
 
-use crate::model::ModelSpec;
-use crate::util::git::{project_root, repo_root};
-use environment::Environment;
-use sections::{
+use self::environment::Environment;
+use self::sections::{
     CAUTION, INTRO, OUTPUT_EFFICIENCY, STYLE, SYSTEM_SECTION, TASK_GUIDANCE, TOOL_GUIDANCE,
 };
+use crate::model::ModelSpec;
+use crate::util::git::{project_root, repo_root};
 
 /// Output of [`build_prompt`] or [`restore_prompt`], held for a whole session so every request
 /// shares a byte-identical prefix.

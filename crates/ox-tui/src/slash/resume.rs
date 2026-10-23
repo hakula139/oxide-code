@@ -1,5 +1,6 @@
 //! `/resume` (alias `/continue`) opens a [`SearchableList`] session picker, and
-//! `/resume <id-prefix>` resumes directly. `ox -r` without a session opens the same picker at startup.
+//! `/resume <id-prefix>` resumes directly.
+//! `ox -r` without a session opens the same picker at startup.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
+use strum::VariantArray;
 use time::OffsetDateTime;
 
 use ox_core::command;
@@ -128,8 +130,9 @@ struct SessionRow {
     haystack: String,
 }
 
-/// One column of a picker row. The title takes whatever width the other columns leave.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One column of a picker row, declared in the order a row lays them out. The title takes whatever
+/// width the other columns leave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, VariantArray)]
 enum Column {
     Id,
     Title,
@@ -140,16 +143,6 @@ enum Column {
 }
 
 impl Column {
-    /// Every column, in the order a row lays them out.
-    const LAYOUT: [Self; 6] = [
-        Self::Id,
-        Self::Title,
-        Self::Branch,
-        Self::Project,
-        Self::Msgs,
-        Self::When,
-    ];
-
     /// The columns a narrowing row drops to keep [`TITLE_FLOOR`], first to last.
     const DROP_ORDER: [Self; 4] = [Self::Id, Self::Branch, Self::Project, Self::Msgs];
 
@@ -206,8 +199,9 @@ impl SessionRow {
     /// too when the title would still fall below [`TITLE_MIN`]. The project shows only when the
     /// picker spans every project.
     fn layout(&self, width: usize) -> (Vec<Column>, usize) {
-        let mut columns: Vec<Column> = Column::LAYOUT
-            .into_iter()
+        let mut columns: Vec<Column> = Column::VARIANTS
+            .iter()
+            .copied()
             .filter(|&c| c != Column::Project || self.project.is_some())
             .collect();
         for drop in Column::DROP_ORDER {
@@ -1932,7 +1926,8 @@ mod tests {
             assert!(
                 matches!(
                     &deleted,
-                    Some(ModalAction::SystemMessage(msg)) if msg == "Deleted session 22222222: second"
+                    Some(ModalAction::SystemMessage(msg))
+                        if msg == "Deleted session 22222222: second"
                 ),
                 "{deleted:?}",
             );
