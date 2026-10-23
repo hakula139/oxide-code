@@ -88,7 +88,7 @@ impl FromStr for Mode {
 /// The rule namespace a tool's calls fall under, which also sets the pipeline's default treatment.
 /// Rules address classes, so one `read` deny pattern covers every tool that reads a file. Each tool
 /// declares its class in its [`crate::tool::ToolSpec`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionClass {
     /// Reads the workspace or acts only on state the session owns (`read`, `grep`, `glob`, `tasks`,

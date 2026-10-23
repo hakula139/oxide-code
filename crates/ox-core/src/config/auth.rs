@@ -40,7 +40,7 @@ impl AuthKind {
     }
 
     /// The request header the credential travels in.
-    pub(crate) fn header_name(self) -> HeaderName {
+    pub(super) fn header_name(self) -> HeaderName {
         match self {
             Self::ApiKey => HeaderName::from_static("x-api-key"),
             Self::AuthToken | Self::OAuth => AUTHORIZATION,
@@ -289,7 +289,7 @@ impl Credential {
 
 /// Why no credential resolved.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum ResolveError {
+pub(super) enum CredentialError {
     /// `base_url` is a gateway, which never receives a stored login.
     #[error("{}", gateway_error(.0))]
     Gateway(String),
@@ -384,25 +384,26 @@ pub(crate) fn secret_env_vars() -> impl Iterator<Item = &'static str> {
         .chain([CUSTOM_HEADERS_VAR])
 }
 
-/// Picks the first explicit credential, falling back to a stored login. `stored` is awaited only
-/// on fallback, and only when `base_url` is first-party, so a personal subscription token never
-/// reaches a gateway the user did not hand it to.
-pub(super) async fn resolve(
+/// The first credential set in `explicit`, which [`explicit_credentials`] lists by precedence.
+pub(super) fn first_explicit(
     explicit: impl IntoIterator<Item = (AuthSource, Option<String>)>,
+) -> Option<Auth> {
+    explicit
+        .into_iter()
+        .find_map(|(source, value)| value.map(|secret| Auth::new(source, secret)))
+}
+
+/// The stored login a session falls back on without an explicit credential. `stored` is awaited
+/// only when `base_url` is first-party, so a personal subscription token never reaches a gateway
+/// the user did not hand it to.
+pub(super) async fn fallback(
     base_url: &str,
     stored: impl Future<Output = Result<Auth, LoginError>>,
-) -> Result<Auth, ResolveError> {
-    if let Some((source, secret)) = explicit
-        .into_iter()
-        .find_map(|(source, value)| value.map(|secret| (source, secret)))
-    {
-        return Ok(Auth::new(source, secret));
-    }
-
+) -> Result<Auth, CredentialError> {
     if !super::is_first_party_base_url(base_url) {
-        return Err(ResolveError::Gateway(base_url.to_owned()));
+        return Err(CredentialError::Gateway(base_url.to_owned()));
     }
-    stored.await.map_err(ResolveError::SignedOut)
+    stored.await.map_err(CredentialError::SignedOut)
 }
 
 /// Loads the stored login to fall back on, trying oxide-code's own before Claude Code's. A login
@@ -744,19 +745,8 @@ mod tests {
         }
     }
 
-    mod resolve {
+    mod first_explicit {
         use super::*;
-
-        const FIRST_PARTY: &str = "https://api.anthropic.com";
-        const GATEWAY: &str = "https://gateway.example.com/anthropic";
-
-        fn unreachable_store() -> impl Future<Output = Result<Auth, LoginError>> {
-            std::future::poll_fn(|_| panic!("stored credentials must not be read"))
-        }
-
-        fn stored_ox_login() -> std::future::Ready<Result<Auth, LoginError>> {
-            std::future::ready(Ok(Auth::new(AuthSource::OxLogin, "stored-token")))
-        }
 
         fn explicit(present: &[AuthSource]) -> Vec<(AuthSource, Option<String>)> {
             ALL_SOURCES[..4]
@@ -770,8 +760,8 @@ mod tests {
                 .collect()
         }
 
-        #[tokio::test]
-        async fn picks_highest_precedence_explicit_credential() {
+        #[test]
+        fn picks_the_highest_precedence_credential() {
             // Each row drops the previous winner, so every adjacent precedence pair is exercised.
             for (present, winner) in [
                 (&ALL_SOURCES[..4], AuthSource::AuthTokenEnv),
@@ -779,19 +769,36 @@ mod tests {
                 (&ALL_SOURCES[2..4], AuthSource::ApiKeyFile),
                 (&ALL_SOURCES[3..4], AuthSource::OAuthTokenEnv),
             ] {
-                let auth = resolve(explicit(present), GATEWAY, unreachable_store())
-                    .await
-                    .unwrap();
+                let auth = first_explicit(explicit(present)).unwrap();
+
                 assert_eq!(auth.source(), winner);
                 assert_eq!(auth.secret(), format!("{winner:?}-secret"));
             }
         }
 
+        #[test]
+        fn finds_none_when_nothing_is_set() {
+            assert!(first_explicit(explicit(&[])).is_none());
+        }
+    }
+
+    mod fallback {
+        use super::*;
+
+        const FIRST_PARTY: &str = "https://api.anthropic.com";
+        const GATEWAY: &str = "https://gateway.example.com/anthropic";
+
+        fn unreachable_store() -> impl Future<Output = Result<Auth, LoginError>> {
+            std::future::poll_fn(|_| panic!("stored credentials must not be read"))
+        }
+
+        fn stored_ox_login() -> std::future::Ready<Result<Auth, LoginError>> {
+            std::future::ready(Ok(Auth::new(AuthSource::OxLogin, "stored-token")))
+        }
+
         #[tokio::test]
         async fn falls_back_to_stored_login_on_first_party_host() {
-            let auth = resolve(explicit(&[]), FIRST_PARTY, stored_ox_login())
-                .await
-                .unwrap();
+            let auth = fallback(FIRST_PARTY, stored_ox_login()).await.unwrap();
             assert_eq!(auth.source(), AuthSource::OxLogin);
             assert_eq!(auth.secret(), "stored-token");
         }
@@ -802,7 +809,7 @@ mod tests {
 
             let (err, message) =
                 temp_env::async_with_vars([("XDG_CONFIG_HOME", Some(config.as_str()))], async {
-                    let err = resolve(explicit(&[]), GATEWAY, unreachable_store())
+                    let err = fallback(GATEWAY, unreachable_store())
                         .await
                         .expect_err("stored login must not go to a gateway");
                     let message = format!("{err:#}");
@@ -810,7 +817,7 @@ mod tests {
                 })
                 .await;
 
-            assert!(matches!(err, ResolveError::Gateway(_)), "{err:?}");
+            assert!(matches!(err, CredentialError::Gateway(_)), "{err:?}");
             assert_eq!(
                 message,
                 format!(
@@ -834,11 +841,9 @@ mod tests {
                     ("XDG_CONFIG_HOME", Some(config.as_str())),
                 ],
                 async {
-                    let err = resolve(explicit(&[]), FIRST_PARTY, async {
-                        Err(LoginError::Missing)
-                    })
-                    .await
-                    .expect_err("no credential anywhere");
+                    let err = fallback(FIRST_PARTY, async { Err(LoginError::Missing) })
+                        .await
+                        .expect_err("no credential anywhere");
                     let message = format!("{err:#}");
                     (err, message)
                 },
@@ -846,7 +851,7 @@ mod tests {
             .await;
 
             assert!(
-                matches!(err, ResolveError::SignedOut(LoginError::Missing)),
+                matches!(err, CredentialError::SignedOut(LoginError::Missing)),
                 "{err:?}"
             );
             assert_eq!(
@@ -874,7 +879,7 @@ mod tests {
 
         #[tokio::test]
         async fn other_login_failures_keep_their_own_recovery_step() {
-            let err = resolve(explicit(&[]), FIRST_PARTY, async {
+            let err = fallback(FIRST_PARTY, async {
                 Err(LoginError::Expired(Login::ClaudeCode))
             })
             .await

@@ -50,7 +50,7 @@ const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 // ── Login ──
 
 /// A stored login that requests fall back to when no explicit credential is set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub(super) enum Login {
     /// oxide-code's own login, which `/login` writes and `/logout` removes.
     Ox,

@@ -27,7 +27,7 @@ use crate::util::tls::testing::NoRoots;
 pub(super) const MODEL: &str = "claude-opus-5-5";
 pub(super) const SESSION_CONTEXT: &str = "<system-reminder>session context</system-reminder>";
 
-/// Non-interactive engine on a fresh session in `store`, working in `cwd`. Its prompt carries
+/// Engine without titles on a fresh session in `store`, working in `cwd`. Its prompt carries
 /// [`SESSION_CONTEXT`] in place of the rendered user context, so tests can tell it apart from a
 /// rebuilt one. Pass an empty directory, and run under [`with_pinned_home`], so the context never
 /// reads the developer's instruction files or git state.

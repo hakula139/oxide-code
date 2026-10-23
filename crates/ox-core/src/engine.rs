@@ -148,8 +148,8 @@ pub struct Engine {
     compaction: CompactionConfig,
     /// The launch directory and the workspace roots every tool call runs in.
     workspace: Arc<Workspace>,
-    /// Whether a TUI is attached, so titles generate in the background.
-    interactive: bool,
+    /// Whether fresh sessions get an AI title in the background, which only the TUI shows.
+    generates_titles: bool,
     auto_compaction_failures: AutoCompactFailures,
     /// [`TurnReport::context_estimate`] of the latest turn the transcript keeps.
     /// Before any such turn, an estimate from the parts of the next request.
@@ -171,7 +171,7 @@ impl Engine {
         trust: impl Trust + 'static,
         device_id: String,
         session: SessionParts,
-        interactive: bool,
+        generates_titles: bool,
     ) -> Result<Self> {
         let SessionParts {
             store,
@@ -228,7 +228,7 @@ impl Engine {
             max_tool_rounds: config.max_tool_rounds,
             compaction: config.compaction,
             workspace,
-            interactive,
+            generates_titles,
             auto_compaction_failures: AutoCompactFailures::default(),
             context_estimate: Some(context_estimate),
             displayed_usage: None,
@@ -360,7 +360,7 @@ impl Engine {
         )
         .await;
 
-        if self.interactive
+        if self.generates_titles
             && let Some(seed) = outcome.ai_title_seed
         {
             self.title_usage = Some(title_generator::spawn(
@@ -1134,14 +1134,14 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn titles_a_fresh_session_when_interactive_and_counts_the_title_cost() {
+        async fn titles_a_fresh_session_and_counts_the_title_cost() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 mount_title(&server, greeting_title()).await;
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.interactive = true;
+                engine.generates_titles = true;
                 let live_id = engine.session_id().to_owned();
                 let mut handle = engine.spawn();
 
@@ -1188,7 +1188,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.interactive = true;
+                engine.generates_titles = true;
                 let session_id = engine.session_id().to_owned();
                 let cache_ttl = engine.client.prompt_cache_ttl();
                 let mut handle = engine.spawn();
@@ -1975,7 +1975,7 @@ mod tests {
                 assert_eq!(
                     turns.len(),
                     2,
-                    "non-interactive turns must not request a title"
+                    "a session without titles must not request one"
                 );
                 assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
                 let (first, second) = (&turns[0]["messages"], &turns[1]["messages"]);
@@ -2080,7 +2080,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.interactive = true;
+                engine.generates_titles = true;
                 let session_id = engine.session_id().to_owned();
                 let cache_ttl = engine.client.prompt_cache_ttl();
                 let sink = CapturingSink::default();

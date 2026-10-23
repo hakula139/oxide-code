@@ -34,7 +34,7 @@ impl Layer {
     }
 
     /// Short name for the layer, as `/config` shows it.
-    pub(crate) fn label(&self) -> String {
+    fn label(&self) -> String {
         match self {
             Self::User(_) => "user".to_owned(),
             Self::DropIn(path) => format!(
@@ -83,7 +83,6 @@ impl fmt::Display for Source {
 // ── Sourced ──
 
 /// A resolved value paired with the source that set it.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Sourced<T> {
     pub(super) value: T,
     pub(super) source: Source,

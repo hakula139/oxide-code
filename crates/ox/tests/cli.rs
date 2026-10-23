@@ -49,7 +49,7 @@ async fn headless_prints_a_startup_error_as_one_line_even_with_backtraces_on() {
     assert!(output.stdout.is_empty(), "{:?}", output.stdout);
     let stderr = String::from_utf8(output.stderr).unwrap();
     let headline = format!(
-        "Error: failed to read extra CA bundle at {}: ",
+        "Error: invalid OX_EXTRA_CA_CERTS: failed to read extra CA bundle at {}: ",
         missing.display()
     );
     assert!(stderr.starts_with(&headline), "{stderr}");
