@@ -69,7 +69,7 @@ struct PathGlob {
 /// match. Naming it at every match keeps the allow / deny asymmetry legible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MatchDiscipline {
-    /// Every simple command of a command that is not opaque must match its named words, each
+    /// Every simple command of a command the analysis recognizes must match its named words, each
     /// literal one exactly, and a path matches only where it resolves, with names exactly as the
     /// pattern writes them. Neither a chained command, a symlink, nor a variant spelling widens.
     Allow,
@@ -157,7 +157,7 @@ impl Rule {
         }
         match (&self.pattern, target) {
             (_, Target::Command(command)) if discipline == MatchDiscipline::Allow => {
-                !command.is_opaque()
+                command.unrecognized().is_none()
                     && !command.segments().is_empty()
                     && command
                         .segments()
@@ -186,8 +186,8 @@ impl Rule {
         }
     }
 
-    /// Returns whether this `exec` rule allows `segment`, one simple command of a command that is
-    /// not opaque.
+    /// Returns whether this `exec` rule allows `segment`, one simple command of a command the
+    /// analysis recognizes.
     pub(super) fn allows(&self, segment: &Segment) -> bool {
         match &self.pattern {
             Pattern::Any => self.class == PermissionClass::Exec,
@@ -923,10 +923,12 @@ mod tests {
         }
 
         #[test]
-        fn exec_star_allows_only_a_command_the_analysis_sees_whole() {
+        fn exec_star_allows_only_a_command_the_analysis_recognizes() {
             let rule = exec("*");
-            assert!(allows(&rule, "cargo test && rm -rf /"));
-            for command in [r#"eval "$CMD""#, "$EDITOR notes", r#"sh -c "$X""#, "FOO=1"] {
+            for command in ["cargo test && rm -rf /", r#"sh -c "$X""#, "eval ls"] {
+                assert!(allows(&rule, command), "{command}");
+            }
+            for command in [r#"eval "$CMD""#, "$EDITOR notes", "FOO=1"] {
                 assert!(!allows(&rule, command), "{command}");
             }
         }
