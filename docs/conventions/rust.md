@@ -66,8 +66,8 @@ Keep each `tracing` message a constant phrase and pass variable data as fields, 
 - In function bodies, use blank lines to separate logical phases such as setup, validation, execution, and result.
 - Put a single-line computation directly above its early-return guard, with no blank line between them. For a multi-line `let` binding, such as an async chain or builder, leave a blank line before the guard.
 - Open a module with its `//!` doc, then its `mod` declarations, its re-exports at any visibility as a group of their own, and its `use` groups.
-- Order `use` groups as std, external crates, workspace crates (`ox_core::`, `ox_tui::`), then internal paths (`crate::`, `super::`, `self::`, and the file's child modules), with a blank line between groups. rustfmt sorts imports within each group, putting `self` before `super` before `crate`, but does not move imports between groups. Authors and reviewers must maintain the grouping.
-- Access a module's children through `self::` and its parent and siblings through `super::`, following `config/*`. Use `crate::` for more distant modules and test modules, which already glob-import their parent.
+- Order `use` groups as std, external crates, workspace crates (`ox_core::`, `ox_tui::`), then internal paths (`crate::`, `super::`, and `self::`), with a blank line between groups. rustfmt sorts imports within each group, putting `self` before `super` before `crate`, but does not move imports between groups. Authors and reviewers must maintain the grouping.
+- Write `use` declarations, re-exports included, with `self::` for a module's children and `super::` for its parent and siblings, following `config/*`. Use `crate::` for more distant modules and test modules, which already glob-import their parent.
 - Import a trait as `Trait as _` when its methods are the only things used, as with `std::fmt::Write as _` and `PermissionsExt as _`. Import it by name only when code refers to the trait itself, such as in a bound. Clippy's `unused_trait_names` lint enforces this.
 
 ## Strings

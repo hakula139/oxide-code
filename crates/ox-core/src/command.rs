@@ -5,7 +5,7 @@
 pub mod init;
 mod parser;
 
-pub use parser::{Parsed, parse_slash, split_slash, unescape_literal};
+pub use self::parser::{Parsed, parse_slash, split_slash, unescape_literal};
 
 use std::path::Path;
 

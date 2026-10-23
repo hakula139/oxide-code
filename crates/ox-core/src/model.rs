@@ -9,15 +9,17 @@
 mod pricing;
 mod usage;
 
-pub(crate) use usage::TokenUsage;
+pub(crate) use self::usage::TokenUsage;
 
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 
+use self::pricing::{
+    FABLE_5_1_RATES, HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES, TokenCostRates,
+};
 use crate::util::variant;
-use pricing::{FABLE_5_1_RATES, HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES, TokenCostRates};
 
 // ── ModelInfo ──
 

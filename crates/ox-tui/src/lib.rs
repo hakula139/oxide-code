@@ -37,11 +37,11 @@ use ox_core::engine::{Engine, EngineHandle};
 use ox_core::session::entry::ArchiveState;
 use ox_core::util::path::tildify;
 
-use action::Action;
-use app::{App, AppHistory};
-use session_info::LiveSessionInfo;
-use slash::ResumePicker;
-use theme::ResolvedTheme;
+use self::action::Action;
+use self::app::{App, AppHistory};
+use self::session_info::LiveSessionInfo;
+use self::slash::ResumePicker;
+use self::theme::ResolvedTheme;
 
 // ── Constants ──
 
