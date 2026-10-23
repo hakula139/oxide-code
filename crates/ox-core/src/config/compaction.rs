@@ -30,8 +30,9 @@ impl CompactionConfig {
         resolve_policy(self.policy, model, max_tokens)
     }
 
+    /// The default policy resolved for `model` with `max_tokens` of output.
     #[cfg(test)]
-    pub(crate) fn default_for_test(model: &ModelSpec, max_tokens: u32) -> Self {
+    pub(crate) fn with_default_policy(model: &ModelSpec, max_tokens: u32) -> Self {
         resolve_policy(AutoCompactionPolicy::Default, model, max_tokens)
     }
 }
@@ -235,7 +236,7 @@ pub mod testing {
             }
         }
 
-        pub const fn with_threshold_for_test(tokens: u32) -> Self {
+        pub const fn with_threshold(tokens: u32) -> Self {
             Self {
                 auto: AutoCompactionConfig {
                     enabled: true,
@@ -347,11 +348,11 @@ mod tests {
         }
     }
 
-    mod window_1m {
+    mod window_1m_threshold {
         use super::*;
 
         #[test]
-        fn pins_default_auto_threshold_per_window() {
+        fn is_the_default_for_every_known_model() {
             for info in MODELS {
                 let model = ModelSpec::resolve(info.id);
                 assert_eq!(

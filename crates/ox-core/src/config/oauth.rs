@@ -1118,7 +1118,7 @@ pub(crate) mod testing {
     use crate::config::auth::Auth;
 
     /// A stored `claudeAiOauth` document, with no refresh token when `refresh` is `None`.
-    pub(super) fn creds_json(
+    pub(crate) fn creds_json(
         access: &str,
         refresh: Option<&str>,
         expires_at: u64,
@@ -1228,7 +1228,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use indoc::indoc;
     use wiremock::matchers::{body_partial_json, method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2490,12 +2489,12 @@ mod tests {
         use super::*;
 
         #[test]
-        fn far_future_is_not_near() {
+        fn counts_a_far_future_expiry_as_not_near() {
             assert!(!is_near_expiry(u64::MAX));
         }
 
         #[test]
-        fn zero_is_expired() {
+        fn counts_an_expiry_in_the_past_as_near() {
             assert!(is_near_expiry(0));
         }
     }
@@ -2504,12 +2503,12 @@ mod tests {
         use super::*;
 
         #[test]
-        fn far_future_is_not_expired() {
+        fn counts_a_far_future_expiry_as_not_expired() {
             assert!(!is_expired(u64::MAX));
         }
 
         #[test]
-        fn zero_is_expired() {
+        fn counts_an_expiry_in_the_past_as_expired() {
             assert!(is_expired(0));
         }
     }
@@ -2599,7 +2598,15 @@ mod tests {
             let err = refresh_oauth_token(&server.uri(), "tok", &NoRoots)
                 .await
                 .expect_err("expected parse error");
-            assert!(format!("{:#}", err.error).contains("parse"));
+            assert_eq!(
+                format!("{:#}", err.error),
+                format!(
+                    "failed to parse token refresh response: \
+                     error decoding response body for url ({}/): \
+                     expected value at line 1 column 1",
+                    server.uri(),
+                ),
+            );
             assert!(!err.transient, "a malformed reply is not retried");
         }
 
@@ -2677,22 +2684,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("credentials.json");
 
-            std::fs::write(
-                &path,
-                indoc! {r#"
-                    {
-                        "claudeAiOauth": {
-                            "accessToken": "old-access",
-                            "refreshToken": "old-refresh",
-                            "expiresAt": 1000,
-                            "scopes": ["user:profile"],
-                            "subscriptionType": "pro",
-                            "rateLimitTier": "default"
-                        }
-                    }
-                "#},
-            )
-            .unwrap();
+            let mut creds = creds_json("old-access", Some("old-refresh"), 1000);
+            creds["claudeAiOauth"]["scopes"] = serde_json::json!(["user:profile"]);
+            creds["claudeAiOauth"]["subscriptionType"] = "pro".into();
+            creds["claudeAiOauth"]["rateLimitTier"] = "default".into();
+            std::fs::write(&path, creds.to_string()).unwrap();
 
             let response = TokenResponse {
                 access_token: "new-access".to_owned(),
@@ -2708,8 +2704,7 @@ mod tests {
             )
             .unwrap();
 
-            let content = std::fs::read_to_string(&path).unwrap();
-            let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+            let json = read_json(&path);
             let oauth = &json["claudeAiOauth"];
 
             assert_eq!(oauth["accessToken"], "new-access");
@@ -2728,20 +2723,9 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("credentials.json");
 
-            std::fs::write(
-                &path,
-                indoc! {r#"
-                    {
-                        "claudeAiOauth": {
-                            "accessToken": "t",
-                            "refreshToken": "r",
-                            "expiresAt": 1000,
-                            "scopes": []
-                        }
-                    }
-                "#},
-            )
-            .unwrap();
+            let mut creds = creds_json("t", Some("r"), 1000);
+            creds["claudeAiOauth"]["scopes"] = serde_json::json!([]);
+            std::fs::write(&path, creds.to_string()).unwrap();
 
             let response = TokenResponse {
                 access_token: "t2".to_owned(),
@@ -2757,8 +2741,7 @@ mod tests {
             )
             .unwrap();
 
-            let content = std::fs::read_to_string(&path).unwrap();
-            let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+            let json = read_json(&path);
             assert_eq!(
                 json["claudeAiOauth"]["scopes"],
                 serde_json::json!(["user:profile", "user:inference"]),
@@ -2770,20 +2753,9 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("credentials.json");
 
-            std::fs::write(
-                &path,
-                indoc! {r#"
-                    {
-                        "claudeAiOauth": {
-                            "accessToken": "old",
-                            "refreshToken": "old",
-                            "expiresAt": 1000,
-                            "scopes": ["user:profile"]
-                        }
-                    }
-                "#},
-            )
-            .unwrap();
+            let mut creds = creds_json("old", Some("old"), 1000);
+            creds["claudeAiOauth"]["scopes"] = serde_json::json!(["user:profile"]);
+            std::fs::write(&path, creds.to_string()).unwrap();
 
             let response = TokenResponse {
                 access_token: "new".to_owned(),
@@ -2799,8 +2771,7 @@ mod tests {
             )
             .unwrap();
 
-            let content = std::fs::read_to_string(&path).unwrap();
-            let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+            let json = read_json(&path);
             let oauth = &json["claudeAiOauth"];
 
             assert_eq!(oauth["scopes"], serde_json::json!(["user:profile"]));

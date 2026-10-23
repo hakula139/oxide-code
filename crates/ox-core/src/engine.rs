@@ -687,11 +687,12 @@ mod tests {
     use super::*;
     use crate::client::anthropic::local_testing::{COMPLETION_USAGE, client_for};
     use crate::client::anthropic::testing::{
-        DEVICE_ID, api_key, sse_body, sse_response, test_config, text_stream_body,
+        DEVICE_ID, api_key, sse_body, sse_response, text_stream_body,
     };
     use crate::config::auth::{AuthSource, LoginUnavailable};
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
+    use crate::config::testing::test_config;
     use crate::config::{Effort, PromptCacheTtl, display_auto_compaction};
     use crate::file_tracker::testing::{record_tracked_file, seed_full_read};
     use crate::message::{Replay, Role};
@@ -881,7 +882,7 @@ mod tests {
                 let session = handle::start(&store, MODEL, None);
                 let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
                 config.max_tool_rounds = Some(3);
-                config.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                config.compaction = CompactionConfig::with_threshold(50_000);
                 config.permission.set_mode(Mode::Plan);
                 config.workspace = Workspace::new(dir.path());
                 config.signed_out = Some(LoginUnavailable {
@@ -1692,7 +1693,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
                 engine.context_estimate = Some(50_000);
                 let mut handle = engine.spawn();
@@ -1927,7 +1928,7 @@ mod tests {
             let mut engine = engine(server.uri(), store, dir)
                 .await
                 .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
-            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+            engine.compaction = CompactionConfig::with_threshold(50_000);
             engine.messages = tool_heavy_transcript();
             engine
         }
@@ -2340,7 +2341,7 @@ mod tests {
                 mount_reply(&server, "auto summary").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
                 engine.context_estimate = Some(50_000);
                 engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
@@ -2421,7 +2422,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
                 engine.context_estimate = Some(50_000);
                 let sink = CapturingSink::default();
@@ -2468,7 +2469,7 @@ mod tests {
                 mount_reply(&server, "   ").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
                 engine.context_estimate = Some(50_000);
                 let sink = CapturingSink::default();
@@ -2818,7 +2819,7 @@ mod tests {
                 engine.client.set_effort(Effort::High);
                 let opus = ModelSpec::resolve(MODEL);
                 engine.compaction =
-                    CompactionConfig::default_for_test(&opus, engine.client.max_tokens());
+                    CompactionConfig::with_default_policy(&opus, engine.client.max_tokens());
                 let opus_compaction = display_auto_compaction(engine.compaction.auto);
                 let sink = CapturingSink::default();
 
@@ -2942,7 +2943,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let mut config = test_config(server.uri(), api_key(), "custom-model");
                 let sink = CapturingSink::default();
-                let unwindowed = CompactionConfig::default_for_test(&config.model, 16_000);
+                let unwindowed = CompactionConfig::with_default_policy(&config.model, 16_000);
                 assert!(!unwindowed.auto.enabled, "precondition: no window");
                 let mut resolved = Vec::new();
 
@@ -2950,7 +2951,7 @@ mod tests {
                     (None, unwindowed, WINDOW_1M_THRESHOLD),
                     (
                         None,
-                        CompactionConfig::with_threshold_for_test(1_500_000),
+                        CompactionConfig::with_threshold(1_500_000),
                         WINDOW_1M_THRESHOLD,
                     ),
                     (Some(8_000), unwindowed, 979_000),
@@ -3151,7 +3152,7 @@ mod tests {
                             model: ModelSpec::resolve(MODEL),
                             effort: Some(Effort::Low),
                             requested: ConfigPick::Effort(Effort::Low),
-                            auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                            auto_compaction: CompactionConfig::with_threshold(50_000).auto,
                             notice: String::new(),
                         },
                         Some(TurnEnd::Completed),
@@ -3162,7 +3163,7 @@ mod tests {
                             model: ModelSpec::resolve("custom-model"),
                             effort: None,
                             requested: ConfigPick::Effort(Effort::Low),
-                            auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                            auto_compaction: CompactionConfig::with_threshold(50_000).auto,
                             notice: String::new(),
                         },
                         Some(TurnEnd::Failed),

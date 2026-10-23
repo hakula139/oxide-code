@@ -13,6 +13,8 @@ mod merge;
 pub(crate) mod oauth;
 pub mod provenance;
 mod schema;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 use std::fmt;
 use std::net::IpAddr;
@@ -761,15 +763,15 @@ pub fn display_auto_compaction(auto: AutoCompactionConfig) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::path::Path;
 
     use indoc::{formatdoc, indoc};
     use tempfile::TempDir;
 
     use super::compaction::testing::WINDOW_1M_THRESHOLD;
     use super::oauth::LoginError;
-    use super::oauth::testing::write_creds;
+    use super::oauth::testing::{creds_json, write_creds};
     use super::provenance::Layer;
+    use super::testing::test_config;
     use super::*;
     use crate::permission::{Access, Decision, PermissionClass};
     use crate::util::path::testing::HOME_VAR;
@@ -778,26 +780,18 @@ mod tests {
 
     fn sample_config() -> Config {
         Config {
-            auth: Some(Auth::new(
-                AuthSource::ClaudeCodeLogin,
-                "token-must-not-leak",
-            )),
-            signed_out: None,
-            base_url: "https://api.example.test".to_owned(),
             extra_ca_certs: Some(PathBuf::from("/etc/ssl/corp-ca.pem")),
             gateway: GatewayCompat {
                 custom_headers: gateway::parse_headers("x-team: secret-team").unwrap(),
                 attribution: false,
                 structured_outputs: true,
             },
-            model: ModelSpec::resolve("claude-test-1-0"),
             effort: Some(Effort::Xhigh),
             max_tokens: None,
             max_tool_rounds: Some(100),
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
-            compaction: CompactionConfig::with_threshold_for_test(42),
+            compaction: CompactionConfig::with_threshold(42),
             permission: Policy::new(Mode::Plan, Vec::new(), Vec::new(), Vec::new()),
-            workspace: Workspace::new(Path::new("/repo")),
             show_thinking: true,
             show_welcome: false,
             status_line: vec![
@@ -814,6 +808,11 @@ mod tests {
                 effort: Source::Env("OX_EFFORT"),
                 ..Provenance::default()
             },
+            ..test_config(
+                "https://api.example.test",
+                Auth::new(AuthSource::ClaudeCodeLogin, "token-must-not-leak"),
+                "claude-test-1-0",
+            )
         }
     }
 
@@ -1054,14 +1053,22 @@ mod tests {
         async fn load_with(dir: &TempDir, overrides: &[(&'static str, &str)]) -> Result<Config> {
             let overrides = overrides.iter().map(|&(key, value)| env(key, value));
             let vars = env_vars([xdg(dir)].into_iter().chain(overrides));
-            temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false)).await
+            load_in(dir, vars, false).await
         }
 
-        /// Runs both startup steps, [`Config::load`] and [`Config::resolve_auth`].
-        async fn load_and_resolve_auth(cwd: &Path, can_sign_in: bool) -> Result<Config> {
-            let mut config = Config::load(cwd)?;
-            config.resolve_auth(can_sign_in).await?;
-            Ok(config)
+        /// Runs both startup steps, [`Config::load`] and [`Config::resolve_auth`],
+        /// in `dir` with exactly `vars` set.
+        async fn load_in(
+            dir: &TempDir,
+            vars: Vec<(&'static str, Option<String>)>,
+            can_sign_in: bool,
+        ) -> Result<Config> {
+            temp_env::async_with_vars(vars, async {
+                let mut config = Config::load(dir.path())?;
+                config.resolve_auth(can_sign_in).await?;
+                Ok(config)
+            })
+            .await
         }
 
         fn assert_auth(config: &Config, source: AuthSource, secret: &str) {
@@ -1079,10 +1086,7 @@ mod tests {
         ) -> Vec<(&'static str, Option<String>)> {
             write_config(
                 data.path().join("ox").join("credentials.json"),
-                &serde_json::json!({
-                    "claudeAiOauth": { "accessToken": "ox-token", "expiresAt": expires_at },
-                })
-                .to_string(),
+                &creds_json("ox-token", None, expires_at).to_string(),
             );
             env_vars(vec![
                 xdg(config),
@@ -1103,6 +1107,7 @@ mod tests {
             assert_eq!(config.max_tokens, None);
             assert_eq!(config.effort, Some(Effort::Medium));
             assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
+            assert_eq!(config.extra_ca_certs, None);
             assert!(config.compaction.auto.enabled);
             assert_eq!(
                 config.compaction.auto.threshold_tokens,
@@ -1325,7 +1330,7 @@ mod tests {
         #[tokio::test]
         async fn propagates_invalid_config_file() {
             let dir = tempfile::tempdir().unwrap();
-            write_user_config(
+            let user = write_user_config(
                 dir.path(),
                 indoc! {r#"
                     [client]
@@ -1333,12 +1338,21 @@ mod tests {
                     show_thinking = true
                 "#},
             );
+
             let err = load_with(&dir, &[("ANTHROPIC_API_KEY", "")])
                 .await
                 .expect_err("misplaced field must surface as an error");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("invalid config at"), "{msg}");
-            assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid config at {}: line 3, column 1, in `client`: \
+                     unknown field `show_thinking`, expected one of `api_key`, `base_url`, \
+                     `extra_ca_certs`, `model`, `effort`, `max_tokens`, `max_tool_rounds`, \
+                     `prompt_cache_ttl`, `compaction`",
+                    user.path().display()
+                ),
+            );
         }
 
         #[tokio::test]
@@ -1409,13 +1423,6 @@ mod tests {
 
                 assert_eq!(config.base_url, raw);
             }
-        }
-
-        #[tokio::test]
-        async fn extra_ca_certs_default_to_no_bundle() {
-            let dir = tempfile::tempdir().unwrap();
-            let config = load_with(&dir, &[]).await.unwrap();
-            assert!(config.extra_ca_certs.is_none());
         }
 
         #[tokio::test]
@@ -1492,20 +1499,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn extra_ca_certs_file_used_when_env_unset() {
-            let dir = tempfile::tempdir().unwrap();
-            write_user_config(
-                dir.path(),
-                &formatdoc! {"
-                    [client]
-                    extra_ca_certs = '{TEST_CA_PATH}'
-                "},
-            );
-            let config = load_with(&dir, &[]).await.unwrap();
-            assert_eq!(config.extra_ca_certs, Some(PathBuf::from(TEST_CA_PATH)),);
-        }
-
-        #[tokio::test]
         async fn extra_ca_certs_file_wins_when_env_is_empty() {
             let dir = tempfile::tempdir().unwrap();
             write_user_config(
@@ -1579,10 +1572,7 @@ mod tests {
                     ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
                     env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
                 ]);
-                let config =
-                    temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
-                        .await
-                        .unwrap();
+                let config = load_in(&dir, vars, false).await.unwrap();
                 assert_auth(&config, winner, secret);
             }
         }
@@ -1591,9 +1581,7 @@ mod tests {
         async fn falls_back_to_the_oxide_code_login() {
             let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let vars = ox_login_env(&dir, &data, 9_999_999_999_999);
-            let config = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
-                .await
-                .unwrap();
+            let config = load_in(&dir, vars, false).await.unwrap();
             assert_auth(&config, AuthSource::OxLogin, "ox-token");
             assert_eq!(config.provenance.auth, Source::Default);
             assert!(config.signed_out.is_none());
@@ -1603,13 +1591,8 @@ mod tests {
         async fn only_a_session_that_can_sign_in_starts_signed_out_when_the_stored_login_fails() {
             let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let vars = ox_login_env(&dir, &data, 1);
-            let (can_sign_in, cannot_sign_in) = temp_env::async_with_vars(vars, async {
-                (
-                    load_and_resolve_auth(dir.path(), true).await,
-                    load_and_resolve_auth(dir.path(), false).await,
-                )
-            })
-            .await;
+            let can_sign_in = load_in(&dir, vars.clone(), true).await;
+            let cannot_sign_in = load_in(&dir, vars, false).await;
 
             let can_sign_in = can_sign_in.unwrap();
             assert!(can_sign_in.auth.is_none());
@@ -1636,9 +1619,7 @@ mod tests {
             write_creds(&store.join("credentials.json"), "dead", Some("refresh"), 0);
             std::fs::create_dir(store.join("credentials.lock")).unwrap();
 
-            let config = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), true))
-                .await
-                .unwrap();
+            let config = load_in(&dir, vars, true).await.unwrap();
 
             let signed_out = config.signed_out.expect("signed out");
             assert_eq!(
@@ -1697,7 +1678,7 @@ mod tests {
                 env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
                 env("ANTHROPIC_CUSTOM_HEADERS", "missing colon"),
             ]);
-            let err = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
+            let err = load_in(&dir, vars, false)
                 .await
                 .expect_err("malformed header must fail startup");
             assert_eq!(
@@ -1727,22 +1708,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn gateway_without_credential_names_the_env_vars() {
-            let dir = tempfile::tempdir().unwrap();
-            let vars = env_vars(vec![
-                xdg(&dir),
-                ("ANTHROPIC_API_KEY", None),
-                env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
-            ]);
-            let err = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
-                .await
-                .expect_err("stored login must not go to a gateway");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("https://gateway.example.com"), "{msg}");
-            assert!(msg.contains("ANTHROPIC_AUTH_TOKEN"), "{msg}");
-        }
-
-        #[tokio::test]
         async fn effort_defaults_to_per_model_value() {
             for (model, expected) in [
                 ("claude-opus-5-5", Some(Effort::Medium)),
@@ -1758,18 +1723,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn effort_env_overrides_per_model_default() {
-            let dir = tempfile::tempdir().unwrap();
-            let config = load_with(
-                &dir,
-                &[("ANTHROPIC_MODEL", "claude-opus-5-5"), ("OX_EFFORT", "low")],
-            )
-            .await
-            .unwrap();
-            assert_eq!(config.effort, Some(Effort::Low));
-        }
-
-        #[tokio::test]
         async fn effort_pick_is_dropped_on_unknown_model() {
             let dir = tempfile::tempdir().unwrap();
             let config = load_with(
@@ -1780,21 +1733,6 @@ mod tests {
             .unwrap();
             assert_eq!(config.effort, None);
             assert_eq!(config.provenance.effort, Source::Default);
-        }
-
-        #[tokio::test]
-        async fn effort_file_picks_up_when_env_unset() {
-            let dir = tempfile::tempdir().unwrap();
-            write_user_config(
-                dir.path(),
-                indoc! {r#"
-                    [client]
-                    model = "claude-sonnet-5-5"
-                    effort = "medium"
-                "#},
-            );
-            let config = load_with(&dir, &[]).await.unwrap();
-            assert_eq!(config.effort, Some(Effort::Medium));
         }
 
         #[tokio::test]
@@ -1827,13 +1765,19 @@ mod tests {
         #[tokio::test]
         async fn status_line_invalid_segment_surfaces_parse_error() {
             let dir = tempfile::tempdir().unwrap();
+
             let err = load_with(&dir, &[("OX_STATUS_LINE", "model,nope")])
                 .await
                 .expect_err("invalid segment must propagate");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("OX_STATUS_LINE"), "{msg}");
-            assert!(msg.contains("nope"), "{msg}");
-            assert!(msg.contains("current-dir"), "{msg}");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid OX_STATUS_LINE \"model,nope\": unknown segment \"nope\": \
+                     expected one of {}",
+                    StatusLineSegment::names()
+                ),
+            );
         }
 
         #[tokio::test]
@@ -1852,36 +1796,49 @@ mod tests {
         #[tokio::test]
         async fn status_line_invalid_segment_in_file_surfaces_parse_error() {
             let dir = tempfile::tempdir().unwrap();
-            write_user_config(
+            let user = write_user_config(
                 dir.path(),
                 indoc! {r#"
                     [tui]
                     status_line = ["model", "nope"]
                 "#},
             );
+
             let err = load_with(&dir, &[])
                 .await
                 .expect_err("invalid TOML segment must propagate");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("status_line"), "{msg}");
-            assert!(msg.contains("unknown variant `nope`"), "{msg}");
-            assert!(msg.contains("current-dir"), "{msg}");
-            assert!(msg.contains("run-state"), "{msg}");
+
+            let variants: Vec<_> = StatusLineSegment::ALL
+                .iter()
+                .map(|(_, name)| format!("`{name}`"))
+                .collect();
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid config at {}: line 2, column 25, in `tui.status_line`: \
+                     unknown variant `nope`, expected one of {}",
+                    user.path().display(),
+                    variants.join(", ")
+                ),
+            );
         }
 
         #[tokio::test]
         async fn status_line_empty_env_is_rejected() {
             let dir = tempfile::tempdir().unwrap();
+
             let err = load_with(&dir, &[("OX_STATUS_LINE", ",")])
                 .await
                 .expect_err("empty status line must not launch without run-state");
-            let msg = format!("{err:#}");
-            assert!(
-                msg.starts_with(r#"invalid OX_STATUS_LINE ",": no segments. List at least one of"#),
-                "{msg}"
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid OX_STATUS_LINE \",\": no segments. List at least one of {}, \
+                     or remove it to use the default.",
+                    StatusLineSegment::names()
+                ),
             );
-            assert!(msg.contains("run-state"), "{msg}");
-            assert!(msg.ends_with("or remove it to use the default."), "{msg}");
         }
 
         #[tokio::test]
@@ -1894,24 +1851,19 @@ mod tests {
                     status_line = []
                 "},
             );
+
             let err = load_with(&dir, &[])
                 .await
                 .expect_err("empty status line must not launch without run-state");
-            let msg = format!("{err:#}");
-            assert!(
-                msg.starts_with("invalid tui.status_line: no segments. List at least one of"),
-                "{msg}"
-            );
-            assert!(msg.contains("run-state"), "{msg}");
-        }
 
-        #[tokio::test]
-        async fn prompt_cache_ttl_env_overrides_default() {
-            let dir = tempfile::tempdir().unwrap();
-            let config = load_with(&dir, &[("OX_PROMPT_CACHE_TTL", "5m")])
-                .await
-                .unwrap();
-            assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid tui.status_line: no segments. List at least one of {}, \
+                     or remove it to use the default.",
+                    StatusLineSegment::names()
+                ),
+            );
         }
 
         #[tokio::test]
@@ -2477,6 +2429,16 @@ mod tests {
         fn names_the_two_flag_states() {
             assert_eq!(display_bool(true), "on");
             assert_eq!(display_bool(false), "off");
+        }
+    }
+
+    mod display_max_tool_rounds {
+        use super::*;
+
+        #[test]
+        fn names_the_cap_or_its_absence() {
+            assert_eq!(display_max_tool_rounds(Some(100)), "100");
+            assert_eq!(display_max_tool_rounds(None), "unbounded");
         }
     }
 

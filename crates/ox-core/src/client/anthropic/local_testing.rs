@@ -8,10 +8,11 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::Client;
-use super::testing::{DEVICE_ID, api_key, test_config};
+use super::testing::{DEVICE_ID, api_key};
 use super::transport::MessagesRequest;
 use crate::config::Config;
 use crate::config::auth::{Auth, AuthSource};
+use crate::config::testing::test_config;
 use crate::model::TokenUsage;
 use crate::util::tls::Trust as _;
 use crate::util::tls::testing::NoRoots;

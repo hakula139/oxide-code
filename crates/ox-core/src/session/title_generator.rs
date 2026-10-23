@@ -223,7 +223,8 @@ mod tests {
     use crate::client::anthropic::local_testing::{
         COMPLETION_USAGE, client_for, completion_body, test_client,
     };
-    use crate::client::anthropic::testing::{api_key, test_config};
+    use crate::client::anthropic::testing::api_key;
+    use crate::config::testing::test_config;
     use crate::message::Message;
     use crate::protocol::testing::CapturingSink;
     use crate::session::handle::testing::dead;

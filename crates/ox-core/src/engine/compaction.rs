@@ -865,7 +865,7 @@ mod tests {
             transcript: Vec<Message>,
         ) -> Engine {
             let mut engine = engine(server.uri(), &test_store(dir), dir).await;
-            engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+            engine.compaction = CompactionConfig::with_threshold(50_000);
             engine.context_estimate = context_estimate;
             engine.messages = transcript;
             engine

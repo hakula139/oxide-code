@@ -1788,7 +1788,7 @@ mod tests {
 
                 let outcome = agent_turn(
                     TurnContext {
-                        auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                        auto_compaction: CompactionConfig::with_threshold(50_000).auto,
                         ..turn_context(&client, &tools, &sink, &session)
                     },
                     &mut messages,
@@ -1829,7 +1829,7 @@ mod tests {
             let err = agent_turn(
                 TurnContext {
                     max_tool_rounds: Some(1),
-                    auto_compaction: CompactionConfig::with_threshold_for_test(50_000).auto,
+                    auto_compaction: CompactionConfig::with_threshold(50_000).auto,
                     ..turn_context(&client, &tools, &sink, &session)
                 },
                 &mut messages,

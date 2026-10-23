@@ -685,7 +685,7 @@ mod tests {
                 saved.record_message(Message::assistant("done")).await;
                 saved.finalize(Vec::new()).await;
                 let mut engine = engine("http://127.0.0.1:9".to_owned(), &store, dir.path()).await;
-                engine.compaction = CompactionConfig::with_threshold_for_test(50_000);
+                engine.compaction = CompactionConfig::with_threshold(50_000);
                 let path = store.find_session_path(&saved_id).unwrap();
 
                 engine

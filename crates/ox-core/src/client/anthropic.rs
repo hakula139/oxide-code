@@ -539,12 +539,11 @@ mod tests {
     use super::local_testing::{
         client_for, completion_body, oauth, request_count, serve, test_client,
     };
-    use super::testing::{
-        DEVICE_ID, api_key, sse_body, sse_response, test_config, text_stream_body,
-    };
+    use super::testing::{DEVICE_ID, api_key, sse_body, sse_response, text_stream_body};
     use super::*;
     use crate::client::{Response, StopReason};
     use crate::config::oauth::testing::{HeldRefresh, ok_refresh_body, ox_login_in, write_creds};
+    use crate::config::testing::test_config;
     use crate::model::TokenUsage;
     use crate::util::tls::PlatformTrust;
     use crate::util::tls::testing::{NoRoots, TEST_CA_PATH};

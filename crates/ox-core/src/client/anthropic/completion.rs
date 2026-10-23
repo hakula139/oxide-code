@@ -88,8 +88,9 @@ mod tests {
         COMPLETION_USAGE, auth_token, client_for, completion_body, oauth, request_count, serve,
         test_client,
     };
-    use crate::client::anthropic::testing::{DEVICE_ID, api_key, test_config};
+    use crate::client::anthropic::testing::{DEVICE_ID, api_key};
     use crate::client::anthropic::{SYSTEM_PROMPT_PREFIX, attribution_text, build_metadata};
+    use crate::config::testing::test_config;
 
     mod client {
         use super::*;

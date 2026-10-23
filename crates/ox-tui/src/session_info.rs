@@ -36,13 +36,9 @@ pub(crate) struct LiveSessionInfo {
 pub(crate) mod testing {
     use std::path::PathBuf;
 
-    use ox_core::config::auth::AuthSource;
     use ox_core::config::compaction::CompactionConfig;
-    use ox_core::config::gateway::GatewaySnapshot;
-    use ox_core::config::provenance::Provenance;
-    use ox_core::config::{ConfigSnapshot, Effort, PromptCacheTtl, StatusLineSegment};
-    use ox_core::model::ModelSpec;
-    use ox_core::permission::Mode;
+    use ox_core::config::testing::test_snapshot;
+    use ox_core::config::{ConfigSnapshot, Effort};
 
     use super::LiveSessionInfo;
 
@@ -58,26 +54,10 @@ pub(crate) mod testing {
             auto_compaction_paused_after: None,
             background_shells: Vec::new(),
             config: ConfigSnapshot {
-                auth: Some(AuthSource::ApiKeyEnv),
-                base_url: "https://api.test.invalid".to_owned(),
-                extra_ca_certs: None,
-                gateway: GatewaySnapshot {
-                    custom_header_names: Vec::new(),
-                    attribution: true,
-                    structured_outputs: true,
-                },
-                model: ModelSpec::resolve("claude-opus-5-5"),
                 effort: Some(Effort::High),
                 max_tokens: None,
-                max_tool_rounds: None,
-                prompt_cache_ttl: PromptCacheTtl::OneHour,
-                compaction: CompactionConfig::with_threshold_for_test(155_000),
-                permission_mode: Mode::Manual,
-                show_thinking: false,
-                show_welcome: true,
-                status_line: StatusLineSegment::DEFAULT.to_vec(),
-                theme_name: "mocha".to_owned(),
-                provenance: Provenance::default(),
+                compaction: CompactionConfig::with_threshold(155_000),
+                ..test_snapshot()
             },
         }
     }
