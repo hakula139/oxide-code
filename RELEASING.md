@@ -46,7 +46,7 @@ The draft lists PR titles, which are too short to explain each change to users. 
 
 - For a stable section, start from the curated sections of the prereleases it rolls up and carry over every entry. The draft rebuilds entries from PR titles, so it drops the curated wording and omits PRs whose titles it skips, such as advisory bumps merged as `chore(deps)`. Then add the draft entries for changes since the last prerelease, and apply the rules below to the whole section.
 - Describe what users can now do, what no longer breaks, and what now works differently, such as a check that now fails or a value that is now rejected. Omit implementation details.
-- For a fix that closes a security gap, such as a permission bypass, state what the gap let through and which releases it affected, as [SECURITY.md](SECURITY.md) promises.
+- For a fix that closes a security gap, such as a permission bypass, state what the gap let through and which releases it affected, and link its advisory after the PR link once the advisory is published, as [SECURITY.md](SECURITY.md) promises.
 - Merge entries that describe the same user-visible change, keeping every PR link, as in `([#223](...), [#224](...))`. Fold a fix to a feature that is new in the same section into that feature's entries, and describe the feature as it now works. A merged entry takes the scope of the feature or main change it describes, and a PR with unrelated effects may be split across entries.
 - Move each entry to the group that matches its effect. For example, move a `fix` that adds a capability to Added. Keep entries under Breaking changes there.
 - Drop entries with no user-visible effect, such as a CI-only or test-only change titled `fix`.
