@@ -71,7 +71,7 @@ impl Mode {
         match self {
             Self::Manual => "Ask before tool calls that no permission rule allows or denies",
             Self::Plan => "Read-only: deny edits and commands",
-            Self::Yolo => "Run tool calls unless a deny rule or your ask rule holds them",
+            Self::Yolo => "Run tool calls unless a deny rule or your ask rules hold them",
         }
     }
 }
