@@ -1084,13 +1084,8 @@ impl Walk<'_> {
             "test" | "[" => !may_test_a_subscript(args),
             "unset" => builtin_options(args, src, "", "", "")
                 .is_some_and(|(_, operands)| operands.iter().all(|word| local(Some(word)))),
-            "wait" => !args.windows(2).any(|pair| {
-                pair[0]
-                    .value
-                    .as_deref()
-                    .is_none_or(|option| option.starts_with('-') && option.contains('p'))
-                    && !local(Some(&pair[1]))
-            }),
+            "wait" => builtin_options(args, src, "", "p", "")
+                .is_some_and(|(names, _)| names.iter().all(|name| self.may_set(name))),
             _ => true,
         }
     }
@@ -1467,6 +1462,7 @@ fn dropped_dash(last: Node<'_>, src: &str) -> Option<Word> {
         span: dash,
         value: Some("-".to_owned()),
         glob: false,
+        splits: false,
     })
 }
 
@@ -1730,8 +1726,18 @@ impl Wrapper {
     };
 
     /// Parses the options that lead `args`, or returns the index of the first word that hides
-    /// where the command starts: an option the grammar does not know, or one that expands.
+    /// where the command starts: an option the grammar does not know or one that expands, or any
+    /// word before the command that bash may expand into other than one word.
     fn invocation(&self, args: &[Word]) -> Result<Invocation, usize> {
+        let parsed = self.options(args);
+        let end = parsed.as_ref().map_or_else(|&at| at, |run| run.start);
+        match args[..end].iter().position(|word| word.splits) {
+            Some(at) => Err(at),
+            None => parsed,
+        }
+    }
+
+    fn options(&self, args: &[Word]) -> Result<Invocation, usize> {
         let mut run = Invocation {
             start: args.len(),
             elsewhere: self.elsewhere,
@@ -2041,25 +2047,31 @@ fn is_identifier(name: &str) -> bool {
 
 /// Returns whether a write to the variable `name` can only change later `$name` expansions, which
 /// the analysis already reads as unknown: it is an identifier with a lowercase letter, which no
-/// variable bash itself reads has, and the environment `bash` starts with does not set it, as
-/// `inherited` tells, so the write exports nothing.
+/// variable a noninteractive bash reads has, and the environment `bash` starts with does not set
+/// it, as `inherited` tells, so the write exports nothing.
 fn is_local_name(name: &str, inherited: &dyn Fn(&str) -> bool) -> bool {
     is_identifier(name) && name.bytes().any(|b| b.is_ascii_lowercase()) && !inherited(name)
 }
 
 /// The variable a `declare`-family or `export` argument names: its value up to an `=` or `+=`, or
-/// when the value expands, the identifier it is written with before an `=`. `None` for an option
-/// or a name the analysis cannot read.
+/// when the value expands, the identifier it is written with before an `=`. `None` for an option,
+/// a name the analysis cannot read, or a literal value that assigns `(...)`, which the builtin
+/// parses again as an array whose keys and values may run substitutions the walk never sees.
 fn declared_name<'w>(word: &'w Word, src: &'w str) -> Option<&'w str> {
     let text = word.value.as_deref().unwrap_or(&src[word.span.clone()]);
-    let name = text
-        .split_once('=')
-        .map_or(text, |(name, _)| name.strip_suffix('+').unwrap_or(name));
-    is_identifier(name).then_some(name)
+    let (name, value) = text.split_once('=').unwrap_or((text, ""));
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let reparsed = word.value.is_some() && value.starts_with('(');
+    (is_identifier(name) && !reparsed).then_some(name)
 }
 
-/// The script `eval` runs from `args`, joined by spaces, or `None` when one of them expands.
+/// The script `eval` runs from `args`, joined by spaces after a leading `--`, which `eval` drops,
+/// or `None` when one of them expands.
 fn literal_script(args: &[Word]) -> Option<String> {
+    let args = match args {
+        [first, rest @ ..] if first.value.as_deref() == Some("--") => rest,
+        _ => args,
+    };
     args.iter()
         .map(|word| word.value.as_deref())
         .collect::<Option<Vec<_>>>()
@@ -2178,6 +2190,8 @@ struct Word {
     value: Option<String>,
     /// Whether an unquoted `*`, `?`, `[`, or `{` leaves the word to pathname or brace expansion.
     glob: bool,
+    /// Whether bash may expand the word into other than one word, as [`splits`] decides.
+    splits: bool,
 }
 
 impl Word {
@@ -2189,6 +2203,7 @@ impl Word {
             span: parts[0].start_byte()..parts[parts.len() - 1].end_byte(),
             value,
             glob: glob.unwrap_or(false),
+            splits: parts.iter().any(|&part| splits(part, src)),
         }
     }
 
@@ -2199,6 +2214,7 @@ impl Word {
             span: node.byte_range(),
             value: Some(src[node.byte_range()].to_owned()),
             glob: false,
+            splits: false,
         }
     }
 
@@ -2341,6 +2357,38 @@ fn unquote_word(text: &str, leading: bool) -> Option<(String, bool)> {
         value = expand_user(&value).ok()?.to_string_lossy().into_owned();
     }
     Some((value, glob))
+}
+
+/// Returns whether bash may expand the word part `node` into other than one word: by splitting an
+/// unquoted expansion or substitution, by pathname expansion, or by brace expansion, which any
+/// unquoted `{` but the literal `{}` may open.
+fn splits(node: Node<'_>, src: &str) -> bool {
+    match node.kind() {
+        "arithmetic_expansion"
+        | "brace_expression"
+        | "command_substitution"
+        | "expansion"
+        | "simple_expansion" => true,
+        "concatenation" => {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).any(|part| splits(part, src))
+        }
+        "word" => {
+            let mut chars = src[node.byte_range()].chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '*' | '?' | '[' => return true,
+                    '{' if chars.peek() != Some(&'}') => return true,
+                    _ => {}
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 /// A double-quoted string's value: a backslash escapes only `$`, `` ` ``, `"`, `\`, and newlines.
@@ -3271,6 +3319,11 @@ mod tests {
                     "unset PATH",
                     "let PATH=1",
                     "sh -c 'BASH_CMDS[ls]=/bin/rm; ls -rf x'",
+                    "declare -a 'x=([$(id)]=1)'",
+                    "declare 'x=($(id))'",
+                    "local x='([0]=$(id))'",
+                    "typeset -A m+='([k]=$(id))'",
+                    "export 'RUST_LOG=($(id))'",
                 ] {
                     assert!(parse(command).unrecognized().is_some(), "{command:?}");
                 }
@@ -3805,6 +3858,29 @@ mod tests {
             }
 
             #[test]
+            fn lets_the_program_start_at_any_word_past_a_wrapper_word_bash_may_split() {
+                for command in [
+                    "nice -n {5,rm,-rf,x} true",
+                    "nice -n $n true",
+                    "timeout * true",
+                    "env $assignment true",
+                    "nice -n {5,rm,-rf,x}",
+                ] {
+                    let parsed = parse(command);
+
+                    assert_eq!(joined(parsed.segments[0].named()), command, "{command:?}");
+                    assert!(!is_safe(command), "{command:?}");
+                }
+                for command in ["nice -n \"$n\" true", "nice -n '{5,rm}' true"] {
+                    assert_eq!(
+                        joined(parse(command).segments[0].named()),
+                        "true",
+                        "{command:?}"
+                    );
+                }
+            }
+
+            #[test]
             fn collects_the_commands_find_runs() {
                 for (command, expected) in [
                     (
@@ -3997,6 +4073,8 @@ mod tests {
                     "unset PATH",
                     "getopts ab PATH",
                     "wait -p PATH",
+                    "wait -np 'a[$(id)]'",
+                    "wait \"$p\"",
                     "test -v 'a[$(id)]'",
                 ] {
                     assert!(parse(command).unrecognized().is_some(), "{command:?}");
@@ -4054,6 +4132,7 @@ mod tests {
                     "unalias ll",
                     "unset x",
                     "wait",
+                    "wait -n -p job 1 2",
                 ] {
                     assert!(parse(command).unrecognized().is_none(), "{command:?}");
                 }
@@ -4066,6 +4145,7 @@ mod tests {
                     "sh -c 'rm -rf /'",
                     "bash -lc \"rm -rf /\"",
                     "eval rm -rf /",
+                    "eval -- 'rm -rf /'",
                     "exec sh -c 'rm -rf /'",
                     "busybox sh -c 'rm -rf /'",
                     "su -c 'rm -rf /' root",
