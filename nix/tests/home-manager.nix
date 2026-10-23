@@ -44,13 +44,34 @@ let
   failedAssertions = hm: map (a: a.message) (builtins.filter (a: !a.assertion) hm.assertions);
   complaints = hm: failedAssertions hm ++ hm.warnings;
 
-  stub = pkgs.writeShellScriptBin "ox" "exit 0";
   contextPackage = pkgs.writeText "ox-test-AGENTS.md" "From a package.\n";
+
+  stub = pkgs.writeShellScriptBin "ox" ''
+    set -eu
+    fail() {
+      echo "stub: $1" >&2
+      exit 1
+    }
+    [ "$*" = "config check" ] || fail "expected config check"
+    [ -d "$XDG_CONFIG_HOME/ox" ] || fail "expected the config directory"
+    [ -z "$(ls -A "$PWD")" ] || fail "expected an empty working directory"
+    [ -d "$HOME" ] && [ -w "$HOME" ] && [ -z "$(ls -A "$HOME")" ] ||
+      fail "expected an empty writable home directory"
+    [ -n "$XDG_DATA_HOME" ] && [ -n "$XDG_STATE_HOME" ] || fail "expected data and state dirs"
+    if grep -q invalid "$XDG_CONFIG_HOME/ox/config.toml"; then
+      fail "invalid config"
+    fi
+  '';
+
+  hintLines = [
+    "ox config check rejected the config.toml generated from programs.oxide-code.settings."
+    "If it names a path the build cannot read, set programs.oxide-code.checkConfig = false."
+  ];
 
   # ------------------------------------------------------------------------------------------------
   # Cases
   # ------------------------------------------------------------------------------------------------
-  full = evalHome {
+  checked = evalHome {
     programs.oxide-code = {
       enable = true;
       package = stub;
@@ -64,6 +85,25 @@ let
       };
 
       context = "Be terse.\n";
+    };
+  };
+
+  rejected = evalHome {
+    programs.oxide-code = {
+      enable = true;
+      package = stub;
+      settings.invalid = true;
+    };
+  };
+
+  rejectedFailure = pkgs.testers.testBuildFailure rejected.programs.oxide-code.configDir;
+
+  unchecked = evalHome {
+    programs.oxide-code = {
+      enable = true;
+      package = stub;
+      checkConfig = false;
+      settings.invalid = true;
     };
   };
 
@@ -93,6 +133,14 @@ let
     };
   };
 
+  checkNeedsPackage = evalHome {
+    programs.oxide-code = {
+      enable = true;
+      package = null;
+      checkConfig = true;
+    };
+  };
+
   disabled = evalHome { programs.oxide-code.settings.tui.show_thinking = true; };
 
   apiKey = evalHome {
@@ -110,7 +158,8 @@ let
     testComplaints = {
       expr = lib.mapAttrs (_: complaints) {
         inherit
-          full
+          checked
+          unchecked
           defaults
           contextFile
           contextFromPackage
@@ -120,7 +169,8 @@ let
       };
 
       expected = {
-        full = [ ];
+        checked = [ ];
+        unchecked = [ ];
         defaults = [ ];
         contextFile = [ ];
         contextFromPackage = [ ];
@@ -129,16 +179,21 @@ let
       };
     };
 
-    testFullTargets = {
-      expr = oxTargets full;
+    testCheckedTargets = {
+      expr = oxTargets checked;
       expected = [
         "ox/AGENTS.md"
         "ox/config.toml"
       ];
     };
 
-    testFullInstallsThePackage = {
-      expr = builtins.elem stub full.home.packages;
+    testCheckedLinksTheConfigFromTheCheckedDirectory = {
+      expr = checked.xdg.configFile."ox/config.toml".source;
+      expected = "${checked.programs.oxide-code.configDir}/ox/config.toml";
+    };
+
+    testCheckedInstallsThePackage = {
+      expr = builtins.elem stub checked.home.packages;
       expected = true;
     };
 
@@ -167,6 +222,16 @@ let
       expected = map toString (evalHome { }).home.packages;
     };
 
+    testCheckNeedsPackageFails = {
+      expr = failedAssertions checkNeedsPackage;
+      expected = [
+        (
+          "programs.oxide-code.checkConfig runs ox from programs.oxide-code.package, "
+          + "which is null. Set a package or checkConfig = false."
+        )
+      ];
+    };
+
     testDisabledWritesNothing = {
       expr = oxTargets disabled;
       expected = [ ];
@@ -193,15 +258,27 @@ pkgs.runCommand "ox-home-manager-module"
     ];
   }
   ''
-    toml2json < ${full.xdg.configFile."ox/config.toml".source} | jq -S . > actual.json
+    toml2json < ${checked.xdg.configFile."ox/config.toml".source} | jq -S . > actual.json
     jq -S . > expected.json <<'EOF'
     {"permission":{"mode":"yolo"},"tui":{"status_line":["model","run-state"]}}
     EOF
     diff -u expected.json actual.json
 
     diff -u ${pkgs.writeText "expected-AGENTS.md" "Be terse.\n"} \
-      ${full.xdg.configFile."ox/AGENTS.md".source}
+      ${checked.xdg.configFile."ox/AGENTS.md".source}
     diff -u ${./fixtures/AGENTS.md} ${contextFile.xdg.configFile."ox/AGENTS.md".source}
+
+    test "$(cat ${rejectedFailure}/testBuildFailure.exit)" = 1
+    grep -Fx "stub: invalid config" ${rejectedFailure}/testBuildFailure.log
+    ${lib.concatMapStrings (line: ''
+      grep -Fx ${lib.escapeShellArg line} ${rejectedFailure}/testBuildFailure.log
+    '') hintLines}
+
+    toml2json < ${unchecked.programs.oxide-code.configDir}/ox/config.toml | jq -S . > actual.json
+    echo '{"invalid":true}' | jq -S . > expected.json
+    diff -u expected.json actual.json
+
+    test -d ${noPackage.programs.oxide-code.configDir}/ox
 
     touch $out
   ''
