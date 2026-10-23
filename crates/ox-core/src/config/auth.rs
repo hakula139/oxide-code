@@ -52,6 +52,7 @@ impl AuthKind {
 
 /// Where the active credential came from, listed in resolution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(strum::VariantArray))]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AuthSource {
     AuthTokenEnv,
@@ -464,6 +465,8 @@ async fn load_login(
 mod tests {
     use std::path::Path;
 
+    use strum::VariantArray as _;
+
     use super::*;
     use crate::config::oauth::testing::{ox_login_in, write_creds};
     use crate::util::path::local_testing::abs;
@@ -471,14 +474,13 @@ mod tests {
     use crate::util::tls::local_testing::no_roots;
     use crate::util::tls::testing::NoRoots;
 
-    const ALL_SOURCES: [AuthSource; 6] = [
-        AuthSource::AuthTokenEnv,
-        AuthSource::ApiKeyEnv,
-        AuthSource::ApiKeyFile,
-        AuthSource::OAuthTokenEnv,
-        AuthSource::OxLogin,
-        AuthSource::ClaudeCodeLogin,
-    ];
+    /// Every source in resolution order.
+    const ALL_SOURCES: &[AuthSource] = AuthSource::VARIANTS;
+
+    /// `f` of every source, in resolution order.
+    fn each_source<T>(f: impl Fn(AuthSource) -> T) -> Vec<T> {
+        ALL_SOURCES.iter().copied().map(f).collect()
+    }
 
     #[test]
     fn debug_omits_secret() {
@@ -492,7 +494,7 @@ mod tests {
 
         #[test]
         fn display_names_kind_and_origin_for_each_source() {
-            let labels = ALL_SOURCES.map(|source| source.to_string());
+            let labels = each_source(|source| source.to_string());
             assert_eq!(
                 labels,
                 [
@@ -511,7 +513,7 @@ mod tests {
 
             #[test]
             fn maps_each_source_to_its_wire_scheme() {
-                let kinds = ALL_SOURCES.map(AuthSource::kind);
+                let kinds = each_source(AuthSource::kind);
                 assert_eq!(
                     kinds,
                     [
@@ -532,7 +534,7 @@ mod tests {
             #[test]
             fn holds_only_for_the_two_logins() {
                 assert_eq!(
-                    ALL_SOURCES.map(AuthSource::is_stored_login),
+                    each_source(AuthSource::is_stored_login),
                     [false, false, false, false, true, true],
                 );
             }
@@ -544,7 +546,7 @@ mod tests {
             #[test]
             fn names_only_environment_sources() {
                 assert_eq!(
-                    ALL_SOURCES.map(AuthSource::env_var),
+                    each_source(AuthSource::env_var),
                     [
                         Some("ANTHROPIC_AUTH_TOKEN"),
                         Some("ANTHROPIC_API_KEY"),

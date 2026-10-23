@@ -275,12 +275,12 @@ impl CacheControl {
 
     /// The breakpoint on the conversation's final block. The transcript is session-specific, so it
     /// never carries `scope`.
-    pub(super) const fn conversation(ttl: PromptCacheTtl) -> Self {
+    pub(super) fn conversation(ttl: PromptCacheTtl) -> Self {
         Self {
             scope: None,
             ttl: match ttl {
                 PromptCacheTtl::FiveMin => None,
-                PromptCacheTtl::OneHour => Some("1h"),
+                PromptCacheTtl::OneHour => Some(ttl.into()),
             },
         }
     }

@@ -8,7 +8,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use indoc::formatdoc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use strum::VariantArray;
 use tokio_util::sync::CancellationToken;
 
 use super::search::{NO_FILES_FOUND, SearchRoot, Unreadable};
@@ -112,7 +113,7 @@ fn input_schema() -> serde_json::Value {
             },
             "output_mode": {
                 "type": "string",
-                "enum": ["content", "files_with_matches", "count"],
+                "enum": OutputMode::VARIANTS,
                 "description": "Output mode: \"content\" shows matching lines (default), \
                                 \"files_with_matches\" shows file paths only, \
                                 \"count\" shows match counts per file"
@@ -135,7 +136,7 @@ fn input_schema() -> serde_json::Value {
     })
 }
 
-#[derive(Clone, Copy, Default, Deserialize)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize, VariantArray)]
 #[serde(rename_all = "snake_case")]
 enum OutputMode {
     #[default]

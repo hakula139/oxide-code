@@ -35,8 +35,8 @@ use ox_tui::slash::ResumePicker;
 use ox_tui::terminal;
 use ox_tui::theme::resolve_theme;
 
-use driver::Exit;
-use driver::headless::OutputFormat;
+use self::driver::Exit;
+use self::driver::headless::OutputFormat;
 
 #[derive(Parser)]
 #[command(
