@@ -217,9 +217,7 @@ where
             TagEnd::CodeBlock => self.end_code_block(),
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => self.end_item(),
-            TagEnd::Emphasis | TagEnd::Strong => {
-                self.pop_inline_style();
-            }
+            TagEnd::Emphasis | TagEnd::Strong => self.pop_inline_style(),
             TagEnd::Link => self.pop_link(),
             TagEnd::Table => self.end_table(),
             TagEnd::TableHead => {
@@ -1896,18 +1894,12 @@ mod tests {
         }
 
         #[test]
-        fn renders_tildes_as_literal_text() {
+        fn tildes_are_kept_as_literal_text() {
             let input = "~~struck~~ and cost ~$1-~$2 per run";
 
             let text = render_markdown(input, &theme(), 0);
 
-            let line = &text.lines[0];
-            let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert_eq!(content, input);
-            assert!(
-                line.spans.iter().all(|s| s.style == Style::default()),
-                "{line:?}"
-            );
+            assert_eq!(text.lines[0].spans, [Span::raw(input)]);
         }
 
         #[test]
