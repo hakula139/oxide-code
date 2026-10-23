@@ -709,9 +709,12 @@ pub(crate) fn is_first_party_base_url(base_url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::cell::Cell;
+    use std::collections::{BTreeSet, HashSet};
 
     use indoc::{formatdoc, indoc};
+    use regex::Regex;
+    use serde::de::{self, value::StrDeserializer};
     use tempfile::TempDir;
 
     use super::compaction::testing::WINDOW_1M_THRESHOLD;
@@ -1267,11 +1270,13 @@ mod tests {
             for (raw, expected) in [
                 (
                     "http://gw:8080",
-                    r#"invalid ANTHROPIC_BASE_URL "http://gw:8080": http is allowed only for localhost"#,
+                    "invalid ANTHROPIC_BASE_URL \"http://gw:8080\": \
+                     http is allowed only for localhost",
                 ),
                 (
                     "ftp://example.com",
-                    r#"invalid ANTHROPIC_BASE_URL "ftp://example.com": expected http or https, got "ftp""#,
+                    "invalid ANTHROPIC_BASE_URL \"ftp://example.com\": \
+                     expected http or https, got \"ftp\"",
                 ),
                 (
                     "gw:8080/v1",
@@ -1310,7 +1315,8 @@ mod tests {
 
             assert_eq!(
                 format!("{err:#}"),
-                r#"invalid client.base_url "http://gw:8080" in ~/ox/config.toml: http is allowed only for localhost"#,
+                "invalid client.base_url \"http://gw:8080\" in ~/ox/config.toml: \
+                 http is allowed only for localhost",
             );
         }
 
@@ -2420,6 +2426,216 @@ mod tests {
             assert!(!is_first_party_base_url("http://127.0.0.1:8080"));
             assert!(!is_first_party_base_url(""));
             assert!(!is_first_party_base_url("not-a-url"));
+        }
+    }
+
+    mod reference {
+        use super::*;
+
+        const GUIDE: &str = include_str!("../../../docs/guide/configuration.md");
+
+        /// The first-column code spans of the table under `heading` in the configuration guide.
+        fn reference_rows(heading: &str) -> Vec<&'static str> {
+            let rows: Vec<_> = GUIDE
+                .lines()
+                .skip_while(|line| *line != heading)
+                .skip(1)
+                .skip_while(|line| !line.starts_with('|'))
+                .take_while(|line| line.starts_with('|'))
+                .skip(2)
+                .map(|row| row.split('|').nth(1).unwrap().trim().trim_matches('`'))
+                .collect();
+            assert_ne!(
+                rows,
+                [] as [&str; 0],
+                "the guide has no table under {heading:?}"
+            );
+            rows
+        }
+
+        #[derive(Clone, Copy)]
+        enum Shape {
+            Table(&'static [&'static str]),
+            Key,
+        }
+
+        /// A deserializer that leads `FileConfig` along `path`, one field per table, and records
+        /// the shape of the value at its end. A struct, such as `[client]`, is a table, and any
+        /// other value is a key, even an optional table such as `permission.allow`.
+        #[derive(Clone, Copy)]
+        struct Probe<'a> {
+            path: &'a [&'static str],
+            shape: &'a Cell<Option<Shape>>,
+        }
+
+        impl Probe<'_> {
+            fn end(self, shape: Shape) -> de::value::Error {
+                self.shape.set(Some(shape));
+                de::Error::custom("probed")
+            }
+        }
+
+        impl<'de> de::Deserializer<'de> for Probe<'_> {
+            type Error = de::value::Error;
+
+            fn deserialize_any<V: de::Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+                Err(self.end(Shape::Key))
+            }
+
+            fn deserialize_struct<V: de::Visitor<'de>>(
+                self,
+                _: &'static str,
+                fields: &'static [&'static str],
+                visitor: V,
+            ) -> Result<V::Value, Self::Error> {
+                match self.path.split_first() {
+                    Some((&field, path)) => visitor.visit_map(Field {
+                        name: Some(field),
+                        value: Self { path, ..self },
+                    }),
+                    None => Err(self.end(Shape::Table(fields))),
+                }
+            }
+
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+                byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map enum
+                identifier ignored_any
+            }
+        }
+
+        /// A table holding only the next field of a [`Probe`]'s path.
+        struct Field<'a> {
+            name: Option<&'static str>,
+            value: Probe<'a>,
+        }
+
+        impl<'de> de::MapAccess<'de> for Field<'_> {
+            type Error = de::value::Error;
+
+            fn next_key_seed<K: de::DeserializeSeed<'de>>(
+                &mut self,
+                seed: K,
+            ) -> Result<Option<K::Value>, Self::Error> {
+                self.name
+                    .take()
+                    .map(|name| seed.deserialize(StrDeserializer::new(name)))
+                    .transpose()
+            }
+
+            fn next_value_seed<V: de::DeserializeSeed<'de>>(
+                &mut self,
+                seed: V,
+            ) -> Result<V::Value, Self::Error> {
+                seed.deserialize(self.value)
+            }
+        }
+
+        /// Appends every key under `path` to `keys` as a dotted path.
+        fn collect_keys(path: &mut Vec<&'static str>, keys: &mut Vec<String>) {
+            let shape = Cell::new(None);
+            FileConfig::deserialize(Probe {
+                path,
+                shape: &shape,
+            })
+            .unwrap_err();
+            match shape.get().expect("the probe reaches the end of its path") {
+                Shape::Table(fields) => {
+                    for field in fields {
+                        path.push(field);
+                        collect_keys(path, keys);
+                        path.pop();
+                    }
+                }
+                Shape::Key => keys.push(path.join(".")),
+            }
+        }
+
+        /// Returns whether `name` is a variable that oxide-code owns or shares with Claude Code.
+        fn is_owned_var(name: &str) -> bool {
+            ["ANTHROPIC_", "CLAUDE_", "OX_"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        }
+
+        /// The owned variables that string literals name in the production lines of each workspace
+        /// member's `src` files other than `testing.rs` and `local_testing.rs`, in byte order.
+        fn owned_vars_in_sources() -> Vec<String> {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .unwrap();
+            let manifest: toml::Table = std::fs::read_to_string(root.join("Cargo.toml"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let literal = Regex::new(r#""([A-Z][A-Z0-9_]+)""#).unwrap();
+            let mut vars = BTreeSet::new();
+            for member in manifest["workspace"]["members"].as_array().unwrap() {
+                for entry in ignore::Walk::new(root.join(member.as_str().unwrap()).join("src")) {
+                    let path = entry.unwrap().into_path();
+                    let stem = path.file_stem().unwrap();
+                    if path.extension().is_some_and(|ext| ext == "rs")
+                        && stem != "testing"
+                        && stem != "local_testing"
+                    {
+                        let source = std::fs::read_to_string(path).unwrap();
+                        vars.extend(
+                            production_lines(&source)
+                                .flat_map(|line| literal.captures_iter(line))
+                                .map(|name| name[1].to_owned())
+                                .filter(|name| is_owned_var(name)),
+                        );
+                    }
+                }
+            }
+            vars.into_iter().collect()
+        }
+
+        /// The lines of `source` outside its top-level `tests`, `testing`, and `local_testing`
+        /// modules, each of which ends at the next line holding `}` alone.
+        fn production_lines(source: &str) -> impl Iterator<Item = &str> {
+            let test_module =
+                Regex::new(r"^(pub(\(\w+\))? )?mod (local_testing|testing|tests) \{$").unwrap();
+            let mut in_test_module = false;
+            source.lines().filter(move |line| {
+                let skip = in_test_module || test_module.is_match(line);
+                in_test_module = skip && *line != "}";
+                !skip
+            })
+        }
+
+        #[test]
+        fn lists_every_config_key_in_order() {
+            let mut keys = Vec::new();
+            collect_keys(&mut Vec::new(), &mut keys);
+            keys.sort();
+
+            assert_eq!(
+                reference_rows("### Config Keys"),
+                keys,
+                "the Config Keys table must list exactly the `FileConfig` keys, in byte order",
+            );
+        }
+
+        #[test]
+        fn lists_every_environment_variable_in_order() {
+            let documented = reference_rows("### Environment Variables");
+            let read = owned_vars_in_sources();
+
+            assert!(
+                documented.is_sorted(),
+                "the Environment Variables table must be in byte order: {documented:?}",
+            );
+            let owned: Vec<_> = documented
+                .into_iter()
+                .filter(|name| is_owned_var(name))
+                .collect();
+            assert_eq!(
+                owned, read,
+                "the Environment Variables table must list exactly the `ANTHROPIC_*`, `CLAUDE_*`, \
+                 and `OX_*` variables that production code names",
+            );
         }
     }
 }

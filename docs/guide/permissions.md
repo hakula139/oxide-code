@@ -31,16 +31,7 @@ Session rules live in memory until you exit, `/clear`, `/archive`, or `/resume` 
 
 ## Settings
 
-Set these keys under `[permission]` in `~/.config/ox/config.toml` or a drop-in. A project's `.ox/config.toml` accepts only `deny` and `ask`, as [Project Config](configuration.md#project-config) explains.
-
-| Key           | Type   | Default    | Description                                                                                          |
-| ------------- | ------ | ---------- | ---------------------------------------------------------------------------------------------------- |
-| `mode`        | string | `"manual"` | `"manual"`, `"plan"`, or `"yolo"`, [user config only](configuration.md#project-config)               |
-| `extra_roots` | array  | `[]`       | More directories whose edits run without asking, [user config only](configuration.md#project-config) |
-| `deny`        | table  | empty      | Calls that never run, in every mode                                                                  |
-| `ask`         | table  | empty      | Calls that ask first, even when an allow pattern matches                                             |
-| `allow`       | table  | empty      | Calls that run without asking, [user config only](configuration.md#project-config)                   |
-| `defaults`    | table  | all on     | Built-in rules to turn off by name, [user config only](configuration.md#project-config)              |
+Set `mode`, `extra_roots`, the `deny`, `ask`, and `allow` rule tables, and `defaults` under `[permission]` in `~/.config/ox/config.toml` or a drop-in. A project's `.ox/config.toml` accepts only `deny` and `ask`, as [Project Config](configuration.md#project-config) explains. [Config Keys](configuration.md#config-keys) lists each key with its type and default.
 
 ```toml
 # ~/.config/ox/config.toml

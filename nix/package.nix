@@ -15,6 +15,8 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../crates
+      # The config tests check that the guide's reference lists every key and variable.
+      ../docs/guide/configuration.md
     ];
   };
 
