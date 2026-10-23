@@ -530,7 +530,7 @@ mod tests {
                     .await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.interactive = true;
+                engine.generates_titles = true;
                 let (sink, mut events) = mpsc::unbounded_channel();
                 engine.submit_prompt("hello", &sink, &mut inert_ops()).await;
                 next_matching(&mut events, |event| {

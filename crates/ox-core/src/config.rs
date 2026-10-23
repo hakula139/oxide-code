@@ -24,7 +24,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use self::auth::{Auth, AuthSource, LoginUnavailable, NoCredential};
+use self::auth::{Auth, AuthSource, CredentialError, LoginUnavailable};
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
@@ -37,7 +37,7 @@ use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
 use crate::util::git::project_root;
 use crate::util::path::{expand_user, tildify};
-use crate::util::tls::{PlatformTrust, Trust, load_extra_ca_certs};
+use crate::util::tls::{PlatformTrust, load_extra_ca_certs};
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -318,7 +318,8 @@ pub struct Config {
     pub model: ModelSpec,
     /// `None` for models outside the catalog.
     pub(crate) effort: Option<Effort>,
-    /// `None` while signed out, which only a session that can run `/login` starts in.
+    /// `None` until [`Config::resolve_auth`] finds a stored login,
+    /// and while signed out, which only a session that can run `/login` starts in.
     pub(crate) auth: Option<Auth>,
     /// Why the session started signed out.
     pub(crate) signed_out: Option<LoginUnavailable>,
@@ -349,9 +350,8 @@ impl Config {
     /// Resolves config from env, the config files [`load::load`] finds from `cwd`
     /// within its [`project_root`], and built-in defaults.
     /// A TOML or env parse error fails the load.
-    /// Without a working credential, a session that `can_sign_in` with `/login`,
-    /// which only the TUI can, starts signed out and any other session fails.
-    pub async fn load(cwd: &Path, can_sign_in: bool) -> Result<Self> {
+    /// Only an explicit credential resolves here, and [`Config::resolve_auth`] adds the rest.
+    pub fn load(cwd: &Path) -> Result<Self> {
         let Loaded { config, origins } = load::load(cwd, &project_root(cwd))?;
         let FileConfig {
             client,
@@ -364,12 +364,13 @@ impl Config {
             .unwrap_or_else(|| Sourced::fallback(DEFAULT_BASE_URL.to_owned()));
         validate_base_url(&base_url)?;
 
-        // Resolved before `auth`, since the OAuth refresh needs the extra trust anchors too.
         let extra_ca_certs = resolve_extra_ca_certs(
             origins.sourced("client.extra_ca_certs", client.extra_ca_certs),
         )?;
 
         let gateway = GatewayCompat::load()?;
+
+        let auth = resolve_explicit_auth(client.api_key, &origins, &gateway)?;
 
         let model_id = env_string("ANTHROPIC_MODEL")
             .or_else(|| origins.sourced("client.model", client.model))
@@ -417,23 +418,11 @@ impl Config {
             overrides: tui.theme.overrides,
         };
 
-        // Resolved last, so a typo in another setting fails before a Keychain prompt or a token
-        // refresh.
-        let credential = resolve_auth(
-            client.api_key,
-            &origins,
-            &base_url.value,
-            &PlatformTrust(extra_ca_certs.value.clone()),
-            &gateway,
-            can_sign_in,
-        )
-        .await?;
-
         let provenance = Provenance {
             layers: origins.into_layers(),
             model: model_id.source,
             effort: effort.source,
-            auth: credential.source,
+            auth: auth.source,
             base_url: base_url.source,
             extra_ca_certs: extra_ca_certs.source,
             custom_headers: Source::env_if_set(gateway::CUSTOM_HEADERS_VAR),
@@ -450,8 +439,8 @@ impl Config {
         Ok(Self {
             model,
             effort: effort.value,
-            auth: credential.auth,
-            signed_out: credential.signed_out,
+            auth: auth.value,
+            signed_out: None,
             base_url: base_url.value,
             extra_ca_certs: extra_ca_certs.value,
             gateway,
@@ -467,6 +456,28 @@ impl Config {
             theme,
             provenance,
         })
+    }
+
+    /// Falls back to a stored login when no explicit credential is set.
+    /// Startup runs this last, after every check that can fail without it,
+    /// so a bad setting fails before a Keychain prompt or a token refresh.
+    /// Without a credential, a session that `can_sign_in` with `/login`,
+    /// which only the TUI can, starts signed out unless `base_url` is a gateway.
+    /// Any other session fails.
+    pub async fn resolve_auth(&mut self, can_sign_in: bool) -> Result<()> {
+        if self.auth.is_some() {
+            return Ok(());
+        }
+        let trust = PlatformTrust(self.extra_ca_certs.clone());
+        let stored = auth::stored_login(ClaudeCodeKeychain::SYSTEM, &trust);
+        match auth::fallback(&self.base_url, stored).await {
+            Ok(auth) => self.auth = Some(auth),
+            Err(CredentialError::SignedOut(e)) if can_sign_in => {
+                self.signed_out = Some(LoginUnavailable::new(&e));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
     }
 
     /// Startup notices: an unsupported model, then why the session is signed out.
@@ -520,7 +531,9 @@ fn resolve_extra_ca_certs(file: Option<Sourced<String>>) -> Result<Sourced<Optio
         .map(|raw| ("OX_EXTRA_CA_CERTS", raw))
         .or(file.map(|raw| ("client.extra_ca_certs", raw)));
     if let Some((key, raw)) = explicit {
-        let path = expand_user(&raw.value).with_context(|| format!("invalid {key}"))?;
+        let path = expand_user(&raw.value)
+            .and_then(|path| load_extra_ca_certs(&path).map(|_| path))
+            .with_context(|| format!("invalid {key}"))?;
         return Ok(Sourced::new(Some(path), raw.source));
     }
 
@@ -536,35 +549,15 @@ fn resolve_extra_ca_certs(file: Option<Sourced<String>>) -> Result<Sourced<Optio
     }
 }
 
-/// The session credential, where it came from, and why the session is signed out without one.
-struct ResolvedAuth {
-    auth: Option<Auth>,
-    source: Source,
-    signed_out: Option<LoginUnavailable>,
-}
-
-/// Resolves the credential and its source, rejecting a custom header that would replace the
-/// credential. A stored login is the fallback when nothing configures one, so its source is the
-/// default. A signed-out session checks the credential header used by `/login`.
-async fn resolve_auth(
+/// The explicit credential and its source, rejecting a custom header that would replace it.
+/// Without one, the source is the default, since [`Config::resolve_auth`] falls back to a stored
+/// login, and the header check covers the OAuth header that a stored login or `/login` sends.
+fn resolve_explicit_auth(
     file_api_key: Option<String>,
     origins: &Origins,
-    base_url: &str,
-    trust: &dyn Trust,
     gateway: &GatewayCompat,
-    can_sign_in: bool,
-) -> Result<ResolvedAuth> {
-    let resolved = auth::resolve(
-        auth::explicit_credentials(file_api_key),
-        base_url,
-        auth::stored_login(ClaudeCodeKeychain::SYSTEM, trust),
-    )
-    .await;
-    let (auth, signed_out) = match resolved {
-        Ok(auth) => (Some(auth), None),
-        Err(NoCredential::SignedOut(e)) if can_sign_in => (None, Some(LoginUnavailable::new(&e))),
-        Err(e) => return Err(e.into()),
-    };
+) -> Result<Sourced<Option<Auth>>> {
+    let auth = auth::first_explicit(auth::explicit_credentials(file_api_key));
     let source = auth.as_ref().map_or(AuthSource::OxLogin, Auth::source);
     gateway.check_credential_header(source)?;
 
@@ -572,11 +565,7 @@ async fn resolve_auth(
         AuthSource::ApiKeyFile => origins.source("client.api_key"),
         source => source.env_var().map_or(Source::Default, Source::Env),
     };
-    Ok(ResolvedAuth {
-        auth,
-        source,
-        signed_out,
-    })
+    Ok(Sourced::new(auth, source))
 }
 
 /// The effort the model takes. A pick the model ignores leaves the source at the default.
@@ -774,7 +763,7 @@ mod tests {
     use std::collections::HashSet;
     use std::path::Path;
 
-    use indoc::indoc;
+    use indoc::{formatdoc, indoc};
     use tempfile::TempDir;
 
     use super::compaction::testing::WINDOW_1M_THRESHOLD;
@@ -785,6 +774,7 @@ mod tests {
     use crate::permission::{Access, Decision, PermissionClass};
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::local_testing::TEST_CA_PEM;
+    use crate::util::tls::testing::TEST_CA_PATH;
 
     fn sample_config() -> Config {
         Config {
@@ -1059,12 +1049,19 @@ mod tests {
             (key, Some(value.to_owned()))
         }
 
-        /// Loads a session that cannot sign in from the user config under `dir` and the baseline
-        /// env plus `overrides`.
+        /// Loads a session that cannot sign in
+        /// from the user config under `dir` and the baseline env plus `overrides`.
         async fn load_with(dir: &TempDir, overrides: &[(&'static str, &str)]) -> Result<Config> {
             let overrides = overrides.iter().map(|&(key, value)| env(key, value));
             let vars = env_vars([xdg(dir)].into_iter().chain(overrides));
-            temp_env::async_with_vars(vars, Config::load(dir.path(), false)).await
+            temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false)).await
+        }
+
+        /// Runs both startup steps, [`Config::load`] and [`Config::resolve_auth`].
+        async fn load_and_resolve_auth(cwd: &Path, can_sign_in: bool) -> Result<Config> {
+            let mut config = Config::load(cwd)?;
+            config.resolve_auth(can_sign_in).await?;
+            Ok(config)
         }
 
         fn assert_auth(config: &Config, source: AuthSource, secret: &str) {
@@ -1203,11 +1200,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let user = write_user_config(
                 dir.path(),
-                indoc! {r#"
+                &formatdoc! {r#"
                     [client]
                     model = "claude-haiku-5-5"
                     base_url = "https://config-file.invalid"
-                    extra_ca_certs = "/etc/ssl/corp-ca.pem"
+                    extra_ca_certs = '{TEST_CA_PATH}'
                     max_tokens = 128
                     max_tool_rounds = 75
 
@@ -1225,7 +1222,7 @@ mod tests {
             assert_eq!(config.base_url, "https://config-file.invalid");
             assert_eq!(
                 config.extra_ca_certs.as_deref(),
-                Some(Path::new("/etc/ssl/corp-ca.pem"))
+                Some(Path::new(TEST_CA_PATH))
             );
             assert_eq!(config.max_tokens, Some(128));
             assert_eq!(config.max_tool_rounds, Some(75));
@@ -1288,30 +1285,6 @@ mod tests {
             assert_eq!(config.model.id(), "claude-sonnet-5-5");
             assert_eq!(config.max_tokens, Some(128));
             assert!(!config.show_thinking, "env `0` overrides file `true`");
-        }
-
-        #[tokio::test]
-        async fn fails_on_another_setting_before_resolving_the_credential() {
-            let dir = tempfile::tempdir().unwrap();
-
-            let err = load_with(
-                &dir,
-                &[
-                    ("ANTHROPIC_API_KEY", ""),
-                    ("ANTHROPIC_BASE_URL", "https://gw.example.com"),
-                    ("OX_MAX_TOKENS", "32k"),
-                ],
-            )
-            .await
-            .expect_err("both the setting and the credential are invalid");
-
-            assert_eq!(
-                format!("{err:#}"),
-                format!(
-                    "invalid OX_MAX_TOKENS \"32k\": expected a whole number from 1 to {}",
-                    u32::MAX
-                ),
-            );
         }
 
         #[tokio::test]
@@ -1455,6 +1428,8 @@ mod tests {
                     extra_ca_certs = "/etc/ssl/from-file.pem"
                 "#},
             );
+            std::fs::create_dir(dir.path().join("certs")).unwrap();
+            std::fs::write(dir.path().join("certs/env.pem"), TEST_CA_PEM).unwrap();
             let home = [(HOME_VAR, Some(dir.path()))];
             let overrides = [("OX_EXTRA_CA_CERTS", "~/certs/env.pem")];
             let config = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &overrides)))
@@ -1478,16 +1453,13 @@ mod tests {
 
             write_user_config(
                 dir.path(),
-                indoc! {r#"
+                &formatdoc! {"
                     [client]
-                    extra_ca_certs = "/etc/ssl/from-file.pem"
-                "#},
+                    extra_ca_certs = '{TEST_CA_PATH}'
+                "},
             );
             let config = load_with(&dir, &node).await.unwrap();
-            assert_eq!(
-                config.extra_ca_certs,
-                Some(PathBuf::from("/etc/ssl/from-file.pem")),
-            );
+            assert_eq!(config.extra_ca_certs, Some(PathBuf::from(TEST_CA_PATH)),);
         }
 
         #[tokio::test]
@@ -1501,20 +1473,36 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn extra_ca_certs_reject_an_unreadable_explicit_bundle() {
+            let dir = tempfile::tempdir().unwrap();
+            let missing = dir.path().join("missing.pem");
+
+            let err = load_with(&dir, &[("OX_EXTRA_CA_CERTS", missing.to_str().unwrap())])
+                .await
+                .expect_err("an explicit bundle must be readable");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid OX_EXTRA_CA_CERTS: failed to read extra CA bundle at {}: {}",
+                    missing.display(),
+                    std::fs::read(&missing).unwrap_err(),
+                ),
+            );
+        }
+
+        #[tokio::test]
         async fn extra_ca_certs_file_used_when_env_unset() {
             let dir = tempfile::tempdir().unwrap();
             write_user_config(
                 dir.path(),
-                indoc! {r#"
+                &formatdoc! {"
                     [client]
-                    extra_ca_certs = "/etc/ssl/from-file.pem"
-                "#},
+                    extra_ca_certs = '{TEST_CA_PATH}'
+                "},
             );
             let config = load_with(&dir, &[]).await.unwrap();
-            assert_eq!(
-                config.extra_ca_certs,
-                Some(PathBuf::from("/etc/ssl/from-file.pem")),
-            );
+            assert_eq!(config.extra_ca_certs, Some(PathBuf::from(TEST_CA_PATH)),);
         }
 
         #[tokio::test]
@@ -1522,16 +1510,13 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             write_user_config(
                 dir.path(),
-                indoc! {r#"
+                &formatdoc! {"
                     [client]
-                    extra_ca_certs = "/etc/ssl/from-file.pem"
-                "#},
+                    extra_ca_certs = '{TEST_CA_PATH}'
+                "},
             );
             let config = load_with(&dir, &[("OX_EXTRA_CA_CERTS", "")]).await.unwrap();
-            assert_eq!(
-                config.extra_ca_certs,
-                Some(PathBuf::from("/etc/ssl/from-file.pem")),
-            );
+            assert_eq!(config.extra_ca_certs, Some(PathBuf::from(TEST_CA_PATH)),);
         }
 
         #[tokio::test]
@@ -1594,9 +1579,10 @@ mod tests {
                     ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
                     env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
                 ]);
-                let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
-                    .await
-                    .unwrap();
+                let config =
+                    temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
+                        .await
+                        .unwrap();
                 assert_auth(&config, winner, secret);
             }
         }
@@ -1605,7 +1591,7 @@ mod tests {
         async fn falls_back_to_the_oxide_code_login() {
             let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let vars = ox_login_env(&dir, &data, 9_999_999_999_999);
-            let config = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
+            let config = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
                 .await
                 .unwrap();
             assert_auth(&config, AuthSource::OxLogin, "ox-token");
@@ -1614,13 +1600,13 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn starts_signed_out_when_the_stored_login_fails_and_it_can_sign_in() {
+        async fn only_a_session_that_can_sign_in_starts_signed_out_when_the_stored_login_fails() {
             let (dir, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let vars = ox_login_env(&dir, &data, 1);
-            let (can_sign_in, cannot) = temp_env::async_with_vars(vars, async {
+            let (can_sign_in, cannot_sign_in) = temp_env::async_with_vars(vars, async {
                 (
-                    Config::load(dir.path(), true).await,
-                    Config::load(dir.path(), false).await,
+                    load_and_resolve_auth(dir.path(), true).await,
+                    load_and_resolve_auth(dir.path(), false).await,
                 )
             })
             .await;
@@ -1636,7 +1622,7 @@ mod tests {
             assert_eq!(
                 format!(
                     "{:#}",
-                    cannot.expect_err("only a session that can sign in starts signed out")
+                    cannot_sign_in.expect_err("only a session that can sign in starts signed out")
                 ),
                 "oxide-code login has expired. Run `/login` to sign in again.",
             );
@@ -1650,7 +1636,7 @@ mod tests {
             write_creds(&store.join("credentials.json"), "dead", Some("refresh"), 0);
             std::fs::create_dir(store.join("credentials.lock")).unwrap();
 
-            let config = temp_env::async_with_vars(vars, Config::load(dir.path(), true))
+            let config = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), true))
                 .await
                 .unwrap();
 
@@ -1669,6 +1655,39 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn leaves_the_stored_login_to_resolve_auth() {
+            let dir = tempfile::tempdir().unwrap();
+            let vars = env_vars(vec![
+                xdg(&dir),
+                ("ANTHROPIC_API_KEY", None),
+                env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
+            ]);
+
+            let (loaded, resolved) = temp_env::async_with_vars(vars, async {
+                let mut config = Config::load(dir.path()).expect("load reads no credential");
+                let loaded = (config.auth.is_none(), config.signed_out.is_none());
+                let resolved = config
+                    .resolve_auth(true)
+                    .await
+                    .map_err(|e| format!("{e:#}"));
+                (loaded, resolved)
+            })
+            .await;
+
+            assert_eq!(loaded, (true, true));
+            assert_eq!(
+                resolved,
+                Err(format!(
+                    "no credentials for https://gateway.example.com. \
+                     Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
+                     or add `api_key` to {}. \
+                     Stored logins are sent only to the Anthropic API.",
+                    dir.path().join("ox").join("config.toml").display(),
+                )),
+            );
+        }
+
+        #[tokio::test]
         async fn malformed_custom_headers_fail_before_credentials_resolve() {
             // No credential exists for the gateway, so reaching auth would fail
             // with a different error.
@@ -1679,7 +1698,7 @@ mod tests {
                 env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
                 env("ANTHROPIC_CUSTOM_HEADERS", "missing colon"),
             ]);
-            let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
+            let err = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
                 .await
                 .expect_err("malformed header must fail startup");
             assert_eq!(
@@ -1716,7 +1735,7 @@ mod tests {
                 ("ANTHROPIC_API_KEY", None),
                 env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
             ]);
-            let err = temp_env::async_with_vars(vars, Config::load(dir.path(), false))
+            let err = temp_env::async_with_vars(vars, load_and_resolve_auth(dir.path(), false))
                 .await
                 .expect_err("stored login must not go to a gateway");
             let msg = format!("{err:#}");
@@ -2299,7 +2318,7 @@ mod tests {
                     ("OX_MAX_TOKENS", "64"),
                     ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
                     ("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
-                    ("OX_EXTRA_CA_CERTS", "/etc/ssl/ca.pem"),
+                    ("OX_EXTRA_CA_CERTS", TEST_CA_PATH),
                     ("OX_PERMISSION_MODE", "yolo"),
                     ("OX_PROMPT_CACHE_TTL", "5m"),
                 ],

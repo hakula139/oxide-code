@@ -333,12 +333,14 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
 
     let headless_prompt = cli.headless_prompt().await?;
 
-    let mut config = Config::load(&cwd, tui_mode).await?;
+    let mut config = Config::load(&cwd)?;
     if let Some(mode) = cli.mode {
         config.apply_mode_flag(mode);
     }
     let show_thinking = config.show_thinking;
     let theme = tui_mode.then(|| resolve_theme(&config.theme)).transpose()?;
+    // Before resolving the session, since resuming an archived session unarchives it.
+    config.resolve_auth(tui_mode).await?;
 
     let store = SessionStore::open(&cwd, &project_root)?;
     let git_branch = util::git::current_branch(&cwd).await;
