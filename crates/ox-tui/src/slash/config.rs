@@ -368,14 +368,13 @@ mod tests {
             let mut info = test_session_info();
             let drop_in = Layer::DropIn(PathBuf::from("/cfg/ox/config.d/10-nix.toml"));
             info.config.provenance.layers = vec![drop_in.clone()];
-            info.config.provenance.model = Source::Env("ANTHROPIC_MODEL");
+            info.config.provenance.model = Source::Env("OX_MODEL");
             info.config.provenance.effort = Source::Session;
             info.config.provenance.max_tokens = Source::File(drop_in);
             let rendered = rendered_text(&build_modal(&info, None), 100);
 
             assert!(
-                row(&rendered, "Model ID")
-                    .ends_with("claude-opus-5-5              $ANTHROPIC_MODEL"),
+                row(&rendered, "Model ID").ends_with("claude-opus-5-5              $OX_MODEL"),
                 "{rendered}"
             );
             assert!(row(&rendered, "Effort").ends_with("session"), "{rendered}");

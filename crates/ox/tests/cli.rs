@@ -365,7 +365,7 @@ async fn headless_reports_startup_notices_and_retries_once_as_plain_text() {
             .current_dir(dir.path())
             .env("ANTHROPIC_API_KEY", "test-key")
             .env("ANTHROPIC_BASE_URL", server.uri())
-            .env("ANTHROPIC_MODEL", "claude-nonexistent-9")
+            .env("OX_MODEL", "claude-nonexistent-9")
             .output()
             .await
             .unwrap();

@@ -287,7 +287,7 @@ impl Config {
 
         let auth = resolve_explicit_auth(client.api_key, &origins, &gateway)?;
 
-        let model_id = env_string("ANTHROPIC_MODEL")
+        let model_id = env_string("OX_MODEL")
             .or_else(|| origins.sourced("client.model", client.model))
             .unwrap_or_else(|| Sourced::fallback(DEFAULT_MODEL.to_owned()));
         let model = ModelSpec::resolve(model_id.value);
@@ -751,7 +751,7 @@ mod tests {
                 overrides: toml::Table::new(),
             },
             provenance: Provenance {
-                model: Source::Env("ANTHROPIC_MODEL"),
+                model: Source::Env("OX_MODEL"),
                 effort: Source::Env("OX_EFFORT"),
                 ..Provenance::default()
             },
@@ -776,12 +776,12 @@ mod tests {
                 let auto = AutoCompactionConfig::disabled();
 
                 snap.apply_swap(model.clone(), Some(Effort::Xhigh), None, auto);
-                assert_eq!(snap.provenance.model, Source::Env("ANTHROPIC_MODEL"));
+                assert_eq!(snap.provenance.model, Source::Env("OX_MODEL"));
                 assert_eq!(snap.provenance.effort, Source::Env("OX_EFFORT"));
                 assert_eq!(snap.compaction.auto, auto);
 
                 snap.apply_swap(model, Some(Effort::Low), Some(Effort::Low), auto);
-                assert_eq!(snap.provenance.model, Source::Env("ANTHROPIC_MODEL"));
+                assert_eq!(snap.provenance.model, Source::Env("OX_MODEL"));
                 assert_eq!(snap.provenance.effort, Source::Session);
                 assert_eq!(snap.effort, Some(Effort::Low));
 
@@ -864,8 +864,8 @@ mod tests {
             "ANTHROPIC_CUSTOM_HEADERS",
             "CLAUDE_CODE_ATTRIBUTION_HEADER",
             "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
-            "ANTHROPIC_MODEL",
             "ANTHROPIC_BASE_URL",
+            "OX_MODEL",
             "OX_EFFORT",
             "OX_MAX_TOKENS",
             "OX_EXTRA_CA_CERTS",
@@ -1062,7 +1062,7 @@ mod tests {
             let config = load_with(
                 &dir,
                 &[
-                    ("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
+                    ("OX_MODEL", "claude-sonnet-5-5"),
                     ("ANTHROPIC_BASE_URL", "https://example.invalid"),
                     ("OX_MAX_TOKENS", "64"),
                     ("OX_MAX_TOOL_ROUNDS", "200"),
@@ -1091,6 +1091,18 @@ mod tests {
                     StatusLineSegment::CurrentDir,
                 ],
             );
+        }
+
+        #[tokio::test]
+        async fn claude_codes_model_variable_leaves_the_default_model() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut vars = env_vars([xdg(&dir)]);
+            vars.push(env("ANTHROPIC_MODEL", "claude-sonnet-5-5"));
+
+            let config = load_in(&dir, vars, false).await.unwrap();
+
+            assert_eq!(config.model.id(), "claude-opus-5-5");
+            assert_eq!(config.provenance.model, Source::Default);
         }
 
         #[tokio::test]
@@ -1175,7 +1187,7 @@ mod tests {
             let config = load_with(
                 &dir,
                 &[
-                    ("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
+                    ("OX_MODEL", "claude-sonnet-5-5"),
                     // `max_tokens` has no env value, so the file value must win.
                     ("OX_SHOW_THINKING", "0"),
                 ],
@@ -1606,9 +1618,7 @@ mod tests {
                 ("custom-model", None),
             ] {
                 let dir = tempfile::tempdir().unwrap();
-                let config = load_with(&dir, &[("ANTHROPIC_MODEL", model)])
-                    .await
-                    .unwrap();
+                let config = load_with(&dir, &[("OX_MODEL", model)]).await.unwrap();
                 assert_eq!(config.effort, expected, "model={model}");
             }
         }
@@ -1616,12 +1626,9 @@ mod tests {
         #[tokio::test]
         async fn effort_pick_is_dropped_on_unknown_model() {
             let dir = tempfile::tempdir().unwrap();
-            let config = load_with(
-                &dir,
-                &[("ANTHROPIC_MODEL", "custom-model"), ("OX_EFFORT", "max")],
-            )
-            .await
-            .unwrap();
+            let config = load_with(&dir, &[("OX_MODEL", "custom-model"), ("OX_EFFORT", "max")])
+                .await
+                .unwrap();
             assert_eq!(config.effort, None);
             assert_eq!(config.provenance.effort, Source::Default);
         }
@@ -2132,7 +2139,7 @@ mod tests {
             let config = load_with(
                 &dir,
                 &[
-                    ("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
+                    ("OX_MODEL", "claude-sonnet-5-5"),
                     ("ANTHROPIC_CUSTOM_HEADERS", "x-team: platform"),
                     ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "1"),
                     ("OX_SHOW_THINKING", "1"),
@@ -2146,7 +2153,7 @@ mod tests {
                 config.provenance,
                 Provenance {
                     layers: vec![user.clone(), drop_in.clone()],
-                    model: Source::Env("ANTHROPIC_MODEL"),
+                    model: Source::Env("OX_MODEL"),
                     effort: Source::File(drop_in.clone()),
                     auth: Source::Env("ANTHROPIC_API_KEY"),
                     custom_headers: Source::Env("ANTHROPIC_CUSTOM_HEADERS"),

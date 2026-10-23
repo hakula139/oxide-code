@@ -479,7 +479,7 @@ mod tests {
                 "Config",
                 vec![
                     KvSection::annotated(vec![
-                        note_row("Model", "Opus", "$ANTHROPIC_MODEL"),
+                        note_row("Model", "Opus", "$OX_MODEL"),
                         note_row("Base URL", "https://x.test", "default"),
                     ]),
                     KvSection::new(vec![row("user", "~/.config/ox/config.toml")]),
@@ -528,15 +528,15 @@ mod tests {
 
         #[test]
         fn aligns_notes_in_a_column_when_they_fit() {
-            // 42 columns is exactly label + gap + value + gap + note for this fixture.
+            // 35 columns is exactly label + gap + value + gap + note for this fixture.
             let m = annotated_overview();
 
-            let rows = trimmed_rows(&m, 42, m.height(42, 40));
+            let rows = trimmed_rows(&m, 35, m.height(35, 40));
 
             assert_eq!(
                 rows[2..6],
                 [
-                    "Model     Opus            $ANTHROPIC_MODEL",
+                    "Model     Opus            $OX_MODEL",
                     "Base URL  https://x.test  default",
                     "",
                     "user      ~/.config/ox/config.toml",
@@ -548,12 +548,12 @@ mod tests {
         fn puts_notes_after_their_values_when_the_column_would_overflow() {
             let m = annotated_overview();
 
-            let rows = trimmed_rows(&m, 41, m.height(41, 40));
+            let rows = trimmed_rows(&m, 34, m.height(34, 40));
 
             assert_eq!(
                 rows[2..4],
                 [
-                    "Model     Opus  $ANTHROPIC_MODEL",
+                    "Model     Opus  $OX_MODEL",
                     "Base URL  https://x.test  default",
                 ],
             );
