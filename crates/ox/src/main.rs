@@ -558,7 +558,7 @@ mod tests {
             for line in [
                 "- manual: Ask before tool calls that no permission rule allows or denies",
                 "- plan:   Read-only: deny edits and commands",
-                "- yolo:   Run tool calls without asking unless a rule denies or asks",
+                "- yolo:   Never ask: run tool calls unless a rule denies or asks",
             ] {
                 assert!(help.contains(line), "{help}");
             }

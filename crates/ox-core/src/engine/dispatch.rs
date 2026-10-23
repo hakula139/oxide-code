@@ -379,6 +379,7 @@ impl<'r> Dispatcher<'r, '_> {
                 Ok(Some(unapproved_output(
                     name,
                     policy.mode(),
+                    policy.attended(),
                     &verdict.basis,
                     fix.as_ref(),
                 )))
@@ -467,12 +468,19 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ))
 }
 
-/// The synthetic error result for a call that would ask in `mode` when it cannot, since `yolo` never
-/// asks or nobody attends the run.
+/// The synthetic error result for a call that would ask in `mode` in a run that does not ask, in
+/// `yolo` or with nobody attending.
 /// It names what made the call ask, then the config `fix` that lets it through, or what else the
-/// model can do.
-fn unapproved_output(name: &str, mode: Mode, basis: &Basis, fix: Option<&ConfigFix>) -> ToolOutput {
-    let cannot = if mode == Mode::Yolo {
+/// model can do, and in an `attended` `yolo` session that the user can approve it in `manual`.
+fn unapproved_output(
+    name: &str,
+    mode: Mode,
+    attended: bool,
+    basis: &Basis,
+    fix: Option<&ConfigFix>,
+) -> ToolOutput {
+    let yolo = mode == Mode::Yolo;
+    let cannot = if yolo {
         "`yolo` mode never asks for it"
     } else {
         "this run cannot ask for it"
@@ -482,7 +490,7 @@ fn unapproved_output(name: &str, mode: Mode, basis: &Basis, fix: Option<&ConfigF
         Basis::Unparsed => "ox could not parse it, \
                             so the permission rules may not see everything it runs."
             .to_owned(),
-        basis => format!("It asks because of {basis}."),
+        basis => format!("It needs approval because of {basis}."),
     };
     let next = match (fix, basis) {
         (Some(ConfigFix::Allow(rule)), _) => format!(
@@ -511,11 +519,16 @@ fn unapproved_output(name: &str, mode: Mode, basis: &Basis, fix: Option<&ConfigF
             "Choose a different approach or ask the user to adjust permissions.".to_owned()
         }
     };
+    let manual = if yolo && attended {
+        " Or ask the user to switch to `manual` mode and approve it there."
+    } else {
+        ""
+    };
     ToolOutput::error(format!(
         "The {name} call was denied because it needs approval and {cannot}. \
          {why} \
          Do not retry it as written. \
-         {next}"
+         {next}{manual}"
     ))
 }
 
@@ -1252,32 +1265,66 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn unattended_run_denies_without_asking_and_names_every_config_change() {
+            async fn a_run_that_cannot_ask_denies_without_asking_and_names_every_config_change() {
                 let tools = bash_registry(Vec::new());
+                let unattended = "this run cannot ask for it";
+                let yolo = "`yolo` mode never asks for it";
+                let rm_fix = "It needs approval because of the built-in `rm` rule. \
+                              Do not retry it as written. \
+                              To allow it, ask the user to set `permission.defaults.rm = false`";
                 let cases = [
                     (
+                        Mode::Manual,
+                        false,
                         "make > .git/log",
                         &["make *"][..],
-                        "It asks because of the built-in `git` rule. \
+                        unattended,
+                        "It needs approval because of the built-in `git` rule. \
                          Do not retry it as written. \
                          To allow it, ask the user to set `permission.defaults.git = false` \
-                         in the user config.",
+                         in the user config."
+                            .to_owned(),
                     ),
                     (
+                        Mode::Manual,
+                        false,
                         "rm -rf build",
                         &[],
-                        "It asks because of the built-in `rm` rule. \
-                         Do not retry it as written. \
-                         To allow it, ask the user to set `permission.defaults.rm = false` \
-                         and add `\"rm -rf build\"` to `permission.allow.exec` in the user config.",
+                        unattended,
+                        format!(
+                            "{rm_fix} and add `\"rm -rf build\"` to `permission.allow.exec` \
+                             in the user config."
+                        ),
+                    ),
+                    (
+                        Mode::Yolo,
+                        false,
+                        "rm -rf build",
+                        &[],
+                        yolo,
+                        format!("{rm_fix} in the user config."),
+                    ),
+                    (
+                        Mode::Yolo,
+                        true,
+                        "rm -rf build",
+                        &[],
+                        yolo,
+                        format!(
+                            "{rm_fix} in the user config. \
+                             Or ask the user to switch to `manual` mode and approve it there."
+                        ),
                     ),
                 ];
 
-                for (command, allow, expected) in cases {
+                for (mode, attended, command, allow, cannot, expected) in cases {
                     let sink = CapturingSink::default();
-                    let mut dispatch_ctx =
-                        dispatch_with(Mode::Manual, &[], allow, Path::new("/repo"));
-                    dispatch_ctx.policy.set_unattended();
+                    let mut dispatch_ctx = dispatch_with(mode, &[], allow, Path::new("/repo"));
+                    if !attended {
+                        dispatch_ctx.policy.set_unattended();
+                    }
+                    // A closed op channel aborts on a stray approval request instead of waiting.
+                    let (_, mut ops) = mpsc::channel(1);
 
                     let denial = gate_call(
                         &tools,
@@ -1285,54 +1332,23 @@ mod tests {
                         "bash",
                         json!({ "command": command }),
                         &sink,
-                        &mut inert_ops(),
+                        &mut ops,
                         &mut dispatch_ctx,
                     )
                     .await
-                    .expect("an unattended denial resolves without abort")
+                    .expect("a denial resolves without abort")
                     .output();
 
                     assert_eq!(
                         denial.content,
                         format!(
-                            "The bash call was denied because it needs approval \
-                             and this run cannot ask for it. {expected}"
+                            "The bash call was denied because it needs approval and {cannot}. \
+                             {expected}"
                         ),
-                        "{command}"
+                        "{mode} {attended} {command}"
                     );
                     assert_eq!(approval_ids(&sink), [] as [&str; 0], "{command}");
                 }
-            }
-
-            #[tokio::test]
-            async fn yolo_denies_what_a_rule_holds_without_asking() {
-                let tools = bash_registry(Vec::new());
-                let sink = CapturingSink::default();
-                let mut dispatch_ctx = dispatch_with(Mode::Yolo, &[], &[], Path::new("/repo"));
-
-                let denial = gate_call(
-                    &tools,
-                    "tool_1",
-                    "bash",
-                    json!({ "command": "rm -rf build" }),
-                    &sink,
-                    &mut inert_ops(),
-                    &mut dispatch_ctx,
-                )
-                .await
-                .expect("a yolo denial resolves without abort")
-                .output();
-
-                assert_eq!(
-                    denial.content,
-                    "The bash call was denied because it needs approval \
-                     and `yolo` mode never asks for it. \
-                     It asks because of the built-in `rm` rule. \
-                     Do not retry it as written. \
-                     To allow it, ask the user to set `permission.defaults.rm = false` \
-                     in the user config."
-                );
-                assert_eq!(approval_ids(&sink), [] as [&str; 0]);
             }
 
             #[tokio::test]
@@ -1494,21 +1510,21 @@ mod tests {
                 (
                     &Basis::Builtin(Shipped::Ssh),
                     None,
-                    "It asks because of the built-in `ssh` rule. \
+                    "It needs approval because of the built-in `ssh` rule. \
                      Do not retry it as written. \
                      Choose a different approach or ask the user to adjust permissions.",
                 ),
                 (
                     &ask,
                     None,
-                    "It asks because of the `ask.exec` pattern `git push *`. \
+                    "It needs approval because of the `ask.exec` pattern `git push *`. \
                      Do not retry it as written. \
                      Choose a different approach or ask the user to adjust permissions.",
                 ),
             ];
 
             for (basis, fix, expected) in cases {
-                let output = unapproved_output("bash", Mode::Manual, basis, fix);
+                let output = unapproved_output("bash", Mode::Manual, false, basis, fix);
 
                 assert_eq!(
                     (output.content, output.is_error),

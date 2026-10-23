@@ -58,7 +58,7 @@ pub enum Mode {
     Manual,
     /// Read-only analysis: every edit, exec, and net call is denied.
     Plan,
-    /// Runs every call the rules leave open. Deny and ask rules still hold.
+    /// Runs every call the rules leave open and never asks, denying what a deny or ask rule holds.
     Yolo,
 }
 
@@ -71,7 +71,7 @@ impl Mode {
         match self {
             Self::Manual => "Ask before tool calls that no permission rule allows or denies",
             Self::Plan => "Read-only: deny edits and commands",
-            Self::Yolo => "Run tool calls without asking unless a rule denies or asks",
+            Self::Yolo => "Never ask: run tool calls unless a rule denies or asks",
         }
     }
 }
@@ -668,7 +668,7 @@ pub(crate) enum Decision {
     Allow,
     Ask,
     Deny,
-    /// Deny a call that would ask, since nobody can answer an approval request in this run.
+    /// Deny a call that would ask, in a run that does not ask: in `yolo` or with nobody attending.
     Unapproved,
 }
 
@@ -701,11 +701,11 @@ pub enum Basis {
     /// An allowed command, by what let each of its simple commands and its writes through.
     Command(Vec<Basis>),
     /// A command ox could not parse, so the rules may not see everything it runs.
-    /// It asks in `manual`, while `yolo` runs it unless a deny rule holds it.
+    /// It asks in `manual`, while `yolo` runs it unless a deny or ask rule holds what ox sees.
     Unparsed,
     /// A command that sets a variable bash reads to find, start, or expand commands, so the rules
     /// may not see what it runs.
-    /// It asks in `manual`, while `yolo` runs it unless a deny rule holds it.
+    /// It asks in `manual`, while `yolo` runs it unless a deny or ask rule holds what ox sees.
     ShellVariable,
 }
 
@@ -952,7 +952,8 @@ impl Policy {
         })
     }
 
-    /// The user config change that lets a call through in a run that cannot ask.
+    /// The user config change that lets a call through in a run that does not ask, in `yolo` or
+    /// with nobody attending.
     /// `None` when something else would still hold the call, or when the group that holds it
     /// guards secrets.
     pub(crate) fn config_fix(&self, class: PermissionClass, target: &Access) -> Option<ConfigFix> {
@@ -1001,7 +1002,7 @@ impl Policy {
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
     /// 2. `plan` denies an edit, exec, or net call.
-    /// 3. An ask rule, an enabled protected name, or a `bash` command [`Self::asks`] holds asks.
+    /// 3. A call [`Self::asks`] holds asks.
     /// 4. A read-class call allows.
     /// 5. An edit-class call inside a workspace root allows.
     /// 6. An allow rule or a session allow rule allows.
@@ -1075,8 +1076,8 @@ impl Policy {
     /// edits or a command writes, a command that failed to parse or sets a shell variable, the
     /// [`read` rule](Self::read_holder) for a file a reader opens, or the `rm` group for a
     /// [forced recursive delete](Segment::removes_recursively_by_force).
-    /// `yolo` holds only what the rules see, so it runs a command that failed to parse or sets a
-    /// shell variable.
+    /// `yolo` holds only what the rules see, so it runs a command that failed to parse or that
+    /// sets a shell variable.
     fn asks(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
         if let Some(rule) = held_by(&self.ask, class, target) {
             return Some(rule.basis(Tier::Ask));
@@ -1118,8 +1119,8 @@ impl Policy {
             })
     }
 
-    /// The deny or ask `read` rule that holds a file `segment` may read, or outside `yolo` the first
-    /// `read` rule of either tier when it may read any file.
+    /// The deny or ask `read` rule that holds a file `segment` may read, or outside `yolo` the
+    /// first `read` rule of either tier when it may read any file.
     fn read_holder(&self, segment: &Segment) -> Option<Basis> {
         let tiers = || {
             self.deny
@@ -1474,15 +1475,6 @@ mod tests {
 
     fn decide(policy: &Policy, class: PermissionClass, target: &Access) -> Decision {
         policy.decide(class, &target.as_target())
-    }
-
-    /// The decision for a call held in the ask tier in `mode`: `yolo` never asks, so it denies.
-    fn held(mode: Mode) -> Decision {
-        if mode == Mode::Yolo {
-            Decision::Unapproved
-        } else {
-            Decision::Ask
-        }
     }
 
     /// How `policy` settles running `command` in `workspace`.
@@ -2945,6 +2937,16 @@ mod tests {
         mod decide {
             use super::*;
 
+            /// The decision for a call the ask tier holds in `mode`: `Ask`, or `Unapproved` in
+            /// `yolo`, which never asks.
+            fn held(mode: Mode) -> Decision {
+                if mode == Mode::Yolo {
+                    Decision::Unapproved
+                } else {
+                    Decision::Ask
+                }
+            }
+
             #[test]
             fn deny_beats_ask_and_ask_beats_allow_in_every_mode() {
                 for &mode in Mode::VARIANTS {
@@ -3050,7 +3052,7 @@ mod tests {
             }
 
             #[test]
-            fn spilled_tool_output_reads_without_a_prompt_and_asks_to_be_edited() {
+            fn spilled_tool_output_reads_freely_and_holds_an_edit() {
                 let root_dir = canonical_tempdir();
                 let root = root_dir.path();
                 let (cwd, home, data) = (root.join("repo"), root.join("home"), root.join("data"));
@@ -3449,8 +3451,7 @@ mod tests {
             }
 
             #[test]
-            fn command_asks_in_manual_and_runs_in_yolo_when_it_sets_a_variable_bash_finds_commands_by()
-             {
+            fn command_setting_a_variable_bash_finds_commands_by_asks_in_manual_and_runs_in_yolo() {
                 let cases = [
                     "BASH_CMDS[ls]=/bin/rm; ls -rf x",
                     "BASH_CMDS+=([ls]=/bin/rm); ls -rf x",
@@ -3586,7 +3587,7 @@ mod tests {
             }
 
             #[test]
-            fn command_rules_hold_the_program_bash_runs_where_the_grammar_splits_its_words() {
+            fn command_rules_see_a_joined_word_and_yolo_runs_a_split_ox_cannot_follow() {
                 let yolo = policy(Mode::Yolo, &[(EXEC, "git push *")], &[], &[]);
 
                 for (case, expected) in [
@@ -3603,7 +3604,7 @@ mod tests {
             }
 
             #[test]
-            fn command_rules_hold_where_the_grammar_reads_a_reserved_word_as_a_command() {
+            fn command_rules_see_coproc_and_yolo_runs_a_compound_after_a_reserved_word() {
                 let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
 
                 assert_eq!(
@@ -3764,26 +3765,40 @@ mod tests {
                         ("cat ~/.*/id_rsa", Decision::Ask),
                         ("grep -r key ~/.ssh", Decision::Ask),
                         ("cat $HOME/.ssh/id_rsa", Decision::Ask),
+                        ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Ask),
+                        ("cat $F", Decision::Ask),
                     ] {
                         assert_eq!(decide_command(&p, case, &workspace), expected, "{case}");
                     }
                     let unguarded = resolve(&[Shipped::Ssh, Shipped::Credentials]);
                     assert_eq!(
-                        decide_command(&unguarded, "cat $HOME/.ssh/id_rsa", &workspace),
+                        decide_command(&unguarded, "cat $F", &workspace),
                         Decision::Allow,
                         "no read rule is left to hold it"
                     );
-                    let mut yolo = resolve(&[]);
-                    yolo.set_mode(Mode::Yolo);
+                });
+            }
+
+            #[test]
+            fn yolo_holds_a_reader_only_for_the_files_it_names() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                let (cwd, home) = (root.join("repo"), root.join("home"));
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::create_dir_all(home.join(".ssh")).unwrap();
+                std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
+                temp_env::with_var(HOME_VAR, Some(&home), || {
+                    let workspace = Workspace::new(&cwd);
+                    let yolo = resolved_policy(Mode::Yolo, &[], &[], &[], &[], &workspace);
+
                     for (case, expected) in [
-                        ("cat $HOME/.ssh/id_rsa", Decision::Allow),
                         ("cat ~/.ssh/id_*", Decision::Unapproved),
+                        ("cat $HOME/.ssh/id_rsa", Decision::Unapproved),
+                        ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Unapproved),
+                        ("cat $F", Decision::Allow),
+                        ("echo x | xargs cat", Decision::Allow),
                     ] {
-                        assert_eq!(
-                            decide_command(&yolo, case, &workspace),
-                            expected,
-                            "yolo holds only the files it sees: {case}"
-                        );
+                        assert_eq!(decide_command(&yolo, case, &workspace), expected, "{case}");
                     }
                 });
             }
