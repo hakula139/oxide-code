@@ -38,8 +38,8 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
 }
 
 /// Writes `content`, which must be longer than [`MAX_OUTPUT_BYTES`], whole to `spill`, and returns
-/// up to half the room from each end around an omission marker, all within the cap.
-/// Each part ends at a line boundary near its cut, or else at a UTF-8 boundary.
+/// up to half the cap left beside an omission marker from each end, all within the cap.
+/// Each part meets the marker at a line boundary near its cut, or else at a UTF-8 boundary.
 fn cap_output(content: &str, mut spill: Spill) -> String {
     spill.write(content.as_bytes());
     let note = spill.note("output");
@@ -49,7 +49,8 @@ fn cap_output(content: &str, mut spill: Spill) -> String {
     let head_end = content.floor_char_boundary(half);
     let tail_start = content.ceil_char_boundary(content.len() - half);
     let bytes = content.as_bytes();
-    let head_end = whole_line_head(&bytes[..head_end]).len();
+    let ends_line = bytes[head_end] == b'\n';
+    let head_end = whole_line_head(&bytes[..head_end], ends_line).len();
     let starts_line = bytes[tail_start - 1] == b'\n';
     let tail_start = content.len() - whole_line_tail(&bytes[tail_start..], starts_line).len();
 
@@ -68,8 +69,11 @@ pub(super) fn omission_marker(omitted: usize, note: &str) -> String {
 }
 
 /// The part of `head` before its last line break within [`LINE_SNAP_BYTES`] of its end, or all of
-/// `head` when no break lies that close.
-pub(super) fn whole_line_head(head: &[u8]) -> &[u8] {
+/// `head` when it `ends_line` or no break lies that close.
+pub(super) fn whole_line_head(head: &[u8], ends_line: bool) -> &[u8] {
+    if ends_line {
+        return head;
+    }
     let window = head.len().saturating_sub(LINE_SNAP_BYTES);
     head[window..]
         .iter()
@@ -403,6 +407,42 @@ mod tests {
         use super::*;
 
         #[test]
+        fn cuts_both_ends_at_line_boundaries() {
+            let dir = tempfile::tempdir().unwrap();
+            let content = (0..20_000).fold(String::new(), |mut content, i| {
+                _ = writeln!(content, "line number {i}");
+                content
+            });
+
+            let out = cap_output(&content, ctx(dir.path()).spills().file(".txt"));
+
+            let (head, marker, tail) = split_capped(&out);
+            assert!(
+                content.starts_with(&format!("{head}\n")),
+                "{:?}",
+                head.lines().last()
+            );
+            let tail_start = content.len() - tail.len();
+            assert!(content[..tail_start].ends_with('\n') && content.ends_with(tail));
+            let omitted = tail_start - head.len();
+            assert!(marker.starts_with(&format!("{omitted} bytes omitted, ")));
+            assert!(out.len() <= MAX_OUTPUT_BYTES, "{}", out.len());
+        }
+
+        #[test]
+        fn keeps_whole_lines_that_meet_the_cuts() {
+            let dir = tempfile::tempdir().unwrap();
+            let content = "\n".repeat(MAX_OUTPUT_BYTES + 1);
+
+            let out = cap_output(&content, ctx(dir.path()).spills().file(".txt"));
+
+            let (head, marker, tail) = split_capped(&out);
+            assert_eq!(head.len(), tail.len());
+            let omitted = content.len() - head.len() - tail.len();
+            assert!(marker.starts_with(&format!("{omitted} bytes omitted, ")));
+        }
+
+        #[test]
         fn cuts_both_ends_at_char_boundaries() {
             // Wherever the cuts fall, three of the four offsets put each one inside a 4-byte char.
             for offset in 0..4 {
@@ -422,25 +462,6 @@ mod tests {
                     out.len()
                 );
             }
-        }
-
-        #[test]
-        fn cuts_both_ends_at_line_boundaries() {
-            let dir = tempfile::tempdir().unwrap();
-            let content = (0..20_000).fold(String::new(), |mut content, i| {
-                _ = writeln!(content, "line number {i}");
-                content
-            });
-
-            let out = cap_output(&content, ctx(dir.path()).spills().file(".txt"));
-
-            let (head, marker, tail) = split_capped(&out);
-            assert!(content.starts_with(&format!("{head}\n")), "{head}");
-            let tail_start = content.len() - tail.len();
-            assert!(content[..tail_start].ends_with('\n') && content.ends_with(tail));
-            let omitted = tail_start - head.len();
-            assert!(marker.starts_with(&format!("{omitted} bytes omitted, ")));
-            assert!(out.len() <= MAX_OUTPUT_BYTES, "{}", out.len());
         }
 
         #[test]
@@ -480,16 +501,21 @@ mod tests {
 
         #[test]
         fn ends_before_the_last_line_break_near_the_end() {
-            assert_eq!(whole_line_head(b"one\ntwo\n333"), b"one\ntwo");
-            assert_eq!(whole_line_head(b"one\ntwo\n"), b"one\ntwo");
+            assert_eq!(whole_line_head(b"one\ntwo\n333", false), b"one\ntwo");
+            assert_eq!(whole_line_head(b"one\ntwo\n", false), b"one\ntwo");
         }
 
         #[test]
-        fn keeps_the_char_cut_when_no_line_break_is_near() {
+        fn keeps_a_head_that_ends_a_line() {
+            assert_eq!(whole_line_head(b"one\ntwo", true), b"one\ntwo");
+        }
+
+        #[test]
+        fn moves_only_to_a_line_break_within_the_window() {
             let head = [b"\n".as_slice(), &[b'a'; LINE_SNAP_BYTES]].concat();
-            assert_eq!(whole_line_head(&head), head);
+            assert_eq!(whole_line_head(&head, false), head);
             let near = [b"\n".as_slice(), &[b'a'; LINE_SNAP_BYTES - 1]].concat();
-            assert_eq!(whole_line_head(&near), b"");
+            assert_eq!(whole_line_head(&near, false), b"");
         }
     }
 
@@ -507,7 +533,7 @@ mod tests {
         }
 
         #[test]
-        fn keeps_the_char_cut_when_no_line_break_is_near() {
+        fn moves_only_to_a_line_break_within_the_window() {
             let tail = [&[b'b'; LINE_SNAP_BYTES], b"\n".as_slice()].concat();
             assert_eq!(whole_line_tail(&tail, false), tail);
             let near = [&[b'b'; LINE_SNAP_BYTES - 1], b"\nc".as_slice()].concat();
