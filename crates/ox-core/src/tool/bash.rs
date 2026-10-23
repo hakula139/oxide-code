@@ -21,7 +21,7 @@ use tokio::process::{ChildStderr, ChildStdout};
 use tracing::warn;
 
 use self::background::{BackgroundShells, ShellState};
-use super::spill::{Spill, omission_marker};
+use super::spill::{Spill, omission_marker, whole_line_head, whole_line_tail};
 use super::view::{ApprovalBody, ApprovalPreview};
 use super::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, pascal_case};
 use crate::config::auth::secret_env_vars;
@@ -377,14 +377,17 @@ fn split_budget(first: usize, second: usize, budget: usize) -> (usize, usize) {
 
 /// Renders the pipe called `name`, whose [`PipeCapture::kept_bytes`] are `kept`, within `budget`
 /// bytes, decoding each invalid UTF-8 sequence as U+FFFD, and counts every raw byte it drops in the
-/// omission marker. A cut spills the pipe's kept bytes if it has not spilled yet, so its marker can
-/// always name a file with the full output.
+/// omission marker.
+/// Each end moves to a line boundary near the cut.
+/// A cut spills the pipe's kept bytes if it has not spilled yet, so its marker can always name a
+/// file with the full output.
 fn render_pipe(pipe: &mut PipeCapture, kept: &[u8], budget: usize, name: &str) -> String {
     let text = if pipe.omitted == 0 && decoded_len(kept) <= budget {
         String::from_utf8_lossy(kept).into_owned()
     } else {
-        let (head, tail) = kept.split_at(pipe.head.len());
-        let (head, tail) = ends_within(head, tail, budget);
+        let (split, tail_starts_line) = pipe.split(kept);
+        let (head, tail) = kept.split_at(split);
+        let (head, tail) = ends_within(head, tail, tail_starts_line, budget);
         if !pipe.spill.started() {
             pipe.spill_kept();
         }
@@ -404,8 +407,14 @@ fn render_pipe(pipe: &mut PipeCapture, kept: &[u8], budget: usize, name: &str) -
 }
 
 /// The start of `head` and the end of `tail` to keep around a cut between them, decoding within
-/// `budget` bytes.
-fn ends_within<'a>(head: &'a [u8], tail: &'a [u8], budget: usize) -> (&'a [u8], &'a [u8]) {
+/// `budget` bytes, with each end moved to a line boundary near the cut.
+/// `tail_starts_line` says whether the byte before `tail` is a line break.
+fn ends_within<'a>(
+    head: &'a [u8],
+    tail: &'a [u8],
+    tail_starts_line: bool,
+    budget: usize,
+) -> (&'a [u8], &'a [u8]) {
     // The capture can split a multibyte char between head and tail, and the stray bytes on either
     // side would decode as U+FFFD.
     let split_char = head.utf8_chunks().last().map_or(0, |c| c.invalid().len());
@@ -418,9 +427,16 @@ fn ends_within<'a>(head: &'a [u8], tail: &'a [u8], budget: usize) -> (&'a [u8], 
     let tail = &tail[continuations..];
 
     let (head_budget, tail_budget) = split_budget(decoded_len(head), decoded_len(tail), budget);
+    let kept_head = prefix_within(head, head_budget);
+    let ends_line = head.get(kept_head.len()) == Some(&b'\n');
+    let kept_tail = suffix_within(tail, tail_budget);
+    let starts_line = match tail.len() - kept_tail.len() {
+        0 => continuations == 0 && tail_starts_line,
+        cut => tail[cut - 1] == b'\n',
+    };
     (
-        prefix_within(head, head_budget),
-        suffix_within(tail, tail_budget),
+        whole_line_head(kept_head, ends_line),
+        whole_line_tail(kept_tail, starts_line),
     )
 }
 
@@ -474,6 +490,8 @@ struct PipeCapture {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     omitted: usize,
+    /// Whether the last byte dropped between head and tail was a line break.
+    dropped_line_break: bool,
     spill: Spill,
 }
 
@@ -483,6 +501,7 @@ impl PipeCapture {
             head: Vec::new(),
             tail: VecDeque::new(),
             omitted: 0,
+            dropped_line_break: false,
             spill,
         }
     }
@@ -506,6 +525,24 @@ impl PipeCapture {
         [self.head.as_slice(), front, back].concat()
     }
 
+    /// Where the [`Self::kept_bytes`] `kept` split into a head and tail to render, and whether the
+    /// tail starts a line.
+    /// A pipe that dropped nothing splits at the start of the line its head ends in, so a short
+    /// tail holds that whole line.
+    fn split(&self, kept: &[u8]) -> (usize, bool) {
+        if self.omitted > 0 {
+            return (self.head.len(), self.dropped_line_break);
+        }
+        let head = &kept[..self.head.len()];
+        let line_break = whole_line_head(head, false).len();
+        let split = if line_break < head.len() {
+            line_break + 1
+        } else {
+            head.len()
+        };
+        (split, split.checked_sub(1).is_none_or(|i| kept[i] == b'\n'))
+    }
+
     fn push(&mut self, chunk: &[u8]) {
         if self.spill.started() {
             self.spill.write(chunk);
@@ -520,6 +557,9 @@ impl PipeCapture {
         self.tail.extend(rest);
 
         let overflow = self.tail.len().saturating_sub(PIPE_TAIL_BYTES);
+        if overflow > 0 {
+            self.dropped_line_break = self.tail[overflow - 1] == b'\n';
+        }
         self.tail.drain(..overflow);
         self.omitted += overflow;
     }
@@ -1315,14 +1355,90 @@ mod tests {
         #[test]
         fn marks_the_omitted_middle_between_head_and_tail() {
             let dir = tempfile::tempdir().unwrap();
-            let mut pipe = capture(dir.path(), b"hello\n", b"world\n", 7);
+            let mut pipe = PipeCapture {
+                dropped_line_break: true,
+                ..capture(dir.path(), b"hello\n", b"world\n", 7)
+            };
+
+            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+
+            assert_eq!(rendered, format!("hello\n{}\nworld", marker(dir.path(), 8)));
+        }
+
+        #[test]
+        fn cuts_partial_lines_beside_the_omission() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut pipe = capture(dir.path(), b"one\ntwo\n333", b"33\nfour\nfive\n", 5);
 
             let rendered = render(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(
                 rendered,
-                format!("hello\n\n{}\nworld", marker(dir.path(), 7))
+                format!("one\ntwo\n{}\nfour\nfive", marker(dir.path(), 12))
             );
+        }
+
+        #[test]
+        fn cuts_an_over_budget_pipe_at_line_boundaries() {
+            // A budget of 12 cuts the tail at a line start, and 13 cuts it inside `l4`.
+            for budget in [12, 13] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut pipe = capture(dir.path(), b"l1\nl2\nl3\n", b"l4\nl5\nl6\n", 0);
+
+                let rendered = render(&mut pipe, budget);
+
+                assert_eq!(
+                    rendered,
+                    format!("l1\nl2\n{}\nl5\nl6", marker(dir.path(), 7)),
+                    "budget {budget}"
+                );
+            }
+        }
+
+        #[test]
+        fn keeps_a_head_cut_at_a_line_end() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut pipe = capture(dir.path(), b"aa\nbb\ncc", b"dd\nee\n", 5);
+
+            let rendered = render(&mut pipe, 10);
+
+            assert_eq!(rendered, format!("aa\nbb\n{}\nee", marker(dir.path(), 11)));
+        }
+
+        #[test]
+        fn cuts_a_line_that_lost_its_first_bytes_to_a_split_char() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut pipe = PipeCapture {
+                dropped_line_break: true,
+                ..capture(dir.path(), b"aa\n", b"\x80abc\ndef\n", 5)
+            };
+
+            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+
+            assert_eq!(rendered, format!("aa\n{}\ndef", marker(dir.path(), 11)));
+        }
+
+        #[test]
+        fn moves_a_partial_last_line_into_a_short_tail() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut pipe = capture(dir.path(), b"one\ntwo\nthree\nfour\nlast li", b"ne\n", 0);
+
+            let rendered = render(&mut pipe, 20);
+
+            assert_eq!(
+                rendered,
+                format!("one\ntwo\n{}\nlast line", marker(dir.path(), 12))
+            );
+        }
+
+        #[test]
+        fn keeps_a_tail_that_follows_the_head_line_break() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut pipe = capture(dir.path(), b"aaaa\n2222\n", b"cc\n", 0);
+
+            let rendered = render(&mut pipe, 8);
+
+            assert_eq!(rendered, format!("aaaa\n{}\ncc", marker(dir.path(), 6)));
         }
 
         #[test]
@@ -1440,6 +1556,23 @@ mod tests {
                     vec![b't'; PIPE_TAIL_BYTES],
                 ];
                 assert!(spilled == sent.concat(), "the spill holds every byte sent");
+            }
+
+            #[test]
+            fn records_whether_the_last_dropped_byte_was_a_line_break() {
+                let dir = tempfile::tempdir().unwrap();
+                let mut pipe = empty_capture(dir.path());
+                pipe.push(&vec![b'h'; PIPE_HEAD_BYTES]);
+
+                pipe.push(&[b"x\n".as_slice(), &vec![b't'; PIPE_TAIL_BYTES]].concat());
+
+                assert_eq!(pipe.omitted, 2);
+                assert!(pipe.dropped_line_break);
+
+                pipe.push(b"uv");
+
+                assert_eq!(pipe.omitted, 4);
+                assert!(!pipe.dropped_line_break);
             }
         }
     }
