@@ -12,8 +12,7 @@ use super::entry::UsageRecord;
 use super::handle::SessionHandle;
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::OutputFormat;
-use crate::config::Effort;
-use crate::model::ModelSpec;
+use crate::model::{Effort, ModelSpec};
 use crate::protocol::{Event, EventSink};
 use crate::util::text::{ELLIPSIS, ELLIPSIS_WIDTH, truncate_to_width};
 

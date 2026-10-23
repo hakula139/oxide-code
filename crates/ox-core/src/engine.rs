@@ -696,12 +696,12 @@ mod tests {
     use crate::config::auth::{AuthSource, LoginUnavailable};
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
+    use crate::config::display_auto_compaction;
     use crate::config::testing::test_config;
-    use crate::config::{Effort, PromptCacheTtl, display_auto_compaction};
     use crate::file_tracker::testing::{record_tracked_file, seed_full_read};
     use crate::message::{Replay, Role};
     use crate::model;
-    use crate::model::ResolvedModelId;
+    use crate::model::{Effort, PromptCacheTtl, ResolvedModelId};
     use crate::permission::PermissionClass;
     use crate::permission::rule::Rule;
     use crate::protocol::testing::CapturingSink;

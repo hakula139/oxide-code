@@ -384,10 +384,9 @@ mod tests {
     use wiremock::MockServer;
 
     use ox_core::client::{RateLimitWindow, RateLimits};
-    use ox_core::config::Effort;
     use ox_core::config::compaction::AutoCompactionConfig;
     use ox_core::engine::testing::{engine, with_pinned_home};
-    use ox_core::model::ModelSpec;
+    use ox_core::model::{Effort, ModelSpec};
     use ox_core::permission::Mode;
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::{CapturingSink, FailingSink, ls_call, text_result};

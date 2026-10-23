@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use ox_core::config::Effort;
+use ox_core::model::Effort;
 use ox_core::protocol::{ConfigPick, Op};
 
 use crate::action::Action;

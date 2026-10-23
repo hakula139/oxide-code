@@ -8,8 +8,9 @@ use anyhow::{Context as _, Result};
 use serde::de::{self, Unexpected};
 use serde::{Deserialize, Deserializer};
 
+use super::StatusLineSegment;
 use super::compaction::ThresholdPercent;
-use super::{Effort, PromptCacheTtl, StatusLineSegment};
+use crate::model::{Effort, PromptCacheTtl};
 use crate::permission::defaults::Shipped;
 use crate::permission::rule::Rule;
 use crate::permission::{Mode, PermissionClass, Tier};

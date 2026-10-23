@@ -14,10 +14,9 @@ use tokio::sync::mpsc;
 use tracing::error;
 
 use crate::client::RateLimits;
-use crate::config::Effort;
 use crate::config::auth::AuthSource;
 use crate::config::compaction::AutoCompactionConfig;
-use crate::model::{ModelSpec, ResolvedModelId};
+use crate::model::{Effort, ModelSpec, ResolvedModelId};
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, Mode, SessionGrant};
 use crate::session::entry::ArchiveState;

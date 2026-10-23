@@ -658,9 +658,9 @@ mod tests {
     };
     use super::testing::{TEST_PROJECT, isolated_store, test_store};
     use super::*;
-    use crate::config::PromptCacheTtl;
     use crate::file_tracker::{FileState, LastView};
     use crate::message::ContentBlock;
+    use crate::model::PromptCacheTtl;
     use crate::prompt::PromptParts;
     use crate::tool::tasks::testing::plan;
     use crate::util::path::testing::HOME_VAR;

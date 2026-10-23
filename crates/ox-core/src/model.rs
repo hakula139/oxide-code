@@ -1,8 +1,9 @@
-//! Catalog of the supported Claude models, matched by exact id.
+//! Catalog of the supported Claude models, matched by exact ID, and the request parameters
+//! resolved or priced per model: [`Effort`] and [`PromptCacheTtl`].
 //!
 //! Every row shares one request surface: adaptive thinking, the full `output_config.effort`
 //! ladder, `clear_thinking` context management, a 1M-token context window, and 128K output.
-//! Other ids (custom gateway names, retired models) pass through verbatim with no known
+//! Other IDs (custom gateway names, retired models) pass through verbatim with no known
 //! capabilities, so their requests carry none of those opt-ins and auto-compaction stays off.
 
 mod pricing;
@@ -10,11 +11,12 @@ mod usage;
 
 pub(crate) use usage::TokenUsage;
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
+use std::str::FromStr;
 
+use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::config::Effort;
 use pricing::{FABLE_5_1_RATES, HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES, TokenCostRates};
 
 // ── ModelInfo ──
@@ -30,7 +32,7 @@ pub struct ModelInfo {
     /// UI shows the level the request actually runs at.
     pub default_effort: Effort,
     /// Whether the model accepts `thinking.display = "updates"`.
-    progress_updates: bool,
+    pub(crate) progress_updates: bool,
     /// First-party Claude API token prices in USD per million tokens.
     cost_rates: TokenCostRates,
 }
@@ -44,7 +46,7 @@ pub(crate) enum Family {
 }
 
 impl Family {
-    /// The family's name as it appears in model ids.
+    /// The family's name as it appears in model IDs.
     pub(crate) const fn id_token(self) -> &'static str {
         match self {
             Self::Fable => "fable",
@@ -59,7 +61,7 @@ const CONTEXT_WINDOW: u32 = 1_000_000;
 /// Half the 128K output ceiling every catalog model shares. `effort` steers thinking depth, so
 /// this only bounds runaway output.
 const MAX_TOKENS: u32 = 64_000;
-/// Fits the lower output ceilings of the older or smaller models an unknown id may name.
+/// Fits the lower output ceilings of the older or smaller models an unknown ID may name.
 const UNKNOWN_MODEL_MAX_TOKENS: u32 = 16_000;
 
 // ── MODELS ──
@@ -109,7 +111,7 @@ fn lookup(id: &str) -> Option<&'static ModelInfo> {
 }
 
 /// The catalog row to suggest for an unknown `id` that carries a `[1m]` suffix or starts with
-/// `claude-`: the row the id names once the suffix is dropped, else the row of the family it names.
+/// `claude-`: the row the ID names once the suffix is dropped, else the row of the family it names.
 pub(crate) fn replacement_for(id: &str) -> Option<&'static ModelInfo> {
     let id = id.to_ascii_lowercase();
     let base = match id.strip_suffix("[1m]") {
@@ -130,14 +132,14 @@ pub(crate) fn lacks_progress_updates(id: &str) -> bool {
     lookup(id).is_some_and(|info| !info.progress_updates)
 }
 
-/// The catalog rates for `id`, or `None` for an id outside the catalog.
+/// The catalog rates for `id`, or `None` for an ID outside the catalog.
 pub(crate) fn cost_rates(id: &str) -> Option<TokenCostRates> {
     lookup(id).map(|info| info.cost_rates)
 }
 
 // ── ModelSpec ──
 
-/// A model id resolved against [`MODELS`] once. Every model-derived request field (effort,
+/// A model ID resolved against [`MODELS`] once. Every model-derived request field (effort,
 /// thinking, betas, context management) and every label reads from here, so a swap re-derives
 /// them all together.
 #[derive(Debug, Clone)]
@@ -153,43 +155,26 @@ impl ModelSpec {
         Self { id, info }
     }
 
-    /// The id sent verbatim as the request's `model`.
+    /// The ID sent verbatim as the request's `model`.
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    /// The catalog row, `None` for ids outside the catalog.
+    /// The catalog row, `None` for IDs outside the catalog.
     pub fn info(&self) -> Option<&'static ModelInfo> {
         self.info
     }
 
-    /// Effort to send: the user's `pick`, else the model's default. `None` for unknown ids, whose
+    /// Effort to send: the user's `pick`, else the model's default. `None` for unknown IDs, whose
     /// upstream may reject `output_config.effort`.
     pub fn resolve_effort(&self, pick: Option<Effort>) -> Option<Effort> {
         self.info.map(|info| pick.unwrap_or(info.default_effort))
     }
 
     /// Output cap to send: the user's `pick`, else 64K for catalog models and 16K for unknown
-    /// ids, whose models may cap output lower.
+    /// IDs, whose models may cap output lower.
     pub fn resolve_max_tokens(&self, pick: Option<u32>) -> u32 {
         pick.unwrap_or(self.info.map_or(UNKNOWN_MODEL_MAX_TOKENS, |_| MAX_TOKENS))
-    }
-
-    /// Adaptive thinking for known models, dropping replayed blocks whose conversation prefix
-    /// changed. `show_thinking` opts into summarized thinking text, otherwise models with progress
-    /// updates return only those, and other models return none. `None` for unknown ids, whose
-    /// upstream may reject the field.
-    pub(crate) fn thinking(&self, show_thinking: bool) -> Option<ThinkingConfig> {
-        self.info.map(|info| ThinkingConfig::Adaptive {
-            display: if show_thinking {
-                ThinkingDisplay::Summarized
-            } else if info.progress_updates {
-                ThinkingDisplay::Updates
-            } else {
-                ThinkingDisplay::Omitted
-            },
-            block_binding: BlockBinding::DropBlock,
-        })
     }
 
     /// The context window in tokens. `None` for unknown IDs disables default and
@@ -199,12 +184,12 @@ impl ModelSpec {
         self.info.map(|_| CONTEXT_WINDOW)
     }
 
-    /// The catalog name, or the raw id for an unknown model.
+    /// The catalog name, or the raw ID for an unknown model.
     pub fn display_name(&self) -> &str {
         self.info.map_or(&self.id, |info| info.display_name)
     }
 
-    /// The status bar label: the catalog name without its `Claude ` prefix, or the raw id for an
+    /// The status bar label: the catalog name without its `Claude ` prefix, or the raw ID for an
     /// unknown model.
     pub fn short_display_name(&self) -> &str {
         self.info.map_or(&self.id, |info| {
@@ -214,7 +199,7 @@ impl ModelSpec {
         })
     }
 
-    /// Warning for an id outside the catalog, naming what its requests go without and the
+    /// Warning for an ID outside the catalog, naming what its requests go without and the
     /// [`replacement_for`] suggestion. `None` for catalog models.
     pub fn unsupported_notice(&self) -> Option<String> {
         if self.info.is_some() {
@@ -257,52 +242,9 @@ impl<'de> Deserialize<'de> for ModelSpec {
     }
 }
 
-// ── ThinkingConfig ──
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ThinkingConfig {
-    /// Model decides the thinking budget.
-    Adaptive {
-        display: ThinkingDisplay,
-        block_binding: BlockBinding,
-    },
-}
-
-impl ThinkingConfig {
-    /// Returns whether the request asks for thinking text, as summaries or progress notes.
-    pub(crate) fn asks_for_text(&self) -> bool {
-        match self {
-            Self::Adaptive { display, .. } => *display != ThinkingDisplay::Omitted,
-        }
-    }
-}
-
-/// `thinking.display` values, always sent so a reply carries only the thinking text ox renders,
-/// whatever an upstream's default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ThinkingDisplay {
-    Summarized,
-    /// Only the progress notes written between tool calls come back as text. Requires the
-    /// `thinking-display-updates-2026-08-18` beta.
-    Updates,
-    /// No thinking text comes back, and the server can skip streaming it.
-    Omitted,
-}
-
-/// `thinking.block_binding`. `DropBlock` makes the API drop a replayed thinking block whose
-/// conversation prefix changed since it was produced, plus every later one, where it would
-/// otherwise reject the request. Requires the `thinking-binding-controls-2026-08-01` beta.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(tag = "prefix_mismatch_behavior", rename_all = "snake_case")]
-pub(crate) enum BlockBinding {
-    DropBlock,
-}
-
 // ── ResolvedModelId ──
 
-/// A model id a frontend picked, such as the `/model` resolver's match. The engine accepts any id,
+/// A model ID a frontend picked, such as the `/model` resolver's match. The engine accepts any ID,
 /// since [`ModelSpec::resolve`] keeps an unknown one without catalog info.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -318,10 +260,107 @@ impl ResolvedModelId {
     }
 }
 
+// ── Effort ──
+
+/// Effort level sent as `output_config.effort`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Effort {
+    pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
+    pub(crate) const VALID_VALUES: &str = "low, medium, high, xhigh, max";
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// One-line UX hint for the typed-arg popup.
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Low => "Fastest, shallow reasoning",
+            Self::Medium => "Balanced",
+            Self::High => "Deep reasoning",
+            Self::Xhigh => "Extended thinking",
+            Self::Max => "Maximum thinking",
+        }
+    }
+}
+
+impl fmt::Display for Effort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Effort {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            _ => bail!("expected one of {}", Self::VALID_VALUES),
+        }
+    }
+}
+
+// ── PromptCacheTtl ──
+
+/// Sent as `cache_control.ttl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromptCacheTtl {
+    #[serde(rename = "5m")]
+    FiveMin,
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+impl PromptCacheTtl {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::FiveMin => "5m",
+            Self::OneHour => "1h",
+        }
+    }
+}
+
+impl fmt::Display for PromptCacheTtl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PromptCacheTtl {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "5m" => Ok(Self::FiveMin),
+            "1h" => Ok(Self::OneHour),
+            _ => bail!("expected one of 5m, 1h"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::PromptCacheTtl;
 
     mod replacement_for {
         use super::*;
@@ -476,46 +515,6 @@ mod tests {
         }
     }
 
-    mod thinking {
-        use super::*;
-
-        #[test]
-        fn known_model_is_adaptive_with_display_following_show_thinking() {
-            let drop_block = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
-            for (id, hidden_display) in [
-                ("claude-fable-5-1", "updates"),
-                ("claude-opus-5-5", "updates"),
-                ("claude-sonnet-5-5", "updates"),
-                ("claude-haiku-5-5", "omitted"),
-            ] {
-                let model = ModelSpec::resolve(id);
-                assert_eq!(
-                    serde_json::to_value(model.thinking(true)).unwrap(),
-                    serde_json::json!({
-                        "type": "adaptive",
-                        "display": "summarized",
-                        "block_binding": drop_block,
-                    }),
-                    "{id}",
-                );
-                assert_eq!(
-                    serde_json::to_value(model.thinking(false)).unwrap(),
-                    serde_json::json!({
-                        "type": "adaptive",
-                        "display": hidden_display,
-                        "block_binding": drop_block,
-                    }),
-                    "{id}"
-                );
-            }
-        }
-
-        #[test]
-        fn unknown_model_is_omitted() {
-            assert!(ModelSpec::resolve("custom-model").thinking(true).is_none());
-        }
-    }
-
     mod context_window {
         use super::*;
 
@@ -624,6 +623,71 @@ mod tests {
                     "{}",
                     info.id
                 );
+            }
+        }
+    }
+
+    mod effort {
+        use super::*;
+
+        #[test]
+        fn round_trips_through_serde_and_fromstr() {
+            for (variant, token) in Effort::ALL
+                .into_iter()
+                .zip(["low", "medium", "high", "xhigh", "max"])
+            {
+                assert_eq!(serde_json::to_value(variant).unwrap(), token);
+                assert_eq!(variant.to_string(), token);
+                assert_eq!(token.parse::<Effort>().unwrap(), variant);
+            }
+        }
+
+        #[test]
+        fn round_trips_through_toml_deserialize() {
+            #[derive(Deserialize)]
+            struct Wrap {
+                effort: Effort,
+            }
+            let wrap: Wrap = toml::from_str(r#"effort = "xhigh""#).unwrap();
+            assert_eq!(wrap.effort, Effort::Xhigh);
+        }
+
+        mod from_str {
+            use super::*;
+
+            #[test]
+            fn rejects_unknown_tokens_listing_the_accepted_ones() {
+                let err = "extra-high".parse::<Effort>().expect_err("unknown token");
+                assert_eq!(
+                    format!("{err:#}"),
+                    "expected one of low, medium, high, xhigh, max"
+                );
+            }
+        }
+    }
+
+    mod prompt_cache_ttl {
+        use super::*;
+
+        #[test]
+        fn round_trips_through_serde_and_fromstr() {
+            for (variant, token) in [
+                (PromptCacheTtl::FiveMin, "5m"),
+                (PromptCacheTtl::OneHour, "1h"),
+            ] {
+                assert_eq!(serde_json::to_value(variant).unwrap(), token);
+                assert_eq!(variant.to_string(), token);
+                assert_eq!(token.parse::<PromptCacheTtl>().unwrap(), variant);
+            }
+        }
+
+        mod from_str {
+            use super::*;
+
+            #[test]
+            fn rejects_unknown_tokens_listing_the_accepted_ones() {
+                let err = "30m".parse::<PromptCacheTtl>().expect_err("unknown token");
+                assert_eq!(format!("{err:#}"), "expected one of 5m, 1h");
             }
         }
     }

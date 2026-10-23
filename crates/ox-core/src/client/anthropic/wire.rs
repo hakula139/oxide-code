@@ -4,9 +4,8 @@ use serde::ser::SerializeSeq as _;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::client::{StopDetails, StopReason};
-use crate::config::Effort;
 use crate::message::{ContentBlock, Message, Role, WireKind};
-use crate::model::{ThinkingConfig, TokenUsage};
+use crate::model::{Effort, ModelSpec, PromptCacheTtl, TokenUsage};
 use crate::tool::ToolDefinition;
 
 // ── Request Types ──
@@ -264,6 +263,87 @@ pub(super) struct CacheControl {
     pub(super) ttl: Option<&'static str>,
 }
 
+impl CacheControl {
+    /// The breakpoint on the static system prefix. Claude Code sends `scope: "global"` only to the
+    /// Anthropic API.
+    pub(super) fn static_prefix(is_first_party: bool, ttl: PromptCacheTtl) -> Self {
+        Self {
+            scope: is_first_party.then_some("global"),
+            ..Self::conversation(ttl)
+        }
+    }
+
+    /// The breakpoint on the conversation's final block. The transcript is session-specific, so it
+    /// never carries `scope`.
+    pub(super) const fn conversation(ttl: PromptCacheTtl) -> Self {
+        Self {
+            scope: None,
+            ttl: match ttl {
+                PromptCacheTtl::FiveMin => None,
+                PromptCacheTtl::OneHour => Some("1h"),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(super) enum ThinkingConfig {
+    /// Model decides the thinking budget.
+    Adaptive {
+        display: ThinkingDisplay,
+        block_binding: BlockBinding,
+    },
+}
+
+impl ThinkingConfig {
+    /// Adaptive thinking for known models, dropping replayed blocks whose conversation prefix
+    /// changed. `show_thinking` opts into summarized thinking text, otherwise models with progress
+    /// updates return only those, and other models return none. `None` for unknown IDs, whose
+    /// upstream may reject the field.
+    pub(super) fn for_model(model: &ModelSpec, show_thinking: bool) -> Option<Self> {
+        model.info().map(|info| Self::Adaptive {
+            display: if show_thinking {
+                ThinkingDisplay::Summarized
+            } else if info.progress_updates {
+                ThinkingDisplay::Updates
+            } else {
+                ThinkingDisplay::Omitted
+            },
+            block_binding: BlockBinding::DropBlock,
+        })
+    }
+
+    /// Returns whether the request asks for thinking text, as summaries or progress notes.
+    pub(super) fn asks_for_text(&self) -> bool {
+        match self {
+            Self::Adaptive { display, .. } => *display != ThinkingDisplay::Omitted,
+        }
+    }
+}
+
+/// `thinking.display` values, always sent so a reply carries only the thinking text ox renders,
+/// whatever an upstream's default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ThinkingDisplay {
+    Summarized,
+    /// Only the progress notes written between tool calls come back as text. Requires the
+    /// `thinking-display-updates-2026-08-18` beta.
+    Updates,
+    /// No thinking text comes back, and the server can skip streaming it.
+    Omitted,
+}
+
+/// `thinking.block_binding`. `DropBlock` makes the API drop a replayed thinking block whose
+/// conversation prefix changed since it was produced, plus every later one, where it would
+/// otherwise reject the request. Requires the `thinking-binding-controls-2026-08-01` beta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "prefix_mismatch_behavior", rename_all = "snake_case")]
+pub(super) enum BlockBinding {
+    DropBlock,
+}
+
 // ── SSE Response Types ──
 
 /// One frame in the streaming response. `Unknown` swallows future event types so an upstream
@@ -395,8 +475,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::client::anthropic::betas::conversation_cache_control;
-    use crate::config::PromptCacheTtl;
     use crate::message::Replay;
 
     mod request_messages {
@@ -424,7 +502,7 @@ mod tests {
             let v = serde_json::to_value(RequestMessages {
                 user_context: None,
                 messages: &messages,
-                breakpoint: Some(conversation_cache_control(PromptCacheTtl::OneHour)),
+                breakpoint: Some(CacheControl::conversation(PromptCacheTtl::OneHour)),
             })
             .unwrap();
 
@@ -458,7 +536,7 @@ mod tests {
             let v = serde_json::to_value(RequestMessages {
                 user_context: None,
                 messages: &messages,
-                breakpoint: Some(conversation_cache_control(PromptCacheTtl::OneHour)),
+                breakpoint: Some(CacheControl::conversation(PromptCacheTtl::OneHour)),
             })
             .unwrap();
 
@@ -488,7 +566,7 @@ mod tests {
             let empty = serde_json::to_value(RequestMessages {
                 user_context: None,
                 messages: &[],
-                breakpoint: Some(conversation_cache_control(PromptCacheTtl::OneHour)),
+                breakpoint: Some(CacheControl::conversation(PromptCacheTtl::OneHour)),
             })
             .unwrap();
             assert_eq!(empty, json!([]));
@@ -520,7 +598,7 @@ mod tests {
                 let v = serde_json::to_value(RequestMessages {
                     user_context: Some("context"),
                     messages: &messages,
-                    breakpoint: Some(conversation_cache_control(PromptCacheTtl::OneHour)),
+                    breakpoint: Some(CacheControl::conversation(PromptCacheTtl::OneHour)),
                 })
                 .unwrap();
 
@@ -609,7 +687,7 @@ mod tests {
             let v = serde_json::to_value(RequestMessages {
                 user_context: None,
                 messages: &messages,
-                breakpoint: Some(conversation_cache_control(PromptCacheTtl::OneHour)),
+                breakpoint: Some(CacheControl::conversation(PromptCacheTtl::OneHour)),
             })
             .unwrap();
 
@@ -671,6 +749,98 @@ mod tests {
                 let v = serde_json::to_value(&fmt).unwrap();
 
                 assert_eq!(v, json!({"type": "json_schema", "schema": schema}));
+            }
+        }
+    }
+
+    mod cache_control {
+        use super::*;
+
+        mod static_prefix {
+            use super::*;
+
+            #[test]
+            fn shares_the_cache_globally_on_first_party_only() {
+                for (is_first_party, ttl, expected) in [
+                    (
+                        true,
+                        PromptCacheTtl::OneHour,
+                        r#"{"type":"ephemeral","scope":"global","ttl":"1h"}"#,
+                    ),
+                    (
+                        false,
+                        PromptCacheTtl::OneHour,
+                        r#"{"type":"ephemeral","ttl":"1h"}"#,
+                    ),
+                    (false, PromptCacheTtl::FiveMin, r#"{"type":"ephemeral"}"#),
+                ] {
+                    let cache = CacheControl::static_prefix(is_first_party, ttl);
+                    assert_eq!(serde_json::to_string(&cache).unwrap(), expected);
+                }
+            }
+        }
+
+        mod conversation {
+            use super::*;
+
+            #[test]
+            fn carries_the_ttl_without_scope_and_omits_the_five_minute_default() {
+                for (ttl, expected) in [
+                    (
+                        PromptCacheTtl::OneHour,
+                        r#"{"type":"ephemeral","ttl":"1h"}"#,
+                    ),
+                    (PromptCacheTtl::FiveMin, r#"{"type":"ephemeral"}"#),
+                ] {
+                    let cache = CacheControl::conversation(ttl);
+                    assert_eq!(serde_json::to_string(&cache).unwrap(), expected);
+                }
+            }
+        }
+    }
+
+    mod thinking_config {
+        use super::*;
+
+        mod for_model {
+            use super::*;
+
+            #[test]
+            fn known_model_is_adaptive_with_display_following_show_thinking() {
+                let drop_block = json!({"prefix_mismatch_behavior": "drop_block"});
+                for (id, hidden_display) in [
+                    ("claude-fable-5-1", "updates"),
+                    ("claude-opus-5-5", "updates"),
+                    ("claude-sonnet-5-5", "updates"),
+                    ("claude-haiku-5-5", "omitted"),
+                ] {
+                    let model = ModelSpec::resolve(id);
+                    assert_eq!(
+                        serde_json::to_value(ThinkingConfig::for_model(&model, true)).unwrap(),
+                        json!({
+                            "type": "adaptive",
+                            "display": "summarized",
+                            "block_binding": drop_block,
+                        }),
+                        "{id}",
+                    );
+                    assert_eq!(
+                        serde_json::to_value(ThinkingConfig::for_model(&model, false)).unwrap(),
+                        json!({
+                            "type": "adaptive",
+                            "display": hidden_display,
+                            "block_binding": drop_block,
+                        }),
+                        "{id}"
+                    );
+                }
+            }
+
+            #[test]
+            fn omits_thinking_for_an_unknown_model() {
+                assert!(
+                    ThinkingConfig::for_model(&ModelSpec::resolve("custom-model"), true).is_none()
+                );
             }
         }
     }

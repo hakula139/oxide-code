@@ -491,9 +491,9 @@ mod tests {
     use ratatui::style::Color;
     use tokio::sync::mpsc::error::TryRecvError;
 
+    use ox_core::config::ThemeConfig;
     use ox_core::config::provenance::Source;
-    use ox_core::config::{Effort, ThemeConfig};
-    use ox_core::model::ResolvedModelId;
+    use ox_core::model::{Effort, ResolvedModelId};
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::testing::text_result;
