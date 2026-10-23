@@ -31,7 +31,7 @@ Session rules live in memory until you exit, `/clear`, `/archive`, or `/resume` 
 
 ## Settings
 
-Set these keys under `[permission]` in `~/.config/ox/config.toml` or a drop-in. A project's `.ox/config.toml` accepts only `deny` and `ask`, as [Project Config](configuration.md#project-config) explains. [Config Keys](configuration.md#config-keys) lists each key with its type and default.
+Set `mode`, `extra_roots`, the `deny`, `ask`, and `allow` rule tables, and `defaults` under `[permission]` in `~/.config/ox/config.toml` or a drop-in. A project's `.ox/config.toml` accepts only `deny` and `ask`, as [Project Config](configuration.md#project-config) explains. [Config Keys](configuration.md#config-keys) lists each key with its type and default.
 
 ```toml
 # ~/.config/ox/config.toml

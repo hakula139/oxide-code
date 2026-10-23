@@ -6,7 +6,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 2. **User config file**: `~/.config/ox/config.toml` (or `$XDG_CONFIG_HOME/ox/config.toml`).
 3. **User drop-ins**: `*.toml` files in `~/.config/ox/config.d/` (or `$XDG_CONFIG_HOME/ox/config.d/`), in file-name order.
 4. **Project config file**: `.ox/config.toml` in the nearest directory from the working directory up to the project root that has one. The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory outside a repository.
-5. **Environment variables**: override every file. A command-line flag such as `--mode` overrides them in turn.
+5. **[Environment variables](#environment-variables)**: override every file. A command-line flag such as `--mode` overrides them in turn.
 
 Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$OX_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, `/mode`, or `/theme` change or a **Shift+Tab** mode switch. Its Permissions section lists every extra root, rule, and turned-off default group the files set, each with the layer that added it, since rule lists and extra roots combine across layers and any user file can turn a default off. It shows what the files set, so it still lists extra roots when a launch from `/`, `$HOME`, or an ancestor of `$HOME` leaves the workspace without roots.
 
@@ -132,7 +132,7 @@ Accepted values: `"5m"` (matches the server default as of 2026-03-06) and `"1h"`
 
 ### `[client.compaction]`: Context Compression
 
-Auto-compaction is enabled by default for the supported models. The default trigger leaves room for the next response and a safety buffer. Set `auto_threshold_tokens` or `auto_threshold_percent` when you want compaction to happen earlier.
+Auto-compaction is enabled by default for the supported models, and `auto_enabled = false` turns it off. The default trigger leaves room for the next response and a safety buffer. Set `auto_threshold_tokens` or `auto_threshold_percent` when you want compaction to happen earlier.
 
 `auto_threshold_tokens` and `auto_threshold_percent` are mutually exclusive. Percent must be between `1` and `100`. Either form resolves to a token count clamped into the usable range: values below `50000` tokens snap up to that floor, and values above the model-derived safe trigger snap down. The model-derived ceiling shifts with `/model`, so a global threshold sized for a larger context window keeps working after a swap.
 
@@ -252,30 +252,30 @@ A gateway that does not serve the configured model may return HTTP 404 with a pl
 
 Each key goes in the table its prefix names, so `client.compaction.auto_enabled` is `auto_enabled` under `[client.compaction]`. A project file sets only the keys [Project Config](#project-config) lists.
 
-| Key                                        | Type    | Default                         | Description                                                                                         |
-| ------------------------------------------ | ------- | ------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `client.api_key`                           | string  | -                               | [Anthropic API key](#authentication), user config only                                              |
-| `client.base_url`                          | string  | `https://api.anthropic.com`     | [API base URL](#base_url-endpoint), user config only                                                |
-| `client.compaction.auto_enabled`           | boolean | `true`                          | Enable [automatic context compaction](#clientcompaction-context-compression)                        |
-| `client.compaction.auto_threshold_percent` | integer | model-derived                   | Share of the context window that triggers compaction, `1` to `100`                                  |
-| `client.compaction.auto_threshold_tokens`  | integer | model-derived                   | Token count that triggers compaction                                                                |
-| `client.effort`                            | string  | per-model                       | [Effort level](#effort-reasoning-effort), `low` to `max`                                            |
-| `client.extra_ca_certs`                    | string  | -                               | [PEM bundle](#extra_ca_certs-corporate-trust-anchors) appended to the trust store, user config only |
-| `client.max_tokens`                        | integer | per-model                       | [Max tokens per response](#max_tokens-response-ceiling)                                             |
-| `client.max_tool_rounds`                   | integer | unset (unbounded)               | [Per-turn safety cap](#max_tool_rounds-agent-loop-safety-cap) on tool rounds                        |
-| `client.model`                             | string  | `claude-opus-5-5`               | [Model](#model-supported-models) to use                                                             |
-| `client.prompt_cache_ttl`                  | string  | `"1h"`                          | [Prompt-cache TTL](#prompt_cache_ttl-cache-duration), `"5m"` or `"1h"`                              |
-| `permission.allow`                         | table   | empty                           | [Calls that run without asking](permissions.md#rule-tables), user config only                       |
-| `permission.ask`                           | table   | empty                           | [Calls that ask first](permissions.md#rule-tables), even when an allow pattern matches              |
-| `permission.defaults`                      | table   | all on                          | [Built-in rules](permissions.md#built-in-rules) to turn off by name, user config only               |
-| `permission.deny`                          | table   | empty                           | [Calls that never run](permissions.md#rule-tables), in every mode                                   |
-| `permission.extra_roots`                   | array   | `[]`                            | [More directories](permissions.md#workspace-roots) whose edits run without asking, user config only |
-| `permission.mode`                          | string  | `"manual"`                      | [Permission mode](permissions.md#modes), `"manual"`, `"plan"`, or `"yolo"`, user config only        |
-| `tui.show_thinking`                        | boolean | `false`                         | [Show extended thinking](#tui-terminal-ui)                                                          |
-| `tui.show_welcome`                         | boolean | `true`                          | [Paint the welcome splash](#tui-terminal-ui) on an empty chat                                       |
-| `tui.status_line`                          | array   | see [`[tui]`](#tui-terminal-ui) | Ordered [status-line segments](#tui-terminal-ui)                                                    |
-| `tui.theme.base`                           | string  | `"mocha"`                       | [Built-in theme](theming.md#built-in-themes) name, or a TOML theme file path in user config         |
-| `tui.theme.overrides`                      | table   | -                               | [Per-slot patches](theming.md#overrides) applied on top of the base                                 |
+| Key                                        | Type    | Default                         | Description                                                                                                 |
+| ------------------------------------------ | ------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `client.api_key`                           | string  | -                               | [Anthropic API key](#authentication), user config only                                                      |
+| `client.base_url`                          | string  | `"https://api.anthropic.com"`   | [API base URL](#base_url-endpoint), user config only                                                        |
+| `client.compaction.auto_enabled`           | boolean | `true`                          | Enable [automatic context compaction](#clientcompaction-context-compression)                                |
+| `client.compaction.auto_threshold_percent` | integer | model-derived                   | Share of the context window that [triggers compaction](#clientcompaction-context-compression), `1` to `100` |
+| `client.compaction.auto_threshold_tokens`  | integer | model-derived                   | Token count that [triggers compaction](#clientcompaction-context-compression)                               |
+| `client.effort`                            | string  | per-model                       | [Effort level](#effort-reasoning-effort), `"low"` to `"max"`                                                |
+| `client.extra_ca_certs`                    | string  | -                               | [PEM bundle](#extra_ca_certs-corporate-trust-anchors) appended to the trust store, user config only         |
+| `client.max_tokens`                        | integer | per-model                       | [Max tokens per response](#max_tokens-response-ceiling)                                                     |
+| `client.max_tool_rounds`                   | integer | unset (unbounded)               | [Per-turn safety cap](#max_tool_rounds-agent-loop-safety-cap) on tool rounds                                |
+| `client.model`                             | string  | `"claude-opus-5-5"`             | [Model](#model-supported-models) to use                                                                     |
+| `client.prompt_cache_ttl`                  | string  | `"1h"`                          | [Prompt-cache TTL](#prompt_cache_ttl-cache-duration), `"5m"` or `"1h"`                                      |
+| `permission.allow`                         | table   | empty                           | [Calls that run without asking](permissions.md#rule-tables), user config only                               |
+| `permission.ask`                           | table   | empty                           | [Calls that ask first](permissions.md#rule-tables), even when an allow pattern matches                      |
+| `permission.defaults`                      | table   | all on                          | [Built-in rules](permissions.md#built-in-rules) to turn off by name, user config only                       |
+| `permission.deny`                          | table   | empty                           | [Calls that never run](permissions.md#rule-tables), in every mode                                           |
+| `permission.extra_roots`                   | array   | `[]`                            | [More directories](permissions.md#workspace-roots) whose edits run without asking, user config only         |
+| `permission.mode`                          | string  | `"manual"`                      | [Permission mode](permissions.md#modes), `"manual"`, `"plan"`, or `"yolo"`, user config only                |
+| `tui.show_thinking`                        | boolean | `false`                         | [Show extended thinking](#tui-terminal-ui)                                                                  |
+| `tui.show_welcome`                         | boolean | `true`                          | [Paint the welcome splash](#tui-terminal-ui) on an empty chat                                               |
+| `tui.status_line`                          | array   | see [`[tui]`](#tui-terminal-ui) | Ordered status-line segments                                                                                |
+| `tui.theme.base`                           | string  | `"mocha"`                       | [Built-in theme](theming.md#built-in-themes) name, or a TOML theme file path in user config                 |
+| `tui.theme.overrides`                      | table   | empty                           | [Per-slot patches](theming.md#overrides) applied on top of the base                                         |
 
 ### Environment Variables
 
@@ -292,7 +292,7 @@ A variable that maps to a config key overrides that key in every file.
 | `CLAUDE_CODE_OAUTH_TOKEN`                | -                                          | [Long-lived OAuth token](#authentication)                                                     |
 | `CLAUDE_CONFIG_DIR`                      | -                                          | [Claude Code's config dir](#authentication), default `~/.claude`                              |
 | `NODE_EXTRA_CA_CERTS`                    | -                                          | [Fallback PEM trust bundle](#llm-gateways)                                                    |
-| `NO_COLOR`                               | -                                          | Turn off color in [logs](#logs) written to stderr                                             |
+| `NO_COLOR`                               | -                                          | Any non-empty value turns off color in the TUI and in [logs](#logs) written to stderr         |
 | `OX_COMPACTION_AUTO_ENABLED`             | `client.compaction.auto_enabled`           | Enable auto-compaction                                                                        |
 | `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`   | `client.compaction.auto_threshold_percent` | Percent compaction trigger                                                                    |
 | `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`    | `client.compaction.auto_threshold_tokens`  | Absolute compaction trigger                                                                   |
@@ -308,10 +308,10 @@ A variable that maps to a config key overrides that key in every file.
 | `OX_SHOW_WELCOME`                        | `tui.show_welcome`                         | Paint the welcome splash                                                                      |
 | `OX_STATUS_LINE`                         | `tui.status_line`                          | Comma-separated status-line segments                                                          |
 | `XDG_CONFIG_HOME`                        | -                                          | Base of the user config directory, default `~/.config`                                        |
-| `XDG_DATA_HOME`                          | -                                          | Base of the sessions and the oxide-code login, default `~/.local/share`                       |
+| `XDG_DATA_HOME`                          | -                                          | Base of the sessions, the device ID, and the oxide-code login, default `~/.local/share`       |
 | `XDG_STATE_HOME`                         | -                                          | Base of the log directory, default `~/.local/state`                                           |
 
-Every variable treats an empty value as unset. Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Numeric variables take a whole number: at least `1` for `OX_MAX_TOKENS` and `OX_MAX_TOOL_ROUNDS`, at least `0` for `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`, and `1` to `100` for `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`. Any other value makes `ox` exit at startup with an error naming the variable and the values it accepts. The matching config keys accept the same ranges, and an out-of-range value there names its file and line.
+`ox` treats an empty value of each variable in the table as unset. Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Numeric variables take a whole number: at least `1` for `OX_MAX_TOKENS` and `OX_MAX_TOOL_ROUNDS`, at least `0` for `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`, and `1` to `100` for `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`. Any other value makes `ox` exit at startup with an error naming the variable and the values it accepts. The matching config keys accept the same ranges, and an out-of-range value there names its file and line.
 
 `ox` also follows these variables, which its libraries read:
 
