@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 
 use super::env;
 use super::fs::{create_private_dir_all, open_private_append};
@@ -43,8 +44,11 @@ pub fn init_tracing(tui_mode: bool) -> Result<Option<WorkerGuard>> {
     }
 }
 
+/// The `RUST_LOG` directives, or `warn` when the variable sets none, skipping invalid ones.
 fn make_filter() -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+    EnvFilter::builder()
+        .with_default_directive(LevelFilter::WARN.into())
+        .from_env_lossy()
 }
 
 fn log_dir() -> Result<PathBuf> {
@@ -131,20 +135,6 @@ mod tests {
         use super::*;
 
         #[test]
-        fn defaults_to_warn_when_rust_log_unset() {
-            temp_env::with_var_unset("RUST_LOG", || {
-                assert_eq!(make_filter().to_string(), "warn");
-            });
-        }
-
-        #[test]
-        fn empty_rust_log_yields_empty_filter() {
-            temp_env::with_var("RUST_LOG", Some(""), || {
-                assert_eq!(make_filter().to_string(), "");
-            });
-        }
-
-        #[test]
         fn honors_rust_log_level() {
             temp_env::with_var("RUST_LOG", Some("debug"), || {
                 assert_eq!(make_filter().to_string(), "debug");
@@ -155,6 +145,22 @@ mod tests {
         fn honors_rust_log_directive_language() {
             temp_env::with_var("RUST_LOG", Some("info,reqwest=warn"), || {
                 assert_eq!(make_filter().to_string(), "reqwest=warn,info");
+            });
+        }
+
+        #[test]
+        fn defaults_to_warn_when_rust_log_is_unset_empty_or_invalid() {
+            for value in [None, Some(""), Some("ox=loud")] {
+                let filter = temp_env::with_var("RUST_LOG", value, make_filter);
+
+                assert_eq!(filter.to_string(), "warn", "{value:?}");
+            }
+        }
+
+        #[test]
+        fn keeps_the_valid_directives_beside_invalid_ones() {
+            temp_env::with_var("RUST_LOG", Some("info,ox=loud"), || {
+                assert_eq!(make_filter().to_string(), "info");
             });
         }
     }
