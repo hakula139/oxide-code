@@ -241,7 +241,7 @@ A gateway that does not serve the configured model may return HTTP 404 with a pl
 
 ## Logs
 
-`ox` logs warnings and errors by default. Set `RUST_LOG=info` (or `debug`) for more detail. Where the log goes depends on the frontend:
+`ox` logs warnings and errors by default. Set `RUST_LOG=info` (or `debug`) for more detail. `ox` skips a directive it cannot parse and names it on stderr at startup. Where the log goes depends on the frontend:
 
 - **TUI**: `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`), which keeps log lines from painting over the full-screen frame. The file is readable only by your user. Once it passes 10 MiB, it moves to `oxide-code.log.1`, replacing the previous backup, so the log directory holds at most two files.
 - **Bare REPL, headless runs, and `--list`**: stderr.
@@ -307,7 +307,7 @@ A variable that maps to a config key overrides that key in every file.
 | `OX_SHOW_THINKING`                       | `tui.show_thinking`                        | Show extended thinking                                                                        |
 | `OX_SHOW_WELCOME`                        | `tui.show_welcome`                         | Paint the welcome splash                                                                      |
 | `OX_STATUS_LINE`                         | `tui.status_line`                          | Comma-separated status-line segments                                                          |
-| `RUST_LOG`                               | -                                          | [Log filter](#logs), `warn` when unset or invalid                                             |
+| `RUST_LOG`                               | -                                          | [Log filter](#logs), default `warn`                                                           |
 | `XDG_CONFIG_HOME`                        | -                                          | Base of the user config directory, default `~/.config`                                        |
 | `XDG_DATA_HOME`                          | -                                          | Base of the sessions, the device ID, and the oxide-code login, default `~/.local/share`       |
 | `XDG_STATE_HOME`                         | -                                          | Base of the log directory, default `~/.local/state`                                           |

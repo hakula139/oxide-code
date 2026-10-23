@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 
 use super::env;
 use super::fs::{create_private_dir_all, open_private_append};
@@ -43,11 +44,11 @@ pub fn init_tracing(tui_mode: bool) -> Result<Option<WorkerGuard>> {
     }
 }
 
-/// The `RUST_LOG` directives, or `warn` when the variable is unset, empty, or invalid.
+/// The `RUST_LOG` directives, or `warn` when the variable sets none, skipping invalid ones.
 fn make_filter() -> EnvFilter {
-    env::string("RUST_LOG")
-        .and_then(|directives| EnvFilter::try_new(directives).ok())
-        .unwrap_or_else(|| EnvFilter::new("warn"))
+    EnvFilter::builder()
+        .with_default_directive(LevelFilter::WARN.into())
+        .from_env_lossy()
 }
 
 fn log_dir() -> Result<PathBuf> {
@@ -154,6 +155,13 @@ mod tests {
 
                 assert_eq!(filter.to_string(), "warn", "{value:?}");
             }
+        }
+
+        #[test]
+        fn keeps_the_valid_directives_beside_invalid_ones() {
+            temp_env::with_var("RUST_LOG", Some("info,ox=loud"), || {
+                assert_eq!(make_filter().to_string(), "info");
+            });
         }
     }
 
