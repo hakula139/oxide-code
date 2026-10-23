@@ -30,6 +30,14 @@ use tokio_util::task::TaskTracker;
 use tracing::debug;
 use uuid::Uuid;
 
+use self::accumulator::ReplySpec;
+use self::betas::compute_betas;
+use self::sse::spawn_stream;
+use self::transport::{MessagesRequest, messages_url};
+use self::wire::{
+    CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
+    RequestMetadata, SystemBlock, ThinkingConfig,
+};
 use super::{ResponseEvent, Wire};
 use crate::config::auth::{self, Auth, AuthSource, LoginUnavailable};
 use crate::config::gateway::GatewayCompat;
@@ -40,14 +48,6 @@ use crate::model::{Effort, ModelSpec, PromptCacheTtl};
 use crate::prompt::SystemPrompt;
 use crate::tool::ToolDefinition;
 use crate::util::tls::Trust;
-use accumulator::ReplySpec;
-use betas::compute_betas;
-use sse::spawn_stream;
-use transport::{MessagesRequest, messages_url};
-use wire::{
-    CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
-    RequestMetadata, SystemBlock, ThinkingConfig,
-};
 
 // ── Constants ──
 
@@ -1700,10 +1700,7 @@ mod tests {
 
         #[test]
         fn orders_billing_then_identity_then_extras() {
-            let cache = CacheControl {
-                scope: Some("global"),
-                ttl: Some("1h"),
-            };
+            let cache = CacheControl::static_prefix(true, PromptCacheTtl::OneHour);
 
             let blocks = build_system_blocks(
                 Some("billing"),

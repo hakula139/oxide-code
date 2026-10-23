@@ -258,9 +258,9 @@ pub(super) struct SystemBlock<'a> {
 #[serde(tag = "type", rename = "ephemeral")]
 pub(super) struct CacheControl {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) scope: Option<&'static str>,
+    scope: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) ttl: Option<&'static str>,
+    ttl: Option<PromptCacheTtl>,
 }
 
 impl CacheControl {
@@ -280,7 +280,7 @@ impl CacheControl {
             scope: None,
             ttl: match ttl {
                 PromptCacheTtl::FiveMin => None,
-                PromptCacheTtl::OneHour => Some("1h"),
+                PromptCacheTtl::OneHour => Some(ttl),
             },
         }
     }

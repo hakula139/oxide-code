@@ -117,16 +117,21 @@ programs.oxide-code = {
 };
 ```
 
-| Option     | Default                           | Purpose                                                                                                     |
-| ---------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `enable`   | `false`                           | Install and configure `ox`                                                                                  |
-| `package`  | Built from this flake with `pkgs` | Package to install, or `null` to manage only the configuration                                              |
-| `settings` | `{ }`                             | TOML configuration written to `ox/config.toml` when nonempty                                                |
-| `context`  | `""`                              | User instructions for `ox/AGENTS.md`: inline text (any string), or a Nix path or package linked as the file |
+| Option        | Default                           | Purpose                                                                                                     |
+| ------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `enable`      | `false`                           | Install and configure `ox`                                                                                  |
+| `package`     | Built from this flake with `pkgs` | Package to install, or `null` to manage only the configuration                                              |
+| `checkConfig` | `package != null`                 | Validate the generated `config.toml` at build time with `ox config check`                                   |
+| `settings`    | `{ }`                             | TOML configuration written to `ox/config.toml` when nonempty                                                |
+| `context`     | `""`                              | User instructions for `ox/AGENTS.md`: inline text (any string), or a Nix path or package linked as the file |
 
 File paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. A tag in the input URL pins the module together with the binary. The module owns `config.toml`, so keep local overrides in `ox/config.d/`, where they take precedence.
 
 The default `package` is built from the flake directly, so an override applied to `pkgs.oxide-code` does not reach it. To wrap or patch the package, apply `inputs.oxide-code.overlays.default` to your package set and set `programs.oxide-code.package` to your wrapper around `pkgs.oxide-code`.
+
+With `checkConfig` on, the build runs the configured package's [`ox config check`](configuration.md#checking-the-config) on the generated `config.toml`, so a typo or an invalid value fails `home-manager switch` with ox's own error. The check runs as a Nix build user with an empty scratch home directory and no credentials, inside the build sandbox where Nix enables one (macOS does not by default), so a wrapper `package` must start without your home directory or secrets.
+
+Paths in `settings` resolve in that environment, where `~` names the scratch home and your own home directory is out of reach. Give a theme file as a Nix path, such as `tui.theme.base = ./theme.toml`, and write an extra root under your home directory with `~/`. Set `checkConfig = false` if the check still rejects a path that exists where `ox` runs.
 
 ## Verify Your Installation
 
