@@ -1,10 +1,10 @@
-//! Labels for the resolved settings that `/status`, `/config`, and the welcome panel show.
+//! Labels for the resolved settings that `/status`, `/config`, and the welcome screen show.
 
 use ox_core::config::auth::AuthSource;
 use ox_core::model::Effort;
 
 /// The credential label while signed out.
-pub(crate) const NOT_SIGNED_IN: &str = "Not signed in";
+const NOT_SIGNED_IN: &str = "Not signed in";
 
 /// The label of a setting that holds no value.
 pub(crate) const NONE: &str = "none";
@@ -13,8 +13,16 @@ pub(crate) fn auth(auth: Option<AuthSource>) -> String {
     auth.map_or_else(|| NOT_SIGNED_IN.to_owned(), |source| source.to_string())
 }
 
+/// The credential kind alone, as the welcome screen's environment line shows it.
+pub(crate) fn auth_kind(auth: Option<AuthSource>) -> &'static str {
+    auth.map_or(NOT_SIGNED_IN, |source| source.kind().label())
+}
+
 pub(crate) fn effort(effort: Option<Effort>) -> String {
-    effort.map_or_else(|| format!("{NONE} (no effort levels)"), |e| e.to_string())
+    effort.map_or_else(
+        || format!("{NONE} (model has no effort levels)"),
+        |e| e.to_string(),
+    )
 }
 
 pub(crate) const fn on_off(flag: bool) -> &'static str {
@@ -39,13 +47,23 @@ mod tests {
         }
     }
 
+    mod auth_kind {
+        use super::*;
+
+        #[test]
+        fn names_the_kind_or_the_signed_out_state() {
+            assert_eq!(auth_kind(Some(AuthSource::OxLogin)), "OAuth");
+            assert_eq!(auth_kind(None), "Not signed in");
+        }
+    }
+
     mod effort {
         use super::*;
 
         #[test]
         fn names_the_effective_level_or_its_absence() {
             assert_eq!(effort(Some(Effort::High)), "high");
-            assert_eq!(effort(None), "none (no effort levels)");
+            assert_eq!(effort(None), "none (model has no effort levels)");
         }
     }
 

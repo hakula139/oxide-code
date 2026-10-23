@@ -185,11 +185,7 @@ fn environment_text(info: &LiveSessionInfo, full: bool, with_starters: bool) -> 
     }
     if full {
         text.push_str(INLINE_SEPARATOR);
-        text.push_str(
-            config
-                .auth
-                .map_or(labels::NOT_SIGNED_IN, |source| source.kind().label()),
-        );
+        text.push_str(labels::auth_kind(config.auth));
     }
     text
 }

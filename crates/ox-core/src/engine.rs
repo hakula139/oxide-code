@@ -2838,7 +2838,7 @@ mod tests {
                     [
                         "Switched to custom-model (custom-model). \
                          Effort cleared (model has no effort levels). \
-                         Auto compaction off."
+                         Auto compaction off (no threshold)."
                             .to_owned(),
                         format!(
                             "Switched to Claude Opus 5.5 (claude-opus-5-5) · \
@@ -2941,7 +2941,10 @@ mod tests {
                 let mut config = test_config(server.uri(), api_key(), "custom-model");
                 let sink = CapturingSink::default();
                 let unwindowed = CompactionConfig::with_default_policy(&config.model, 16_000);
-                assert!(!unwindowed.auto.enabled, "precondition: no window");
+                assert_eq!(
+                    unwindowed.auto.threshold_tokens, None,
+                    "precondition: no window"
+                );
                 let mut resolved = Vec::new();
 
                 for (max_tokens, configured, threshold) in [

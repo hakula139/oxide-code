@@ -9,7 +9,7 @@ use ox_core::util::path::tildify;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::labels::{self, NONE};
+use crate::labels;
 use crate::modal::kv_overview::{KvOverview, KvSection};
 use crate::session_info::LiveSessionInfo;
 
@@ -56,7 +56,7 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
             "Extra CA Certs",
             cfg.extra_ca_certs
                 .as_deref()
-                .map_or_else(|| NONE.to_owned(), tildify),
+                .map_or_else(|| labels::NONE.to_owned(), tildify),
             &sources.extra_ca_certs,
         ),
         row(
@@ -116,7 +116,7 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
 
 fn display_names(names: &[String]) -> String {
     if names.is_empty() {
-        NONE.to_owned()
+        labels::NONE.to_owned()
     } else {
         names.join(", ")
     }
@@ -217,14 +217,14 @@ mod tests {
         }
 
         #[test]
-        fn renders_unset_extra_ca_certs_as_placeholder() {
+        fn shows_none_for_unset_extra_ca_certs() {
             let info = test_session_info();
             assert!(info.config.extra_ca_certs.is_none(), "precondition: unset");
             let m = build_modal(&info, None);
             let rendered = rendered_text(&m, 80);
 
             assert!(
-                row(&rendered, "Extra CA Certs").contains(NONE),
+                row(&rendered, "Extra CA Certs").contains(" none "),
                 "{rendered}"
             );
         }
@@ -234,7 +234,7 @@ mod tests {
             let mut info = test_session_info();
             let rendered = rendered_text(&build_modal(&info, None), 80);
             assert!(
-                row(&rendered, "Custom Headers").contains(NONE),
+                row(&rendered, "Custom Headers").contains(" none "),
                 "{rendered}"
             );
 
@@ -249,11 +249,11 @@ mod tests {
             info.config.gateway.attribution = false;
             let rendered = rendered_text(&build_modal(&info, None), 80);
             assert!(
-                row(&rendered, "Attribution Header").contains(labels::on_off(false)),
+                row(&rendered, "Attribution Header").contains(" off "),
                 "{rendered}"
             );
             assert!(
-                row(&rendered, "Structured Outputs").contains(labels::on_off(true)),
+                row(&rendered, "Structured Outputs").contains(" on "),
                 "{rendered}"
             );
         }
