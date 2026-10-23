@@ -238,9 +238,7 @@ impl Live {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ox"));
         env::remove_inherited(&mut command, env::is_ox_setting);
         env::use_scratch_dirs(&mut command, self.root.path());
-        command
-            .current_dir(self.cwd())
-            .env("ANTHROPIC_MODEL", model);
+        command.current_dir(self.cwd()).env("OX_MODEL", model);
         command
     }
 
