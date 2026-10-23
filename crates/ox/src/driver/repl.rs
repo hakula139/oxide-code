@@ -97,7 +97,7 @@ where
                         continue;
                     }
                 },
-                None => Op::Prompt(command::unescape_literal(input).to_owned()),
+                None => Op::prompt(command::unescape_literal(input)),
             };
             if op == Op::Shutdown {
                 break;
@@ -584,7 +584,8 @@ mod tests {
                 let server = MockServer::start().await;
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
-                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
                 let sink = CapturingSink::default();
                 let input: &[u8] = indoc! {b"
                     /init
@@ -624,6 +625,13 @@ mod tests {
                     last["content"][0]["text"],
                     command::init::create_prompt(dir.path(), "CLAUDE.md"),
                 );
+                let titles: Vec<String> = store
+                    .list()
+                    .unwrap()
+                    .into_iter()
+                    .filter_map(|info| info.title.map(|title| title.title))
+                    .collect();
+                assert_eq!(titles, ["/init CLAUDE.md"]);
             })
             .await;
         }

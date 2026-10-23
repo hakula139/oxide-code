@@ -12,7 +12,7 @@ use crate::file_tracker::FileTracker;
 use crate::file_tracker::testing::record_tracked_file;
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SessionContext;
-use crate::session::actor::SessionCmd;
+use crate::session::actor::{Record, SessionCmd};
 use crate::session::entry::CompactBoundary;
 
 /// A `/compact` boundary for `summary` with no focus or task list.
@@ -86,7 +86,7 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                 continue;
             }
             match cmd {
-                SessionCmd::Record { ack, .. } => {
+                SessionCmd::Record(Record { ack, .. }) => {
                     _ = ack.send(RecordOutcome {
                         checkpoint: None,
                         ai_title_seed: None,

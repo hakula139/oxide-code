@@ -32,8 +32,10 @@ use crate::tool::view::{ApprovalPreview, ToolResultView};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Op {
-    /// Starts a turn with this prompt.
-    Prompt(String),
+    /// Starts a turn with `text`.
+    /// A fresh session takes `title` as its first-prompt title in place of `text`,
+    /// so a prompt a slash command built lists under the command line that built it.
+    Prompt { text: String, title: Option<String> },
     /// Adds a prompt typed while a turn runs. The turn splices it in at its next round boundary and
     /// confirms with [`Event::PromptDrained`]. The frontend keeps every unconfirmed prompt and
     /// submits it later, so the engine drops one that arrives after its turn ended.
@@ -71,6 +73,16 @@ pub enum Op {
     /// Ends any running operation without a terminal event, finalizes the live session, and stops
     /// the engine. Closing the op channel does the same.
     Shutdown,
+}
+
+impl Op {
+    /// An [`Op::Prompt`] whose session title comes from its own text.
+    pub fn prompt(text: impl Into<String>) -> Self {
+        Self::Prompt {
+            text: text.into(),
+            title: None,
+        }
+    }
 }
 
 /// The saved session an [`Op::Resume`] continues.
@@ -513,7 +525,7 @@ mod tests {
         /// here until it gets a tag and a case in `every_op`.
         fn op_tag(op: &Op) -> &'static str {
             match op {
-                Op::Prompt(_) => "prompt",
+                Op::Prompt { .. } => "prompt",
                 Op::Queue(_) => "queue",
                 Op::Interrupt => "interrupt",
                 Op::Resolve { .. } => "resolve",
@@ -532,7 +544,11 @@ mod tests {
 
         fn every_op() -> Vec<Op> {
             vec![
-                Op::Prompt("hi".to_owned()),
+                Op::prompt("hi"),
+                Op::Prompt {
+                    text: "Create AGENTS.md".to_owned(),
+                    title: Some("/init AGENTS.md".to_owned()),
+                },
                 Op::Queue("next".to_owned()),
                 Op::Interrupt,
                 Op::Resolve {
@@ -601,8 +617,16 @@ mod tests {
         #[test]
         fn carries_its_payload_under_data() {
             assert_eq!(
-                serde_json::to_value(Op::Prompt("hi".to_owned())).unwrap(),
-                json!({"type": "prompt", "data": "hi"}),
+                serde_json::to_value(Op::Queue("next".to_owned())).unwrap(),
+                json!({"type": "queue", "data": "next"}),
+            );
+            assert_eq!(
+                serde_json::to_value(Op::Prompt {
+                    text: "Create AGENTS.md".to_owned(),
+                    title: Some("/init AGENTS.md".to_owned())
+                })
+                .unwrap(),
+                json!({"type": "prompt", "data": {"text": "Create AGENTS.md", "title": "/init AGENTS.md"}}),
             );
             assert_eq!(
                 serde_json::to_value(Op::Resolve {

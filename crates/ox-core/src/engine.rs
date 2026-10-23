@@ -288,7 +288,9 @@ impl Engine {
         while let Some(op) = ops.recv().await {
             let mut end = None;
             match op {
-                Op::Prompt(text) => end = Some(self.submit_prompt(&text, &sink, &mut ops).await),
+                Op::Prompt { text, title } => {
+                    end = Some(self.submit_prompt(&text, title, &sink, &mut ops).await);
+                }
                 Op::Compact { instructions } => {
                     end = Some(self.compact(&sink, &mut ops, instructions).await);
                 }
@@ -315,11 +317,13 @@ impl Engine {
 
     /// Runs `text` through auto-compaction and one agent turn, rolling back a refused turn, and
     /// reports how it ended on `sink`.
+    /// A fresh session takes `title` as its first-prompt title.
     /// The turn compacts at each round boundary that leaves the context at the threshold,
     /// then goes on from the summary.
     async fn submit_prompt<S>(
         &mut self,
         text: &str,
+        title: Option<String>,
         sink: &S,
         ops: &mut mpsc::Receiver<Op>,
     ) -> TurnEnd
@@ -348,7 +352,7 @@ impl Engine {
             std::mem::take(&mut self.prompt_unrecorded).then(|| self.prompt.session_context());
         let outcome = self
             .session
-            .record_message_with_context(user_msg.clone(), context)
+            .record_prompt(user_msg.clone(), context, title)
             .await;
         sink.session_write_error(outcome.failure.as_deref());
         self.messages.push(user_msg);
@@ -614,7 +618,7 @@ impl TurnEnd {
     pub fn of(op: &Op, event: &Event) -> Option<Self> {
         match (op, event) {
             (
-                Op::Prompt(_)
+                Op::Prompt { .. }
                 | Op::Compact { .. }
                 | Op::Archive
                 | Op::Resume { .. }
@@ -627,7 +631,7 @@ impl TurnEnd {
             | (Op::SetModel(ConfigPick::Effort(_)), Event::ConfigChanged { effort: None, .. }) => {
                 Some(Self::Failed)
             }
-            (Op::Prompt(_), Event::TurnComplete)
+            (Op::Prompt { .. }, Event::TurnComplete)
             | (
                 Op::Compact { .. } | Op::Clear | Op::Archive | Op::Resume { .. },
                 Event::SessionReady,
@@ -637,7 +641,7 @@ impl TurnEnd {
             | (Op::Logout, Event::SignedOut { .. })
             | (Op::SetModel(_), Event::ConfigChanged { .. })
             | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
-            (Op::Prompt(_) | Op::Compact { .. } | Op::Login, Event::Cancelled) => {
+            (Op::Prompt { .. } | Op::Compact { .. } | Op::Login, Event::Cancelled) => {
                 Some(Self::Cancelled)
             }
             _ => None,
@@ -1078,7 +1082,7 @@ mod tests {
         /// Events of the prompt in flight until both its terminal event and its session's AI title
         /// have arrived, in either order.
         async fn titled_turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
-            let prompt = Op::Prompt(String::new());
+            let prompt = Op::prompt("");
             let (mut ended, mut titled) = (false, false);
             let mut seen = Vec::new();
             while !(ended && titled) {
@@ -1146,11 +1150,7 @@ mod tests {
                 let live_id = engine.session_id().to_owned();
                 let mut handle = engine.spawn();
 
-                handle
-                    .ops
-                    .send(Op::Prompt("hello".to_owned()))
-                    .await
-                    .unwrap();
+                handle.ops.send(Op::prompt("hello")).await.unwrap();
                 let first = titled_turn_events(&mut handle.events).await;
                 let second = submit(&mut handle, "again").await;
                 handle.shutdown().await.unwrap();
@@ -1194,11 +1194,7 @@ mod tests {
                 let cache_ttl = engine.client.prompt_cache_ttl();
                 let mut handle = engine.spawn();
 
-                handle
-                    .ops
-                    .send(Op::Prompt("hello".to_owned()))
-                    .await
-                    .unwrap();
+                handle.ops.send(Op::prompt("hello")).await.unwrap();
                 titled_turn_events(&mut handle.events).await;
                 handle.ops.send(Op::Clear).await.unwrap();
                 next_matching(&mut handle.events, |event| {
@@ -1256,7 +1252,7 @@ mod tests {
 
                 for op in [
                     Op::Queue("early".to_owned()),
-                    Op::Prompt("first".to_owned()),
+                    Op::prompt("first"),
                     Op::Queue("queued".to_owned()),
                 ] {
                     handle.ops.send(op).await.unwrap();
@@ -1644,11 +1640,7 @@ mod tests {
 
                 let mut cancelled = Vec::new();
                 for (count, prompt) in [(1, "write a story"), (2, "write a poem")] {
-                    handle
-                        .ops
-                        .send(Op::Prompt(prompt.to_owned()))
-                        .await
-                        .unwrap();
+                    handle.ops.send(Op::prompt(prompt)).await.unwrap();
                     until_requested(&server, count).await;
                     handle.ops.send(Op::Interrupt).await.unwrap();
                     cancelled.extend(turn_events(&mut handle.events).await);
@@ -1698,11 +1690,7 @@ mod tests {
                 engine.context_estimate = Some(50_000);
                 let mut handle = engine.spawn();
 
-                handle
-                    .ops
-                    .send(Op::Prompt("five".to_owned()))
-                    .await
-                    .unwrap();
+                handle.ops.send(Op::prompt("five")).await.unwrap();
                 until_requested(&server, 1).await;
                 handle.ops.send(Op::Interrupt).await.unwrap();
                 let events = turn_events(&mut handle.events).await;
@@ -1733,7 +1721,7 @@ mod tests {
         async fn shutdown_mid_request_stops_without_a_terminal_event() {
             with_pinned_home(async {
                 for (label, op) in [
-                    ("prompt", Op::Prompt("mid stream".to_owned())),
+                    ("prompt", Op::prompt("mid stream")),
                     ("compaction", Op::Compact { instructions: None }),
                 ] {
                     let server = MockServer::start().await;
@@ -1779,11 +1767,7 @@ mod tests {
                 seed_full_read(&engine.file_tracker, &read_path);
                 let handle = engine.spawn();
 
-                handle
-                    .ops
-                    .send(Op::Prompt("mid stream".to_owned()))
-                    .await
-                    .unwrap();
+                handle.ops.send(Op::prompt("mid stream")).await.unwrap();
                 until_requested(&server, 1).await;
                 tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
                     .await
@@ -1966,10 +1950,10 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
-                let end = engine.submit_prompt("first", &sink, &mut ops).await;
+                let end = engine.submit_prompt("first", None, &sink, &mut ops).await;
                 assert_eq!(end, TurnEnd::Completed);
                 "2000-01-01".clone_into(&mut engine.prompt.seen.date);
-                let end = engine.submit_prompt("second", &sink, &mut ops).await;
+                let end = engine.submit_prompt("second", None, &sink, &mut ops).await;
                 assert_eq!(end, TurnEnd::Completed);
 
                 let turns = request_bodies(&server).await;
@@ -2017,12 +2001,16 @@ mod tests {
                 let mut ops = inert_ops();
                 let warning = write_unreadable_instructions(dir.path());
 
-                engine.submit_prompt("broken", &sink, &mut ops).await;
-                engine.submit_prompt("still broken", &sink, &mut ops).await;
+                engine.submit_prompt("broken", None, &sink, &mut ops).await;
+                engine
+                    .submit_prompt("still broken", None, &sink, &mut ops)
+                    .await;
                 std::fs::write(dir.path().join("CLAUDE.md"), "Fixed rules.").unwrap();
-                engine.submit_prompt("fixed", &sink, &mut ops).await;
+                engine.submit_prompt("fixed", None, &sink, &mut ops).await;
                 write_unreadable_instructions(dir.path());
-                engine.submit_prompt("broken again", &sink, &mut ops).await;
+                engine
+                    .submit_prompt("broken again", None, &sink, &mut ops)
+                    .await;
 
                 let notices: Vec<String> = sink
                     .events()
@@ -2048,7 +2036,7 @@ mod tests {
                 let mut ops = inert_ops();
 
                 for text in ["first", "second"] {
-                    engine.submit_prompt(text, &sink, &mut ops).await;
+                    engine.submit_prompt(text, None, &sink, &mut ops).await;
                 }
 
                 let usage = sink
@@ -2086,7 +2074,9 @@ mod tests {
                 let cache_ttl = engine.client.prompt_cache_ttl();
                 let sink = CapturingSink::default();
 
-                engine.submit_prompt("hello", &sink, &mut inert_ops()).await;
+                engine
+                    .submit_prompt("hello", None, &sink, &mut inert_ops())
+                    .await;
                 let title = engine.title_usage.as_mut().expect("a fresh session titles");
                 let delivered = title.await;
                 engine.emit_usage_update(&sink);
@@ -2133,7 +2123,7 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
-                let end = engine.submit_prompt("plan it", &sink, &mut ops).await;
+                let end = engine.submit_prompt("plan it", None, &sink, &mut ops).await;
 
                 assert_eq!(end, TurnEnd::Completed);
                 assert_eq!(engine.tasks, plan());
@@ -2174,7 +2164,7 @@ mod tests {
                 let mut ops = inert_ops();
 
                 let end = engine
-                    .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
+                    .submit_prompt("plan it", None, &CapturingSink::default(), &mut ops)
                     .await;
 
                 assert_eq!(end, TurnEnd::Completed);
@@ -2198,7 +2188,7 @@ mod tests {
                 let mut ops = inert_ops();
 
                 let end = engine
-                    .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
+                    .submit_prompt("plan it", None, &CapturingSink::default(), &mut ops)
                     .await;
 
                 assert_eq!(end, TurnEnd::Failed);
@@ -2238,12 +2228,12 @@ mod tests {
                 let today = engine.prompt.seen.date.clone();
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
-                let first = engine.submit_prompt("first", &sink, &mut ops).await;
+                let first = engine.submit_prompt("first", None, &sink, &mut ops).await;
                 assert_eq!(first, TurnEnd::Completed);
                 "2000-01-01".clone_into(&mut engine.prompt.seen.date);
                 let before_refusal = sink.events().len();
 
-                let refused = engine.submit_prompt("refused", &sink, &mut ops).await;
+                let refused = engine.submit_prompt("refused", None, &sink, &mut ops).await;
                 let refused_events = sink.events().split_off(before_refusal);
                 let tracked: Vec<_> = engine
                     .file_tracker
@@ -2252,7 +2242,9 @@ mod tests {
                     .map(|snapshot| snapshot.path)
                     .collect();
                 let tasks = engine.tasks.clone();
-                let rephrased = engine.submit_prompt("rephrased", &sink, &mut ops).await;
+                let rephrased = engine
+                    .submit_prompt("rephrased", None, &sink, &mut ops)
+                    .await;
 
                 assert_eq!(refused, TurnEnd::Failed);
                 let [
@@ -2323,8 +2315,10 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
-                let refused = engine.submit_prompt("refused", &sink, &mut ops).await;
-                let rephrased = engine.submit_prompt("rephrased", &sink, &mut ops).await;
+                let refused = engine.submit_prompt("refused", None, &sink, &mut ops).await;
+                let rephrased = engine
+                    .submit_prompt("rephrased", None, &sink, &mut ops)
+                    .await;
 
                 assert_eq!(refused, TurnEnd::Failed);
                 assert_eq!(rephrased, TurnEnd::Completed);
@@ -2350,7 +2344,7 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
-                let end = engine.submit_prompt("five", &sink, &mut ops).await;
+                let end = engine.submit_prompt("five", None, &sink, &mut ops).await;
 
                 assert_eq!(end, TurnEnd::Completed);
                 assert_eq!(
@@ -2428,7 +2422,7 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
-                let end = engine.submit_prompt("five", &sink, &mut ops).await;
+                let end = engine.submit_prompt("five", None, &sink, &mut ops).await;
 
                 assert_eq!(end, TurnEnd::Failed);
                 assert_eq!(engine.messages, tool_heavy_transcript());
@@ -2476,7 +2470,7 @@ mod tests {
                 let (ops_tx, mut ops) = mpsc::channel(1);
                 ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
 
-                let end = engine.submit_prompt("five", &sink, &mut ops).await;
+                let end = engine.submit_prompt("five", None, &sink, &mut ops).await;
 
                 assert_eq!(end, TurnEnd::Failed);
                 assert_eq!(engine.policy.mode(), Mode::Plan);
@@ -2495,7 +2489,7 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
-                let end = engine.submit_prompt("hello", &sink, &mut ops).await;
+                let end = engine.submit_prompt("hello", None, &sink, &mut ops).await;
 
                 assert_eq!(end, TurnEnd::Failed);
                 assert_eq!(engine.messages, [] as [Message; 0]);
@@ -2524,7 +2518,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 let end = engine
-                    .submit_prompt("plan it", &sink, &mut inert_ops())
+                    .submit_prompt("plan it", None, &sink, &mut inert_ops())
                     .await;
 
                 assert_eq!(end, TurnEnd::Completed);
@@ -2585,7 +2579,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 let end = engine
-                    .submit_prompt("plan it", &sink, &mut inert_ops())
+                    .submit_prompt("plan it", None, &sink, &mut inert_ops())
                     .await;
 
                 assert_eq!(end, TurnEnd::Failed);
@@ -2639,8 +2633,10 @@ mod tests {
                     ops_tx.send(prompt).await.unwrap();
                 };
 
-                let (end, ()) =
-                    tokio::join!(engine.submit_prompt("plan it", &sink, &mut ops), queue);
+                let (end, ()) = tokio::join!(
+                    engine.submit_prompt("plan it", None, &sink, &mut ops),
+                    queue
+                );
 
                 assert_eq!(end, TurnEnd::Failed);
                 let requests = request_bodies(&server).await;
@@ -2693,7 +2689,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 let end = engine
-                    .submit_prompt("plan it", &sink, &mut inert_ops())
+                    .submit_prompt("plan it", None, &sink, &mut inert_ops())
                     .await;
 
                 assert_eq!(end, TurnEnd::Completed);
@@ -2728,7 +2724,7 @@ mod tests {
                     };
 
                     let (end, ()) =
-                        tokio::join!(engine.submit_prompt("plan it", &sink, &mut ops), stop);
+                        tokio::join!(engine.submit_prompt("plan it", None, &sink, &mut ops), stop);
 
                     assert_eq!(end, expected);
                     assert_eq!(engine.messages.len(), tool_heavy_transcript().len() + 4);
@@ -2759,7 +2755,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 let end = engine
-                    .submit_prompt("plan it", &sink, &mut inert_ops())
+                    .submit_prompt("plan it", None, &sink, &mut inert_ops())
                     .await;
 
                 assert_eq!(end, TurnEnd::Completed, "{:?}", sink.events().last());
@@ -2790,8 +2786,10 @@ mod tests {
                     ops_tx.send(Op::SetMode(Mode::Plan)).await.unwrap();
                 };
 
-                let (end, ()) =
-                    tokio::join!(engine.submit_prompt("plan it", &sink, &mut ops), switch);
+                let (end, ()) = tokio::join!(
+                    engine.submit_prompt("plan it", None, &sink, &mut ops),
+                    switch
+                );
 
                 assert_eq!(end, TurnEnd::Failed);
                 assert_eq!(engine.policy.mode(), Mode::Plan);
@@ -2864,9 +2862,9 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
-                engine.submit_prompt("first", &sink, &mut ops).await;
+                engine.submit_prompt("first", None, &sink, &mut ops).await;
                 engine.set_model(&sink, sonnet_pick());
-                engine.submit_prompt("second", &sink, &mut ops).await;
+                engine.submit_prompt("second", None, &sink, &mut ops).await;
 
                 let turns = request_bodies(&server).await;
                 assert_eq!(turns[1]["model"], "claude-sonnet-5-5");
@@ -2912,9 +2910,9 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
-                engine.submit_prompt("first", &sink, &mut ops).await;
+                engine.submit_prompt("first", None, &sink, &mut ops).await;
                 engine.set_model(&sink, sonnet_pick());
-                engine.submit_prompt("second", &sink, &mut ops).await;
+                engine.submit_prompt("second", None, &sink, &mut ops).await;
 
                 let turns = request_bodies(&server).await;
                 let assistant_turns: Vec<&serde_json::Value> = turns[1]["messages"]
@@ -3062,7 +3060,7 @@ mod tests {
                 let (tx, mut ops) = mpsc::channel(1);
                 tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
 
-                engine.submit_prompt("hello", &sink, &mut ops).await;
+                engine.submit_prompt("hello", None, &sink, &mut ops).await;
 
                 assert_eq!(engine.policy.mode(), Mode::Plan);
                 assert!(
@@ -3084,7 +3082,7 @@ mod tests {
 
             #[test]
             fn reads_only_the_terminal_events_of_the_op_in_flight() {
-                let prompt = Op::Prompt("hi".to_owned());
+                let prompt = Op::prompt("hi");
                 let compact = Op::Compact { instructions: None };
                 let resume = Op::Resume {
                     target: ResumeTarget::Prefix("1a2b".to_owned()),

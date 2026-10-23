@@ -10,7 +10,7 @@
 - **No file exists.** `/init AGENTS.md` or `/init CLAUDE.md` starts a turn with a prompt that names the file to create, matching the name ignoring case. Besides oxide-code, Codex and other agents that follow the `AGENTS.md` convention read `AGENTS.md`, and Claude Code reads `CLAUDE.md`. Bare `/init` needs that choice first. In the TUI, it opens a picker whose choice sends the same prompt. Pressing Esc closes the picker without starting a turn, and the `/init` line stays in the chat, since bare `/init` echoes like a typed command ([commands.md](commands.md) decision 13). The REPL has no picker, so it rejects bare `/init` with an error naming both commands.
 - **A file name with a file present.** Naming a file the project has, as `/init CLAUDE.md` does when `.claude/CLAUDE.md` exists, sends the update prompt that bare `/init` sends. Naming the other file is rejected with the existing paths and a pointer to bare `/init`. A name other than `AGENTS.md` or `CLAUDE.md` is rejected with a list of the two.
 
-`command::init` holds the discovery, both prompts, and `resolve`, which turns the arguments into the prompt to send or reports that the file must be picked first. The TUI's `slash/init.rs` adds only the picker. Because `-p` runs no slash commands, it sends `/init` to the model as text.
+`command::init` holds the discovery, both prompts, and `resolve`, which turns the arguments into the prompt to send or reports that the file must be picked first. The TUI's `slash/init.rs` adds only the picker, whose choice runs as the line `/init <file>`. Every `/init` prompt carries its command line, typed or picked, as the session's first-prompt title, so `ox --list` shows `/init AGENTS.md` until the TUI's AI title replaces it. Because `-p` runs no slash commands, it sends `/init` to the model as text.
 
 Both prompts share one rubric: include only information an agent would otherwise get wrong, such as commands that differ from language defaults, architecture spanning several files, conventions that diverge from defaults, and constraints that the code cannot reveal. Omit standard conventions, file listings, generic advice, and anything not grounded in files the model has read.
 
@@ -30,11 +30,12 @@ Both prompts share one rubric: include only information an agent would otherwise
 
 ## Sources
 
-- `crates/ox-core/src/command.rs`: `parse`, which routes `/init` to `command::init`.
+- `crates/ox-core/src/command.rs`: `parse`, which routes `/init` to `command::init`, and `typed_op`, which titles the REPL's prompt.
 - `crates/ox-core/src/command/init.rs`: `FILE_CHOICES`, `resolve`, the instruction-file discovery, and the create and update prompts.
 - `crates/ox-core/src/prompt/instructions.rs`: `project_candidates` and `read_project`, the files `/init` checks and the rule for which of them count.
 - `crates/ox-core/src/util/git.rs`: `project_root`, the lookup for the project root.
 - `crates/ox-tui/src/lib.rs`: `run`, which resolves the project root and stores it in `LiveSessionInfo`.
 - `crates/ox-tui/src/session_info.rs`: `LiveSessionInfo::project_root`.
+- `crates/ox-tui/src/app/queue.rs`: `QueuedPrompt::title`, which titles the TUI's prompt.
 - `crates/ox-tui/src/slash/init.rs`: `InitCmd` and the file picker.
 - `crates/ox/src/driver/repl.rs`: resolves the project root and runs `/init` in the bare REPL.

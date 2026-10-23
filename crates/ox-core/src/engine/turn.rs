@@ -1422,7 +1422,7 @@ mod tests {
         #[tokio::test]
         async fn absorbs_stragglers_without_killing_turn() {
             for op in [
-                Op::Prompt("late".to_owned()),
+                Op::prompt("late"),
                 Op::Resolve {
                     id: "stale".to_owned(),
                     decision: ApprovalDecision::Approve,

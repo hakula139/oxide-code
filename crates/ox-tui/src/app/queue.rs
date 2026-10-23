@@ -9,31 +9,45 @@ use ox_core::command;
 /// A prompt the TUI holds: the line the user typed and the text the engine receives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QueuedPrompt {
-    /// The line as typed, which Esc and a failed turn hand back.
-    /// It unescapes to the text the chat shows.
+    /// The line as typed, or the `/init <file>` a picker choice stands for, which Esc and a
+    /// failed turn hand back.
+    /// A typed line unescapes to the text the chat shows.
     line: String,
-    /// The text the engine receives: the unescaped line, or the prompt a slash command built.
-    prompt: String,
+    /// The prompt a slash command built from `line`, which the engine receives in its place.
+    built: Option<String>,
 }
 
 impl QueuedPrompt {
     /// A prompt typed into the input, sent with its `//` escape removed.
     fn typed(line: String) -> Self {
-        let prompt = command::unescape_literal(&line).to_owned();
-        Self { line, prompt }
+        Self { line, built: None }
     }
 
-    /// A prompt a slash command built, headed in the chat by the command `line`.
+    /// A prompt a slash command built from the command `line`.
     pub(super) fn slash(line: String, prompt: String) -> Self {
-        Self { line, prompt }
+        Self {
+            line,
+            built: Some(prompt),
+        }
     }
 
     pub(super) fn line(&self) -> &str {
         &self.line
     }
 
+    /// The text the engine receives: the unescaped line, or the prompt a slash command built.
     pub(super) fn prompt(&self) -> &str {
-        &self.prompt
+        self.built.as_deref().unwrap_or_else(|| self.display())
+    }
+
+    /// Returns whether a slash command built the prompt from its line.
+    pub(super) fn is_slash(&self) -> bool {
+        self.built.is_some()
+    }
+
+    /// The session title for a prompt a slash command built: the line that ran it.
+    pub(super) fn title(&self) -> Option<&str> {
+        self.is_slash().then_some(self.line.as_str())
     }
 
     /// The text the chat shows for the prompt.
@@ -90,8 +104,8 @@ pub(super) enum FailedTurn {
     Ran,
     /// The prompt ran, but the queue waits for the user.
     Held,
-    /// The prompts came back to the queue, apart from the line returned for the empty input.
-    HandedBack(Option<String>),
+    /// The prompts came back to the queue, apart from the one returned for the empty input.
+    HandedBack(Option<QueuedPrompt>),
 }
 
 impl PromptQueue {
@@ -160,7 +174,7 @@ impl PromptQueue {
     pub(super) fn next_to_forward(&self) -> Option<String> {
         self.pending
             .get(self.forwarded)
-            .map(|queued| queued.prompt.clone())
+            .map(|queued| queued.prompt().to_owned())
     }
 
     /// Records that the in-flight turn now holds [`Self::next_to_forward`].
@@ -181,7 +195,7 @@ impl PromptQueue {
             && self
                 .pending
                 .front()
-                .is_some_and(|queued| queued.prompt == text)
+                .is_some_and(|queued| queued.prompt() == text)
             && let Some(queued) = self.pending.pop_front()
         {
             let display = queued.display().to_owned();
@@ -220,10 +234,10 @@ impl PromptQueue {
         }
     }
 
-    fn restore_active(&mut self, into_input: bool) -> Option<String> {
+    fn restore_active(&mut self, into_input: bool) -> Option<QueuedPrompt> {
         let prompt = self.active.take()?;
         if into_input {
-            return Some(prompt.line);
+            return Some(prompt);
         }
         self.pending.push_front(prompt);
         None
@@ -330,7 +344,10 @@ mod tests {
 
             let failed = queue.fail_turn(true);
 
-            assert_eq!(failed, FailedTurn::HandedBack(Some("active".to_owned())));
+            assert_eq!(
+                failed,
+                FailedTurn::HandedBack(Some(QueuedPrompt::typed("active".to_owned())))
+            );
             assert_eq!(*queue.pending(), ["d1"]);
         }
 
@@ -379,7 +396,9 @@ mod tests {
 
                 assert_eq!(
                     failed,
-                    FailedTurn::HandedBack(into_input.map(str::to_owned)),
+                    FailedTurn::HandedBack(
+                        into_input.map(|line| QueuedPrompt::typed(line.to_owned()))
+                    ),
                     "{label}"
                 );
                 assert_eq!(*queue.pending(), pending, "{label}");

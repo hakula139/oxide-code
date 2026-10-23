@@ -58,7 +58,7 @@ pub(super) async fn next_matching<T>(
 
 /// Events up to and including the terminal event of the prompt in flight.
 pub(super) async fn turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
-    let prompt = Op::Prompt(String::new());
+    let prompt = Op::prompt("");
     let mut seen = Vec::new();
     loop {
         let event = events.recv().await.expect("the engine stopped early");
@@ -90,7 +90,7 @@ pub(super) fn greeting_title() -> ResponseTemplate {
 }
 
 pub(super) async fn submit(handle: &mut EngineHandle, text: &str) -> Vec<Event> {
-    handle.ops.send(Op::Prompt(text.to_owned())).await.unwrap();
+    handle.ops.send(Op::prompt(text)).await.unwrap();
     turn_events(&mut handle.events).await
 }
 

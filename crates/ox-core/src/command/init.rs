@@ -23,7 +23,7 @@ pub fn no_file_sentence() -> String {
 /// [`resolve`] for a frontend without a picker, where a bare `/init` in a project with no
 /// instruction file errors naming both files.
 pub(super) fn parse(args: &str, root: &Path) -> Result<Op, String> {
-    resolve(args, root)?.map(Op::Prompt).ok_or_else(|| {
+    resolve(args, root)?.map(Op::prompt).ok_or_else(|| {
         let no_file = no_file_sentence();
         let [(first, _), (second, _)] = FILE_CHOICES;
         format!("{no_file} Run `/init {first}` or `/init {second}` to create one.")

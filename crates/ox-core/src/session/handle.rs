@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, warn};
 use uuid::Uuid;
 
-use super::actor::{self, SessionCmd};
+use super::actor::{self, Record, SessionCmd};
 use super::entry::{ArchiveState, CompactBoundary, CompactInfo, UsageRecord};
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
@@ -156,17 +156,25 @@ impl SessionHandle {
 
     /// Records a conversation message.
     pub(crate) async fn record_message(&self, msg: Message) -> RecordOutcome {
-        self.record_message_with_context(msg, None).await
+        self.record_prompt(msg, None, None).await
     }
 
-    /// [`Self::record_message`], with the prompt state `msg` is the first to carry.
-    pub(crate) async fn record_message_with_context(
+    /// Records the user prompt `msg`, with the prompt state it is the first to carry.
+    /// A fresh session takes `title` as its first-prompt title in place of `msg`'s text.
+    pub(crate) async fn record_prompt(
         &self,
         msg: Message,
         context: Option<SessionContext>,
+        title: Option<String>,
     ) -> RecordOutcome {
         let (ack, rx) = oneshot::channel();
-        self.request(SessionCmd::Record { msg, context, ack }, rx)
+        let record = Record {
+            msg,
+            context,
+            title,
+            ack,
+        };
+        self.request(SessionCmd::Record(record), rx)
             .await
             .unwrap_or_else(|| RecordOutcome {
                 checkpoint: None,
@@ -1974,9 +1982,10 @@ mod tests {
             "2026-01-01".clone_into(&mut prompt.seen.date);
 
             session
-                .record_message_with_context(
+                .record_prompt(
                     Message::user("Edit f.rs"),
                     Some(prompt.session_context()),
+                    None,
                 )
                 .await;
             session
@@ -2000,9 +2009,10 @@ mod tests {
 
             "2026-01-02".clone_into(&mut prompt.seen.date);
             session
-                .record_message_with_context(
+                .record_prompt(
                     Message::user("Rename main in f.rs"),
                     Some(prompt.session_context()),
+                    None,
                 )
                 .await;
             record_tool_turns(&session).await;

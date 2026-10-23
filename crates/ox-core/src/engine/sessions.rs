@@ -280,7 +280,7 @@ mod tests {
         mount_tool_call_once(server, id, "echo", &input.to_string()).await;
         mount_reply(server, "done").await;
         engine
-            .submit_prompt("echo it", &CapturingSink::default(), &mut inert_ops())
+            .submit_prompt("echo it", None, &CapturingSink::default(), &mut inert_ops())
             .await;
         engine.session_id().to_owned()
     }
@@ -486,7 +486,9 @@ mod tests {
                 }
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
-                engine.submit_prompt("before clear", &sink, &mut ops).await;
+                engine
+                    .submit_prompt("before clear", None, &sink, &mut ops)
+                    .await;
                 seed_full_read(&engine.file_tracker, &before);
                 let old_tracker = Arc::clone(&engine.file_tracker);
 
@@ -494,7 +496,9 @@ mod tests {
                 assert_eq!(tracked_paths(&engine), [] as [PathBuf; 0]);
                 seed_full_read(&old_tracker, &late);
                 let new_id = engine.session_id().to_owned();
-                engine.submit_prompt("after clear", &sink, &mut ops).await;
+                engine
+                    .submit_prompt("after clear", None, &sink, &mut ops)
+                    .await;
                 seed_full_read(&engine.file_tracker, &after);
                 assert_eq!(engine.finalize().await, None);
 
@@ -532,7 +536,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.generates_titles = true;
                 let (sink, mut events) = mpsc::unbounded_channel();
-                engine.submit_prompt("hello", &sink, &mut inert_ops()).await;
+                engine.submit_prompt("hello", None, &sink, &mut inert_ops()).await;
                 next_matching(&mut events, |event| {
                     matches!(event, Event::SessionTitleUpdated { .. }).then_some(())
                 })
@@ -603,7 +607,7 @@ mod tests {
                 let planned_id = engine.session_id().to_owned();
                 let mut ops = inert_ops();
                 engine
-                    .submit_prompt("plan it", &CapturingSink::default(), &mut ops)
+                    .submit_prompt("plan it", None, &CapturingSink::default(), &mut ops)
                     .await;
 
                 engine.clear(&CapturingSink::default()).await;
@@ -752,7 +756,7 @@ mod tests {
                 let recorded_id = engine.session.session_id().to_owned();
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
-                engine.submit_prompt("first", &sink, &mut ops).await;
+                engine.submit_prompt("first", None, &sink, &mut ops).await;
                 engine.clear(&sink).await;
 
                 let recorded_path = store.find_session_path(&recorded_id).unwrap();
@@ -761,7 +765,7 @@ mod tests {
                     .await;
                 assert_eq!(engine.prompt.user_context, SESSION_CONTEXT);
                 assert!(!engine.prompt_unrecorded);
-                engine.submit_prompt("second", &sink, &mut ops).await;
+                engine.submit_prompt("second", None, &sink, &mut ops).await;
 
                 let turns = request_bodies(&server).await;
                 assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
@@ -783,13 +787,15 @@ mod tests {
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
                 ops_tx.send(Op::Interrupt).await.unwrap();
-                engine.submit_prompt("write a story", &sink, &mut ops).await;
+                engine
+                    .submit_prompt("write a story", None, &sink, &mut ops)
+                    .await;
                 engine.clear(&sink).await;
                 let path = store.find_session_path(&interrupted_id).unwrap();
 
                 engine.resume(&sink, ResumeTarget::Path(path)).await;
                 engine
-                    .submit_prompt("what is 7 times 6?", &sink, &mut ops)
+                    .submit_prompt("what is 7 times 6?", None, &sink, &mut ops)
                     .await;
 
                 let history = sink.events().into_iter().find_map(|event| match event {

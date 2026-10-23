@@ -116,10 +116,12 @@ impl SessionState {
     }
 
     /// Builds entries for one message and returns the AI-title seed on first user text.
+    /// The first-prompt title is `title`, or else that text.
     /// `manual_title_set` skips both the first-prompt title and the AI-title seed.
     pub(super) fn queue_message_entries(
         &mut self,
         message: &Message,
+        title: Option<&str>,
         now: OffsetDateTime,
         manual_title_set: bool,
     ) -> (Vec<Entry>, Option<String>) {
@@ -134,7 +136,7 @@ impl SessionState {
             if !manual_title_set {
                 ai_title_seed = Some(text.to_owned());
                 entries.push(Entry::Title {
-                    title: fit_title(text),
+                    title: fit_title(title.unwrap_or(text)),
                     updated_at: now,
                 });
             }
@@ -387,7 +389,8 @@ mod tests {
             let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
-            let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
+            let (entries, _) =
+                state.queue_message_entries(&Message::user("first"), None, now, false);
             state.flush_entries(entries).unwrap();
             assert!(matches!(state.writer_status, WriterStatus::Active(_)));
 
@@ -406,7 +409,7 @@ mod tests {
             let now = OffsetDateTime::now_utc();
 
             let (entries, seed) =
-                state.queue_message_entries(&Message::user("Fix the auth bug"), now, false);
+                state.queue_message_entries(&Message::user("Fix the auth bug"), None, now, false);
 
             assert_eq!(entries.len(), 2, "title + message");
             assert!(matches!(
@@ -421,14 +424,35 @@ mod tests {
         }
 
         #[test]
+        fn titles_the_session_after_a_given_title_and_seeds_the_ai_title_with_the_text() {
+            let (_dir, store) = isolated_store();
+            let mut state = SessionState::fresh(store, "m", None);
+            let now = OffsetDateTime::now_utc();
+
+            let (entries, seed) = state.queue_message_entries(
+                &Message::user("Create AGENTS.md for this project."),
+                Some("/init AGENTS.md"),
+                now,
+                false,
+            );
+
+            assert!(matches!(
+                &entries[0],
+                Entry::Title { title, .. } if title == "/init AGENTS.md",
+            ));
+            assert_eq!(seed.as_deref(), Some("Create AGENTS.md for this project."));
+        }
+
+        #[test]
         fn subsequent_user_message_skips_title_and_chains_uuid() {
             let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
-            _ = state.queue_message_entries(&Message::user("first"), now, false);
+            _ = state.queue_message_entries(&Message::user("first"), None, now, false);
             let first_tip = state.last_message_uuid.unwrap();
 
-            let (entries, seed) = state.queue_message_entries(&Message::user("second"), now, false);
+            let (entries, seed) =
+                state.queue_message_entries(&Message::user("second"), None, now, false);
 
             assert_eq!(entries.len(), 1, "no second title");
             let Entry::Message {
@@ -453,7 +477,7 @@ mod tests {
                 content: vec![ContentBlock::tool_result("t", "out", false)],
             };
 
-            let (entries, seed) = state.queue_message_entries(&msg, now, false);
+            let (entries, seed) = state.queue_message_entries(&msg, None, now, false);
 
             assert_eq!(entries.len(), 1, "message only");
             assert!(matches!(&entries[0], Entry::Message { .. }));
@@ -471,7 +495,7 @@ mod tests {
             let now = OffsetDateTime::now_utc();
 
             let (entries, seed) =
-                state.queue_message_entries(&Message::assistant("hi"), now, false);
+                state.queue_message_entries(&Message::assistant("hi"), None, now, false);
 
             assert_eq!(entries.len(), 1);
             assert!(seed.is_none());
@@ -487,12 +511,13 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut state = SessionState::fresh(test_store(dir.path()), "m", None);
             let now = OffsetDateTime::now_utc();
-            _ = state.queue_message_entries(&Message::user("first"), now, false);
+            _ = state.queue_message_entries(&Message::user("first"), None, now, false);
             let checkpoint = state.checkpoint();
-            _ = state.queue_message_entries(&Message::user("refused"), now, false);
+            _ = state.queue_message_entries(&Message::user("refused"), None, now, false);
 
             let entry = state.rewind_entry(checkpoint, now);
-            let (entries, _) = state.queue_message_entries(&Message::user("next"), now, false);
+            let (entries, _) =
+                state.queue_message_entries(&Message::user("next"), None, now, false);
 
             let first = checkpoint.tip.expect("the first message is the tip");
             assert!(matches!(entry, Entry::Rewind { tip: Some(tip), .. } if tip == first));
@@ -509,10 +534,11 @@ mod tests {
             let mut state = SessionState::fresh(test_store(dir.path()), "m", None);
             let now = OffsetDateTime::now_utc();
             let checkpoint = state.checkpoint();
-            _ = state.queue_message_entries(&Message::user("refused"), now, false);
+            _ = state.queue_message_entries(&Message::user("refused"), None, now, false);
 
             _ = state.rewind_entry(checkpoint, now);
-            let (entries, seed) = state.queue_message_entries(&Message::user("next"), now, false);
+            let (entries, seed) =
+                state.queue_message_entries(&Message::user("next"), None, now, false);
 
             assert!(matches!(&entries[0], Entry::Title { title, .. } if title == "next"));
             assert_eq!(seed.as_deref(), Some("next"));
@@ -528,9 +554,10 @@ mod tests {
             let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
-            let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
+            let (rec, _) = state.queue_message_entries(&Message::user("first"), None, now, false);
             state.flush_entries(rec).unwrap();
-            let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
+            let (rec, _) =
+                state.queue_message_entries(&Message::assistant("reply"), None, now, false);
             state.flush_entries(rec).unwrap();
             assert_eq!(state.message_count(), 2);
 
@@ -616,9 +643,10 @@ mod tests {
             let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
-            let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
+            let (rec, _) = state.queue_message_entries(&Message::user("first"), None, now, false);
             state.flush_entries(rec).unwrap();
-            let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
+            let (rec, _) =
+                state.queue_message_entries(&Message::assistant("reply"), None, now, false);
             state.flush_entries(rec).unwrap();
 
             let (_, synthetic_uuid) =
@@ -640,7 +668,7 @@ mod tests {
             state.commit_compact(synthetic_uuid);
 
             assert!(state.first_user_prompt_seen);
-            let (_, seed) = state.queue_message_entries(&Message::user("after"), now, false);
+            let (_, seed) = state.queue_message_entries(&Message::user("after"), None, now, false);
             assert!(seed.is_none());
         }
 
@@ -669,7 +697,8 @@ mod tests {
             let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
-            let (entries, _) = state.queue_message_entries(&Message::user("hello"), now, false);
+            let (entries, _) =
+                state.queue_message_entries(&Message::user("hello"), None, now, false);
             state.flush_entries(entries).unwrap();
 
             let entries = state.finish_entries(Vec::new(), now);
@@ -696,7 +725,7 @@ mod tests {
             let tracker = FileTracker::default();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
-            let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now, false);
+            let (msgs, _) = state.queue_message_entries(&Message::user("hi"), None, now, false);
             state.flush_entries(msgs).unwrap();
 
             for name in ["/tmp/a", "/tmp/b", "/tmp/c"] {
@@ -725,7 +754,7 @@ mod tests {
             let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store, "m", None);
             let now = OffsetDateTime::now_utc();
-            let (entries, _) = state.queue_message_entries(&Message::user("hi"), now, false);
+            let (entries, _) = state.queue_message_entries(&Message::user("hi"), None, now, false);
             state.flush_entries(entries).unwrap();
             let _first = state.finish_entries(Vec::new(), now);
 
@@ -740,7 +769,8 @@ mod tests {
             let (_dir, store) = isolated_store();
             let mut original = SessionState::fresh(store.clone(), "m", None);
             let now = OffsetDateTime::now_utc();
-            let (entries, _) = original.queue_message_entries(&Message::user("hi"), now, false);
+            let (entries, _) =
+                original.queue_message_entries(&Message::user("hi"), None, now, false);
             original.flush_entries(entries).unwrap();
             let parent = original.last_message_uuid;
             let session_id = original.session_id.to_string();
@@ -764,7 +794,8 @@ mod tests {
             let elsewhere = tempfile::tempdir().unwrap();
             let now = OffsetDateTime::now_utc();
             let mut original = SessionState::fresh(test_store(source.path()), "m", None);
-            let (entries, _) = original.queue_message_entries(&Message::user("first"), now, false);
+            let (entries, _) =
+                original.queue_message_entries(&Message::user("first"), None, now, false);
             original.flush_entries(entries).unwrap();
             let session_id = original.session_id.to_string();
             let copied = elsewhere.path().join("copied.jsonl");
@@ -779,14 +810,15 @@ mod tests {
                 1,
                 true,
             );
-            let (entries, _) = state.queue_message_entries(&Message::user("second"), now, false);
+            let (entries, _) =
+                state.queue_message_entries(&Message::user("second"), None, now, false);
             let err = state.flush_entries(entries).unwrap_err();
             assert_eq!(
                 err.to_string(),
                 format!("failed to write {}", copied.display())
             );
             let (entries, _) =
-                state.queue_message_entries(&Message::assistant("third"), now, false);
+                state.queue_message_entries(&Message::assistant("third"), None, now, false);
             state.flush_entries(entries).unwrap();
 
             let data = load_session_data_from_path(&copied).unwrap();
@@ -817,7 +849,8 @@ mod tests {
 
             let project_dir = test_project_dir(dir.path());
             std::fs::remove_dir_all(&project_dir).unwrap();
-            let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
+            let (entries, _) =
+                state.queue_message_entries(&Message::user("first"), None, now, false);
             let err = state.flush_entries(entries).unwrap_err();
 
             let WriterStatus::Pending {
@@ -836,7 +869,7 @@ mod tests {
 
             std::fs::create_dir_all(&project_dir).unwrap();
             let (entries, _) =
-                state.queue_message_entries(&Message::assistant("second"), now, false);
+                state.queue_message_entries(&Message::assistant("second"), None, now, false);
             state.flush_entries(entries).unwrap();
 
             let data =
@@ -856,7 +889,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let now = OffsetDateTime::now_utc();
             let mut original = SessionState::fresh(test_store(dir.path()), "m", None);
-            let (entries, _) = original.queue_message_entries(&Message::user("first"), now, false);
+            let (entries, _) =
+                original.queue_message_entries(&Message::user("first"), None, now, false);
             original.flush_entries(entries).unwrap();
             let session_id = original.session_id.to_string();
             let path = test_session_file(dir.path(), &session_id);
@@ -871,14 +905,14 @@ mod tests {
                 true,
             );
             let huge = Message::user("x".repeat(MAX_UNWRITTEN_BYTES));
-            let (entries, _) = state.queue_message_entries(&huge, now, false);
+            let (entries, _) = state.queue_message_entries(&huge, None, now, false);
             let err = state.flush_entries(entries).unwrap_err();
             assert!(
                 format!("{err:#}").contains(&persistence_stopped()),
                 "got: {err:#}"
             );
             let (entries, _) =
-                state.queue_message_entries(&Message::assistant("after"), now, false);
+                state.queue_message_entries(&Message::assistant("after"), None, now, false);
             let err = state.flush_entries(entries).unwrap_err();
 
             assert_eq!(err.to_string(), persistence_stopped());

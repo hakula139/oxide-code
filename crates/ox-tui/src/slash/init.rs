@@ -111,9 +111,10 @@ impl InitPicker {
     }
 
     fn submit(&self) -> ModalKey {
-        let prompt = init::create_prompt(&self.root, self.list.selected().name);
+        let file = self.list.selected().name;
+        let prompt = init::create_prompt(&self.root, file);
         ModalKey::Submitted(ModalAction::Dispatch(Action::SlashPrompt {
-            line: format!("/{}", InitCmd.name()),
+            line: format!("/{} {file}", InitCmd.name()),
             prompt,
         }))
     }
@@ -147,7 +148,7 @@ mod tests {
     /// The action the picker submits to start the turn creating `file` at `root`.
     fn create_action(root: &Path, file: &str) -> Action {
         Action::SlashPrompt {
-            line: "/init".to_owned(),
+            line: format!("/init {file}"),
             prompt: init::create_prompt(root, file),
         }
     }

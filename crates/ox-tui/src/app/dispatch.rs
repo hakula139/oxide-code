@@ -265,7 +265,7 @@ impl App {
                 self.set_status(Status::Archiving);
             }
             Op::SetMode(mode) => self.requested_mode = *mode,
-            Op::Prompt(_)
+            Op::Prompt { .. }
             | Op::Queue(_)
             | Op::Resolve { .. }
             | Op::SetModel(_)
@@ -397,10 +397,13 @@ impl App {
     /// Starts a turn running `prompt` as the active prompt, then hands it the queued prompts so
     /// they splice in at its round boundaries.
     pub(super) fn start_turn(&mut self, prompt: QueuedPrompt) {
-        let text = prompt.prompt().to_owned();
+        let op = Op::Prompt {
+            text: prompt.prompt().to_owned(),
+            title: prompt.title().map(str::to_owned),
+        };
         self.queue.set_active(prompt);
         self.set_status(Status::Streaming);
-        self.send_op(Op::Prompt(text));
+        self.send_op(op);
         self.forward_queued_prompts();
     }
 
@@ -836,7 +839,7 @@ mod tests {
             assert_eq!(app.chat.entry_count(), 1);
             assert_eq!(app.status, Status::Streaming);
             let forwarded = rx.try_recv().ok().unwrap();
-            assert!(matches!(forwarded, Op::Prompt(s) if s == "hi"));
+            assert!(matches!(forwarded, Op::Prompt { text, title: None } if text == "hi"));
         }
 
         #[test]
@@ -1264,7 +1267,7 @@ mod tests {
             assert_eq!(app.status, Status::Streaming);
             assert!(!app.should_quit);
             let forwarded = rx.try_recv().expect("forwarded action");
-            assert!(matches!(forwarded, Op::Prompt(s) if s == "hello"));
+            assert!(matches!(forwarded, Op::Prompt { text, title: None } if text == "hello"));
         }
 
         #[test]
@@ -1317,7 +1320,7 @@ mod tests {
             let forwarded = rx.try_recv().expect("forwarded action");
             assert!(matches!(
                 forwarded,
-                Op::Prompt(s) if s == "/etc/hosts",
+                Op::Prompt { text, title: None } if text == "/etc/hosts",
             ));
             assert_eq!(
                 app.queue.active().map(QueuedPrompt::line),
@@ -1509,8 +1512,10 @@ mod tests {
             assert!(
                 matches!(
                     &forwarded,
-                    Op::Prompt(body)
-                        if body.contains("- `AGENTS.md`") && body.contains("unified diff")
+                    Op::Prompt { text, title: Some(title) }
+                        if title == "/init"
+                            && text.contains("- `AGENTS.md`")
+                            && text.contains("unified diff")
                 ),
                 "expected the update prompt, got {forwarded:?}",
             );
@@ -1538,12 +1543,16 @@ mod tests {
             assert_eq!(app.status, Status::Streaming);
             assert_eq!(
                 app.queue.active().map(QueuedPrompt::line),
-                Some("/init"),
+                Some("/init CLAUDE.md"),
                 "the line auto-compaction replays"
             );
             let forwarded = rx.try_recv().expect("create prompt forwarded");
             assert!(
-                matches!(&forwarded, Op::Prompt(body) if body.contains("create `CLAUDE.md`")),
+                matches!(
+                    &forwarded,
+                    Op::Prompt { text, title: Some(title) }
+                        if title == "/init CLAUDE.md" && text.contains("create `CLAUDE.md`")
+                ),
                 "expected the create prompt for the second file, got {forwarded:?}",
             );
         }
@@ -1800,7 +1809,7 @@ mod tests {
                 assert_eq!(app.status, Status::Streaming, "{command}");
                 assert_eq!(
                     rx.try_recv().ok(),
-                    Some(Op::Prompt("after the switch".to_owned())),
+                    Some(Op::prompt("after the switch")),
                     "{command}",
                 );
                 let text = rendered_text(&mut app, 80, 12);
@@ -2078,7 +2087,7 @@ mod tests {
             assert_eq!(
                 forwarded(),
                 [
-                    Op::Prompt("active".to_owned()),
+                    Op::prompt("active"),
                     Op::Queue("held".to_owned()),
                     Op::Interrupt,
                 ],
@@ -2088,7 +2097,7 @@ mod tests {
 
             assert_eq!(
                 forwarded(),
-                [Op::Prompt("held".to_owned()), Op::Queue("new".to_owned())],
+                [Op::prompt("held"), Op::Queue("new".to_owned())],
             );
             assert_eq!(*app.queue.pending(), ["new"],);
         }
@@ -2105,7 +2114,7 @@ mod tests {
             assert_eq!(
                 forwarded(),
                 [
-                    Op::Prompt("active".to_owned()),
+                    Op::prompt("active"),
                     Op::Queue("/etc/hosts".to_owned()),
                     Op::Queue("/tmp".to_owned()),
                 ],
@@ -2124,7 +2133,7 @@ mod tests {
 
             assert_eq!(
                 forwarded(),
-                [Op::Prompt("/tmp".to_owned()), Op::Queue("new".to_owned())],
+                [Op::prompt("/tmp"), Op::Queue("new".to_owned())],
             );
             assert_eq!(app.queue.active().map(QueuedPrompt::line), Some("//tmp"));
         }

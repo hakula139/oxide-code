@@ -109,7 +109,7 @@ where
     O: Write + Send,
     E: Write + Send,
 {
-    let prompt = Op::Prompt(command::unescape_literal(prompt).to_owned());
+    let prompt = Op::prompt(command::unescape_literal(prompt));
     // A send fails only once the engine has stopped, which `render_op` then reports.
     _ = handle.ops.send(prompt.clone()).await;
     let mut approver = Unattended;
