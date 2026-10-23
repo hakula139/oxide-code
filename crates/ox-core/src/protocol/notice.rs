@@ -52,7 +52,7 @@ pub(crate) fn config_changed(
         ConfigPick::Effort(pick) => {
             return match after.effort {
                 Some(effort) => format!("Effort set to {effort}"),
-                None => pick.unapplied_notice(),
+                None => effort_unapplied(pick),
             };
         }
     };
@@ -64,7 +64,7 @@ pub(crate) fn config_changed(
     };
     let named = format!("{action} {} ({})", model.display_name(), model.id());
     let (head, effort) = match (requested_effort, before.effort, after.effort) {
-        (Some(req), _, None) => (named, Some(req.unapplied_notice())),
+        (Some(req), _, None) => (named, Some(effort_unapplied(req))),
         (None, None, None) => (named, None),
         (None, Some(_), None) => (
             named,
@@ -85,6 +85,11 @@ pub(crate) fn config_changed(
         (None, Some(compaction)) => format!("{head}. {compaction}."),
         (Some(effort), Some(compaction)) => format!("{head}. {effort}. {compaction}."),
     }
+}
+
+/// Notes that the model has no effort levels, so the `requested` effort did not apply.
+fn effort_unapplied(requested: Effort) -> String {
+    format!("Effort unchanged (model has no effort levels, asked for {requested})")
 }
 
 /// The message that reports a session-writer failure.

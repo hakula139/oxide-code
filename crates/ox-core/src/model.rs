@@ -1,9 +1,9 @@
-//! Catalog of the supported Claude models, matched by exact id, and the request parameters each
-//! model takes: [`Effort`] and [`PromptCacheTtl`].
+//! Catalog of the supported Claude models, matched by exact ID, and the request parameters
+//! resolved or priced per model: [`Effort`] and [`PromptCacheTtl`].
 //!
 //! Every row shares one request surface: adaptive thinking, the full `output_config.effort`
 //! ladder, `clear_thinking` context management, a 1M-token context window, and 128K output.
-//! Other ids (custom gateway names, retired models) pass through verbatim with no known
+//! Other IDs (custom gateway names, retired models) pass through verbatim with no known
 //! capabilities, so their requests carry none of those opt-ins and auto-compaction stays off.
 
 mod pricing;
@@ -46,7 +46,7 @@ pub(crate) enum Family {
 }
 
 impl Family {
-    /// The family's name as it appears in model ids.
+    /// The family's name as it appears in model IDs.
     pub(crate) const fn id_token(self) -> &'static str {
         match self {
             Self::Fable => "fable",
@@ -61,7 +61,7 @@ const CONTEXT_WINDOW: u32 = 1_000_000;
 /// Half the 128K output ceiling every catalog model shares. `effort` steers thinking depth, so
 /// this only bounds runaway output.
 const MAX_TOKENS: u32 = 64_000;
-/// Fits the lower output ceilings of the older or smaller models an unknown id may name.
+/// Fits the lower output ceilings of the older or smaller models an unknown ID may name.
 const UNKNOWN_MODEL_MAX_TOKENS: u32 = 16_000;
 
 // ── MODELS ──
@@ -111,7 +111,7 @@ fn lookup(id: &str) -> Option<&'static ModelInfo> {
 }
 
 /// The catalog row to suggest for an unknown `id` that carries a `[1m]` suffix or starts with
-/// `claude-`: the row the id names once the suffix is dropped, else the row of the family it names.
+/// `claude-`: the row the ID names once the suffix is dropped, else the row of the family it names.
 pub(crate) fn replacement_for(id: &str) -> Option<&'static ModelInfo> {
     let id = id.to_ascii_lowercase();
     let base = match id.strip_suffix("[1m]") {
@@ -132,14 +132,14 @@ pub(crate) fn lacks_progress_updates(id: &str) -> bool {
     lookup(id).is_some_and(|info| !info.progress_updates)
 }
 
-/// The catalog rates for `id`, or `None` for an id outside the catalog.
+/// The catalog rates for `id`, or `None` for an ID outside the catalog.
 pub(crate) fn cost_rates(id: &str) -> Option<TokenCostRates> {
     lookup(id).map(|info| info.cost_rates)
 }
 
 // ── ModelSpec ──
 
-/// A model id resolved against [`MODELS`] once. Every model-derived request field (effort,
+/// A model ID resolved against [`MODELS`] once. Every model-derived request field (effort,
 /// thinking, betas, context management) and every label reads from here, so a swap re-derives
 /// them all together.
 #[derive(Debug, Clone)]
@@ -155,24 +155,24 @@ impl ModelSpec {
         Self { id, info }
     }
 
-    /// The id sent verbatim as the request's `model`.
+    /// The ID sent verbatim as the request's `model`.
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    /// The catalog row, `None` for ids outside the catalog.
+    /// The catalog row, `None` for IDs outside the catalog.
     pub fn info(&self) -> Option<&'static ModelInfo> {
         self.info
     }
 
-    /// Effort to send: the user's `pick`, else the model's default. `None` for unknown ids, whose
+    /// Effort to send: the user's `pick`, else the model's default. `None` for unknown IDs, whose
     /// upstream may reject `output_config.effort`.
     pub fn resolve_effort(&self, pick: Option<Effort>) -> Option<Effort> {
         self.info.map(|info| pick.unwrap_or(info.default_effort))
     }
 
     /// Output cap to send: the user's `pick`, else 64K for catalog models and 16K for unknown
-    /// ids, whose models may cap output lower.
+    /// IDs, whose models may cap output lower.
     pub fn resolve_max_tokens(&self, pick: Option<u32>) -> u32 {
         pick.unwrap_or(self.info.map_or(UNKNOWN_MODEL_MAX_TOKENS, |_| MAX_TOKENS))
     }
@@ -184,12 +184,12 @@ impl ModelSpec {
         self.info.map(|_| CONTEXT_WINDOW)
     }
 
-    /// The catalog name, or the raw id for an unknown model.
+    /// The catalog name, or the raw ID for an unknown model.
     pub fn display_name(&self) -> &str {
         self.info.map_or(&self.id, |info| info.display_name)
     }
 
-    /// The status bar label: the catalog name without its `Claude ` prefix, or the raw id for an
+    /// The status bar label: the catalog name without its `Claude ` prefix, or the raw ID for an
     /// unknown model.
     pub fn short_display_name(&self) -> &str {
         self.info.map_or(&self.id, |info| {
@@ -199,7 +199,7 @@ impl ModelSpec {
         })
     }
 
-    /// Warning for an id outside the catalog, naming what its requests go without and the
+    /// Warning for an ID outside the catalog, naming what its requests go without and the
     /// [`replacement_for`] suggestion. `None` for catalog models.
     pub fn unsupported_notice(&self) -> Option<String> {
         if self.info.is_some() {
@@ -244,7 +244,7 @@ impl<'de> Deserialize<'de> for ModelSpec {
 
 // ── ResolvedModelId ──
 
-/// A model id a frontend picked, such as the `/model` resolver's match. The engine accepts any id,
+/// A model ID a frontend picked, such as the `/model` resolver's match. The engine accepts any ID,
 /// since [`ModelSpec::resolve`] keeps an unknown one without catalog info.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -297,11 +297,6 @@ impl Effort {
             Self::Max => "Maximum thinking",
         }
     }
-
-    /// Notes that the model has no effort levels, so this requested effort did not apply.
-    pub fn unapplied_notice(self) -> String {
-        format!("Effort unchanged (model has no effort levels, asked for {self})")
-    }
 }
 
 impl fmt::Display for Effort {
@@ -337,14 +332,6 @@ pub enum PromptCacheTtl {
 }
 
 impl PromptCacheTtl {
-    /// `None` for the server default (5 m).
-    pub(crate) const fn wire(self) -> Option<&'static str> {
-        match self {
-            Self::FiveMin => None,
-            Self::OneHour => Some("1h"),
-        }
-    }
-
     const fn as_str(self) -> &'static str {
         match self {
             Self::FiveMin => "5m",
@@ -691,16 +678,6 @@ mod tests {
                 assert_eq!(serde_json::to_value(variant).unwrap(), token);
                 assert_eq!(variant.to_string(), token);
                 assert_eq!(token.parse::<PromptCacheTtl>().unwrap(), variant);
-            }
-        }
-
-        mod wire {
-            use super::*;
-
-            #[test]
-            fn omits_the_five_minute_server_default() {
-                assert_eq!(PromptCacheTtl::FiveMin.wire(), None);
-                assert_eq!(PromptCacheTtl::OneHour.wire(), Some("1h"));
             }
         }
 

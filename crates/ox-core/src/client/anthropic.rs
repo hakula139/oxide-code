@@ -41,7 +41,7 @@ use crate::prompt::SystemPrompt;
 use crate::tool::ToolDefinition;
 use crate::util::tls::Trust;
 use accumulator::ReplySpec;
-use betas::{compute_betas, conversation_cache_control, static_prefix_cache_control};
+use betas::compute_betas;
 use sse::spawn_stream;
 use transport::{MessagesRequest, messages_url};
 use wire::{
@@ -240,7 +240,7 @@ impl Client {
         tools: &[ToolDefinition],
         breakpoint: Option<CacheControl>,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        let prefix_cache = static_prefix_cache_control(self.is_first_party, self.prompt_cache_ttl);
+        let prefix_cache = CacheControl::static_prefix(self.is_first_party, self.prompt_cache_ttl);
         let thinking = ThinkingConfig::for_model(&self.model, self.show_thinking);
         let request = self.prepare(RequestSpec {
             kind: RequestKind::Agentic,
@@ -283,7 +283,7 @@ impl Wire for Client {
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        let breakpoint = conversation_cache_control(self.prompt_cache_ttl);
+        let breakpoint = CacheControl::conversation(self.prompt_cache_ttl);
         self.stream(messages, system, user_context, tools, Some(breakpoint))
     }
 

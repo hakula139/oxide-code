@@ -1,9 +1,9 @@
 //! Per-request `anthropic-beta` header computation.
 
 use super::RequestKind;
-use super::wire::{CacheControl, ThinkingConfig, ThinkingDisplay};
+use super::wire::{ThinkingConfig, ThinkingDisplay};
 use crate::config::auth::AuthKind;
-use crate::model::{Family, ModelSpec, PromptCacheTtl};
+use crate::model::{Family, ModelSpec};
 
 const ADVISOR_TOOL_BETA_HEADER: &str = "advisor-tool-2026-03-01";
 const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
@@ -73,27 +73,6 @@ pub(super) fn compute_betas(
     }
 
     out
-}
-
-/// `cache_control` for the static system prefix. `scope: "global"` shares the cache across
-/// sessions, and Claude Code sends it only to the Anthropic API.
-pub(super) fn static_prefix_cache_control(
-    is_first_party: bool,
-    ttl: PromptCacheTtl,
-) -> CacheControl {
-    CacheControl {
-        scope: is_first_party.then_some("global"),
-        ..conversation_cache_control(ttl)
-    }
-}
-
-/// `cache_control` for the breakpoint on the conversation's final block. The transcript is
-/// session-specific, so it never carries `scope`.
-pub(super) fn conversation_cache_control(ttl: PromptCacheTtl) -> CacheControl {
-    CacheControl {
-        scope: None,
-        ttl: ttl.wire(),
-    }
 }
 
 #[cfg(test)]
@@ -250,58 +229,6 @@ mod tests {
             assert_eq!(
                 compute_betas(&gateway, None, AuthKind::ApiKey, SideQuery),
                 vec![CLAUDE_CODE_BETA_HEADER],
-            );
-        }
-    }
-
-    mod static_prefix_cache_control {
-        use super::*;
-
-        #[test]
-        fn emits_global_scope_on_first_party_only() {
-            let first = static_prefix_cache_control(true, PromptCacheTtl::OneHour);
-            assert_eq!(
-                serde_json::to_string(&first).unwrap(),
-                r#"{"type":"ephemeral","scope":"global","ttl":"1h"}"#,
-            );
-
-            let third = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
-            assert_eq!(
-                serde_json::to_string(&third).unwrap(),
-                r#"{"type":"ephemeral","ttl":"1h"}"#,
-            );
-        }
-
-        #[test]
-        fn ttl_matches_config() {
-            let one_hour = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
-            assert_eq!(
-                serde_json::to_string(&one_hour).unwrap(),
-                r#"{"type":"ephemeral","ttl":"1h"}"#,
-            );
-
-            let five_min = static_prefix_cache_control(false, PromptCacheTtl::FiveMin);
-            assert_eq!(
-                serde_json::to_string(&five_min).unwrap(),
-                r#"{"type":"ephemeral"}"#,
-            );
-        }
-    }
-
-    mod conversation_cache_control {
-        use super::*;
-
-        #[test]
-        fn carries_ttl_without_scope() {
-            assert_eq!(
-                serde_json::to_string(&conversation_cache_control(PromptCacheTtl::OneHour))
-                    .unwrap(),
-                r#"{"type":"ephemeral","ttl":"1h"}"#,
-            );
-            assert_eq!(
-                serde_json::to_string(&conversation_cache_control(PromptCacheTtl::FiveMin))
-                    .unwrap(),
-                r#"{"type":"ephemeral"}"#,
             );
         }
     }
