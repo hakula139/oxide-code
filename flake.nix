@@ -20,11 +20,6 @@
 
     flake-utils.url = "github:numtide/flake-utils";
 
-    home-manager = {
-      url = "github:nix-community/home-manager/release-26.05";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -32,6 +27,11 @@
 
     git-hooks-nix = {
       url = "github:cachix/git-hooks.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    home-manager = {
+      url = "github:nix-community/home-manager/release-26.05";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -44,9 +44,9 @@
       self,
       nixpkgs,
       flake-utils,
-      home-manager,
       rust-overlay,
       git-hooks-nix,
+      home-manager,
       ...
     }:
     let
@@ -57,13 +57,13 @@
         "x86_64-linux"
       ];
 
-      # Builds ox against pkgs with the toolchain rust-toolchain.toml pins.
+      toolchainFor =
+        pkgs: (rust-overlay.lib.mkRustBin { } pkgs).fromRustupToolchainFile ./rust-toolchain.toml;
+
       mkOxideCode =
         pkgs:
         let
-          toolchain =
-            (rust-overlay.lib.mkRustBin { } pkgs.buildPackages).fromRustupToolchainFile
-              ./rust-toolchain.toml;
+          toolchain = toolchainFor pkgs.buildPackages;
         in
         pkgs.callPackage ./nix/package.nix {
           rustPlatform = pkgs.makeRustPlatform {
@@ -71,6 +71,9 @@
             rustc = toolchain;
           };
         };
+
+      # A key lets the module system deduplicate the module when it is imported twice.
+      homeModuleKey = "${self}/flake.nix#homeModules.default";
     in
     # ----------------------------------------------------------------------------------------------
     # Overlay and Home Manager Module
@@ -80,7 +83,8 @@
 
       homeModules.default = {
         _class = "homeManager";
-        _file = "${self}/flake.nix#homeModules.default";
+        _file = homeModuleKey;
+        key = homeModuleKey;
         imports = [ (import ./nix/home-manager.nix { inherit mkOxideCode; }) ];
       };
     }
@@ -89,9 +93,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
-        rustBin = rust-overlay.lib.mkRustBin { } pkgs;
-        rustToolchain = rustBin.fromRustupToolchainFile ./rust-toolchain.toml;
-
+        rustToolchain = toolchainFor pkgs;
         rustDevToolchain = rustToolchain.override (prev: {
           extensions = prev.extensions ++ [
             "rust-analyzer"
@@ -127,8 +129,8 @@
           };
         };
 
-        # These hooks run the tools pinned in node_modules, which the Nix sandbox lacks. The flake
-        # check leaves them to CI's Lint job.
+        # These hooks run the tools pinned in node_modules, which the Nix sandbox lacks.
+        # The flake check leaves them to CI's Lint job.
         nodeHook =
           name: cmd:
           pkgs.lib.getExe (
@@ -207,8 +209,9 @@
 
           # git-hooks.nix stores a hooks path relative to the main checkout, which linked worktrees
           # can't resolve (cachix/git-hooks.nix#688), so unset it to fall back to the shared hooks
-          # directory. The lock keeps a concurrent load from setting it while `pre-commit install`
-          # runs, since pre-commit refuses to install with the path set.
+          # directory.
+          # The lock keeps a concurrent load from setting it while `pre-commit install` runs,
+          # since pre-commit refuses to install with the path set.
           shellHook = ''
             if common=$(${git} rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
               (
@@ -238,6 +241,10 @@
             inherit home-manager pkgs;
             homeModule = self.homeModules.default;
           };
+
+          overlay =
+            assert (pkgs.extend self.overlays.default).oxide-code.drvPath == oxide-code.drvPath;
+            pkgs.emptyFile;
         };
 
         # ------------------------------------------------------------------------------------------

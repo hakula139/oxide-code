@@ -38,7 +38,7 @@ in
       default = { };
       example = lib.literalExpression ''
         {
-          permission.mode = "yolo";
+          client.effort = "high";
           tui = {
             show_thinking = true;
             status_line = [ "model-with-effort" "context-used" "run-state" ];
@@ -55,8 +55,10 @@ in
     context = lib.mkOption {
       type = lib.types.either lib.types.lines lib.types.path;
       default = "";
+      example = lib.literalExpression "./AGENTS.md";
       description = ''
-        User instructions written to {file}`$XDG_CONFIG_HOME/ox/AGENTS.md`, inline or from a file.
+        User instructions for {file}`$XDG_CONFIG_HOME/ox/AGENTS.md`: inline text, or a Nix path or
+        package linked as the file. A string is always inline text.
       '';
     };
   };
@@ -83,7 +85,7 @@ in
       };
 
       "ox/AGENTS.md" = lib.mkIf (cfg.context != "") (
-        if lib.isPath cfg.context then { source = cfg.context; } else { text = cfg.context; }
+        if builtins.isString cfg.context then { text = cfg.context; } else { source = cfg.context; }
       );
     };
   };

@@ -96,12 +96,14 @@ inputs.oxide-code = {
   url = "github:hakula139/oxide-code";
   inputs = {
     nixpkgs.follows = "nixpkgs";
-    rust-overlay.follows = "rust-overlay";
+    flake-utils.follows = "flake-utils";
     git-hooks-nix.follows = "git-hooks-nix";
     home-manager.follows = "home-manager";
   };
 };
 ```
+
+Leave `rust-overlay` unfollowed, since the flake's lock carries a revision that knows the Rust release `rust-toolchain.toml` pins, which an older lock of yours may lack.
 
 Then import the module in your Home Manager configuration:
 
@@ -110,21 +112,21 @@ imports = [ inputs.oxide-code.homeModules.default ];
 
 programs.oxide-code = {
   enable = true;
-  settings.permission.mode = "yolo";
-  context = "Prefer small commits.";
+  settings.tui.show_thinking = true;
+  context = ./AGENTS.md;
 };
 ```
 
-| Option     | Default                           | Purpose                                                                    |
-| ---------- | --------------------------------- | -------------------------------------------------------------------------- |
-| `enable`   | `false`                           | Install and configure `ox`                                                 |
-| `package`  | Built from this flake with `pkgs` | Package to install, or `null` to manage only configuration                 |
-| `settings` | `{ }`                             | TOML configuration written to `ox/config.toml` when nonempty               |
-| `context`  | `""`                              | Inline instructions or a file path written to `ox/AGENTS.md` when nonempty |
+| Option     | Default                           | Purpose                                                                                                     |
+| ---------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `enable`   | `false`                           | Install and configure `ox`                                                                                  |
+| `package`  | Built from this flake with `pkgs` | Package to install, or `null` to manage only the configuration                                              |
+| `settings` | `{ }`                             | TOML configuration written to `ox/config.toml` when nonempty                                                |
+| `context`  | `""`                              | User instructions for `ox/AGENTS.md`: inline text (any string), or a Nix path or package linked as the file |
 
-File paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. A tag in the input URL pins the module together with the binary. The module owns `config.toml`, so keep local overrides in `~/.config/ox/config.d/`, where they take precedence.
+File paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. A tag in the input URL pins the module together with the binary. The module owns `config.toml`, so keep local overrides in `ox/config.d/`, where they take precedence.
 
-The module builds its default package without an overlay. To wrap or patch the package, apply `inputs.oxide-code.overlays.default` to your package set and set `programs.oxide-code.package` to your wrapper around `pkgs.oxide-code`.
+The default `package` is built from the flake directly, so an override applied to `pkgs.oxide-code` does not reach it. To wrap or patch the package, apply `inputs.oxide-code.overlays.default` to your package set and set `programs.oxide-code.package` to your wrapper around `pkgs.oxide-code`.
 
 ## Verify Your Installation
 
@@ -154,6 +156,7 @@ This prints the version string. If you see `command not found`, the binary is no
 | Homebrew        | `brew uninstall oxide-code && brew untap hakula139/oxide-code`                                     |
 | Cargo           | `cargo uninstall ox`, or `cargo uninstall oxide-code` if `cargo install --list` lists `oxide-code` |
 | Nix profile     | `nix profile remove oxide-code`                                                                    |
+| Home Manager    | Remove the module import or set `programs.oxide-code.enable = false`, then switch                  |
 
 To also remove session data and config:
 

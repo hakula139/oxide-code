@@ -11,10 +11,8 @@
 let
   inherit (pkgs) lib;
 
-  homeDirectory = if pkgs.stdenv.hostPlatform.isDarwin then "/Users/ox-test" else "/home/ox-test";
-
-  # Mirrors Home Manager's modules/default.nix without its assertion check, which throws before a
-  # test can read the failed messages.
+  # Mirrors Home Manager's modules/default.nix with the caller's pkgs, as useGlobalPkgs does,
+  # and without its assertion check, which throws before a test can read the failed messages.
   evalHome =
     module:
     let
@@ -33,7 +31,7 @@ let
           homeModule
           {
             home = {
-              inherit homeDirectory;
+              homeDirectory = "/home/ox-test";
               username = "ox-test";
               stateVersion = "26.05";
             };
@@ -44,14 +42,10 @@ let
 
   oxTargets = hm: builtins.filter (lib.hasPrefix "ox/") (builtins.attrNames hm.xdg.configFile);
   failedAssertions = hm: map (a: a.message) (builtins.filter (a: !a.assertion) hm.assertions);
-
-  expectEqual =
-    name: actual: expected:
-    lib.assertMsg (
-      actual == expected
-    ) "${name}: expected ${builtins.toJSON expected}, got ${builtins.toJSON actual}";
+  complaints = hm: failedAssertions hm ++ hm.warnings;
 
   stub = pkgs.writeShellScriptBin "ox" "exit 0";
+  contextPackage = pkgs.writeText "ox-test-AGENTS.md" "From a package.\n";
 
   # ------------------------------------------------------------------------------------------------
   # Cases
@@ -83,6 +77,14 @@ let
     };
   };
 
+  contextFromPackage = evalHome {
+    programs.oxide-code = {
+      enable = true;
+      package = stub;
+      context = contextPackage;
+    };
+  };
+
   noPackage = evalHome {
     programs.oxide-code = {
       enable = true;
@@ -100,26 +102,89 @@ let
       settings.client.api_key = "sk-test";
     };
   };
+
+  # ------------------------------------------------------------------------------------------------
+  # Evaluation Tests
+  # ------------------------------------------------------------------------------------------------
+  failures = lib.runTests {
+    testComplaints = {
+      expr = lib.mapAttrs (_: complaints) {
+        inherit
+          full
+          defaults
+          contextFile
+          contextFromPackage
+          noPackage
+          disabled
+          ;
+      };
+
+      expected = {
+        full = [ ];
+        defaults = [ ];
+        contextFile = [ ];
+        contextFromPackage = [ ];
+        noPackage = [ ];
+        disabled = [ ];
+      };
+    };
+
+    testFullTargets = {
+      expr = oxTargets full;
+      expected = [
+        "ox/AGENTS.md"
+        "ox/config.toml"
+      ];
+    };
+
+    testFullInstallsThePackage = {
+      expr = builtins.elem stub full.home.packages;
+      expected = true;
+    };
+
+    testDefaultsWriteNothing = {
+      expr = oxTargets defaults;
+      expected = [ ];
+    };
+
+    testDefaultsBuildTheFlakePackage = {
+      expr = defaults.programs.oxide-code.package.pname;
+      expected = "oxide-code";
+    };
+
+    testContextFromPackageLinksIt = {
+      expr = toString contextFromPackage.xdg.configFile."ox/AGENTS.md".source;
+      expected = toString contextPackage;
+    };
+
+    testNoPackageStillWritesTheConfig = {
+      expr = oxTargets noPackage;
+      expected = [ "ox/config.toml" ];
+    };
+
+    testNoPackageInstallsNothing = {
+      expr = map toString noPackage.home.packages;
+      expected = map toString (evalHome { }).home.packages;
+    };
+
+    testDisabledWritesNothing = {
+      expr = oxTargets disabled;
+      expected = [ ];
+    };
+
+    testApiKeyFails = {
+      expr = failedAssertions apiKey;
+      expected = [
+        (
+          "programs.oxide-code.settings.client.api_key would write the key into the Nix store, "
+          + "which every local user can read. Export ANTHROPIC_API_KEY from your secret manager "
+          + "instead."
+        )
+      ];
+    };
+  };
 in
-assert expectEqual "full targets" (oxTargets full) [
-  "ox/AGENTS.md"
-  "ox/config.toml"
-];
-assert expectEqual "full assertions" (failedAssertions full) [ ];
-assert expectEqual "full package" (builtins.elem stub full.home.packages) true;
-assert expectEqual "defaults targets" (oxTargets defaults) [ ];
-assert expectEqual "defaults package" defaults.programs.oxide-code.package.pname "oxide-code";
-assert expectEqual "no package" (map toString noPackage.home.packages) (
-  map toString (evalHome { }).home.packages
-);
-assert expectEqual "disabled targets" (oxTargets disabled) [ ];
-assert expectEqual "API key assertions" (failedAssertions apiKey) [
-  (
-    "programs.oxide-code.settings.client.api_key would write the key into the Nix store, "
-    + "which every local user can read. Export ANTHROPIC_API_KEY from your secret manager "
-    + "instead."
-  )
-];
+assert lib.assertMsg (failures == [ ]) "failed tests: ${builtins.toJSON failures}";
 pkgs.runCommand "ox-home-manager-module"
   {
     nativeBuildInputs = [

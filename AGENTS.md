@@ -26,14 +26,14 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 
 ## Read Before You Edit
 
-| When the change touches                              | Read                                                                               |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Rust code                                            | [Rust](docs/conventions/rust.md) and the [module map](docs/design/architecture.md) |
-| Tests                                                | [Testing](docs/conventions/testing.md)                                             |
-| Comments, docs, or text that users or the model read | [Writing](docs/conventions/writing.md)                                             |
-| Commits, branches, PRs, or issues                    | [GitHub](docs/conventions/github.md)                                               |
-| The dev shell, hooks, toolchain, CI, or config files | [Development](docs/conventions/development.md)                                     |
-| A release                                            | [RELEASING.md](RELEASING.md)                                                       |
+| When the change touches                                   | Read                                                                               |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Rust code                                                 | [Rust](docs/conventions/rust.md) and the [module map](docs/design/architecture.md) |
+| Tests                                                     | [Testing](docs/conventions/testing.md)                                             |
+| Comments, docs, or text that users or the model read      | [Writing](docs/conventions/writing.md)                                             |
+| Commits, branches, PRs, or issues                         | [GitHub](docs/conventions/github.md)                                               |
+| The dev shell, hooks, toolchain, CI, Nix, or config files | [Development](docs/conventions/development.md)                                     |
+| A release                                                 | [RELEASING.md](RELEASING.md)                                                       |
 
 ## Rules for Every Change
 
