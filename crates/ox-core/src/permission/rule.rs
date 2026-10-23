@@ -620,7 +620,7 @@ mod tests {
                 ("> out echo hi", redirection.to_owned()),
                 ("echo > out hi", redirection.to_owned()),
                 ("cat <<< hi", redirection.to_owned()),
-                ("cat $HOME", expands("$HOME")),
+                ("cat $X", expands("$X")),
                 ("echo $(date)", expands("$(date)")),
                 ("mkfs*", glob("mkfs*")),
                 ("ls *.rs", glob("*.rs")),
