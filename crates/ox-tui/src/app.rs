@@ -409,7 +409,6 @@ mod tests {
         #[tokio::test(start_paused = true)]
         async fn sleeps_while_idle() {
             let (mut app, _rx, event_tx) = test_app(None);
-            app.git_probes = GitProbes::new(PathBuf::from("/repo"), &[], now());
             let modal = ScriptedModal::new(ModalAction::Cancelled);
             let ticks = Arc::clone(&modal.tick_count);
             app.modals.push(Box::new(modal));
@@ -542,10 +541,9 @@ mod tests {
     mod next_tick {
         use super::*;
 
-        /// An idle app with no probes, no clock segment, and nothing to redraw.
+        /// An idle app with no clock segment and nothing to redraw.
         fn settled_app() -> App {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.git_probes = GitProbes::new(PathBuf::from("/repo"), &[], now());
             app.status_bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::RunState]));
             app.dirty = false;
             app
