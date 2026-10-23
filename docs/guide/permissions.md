@@ -27,7 +27,7 @@ The **A** key opens the pattern of the session rule it will add, in the syntax b
 - A chained command, such as `cargo test | tail`
 - A command with a word that expands or globs, as in `ls *.rs`, or with an invisible character
 
-Session rules live in memory until you exit, `/clear`, `/archive`, or `/resume` another session, and `/status` lists them. Deny patterns, ask patterns, and protected paths still take precedence over them. To keep a session rule, add its pattern to the matching class list under `[permission.allow]` in your user config.
+Session rules live in memory until you exit, `/clear`, `/archive`, or `/resume` another session, and `/status` lists them. Deny patterns, ask patterns, and protected paths still take precedence over them. To keep a session rule, add its pattern to the matching class list under `[permission.allow]` in your user config. `/config` lists the rules, extra roots, and turned-off defaults the config files set, each with the layer that added it.
 
 ## Settings
 

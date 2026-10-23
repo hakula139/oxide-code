@@ -1,6 +1,9 @@
 //! Read-only key-value overview modal with a title, multi-section body, and fixed footer.
 //! `/status`, `/config`, and `/help` supply the sections, and the modal lays them out.
 
+use std::cell::Cell;
+use std::iter;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -35,38 +38,82 @@ struct KvRow {
 }
 
 impl KvRow {
-    /// The row with its label padded to `label_width` and any note aligned after `value_width`,
-    /// fitted to `width`. A note shows whole, or not at all once the value would keep less than
-    /// half its room, and the value truncates in its middle, keeping the ends that tell paths apart.
-    fn line(
-        &self,
-        label_width: usize,
-        value_width: usize,
-        width: usize,
-        theme: &Theme,
-    ) -> Line<'static> {
+    /// The row's value lines and the note that fits beside the first, for a label column of
+    /// `label_width` within `width`. A note shows whole, or not at all once the value would keep
+    /// less than half its room.
+    fn layout(&self, label_width: usize, width: usize) -> (Vec<String>, Option<&str>) {
         let room = width.saturating_sub(label_width + COLUMN_GAP);
         let note = self.note.as_deref().filter(|note| {
             let claim = COLUMN_GAP + note.width();
             self.value.width() + claim <= room || claim <= room / 2
         });
         let value_room = note.map_or(room, |note| room - COLUMN_GAP - note.width());
-        let value = center_truncate_to_width(&self.value, value_room);
-        let pad = value_width.saturating_sub(value.width());
+        (wrap_value(&self.value, value_room), note)
+    }
+
+    /// The row's lines with its label padded to `label_width` and any note aligned after
+    /// `value_width`, fitted to `width`.
+    fn lines(
+        &self,
+        label_width: usize,
+        value_width: usize,
+        width: usize,
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
+        let (values, note) = self.layout(label_width, width);
+        let mut values = values.into_iter();
+        let first = values.next().unwrap_or_default();
+        let pad = value_width.saturating_sub(first.width());
         let mut spans = vec![
             Span::styled(pad_to_width(&self.label, label_width), theme.dim()),
             Span::styled(" ".repeat(COLUMN_GAP), theme.surface()),
-            Span::styled(value, theme.text()),
+            Span::styled(first, theme.text()),
         ];
         if let Some(note) = note {
             spans.push(Span::styled(" ".repeat(pad + COLUMN_GAP), theme.surface()));
             spans.push(Span::styled(note.to_owned(), theme.dim()));
         }
-        Line::from(spans)
+        let indent = " ".repeat(label_width + COLUMN_GAP);
+        iter::once(Line::from(spans))
+            .chain(values.map(|value| {
+                Line::from(vec![
+                    Span::styled(indent.clone(), theme.surface()),
+                    Span::styled(value, theme.text()),
+                ])
+            }))
+            .collect()
     }
 }
 
-/// One line of the overview body.
+/// `value` in lines of at most `room` columns: whole when it fits, or else wrapped after its `, `
+/// separators, with any part still too wide truncated in its middle, keeping the ends that tell
+/// paths apart.
+fn wrap_value(value: &str, room: usize) -> Vec<String> {
+    if value.width() <= room {
+        return vec![value.to_owned()];
+    }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut items = value.split(", ").peekable();
+    while let Some(item) = items.next() {
+        let separator = if items.peek().is_some() { "," } else { "" };
+        if !line.is_empty() && line.width() + 1 + item.width() + separator.len() > room {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(item);
+        line.push_str(separator);
+    }
+    lines.push(line);
+    lines
+        .iter()
+        .map(|line| center_truncate_to_width(line, room))
+        .collect()
+}
+
+/// One row of the overview body, which an entry may wrap onto several lines.
 enum BodyRow<'a> {
     Blank,
     Heading(&'a str),
@@ -111,6 +158,8 @@ pub(crate) struct KvOverview {
     header: Header,
     sections: Vec<KvSection>,
     viewport: Viewport,
+    /// The width of the last render, which sets how many lines the wrapped rows take.
+    width: Cell<usize>,
 }
 
 impl KvOverview {
@@ -119,6 +168,7 @@ impl KvOverview {
             header: Header::new(title),
             sections,
             viewport: Viewport::default(),
+            width: Cell::new(0),
         }
     }
 
@@ -132,7 +182,7 @@ impl KvOverview {
             .unwrap_or(0)
     }
 
-    /// Every body line in order: sections apart by a blank line, each heading followed by one.
+    /// Every body row in order: sections apart by a blank line, each heading followed by one.
     fn body_rows(&self) -> impl Iterator<Item = BodyRow<'_>> {
         self.sections.iter().enumerate().flat_map(|(i, section)| {
             let gap = (i > 0).then_some(BodyRow::Blank);
@@ -148,8 +198,15 @@ impl KvOverview {
         })
     }
 
-    fn body_len(&self) -> usize {
-        self.body_rows().count()
+    /// How many lines the body takes at `width`.
+    fn body_len(&self, width: usize) -> usize {
+        let label_width = self.label_width();
+        self.body_rows()
+            .map(|row| match row {
+                BodyRow::Blank | BodyRow::Heading(_) => 1,
+                BodyRow::Entry { row, .. } => row.layout(label_width, width).0.len(),
+            })
+            .sum()
     }
 
     fn body_lines(&self, theme: &Theme, width: usize) -> Vec<Line<'static>> {
@@ -160,21 +217,22 @@ impl KvOverview {
             .map(|section| note_column(section, label_width, width))
             .collect();
         self.body_rows()
-            .map(|row| match row {
-                BodyRow::Blank => Line::default(),
-                BodyRow::Heading(heading) => Line::from(Span::styled(
+            .flat_map(|row| match row {
+                BodyRow::Blank => vec![Line::default()],
+                BodyRow::Heading(heading) => vec![Line::from(Span::styled(
                     heading.to_owned(),
                     theme.text().add_modifier(Modifier::BOLD),
-                )),
+                ))],
                 BodyRow::Entry { section, row } => {
-                    row.line(label_width, value_widths[section], width, theme)
+                    row.lines(label_width, value_widths[section], width, theme)
                 }
             })
             .collect()
     }
 
     fn scroll(&self, delta: isize) {
-        self.viewport.scroll_by(delta, self.body_len());
+        self.viewport
+            .scroll_by(delta, self.body_len(self.width.get()));
     }
 
     fn page(&self) -> isize {
@@ -182,26 +240,28 @@ impl KvOverview {
     }
 }
 
-/// Width of the value column that aligns a section's notes, or 0 to put each note right after its
-/// value when the aligned notes would overflow `width`.
+/// Width of the value column that aligns a section's notes: the widest value that leaves room for
+/// the widest note within `width`.
+/// A wider value puts its note right after it.
 fn note_column(section: &KvSection, label_width: usize, width: usize) -> usize {
-    let (value_width, note_width) = section
+    let annotated: Vec<(usize, usize)> = section
         .rows
         .iter()
-        .filter_map(|row| {
-            let note = row.note.as_ref()?;
-            Some((row.value.width(), note.width()))
-        })
-        .fold((0, 0), |(values, notes), (value, note)| {
-            (values.max(value), notes.max(note))
-        });
-    let aligned = label_width + COLUMN_GAP + value_width + COLUMN_GAP + note_width;
-    if aligned <= width { value_width } else { 0 }
+        .filter_map(|row| Some((row.value.width(), row.note.as_ref()?.width())))
+        .collect();
+    let note_width = annotated.iter().map(|&(_, note)| note).max().unwrap_or(0);
+    let room = width.saturating_sub(label_width + COLUMN_GAP + COLUMN_GAP + note_width);
+    annotated
+        .iter()
+        .map(|&(value, _)| value)
+        .filter(|&value| value <= room)
+        .max()
+        .unwrap_or(0)
 }
 
 impl Modal for KvOverview {
-    fn height(&self, _width: u16, max_height: u16) -> u16 {
-        let body = saturating_u16(self.body_len());
+    fn height(&self, width: u16, max_height: u16) -> u16 {
+        let body = saturating_u16(self.body_len(usize::from(width)));
         (self.header.height() + FOOTER_HEIGHT)
             .saturating_add(body)
             .min(max_height)
@@ -211,6 +271,7 @@ impl Modal for KvOverview {
         let rows = area
             .height
             .saturating_sub(self.header.height() + FOOTER_HEIGHT);
+        self.width.set(usize::from(area.width));
         let body = self.body_lines(theme, usize::from(area.width));
         let window = self.viewport.window(body.len(), usize::from(rows), None);
         let scrollable = window.len() < body.len();
@@ -356,8 +417,42 @@ mod tests {
         }
     }
 
+    mod wrap_value {
+        use super::*;
+
+        #[test]
+        fn keeps_a_value_that_fits_whole() {
+            assert_eq!(wrap_value("model, run-state", 16), ["model, run-state"]);
+        }
+
+        #[test]
+        fn wraps_after_the_commas_and_truncates_an_item_still_too_wide() {
+            assert_eq!(
+                wrap_value("model, run-state, model-with-effort, cost", 18),
+                ["model, run-state,", "model-with-effort,", "cost"]
+            );
+            assert_eq!(
+                wrap_value("a, /etc/ssl/certs/corporate/ca-chain.pem", 12),
+                ["a,", "/etc...n.pem"]
+            );
+        }
+    }
+
     mod height {
         use super::*;
+
+        #[test]
+        fn counts_the_lines_a_wrapped_value_takes() {
+            let m = KvOverview::new(
+                "Config",
+                vec![KvSection::new(vec![row(
+                    "Status",
+                    "model, run-state, cost",
+                )])],
+            );
+
+            assert_eq!((m.height(30, 40), m.height(20, 40)), (5, 7));
+        }
 
         #[test]
         fn for_single_section_without_heading_counts_title_blank_rows_blank_footer() {
@@ -460,6 +555,30 @@ mod tests {
                 [
                     "Model     Opus  $ANTHROPIC_MODEL",
                     "Base URL  https://x.test  default",
+                ],
+            );
+        }
+
+        #[test]
+        fn keeps_the_other_notes_aligned_beside_a_value_too_wide_for_the_column() {
+            let note_row = |k: &str, v: &str, n: &str| (k.to_owned(), v.to_owned(), n.to_owned());
+            let m = KvOverview::new(
+                "Config",
+                vec![KvSection::annotated(vec![
+                    note_row("Model", "Opus", "user"),
+                    note_row("Theme", "mocha-dark", "default"),
+                    note_row("Status", "model, run-state, current-time", "env"),
+                ])],
+            );
+
+            let rows = trimmed_rows(&m, 44, m.height(44, 40));
+
+            assert_eq!(
+                rows[2..5],
+                [
+                    "Model   Opus        user",
+                    "Theme   mocha-dark  default",
+                    "Status  model, run-state, current-time  env",
                 ],
             );
         }

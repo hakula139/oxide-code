@@ -349,9 +349,7 @@ impl App {
     fn swap_theme(&mut self, builtin: &BuiltinTheme) {
         self.preview_theme_snapshot = None;
         let theme = self.with_overrides(builtin);
-        builtin
-            .name
-            .clone_into(&mut self.session_info.config.theme_name);
+        self.session_info.config.apply_theme(builtin.name);
         self.apply_theme(&theme);
         self.chat
             .push_system_message(format!("Theme set to {}", builtin.name));
@@ -1990,6 +1988,7 @@ mod tests {
 
             assert!(app.preview_theme_snapshot.is_none());
             assert_eq!(app.session_info.config.theme_name, "latte");
+            assert_eq!(app.session_info.config.provenance.theme, Source::Session);
             assert_eq!(app.theme.text, previewed.text);
 
             app.apply_modal_action(ModalAction::Cancelled);
