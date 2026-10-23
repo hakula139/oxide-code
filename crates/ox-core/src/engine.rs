@@ -303,8 +303,9 @@ impl Engine {
                 Op::Login => end = Some(self.login(&sink, &mut ops).await),
                 Op::Logout => self.logout(&sink).await,
                 // A `Queue` here arrived after its turn ended, and the frontend still submits it.
-                // An interrupt or approval only matters mid-turn, where `agent_turn` consumes it.
-                Op::Queue(_) | Op::Interrupt | Op::Resolve { .. } => {}
+                // An interrupt or approval only matters mid-turn, where `agent_turn` consumes it,
+                // and a sign-in code only while `login` waits for one.
+                Op::Queue(_) | Op::Interrupt | Op::Resolve { .. } | Op::LoginCode(_) => {}
                 Op::Shutdown => break,
             }
             if end == Some(TurnEnd::Shutdown) {
@@ -679,7 +680,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::local_testing::{
-        TITLE_MODEL, dead_test_session, finished_session, greeting_title, inert_ops, login_url,
+        TITLE_MODEL, dead_test_session, finished_session, greeting_title, inert_ops, login_urls,
         mount_title, next_matching, service_log, session_paths, submit, system_prompt, texts,
         tool_heavy_transcript, tracked_paths, turn_events, write_unreadable_instructions,
     };
@@ -1803,13 +1804,13 @@ mod tests {
                     } = engine.spawn();
 
                     ops.send(Op::Login).await.unwrap();
-                    let url = login_url(&mut events).await;
+                    let (url, _) = login_urls(&mut events).await;
                     ops.send(Op::Interrupt).await.unwrap();
                     let cancelled = events.recv().await;
                     ops.send(Op::Logout).await.unwrap();
                     let signed_out = events.recv().await;
                     ops.send(Op::Login).await.unwrap();
-                    login_url(&mut events).await;
+                    login_urls(&mut events).await;
                     ops.send(Op::Shutdown).await.unwrap();
                     let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
                         .await
@@ -3192,6 +3193,7 @@ mod tests {
                         &Op::Login,
                         Event::LoginStarted {
                             url: "https://example.com/login".to_owned(),
+                            manual_url: "https://example.com/login?manual".to_owned(),
                         },
                         None,
                     ),

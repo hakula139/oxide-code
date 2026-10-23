@@ -12,7 +12,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tracing::debug;
 
 use ox_core::command::{self, Parsed};
-use ox_core::protocol::Op;
+use ox_core::protocol::{Op, SignInCode};
 
 use super::queue::QueuedPrompt;
 use super::{App, EXIT_WINDOW};
@@ -269,7 +269,8 @@ impl App {
             | Op::Queue(_)
             | Op::Resolve { .. }
             | Op::SetModel(_)
-            | Op::Rename { .. } => {}
+            | Op::Rename { .. }
+            | Op::LoginCode(_) => {}
         }
         self.send_op(op);
     }
@@ -362,11 +363,15 @@ impl App {
         theme
     }
 
-    /// Queues the prompt, then starts a turn with the queue head when idle. Slash commands forward
-    /// their own synthesized actions.
+    /// Queues the prompt, then starts a turn with the queue head when idle. While signing in, it
+    /// takes only the sign-in code. Slash commands forward their own synthesized actions.
     fn handle_submit_prompt(&mut self, text: &str) {
         let idle = self.status.is_idle();
         let Some(parsed) = command::parse_slash(text) else {
+            if self.status == Status::SigningIn {
+                self.submit_sign_in_code(text);
+                return;
+            }
             self.queue.push(text.to_owned());
             if idle {
                 // Prompts a cancel left queued run before this one.
@@ -389,6 +394,26 @@ impl App {
         }
         if let Some(action) = self.run_slash(&parsed, text) {
             self.dispatch_action(action);
+        }
+    }
+
+    /// Sends `text` as the sign-in code, without an echo, when it has the code's `code#state`
+    /// shape. Other text goes back to the input with a note, so a prompt typed during sign-in is
+    /// neither lost nor sent as a code.
+    fn submit_sign_in_code(&mut self, text: &str) {
+        let code = text.trim();
+        let shaped = !code.contains(char::is_whitespace)
+            && code
+                .split_once('#')
+                .is_some_and(|(code, state)| !code.is_empty() && !state.is_empty());
+        if shaped {
+            self.dispatch_op(Op::LoginCode(SignInCode(code.to_owned())));
+        } else {
+            self.input.set_text(text);
+            self.chat.push_system_message(
+                "Sign-in is waiting for the code the sign-in page shows. \
+                 Send other prompts after sign-in ends, or press Esc to cancel it.",
+            );
         }
     }
 
@@ -1748,22 +1773,13 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn login_goes_busy_and_holds_prompts_typed_while_signing_in() {
+        async fn login_goes_busy() {
             let (mut app, mut rx, _event_tx) = test_app(None);
 
             app.dispatch_op(Op::Login);
 
             assert_eq!(rx.try_recv().ok(), Some(Op::Login));
             assert_eq!(app.status, Status::SigningIn);
-
-            app.dispatch_action(Action::Submit("typed-while-signing-in".to_owned()));
-
-            assert_eq!(
-                rx.try_recv(),
-                Err(TryRecvError::Empty),
-                "no turn exists to splice a prompt into while signing in"
-            );
-            assert_eq!(*app.queue.pending(), ["typed-while-signing-in"],);
         }
 
         #[tokio::test]
@@ -2016,6 +2032,66 @@ mod tests {
 
     mod handle_submit_prompt {
         use super::*;
+
+        /// An app signing in, with the `Login` op already taken off `rx`.
+        fn signing_in() -> (
+            App,
+            tokio::sync::mpsc::Receiver<Op>,
+            tokio::sync::mpsc::UnboundedSender<Event>,
+        ) {
+            let (mut app, mut rx, event_tx) = test_app(None);
+            app.dispatch_op(Op::Login);
+            rx.try_recv().expect("login forwarded");
+            (app, rx, event_tx)
+        }
+
+        #[tokio::test]
+        async fn sends_a_code_typed_while_signing_in_without_an_echo() {
+            let (mut app, mut rx, _event_tx) = signing_in();
+            let entries = app.chat.entry_count();
+
+            app.dispatch_action(Action::Submit(" auth-code#state\n".to_owned()));
+
+            assert_eq!(
+                rx.try_recv().ok(),
+                Some(Op::LoginCode(SignInCode("auth-code#state".to_owned())))
+            );
+            assert_eq!(app.status, Status::SigningIn);
+            assert_eq!(*app.queue.pending(), [] as [&str; 0]);
+            assert_eq!(
+                app.chat.entry_count(),
+                entries,
+                "a sign-in code is never echoed"
+            );
+        }
+
+        #[tokio::test]
+        async fn returns_a_prompt_typed_while_signing_in_to_the_input() {
+            let (mut app, mut rx, _event_tx) = signing_in();
+
+            app.dispatch_action(Action::Submit("fix the #42 bug".to_owned()));
+
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+            assert_eq!(app.input.lines(), ["fix the #42 bug"]);
+            assert_eq!(*app.queue.pending(), [] as [&str; 0]);
+            assert_eq!(
+                app.chat.last_system_text(),
+                Some(
+                    "Sign-in is waiting for the code the sign-in page shows. \
+                     Send other prompts after sign-in ends, or press Esc to cancel it."
+                ),
+            );
+        }
+
+        #[tokio::test]
+        async fn runs_a_slash_command_typed_while_signing_in() {
+            let (mut app, mut rx, _event_tx) = signing_in();
+
+            app.dispatch_action(Action::Submit("/theme latte".to_owned()));
+
+            assert_eq!(app.session_info.config.theme_name, "latte");
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+        }
 
         #[test]
         fn slash_theme_opens_the_picker() {
