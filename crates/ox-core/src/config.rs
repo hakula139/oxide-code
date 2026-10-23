@@ -2456,9 +2456,9 @@ mod tests {
             Key,
         }
 
-        /// Deserializes `FileConfig` along `path`, one field per table, and records the shape of
-        /// the value at its end. A table is a struct every file has, such as `[client]`, while an
-        /// optional field is a key even when it holds a table, as `permission.allow` does.
+        /// A deserializer that leads `FileConfig` along `path`, one field per table, and records
+        /// the shape of the value at its end. A struct, such as `[client]`, is a table, and any
+        /// other value is a key, even an optional table such as `permission.allow`.
         #[derive(Clone, Copy)]
         struct Probe<'a> {
             path: &'a [&'static str],
@@ -2548,26 +2548,37 @@ mod tests {
             }
         }
 
-        /// Whether `name` is a variable that oxide-code owns or shares with Claude Code.
+        /// Returns whether `name` is a variable that oxide-code owns or shares with Claude Code.
         fn is_owned_var(name: &str) -> bool {
             ["ANTHROPIC_", "CLAUDE_", "OX_"]
                 .iter()
                 .any(|prefix| name.starts_with(prefix))
         }
 
-        /// The owned variables that string literals name in the workspace's non-test sources.
-        fn owned_vars_in_sources() -> BTreeSet<String> {
+        /// The owned variables that string literals name in the production lines of each workspace
+        /// member's `src` files other than `testing.rs` and `local_testing.rs`, in byte order.
+        fn owned_vars_in_sources() -> Vec<String> {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .unwrap();
+            let manifest: toml::Table = std::fs::read_to_string(root.join("Cargo.toml"))
+                .unwrap()
+                .parse()
+                .unwrap();
             let literal = Regex::new(r#""([A-Z][A-Z0-9_]+)""#).unwrap();
-            let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
             let mut vars = BTreeSet::new();
-            for member in std::fs::read_dir(crates).unwrap() {
-                for entry in ignore::Walk::new(member.unwrap().path().join("src")) {
+            for member in manifest["workspace"]["members"].as_array().unwrap() {
+                for entry in ignore::Walk::new(root.join(member.as_str().unwrap()).join("src")) {
                     let path = entry.unwrap().into_path();
-                    if path.extension().is_some_and(|ext| ext == "rs") {
+                    let stem = path.file_stem().unwrap();
+                    if path.extension().is_some_and(|ext| ext == "rs")
+                        && stem != "testing"
+                        && stem != "local_testing"
+                    {
                         let source = std::fs::read_to_string(path).unwrap();
-                        let production = source.lines().take_while(|line| *line != "mod tests {");
                         vars.extend(
-                            production
+                            production_lines(&source)
                                 .flat_map(|line| literal.captures_iter(line))
                                 .map(|name| name[1].to_owned())
                                 .filter(|name| is_owned_var(name)),
@@ -2575,7 +2586,20 @@ mod tests {
                     }
                 }
             }
-            vars
+            vars.into_iter().collect()
+        }
+
+        /// The lines of `source` outside its top-level `tests`, `testing`, and `local_testing`
+        /// modules, each of which ends at the next line holding `}` alone.
+        fn production_lines(source: &str) -> impl Iterator<Item = &str> {
+            let test_module =
+                Regex::new(r"^(pub(\(\w+\))? )?mod (local_testing|testing|tests) \{$").unwrap();
+            let mut in_test_module = false;
+            source.lines().filter(move |line| {
+                let skip = in_test_module || test_module.is_match(line);
+                in_test_module = skip && *line != "}";
+                !skip
+            })
         }
 
         #[test]
@@ -2587,28 +2611,27 @@ mod tests {
             assert_eq!(
                 reference_rows("### Config Keys"),
                 keys,
-                "the Config Keys table must list every `FileConfig` key in byte order",
+                "the Config Keys table must list exactly the `FileConfig` keys, in byte order",
             );
         }
 
         #[test]
         fn lists_every_environment_variable_in_order() {
-            let read = owned_vars_in_sources();
-
             let documented = reference_rows("### Environment Variables");
+            let read = owned_vars_in_sources();
 
             assert!(
                 documented.is_sorted(),
                 "the Environment Variables table must be in byte order: {documented:?}",
             );
-            let owned: Vec<&str> = documented
+            let owned: Vec<_> = documented
                 .into_iter()
                 .filter(|name| is_owned_var(name))
                 .collect();
             assert_eq!(
-                owned,
-                read.iter().map(String::as_str).collect::<Vec<_>>(),
-                "the Environment Variables table must list every variable the sources name",
+                owned, read,
+                "the Environment Variables table must list exactly the `ANTHROPIC_*`, `CLAUDE_*`, \
+                 and `OX_*` variables that production code names",
             );
         }
     }
