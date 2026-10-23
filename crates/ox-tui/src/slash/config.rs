@@ -169,7 +169,7 @@ fn permission_rows(sources: &Provenance) -> Vec<(String, String, String)> {
 
 fn display_overrides(count: usize) -> String {
     if count == 0 {
-        NONE.to_owned()
+        labels::NONE.to_owned()
     } else {
         format!("{count} {}", plural(count, "slot", "slots"))
     }
