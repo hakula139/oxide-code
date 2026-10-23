@@ -26,8 +26,13 @@ const HAIKU_MODEL: &str = "claude-haiku-5-5";
 /// ahead of the 3-7 word JSON envelope.
 const MAX_TOKENS: u32 = 1_024;
 
-/// Chars of the first prompt sent for titling, so a long paste stays cheap.
-const MAX_PROMPT_CHARS: usize = 1_000;
+/// Chars of the first prompt sent for titling, omission marker included, so a long paste stays
+/// cheap.
+const MAX_PROMPT_CHARS: usize = 2_000;
+
+/// Chars kept from the start of a long first prompt, where a request usually leads, while the
+/// rest of [`MAX_PROMPT_CHARS`] goes to its tail.
+const PROMPT_HEAD_CHARS: usize = 1_500;
 
 /// Title prompt, whose `{"title": ...}` shape [`title_output_format`] enforces when structured
 /// outputs are on.
@@ -130,10 +135,11 @@ async fn generate_and_record(
     Ok(())
 }
 
-/// The title request's user turn, which frames the tail of `first_prompt` as text to title,
-/// so Haiku titles an imperative prompt even with structured outputs off.
+/// The title request's user turn, which frames `first_prompt`, shortened to fit
+/// [`MAX_PROMPT_CHARS`], as text to title, so Haiku titles an imperative prompt even with
+/// structured outputs off.
 fn title_request(first_prompt: &str) -> String {
-    let prompt = truncate_prompt(first_prompt, MAX_PROMPT_CHARS);
+    let prompt = truncate_prompt(first_prompt, MAX_PROMPT_CHARS, PROMPT_HEAD_CHARS);
     formatdoc! {"
         <first_prompt>
         {prompt}
@@ -143,10 +149,25 @@ fn title_request(first_prompt: &str) -> String {
     }
 }
 
-/// Truncates `text` to `max_chars`, keeping the tail, where the request usually is.
-fn truncate_prompt(text: &str, max_chars: usize) -> String {
-    let skip = text.chars().count().saturating_sub(max_chars);
-    text.chars().skip(skip).collect()
+/// Shortens `text` to at most `max_chars` chars, keeping its first `head_chars` and as much of its
+/// tail as fits around an omission marker. `head_chars` plus the marker must fit in `max_chars`.
+fn truncate_prompt(text: &str, max_chars: usize, head_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_owned();
+    }
+    // A marker sized for `total` has at least as many digits as the final one, so the result fits.
+    let tail_chars = max_chars - head_chars - omission_marker(total).chars().count();
+    let omitted = total - head_chars - tail_chars;
+    let head: String = text.chars().take(head_chars).collect();
+    let tail: String = text.chars().skip(total - tail_chars).collect();
+    let marker = omission_marker(omitted);
+    format!("{head}{marker}{tail}")
+}
+
+/// The line that stands in for the `omitted` chars between the kept head and tail.
+fn omission_marker(omitted: usize) -> String {
+    format!("\n... [{omitted} characters omitted] ...\n")
 }
 
 /// `{"title": string}` schema for structured outputs. Forces the envelope shape so Haiku
@@ -623,17 +644,22 @@ mod tests {
         use super::*;
 
         #[test]
-        fn frames_only_the_tail_of_a_long_prompt() {
-            let prompt = "x".repeat(MAX_PROMPT_CHARS) + "TAIL";
+        fn keeps_the_question_ahead_of_a_long_paste() {
+            let prompt = format!("Why does the build fail?\n{}", "log line\n".repeat(500));
 
             let request = title_request(&prompt);
 
-            let framed = request
+            let inner = request
                 .strip_prefix("<first_prompt>\n")
                 .and_then(|rest| rest.split_once("\n</first_prompt>"))
-                .map(|(framed, _)| framed);
-            let tail = "x".repeat(MAX_PROMPT_CHARS - 4) + "TAIL";
-            assert_eq!(framed, Some(tail.as_str()));
+                .map(|(inner, _)| inner)
+                .unwrap();
+            assert!(
+                inner.starts_with("Why does the build fail?\nlog line\n"),
+                "{inner}"
+            );
+            assert!(inner.contains(" characters omitted] ...\n"), "{inner}");
+            assert_eq!(inner.chars().count(), MAX_PROMPT_CHARS);
         }
     }
 
@@ -641,24 +667,38 @@ mod tests {
         use super::*;
 
         #[test]
-        fn passes_short_text_through() {
-            assert_eq!(truncate_prompt("short", 100), "short");
+        fn passes_text_within_the_budget_through() {
+            assert_eq!(truncate_prompt("short", 60, 4), "short");
+            let full = "a".repeat(60);
+            assert_eq!(truncate_prompt(&full, 60, 4), full);
         }
 
         #[test]
-        fn keeps_the_tail_of_long_text() {
-            let long = "a".repeat(50) + "TAIL";
+        fn keeps_the_head_and_tail_around_an_omission_marker() {
+            let long = format!("HEAD{}TAIL", "x".repeat(200));
 
-            let out = truncate_prompt(&long, 10);
+            let out = truncate_prompt(&long, 60, 4);
 
-            assert_eq!(out, "aaaaaaTAIL");
+            assert_eq!(
+                out,
+                format!(
+                    "HEAD\n... [182 characters omitted] ...\n{}TAIL",
+                    "x".repeat(18)
+                ),
+            );
+            assert_eq!(out.chars().count(), 60);
         }
 
         #[test]
-        fn respects_char_boundaries_for_multibyte() {
-            let s: String = "\u{00e9}".repeat(1_000) + "tail";
-            let out = truncate_prompt(&s, 4);
-            assert_eq!(out, "tail");
+        fn counts_multibyte_chars_as_one() {
+            let long = "\u{00e9}".repeat(100);
+
+            let out = truncate_prompt(&long, 40, 5);
+
+            assert_eq!(
+                out,
+                "\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\n... [94 characters omitted] ...\n\u{00e9}",
+            );
         }
     }
 

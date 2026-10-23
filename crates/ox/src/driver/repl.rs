@@ -97,7 +97,7 @@ where
                         continue;
                     }
                 },
-                None => Op::Prompt(command::unescape_literal(input).to_owned()),
+                None => Op::prompt(command::unescape_literal(input)),
             };
             if op == Op::Shutdown {
                 break;

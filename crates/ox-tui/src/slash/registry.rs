@@ -462,7 +462,7 @@ mod tests {
             let offenders: Vec<String> = forms()
                 .iter()
                 .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
-                    Ok(SlashOutcome::Forward(Action::Op(Op::Prompt(_) | Op::Queue(_)))) => {
+                    Ok(SlashOutcome::Forward(Action::Op(Op::Prompt { .. } | Op::Queue(_)))) => {
                         Some(format!("/{} {args} bypasses the prompt queue", cmd.name()))
                     }
                     Ok(SlashOutcome::Prompt(_)) if !cmd.echoes_input(args) => Some(format!(

@@ -110,7 +110,7 @@ To find archived sessions, run `ox --list --archived` or press **Ctrl+A** in the
 
 ## Titles
 
-When the TUI is running, oxide-code generates a concise AI title (3-7 words) shortly after your first prompt. Outside the TUI (bare REPL, headless mode), sessions keep the first prompt as the title.
+When the TUI is running, oxide-code generates a concise AI title (3-7 words) shortly after your first prompt. Outside the TUI (bare REPL, headless mode), sessions keep the first prompt as the title, or the command line when the session starts with `/init`, such as `/init AGENTS.md`.
 
 In the TUI, `/rename` opens a title editor pre-filled with the current title, and `/rename <title>` sets it directly, as it does in the `--no-tui` REPL. Your title replaces the AI title, and AI title generation stops for that session.
 

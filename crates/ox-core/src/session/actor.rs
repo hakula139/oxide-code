@@ -22,12 +22,7 @@ use crate::tool::ToolMetadata;
 
 /// Cross-task protocol for [`super::handle::SessionHandle`]. Acks fire after the batch flush.
 pub(super) enum SessionCmd {
-    Record {
-        msg: Message,
-        /// Written ahead of `msg`, so prompt state only lands alongside the message carrying it.
-        context: Option<SessionContext>,
-        ack: oneshot::Sender<RecordOutcome>,
-    },
+    Record(Record),
     /// Moves the chain anchor back to `checkpoint` and records the move.
     Rewind {
         checkpoint: Checkpoint,
@@ -53,7 +48,9 @@ pub(super) enum SessionCmd {
     },
     /// Bare `/archive`, sent just before the roll that finalizes the session. Ends its batch, and
     /// its ack carries every write failure.
-    Archive { ack: oneshot::Sender<Outcome> },
+    Archive {
+        ack: oneshot::Sender<Outcome>,
+    },
     Finish {
         /// Drained tracker snapshots, written as one `FileSnapshot` entry each plus a `Summary`.
         snapshots: Vec<FileSnapshot>,
@@ -68,7 +65,19 @@ pub(super) enum SessionCmd {
     },
     /// Drains pending writes, acks, then exits the actor loop so shutdown returns without
     /// waiting for orphaned clones to drop.
-    Shutdown { ack: oneshot::Sender<()> },
+    Shutdown {
+        ack: oneshot::Sender<()>,
+    },
+}
+
+/// A conversation message to record, with what it is the first to carry.
+pub(super) struct Record {
+    pub(super) msg: Message,
+    /// Written ahead of `msg`, so prompt state only lands alongside the message carrying it.
+    pub(super) context: Option<SessionContext>,
+    /// The first-prompt title in place of `msg`'s text.
+    pub(super) title: Option<String>,
+    pub(super) ack: oneshot::Sender<RecordOutcome>,
 }
 
 // ── Actor Loop ──
@@ -143,9 +152,9 @@ impl Batch {
     ) -> BatchFlow {
         let now = OffsetDateTime::now_utc();
         match cmd {
-            SessionCmd::Record { msg, context, ack } => {
+            SessionCmd::Record(record) => {
                 let manual_title_set = shared.manual_title_set();
-                self.absorb_record(&msg, context, ack, state, manual_title_set, now);
+                self.absorb_record(record, state, manual_title_set, now);
                 BatchFlow::Continue
             }
             SessionCmd::Rewind { checkpoint, ack } => {
@@ -229,18 +238,23 @@ impl Batch {
         }
     }
 
-    /// Queues `msg` behind the prompt `context` it is the first to carry, if any.
+    /// Queues the record's message behind the prompt context it is the first to carry, if any.
     fn absorb_record(
         &mut self,
-        msg: &Message,
-        context: Option<SessionContext>,
-        ack: oneshot::Sender<RecordOutcome>,
+        record: Record,
         state: &mut SessionState,
         manual_title_set: bool,
         now: OffsetDateTime,
     ) {
+        let Record {
+            msg,
+            context,
+            title,
+            ack,
+        } = record;
         let checkpoint = state.checkpoint();
-        let (msg_entries, ai_title_seed) = state.queue_message_entries(msg, now, manual_title_set);
+        let (msg_entries, ai_title_seed) =
+            state.queue_message_entries(&msg, title.as_deref(), now, manual_title_set);
         if let Some(context) = context {
             self.entries.push(Entry::Context {
                 context: Box::new(context),
@@ -398,11 +412,12 @@ mod tests {
         fn record_cmd(text: &str) -> (SessionCmd, oneshot::Receiver<RecordOutcome>) {
             let (ack, rx) = oneshot::channel();
             (
-                SessionCmd::Record {
+                SessionCmd::Record(Record {
                     msg: Message::user(text),
                     context: None,
+                    title: None,
                     ack,
-                },
+                }),
                 rx,
             )
         }

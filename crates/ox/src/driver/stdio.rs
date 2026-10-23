@@ -431,7 +431,7 @@ mod tests {
         }
 
         fn prompt() -> Op {
-            Op::Prompt("hi".to_owned())
+            Op::prompt("hi")
         }
 
         #[tokio::test]

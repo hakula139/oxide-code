@@ -301,7 +301,10 @@ mod tests {
                 (
                     "init",
                     "AGENTS.md",
-                    Op::Prompt(init::create_prompt(root.path(), "AGENTS.md")),
+                    Op::Prompt {
+                        text: init::create_prompt(root.path(), "AGENTS.md"),
+                        title: Some("/init AGENTS.md".to_owned()),
+                    },
                 ),
                 ("mode", "plan", Op::SetMode(Mode::Plan)),
                 ("model", "haiku", set_model("claude-haiku-5-5")),

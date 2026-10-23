@@ -210,7 +210,7 @@ mod tests {
                     let sink = CapturingSink::default();
                     let mut ops = inert_ops();
 
-                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+                    let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
 
                     assert_eq!(end, TurnEnd::Completed);
                     assert!(!engine.retry_login);
@@ -296,7 +296,7 @@ mod tests {
                     let sink = CapturingSink::default();
                     let mut ops = inert_ops();
 
-                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+                    let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
 
                     assert_eq!(end, TurnEnd::Failed);
                     assert!(engine.retry_login);
@@ -335,7 +335,7 @@ mod tests {
                     tx.try_send(Op::Interrupt).unwrap();
                     let start = tokio::time::Instant::now();
 
-                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+                    let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
                     let waited = start.elapsed();
                     engine.client.finish_reloads().await;
 
@@ -367,7 +367,7 @@ mod tests {
                     let sink = CapturingSink::default();
                     let mut ops = inert_ops();
 
-                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+                    let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
 
                     assert_eq!(end, TurnEnd::Failed);
                     assert!(!engine.retry_login);
@@ -404,7 +404,7 @@ mod tests {
                     let sink = CapturingSink::default();
                     let mut ops = inert_ops();
 
-                    let end = engine.submit_prompt("hi", &sink, &mut ops).await;
+                    let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
 
                     assert_eq!(end, TurnEnd::Failed);
                     assert_eq!(engine.client.auth_source(), None);

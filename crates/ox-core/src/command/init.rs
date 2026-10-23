@@ -20,13 +20,21 @@ pub fn no_file_sentence() -> String {
     format!("This project has no {first} or {second}.")
 }
 
-/// [`resolve`] for a frontend without a picker, where a bare `/init` in a project with no
-/// instruction file errors naming both files.
+/// [`resolve`] for a frontend without a picker, titled after the typed command. A bare `/init` in a
+/// project with no instruction file errors naming both files.
 pub(super) fn parse(args: &str, root: &Path) -> Result<Op, String> {
-    resolve(args, root)?.map(Op::Prompt).ok_or_else(|| {
+    let text = resolve(args, root)?.ok_or_else(|| {
         let no_file = no_file_sentence();
         let [(first, _), (second, _)] = FILE_CHOICES;
         format!("{no_file} Run `/init {first}` or `/init {second}` to create one.")
+    })?;
+    let title = match args.trim() {
+        "" => "/init".to_owned(),
+        arg => format!("/init {arg}"),
+    };
+    Ok(Op::Prompt {
+        text,
+        title: Some(title),
     })
 }
 
@@ -166,6 +174,33 @@ mod tests {
 
     mod parse {
         use super::*;
+
+        #[test]
+        fn file_form_titles_the_session_after_the_command() {
+            let root = tempfile::tempdir().unwrap();
+
+            assert_eq!(
+                parse(" AGENTS.md ", root.path()),
+                Ok(Op::Prompt {
+                    text: create_prompt(root.path(), "AGENTS.md"),
+                    title: Some("/init AGENTS.md".to_owned()),
+                }),
+            );
+        }
+
+        #[test]
+        fn bare_form_with_an_instruction_file_titles_the_session_after_the_bare_command() {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(root.path().join("AGENTS.md"), "# AGENTS.md\n").unwrap();
+
+            assert_eq!(
+                parse("", root.path()),
+                Ok(Op::Prompt {
+                    text: update_prompt(root.path(), &[PathBuf::from("AGENTS.md")]),
+                    title: Some("/init".to_owned()),
+                }),
+            );
+        }
 
         #[test]
         fn bare_form_without_an_instruction_file_names_both_files() {

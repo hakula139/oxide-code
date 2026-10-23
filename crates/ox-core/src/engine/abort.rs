@@ -52,7 +52,7 @@ impl Inbox {
                 Ok(None)
             }
             Some(
-                op @ (Op::Prompt(_)
+                op @ (Op::Prompt { .. }
                 | Op::Clear
                 | Op::Archive
                 | Op::Resume { .. }

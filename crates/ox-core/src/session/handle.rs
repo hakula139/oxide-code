@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, warn};
 use uuid::Uuid;
 
-use super::actor::{self, SessionCmd};
+use super::actor::{self, Record, SessionCmd};
 use super::entry::{ArchiveState, CompactBoundary, CompactInfo, UsageRecord};
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
@@ -156,17 +156,25 @@ impl SessionHandle {
 
     /// Records a conversation message.
     pub(crate) async fn record_message(&self, msg: Message) -> RecordOutcome {
-        self.record_message_with_context(msg, None).await
+        self.record_message_with_context(msg, None, None).await
     }
 
-    /// [`Self::record_message`], with the prompt state `msg` is the first to carry.
+    /// [`Self::record_message`], with the prompt state `msg` is the first to carry, and the title a
+    /// fresh session takes in place of `msg`'s text.
     pub(crate) async fn record_message_with_context(
         &self,
         msg: Message,
         context: Option<SessionContext>,
+        title: Option<String>,
     ) -> RecordOutcome {
         let (ack, rx) = oneshot::channel();
-        self.request(SessionCmd::Record { msg, context, ack }, rx)
+        let record = Record {
+            msg,
+            context,
+            title,
+            ack,
+        };
+        self.request(SessionCmd::Record(record), rx)
             .await
             .unwrap_or_else(|| RecordOutcome {
                 checkpoint: None,
@@ -1977,6 +1985,7 @@ mod tests {
                 .record_message_with_context(
                     Message::user("Edit f.rs"),
                     Some(prompt.session_context()),
+                    None,
                 )
                 .await;
             session
@@ -2003,6 +2012,7 @@ mod tests {
                 .record_message_with_context(
                     Message::user("Rename main in f.rs"),
                     Some(prompt.session_context()),
+                    None,
                 )
                 .await;
             record_tool_turns(&session).await;

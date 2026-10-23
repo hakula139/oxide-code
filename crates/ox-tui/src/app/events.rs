@@ -169,6 +169,7 @@ impl App {
     /// A turn whose automatic compaction failed goes idle with the queue held.
     /// A turn that never reached the model, or that the engine rolled back, does the same
     /// and hands its prompts back, one into the empty input for another try.
+    /// A slash command handed back that way gets a note that Enter runs it again.
     fn apply_turn_failed(&mut self, msg: &str) {
         self.chat.push_error(msg);
         match self.queue.fail_turn(self.input.is_empty()) {
@@ -179,7 +180,13 @@ impl App {
             }
             FailedTurn::HandedBack(prompt) => {
                 if let Some(prompt) = prompt {
-                    self.input.set_text(&prompt);
+                    self.input.set_text(prompt.line());
+                    if prompt.is_slash() {
+                        let line = prompt.line();
+                        self.chat.push_system_message(format!(
+                            "`{line}` did not finish. Press Enter to run it again."
+                        ));
+                    }
                 }
                 self.enter_idle();
             }
@@ -774,10 +781,7 @@ mod tests {
             app.handle_engine_event(Event::TurnComplete);
 
             let forwarded: Vec<Op> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-            assert_eq!(
-                forwarded,
-                [Op::Prompt("a".to_owned()), Op::Queue("b".to_owned())],
-            );
+            assert_eq!(forwarded, [Op::prompt("a"), Op::Queue("b".to_owned())],);
             assert_eq!(app.status, Status::Streaming);
             assert_eq!(*app.queue.pending(), ["b"],);
         }
@@ -821,11 +825,38 @@ mod tests {
 
             assert_eq!(app.status, Status::Idle);
             assert_eq!(app.input.lines(), ["//refused".to_owned()]);
+            assert_eq!(
+                app.chat.last_system_text(),
+                None,
+                "a typed prompt needs no note"
+            );
             assert_eq!(*app.queue.pending(), ["drained", "queued"],);
             assert_eq!(
                 rx.try_recv(),
                 Err(TryRecvError::Empty),
                 "nothing reaches the engine until the user sends"
+            );
+        }
+
+        #[tokio::test]
+        async fn turn_rolled_back_notes_that_enter_reruns_a_slash_command() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::SlashPrompt {
+                line: "/init AGENTS.md".to_owned(),
+                prompt: "Create AGENTS.md for this repository.".to_owned(),
+            });
+            rx.try_recv().expect("prompt forwarded");
+
+            app.handle_engine_event(Event::TurnRolledBack);
+            app.handle_engine_event(Event::TurnFailed(
+                "The model declined this request.".to_owned(),
+            ));
+
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(app.input.lines(), ["/init AGENTS.md".to_owned()]);
+            assert_eq!(
+                app.chat.last_system_text(),
+                Some("`/init AGENTS.md` did not finish. Press Enter to run it again.")
             );
         }
 
@@ -906,9 +937,10 @@ mod tests {
 
             assert_eq!(
                 rx.try_recv().ok(),
-                Some(Op::Prompt(
-                    "Create AGENTS.md for this repository.".to_owned()
-                )),
+                Some(Op::Prompt {
+                    text: "Create AGENTS.md for this repository.".to_owned(),
+                    title: Some("/init".to_owned()),
+                }),
                 "the command's prompt runs, not its line",
             );
             let text = rendered_text(&mut app, 80, 20);
@@ -968,10 +1000,7 @@ mod tests {
             let forwarded: Vec<Op> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             assert_eq!(
                 forwarded,
-                [
-                    Op::Prompt("first".to_owned()),
-                    Op::Queue("second".to_owned()),
-                ],
+                [Op::prompt("first"), Op::Queue("second".to_owned())],
             );
             assert_eq!(*app.queue.pending(), ["second"],);
         }
@@ -992,7 +1021,7 @@ mod tests {
 
             app.handle_engine_event(Event::TurnFailed("API failed".to_owned()));
 
-            assert_eq!(rx.try_recv().unwrap(), Op::Prompt("queued".to_owned()));
+            assert_eq!(rx.try_recv().unwrap(), Op::prompt("queued"));
             assert!(app.input.is_empty(), "the sent prompt is not handed back");
         }
 
@@ -1083,7 +1112,7 @@ mod tests {
             assert_eq!(
                 forwarded(),
                 [
-                    Op::Prompt("a".to_owned()),
+                    Op::prompt("a"),
                     Op::Queue("b".to_owned()),
                     Op::Queue("c".to_owned()),
                 ],
@@ -1091,14 +1120,11 @@ mod tests {
 
             app.handle_engine_event(Event::TurnComplete);
 
-            assert_eq!(
-                forwarded(),
-                [Op::Prompt("b".to_owned()), Op::Queue("c".to_owned())],
-            );
+            assert_eq!(forwarded(), [Op::prompt("b"), Op::Queue("c".to_owned())],);
 
             app.handle_engine_event(Event::TurnComplete);
 
-            assert_eq!(forwarded(), [Op::Prompt("c".to_owned())]);
+            assert_eq!(forwarded(), [Op::prompt("c")]);
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
         }
 
@@ -1683,7 +1709,7 @@ mod tests {
             assert_eq!(before_ready, Err(TryRecvError::Empty));
             assert_eq!(
                 rx.try_recv().ok(),
-                Some(Op::Prompt("queued before compact".to_owned())),
+                Some(Op::prompt("queued before compact")),
             );
             assert_eq!(app.status, Status::Streaming);
             let text = rendered_text(&mut app, 80, 12);
@@ -1753,7 +1779,7 @@ mod tests {
 
             assert_eq!(during, Err(TryRecvError::Empty));
             assert_eq!(at_roll, Status::Archiving);
-            assert_eq!(rx.recv().await, Some(Op::Prompt("next".to_owned())));
+            assert_eq!(rx.recv().await, Some(Op::prompt("next")));
             assert_eq!(app.status, Status::Streaming);
         }
 
@@ -1903,7 +1929,7 @@ mod tests {
                 auth: AuthSource::OxLogin,
             });
 
-            assert_eq!(rx.try_recv().ok(), Some(Op::Prompt("held".to_owned())));
+            assert_eq!(rx.try_recv().ok(), Some(Op::prompt("held")));
             assert_eq!(app.status, Status::Streaming);
         }
 
@@ -2008,7 +2034,7 @@ mod tests {
             });
 
             assert_eq!(during, (Status::SigningOut, Err(TryRecvError::Empty)));
-            assert_eq!(rx.recv().await, Some(Op::Prompt("next".to_owned())));
+            assert_eq!(rx.recv().await, Some(Op::prompt("next")));
             assert_eq!(app.status, Status::Streaming);
         }
 
