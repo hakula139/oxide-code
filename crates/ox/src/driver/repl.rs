@@ -1,6 +1,6 @@
 //! Bare REPL driver for `--no-tui`: prompts and slash commands from stdin, replies on stdout.
 
-use std::io::{self, IsTerminal as _, Write};
+use std::io::{self, Write};
 use std::path::Path;
 use std::pin::pin;
 
@@ -19,18 +19,21 @@ use ox_core::util::text::escape_hidden;
 use super::stdio::{Approver, StdioSink, render_op, render_queued};
 use super::{Exit, Shutdown, shutdown_signal};
 
-/// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session. EOF after
-/// an operation failed or a command was rejected exits with failure. Only a terminal on stdin
-/// answers approvals, so a piped line is never taken as an answer. With a terminal, SIGINT
-/// interrupts the running operation or discards the line at the prompt, as shells do. Every other
-/// signal ends the run. `first`, when given, runs as the first input line.
+/// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session.
+/// EOF after an operation failed or a command was rejected exits with failure.
+/// An attended `engine` asks its approvals on stdin, while an unattended one asks none, so a piped
+/// line is never taken as an answer.
+/// In an attended run, SIGINT interrupts the running operation or discards the line at the prompt,
+/// as shells do.
+/// Every other signal ends the run.
+/// `first`, when given, runs as the first input line.
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,
     first: Option<String>,
 ) -> Result<Exit> {
     let sink = StdioSink::new(show_thinking);
-    let attended = io::stdin().is_terminal();
+    let attended = engine.attended();
     let stdin = BufReader::new(tokio::io::stdin());
     let project_root = engine.project_root().to_owned();
     let handle = engine.spawn();
@@ -114,7 +117,7 @@ where
                 sink,
                 &handle.ops,
                 &op,
-                Some(&mut prompter)
+                attended.then_some(&mut prompter)
             ));
             let end = loop {
                 tokio::select! {
@@ -174,7 +177,8 @@ const GRANT_CHOICES: &str =
     "[y] approve  [a] allow for session  [n] deny  [f] feedback  [x] abort: ";
 
 /// Answers approvals with lines read from the REPL's input, writing the call and its choices to
-/// `out`. The input ending aborts the turn.
+/// `out`.
+/// The input ending aborts the turn.
 struct Prompter<'a, R, W> {
     lines: &'a mut Lines<R>,
     out: W,
@@ -753,47 +757,6 @@ mod tests {
                     result["content"],
                     "The user denied the bash call and wrote: Use git ls-files.",
                 );
-            })
-            .await;
-        }
-
-        #[tokio::test]
-        async fn without_a_terminal_denies_approvals_and_keeps_every_line_a_prompt() {
-            with_pinned_home(async {
-                let server = MockServer::start().await;
-                mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"git push"}"#).await;
-                mount_reply(&server, "Done.").await;
-                let dir = tempfile::tempdir().unwrap();
-                let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
-                    .await
-                    .with_tools(bash_registry(Vec::new()))
-                    .unattended();
-                let input = indoc! {"
-                    list files
-                    y
-                "};
-
-                let exit = Box::pin(drive(
-                    engine.spawn(),
-                    dir.path(),
-                    &CapturingSink::default(),
-                    None,
-                    input.as_bytes(),
-                    false,
-                    no_signal,
-                ))
-                .await
-                .unwrap();
-
-                assert_eq!(exit, Exit::Success);
-                let requests = request_bodies(&server).await;
-                assert_eq!(requests.len(), 3, "the `y` line is the second prompt");
-                let result =
-                    &requests[1]["messages"].as_array().unwrap().last().unwrap()["content"][0];
-                let content = result["content"].as_str().unwrap();
-                assert!(content.contains("this run cannot ask for it."), "{content}");
-                let last = requests[2]["messages"].as_array().unwrap().last().unwrap();
-                assert_eq!(last["content"][0]["text"], "y");
             })
             .await;
         }

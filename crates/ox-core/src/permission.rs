@@ -908,6 +908,10 @@ impl Policy {
         self.mode = mode;
     }
 
+    pub(crate) const fn attended(&self) -> bool {
+        self.attended
+    }
+
     /// Marks the run as one nobody can answer an approval request in, so each call that would ask
     /// is [unapproved](Decision::Unapproved).
     pub(crate) const fn set_unattended(&mut self) {
@@ -3955,6 +3959,55 @@ mod tests {
                     (Decision::Allow, Basis::Mode(Mode::Yolo)),
                     "an edit that names no path has no protected group",
                 );
+            }
+
+            #[test]
+            fn of_an_unattended_run_leaves_only_what_would_ask_unapproved() {
+                let unattended = |mode| {
+                    let mut p = policy(mode, &[(EXEC, "rm *")], &[(EXEC, "git push *")], &[]);
+                    p.set_unattended();
+                    p
+                };
+                let manual = unattended(Mode::Manual);
+                let plan = unattended(Mode::Plan);
+
+                for (p, class, target, expected) in [
+                    (
+                        &manual,
+                        EXEC,
+                        command("rm x"),
+                        (Decision::Deny, rule_basis(Tier::Deny, EXEC, "rm *")),
+                    ),
+                    (
+                        &plan,
+                        EXEC,
+                        command("ls"),
+                        (Decision::Deny, Basis::Mode(Mode::Plan)),
+                    ),
+                    (
+                        &manual,
+                        READ,
+                        outside(&abs("/etc/hosts")),
+                        (Decision::Allow, Basis::Read),
+                    ),
+                    (
+                        &manual,
+                        EXEC,
+                        command("git push origin"),
+                        (
+                            Decision::Unapproved,
+                            rule_basis(Tier::Ask, EXEC, "git push *"),
+                        ),
+                    ),
+                    (
+                        &manual,
+                        EXEC,
+                        command("git status"),
+                        (Decision::Unapproved, Basis::Mode(Mode::Manual)),
+                    ),
+                ] {
+                    assert_eq!(verdict(p, class, &target), expected, "{target:?}");
+                }
             }
         }
     }

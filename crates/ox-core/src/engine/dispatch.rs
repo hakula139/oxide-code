@@ -461,8 +461,9 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ))
 }
 
-/// The synthetic error result for a call that would ask in a run nobody attends. It names what made
-/// the call ask, then the config `fix` that lets it through, or what else the model can do.
+/// The synthetic error result for a call that would ask in a run nobody attends.
+/// It names what made the call ask, then the config `fix` that lets it through, or what else the
+/// model can do.
 fn unapproved_output(name: &str, basis: &Basis, fix: Option<&ConfigFix>) -> ToolOutput {
     let why = match basis {
         Basis::Mode(_) => "No allow pattern matches it.".to_owned(),
@@ -486,11 +487,11 @@ fn unapproved_output(name: &str, basis: &Basis, fix: Option<&ConfigFix>) -> Tool
                  in the user config."
             )
         }
-        (None, Basis::Mode(_)) => "Under `permission.allow` in the user config, \
-                                   a chained command needs a pattern per command, \
-                                   and a word that expands needs a pattern ending in `*` \
-                                   at that word, \
-                                   while no pattern covers a command that hides what it runs, \
+        (None, Basis::Mode(_)) => "To allow it, ask the user to add a pattern \
+                                   for each of its commands under `permission.allow` \
+                                   in the user config, \
+                                   ending a pattern in `*` at a word that expands. \
+                                   No pattern covers a command that hides what it runs, \
                                    such as `$(...)`, `sh -c`, or `cd /tmp/x && make`."
             .to_owned(),
         (None, Basis::Unparsed) => "Rewrite it in simpler shell syntax.".to_owned(),
@@ -502,7 +503,7 @@ fn unapproved_output(name: &str, basis: &Basis, fix: Option<&ConfigFix>) -> Tool
         "The {name} call was denied because it needs approval \
          and this run cannot ask for it. \
          {why} \
-         Do not retry it. \
+         Do not retry it as written. \
          {next}"
     ))
 }
@@ -1247,7 +1248,7 @@ mod tests {
                         "make > .git/log",
                         &["make *"][..],
                         "It asks because of the built-in `git` rule. \
-                         Do not retry it. \
+                         Do not retry it as written. \
                          To allow it, ask the user to set `permission.defaults.git = false` \
                          in the user config.",
                     ),
@@ -1255,7 +1256,7 @@ mod tests {
                         "rm -rf build",
                         &[],
                         "It asks because of the built-in `rm` rule. \
-                         Do not retry it. \
+                         Do not retry it as written. \
                          To allow it, ask the user to set `permission.defaults.rm = false` \
                          and add `\"rm -rf build\"` to `permission.allow.exec` in the user config.",
                     ),
@@ -1425,7 +1426,7 @@ mod tests {
                     &manual,
                     Some(&allow),
                     "No allow pattern matches it. \
-                     Do not retry it. \
+                     Do not retry it as written. \
                      To allow it, ask the user to add `'''echo 'a\\b''''` \
                      to `permission.allow.exec` in the user config.",
                 ),
@@ -1433,11 +1434,11 @@ mod tests {
                     &manual,
                     None,
                     "No allow pattern matches it. \
-                     Do not retry it. \
-                     Under `permission.allow` in the user config, \
-                     a chained command needs a pattern per command, \
-                     and a word that expands needs a pattern ending in `*` at that word, \
-                     while no pattern covers a command that hides what it runs, \
+                     Do not retry it as written. \
+                     To allow it, ask the user to add a pattern for each of its commands \
+                     under `permission.allow` in the user config, \
+                     ending a pattern in `*` at a word that expands. \
+                     No pattern covers a command that hides what it runs, \
                      such as `$(...)`, `sh -c`, or `cd /tmp/x && make`.",
                 ),
                 (
@@ -1445,21 +1446,21 @@ mod tests {
                     None,
                     "ox could not parse it, \
                      so the permission rules may not see everything it runs. \
-                     Do not retry it. \
+                     Do not retry it as written. \
                      Rewrite it in simpler shell syntax.",
                 ),
                 (
                     &Basis::Builtin(Shipped::Ssh),
                     None,
                     "It asks because of the built-in `ssh` rule. \
-                     Do not retry it. \
+                     Do not retry it as written. \
                      Choose a different approach or ask the user to adjust permissions.",
                 ),
                 (
                     &ask,
                     None,
                     "It asks because of the `ask.exec` pattern `git push *`. \
-                     Do not retry it. \
+                     Do not retry it as written. \
                      Choose a different approach or ask the user to adjust permissions.",
                 ),
             ];

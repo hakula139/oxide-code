@@ -57,7 +57,8 @@ impl Engine {
         self
     }
 
-    /// This engine for a run nobody attends, as [`Config::set_unattended`](crate::config::Config::set_unattended) sets up.
+    /// This engine for a run nobody attends, as
+    /// [`Config::set_unattended`](crate::config::Config::set_unattended) sets up.
     #[must_use]
     pub fn unattended(mut self) -> Self {
         self.policy.set_unattended();

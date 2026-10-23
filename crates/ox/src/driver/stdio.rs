@@ -109,7 +109,8 @@ fn render(sink: &dyn EventSink, event: Event) {
 }
 
 /// The approver of a run nobody attends, which never needs one, since its engine requests no
-/// approval. Uninhabited, so only `None` names it.
+/// approval.
+/// Uninhabited, so only `None` names it.
 pub(super) enum Unattended {}
 
 impl Approver for Unattended {

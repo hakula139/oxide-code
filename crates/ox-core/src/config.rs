@@ -421,8 +421,8 @@ impl Config {
         self.provenance.permission_mode = Source::Flag("--mode");
     }
 
-    /// Marks the run as one nobody can answer an approval request in, so the engine denies each call
-    /// that would ask without requesting approval, telling the model what would let it through.
+    /// Marks the run as one nobody can answer an approval request in, so the engine denies each
+    /// call that would ask without requesting approval, and words the denial for the model.
     pub fn set_unattended(&mut self) {
         self.permission.set_unattended();
     }
