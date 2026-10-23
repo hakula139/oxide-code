@@ -22,7 +22,7 @@ Each file sets only the keys it names, and a later layer wins key by key, so a d
 
 ### Drop-Ins
 
-`config.d/` lets a dotfile manager, a Nix module, or a team script own one file without editing your `config.toml`. Drop-ins load after `config.toml`, sorted by file name byte by byte, so a numeric prefix such as `10-team.toml` or `50-nix.toml` sets their order. Hidden files, subdirectories, and files without a `.toml` extension are skipped, and a symlink loads its target.
+`config.d/` lets a dotfile manager or a team script own one file without editing your `config.toml`. When the [Home Manager module](install.md#home-manager) writes `config.toml` itself, drop-ins hold your local overrides. Drop-ins load after `config.toml`, sorted by file name byte by byte, so a numeric prefix such as `10-team.toml` or `50-local.toml` sets their order. Hidden files, subdirectories, and files without a `.toml` extension are skipped, and a symlink loads its target.
 
 Drop-ins share the `config.toml` schema and count as user config. An invalid drop-in, including a symlink whose target is missing, stops startup with an error that names the file. A malformed permission pattern or extra root names the file that holds it in the same way.
 
