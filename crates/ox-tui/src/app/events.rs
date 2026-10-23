@@ -105,7 +105,7 @@ impl App {
                 notice,
             ),
             Event::ModeChanged(mode) => self.apply_mode_changed(mode),
-            Event::LoginStarted { url } => self.open_sign_in_url(&url),
+            Event::LoginStarted { url, manual_url } => self.open_sign_in_url(&url, &manual_url),
             Event::SignedIn { auth } => self.apply_signed_in(auth),
             Event::LoginRestored { auth } => self.apply_login_restored(auth),
             Event::SignedOut {
@@ -315,19 +315,21 @@ impl App {
         self.chat.push_system_message(notice::mode_changed(mode));
     }
 
-    /// Opens `url` in the browser and prints it in case the browser does not open. The sign-in
-    /// returns to a loopback listener, so only a browser on this machine can complete it.
-    fn open_sign_in_url(&mut self, url: &str) {
+    /// Opens `url` in the browser, which returns to a listener on this machine, and prints
+    /// `manual_url` for a browser that does not open or runs elsewhere, whose page shows a code to
+    /// paste back.
+    fn open_sign_in_url(&mut self, url: &str, manual_url: &str) {
         let message = match (self.open_browser)(url) {
             Ok(()) => formatdoc! {"
-                Opened the browser to sign in. If it did not open, visit this URL in a browser on this machine:
-                {url}"
+                Opened the browser to sign in. If it did not open or cannot reach this machine, \
+                sign in at this URL and paste the code it shows here:
+                {manual_url}"
             },
             Err(e) => {
                 debug!(error = %e, "failed to open the browser");
                 formatdoc! {"
-                    Could not open the browser. Sign in at this URL in a browser on this machine:
-                    {url}"
+                    Could not open the browser. Sign in at this URL and paste the code it shows here:
+                    {manual_url}"
                 }
             }
         };
@@ -1852,10 +1854,11 @@ mod tests {
         }
 
         #[test]
-        fn login_started_opens_the_browser_and_prints_the_url() {
+        fn login_started_opens_the_browser_and_prints_the_manual_url() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let started = || Event::LoginStarted {
                 url: "https://example.com/authorize".to_owned(),
+                manual_url: "https://example.com/authorize?manual".to_owned(),
             };
             app.open_browser = |url| {
                 assert_eq!(url, "https://example.com/authorize");
@@ -1867,8 +1870,8 @@ mod tests {
             assert_eq!(
                 app.chat.last_system_text(),
                 Some(indoc! {"
-                    Opened the browser to sign in. If it did not open, visit this URL in a browser on this machine:
-                    https://example.com/authorize"
+                    Opened the browser to sign in. If it did not open or cannot reach this machine, sign in at this URL and paste the code it shows here:
+                    https://example.com/authorize?manual"
                 }),
             );
 
@@ -1878,8 +1881,8 @@ mod tests {
             assert_eq!(
                 app.chat.last_system_text(),
                 Some(indoc! {"
-                    Could not open the browser. Sign in at this URL in a browser on this machine:
-                    https://example.com/authorize"
+                    Could not open the browser. Sign in at this URL and paste the code it shows here:
+                    https://example.com/authorize?manual"
                 }),
             );
         }
@@ -1921,7 +1924,7 @@ mod tests {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_op(Op::Login);
             rx.try_recv().expect("login forwarded");
-            app.dispatch_action(Action::Submit("held".to_owned()));
+            app.queue.push("held".to_owned());
 
             app.handle_engine_event(Event::SignedIn {
                 auth: AuthSource::OxLogin,
@@ -1936,7 +1939,7 @@ mod tests {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_op(Op::Login);
             rx.try_recv().expect("login forwarded");
-            app.dispatch_action(Action::Submit("held".to_owned()));
+            app.queue.push("held".to_owned());
             app.set_status(Status::Cancelling);
 
             app.handle_engine_event(Event::SignedIn {

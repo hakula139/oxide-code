@@ -269,7 +269,8 @@ impl App {
             | Op::Queue(_)
             | Op::Resolve { .. }
             | Op::SetModel(_)
-            | Op::Rename { .. } => {}
+            | Op::Rename { .. }
+            | Op::LoginCode(_) => {}
         }
         self.send_op(op);
     }
@@ -362,11 +363,16 @@ impl App {
         theme
     }
 
-    /// Queues the prompt, then starts a turn with the queue head when idle. Slash commands forward
-    /// their own synthesized actions.
+    /// Queues the prompt, then starts a turn with the queue head when idle. While signing in, the
+    /// text is the sign-in code instead, sent without an echo. Slash commands forward their own
+    /// synthesized actions.
     fn handle_submit_prompt(&mut self, text: &str) {
         let idle = self.status.is_idle();
         let Some(parsed) = command::parse_slash(text) else {
+            if self.status == Status::SigningIn {
+                self.dispatch_op(Op::LoginCode(text.to_owned()));
+                return;
+            }
             self.queue.push(text.to_owned());
             if idle {
                 // Prompts a cancel left queued run before this one.
@@ -1748,22 +1754,28 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn login_goes_busy_and_holds_prompts_typed_while_signing_in() {
+        async fn login_goes_busy_and_sends_text_typed_while_signing_in_as_the_code() {
             let (mut app, mut rx, _event_tx) = test_app(None);
 
             app.dispatch_op(Op::Login);
 
             assert_eq!(rx.try_recv().ok(), Some(Op::Login));
             assert_eq!(app.status, Status::SigningIn);
+            let entries = app.chat.entry_count();
 
-            app.dispatch_action(Action::Submit("typed-while-signing-in".to_owned()));
+            app.dispatch_action(Action::Submit("auth-code#state".to_owned()));
 
             assert_eq!(
-                rx.try_recv(),
-                Err(TryRecvError::Empty),
-                "no turn exists to splice a prompt into while signing in"
+                rx.try_recv().ok(),
+                Some(Op::LoginCode("auth-code#state".to_owned()))
             );
-            assert_eq!(*app.queue.pending(), ["typed-while-signing-in"],);
+            assert_eq!(app.status, Status::SigningIn);
+            assert!(app.queue.pending().is_empty());
+            assert_eq!(
+                app.chat.entry_count(),
+                entries,
+                "a sign-in code is never echoed"
+            );
         }
 
         #[tokio::test]

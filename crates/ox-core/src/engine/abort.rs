@@ -60,6 +60,7 @@ impl Inbox {
                 | Op::Rename { .. }
                 | Op::SetModel(_)
                 | Op::Login
+                | Op::LoginCode(_)
                 | Op::Logout
                 | Op::Resolve { .. }),
             ) => Ok(Some(op)),
@@ -77,16 +78,35 @@ pub(super) async fn await_unless_aborted<F, T>(
 where
     F: Future<Output = T>,
 {
+    await_or_op(fut, ops, inbox, sink, |op| {
+        // Unreachable under current wiring, and a `Resolve` here is a stale reply for an
+        // already-resolved call.
+        warn!(?op, "dropped mid-turn op");
+        None
+    })
+    .await
+}
+
+/// Races `fut` like [`await_unless_aborted`], handing each op that [`Inbox::absorb`] gives back to
+/// `on_op`, whose `Some` ends the wait in place of `fut`.
+pub(super) async fn await_or_op<F, T>(
+    fut: F,
+    ops: &mut mpsc::Receiver<Op>,
+    inbox: &mut Inbox,
+    sink: &dyn EventSink,
+    mut on_op: impl FnMut(Op) -> Option<T>,
+) -> AbortResult<T>
+where
+    F: Future<Output = T>,
+{
     tokio::pin!(fut);
     loop {
         tokio::select! {
             // Queued ops, an interrupt above all, must win over a `fut` that is already ready.
             biased;
             op = ops.recv() => {
-                // Unreachable under current wiring, and a `Resolve` here is a stale reply for an
-                // already-resolved call.
-                if let Some(op) = inbox.absorb(op, sink)? {
-                    warn!(?op, "dropped mid-turn op");
+                if let Some(output) = inbox.absorb(op, sink)?.and_then(&mut on_op) {
+                    return Ok(output);
                 }
             }
             output = &mut fut => return Ok(output),
@@ -170,6 +190,44 @@ mod tests {
                 sink.events(),
             );
             drop(tx);
+        }
+    }
+
+    mod await_or_op {
+        use super::*;
+
+        #[tokio::test]
+        async fn ends_with_the_first_op_the_handler_takes() {
+            let (tx, mut rx) = mpsc::channel(3);
+            tx.try_send(Op::Clear).unwrap();
+            tx.try_send(Op::LoginCode("code#state".to_owned())).unwrap();
+            tx.try_send(Op::Logout).unwrap();
+            let mut inbox = Inbox::default();
+            let sink = CapturingSink::default();
+            let mut passed = Vec::new();
+
+            let output =
+                await_or_op(
+                    std::future::pending(),
+                    &mut rx,
+                    &mut inbox,
+                    &sink,
+                    |op| match op {
+                        Op::LoginCode(code) => Some(code),
+                        op => {
+                            passed.push(op);
+                            None
+                        }
+                    },
+                )
+                .await;
+
+            assert!(
+                matches!(&output, Ok(code) if code == "code#state"),
+                "{output:?}"
+            );
+            assert_eq!(passed, [Op::Clear]);
+            assert_eq!(rx.try_recv().ok(), Some(Op::Logout));
         }
     }
 }

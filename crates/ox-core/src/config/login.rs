@@ -1,5 +1,6 @@
 //! Browser sign-in for the oxide-code login: the OAuth authorization-code flow with PKCE, a
-//! loopback listener for the redirect, and the code exchange.
+//! loopback listener for the redirect, a pasted code for a browser that cannot reach it, and the
+//! code exchange.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -23,23 +24,28 @@ const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 /// page expects it.
 const CONSOLE_SCOPE: &str = "org:create_api_key";
 const SUCCESS_URL: &str = "https://platform.claude.com/oauth/code/success?app=claude-code";
+/// Claude Code's manual redirect, a page that shows the code as `code#state` for the user to paste.
+const MANUAL_REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
 const CALLBACK_PATH: &str = "/callback";
 const LOGIN_TIMEOUT: Duration = Duration::from_mins(5);
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 
 // ── PendingLogin ──
 
-/// A sign-in waiting for the browser to return to the loopback listener.
+/// A sign-in waiting for the browser to return to the loopback listener, or for the code the manual
+/// redirect page shows.
 pub(crate) struct PendingLogin {
     listener: TcpListener,
     url: String,
+    manual_url: String,
     redirect_uri: String,
     verifier: String,
     state: String,
 }
 
 impl PendingLogin {
-    /// Binds the listener on a free loopback port and builds the URL to sign in at.
+    /// Binds the listener on a free loopback port and builds the URLs to sign in at, which share
+    /// the verifier and `state`.
     pub(crate) async fn start() -> Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -48,33 +54,79 @@ impl PendingLogin {
         let redirect_uri = format!("http://localhost:{port}{CALLBACK_PATH}");
         let verifier = random_token()?;
         let state = random_token()?;
-        let url = authorize_url(&redirect_uri, &code_challenge(&verifier), &state);
+        let challenge = code_challenge(&verifier);
+        let url = authorize_url(&redirect_uri, &challenge, &state);
+        let manual_url = authorize_url(MANUAL_REDIRECT_URI, &challenge, &state);
         Ok(Self {
             listener,
             url,
+            manual_url,
             redirect_uri,
             verifier,
             state,
         })
     }
 
+    /// The URL whose redirect returns to the listener.
     pub(crate) fn url(&self) -> &str {
         &self.url
     }
 
-    /// Waits for the browser redirect, exchanges its code for tokens at `token_url`, and stores
-    /// them as the oxide-code login. Fails if the browser does not return in time.
-    pub(crate) async fn finish(self, token_url: &str, trust: &dyn Trust) -> Result<Auth> {
+    /// The URL whose redirect shows the code to paste, which a browser on any machine can use.
+    pub(crate) fn manual_url(&self) -> &str {
+        &self.manual_url
+    }
+
+    /// Waits for the browser to return to the listener. Fails if the browser refuses the sign-in,
+    /// or if nothing returns in time, which also ends the wait for a pasted code. Cancel-safe.
+    pub(crate) async fn await_redirect(&self) -> Result<Grant> {
         let Ok(callback) = tokio::time::timeout(LOGIN_TIMEOUT, self.await_code()).await else {
             bail!(
-                "the browser did not return within {} minutes",
+                "the sign-in did not finish within {} minutes",
                 LOGIN_TIMEOUT.as_secs() / 60
             );
         };
-        let (mut browser, code) = callback?;
+        let (browser, code) = callback?;
+        Ok(Grant::Browser(browser, code))
+    }
+
+    /// Takes the `code#state` the manual redirect page shows, as the user pasted it. The error is
+    /// a complete message with its recovery step.
+    pub(crate) fn paste(&self, input: &str) -> Result<Grant> {
+        let Some((code, state)) = input
+            .trim()
+            .split_once('#')
+            .filter(|(code, state)| !code.is_empty() && !state.is_empty())
+        else {
+            bail!(
+                "That is not a complete sign-in code. \
+                 Copy the whole code from the sign-in page and paste it again."
+            );
+        };
+        if state != self.state {
+            bail!(
+                "That code belongs to another sign-in. \
+                 Paste the code from the page that this sign-in opened."
+            );
+        }
+        Ok(Grant::Pasted(code.to_owned()))
+    }
+
+    /// Exchanges the code of `grant` for tokens at `token_url` and stores them as the oxide-code
+    /// login, then sends a browser that returned to the listener to the result page.
+    pub(crate) async fn finish(
+        self,
+        grant: Grant,
+        token_url: &str,
+        trust: &dyn Trust,
+    ) -> Result<Auth> {
+        let (mut browser, code, redirect_uri) = match grant {
+            Grant::Browser(browser, code) => (Some(browser), code, self.redirect_uri.as_str()),
+            Grant::Pasted(code) => (None, code, MANUAL_REDIRECT_URI),
+        };
         let grant = CodeGrant {
             code: &code,
-            redirect_uri: &self.redirect_uri,
+            redirect_uri,
             code_verifier: &self.verifier,
             state: &self.state,
         };
@@ -83,14 +135,16 @@ impl PendingLogin {
             Ok(Auth::stored(oauth::save_login(&tokens, token_url).await?))
         }
         .await;
-        let reply = match &result {
-            Ok(_) => redirect(SUCCESS_URL),
-            Err(_) => plain_text(
-                "500 Internal Server Error",
-                "Sign-in failed. Return to the terminal for details.",
-            ),
-        };
-        respond(&mut browser, &reply).await;
+        if let Some(browser) = &mut browser {
+            let reply = match &result {
+                Ok(_) => redirect(SUCCESS_URL),
+                Err(_) => plain_text(
+                    "500 Internal Server Error",
+                    "Sign-in failed. Return to the terminal for details.",
+                ),
+            };
+            respond(browser, &reply).await;
+        }
         result
     }
 
@@ -135,6 +189,17 @@ impl PendingLogin {
             }
         }
     }
+}
+
+// ── Grant ──
+
+/// The authorization code a sign-in received, which the exchange sends with the redirect URI that
+/// carried it.
+pub(crate) enum Grant {
+    /// The browser returned to the listener, whose connection stays open for the reply.
+    Browser(TcpStream, String),
+    /// The user pasted the code from the manual redirect page.
+    Pasted(String),
 }
 
 // ── PKCE ──
@@ -296,6 +361,22 @@ mod tests {
         reply
     }
 
+    /// Waits for the browser redirect, then finishes the sign-in with it.
+    async fn sign_in_from_browser(pending: PendingLogin, token_url: &str) -> Result<Auth> {
+        let grant = pending.await_redirect().await?;
+        pending.finish(grant, token_url, &NoRoots).await
+    }
+
+    /// The value of the query parameter `name` in `url`.
+    fn query_param(url: &str, name: &str) -> String {
+        reqwest::Url::parse(url)
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+            .unwrap()
+    }
+
     async fn browse(port: u16, target: &str) -> String {
         let request = formatdoc! {"
             GET {target} HTTP/1.1\r
@@ -309,22 +390,65 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn points_the_redirect_at_its_own_listener() {
+        async fn points_the_redirect_at_its_own_listener_and_the_manual_page() {
             let pending = PendingLogin::start().await.unwrap();
 
-            let url = reqwest::Url::parse(pending.url()).unwrap();
-            let param = |name: &str| {
-                url.query_pairs()
-                    .find(|(key, _)| key == name)
-                    .map(|(_, value)| value.into_owned())
-                    .unwrap()
-            };
             let redirect_uri = format!("http://localhost:{}/callback", port(&pending));
-            assert_eq!(param("redirect_uri"), redirect_uri);
+            assert_eq!(query_param(pending.url(), "redirect_uri"), redirect_uri);
             assert_eq!(pending.redirect_uri, redirect_uri);
-            assert_eq!(param("state"), pending.state);
-            assert_eq!(param("code_challenge"), code_challenge(&pending.verifier));
+            assert_eq!(
+                query_param(pending.manual_url(), "redirect_uri"),
+                MANUAL_REDIRECT_URI
+            );
+            for url in [pending.url(), pending.manual_url()] {
+                assert_eq!(query_param(url, "state"), pending.state);
+                assert_eq!(
+                    query_param(url, "code_challenge"),
+                    code_challenge(&pending.verifier)
+                );
+            }
             assert_ne!(pending.state, pending.verifier);
+        }
+    }
+
+    mod paste {
+        use super::*;
+
+        #[tokio::test]
+        async fn takes_the_code_of_a_matching_state() {
+            let pending = PendingLogin::start().await.unwrap();
+
+            let grant = pending.paste(&format!("  auth-code#{}\n", pending.state));
+
+            assert!(
+                matches!(&grant, Ok(Grant::Pasted(code)) if code == "auth-code"),
+                "{:?}",
+                grant.err()
+            );
+        }
+
+        #[tokio::test]
+        async fn rejects_an_incomplete_code_or_one_from_another_sign_in() {
+            let pending = PendingLogin::start().await.unwrap();
+            let incomplete = "That is not a complete sign-in code. \
+                              Copy the whole code from the sign-in page and paste it again.";
+            let foreign = "That code belongs to another sign-in. \
+                           Paste the code from the page that this sign-in opened.";
+            let state = pending.state.clone();
+
+            for (input, expected) in [
+                ("auth-code".to_owned(), incomplete),
+                (format!("#{state}"), incomplete),
+                ("auth-code#".to_owned(), incomplete),
+                (String::new(), incomplete),
+                ("auth-code#other-state".to_owned(), foreign),
+                (format!("auth-code#{state}x"), foreign),
+            ] {
+                let Err(e) = pending.paste(&input) else {
+                    panic!("{input:?} must be rejected");
+                };
+                assert_eq!(e.to_string(), expected, "{input:?}");
+            }
         }
     }
 
@@ -364,8 +488,10 @@ mod tests {
 
             let (auth, reply, reloaded) =
                 temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                    let (auth, reply) =
-                        tokio::join!(pending.finish(&token_url, &NoRoots), browse(port, &target));
+                    let (auth, reply) = tokio::join!(
+                        sign_in_from_browser(pending, &token_url),
+                        browse(port, &target)
+                    );
                     (
                         auth,
                         reply,
@@ -410,7 +536,10 @@ mod tests {
 
             let (auth, reply) =
                 temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                    tokio::join!(pending.finish(&token_url, &NoRoots), browse(port, &target))
+                    tokio::join!(
+                        sign_in_from_browser(pending, &token_url),
+                        browse(port, &target)
+                    )
                 })
                 .await;
 
@@ -433,7 +562,7 @@ mod tests {
             let target = format!("/callback?error=access_denied&state={}", pending.state);
 
             let (auth, reply) = tokio::join!(
-                pending.finish(UNUSED_TOKEN_URL, &NoRoots),
+                sign_in_from_browser(pending, UNUSED_TOKEN_URL),
                 browse(port, &target),
             );
 
@@ -446,18 +575,54 @@ mod tests {
         }
 
         #[tokio::test(start_paused = true)]
-        async fn gives_up_when_the_browser_never_returns() {
+        async fn gives_up_when_nothing_returns() {
             let pending = PendingLogin::start().await.unwrap();
 
-            let err = pending
-                .finish(UNUSED_TOKEN_URL, &NoRoots)
+            let err = sign_in_from_browser(pending, UNUSED_TOKEN_URL)
                 .await
                 .unwrap_err();
 
             assert_eq!(
                 err.to_string(),
-                "the browser did not return within 5 minutes"
+                "the sign-in did not finish within 5 minutes"
             );
+        }
+
+        #[tokio::test]
+        async fn exchanges_a_pasted_code_with_the_manual_redirect() {
+            let data = tempfile::tempdir().unwrap();
+            let server = MockServer::start().await;
+            let pending = PendingLogin::start().await.unwrap();
+            Mock::given(method("POST"))
+                .and(body_json(json!({
+                    "grant_type": "authorization_code",
+                    "client_id": OAUTH_CLIENT_ID,
+                    "code": "pasted-code",
+                    "redirect_uri": MANUAL_REDIRECT_URI,
+                    "code_verifier": pending.verifier,
+                    "state": pending.state,
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "access_token": "pasted-access",
+                    "refresh_token": "pasted-refresh",
+                    "expires_in": 3600,
+                    "scope": "user:inference",
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let grant = pending
+                .paste(&format!("pasted-code#{}", pending.state))
+                .unwrap();
+            let token_url = server.uri();
+
+            let auth = temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                pending.finish(grant, &token_url, &NoRoots).await
+            })
+            .await;
+
+            assert_eq!(auth.unwrap().secret(), "pasted-access");
+            assert!(data.path().join("ox").join("credentials.json").exists());
         }
     }
 

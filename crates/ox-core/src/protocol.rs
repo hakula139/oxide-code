@@ -67,6 +67,11 @@ pub enum Op {
     /// Starts a browser sign-in for the oxide-code login, announced with [`Event::LoginStarted`].
     /// [`Self::Interrupt`] cancels it like a turn.
     Login,
+    /// Finishes the waiting [`Self::Login`] with the `code#state` the sign-in page shows when the
+    /// browser cannot reach the sign-in listener. A code from another sign-in, or an incomplete
+    /// one, reports [`Event::Error`] and the sign-in keeps waiting. With no sign-in waiting, the
+    /// engine ignores it.
+    LoginCode(String),
     /// Removes the oxide-code login.
     Logout,
     /// Ends any running operation without a terminal event, finalizes the live session, and stops
@@ -288,8 +293,10 @@ pub enum Event {
     },
     /// The permission mode after an [`Op::SetMode`].
     ModeChanged(Mode),
-    /// An [`Op::Login`] waits for sign-in at `url`, which the frontend opens in a browser.
-    LoginStarted { url: String },
+    /// An [`Op::Login`] waits for sign-in at `url`, which returns to a listener on this machine
+    /// and which the frontend opens in a browser. A browser anywhere can sign in at `manual_url`,
+    /// whose page shows the code to send back on [`Op::LoginCode`].
+    LoginStarted { url: String, manual_url: String },
     /// An [`Op::Login`] stored a new oxide-code login. `auth` is the credential requests now use,
     /// which stays an env var or `client.api_key` when one outranks the login.
     SignedIn { auth: AuthSource },
@@ -536,6 +543,7 @@ mod tests {
                 Op::Resume { .. } => "resume",
                 Op::Rename { .. } => "rename",
                 Op::Login => "login",
+                Op::LoginCode(_) => "login_code",
                 Op::Logout => "logout",
                 Op::Shutdown => "shutdown",
             }
@@ -599,6 +607,7 @@ mod tests {
                     title: "Title".to_owned(),
                 },
                 Op::Login,
+                Op::LoginCode("code#state".to_owned()),
                 Op::Logout,
                 Op::Shutdown,
             ]
@@ -883,6 +892,7 @@ mod tests {
                 Event::ModeChanged(Mode::Yolo),
                 Event::LoginStarted {
                     url: "https://claude.ai/oauth/authorize?state=s".to_owned(),
+                    manual_url: "https://claude.ai/oauth/authorize?code=true&state=s".to_owned(),
                 },
                 Event::SignedIn {
                     auth: AuthSource::OxLogin,
