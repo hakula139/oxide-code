@@ -784,7 +784,8 @@ mod tests {
                         Entry::Message { .. },
                     ]
                 ),
-                "the refreshed context and the synthetic continuation follow the boundary: {entries:?}",
+                "the refreshed context and the synthetic continuation \
+                 follow the boundary: {entries:?}",
             );
         }
 

@@ -698,7 +698,9 @@ mod tests {
 
             assert_eq!(
                 out,
-                "\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\n... [94 characters omitted] ...\n\u{00e9}",
+                "\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\n\
+                 ... [94 characters omitted] ...\n\
+                 \u{00e9}",
             );
         }
     }

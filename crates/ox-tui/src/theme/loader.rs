@@ -464,8 +464,8 @@ mod tests {
             assert_eq!(
                 format!("{err:#}"),
                 format!(
-                    "failed to parse base theme {path_str:?}: invalid theme TOML: line 1, column 43: \
-                     key with no value, expected `=`"
+                    "failed to parse base theme {path_str:?}: \
+                     invalid theme TOML: line 1, column 43: key with no value, expected `=`"
                 ),
             );
         }

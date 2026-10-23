@@ -230,7 +230,10 @@ impl Auth {
             Ok(secret) => Credential::new(self.source, secret).map(Some),
             Err(e) if e.is_transient() => Err(e.into()),
             Err(e) => {
-                warn!(error = %format_args!("{e:#}"), "failed to reload the stored login after HTTP 401");
+                warn!(
+                    error = %format_args!("{e:#}"),
+                    "failed to reload the stored login after HTTP 401"
+                );
                 Ok(None)
             }
         }

@@ -91,8 +91,8 @@ fn normalize_target(target: Option<SessionTarget<'_>>) -> Result<ResumeMode<'_>>
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 bail!(
-                    "empty session ID prefix (run `ox -c` to continue the latest session or `ox -r` \
-                     to pick one)"
+                    "empty session ID prefix \
+                     (run `ox -c` to continue the latest session or `ox -r` to pick one)"
                 );
             }
             if looks_like_path(trimmed) {
@@ -577,8 +577,8 @@ mod tests {
                     .to_string();
                 assert_eq!(
                     err,
-                    "empty session ID prefix (run `ox -c` to continue the latest session or \
-                     `ox -r` to pick one)",
+                    "empty session ID prefix \
+                     (run `ox -c` to continue the latest session or `ox -r` to pick one)",
                     "{raw:?}",
                 );
             }

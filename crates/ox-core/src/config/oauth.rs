@@ -757,8 +757,7 @@ impl TokenResponse {
     }
 }
 
-/// The authorization-code grant `/login` sends
-/// once the browser returns or the user pastes the code.
+/// The authorization-code grant `/login` sends once the browser returns or the user pastes a code.
 #[derive(Serialize)]
 pub(super) struct CodeGrant<'a> {
     pub(super) code: &'a str,
