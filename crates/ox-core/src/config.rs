@@ -1270,11 +1270,13 @@ mod tests {
             for (raw, expected) in [
                 (
                     "http://gw:8080",
-                    r#"invalid ANTHROPIC_BASE_URL "http://gw:8080": http is allowed only for localhost"#,
+                    "invalid ANTHROPIC_BASE_URL \"http://gw:8080\": \
+                     http is allowed only for localhost",
                 ),
                 (
                     "ftp://example.com",
-                    r#"invalid ANTHROPIC_BASE_URL "ftp://example.com": expected http or https, got "ftp""#,
+                    "invalid ANTHROPIC_BASE_URL \"ftp://example.com\": \
+                     expected http or https, got \"ftp\"",
                 ),
                 (
                     "gw:8080/v1",
@@ -1313,7 +1315,8 @@ mod tests {
 
             assert_eq!(
                 format!("{err:#}"),
-                r#"invalid client.base_url "http://gw:8080" in ~/ox/config.toml: http is allowed only for localhost"#,
+                "invalid client.base_url \"http://gw:8080\" in ~/ox/config.toml: \
+                 http is allowed only for localhost",
             );
         }
 
