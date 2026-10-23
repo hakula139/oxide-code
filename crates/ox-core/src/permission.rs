@@ -973,6 +973,38 @@ impl Policy {
         })
     }
 
+    /// The user config change that lets through a call that asks because of `basis`, for a run
+    /// that cannot ask. A shipped deny-tier group guards secrets, so no fix turns one off.
+    pub(crate) fn config_fix(
+        &self,
+        class: PermissionClass,
+        target: &Access,
+        basis: &Basis,
+    ) -> Option<ConfigFix> {
+        let Basis::Builtin(group) = *basis else {
+            return self
+                .session_grant(class, target)
+                .map(|grant| ConfigFix::Allow(grant.suggested));
+        };
+        if group.tier() == ShippedTier::Deny {
+            return None;
+        }
+        let mut trial = self.clone();
+        trial.enabled.retain(|enabled| *enabled != group);
+        for rules in [&mut trial.deny, &mut trial.ask] {
+            rules.retain(|entry| entry.builtin != Some(group));
+        }
+        if trial.decide(class, &target.as_target()) == Decision::Allow {
+            return Some(ConfigFix::Disable { group, allow: None });
+        }
+        trial
+            .session_grant(class, target)
+            .map(|grant| ConfigFix::Disable {
+                group,
+                allow: Some(grant.suggested),
+            })
+    }
+
     /// The `read` deny and ask rules for files below a search tool's root.
     pub(crate) fn read_filter(&self) -> ReadFilter {
         ReadFilter(
@@ -1259,6 +1291,16 @@ impl SessionGrant {
         );
         Ok(rule)
     }
+}
+
+/// A user config change that lets a held call through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfigFix {
+    /// An allow rule to add.
+    Allow(Rule),
+    /// A shipped group to turn off under `[permission.defaults]`, with the allow rule the call
+    /// would then still need.
+    Disable { group: Shipped, allow: Option<Rule> },
 }
 
 /// The `read` deny and ask rules a search tool applies to each file it finds, since the gate
@@ -2757,6 +2799,99 @@ mod tests {
                 assert!(p.session_grant(EDIT, &protected).is_none());
                 assert!(p.session_grant(EXEC, &command("git push origin")).is_none());
                 assert!(p.session_grant(EXEC, &command("ls *.rs")).is_none());
+            }
+        }
+
+        mod config_fix {
+            use super::*;
+
+            const RM: Basis = Basis::Builtin(Shipped::Rm);
+
+            #[test]
+            fn turns_off_the_group_alone_when_the_call_then_runs() {
+                let target = command("rm -rf build");
+
+                for p in [
+                    policy(Mode::Manual, &[], &[], &[(EXEC, "rm *")]),
+                    policy(Mode::Yolo, &[], &[], &[]),
+                ] {
+                    assert_eq!(
+                        p.config_fix(EXEC, &target, &RM),
+                        Some(ConfigFix::Disable {
+                            group: Shipped::Rm,
+                            allow: None,
+                        }),
+                        "{:?}",
+                        p.mode(),
+                    );
+                }
+            }
+
+            #[test]
+            fn adds_the_allow_rule_the_mode_still_needs_once_the_group_is_off() {
+                let p = policy(Mode::Manual, &[], &[], &[]);
+
+                let fix = p.config_fix(EXEC, &command("rm -rf build"), &RM);
+
+                assert_eq!(
+                    fix,
+                    Some(ConfigFix::Disable {
+                        group: Shipped::Rm,
+                        allow: Some(Rule::parse(EXEC, "rm -rf build").unwrap()),
+                    }),
+                );
+            }
+
+            #[test]
+            fn suggests_the_allow_rule_for_a_call_no_group_holds() {
+                let p = policy(Mode::Manual, &[], &[], &[]);
+
+                let fix = p.config_fix(EXEC, &command("cargo test"), &Basis::Mode(Mode::Manual));
+
+                assert_eq!(
+                    fix,
+                    Some(ConfigFix::Allow(Rule::parse(EXEC, "cargo test").unwrap()))
+                );
+            }
+
+            #[test]
+            fn offers_nothing_for_a_group_that_guards_secrets_or_a_call_still_held() {
+                let p = policy(Mode::Yolo, &[], &[], &[]);
+                let target = command("rm -rf build > .git/log");
+                let git = Basis::Builtin(Shipped::Git);
+                assert_eq!(p.verdict(EXEC, &target.as_target()).basis, git);
+
+                assert_eq!(p.config_fix(EXEC, &target, &git), None);
+                assert_eq!(
+                    p.config_fix(EXEC, &target, &Basis::Builtin(Shipped::Ssh)),
+                    None
+                );
+            }
+
+            #[cfg(unix)]
+            #[test]
+            fn drops_the_patterns_of_the_group_it_turns_off() {
+                let p = resolved_policy(
+                    Mode::Yolo,
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                    &Workspace::new(Path::new("/repo")),
+                );
+                let target = Access::for_path("/dev/null", &Workspace::new(Path::new("/repo")));
+                let devices = Basis::Builtin(Shipped::Devices);
+                assert_eq!(p.verdict(EDIT, &target.as_target()).basis, devices);
+
+                let fix = p.config_fix(EDIT, &target, &devices);
+
+                assert_eq!(
+                    fix,
+                    Some(ConfigFix::Disable {
+                        group: Shipped::Devices,
+                        allow: None,
+                    }),
+                );
             }
         }
 
