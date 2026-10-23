@@ -58,7 +58,7 @@ pub enum Mode {
     Manual,
     /// Read-only analysis: every edit, exec, and net call is denied.
     Plan,
-    /// Runs every call the rules leave open and never asks, denying what a deny or ask rule holds.
+    /// Runs every call no deny rule or configured ask rule holds, skipping the built-in ask rules.
     Yolo,
 }
 
@@ -71,7 +71,7 @@ impl Mode {
         match self {
             Self::Manual => "Ask before tool calls that no permission rule allows or denies",
             Self::Plan => "Read-only: deny edits and commands",
-            Self::Yolo => "Never ask: run tool calls unless a rule denies or asks",
+            Self::Yolo => "Run tool calls unless a deny rule or your ask rules hold them",
         }
     }
 }
@@ -668,7 +668,7 @@ pub(crate) enum Decision {
     Allow,
     Ask,
     Deny,
-    /// Deny a call that would ask, in a run that does not ask: in `yolo` or with nobody attending.
+    /// Deny a call that would ask, in a run nobody attends.
     Unapproved,
 }
 
@@ -700,9 +700,9 @@ pub enum Basis {
     SafeRead,
     /// An allowed command, by what let each of its simple commands and its writes through.
     Command(Vec<Basis>),
-    /// A command holding `construct`, which the analysis does not recognize, so no allow rule
-    /// covers it.
-    /// It asks in `manual`, while `yolo` runs it unless a deny or ask rule holds what ox sees.
+    /// A command holding `construct`, which the analysis does not recognize,
+    /// so no allow rule covers it.
+    /// `manual` asks, and `yolo` runs it unless a deny or configured ask rule holds what ox sees.
     Unrecognized { construct: String },
 }
 
@@ -952,8 +952,7 @@ impl Policy {
         })
     }
 
-    /// The user config change that lets a call through in a run that does not ask, in `yolo` or
-    /// with nobody attending.
+    /// The user config change that lets a call through in a run nobody attends.
     /// `None` when something else would still hold the call, or when the group that holds it
     /// guards secrets.
     pub(crate) fn config_fix(&self, class: PermissionClass, target: &Access) -> Option<ConfigFix> {
@@ -1002,7 +1001,8 @@ impl Policy {
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
     /// 2. `plan` denies an edit, exec, or net call.
-    /// 3. A call [`Self::asks`] holds asks.
+    /// 3. Outside `yolo`, a call [`Self::asks`] holds asks.
+    ///    In `yolo`, a call [`Self::yolo_hold`] holds asks or is denied.
     /// 4. A read-class call allows.
     /// 5. An edit-class call inside a workspace root allows.
     /// 6. An allow rule or a session allow rule allows.
@@ -1013,11 +1013,10 @@ impl Policy {
     /// case [`Self::asks`] lists, and step 6 allows it only when the analysis recognizes it and
     /// [`Self::allows_command`] holds.
     ///
-    /// A call that would ask is [unapproved](Decision::Unapproved) in `yolo`, which never asks, and
-    /// in a run nobody attends.
+    /// A call that would ask is [unapproved](Decision::Unapproved) in a run nobody attends.
     pub(crate) fn verdict(&self, class: PermissionClass, target: &Target<'_>) -> Verdict {
         let verdict = self.settle(class, target);
-        if verdict.decision == Decision::Ask && (self.mode == Mode::Yolo || !self.attended) {
+        if verdict.decision == Decision::Ask && !self.attended {
             return Verdict {
                 decision: Decision::Unapproved,
                 ..verdict
@@ -1029,7 +1028,7 @@ impl Policy {
     /// The verdict of the pipeline [`Self::verdict`] lists, as if a person attended the run.
     fn settle(&self, class: PermissionClass, target: &Target<'_>) -> Verdict {
         let verdict = |decision, basis| Verdict { decision, basis };
-        if let Some(rule) = held_by(&self.deny, class, target) {
+        if let Some(rule) = held_by(&self.deny.iter(), class, target) {
             return verdict(Decision::Deny, rule.basis(Tier::Deny));
         }
 
@@ -1042,7 +1041,11 @@ impl Policy {
             return verdict(Decision::Deny, Basis::Mode(Mode::Plan));
         }
 
-        if let Some(basis) = self.asks(class, target) {
+        if self.mode == Mode::Yolo {
+            if let Some(held) = self.yolo_hold(class, target) {
+                return held;
+            }
+        } else if let Some(basis) = self.asks(class, target) {
             return verdict(Decision::Ask, basis);
         }
 
@@ -1074,11 +1077,10 @@ impl Policy {
 
     /// What holds the call in the ask tier: an ask rule, the protected group of a path the call
     /// edits or a command writes, a command the analysis does not recognize, the
-    /// [`read` rule](Self::read_holder) for a file a reader opens, or the `rm` group for a
+    /// [`read` rule](read_holder) for a file a reader opens, or the `rm` group for a
     /// [forced recursive delete](Segment::removes_recursively_by_force).
-    /// `yolo` holds only what the rules see, so it runs a command the analysis does not recognize.
     fn asks(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
-        if let Some(rule) = held_by(&self.ask, class, target) {
+        if let Some(rule) = held_by(&self.ask.iter(), class, target) {
             return Some(rule.basis(Tier::Ask));
         }
         if class == PermissionClass::Edit
@@ -1089,13 +1091,16 @@ impl Policy {
         let Target::Command(command) = target else {
             return None;
         };
-        if self.mode != Mode::Yolo
-            && let Some(construct) = command.unrecognized()
-        {
+        if let Some(construct) = command.unrecognized() {
             return Some(Basis::Unrecognized {
                 construct: construct.to_owned(),
             });
         }
+        let tiers = self
+            .deny
+            .iter()
+            .map(|rule| (rule, Tier::Deny))
+            .chain(self.ask.iter().map(|rule| (rule, Tier::Ask)));
         command
             .writes()
             .iter()
@@ -1105,7 +1110,7 @@ impl Policy {
                 command
                     .segments()
                     .iter()
-                    .find_map(|segment| self.read_holder(segment))
+                    .find_map(|segment| read_holder(segment, &tiers))
             })
             .or_else(|| {
                 (self.enabled.contains(&Shipped::Rm)
@@ -1117,35 +1122,36 @@ impl Policy {
             })
     }
 
-    /// The deny or ask `read` rule that holds a file `segment` may read, or outside `yolo` the
-    /// first `read` rule of either tier when it may read any file.
-    fn read_holder(&self, segment: &Segment) -> Option<Basis> {
-        let tiers = || {
-            self.deny
-                .iter()
-                .map(|rule| (rule, Tier::Deny))
-                .chain(self.ask.iter().map(|rule| (rule, Tier::Ask)))
+    /// What holds a call in `yolo` past the deny tier:
+    /// a deny `read` rule matching a file a reader names denies, and a configured ask rule asks.
+    /// `yolo` runs what only the built-in ask rules, protected paths, or the analysis would hold.
+    fn yolo_hold(&self, class: PermissionClass, target: &Target<'_>) -> Option<Verdict> {
+        let segments = match target {
+            Target::Command(command) => command.segments(),
+            _ => &[],
         };
-        segment
-            .reads()
+        let deny = self.deny.iter().map(|rule| (rule, Tier::Deny));
+        if let Some(basis) = segments
             .iter()
-            .find_map(|read| {
-                let read = read.as_target();
-                tiers()
-                    .find(|(rule, _)| {
-                        rule.rule
-                            .matches(PermissionClass::Read, &read, MatchDiscipline::Deny)
-                    })
-                    .map(|(rule, tier)| rule.basis(tier))
-            })
+            .find_map(|segment| named_read_holder(segment, &deny))
+        {
+            return Some(Verdict {
+                decision: Decision::Deny,
+                basis,
+            });
+        }
+        let configured = self.ask.iter().filter(|entry| entry.builtin.is_none());
+        held_by(&configured, class, target)
+            .map(|rule| rule.basis(Tier::Ask))
             .or_else(|| {
-                (self.mode != Mode::Yolo && segment.reads_anything())
-                    .then(|| {
-                        tiers()
-                            .find(|(rule, _)| rule.rule.class() == PermissionClass::Read)
-                            .map(|(rule, tier)| rule.basis(tier))
-                    })
-                    .flatten()
+                let ask = configured.map(|rule| (rule, Tier::Ask));
+                segments
+                    .iter()
+                    .find_map(|segment| named_read_holder(segment, &ask))
+            })
+            .map(|basis| Verdict {
+                decision: Decision::Ask,
+                basis,
             })
     }
 
@@ -1223,12 +1229,12 @@ impl Policy {
 /// The first of the deny or ask `rules` that matches the call, or, for a command, an edit of a
 /// file it writes or a read of a file it redirects into its input.
 fn held_by<'a>(
-    rules: &'a [TierRule],
+    rules: &(impl Iterator<Item = &'a TierRule> + Clone),
     class: PermissionClass,
     target: &Target<'_>,
 ) -> Option<&'a TierRule> {
     rules
-        .iter()
+        .clone()
         .find(|entry| entry.rule.matches(class, target, MatchDiscipline::Deny))
         .or_else(|| {
             let Target::Command(command) = target else {
@@ -1245,6 +1251,42 @@ fn held_by<'a>(
                         .find_map(|read| held_by(rules, PermissionClass::Read, &read.as_target()))
                 })
         })
+}
+
+/// The first `read` rule among the deny or ask `tiers` that matches a file `segment` names,
+/// or the first `read` rule among them when the segment may read any file.
+fn read_holder<'a>(
+    segment: &Segment,
+    tiers: &(impl Iterator<Item = (&'a TierRule, Tier)> + Clone),
+) -> Option<Basis> {
+    named_read_holder(segment, tiers).or_else(|| {
+        segment
+            .reads_anything()
+            .then(|| {
+                tiers
+                    .clone()
+                    .find(|(rule, _)| rule.rule.class() == PermissionClass::Read)
+                    .map(|(rule, tier)| rule.basis(tier))
+            })
+            .flatten()
+    })
+}
+
+/// The first `read` rule among the deny or ask `tiers` that matches a file `segment` names.
+fn named_read_holder<'a>(
+    segment: &Segment,
+    tiers: &(impl Iterator<Item = (&'a TierRule, Tier)> + Clone),
+) -> Option<Basis> {
+    segment.reads().iter().find_map(|read| {
+        let read = read.as_target();
+        tiers
+            .clone()
+            .find(|(rule, _)| {
+                rule.rule
+                    .matches(PermissionClass::Read, &read, MatchDiscipline::Deny)
+            })
+            .map(|(rule, tier)| rule.basis(tier))
+    })
 }
 
 /// An approval's "allow for this session" offer: the suggested rule, plus the call that any edit
@@ -2581,7 +2623,7 @@ mod tests {
                         let workspace = Workspace::new(&cwd);
                         let resolve = |disabled: &[Shipped]| {
                             resolved_policy(
-                                Mode::Yolo,
+                                Mode::Manual,
                                 &[],
                                 &[],
                                 &[(EDIT, "*")],
@@ -2615,7 +2657,7 @@ mod tests {
                             let target = edit(path.clone());
                             assert_eq!(
                                 decide(&resolve(&[]), EDIT, &target),
-                                Decision::Unapproved,
+                                Decision::Ask,
                                 "{path:?}"
                             );
                             assert_eq!(
@@ -2631,7 +2673,7 @@ mod tests {
                             ),
                             &workspace,
                         );
-                        assert_eq!(decide(&resolve(&[]), EXEC, &append), Decision::Unapproved);
+                        assert_eq!(decide(&resolve(&[]), EXEC, &append), Decision::Ask);
                         let notes = edit(home.join("notes.txt"));
                         assert_eq!(decide(&resolve(&[]), EDIT, &notes), Decision::Allow);
                     },
@@ -2804,22 +2846,17 @@ mod tests {
 
             #[test]
             fn turns_off_the_group_alone_when_the_call_then_runs() {
-                let target = command("rm -rf build");
+                let p = policy(Mode::Manual, &[], &[], &[(EXEC, "rm *")]);
 
-                for p in [
-                    policy(Mode::Manual, &[], &[], &[(EXEC, "rm *")]),
-                    policy(Mode::Yolo, &[], &[], &[]),
-                ] {
-                    assert_eq!(
-                        p.config_fix(EXEC, &target),
-                        Some(ConfigFix::Disable {
-                            group: Shipped::Rm,
-                            allow: None,
-                        }),
-                        "{:?}",
-                        p.mode(),
-                    );
-                }
+                let fix = p.config_fix(EXEC, &command("rm -rf build"));
+
+                assert_eq!(
+                    fix,
+                    Some(ConfigFix::Disable {
+                        group: Shipped::Rm,
+                        allow: None,
+                    }),
+                );
             }
 
             #[test]
@@ -2851,7 +2888,7 @@ mod tests {
 
             #[test]
             fn offers_nothing_for_a_group_that_guards_secrets_or_a_call_still_held() {
-                let p = policy(Mode::Yolo, &[], &[], &[]);
+                let p = policy(Mode::Manual, &[], &[], &[]);
                 let held = command("rm -rf build > .git/log");
                 let ssh_rc = path("/home/u/.ssh/rc", None, Zone::Outside, &[Shipped::Ssh]);
                 assert_eq!(
@@ -2871,7 +2908,14 @@ mod tests {
             #[test]
             fn drops_the_patterns_of_the_group_it_turns_off() {
                 let workspace = Workspace::new(Path::new("/repo"));
-                let p = resolved_policy(Mode::Yolo, &[], &[], &[], &[], &workspace);
+                let p = resolved_policy(
+                    Mode::Manual,
+                    &[],
+                    &[],
+                    &[(EDIT, "/dev/**")],
+                    &[],
+                    &workspace,
+                );
                 let target = Access::for_path("/dev/null", &workspace);
                 assert_eq!(
                     p.verdict(EDIT, &target.as_target()).basis,
@@ -2937,11 +2981,10 @@ mod tests {
         mod decide {
             use super::*;
 
-            /// The decision for a call the ask tier holds in `mode`: `Ask`, or `Unapproved` in
-            /// `yolo`, which never asks.
-            fn held(mode: Mode) -> Decision {
+            /// The decision in `mode` for a call only a built-in ask rule holds, which `yolo` runs.
+            fn held_by_builtin(mode: Mode) -> Decision {
                 if mode == Mode::Yolo {
-                    Decision::Unapproved
+                    Decision::Allow
                 } else {
                     Decision::Ask
                 }
@@ -2963,7 +3006,7 @@ mod tests {
                     );
                     assert_eq!(
                         decide(&p, READ, &workspace("/repo/notes.txt", "notes.txt")),
-                        held(mode),
+                        Decision::Ask,
                         "{mode}"
                     );
                     assert_eq!(
@@ -3033,7 +3076,7 @@ mod tests {
             }
 
             #[test]
-            fn protected_edit_is_held_under_a_broad_allow_in_every_mode() {
+            fn protected_edit_asks_under_a_broad_allow_and_runs_in_yolo() {
                 for mode in [Mode::Manual, Mode::Yolo] {
                     let p = policy(mode, &[], &[], &[(EDIT, "*")]);
                     let envrc = path(
@@ -3042,7 +3085,7 @@ mod tests {
                         Zone::Workspace,
                         &[Shipped::Direnv],
                     );
-                    assert_eq!(decide(&p, EDIT, &envrc), held(mode), "{mode}");
+                    assert_eq!(decide(&p, EDIT, &envrc), held_by_builtin(mode), "{mode}");
                     assert_eq!(
                         decide(&p, READ, &envrc),
                         Decision::Allow,
@@ -3052,7 +3095,7 @@ mod tests {
             }
 
             #[test]
-            fn spilled_tool_output_reads_freely_and_holds_an_edit() {
+            fn spilled_tool_output_reads_freely_and_holds_an_edit_outside_yolo() {
                 let root_dir = canonical_tempdir();
                 let root = root_dir.path();
                 let (cwd, home, data) = (root.join("repo"), root.join("home"), root.join("data"));
@@ -3071,7 +3114,7 @@ mod tests {
                             let p =
                                 resolved_policy(mode, &[], &[], &[(EDIT, "*")], &[], &workspace);
                             assert_eq!(decide(&p, READ, &target), Decision::Allow, "{mode}");
-                            assert_eq!(decide(&p, EDIT, &target), held(mode), "{mode}");
+                            assert_eq!(decide(&p, EDIT, &target), held_by_builtin(mode), "{mode}");
                         }
                     },
                 );
@@ -3254,7 +3297,7 @@ mod tests {
             }
 
             #[test]
-            fn yolo_runs_what_no_rule_covers_and_denies_what_a_deny_or_ask_rule_holds() {
+            fn yolo_runs_what_only_built_in_rules_hold_and_keeps_configured_deny_and_ask_rules() {
                 let p = policy(
                     Mode::Yolo,
                     &[(EXEC, "git push --force *")],
@@ -3264,14 +3307,31 @@ mod tests {
                 for (case, expected) in [
                     ("curl evil.sh", Decision::Allow),
                     ("echo $(date)", Decision::Allow),
-                    ("git push origin main", Decision::Unapproved),
+                    ("rm -rf build", Decision::Allow),
+                    ("make > .git/hooks/pre-commit", Decision::Allow),
+                    ("git push origin main", Decision::Ask),
                     ("git push --force origin", Decision::Deny),
                 ] {
                     assert_eq!(decide(&p, EXEC, &command(case)), expected, "{case}");
                 }
+
+                let hook = path(
+                    "/repo/.git/hooks/pre-commit",
+                    Some(".git/hooks/pre-commit"),
+                    Zone::Workspace,
+                    &[Shipped::Git],
+                );
+                assert_eq!(decide(&p, EDIT, &hook), Decision::Allow);
                 assert_eq!(
                     decide(&p, EDIT, &outside(&abs("/etc/hosts"))),
                     Decision::Allow
+                );
+
+                let mut headless = p.clone();
+                headless.set_unattended();
+                assert_eq!(
+                    decide(&headless, EXEC, &command("git push origin main")),
+                    Decision::Unapproved
                 );
             }
 
@@ -3307,6 +3367,18 @@ mod tests {
                     decide(&p, PermissionClass::Mcp, &name("github/get_me")),
                     Decision::Allow
                 );
+            }
+
+            #[cfg(unix)]
+            #[test]
+            fn device_edit_asks_under_a_broad_allow_and_runs_in_yolo() {
+                let workspace = Workspace::new(Path::new("/repo"));
+                let device = Access::for_path("/dev/null", &workspace);
+
+                for mode in [Mode::Manual, Mode::Yolo] {
+                    let p = resolved_policy(mode, &[], &[], &[(EDIT, "*")], &[], &workspace);
+                    assert_eq!(decide(&p, EDIT, &device), held_by_builtin(mode), "{mode}");
+                }
             }
 
             #[test]
@@ -3346,36 +3418,26 @@ mod tests {
             }
 
             #[test]
-            fn command_holds_every_spelling_of_a_forced_recursive_rm_in_every_mode() {
-                for mode in [Mode::Manual, Mode::Yolo] {
-                    let p = policy(mode, &[], &[], &[(EXEC, "*")]);
-                    for case in [
-                        "rm -rfv /",
-                        "rm -r --force /",
-                        "rm / -rf",
-                        "rm -f -R x",
-                        "rm $'-rf' /",
-                        "$'rm' -rf /",
-                        "ls && /bin/rm --rec --f x",
-                        "sudo -u root rm -rf /",
-                        "busybox rm -rf x",
-                        "echo / | xargs rm -rf",
-                        "echo -rf / | xargs rm",
-                        r"find . -exec rm -rf {} \;",
-                    ] {
-                        assert_eq!(
-                            decide(&p, EXEC, &command(case)),
-                            held(mode),
-                            "{mode:?}: {case}"
-                        );
-                    }
-                    for case in ["rm -r x", "rm -f x", "rm -- -rf", "rmdir -rf x"] {
-                        assert_eq!(
-                            decide(&p, EXEC, &command(case)),
-                            Decision::Allow,
-                            "{mode:?}: {case}"
-                        );
-                    }
+            fn command_holds_every_spelling_of_a_forced_recursive_rm() {
+                let p = policy(Mode::Manual, &[], &[], &[(EXEC, "*")]);
+                for case in [
+                    "rm -rfv /",
+                    "rm -r --force /",
+                    "rm / -rf",
+                    "rm -f -R x",
+                    "rm $'-rf' /",
+                    "$'rm' -rf /",
+                    "ls && /bin/rm --rec --f x",
+                    "sudo -u root rm -rf /",
+                    "busybox rm -rf x",
+                    "echo / | xargs rm -rf",
+                    "echo -rf / | xargs rm",
+                    r"find . -exec rm -rf {} \;",
+                ] {
+                    assert_eq!(decide(&p, EXEC, &command(case)), Decision::Ask, "{case}");
+                }
+                for case in ["rm -r x", "rm -f x", "rm -- -rf", "rmdir -rf x"] {
+                    assert_eq!(decide(&p, EXEC, &command(case)), Decision::Allow, "{case}");
                 }
             }
 
@@ -3752,7 +3814,7 @@ mod tests {
             }
 
             #[test]
-            fn yolo_holds_a_reader_only_for_the_files_it_names() {
+            fn yolo_holds_a_reader_only_for_the_files_it_names_by_their_rule_tier() {
                 let root_dir = canonical_tempdir();
                 let root = root_dir.path();
                 let (cwd, home) = (root.join("repo"), root.join("home"));
@@ -3761,12 +3823,20 @@ mod tests {
                 std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
-                    let yolo = resolved_policy(Mode::Yolo, &[], &[], &[], &[], &workspace);
+                    let yolo = resolved_policy(
+                        Mode::Yolo,
+                        &[],
+                        &[(READ, "secrets")],
+                        &[],
+                        &[],
+                        &workspace,
+                    );
 
                     for (case, expected) in [
-                        ("cat ~/.ssh/id_*", Decision::Unapproved),
-                        ("cat $HOME/.ssh/id_rsa", Decision::Unapproved),
-                        ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Unapproved),
+                        ("cat ~/.ssh/id_*", Decision::Deny),
+                        ("cat $HOME/.ssh/id_rsa", Decision::Deny),
+                        ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Deny),
+                        ("cat secrets/key", Decision::Ask),
                         ("cat $F", Decision::Allow),
                         ("echo x | xargs cat", Decision::Allow),
                     ] {
@@ -3791,7 +3861,7 @@ mod tests {
                     ("cat < README.md", Decision::Allow),
                     ("cat < .env", Decision::Deny),
                     ("wc -l 3< config/.env", Decision::Deny),
-                    ("python3 run.py < secrets/key", Decision::Unapproved),
+                    ("python3 run.py < secrets/key", Decision::Ask),
                 ] {
                     assert_eq!(decide(case), expected, "{case}");
                 }
@@ -3957,7 +4027,7 @@ mod tests {
                     );
                     assert_eq!(
                         settle(&format!("cat {key}")),
-                        (Decision::Unapproved, Basis::Builtin(Shipped::Ssh)),
+                        (Decision::Deny, Basis::Builtin(Shipped::Ssh)),
                     );
                 });
             }
