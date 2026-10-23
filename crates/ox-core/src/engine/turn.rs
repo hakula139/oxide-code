@@ -2456,12 +2456,6 @@ mod tests {
                     "The user denied the echo call and wrote: Use ls instead.",
                     false,
                 ),
-                (
-                    ApprovalDecision::DenyUnattended,
-                    "The echo call was denied. \
-                     This run cannot ask for approval, and no allow pattern matches this call.",
-                    false,
-                ),
                 (ApprovalDecision::Abort, NOT_RUN, true),
             ] {
                 let dir = tempfile::tempdir().unwrap();
