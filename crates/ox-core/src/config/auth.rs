@@ -287,53 +287,45 @@ impl Credential {
 
 // ── Resolution ──
 
-/// Why no credential resolved. Each variant builds its message when it is constructed, since the
-/// message names config paths that the environment of that moment resolves.
+/// Why no credential resolved.
+/// The constructors format each message when the error is raised,
+/// since the config paths it names depend on the environment at that moment.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum CredentialError {
     /// The base URL is a gateway, which never receives a stored login.
     #[error("{message}")]
     Gateway { message: String },
-    /// No stored login supplied a token. A TUI session starts signed out, since `/login` can sign
-    /// it in.
+    /// No stored login supplied a token.
+    /// A TUI session starts signed out, since `/login` can sign it in.
     #[error("{message}")]
     SignedOut { cause: LoginError, message: String },
 }
 
 impl CredentialError {
     fn gateway(base_url: &str) -> Self {
-        Self::Gateway {
-            message: gateway_error(base_url),
-        }
+        let message = format!(
+            "no credentials for {base_url}. \
+             Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
+             or add `api_key` to {config}. \
+             Stored logins are sent only to the Anthropic API.",
+            config = user_config_hint(),
+        );
+        Self::Gateway { message }
     }
 
     fn signed_out(cause: LoginError) -> Self {
-        let message = signed_out_error(&cause);
+        let message = match &cause {
+            LoginError::Missing => format!(
+                "no credentials found: no API key or token is set, no oxide-code login is stored, \
+                 and no Claude Code login is in {stores}. \
+                 Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
+                 add `api_key` to {config}, or sign in with `/login` in the `ox` TUI.",
+                stores = login_stores(),
+                config = user_config_hint(),
+            ),
+            cause => cause.to_string(),
+        };
         Self::SignedOut { cause, message }
-    }
-}
-
-fn gateway_error(base_url: &str) -> String {
-    format!(
-        "no credentials for {base_url}. \
-         Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
-         or add `api_key` to {config}. \
-         Stored logins are sent only to the Anthropic API.",
-        config = user_config_hint(),
-    )
-}
-
-fn signed_out_error(e: &LoginError) -> String {
-    match e {
-        LoginError::Missing => format!(
-            "no credentials found: no API key or token is set, no oxide-code login is stored, \
-             and no Claude Code login is in {stores}. \
-             Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
-             add `api_key` to {config}, or sign in with `/login` in the `ox` TUI.",
-            stores = login_stores(),
-            config = user_config_hint(),
-        ),
-        e => e.to_string(),
     }
 }
 
@@ -822,12 +814,12 @@ mod tests {
         async fn refuses_stored_login_for_third_party_host_without_reading_it() {
             let config = abs("/srv/cfg");
 
-            let err =
-                temp_env::async_with_vars([("XDG_CONFIG_HOME", Some(config.as_str()))], async {
-                    fallback(GATEWAY, unreachable_store()).await
-                })
-                .await
-                .expect_err("stored login must not go to a gateway");
+            let err = temp_env::async_with_vars(
+                [("XDG_CONFIG_HOME", Some(config.as_str()))],
+                fallback(GATEWAY, unreachable_store()),
+            )
+            .await
+            .expect_err("stored login must not go to a gateway");
 
             assert!(matches!(err, CredentialError::Gateway { .. }), "{err:?}");
             assert_eq!(
