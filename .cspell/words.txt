@@ -35,6 +35,7 @@ EPERM
 esac
 esbenp
 ESRCH
+euvx
 fcntl
 feff
 flippable
@@ -86,6 +87,7 @@ nocapture
 nohup
 nonewline
 noprefix
+nptu
 NTFS
 numtide
 OCSP
@@ -102,6 +104,7 @@ popd
 POSIXLY
 procs
 pushd
+pytest
 PYTHONDONTWRITEBYTECODE
 PYTHONUNBUFFERED
 rects
@@ -148,6 +151,7 @@ uninlined
 untap
 unwritable
 URXVT
+venv
 vſcode
 WakaTime
 wakeup
@@ -155,5 +159,6 @@ webpki
 xhigh
 XPRESS
 Xresources
+xtrace
 xxhash
 yazi

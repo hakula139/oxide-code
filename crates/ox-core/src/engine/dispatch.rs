@@ -487,9 +487,6 @@ fn unapproved_output(
     };
     let why = match basis {
         Basis::Mode(_) => "No allow pattern matches it.".to_owned(),
-        Basis::Unparsed => "ox could not parse it, \
-                            so the permission rules may not see everything it runs."
-            .to_owned(),
         basis => format!("It needs approval because of {basis}."),
     };
     let next = match (fix, basis) {
@@ -510,11 +507,14 @@ fn unapproved_output(
         (None, Basis::Mode(_)) => "To allow it, ask the user to add a pattern \
                                    for each of its commands under `permission.allow` \
                                    in the user config, \
-                                   ending a pattern in `*` at a word that expands. \
-                                   No pattern covers a command that hides what it runs, \
-                                   such as `$(...)`, `sh -c`, or `cd /tmp/x && make`."
+                                   ending a pattern in `*` at a word that expands."
             .to_owned(),
-        (None, Basis::Unparsed) => "Rewrite it in simpler shell syntax.".to_owned(),
+        (None, Basis::Unrecognized { .. }) => "No permission rule can allow it. \
+                                               Rewrite it as plain commands joined by \
+                                               `&&`, `||`, `;`, or `|`, \
+                                               and set a variable for one command \
+                                               in the prefix form `NAME=value cmd`."
+            .to_owned(),
         (None, _) => {
             "Choose a different approach or ask the user to adjust permissions.".to_owned()
         }
@@ -1474,6 +1474,9 @@ mod tests {
         #[test]
         fn names_what_made_the_call_ask_and_the_config_fix_or_next_step() {
             let manual = Basis::Mode(Mode::Manual);
+            let unrecognized = Basis::Unrecognized {
+                construct: "$((1 + 2))".to_owned(),
+            };
             let allow = ConfigFix::Allow(exec_grant(r#"echo "a\b""#).suggested().clone());
             let ask = Basis::Rule {
                 tier: Tier::Ask,
@@ -1495,17 +1498,16 @@ mod tests {
                      Do not retry it as written. \
                      To allow it, ask the user to add a pattern for each of its commands \
                      under `permission.allow` in the user config, \
-                     ending a pattern in `*` at a word that expands. \
-                     No pattern covers a command that hides what it runs, \
-                     such as `$(...)`, `sh -c`, or `cd /tmp/x && make`.",
+                     ending a pattern in `*` at a word that expands.",
                 ),
                 (
-                    &Basis::Unparsed,
+                    &unrecognized,
                     None,
-                    "ox could not parse it, \
-                     so the permission rules may not see everything it runs. \
+                    "It needs approval because of `$((1 + 2))`, which ox cannot analyze. \
                      Do not retry it as written. \
-                     Rewrite it in simpler shell syntax.",
+                     No permission rule can allow it. \
+                     Rewrite it as plain commands joined by `&&`, `||`, `;`, or `|`, \
+                     and set a variable for one command in the prefix form `NAME=value cmd`.",
                 ),
                 (
                     &Basis::Builtin(Shipped::Ssh),
