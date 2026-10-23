@@ -16,7 +16,7 @@ use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::text::escape_hidden;
 
-use super::stdio::{Approver, StdioSink, Unattended, render_op, render_queued};
+use super::stdio::{Approver, StdioSink, render_op, render_queued};
 use super::{Exit, Shutdown, shutdown_signal};
 
 /// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session. EOF after
@@ -108,14 +108,13 @@ where
             let mut prompter = Prompter {
                 lines: &mut lines,
                 out: io::stderr(),
-                attended,
             };
             let mut rendered = pin!(render_op(
                 &mut handle.events,
                 sink,
                 &handle.ops,
                 &op,
-                &mut prompter
+                Some(&mut prompter)
             ));
             let end = loop {
                 tokio::select! {
@@ -175,11 +174,10 @@ const GRANT_CHOICES: &str =
     "[y] approve  [a] allow for session  [n] deny  [f] feedback  [x] abort: ";
 
 /// Answers approvals with lines read from the REPL's input, writing the call and its choices to
-/// `out`. The input ending aborts the turn. Unless `attended`, it denies as [`Unattended`] does.
+/// `out`. The input ending aborts the turn.
 struct Prompter<'a, R, W> {
     lines: &'a mut Lines<R>,
     out: W,
-    attended: bool,
 }
 
 impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<'_, R, W> {
@@ -189,9 +187,6 @@ impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<'_, R, W> {
         basis: &Basis,
         grant: Option<&SessionGrant>,
     ) -> ApprovalDecision {
-        if !self.attended {
-            return Unattended.decide(preview, basis, grant).await;
-        }
         _ = write_preview(&mut self.out, preview, basis);
         let choices = if grant.is_some() {
             GRANT_CHOICES
@@ -771,7 +766,8 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
                     .await
-                    .with_tools(bash_registry(Vec::new()));
+                    .with_tools(bash_registry(Vec::new()))
+                    .unattended();
                 let input = indoc! {"
                     list files
                     y
@@ -795,10 +791,7 @@ mod tests {
                 let result =
                     &requests[1]["messages"].as_array().unwrap().last().unwrap()["content"][0];
                 let content = result["content"].as_str().unwrap();
-                assert!(
-                    content.contains("This run cannot ask for approval."),
-                    "{content}"
-                );
+                assert!(content.contains("this run cannot ask for it."), "{content}");
                 let last = requests[2]["messages"].as_array().unwrap().last().unwrap();
                 assert_eq!(last["content"][0]["text"], "y");
             })
@@ -969,7 +962,6 @@ mod tests {
                 let mut prompter = Prompter {
                     lines: &mut lines,
                     out: Vec::new(),
-                    attended: true,
                 };
                 let decision = prompter
                     .decide(
@@ -1072,7 +1064,6 @@ mod tests {
                 let mut prompter = Prompter {
                     lines: &mut lines,
                     out: Vec::new(),
-                    attended: true,
                 };
 
                 let decision = prompter

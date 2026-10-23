@@ -28,12 +28,13 @@ use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 /// once the engine has stopped. Approval requests go to `approver` in place of `sink`, and its
 /// answer goes back on `ops`. Events that arrive while `approver` decides wait until it answers,
 /// unless one ends `op`, such as the cancellation an interrupt causes, which drops the question.
-pub(super) async fn render_op(
+/// An engine for a run nobody attends requests no approval, so such a run passes no `approver`.
+pub(super) async fn render_op<A: Approver>(
     events: &mut mpsc::UnboundedReceiver<Event>,
     sink: &dyn EventSink,
     ops: &mpsc::Sender<Op>,
     op: &Op,
-    approver: &mut impl Approver,
+    mut approver: Option<&mut A>,
 ) -> Option<TurnEnd> {
     let mut held = VecDeque::new();
     loop {
@@ -56,6 +57,9 @@ pub(super) async fn render_op(
             continue;
         };
 
+        let approver = approver
+            .as_deref_mut()
+            .expect("an engine requests approval only in an attended run");
         let mut decision = pin!(approver.decide(&preview, &basis, grant.as_deref()));
         let decision = loop {
             tokio::select! {
@@ -104,19 +108,22 @@ fn render(sink: &dyn EventSink, event: Event) {
     }
 }
 
-// ── Unattended ──
-
-/// Answers every approval with [`ApprovalDecision::DenyUnattended`], for a run with nobody to ask.
-pub(super) struct Unattended;
+/// The approver of a run nobody attends, which never needs one, since its engine requests no
+/// approval. Uninhabited, so only `None` names it.
+pub(super) enum Unattended {}
 
 impl Approver for Unattended {
-    fn decide(
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "an uninhabited type has no value to await on"
+    )]
+    async fn decide(
         &mut self,
         _: &ApprovalPreview,
         _: &Basis,
         _: Option<&SessionGrant>,
-    ) -> impl Future<Output = ApprovalDecision> {
-        std::future::ready(ApprovalDecision::DenyUnattended)
+    ) -> ApprovalDecision {
+        match *self {}
     }
 }
 
@@ -449,7 +456,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut approver = fixed(ApprovalDecision::Deny);
 
-            let end = render_op(&mut events, &sink, &ops_tx, &prompt(), &mut approver).await;
+            let end = render_op(&mut events, &sink, &ops_tx, &prompt(), Some(&mut approver)).await;
 
             assert_eq!(end, Some(TurnEnd::Completed));
             assert_eq!(
@@ -498,7 +505,7 @@ mod tests {
             let (ops_tx, mut ops) = mpsc::channel(1);
             let sink = CapturingSink::default();
 
-            let end = render_op(&mut events, &sink, &ops_tx, &prompt(), &mut Undecided).await;
+            let end = render_op(&mut events, &sink, &ops_tx, &prompt(), Some(&mut Undecided)).await;
 
             assert_eq!(end, Some(TurnEnd::Cancelled));
             assert_eq!(
@@ -550,7 +557,7 @@ mod tests {
                 rendered: None,
             };
 
-            let end = render_op(&mut events, &sink, &ops, &prompt(), &mut approver).await;
+            let end = render_op(&mut events, &sink, &ops, &prompt(), Some(&mut approver)).await;
 
             assert_eq!(end, Some(TurnEnd::Completed));
             assert_eq!(approver.rendered, Some(Vec::new()));
@@ -573,7 +580,14 @@ mod tests {
 
             let (ops, _) = mpsc::channel(1);
             let mut approver = fixed(ApprovalDecision::Deny);
-            let end = render_op(&mut events, &FailingSink, &ops, &prompt(), &mut approver).await;
+            let end = render_op(
+                &mut events,
+                &FailingSink,
+                &ops,
+                &prompt(),
+                Some(&mut approver),
+            )
+            .await;
 
             assert_eq!(end, Some(TurnEnd::Cancelled));
             assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
@@ -601,7 +615,7 @@ mod tests {
 
             let (ops, _) = mpsc::channel(1);
             let mut approver = fixed(ApprovalDecision::Deny);
-            let end = render_op(&mut events, &sink, &ops, &Op::Clear, &mut approver).await;
+            let end = render_op(&mut events, &sink, &ops, &Op::Clear, Some(&mut approver)).await;
 
             assert_eq!(end, Some(TurnEnd::Completed));
             assert_eq!(sink.events(), cleared);
@@ -626,7 +640,7 @@ mod tests {
                     &sink,
                     &handle.ops,
                     &Op::Clear,
-                    &mut approver,
+                    Some(&mut approver),
                 )
                 .await;
 
@@ -661,7 +675,7 @@ mod tests {
 
             let (ops, _) = mpsc::channel(1);
             let mut approver = fixed(ApprovalDecision::Deny);
-            let end = render_op(&mut events, &sink, &ops, &prompt(), &mut approver).await;
+            let end = render_op(&mut events, &sink, &ops, &prompt(), Some(&mut approver)).await;
 
             assert_eq!(end, None);
             assert_eq!(sink.events(), [Event::StreamToken("partial".to_owned())]);

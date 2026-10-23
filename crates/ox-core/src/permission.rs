@@ -668,6 +668,8 @@ pub(crate) enum Decision {
     Allow,
     Ask,
     Deny,
+    /// Deny a call that would ask, since nobody can answer an approval request in this run.
+    Unapproved,
 }
 
 /// A call's [`Decision`] and what settled it.
@@ -780,6 +782,8 @@ pub(crate) struct Policy {
     session_allow: Vec<Rule>,
     /// The shipped groups `[permission.defaults]` leaves on.
     enabled: Vec<Shipped>,
+    /// Whether a person can answer an approval request in this run.
+    attended: bool,
 }
 
 /// A deny or ask rule, with the shipped group it comes from.
@@ -820,6 +824,7 @@ impl Default for Policy {
             allow: Vec::new(),
             session_allow: Vec::new(),
             enabled: Shipped::VARIANTS.to_vec(),
+            attended: true,
         }
     }
 }
@@ -891,6 +896,7 @@ impl Policy {
             allow,
             session_allow: Vec::new(),
             enabled: enabled().collect(),
+            attended: true,
         })
     }
 
@@ -900,6 +906,12 @@ impl Policy {
 
     pub(crate) const fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
+    }
+
+    /// Marks the run as one nobody can answer an approval request in, so each call that would ask
+    /// is [unapproved](Decision::Unapproved).
+    pub(crate) const fn set_unattended(&mut self) {
+        self.attended = false;
     }
 
     pub(crate) fn session_allow(&self) -> &[Rule] {
@@ -995,7 +1007,21 @@ impl Policy {
     /// file it writes, or a read of a file it redirects into its input. It asks at step 3 in each
     /// case [`Self::asks`] lists, and step 6 allows it only when it is not opaque and
     /// [`Self::allows_command`] holds.
+    ///
+    /// In a run nobody attends, a call that would ask is [unapproved](Decision::Unapproved).
     pub(crate) fn verdict(&self, class: PermissionClass, target: &Target<'_>) -> Verdict {
+        let verdict = self.settle(class, target);
+        if verdict.decision == Decision::Ask && !self.attended {
+            return Verdict {
+                decision: Decision::Unapproved,
+                ..verdict
+            };
+        }
+        verdict
+    }
+
+    /// The verdict of the pipeline [`Self::verdict`] lists, as if a person attended the run.
+    fn settle(&self, class: PermissionClass, target: &Target<'_>) -> Verdict {
         let verdict = |decision, basis| Verdict { decision, basis };
         if let Some(rule) = held_by(&self.deny, class, target) {
             return verdict(Decision::Deny, rule.basis(Tier::Deny));

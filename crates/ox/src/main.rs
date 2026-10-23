@@ -387,6 +387,9 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     if let Some(mode) = cli.mode {
         config.apply_mode_flag(mode);
     }
+    if headless_prompt.is_some() || !io::stdin().is_terminal() {
+        config.set_unattended();
+    }
     let show_thinking = config.show_thinking;
     let theme = tui_mode.then(|| resolve_theme(&config.theme)).transpose()?;
     // Before resolving the session, since resuming an archived session unarchives it.
