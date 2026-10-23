@@ -32,8 +32,9 @@ use crate::tool::view::{ApprovalPreview, ToolResultView};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Op {
-    /// Starts a turn with `text`. A fresh session takes `title` as its first-prompt title in place
-    /// of `text`, so a prompt a slash command built lists under the command the user typed.
+    /// Starts a turn with `text`.
+    /// A fresh session takes `title` as its first-prompt title in place of `text`,
+    /// so a prompt a slash command built lists under the command line that built it.
     Prompt { text: String, title: Option<String> },
     /// Adds a prompt typed while a turn runs. The turn splices it in at its next round boundary and
     /// confirms with [`Event::PromptDrained`]. The frontend keeps every unconfirmed prompt and

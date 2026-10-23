@@ -183,9 +183,8 @@ impl App {
                     self.input.set_text(prompt.line());
                     if prompt.is_slash() {
                         let line = prompt.line();
-                        self.chat.push_system_message(format!(
-                            "`{line}` did not finish. Press Enter to run it again."
-                        ));
+                        self.chat
+                            .push_system_message(format!("Press Enter to run `{line}` again"));
                     }
                 }
                 self.enter_idle();
@@ -856,7 +855,7 @@ mod tests {
             assert_eq!(app.input.lines(), ["/init AGENTS.md".to_owned()]);
             assert_eq!(
                 app.chat.last_system_text(),
-                Some("`/init AGENTS.md` did not finish. Press Enter to run it again.")
+                Some("Press Enter to run `/init AGENTS.md` again")
             );
         }
 

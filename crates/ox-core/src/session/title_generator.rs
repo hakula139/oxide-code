@@ -26,8 +26,8 @@ const HAIKU_MODEL: &str = "claude-haiku-5-5";
 /// ahead of the 3-7 word JSON envelope.
 const MAX_TOKENS: u32 = 1_024;
 
-/// Chars of the first prompt sent for titling, omission marker included, so a long paste stays
-/// cheap.
+/// Chars of the first prompt a title request sends, omission marker included,
+/// so a long paste stays cheap.
 const MAX_PROMPT_CHARS: usize = 2_000;
 
 /// Chars kept from the start of a long first prompt, where a request usually leads, while the
@@ -135,9 +135,9 @@ async fn generate_and_record(
     Ok(())
 }
 
-/// The title request's user turn, which frames `first_prompt`, shortened to fit
-/// [`MAX_PROMPT_CHARS`], as text to title, so Haiku titles an imperative prompt even with
-/// structured outputs off.
+/// The title request's user turn, which frames `first_prompt` as text to title,
+/// so Haiku titles an imperative prompt even with structured outputs off.
+/// A prompt over [`MAX_PROMPT_CHARS`] goes out shortened by [`truncate_prompt`].
 fn title_request(first_prompt: &str) -> String {
     let prompt = truncate_prompt(first_prompt, MAX_PROMPT_CHARS, PROMPT_HEAD_CHARS);
     formatdoc! {"
@@ -150,7 +150,8 @@ fn title_request(first_prompt: &str) -> String {
 }
 
 /// Shortens `text` to at most `max_chars` chars, keeping its first `head_chars` and as much of its
-/// tail as fits around an omission marker. `head_chars` plus the marker must fit in `max_chars`.
+/// tail as fits around an omission marker.
+/// `head_chars` plus the marker must fit in `max_chars`.
 fn truncate_prompt(text: &str, max_chars: usize, head_chars: usize) -> String {
     let total = text.chars().count();
     if total <= max_chars {
@@ -658,8 +659,9 @@ mod tests {
                 inner.starts_with("Why does the build fail?\nlog line\n"),
                 "{inner}"
             );
-            assert!(inner.contains(" characters omitted] ...\n"), "{inner}");
-            assert_eq!(inner.chars().count(), MAX_PROMPT_CHARS);
+            let (head, _) = inner.split_once("\n... [").unwrap();
+            assert_eq!(head.chars().count(), 1_500);
+            assert_eq!(inner.chars().count(), 2_000);
         }
     }
 

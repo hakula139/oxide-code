@@ -289,10 +289,7 @@ impl Engine {
             let mut end = None;
             match op {
                 Op::Prompt { text, title } => {
-                    end = Some(
-                        self.submit_prompt(&text, title.as_deref(), &sink, &mut ops)
-                            .await,
-                    );
+                    end = Some(self.submit_prompt(&text, title, &sink, &mut ops).await);
                 }
                 Op::Compact { instructions } => {
                     end = Some(self.compact(&sink, &mut ops, instructions).await);
@@ -319,13 +316,14 @@ impl Engine {
     }
 
     /// Runs `text` through auto-compaction and one agent turn, rolling back a refused turn, and
-    /// reports how it ended on `sink`. A fresh session takes `title` as its first-prompt title.
+    /// reports how it ended on `sink`.
+    /// A fresh session takes `title` as its first-prompt title.
     /// The turn compacts at each round boundary that leaves the context at the threshold,
     /// then goes on from the summary.
     async fn submit_prompt<S>(
         &mut self,
         text: &str,
-        title: Option<&str>,
+        title: Option<String>,
         sink: &S,
         ops: &mut mpsc::Receiver<Op>,
     ) -> TurnEnd
@@ -354,7 +352,7 @@ impl Engine {
             std::mem::take(&mut self.prompt_unrecorded).then(|| self.prompt.session_context());
         let outcome = self
             .session
-            .record_message_with_context(user_msg.clone(), context, title.map(str::to_owned))
+            .record_prompt(user_msg.clone(), context, title)
             .await;
         sink.session_write_error(outcome.failure.as_deref());
         self.messages.push(user_msg);
@@ -1988,38 +1986,6 @@ mod tests {
                     &data.messages[2].content[..],
                     [_, ContentBlock::Text { text }] if text == reminder
                 ));
-            })
-            .await;
-        }
-
-        #[tokio::test]
-        async fn titles_a_fresh_session_after_its_given_title() {
-            with_pinned_home(async {
-                let server = MockServer::start().await;
-                mount_reply(&server, "reply").await;
-                let dir = tempfile::tempdir().unwrap();
-                let store = test_store(dir.path());
-                let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let sink = CapturingSink::default();
-                let mut ops = inert_ops();
-
-                let end = engine
-                    .submit_prompt(
-                        "Create AGENTS.md for this project.",
-                        Some("/init AGENTS.md"),
-                        &sink,
-                        &mut ops,
-                    )
-                    .await;
-                assert_eq!(end, TurnEnd::Completed);
-
-                let titles: Vec<String> = store
-                    .list()
-                    .unwrap()
-                    .into_iter()
-                    .filter_map(|info| info.title.map(|title| title.title))
-                    .collect();
-                assert_eq!(titles, ["/init AGENTS.md"]);
             })
             .await;
         }

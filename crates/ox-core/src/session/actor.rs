@@ -70,7 +70,7 @@ pub(super) enum SessionCmd {
     },
 }
 
-/// A conversation message to record, with what it is the first to carry.
+/// A conversation message for the actor to record.
 pub(super) struct Record {
     pub(super) msg: Message,
     /// Written ahead of `msg`, so prompt state only lands alongside the message carrying it.

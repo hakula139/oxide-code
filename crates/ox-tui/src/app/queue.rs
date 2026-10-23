@@ -9,8 +9,9 @@ use ox_core::command;
 /// A prompt the TUI holds: the line the user typed and the text the engine receives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QueuedPrompt {
-    /// The line as typed, which Esc and a failed turn hand back.
-    /// It unescapes to the text the chat shows.
+    /// The line as typed, or the `/init <file>` a picker choice stands for, which Esc and a
+    /// failed turn hand back.
+    /// A typed line unescapes to the text the chat shows.
     line: String,
     /// The prompt a slash command built from `line`, which the engine receives in its place.
     built: Option<String>,
@@ -22,7 +23,7 @@ impl QueuedPrompt {
         Self { line, built: None }
     }
 
-    /// A prompt a slash command built, headed in the chat by the command `line`.
+    /// A prompt a slash command built from the command `line`.
     pub(super) fn slash(line: String, prompt: String) -> Self {
         Self {
             line,

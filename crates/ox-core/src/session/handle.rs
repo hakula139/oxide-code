@@ -156,12 +156,12 @@ impl SessionHandle {
 
     /// Records a conversation message.
     pub(crate) async fn record_message(&self, msg: Message) -> RecordOutcome {
-        self.record_message_with_context(msg, None, None).await
+        self.record_prompt(msg, None, None).await
     }
 
-    /// [`Self::record_message`], with the prompt state `msg` is the first to carry, and the title a
-    /// fresh session takes in place of `msg`'s text.
-    pub(crate) async fn record_message_with_context(
+    /// Records the user prompt `msg`, with the prompt state it is the first to carry.
+    /// A fresh session takes `title` as its first-prompt title in place of `msg`'s text.
+    pub(crate) async fn record_prompt(
         &self,
         msg: Message,
         context: Option<SessionContext>,
@@ -1982,7 +1982,7 @@ mod tests {
             "2026-01-01".clone_into(&mut prompt.seen.date);
 
             session
-                .record_message_with_context(
+                .record_prompt(
                     Message::user("Edit f.rs"),
                     Some(prompt.session_context()),
                     None,
@@ -2009,7 +2009,7 @@ mod tests {
 
             "2026-01-02".clone_into(&mut prompt.seen.date);
             session
-                .record_message_with_context(
+                .record_prompt(
                     Message::user("Rename main in f.rs"),
                     Some(prompt.session_context()),
                     None,

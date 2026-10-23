@@ -30,9 +30,14 @@ const ALIASES: [(&str, &[&str]); 3] = [
 ];
 
 /// The op the typed form of `parsed` runs at `project_root`, with an alias resolved to its command
-/// and an error prefixed by the name the user typed. `None` when the command has no typed form.
+/// and an error prefixed by the name the user typed.
+/// A prompt it starts takes the command line as its first-prompt title.
+/// `None` when the command has no typed form.
 pub fn typed_op(parsed: &Parsed, project_root: &Path) -> Option<Result<Op, String>> {
-    let op = parse(canonical(&parsed.name), &parsed.args, project_root)?;
+    let mut op = parse(canonical(&parsed.name), &parsed.args, project_root)?;
+    if let Ok(Op::Prompt { title, .. }) = &mut op {
+        *title = Some(parsed.line());
+    }
     Some(op.map_err(|msg| parsed.named_error(&msg)))
 }
 
@@ -235,6 +240,17 @@ mod tests {
         }
 
         #[test]
+        fn titles_a_prompt_after_the_command_line() {
+            assert_eq!(
+                typed("/init AGENTS.md"),
+                Some(Ok(Op::Prompt {
+                    text: init::create_prompt(Path::new("/repo"), "AGENTS.md"),
+                    title: Some("/init AGENTS.md".to_owned()),
+                })),
+            );
+        }
+
+        #[test]
         fn error_names_the_command_as_typed() {
             assert_eq!(
                 typed("/continue"),
@@ -301,10 +317,7 @@ mod tests {
                 (
                     "init",
                     "AGENTS.md",
-                    Op::Prompt {
-                        text: init::create_prompt(root.path(), "AGENTS.md"),
-                        title: Some("/init AGENTS.md".to_owned()),
-                    },
+                    Op::prompt(init::create_prompt(root.path(), "AGENTS.md")),
                 ),
                 ("mode", "plan", Op::SetMode(Mode::Plan)),
                 ("model", "haiku", set_model("claude-haiku-5-5")),

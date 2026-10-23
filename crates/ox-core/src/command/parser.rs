@@ -13,6 +13,15 @@ impl Parsed {
     pub fn named_error(&self, msg: &str) -> String {
         format!("/{}: {msg}", self.name)
     }
+
+    /// The command line as the user typed it, with one space between the name and any args.
+    pub(super) fn line(&self) -> String {
+        if self.args.is_empty() {
+            format!("/{}", self.name)
+        } else {
+            format!("/{} {}", self.name, self.args)
+        }
+    }
 }
 
 /// `None` for plain prompts, `//` escape, bare `/`, or names with disallowed chars.
@@ -60,6 +69,23 @@ pub fn unescape_literal(input: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod parsed {
+        use super::*;
+
+        mod line {
+            use super::*;
+
+            #[test]
+            fn joins_the_name_and_args_with_one_space() {
+                assert_eq!(parse_slash("/init").unwrap().line(), "/init");
+                assert_eq!(
+                    parse_slash(" /init   AGENTS.md ").unwrap().line(),
+                    "/init AGENTS.md"
+                );
+            }
+        }
+    }
 
     mod parse_slash {
         use super::*;
