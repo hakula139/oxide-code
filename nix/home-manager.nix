@@ -16,6 +16,36 @@
 let
   cfg = config.programs.oxide-code;
   toml = pkgs.formats.toml { };
+
+  contextTarget =
+    if builtins.isString cfg.context then { text = cfg.context; } else { source = cfg.context; };
+
+  # Only the files the check reads go through configDir, so an out-of-store context link stays live.
+  checkedFiles = lib.optionalAttrs (cfg.settings != { }) {
+    "config.toml" = toml.generate "ox-config.toml" cfg.settings;
+  };
+
+  configDir = pkgs.runCommand "ox-config" { } ''
+    mkdir -p "$out/ox"
+    ${lib.concatStrings (
+      lib.mapAttrsToList (rel: source: ''
+        install -D -m 0444 ${source} "$out/ox/${rel}"
+      '') checkedFiles
+    )}
+    ${lib.optionalString cfg.checkConfig ''
+      # crates/ox/tests/cli.rs runs `ox config check` in this same scratch environment.
+      export HOME=$TMPDIR/home XDG_CONFIG_HOME=$out \
+        XDG_DATA_HOME=$TMPDIR/data XDG_STATE_HOME=$TMPDIR/state
+      mkdir "$HOME" "$TMPDIR/work"
+      cd "$TMPDIR/work"
+      ${lib.getExe' cfg.package "ox"} config check || {
+        echo "ox config check rejected the generated configuration above." >&2
+        echo "If it names a file the build sandbox cannot read," \
+          "set programs.oxide-code.checkConfig = false." >&2
+        exit 1
+      }
+    ''}
+  '';
 in
 {
   # ------------------------------------------------------------------------------------------------
@@ -30,6 +60,25 @@ in
       defaultText = lib.literalMD "oxide-code built from this flake with `pkgs`";
       description = ''
         The oxide-code package to install, or `null` to manage only the configuration.
+      '';
+    };
+
+    checkConfig = lib.mkOption {
+      type = lib.types.bool;
+      default = cfg.package != null;
+      defaultText = lib.literalExpression "config.programs.oxide-code.package != null";
+      description = ''
+        Whether to validate the generated configuration at build time with
+        {command}`ox config check` from {option}`programs.oxide-code.package`.
+      '';
+    };
+
+    configDir = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      internal = true;
+      description = ''
+        The generated directory holding `ox/` with every file the check validates.
       '';
     };
 
@@ -67,7 +116,16 @@ in
   # Module Config
   # ------------------------------------------------------------------------------------------------
   config = lib.mkIf cfg.enable {
+    programs.oxide-code.configDir = configDir;
+
     assertions = [
+      {
+        assertion = cfg.checkConfig -> cfg.package != null;
+        message =
+          "programs.oxide-code.checkConfig needs programs.oxide-code.package, "
+          + "since the check runs its ox.";
+      }
+
       {
         assertion = !(cfg.settings ? client.api_key);
         message =
@@ -79,14 +137,12 @@ in
 
     home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
 
-    xdg.configFile = {
-      "ox/config.toml" = lib.mkIf (cfg.settings != { }) {
-        source = toml.generate "ox-config.toml" cfg.settings;
+    xdg.configFile =
+      lib.mapAttrs' (
+        rel: _: lib.nameValuePair "ox/${rel}" { source = "${configDir}/ox/${rel}"; }
+      ) checkedFiles
+      // {
+        "ox/AGENTS.md" = lib.mkIf (cfg.context != "") contextTarget;
       };
-
-      "ox/AGENTS.md" = lib.mkIf (cfg.context != "") (
-        if builtins.isString cfg.context then { text = cfg.context; } else { source = cfg.context; }
-      );
-    };
   };
 }
