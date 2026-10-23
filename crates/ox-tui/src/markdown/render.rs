@@ -186,9 +186,6 @@ where
             Tag::Item => self.start_item(),
             Tag::Emphasis => self.push_inline_style(Style::new().add_modifier(Modifier::ITALIC)),
             Tag::Strong => self.push_inline_style(Style::new().add_modifier(Modifier::BOLD)),
-            Tag::Strikethrough => {
-                self.push_inline_style(Style::new().add_modifier(Modifier::CROSSED_OUT));
-            }
             Tag::Link {
                 link_type,
                 dest_url,
@@ -204,6 +201,7 @@ where
             | Tag::DefinitionList
             | Tag::DefinitionListTitle
             | Tag::DefinitionListDefinition
+            | Tag::Strikethrough
             | Tag::Subscript
             | Tag::Superscript => {
                 debug!(?tag, "unsupported markdown tag");
@@ -219,9 +217,7 @@ where
             TagEnd::CodeBlock => self.end_code_block(),
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => self.end_item(),
-            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
-                self.pop_inline_style();
-            }
+            TagEnd::Emphasis | TagEnd::Strong => self.pop_inline_style(),
             TagEnd::Link => self.pop_link(),
             TagEnd::Table => self.end_table(),
             TagEnd::TableHead => {
@@ -238,6 +234,7 @@ where
             | TagEnd::DefinitionList
             | TagEnd::DefinitionListTitle
             | TagEnd::DefinitionListDefinition
+            | TagEnd::Strikethrough
             | TagEnd::Subscript
             | TagEnd::Superscript => {}
         }
@@ -1897,9 +1894,12 @@ mod tests {
         }
 
         #[test]
-        fn strikethrough_crosses_out_text() {
-            let text = render_markdown("~~struck~~", &theme(), 0);
-            assert_eq!(text.lines[0].spans, [Span::raw("struck").crossed_out()]);
+        fn tildes_are_kept_as_literal_text() {
+            let input = "~~struck~~ and cost ~$1-~$2 per run";
+
+            let text = render_markdown(input, &theme(), 0);
+
+            assert_eq!(text.lines[0].spans, [Span::raw(input)]);
         }
 
         #[test]

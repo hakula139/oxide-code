@@ -95,6 +95,7 @@ A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other
 10. **A rule between every table row.** Without one, the continuation lines of a wrapped row leave blank cells that read as spacing, so the single-line rows around it seem to run together. Claude Code and oh-my-pi rule off every row of their boxed tables, as Codex does in its borderless ones.
 11. **Table columns no narrower than their longest word.** A narrower column splits words mid-way, so a flag such as `--all-targets` breaks across rows. When the words can't all fit side by side, the rows stack as `header: value` lines. Claude Code and oh-my-pi also start each column at its longest word, and Claude Code stacks rows the same way once wrapped rows grow too tall.
 12. **One toggle for every collapsed block.** Claude Code's Ctrl+O transcript viewer expands lines that collapse by default, and its collapsed thinking names the key. Codex ends truncated output with the key that opens its transcript. A toggle in place keeps the reader's position in the chat, so one key serves tool bodies and thinking, and each footer names it.
+13. **Tildes stay literal.** The model writes `~` for "approximately" and in home-relative paths, and pulldown-cmark 0.13 strikes the text between two single tildes, so `cost ~$1-~$2` would render `$1-` crossed out. The renderer leaves strikethrough off, as Claude Code does for the same reason, while Codex keeps it.
 
 ## Sources
 
@@ -106,6 +107,6 @@ A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other
 - `crates/ox-tui/src/components/chat/scroll.rs`: `ChatView::place`, the anchored placement each frame paints, and the auto-scroll that follows the tail.
 - `crates/ox-tui/src/components/chat/stack.rs`: `CachedBlock`, `SlotTops`, and `Stack`, the block cache and the row anchors.
 - `crates/ox-tui/src/keymap.rs`: `KeyAction`, `KeyChord`, and `Keymap`.
-- `crates/ox-tui/src/markdown.rs`: `render_markdown_chunk` and `complete_blocks_len`, the stable block boundaries.
+- `crates/ox-tui/src/markdown.rs`: `OPTIONS`, the parser extensions, and `render_markdown_chunk` and `complete_blocks_len`, the stable block boundaries.
 - `crates/ox-tui/src/markdown/render.rs`: the pulldown-cmark renderer, its `pending_markers`, and the table layout.
 - `crates/ox-tui/src/terminal.rs`: `synchronized_update`, which wraps each frame in mode 2026.
