@@ -75,7 +75,11 @@ impl App {
         } else {
             self.input.popup_height()
         };
-        let input_height = if modal_active { 0 } else { self.input.height() };
+        let input_height = if modal_active {
+            0
+        } else {
+            self.input.height(frame.area().width)
+        };
         let spare = modal_max.saturating_sub(modal_height + popup_height + input_height);
         let preview_height = self.preview_height().min(spare);
         let tasks_height = self.tasks.height().min(spare - preview_height);
@@ -769,6 +773,27 @@ mod tests {
             assert_eq!(rows[3..5], ["  ● Add the entry type", "  ... +2 tasks"]);
             assert_eq!(rows[5], "─".repeat(40));
             assert!(rows[6].ends_with("one"), "{text}");
+        }
+
+        #[test]
+        fn sizes_the_input_at_the_new_width_on_the_first_frame_after_a_resize() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.input.set_text(&"a".repeat(25));
+            let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+            terminal.draw(|frame| app.draw_frame(frame)).unwrap();
+
+            terminal.backend_mut().resize(14, 12);
+            terminal.draw(|frame| app.draw_frame(frame)).unwrap();
+
+            let rows = buffer_rows(terminal.backend().buffer());
+            let rule = "─".repeat(14);
+            assert_eq!(
+                rows[7..]
+                    .iter()
+                    .map(|row| row.trim_end())
+                    .collect::<Vec<_>>(),
+                [&rule, "❯ aaaaaaaaaaaa", "  aaaaaaaaaaaa", "  a", &rule],
+            );
         }
 
         #[test]

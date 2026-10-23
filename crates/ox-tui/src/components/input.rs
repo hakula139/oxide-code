@@ -6,10 +6,11 @@ use std::cell::Cell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget as _};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
 use ox_core::util::text::trim_blank_edges;
@@ -47,10 +48,8 @@ pub(crate) enum InputOutcome {
 pub(crate) struct InputArea {
     textarea: TextArea<'static>,
     popup: SlashPopup,
-    /// Textarea width at the last render, which sets the wrap layout.
-    rendered_width: Cell<u16>,
-    /// Cached [`Self::visual_line_count`], cleared when the text or the rendered width changes.
-    visual_lines: Cell<Option<u16>>,
+    /// The last [`Self::visual_line_count`] as `(width, rows)`, cleared when the text changes.
+    visual_lines: Cell<Option<(u16, u16)>>,
 }
 
 // ── Public API ──
@@ -64,7 +63,6 @@ impl InputArea {
         Self {
             textarea,
             popup: SlashPopup::default(),
-            rendered_width: Cell::new(0),
             visual_lines: Cell::new(None),
         }
     }
@@ -89,8 +87,9 @@ impl InputArea {
             .all(|line| line.trim().is_empty())
     }
 
-    pub(crate) fn height(&self) -> u16 {
-        let content_lines = self.visual_line_count();
+    /// Rows the band needs at `width` columns, borders included.
+    pub(crate) fn height(&self, width: u16) -> u16 {
+        let content_lines = self.visual_line_count(width.saturating_sub(USER_PROMPT_PREFIX_WIDTH));
         content_lines.min(MAX_VISIBLE_LINES) + BORDER_ROWS
     }
 
@@ -153,9 +152,6 @@ impl InputArea {
         // The textarea keeps its default style and takes the text slot from the cells under it.
         frame.render_widget(Block::default().style(theme.text()), textarea_area);
         frame.render_widget(&self.textarea, textarea_area);
-        if self.rendered_width.replace(textarea_area.width) != textarea_area.width {
-            self.visual_lines.set(None);
-        }
 
         let sc = self.textarea.screen_cursor();
         let cursor_row = saturating_u16(sc.row);
@@ -197,8 +193,8 @@ impl InputArea {
             _ => {}
         }
 
-        if self.popup.is_visible() {
-            let outcome = self.handle_popup_key(key);
+        if let Some(completion) = self.popup.completion() {
+            let outcome = self.handle_popup_key(key, completion);
             if outcome != InputOutcome::Ignored {
                 return outcome;
             }
@@ -256,7 +252,7 @@ impl InputArea {
 
     // ── Popup & State ──
 
-    fn handle_popup_key(&mut self, key: &KeyEvent) -> InputOutcome {
+    fn handle_popup_key(&mut self, key: &KeyEvent, completion: String) -> InputOutcome {
         match key.code {
             KeyCode::Up => {
                 self.popup.select_prev();
@@ -271,29 +267,25 @@ impl InputArea {
                 InputOutcome::Consumed
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
-                self.popup_complete_to_buffer();
+                self.popup_complete_to_buffer(&completion);
                 InputOutcome::Consumed
             }
-            KeyCode::Enter if key.modifiers.is_empty() => self
-                .popup_submit_selected()
-                .map_or(InputOutcome::Ignored, InputOutcome::Action),
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                InputOutcome::Action(self.popup_submit_selected(completion))
+            }
             _ => InputOutcome::Ignored,
         }
     }
 
-    fn popup_complete_to_buffer(&mut self) {
-        let Some(completion) = self.popup.completion() else {
-            return;
-        };
+    fn popup_complete_to_buffer(&mut self, completion: &str) {
         self.set_text(&format!("{completion} "));
         self.refresh_popup();
     }
 
-    fn popup_submit_selected(&mut self) -> Option<Action> {
-        let submission = self.popup.completion()?;
+    fn popup_submit_selected(&mut self, completion: String) -> Action {
         self.set_text("");
         self.popup.set_state(None);
-        Some(Action::Submit(submission))
+        Action::Submit(completion)
     }
 
     fn refresh_popup(&mut self) {
@@ -317,17 +309,22 @@ impl InputArea {
         }
     }
 
-    /// Screen rows in the textarea's own wrap layout at its last-rendered width.
-    fn visual_line_count(&self) -> u16 {
-        if let Some(count) = self.visual_lines.get() {
-            return count;
+    /// Screen rows of the text wrapped at `width` columns, as the textarea lays it out.
+    fn visual_line_count(&self, width: u16) -> u16 {
+        if let Some((measured_width, rows)) = self.visual_lines.get()
+            && measured_width == width
+        {
+            return rows;
         }
+        // The textarea takes its wrap width from the area it renders into.
         let mut probe = self.textarea.clone();
         probe.move_cursor(CursorMove::Bottom);
         probe.move_cursor(CursorMove::End);
-        let count = saturating_u16(probe.screen_cursor().row.saturating_add(1));
-        self.visual_lines.set(Some(count));
-        count
+        let area = Rect::new(0, 0, width, 1);
+        (&probe).render(area, &mut Buffer::empty(area));
+        let rows = saturating_u16(probe.screen_cursor().row.saturating_add(1));
+        self.visual_lines.set(Some((width, rows)));
+        rows
     }
 
     fn submit(&mut self) -> Option<Action> {
@@ -386,7 +383,7 @@ mod tests {
 
         #[test]
         fn holds_one_row_inside_the_borders_when_empty() {
-            assert_eq!(test_input().height(), 1 + BORDER_ROWS);
+            assert_eq!(test_input().height(80), 1 + BORDER_ROWS);
         }
 
         #[test]
@@ -396,7 +393,7 @@ mod tests {
             input.textarea.insert_newline();
             input.textarea.insert_newline();
 
-            assert_eq!(input.height(), 3 + BORDER_ROWS);
+            assert_eq!(input.height(80), 3 + BORDER_ROWS);
         }
 
         #[test]
@@ -404,9 +401,7 @@ mod tests {
             let mut input = test_input();
             type_text(&mut input, "aaaaaa bbbbbb cccccc dddddd");
 
-            render_to_backend(&input, 12, 3);
-
-            assert_eq!(input.height(), 4 + BORDER_ROWS, "4 word-wrapped rows");
+            assert_eq!(input.height(12), 4 + BORDER_ROWS, "4 word-wrapped rows");
         }
 
         #[test]
@@ -417,7 +412,7 @@ mod tests {
                 input.textarea.insert_newline();
             }
 
-            assert_eq!(input.height(), MAX_VISIBLE_LINES + BORDER_ROWS);
+            assert_eq!(input.height(80), MAX_VISIBLE_LINES + BORDER_ROWS);
         }
     }
 
@@ -791,7 +786,7 @@ mod tests {
             type_text(&mut input, "line 2");
             input.textarea.insert_newline();
             type_text(&mut input, "line 3");
-            insta::assert_snapshot!(render_to_backend(&input, 60, input.height()));
+            insta::assert_snapshot!(render_to_backend(&input, 60, input.height(60)));
         }
 
         #[test]
@@ -919,60 +914,60 @@ mod tests {
         use super::*;
 
         #[test]
-        fn returns_the_cached_count_without_remeasuring() {
+        fn returns_the_cached_count_at_its_width() {
             let input = test_input();
-            input.visual_lines.set(Some(4));
+            input.visual_lines.set(Some((10, 4)));
 
-            assert_eq!(input.visual_line_count(), 4);
+            assert_eq!(input.visual_line_count(10), 4);
         }
 
         #[test]
-        fn keeps_the_count_across_same_width_renders_and_cursor_moves() {
+        fn keeps_the_count_across_renders_and_cursor_moves() {
             let mut input = test_input();
             type_text(&mut input, &"a".repeat(25));
-            render_to_backend(&input, 12, 6);
-            assert_eq!(input.visual_line_count(), 3);
+            assert_eq!(input.visual_line_count(10), 3);
 
-            render_to_backend(&input, 12, 6);
+            render_to_backend(&input, 40, 6);
             assert_eq!(
                 input.visual_lines.get(),
-                Some(3),
-                "a same-width render keeps it"
+                Some((10, 3)),
+                "a render at another width keeps it"
             );
 
             input.handle_event(&key(KeyCode::Left, KeyModifiers::NONE));
-            assert_eq!(input.visual_lines.get(), Some(3), "a cursor move keeps it");
+            assert_eq!(
+                input.visual_lines.get(),
+                Some((10, 3)),
+                "a cursor move keeps it"
+            );
         }
 
         #[test]
         fn tracks_edits_and_width_changes() {
             let mut input = test_input();
-            render_to_backend(&input, 12, 6);
-            assert_eq!(input.visual_line_count(), 1);
+            assert_eq!(input.visual_line_count(10), 1);
 
             for ch in "a".repeat(25).chars() {
                 input.handle_event(&key(KeyCode::Char(ch), KeyModifiers::NONE));
             }
-            assert_eq!(input.visual_line_count(), 3, "typing re-measures");
+            assert_eq!(input.visual_line_count(10), 3, "typing re-measures");
 
             input.handle_event(&Event::Paste("dddddddddd".to_owned()));
-            assert_eq!(input.visual_line_count(), 4, "a paste re-measures");
+            assert_eq!(input.visual_line_count(10), 4, "a paste re-measures");
 
-            render_to_backend(&input, 40, 6);
-            assert_eq!(input.visual_line_count(), 1, "a wider render re-measures");
+            assert_eq!(input.visual_line_count(38), 1, "another width re-measures");
 
             input.set_text("a\nb\nc");
-            assert_eq!(input.visual_line_count(), 3, "set_text re-measures");
+            assert_eq!(input.visual_line_count(38), 3, "set_text re-measures");
         }
 
         #[test]
-        fn no_width_falls_back_to_logical() {
-            // Before the first render the textarea has no wrap width.
+        fn zero_width_counts_logical_lines() {
             let mut input = test_input();
-            assert_eq!(input.visual_line_count(), 1);
+            assert_eq!(input.visual_line_count(0), 1);
 
             input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
-            assert_eq!(input.visual_line_count(), 2);
+            assert_eq!(input.visual_line_count(0), 2);
         }
 
         #[test]
@@ -980,8 +975,8 @@ mod tests {
             // 27 chars fit 3 rows of 10 by width alone, but words cannot straddle a row break.
             let mut input = test_input();
             type_text(&mut input, "aaaaaa bbbbbb cccccc dddddd");
-            render_to_backend(&input, 12, 6);
-            assert_eq!(input.visual_line_count(), 4);
+
+            assert_eq!(input.visual_line_count(10), 4);
         }
 
         #[test]
@@ -989,16 +984,16 @@ mod tests {
             // A pasted URL or path wider than the band wraps onto the following rows.
             let mut input = test_input();
             type_text(&mut input, "abcdefghijklmnopqrstuvwxy");
-            render_to_backend(&input, 12, 3);
-            assert_eq!(input.visual_line_count(), 3);
+
+            assert_eq!(input.visual_line_count(10), 3);
         }
 
         #[test]
         fn mixed_logical_and_wrapped() {
             let mut input = test_input();
             input.set_text("hello\nabcdefghijklmno");
-            render_to_backend(&input, 12, 3);
-            assert_eq!(input.visual_line_count(), 3, "1 row + 2 rows");
+
+            assert_eq!(input.visual_line_count(10), 3, "1 row + 2 rows");
         }
     }
 
