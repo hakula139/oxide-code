@@ -602,35 +602,6 @@ pub(crate) fn is_first_party_base_url(base_url: &str) -> bool {
     })
 }
 
-// ── Display ──
-
-/// Auth label for a session without credentials.
-pub const NOT_SIGNED_IN: &str = "Not signed in";
-
-pub fn display_auth(auth: Option<AuthSource>) -> String {
-    auth.map_or_else(|| NOT_SIGNED_IN.to_owned(), |source| source.to_string())
-}
-
-pub fn display_effort(effort: Option<Effort>) -> String {
-    effort.map_or_else(|| "(no effort levels)".to_owned(), |e| e.to_string())
-}
-
-pub fn display_bool(flag: bool) -> &'static str {
-    if flag { "on" } else { "off" }
-}
-
-pub fn display_max_tool_rounds(cap: Option<u32>) -> String {
-    cap.map_or_else(|| "unbounded".to_owned(), |n| n.to_string())
-}
-
-pub fn display_auto_compaction(auto: AutoCompactionConfig) -> String {
-    match (auto.enabled, auto.threshold_tokens) {
-        (true, Some(threshold)) => format!("at {threshold} tokens"),
-        (true, None) => "off (no threshold)".to_owned(),
-        _ => "off".to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -2193,78 +2164,6 @@ mod tests {
             assert!(!is_first_party_base_url("http://127.0.0.1:8080"));
             assert!(!is_first_party_base_url(""));
             assert!(!is_first_party_base_url("not-a-url"));
-        }
-    }
-
-    mod display_auth {
-        use super::*;
-
-        #[test]
-        fn names_the_source_or_the_signed_out_state() {
-            assert_eq!(
-                display_auth(Some(AuthSource::OxLogin)),
-                "OAuth (oxide-code login)"
-            );
-            assert_eq!(display_auth(None), "Not signed in");
-        }
-    }
-
-    mod display_effort {
-        use super::*;
-
-        #[test]
-        fn names_the_effective_level_or_its_absence() {
-            assert_eq!(display_effort(Some(Effort::High)), "high");
-            assert_eq!(display_effort(None), "(no effort levels)");
-        }
-    }
-
-    mod display_bool {
-        use super::*;
-
-        #[test]
-        fn names_the_two_flag_states() {
-            assert_eq!(display_bool(true), "on");
-            assert_eq!(display_bool(false), "off");
-        }
-    }
-
-    mod display_max_tool_rounds {
-        use super::*;
-
-        #[test]
-        fn names_the_cap_or_its_absence() {
-            assert_eq!(display_max_tool_rounds(Some(100)), "100");
-            assert_eq!(display_max_tool_rounds(None), "unbounded");
-        }
-    }
-
-    mod display_auto_compaction {
-        use super::*;
-
-        #[test]
-        fn names_enabled_threshold_or_off() {
-            assert_eq!(
-                display_auto_compaction(AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(400_000),
-                }),
-                "at 400000 tokens",
-            );
-            assert_eq!(
-                display_auto_compaction(AutoCompactionConfig {
-                    enabled: false,
-                    threshold_tokens: Some(400_000),
-                }),
-                "off",
-            );
-            assert_eq!(
-                display_auto_compaction(AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: None,
-                }),
-                "off (no threshold)",
-            );
         }
     }
 }

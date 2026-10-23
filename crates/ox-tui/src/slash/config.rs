@@ -5,13 +5,11 @@ use std::path::Path;
 
 use ox_core::config::load::user_config_path;
 use ox_core::config::provenance::{Layer, Source};
-use ox_core::config::{
-    display_auth, display_auto_compaction, display_bool, display_effort, display_max_tool_rounds,
-};
 use ox_core::util::path::tildify;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
+use crate::labels;
 use crate::modal::kv_overview::{KvOverview, KvSection};
 use crate::session_info::LiveSessionInfo;
 
@@ -51,14 +49,14 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
     let resolved = vec![
         row("Model", cfg.model.display_name().to_owned(), &sources.model),
         row("Model ID", cfg.model.id().to_owned(), &sources.model),
-        row("Effort", display_effort(cfg.effort), &sources.effort),
-        row("Auth", display_auth(cfg.auth), &sources.auth),
+        row("Effort", labels::effort(cfg.effort), &sources.effort),
+        row("Auth", labels::auth(cfg.auth), &sources.auth),
         row("Base URL", cfg.base_url.clone(), &sources.base_url),
         row(
             "Extra CA Certs",
             cfg.extra_ca_certs
                 .as_deref()
-                .map_or_else(|| "(none)".to_owned(), tildify),
+                .map_or_else(|| labels::NONE.to_owned(), tildify),
             &sources.extra_ca_certs,
         ),
         row(
@@ -68,12 +66,12 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
         ),
         row(
             "Attribution Header",
-            display_bool(cfg.gateway.attribution).to_owned(),
+            labels::on_off(cfg.gateway.attribution).to_owned(),
             &sources.attribution,
         ),
         row(
             "Structured Outputs",
-            display_bool(cfg.gateway.structured_outputs).to_owned(),
+            labels::on_off(cfg.gateway.structured_outputs).to_owned(),
             &sources.structured_outputs,
         ),
         row(
@@ -83,7 +81,7 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
         ),
         row(
             "Max Tool Rounds",
-            display_max_tool_rounds(cfg.max_tool_rounds),
+            labels::max_tool_rounds(cfg.max_tool_rounds),
             &sources.max_tool_rounds,
         ),
         row(
@@ -93,7 +91,7 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
         ),
         row(
             "Auto Compaction",
-            display_auto_compaction(cfg.compaction.auto),
+            cfg.compaction.auto.to_string(),
             &sources.compaction,
         ),
         row(
@@ -103,7 +101,7 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
         ),
         row(
             "Show Thinking",
-            display_bool(cfg.show_thinking).to_owned(),
+            labels::on_off(cfg.show_thinking).to_owned(),
             &sources.show_thinking,
         ),
     ];
@@ -118,7 +116,7 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
 
 fn display_names(names: &[String]) -> String {
     if names.is_empty() {
-        "(none)".to_owned()
+        labels::NONE.to_owned()
     } else {
         names.join(", ")
     }
@@ -129,7 +127,7 @@ fn file_rows(layers: &[Layer], user_path: Option<&Path>) -> Vec<(String, String)
     let user_loaded = layers.iter().any(|layer| matches!(layer, Layer::User(_)));
     let missing_user = (!user_loaded).then(|| {
         let path = user_path.map_or_else(
-            || "(not configured)".to_owned(),
+            || "not configured".to_owned(),
             |path| format!("{} (not found)", tildify(path)),
         );
         ("User".to_owned(), path)
@@ -219,14 +217,14 @@ mod tests {
         }
 
         #[test]
-        fn renders_unset_extra_ca_certs_as_placeholder() {
+        fn shows_none_for_unset_extra_ca_certs() {
             let info = test_session_info();
             assert!(info.config.extra_ca_certs.is_none(), "precondition: unset");
             let m = build_modal(&info, None);
             let rendered = rendered_text(&m, 80);
 
             assert!(
-                row(&rendered, "Extra CA Certs").contains("(none)"),
+                row(&rendered, "Extra CA Certs").contains(" none "),
                 "{rendered}"
             );
         }
@@ -236,7 +234,7 @@ mod tests {
             let mut info = test_session_info();
             let rendered = rendered_text(&build_modal(&info, None), 80);
             assert!(
-                row(&rendered, "Custom Headers").contains("(none)"),
+                row(&rendered, "Custom Headers").contains(" none "),
                 "{rendered}"
             );
 
@@ -251,11 +249,11 @@ mod tests {
             info.config.gateway.attribution = false;
             let rendered = rendered_text(&build_modal(&info, None), 80);
             assert!(
-                row(&rendered, "Attribution Header").contains(display_bool(false)),
+                row(&rendered, "Attribution Header").contains(" off "),
                 "{rendered}"
             );
             assert!(
-                row(&rendered, "Structured Outputs").contains(display_bool(true)),
+                row(&rendered, "Structured Outputs").contains(" on "),
                 "{rendered}"
             );
         }
@@ -342,7 +340,7 @@ mod tests {
                 );
                 assert_eq!(
                     file_rows(&[], None),
-                    [("User".to_owned(), "(not configured)".to_owned())],
+                    [("User".to_owned(), "not configured".to_owned())],
                 );
             });
         }

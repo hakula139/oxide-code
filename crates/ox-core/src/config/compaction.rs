@@ -1,6 +1,7 @@
 //! Compaction settings: whether auto-compaction runs and the token count that triggers it, derived
 //! from the configured threshold and the model's context window.
 
+use std::fmt;
 use std::ops::RangeInclusive;
 
 use anyhow::{Result, bail};
@@ -55,6 +56,18 @@ impl AutoCompactionConfig {
         match (self.enabled, self.threshold_tokens) {
             (true, Some(threshold)) => context_tokens >= threshold,
             _ => false,
+        }
+    }
+}
+
+/// When compaction triggers, or why it never does, as `/status`, `/config`, and the config-change
+/// notice show it.
+impl fmt::Display for AutoCompactionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.enabled, self.threshold_tokens) {
+            (true, Some(threshold)) => write!(f, "at {threshold} tokens"),
+            (true, None) => f.write_str("off (no threshold)"),
+            _ => f.write_str("off"),
         }
     }
 }
@@ -129,7 +142,7 @@ fn resolve_auto_compaction(
         }
     };
     AutoCompactionConfig {
-        enabled: threshold.is_some(),
+        enabled: true,
         threshold_tokens: threshold,
     }
 }
@@ -262,7 +275,10 @@ mod tests {
             let policy = AutoCompactionPolicy::Percent(ThresholdPercent(40));
             let unknown = ModelSpec::resolve("custom-model");
             let compaction = resolve_policy(policy, &unknown, 16_000);
-            assert!(!compaction.auto.enabled, "precondition: no window");
+            assert_eq!(
+                compaction.auto.threshold_tokens, None,
+                "precondition: no window"
+            );
 
             let known = ModelSpec::resolve("claude-opus-5-5");
             let swapped = compaction.for_model(&known, 64_000);
@@ -280,6 +296,22 @@ mod tests {
 
     mod auto_compaction_config {
         use super::*;
+
+        #[test]
+        fn display_names_the_threshold_or_why_it_is_off() {
+            let windowless = AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: None,
+            };
+            let windowed = AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(400_000),
+            };
+
+            assert_eq!(windowed.to_string(), "at 400000 tokens");
+            assert_eq!(windowless.to_string(), "off (no threshold)");
+            assert_eq!(AutoCompactionConfig::disabled().to_string(), "off");
+        }
 
         mod should_trigger {
             use super::*;
@@ -339,7 +371,7 @@ mod tests {
                 assert_eq!(
                     resolve_policy(policy, &model, 64_000).auto,
                     AutoCompactionConfig {
-                        enabled: threshold.is_some(),
+                        enabled: true,
                         threshold_tokens: threshold,
                     },
                     "{id} {policy:?}",

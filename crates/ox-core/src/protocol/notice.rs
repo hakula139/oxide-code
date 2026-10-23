@@ -4,7 +4,6 @@
 
 use super::ConfigPick;
 use crate::config::compaction::AutoCompactionConfig;
-use crate::config::display_auto_compaction;
 use crate::model::{Effort, ModelSpec};
 use crate::permission::Mode;
 use crate::util::text::plural;
@@ -73,12 +72,8 @@ pub(crate) fn config_changed(
         (None, None, Some(eff)) => (format!("{named} · effort {eff} (model default)"), None),
         (_, _, Some(eff)) => (format!("{named} · effort {eff}"), None),
     };
-    let compaction = (before.auto_compaction != after.auto_compaction).then(|| {
-        format!(
-            "Auto compaction {}",
-            display_auto_compaction(after.auto_compaction)
-        )
-    });
+    let compaction = (before.auto_compaction != after.auto_compaction)
+        .then(|| format!("Auto compaction {}", after.auto_compaction));
     match (effort, compaction) {
         (None, None) => head,
         (Some(effort), None) => format!("{head}. {effort}."),
