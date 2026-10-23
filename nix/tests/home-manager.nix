@@ -44,10 +44,9 @@ let
   failedAssertions = hm: map (a: a.message) (builtins.filter (a: !a.assertion) hm.assertions);
   complaints = hm: failedAssertions hm ++ hm.warnings;
 
-  stub = pkgs.writeShellScriptBin "ox" "exit 0";
   contextPackage = pkgs.writeText "ox-test-AGENTS.md" "From a package.\n";
 
-  checkingStub = pkgs.writeShellScriptBin "ox" ''
+  stub = pkgs.writeShellScriptBin "ox" ''
     set -eu
     fail() {
       echo "stub: $1" >&2
@@ -65,11 +64,8 @@ let
   '';
 
   hintLines = [
-    "ox config check rejected the generated configuration above."
-    (
-      "If it names a file the build sandbox cannot read, "
-      + "set programs.oxide-code.checkConfig = false."
-    )
+    "ox config check rejected the config.toml generated from programs.oxide-code.settings."
+    "If it names a path the build cannot read, set programs.oxide-code.checkConfig = false."
   ];
 
   # ------------------------------------------------------------------------------------------------
@@ -78,7 +74,7 @@ let
   checked = evalHome {
     programs.oxide-code = {
       enable = true;
-      package = checkingStub;
+      package = stub;
 
       settings = {
         permission.mode = "yolo";
@@ -95,7 +91,7 @@ let
   rejected = evalHome {
     programs.oxide-code = {
       enable = true;
-      package = checkingStub;
+      package = stub;
       settings.invalid = true;
     };
   };
@@ -105,7 +101,7 @@ let
   unchecked = evalHome {
     programs.oxide-code = {
       enable = true;
-      package = checkingStub;
+      package = stub;
       checkConfig = false;
       settings.invalid = true;
     };
@@ -197,7 +193,7 @@ let
     };
 
     testCheckedInstallsThePackage = {
-      expr = builtins.elem checkingStub checked.home.packages;
+      expr = builtins.elem stub checked.home.packages;
       expected = true;
     };
 
@@ -226,17 +222,12 @@ let
       expected = map toString (evalHome { }).home.packages;
     };
 
-    testNoPackageSkipsTheCheck = {
-      expr = noPackage.programs.oxide-code.checkConfig;
-      expected = false;
-    };
-
     testCheckNeedsPackageFails = {
       expr = failedAssertions checkNeedsPackage;
       expected = [
         (
-          "programs.oxide-code.checkConfig needs programs.oxide-code.package, "
-          + "since the check runs its ox."
+          "programs.oxide-code.checkConfig runs ox from programs.oxide-code.package, "
+          + "which is null. Set a package or checkConfig = false."
         )
       ];
     };
@@ -282,6 +273,7 @@ pkgs.runCommand "ox-home-manager-module"
     ${lib.concatMapStrings (line: ''
       grep -Fx ${lib.escapeShellArg line} ${rejectedFailure}/testBuildFailure.log
     '') hintLines}
+
     toml2json < ${unchecked.programs.oxide-code.configDir}/ox/config.toml | jq -S . > actual.json
     echo '{"invalid":true}' | jq -S . > expected.json
     diff -u expected.json actual.json

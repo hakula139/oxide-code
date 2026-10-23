@@ -25,7 +25,7 @@ let
     "config.toml" = toml.generate "ox-config.toml" cfg.settings;
   };
 
-  configDir = pkgs.runCommand "ox-config" { } ''
+  configDir = pkgs.runCommandLocal "ox-config" { } ''
     mkdir -p "$out/ox"
     ${lib.concatStrings (
       lib.mapAttrsToList (rel: source: ''
@@ -39,8 +39,9 @@ let
       mkdir "$HOME" "$TMPDIR/work"
       cd "$TMPDIR/work"
       ${lib.getExe' cfg.package "ox"} config check || {
-        echo "ox config check rejected the generated configuration above." >&2
-        echo "If it names a file the build sandbox cannot read," \
+        echo "ox config check rejected the config.toml generated from" \
+          "programs.oxide-code.settings." >&2
+        echo "If it names a path the build cannot read," \
           "set programs.oxide-code.checkConfig = false." >&2
         exit 1
       }
@@ -73,15 +74,6 @@ in
       '';
     };
 
-    configDir = lib.mkOption {
-      type = lib.types.package;
-      readOnly = true;
-      internal = true;
-      description = ''
-        The generated directory holding `ox/` with every file the check validates.
-      '';
-    };
-
     settings = lib.mkOption {
       inherit (toml) type;
       default = { };
@@ -110,6 +102,16 @@ in
         package linked as the file. A string is always inline text.
       '';
     };
+
+    configDir = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      internal = true;
+      description = ''
+        The generated directory holding `ox/` with every file `ox config check` reads, checked
+        when {option}`programs.oxide-code.checkConfig` is on.
+      '';
+    };
   };
 
   # ------------------------------------------------------------------------------------------------
@@ -122,8 +124,8 @@ in
       {
         assertion = cfg.checkConfig -> cfg.package != null;
         message =
-          "programs.oxide-code.checkConfig needs programs.oxide-code.package, "
-          + "since the check runs its ox.";
+          "programs.oxide-code.checkConfig runs ox from programs.oxide-code.package, "
+          + "which is null. Set a package or checkConfig = false.";
       }
 
       {
