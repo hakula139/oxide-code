@@ -6,19 +6,19 @@
 }:
 
 rustPlatform.buildRustPackage {
-  inherit ((lib.importTOML ./Cargo.toml).workspace.package) version;
+  inherit ((lib.importTOML ../Cargo.toml).workspace.package) version;
   pname = "oxide-code";
 
   src = lib.fileset.toSource {
-    root = ./.;
+    root = ../.;
     fileset = lib.fileset.unions [
-      ./Cargo.toml
-      ./Cargo.lock
-      ./crates
+      ../Cargo.toml
+      ../Cargo.lock
+      ../crates
     ];
   };
 
-  cargoLock.lockFile = ./Cargo.lock;
+  cargoLock.lockFile = ../Cargo.lock;
 
   # Tests build much faster without the release profile's LTO and single codegen unit.
   checkType = "debug";

@@ -128,9 +128,6 @@ pub enum ApprovalDecision {
     DenyWithFeedback {
         feedback: String,
     },
-    /// Deny without asking, since the frontend has nobody to ask.
-    /// The engine tells the model what would let a rerun make the call.
-    DenyUnattended,
     /// Deny, and end the turn as [`Op::Interrupt`] does.
     Abort,
 }
@@ -590,10 +587,6 @@ mod tests {
                     decision: ApprovalDecision::DenyWithFeedback {
                         feedback: "Use rg instead.".to_owned(),
                     },
-                },
-                Op::Resolve {
-                    id: "t1".to_owned(),
-                    decision: ApprovalDecision::DenyUnattended,
                 },
                 Op::Resolve {
                     id: "t1".to_owned(),

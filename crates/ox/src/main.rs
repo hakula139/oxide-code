@@ -10,8 +10,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
-use clap::error::ErrorKind;
-use clap::{Arg, ArgGroup, Command, CommandFactory as _, Parser};
+use clap::error::{ContextKind, ContextValue, ErrorKind};
+use clap::{Arg, ArgGroup, CommandFactory as _, Parser, Subcommand};
 use indoc::indoc;
 use strum::VariantArray as _;
 use time::error::IndeterminateOffset;
@@ -28,6 +28,7 @@ use ox_core::session::resolver::{SessionTarget, resolve_session};
 use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope, ProjectScope};
 use ox_core::util;
+use ox_core::util::path::tildify;
 use ox_core::util::tls::PlatformTrust;
 use ox_tui::Startup;
 use ox_tui::slash::ResumePicker;
@@ -41,6 +42,8 @@ use driver::headless::OutputFormat;
 #[command(
     name = "ox",
     version,
+    args_conflicts_with_subcommands = true,
+    disable_help_subcommand = true,
     about = "A terminal-based AI coding assistant",
     long_about = indoc! {"
         A terminal-based AI coding assistant.
@@ -54,6 +57,7 @@ use driver::headless::OutputFormat;
           ox -c                                 Continue the latest session in this project
           ox -r                                 Pick a session to resume
           git diff | ox -p \"Review this diff\"   Answer once, with the diff attached from stdin
+          ox config check                       Validate the config files and exit
 
         Guides: https://github.com/hakula139/oxide-code/tree/main/docs/guide"
     }
@@ -73,6 +77,9 @@ use driver::headless::OutputFormat;
     reason = "each bool is an independent CLI switch that clap parses into its own field"
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Start with this prompt, or with `--print`, answer it.
     #[arg(value_parser = non_blank)]
     prompt: Option<String>,
@@ -140,7 +147,9 @@ impl Cli {
     /// Parses the command line, exiting with a usage error as clap does for a combination clap
     /// cannot express.
     fn parse_valid() -> Self {
-        let cli = Self::parse();
+        let cli = Self::try_parse()
+            .map_err(unexpected_word)
+            .unwrap_or_else(|e| e.exit());
         if let Err(e) = cli.validate() {
             e.exit();
         }
@@ -238,6 +247,25 @@ impl Cli {
     }
 }
 
+/// Reports a stray word after the prompt as an unexpected argument. With
+/// `args_conflicts_with_subcommands`, clap blames any such word on a subcommand of that name, even
+/// when none exists.
+fn unexpected_word(error: clap::Error) -> clap::Error {
+    if error.kind() != ErrorKind::ArgumentConflict {
+        return error;
+    }
+    let Some(ContextValue::String(word)) = error.get(ContextKind::InvalidSubcommand) else {
+        return error;
+    };
+    if Cli::command().find_subcommand(word).is_some() {
+        return error;
+    }
+    Cli::command().error(
+        ErrorKind::UnknownArgument,
+        format!("unexpected argument '{word}' found. Quote a prompt that has spaces."),
+    )
+}
+
 /// Parses a prompt or session, which must hold more than whitespace.
 fn non_blank(value: &str) -> Result<String, &'static str> {
     if value.trim().is_empty() {
@@ -263,7 +291,7 @@ impl TypedValueParser for ModeParser {
 
     fn parse_ref(
         &self,
-        cmd: &Command,
+        cmd: &clap::Command,
         arg: Option<&Arg>,
         value: &OsStr,
     ) -> Result<Mode, clap::Error> {
@@ -277,6 +305,21 @@ impl TypedValueParser for ModeParser {
     fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
         self.0.possible_values()
     }
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Inspect the configuration.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Validate the config files and environment variables without starting a session.
+    Check,
 }
 
 fn main() -> ExitCode {
@@ -311,6 +354,12 @@ fn try_main() -> Result<ExitCode> {
 
 async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let cli = Cli::parse_valid();
+    if let Some(Command::Config {
+        action: ConfigAction::Check,
+    }) = cli.command
+    {
+        return check_config();
+    }
 
     let tui_mode = cli.tui_mode()?;
     let _log_guard = util::log::init_tracing(tui_mode)?;
@@ -337,6 +386,9 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let mut config = Config::load(&cwd)?;
     if let Some(mode) = cli.mode {
         config.apply_mode_flag(mode);
+    }
+    if headless_prompt.is_some() || !io::stdin().is_terminal() {
+        config.set_unattended();
     }
     let show_thinking = config.show_thinking;
     let theme = tui_mode.then(|| resolve_theme(&config.theme)).transpose()?;
@@ -412,6 +464,26 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     Ok(signal.map_or(Exit::Success, Exit::Signal))
 }
 
+/// Runs `ox config check`: loads the config as [`Config::check`] does and resolves the theme.
+/// Then it prints the startup and theme notices, each file read, and a verdict.
+fn check_config() -> Result<Exit> {
+    _ = util::log::init_tracing(false)?;
+    let cwd = env::current_dir().context("failed to read the current working directory")?;
+    let check = Config::check(&cwd)?;
+    let theme = resolve_theme(&check.theme)?;
+
+    let mut stderr = io::stderr().lock();
+    for notice in check.notices.iter().chain(&theme.notices) {
+        writeln!(stderr, "Warning: {}", util::text::escape_controls(notice))?;
+    }
+    let mut stdout = io::stdout().lock();
+    for file in &check.files {
+        writeln!(stdout, "Read {}", tildify(file))?;
+    }
+    writeln!(stdout, "Config is valid")?;
+    Ok(Exit::Success)
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -425,7 +497,10 @@ mod tests {
 
         /// The kind of error `args` fail to parse with, or `None` when they parse.
         fn parse_error(args: &[&str]) -> Option<ErrorKind> {
-            Cli::try_parse_from(args).err().map(|error| error.kind())
+            Cli::try_parse_from(args)
+                .map_err(unexpected_word)
+                .err()
+                .map(|error| error.kind())
         }
 
         #[test]
@@ -483,7 +558,7 @@ mod tests {
             for line in [
                 "- manual: Ask before tool calls that no permission rule allows or denies",
                 "- plan:   Read-only: deny edits and commands",
-                "- yolo:   Run tool calls without asking unless a rule denies or asks",
+                "- yolo:   Never ask: run tool calls unless a rule denies or asks",
             ] {
                 assert!(help.contains(line), "{help}");
             }
@@ -576,6 +651,50 @@ mod tests {
             assert_eq!(
                 parse_error(&["ox", "-c", "-r", "a1b2"]),
                 Some(ErrorKind::ArgumentConflict),
+            );
+        }
+
+        #[test]
+        fn config_check_parses_as_a_subcommand_only_without_session_arguments() {
+            let cli = Cli::try_parse_from(["ox", "config", "check"]).unwrap();
+
+            assert!(matches!(
+                cli.command,
+                Some(Command::Config {
+                    action: ConfigAction::Check,
+                })
+            ));
+            assert_eq!(cli.prompt, None);
+            assert_eq!(
+                parse_error(&["ox", "config"]),
+                Some(ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand),
+            );
+            assert_eq!(
+                parse_error(&["ox", "-p", "hi", "config", "check"]),
+                Some(ErrorKind::ArgumentConflict),
+            );
+
+            let escaped = Cli::try_parse_from(["ox", "--", "config"]).unwrap();
+            let help = Cli::try_parse_from(["ox", "help"]).unwrap();
+
+            assert_eq!(escaped.prompt.as_deref(), Some("config"));
+            assert!(escaped.command.is_none());
+            assert_eq!(help.prompt.as_deref(), Some("help"));
+        }
+
+        #[test]
+        fn a_stray_word_after_the_prompt_is_an_unexpected_argument() {
+            let error = Cli::try_parse_from(["ox", "-p", "fix", "the", "bug"])
+                .map_err(unexpected_word)
+                .err()
+                .expect("an unquoted prompt fails");
+
+            assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+            assert!(
+                error.to_string().starts_with(
+                    "error: unexpected argument 'the' found. Quote a prompt that has spaces.\n"
+                ),
+                "{error}",
             );
         }
 

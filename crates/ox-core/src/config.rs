@@ -190,6 +190,18 @@ pub struct ThemeConfig {
     pub overrides: toml::Table,
 }
 
+// ── ConfigCheck ──
+
+/// What `ox config check` reports about a configuration that loads.
+#[derive(Debug, Clone)]
+pub struct ConfigCheck {
+    /// The config files read, in load order.
+    pub files: Vec<PathBuf>,
+    /// Startup notices, such as an unsupported model.
+    pub notices: Vec<String>,
+    pub theme: ThemeConfig,
+}
+
 // ── Config ──
 
 /// Resolved configuration.
@@ -232,6 +244,28 @@ impl Config {
     /// A TOML or env parse error fails the load.
     /// Only an explicit credential resolves here, and [`Config::resolve_auth`] adds the rest.
     pub fn load(cwd: &Path) -> Result<Self> {
+        Self::resolve(cwd, |path| load_extra_ca_certs(path).map(drop))
+    }
+
+    /// Resolves the config as [`Config::load`] does,
+    /// except that it never reads the CA bundle, which may be a secret the caller cannot read.
+    /// Like `load`, it reads no stored login.
+    pub fn check(cwd: &Path) -> Result<ConfigCheck> {
+        let config = Self::resolve(cwd, |_| Ok(()))?;
+        Ok(ConfigCheck {
+            files: config
+                .provenance
+                .layers
+                .iter()
+                .map(|layer| layer.path().to_owned())
+                .collect(),
+            notices: config.notices(),
+            theme: config.theme,
+        })
+    }
+
+    /// Resolves the config, checking the CA bundle it picks with `check_ca_bundle`.
+    fn resolve(cwd: &Path, check_ca_bundle: fn(&Path) -> Result<()>) -> Result<Self> {
         let Loaded { config, origins } = load::load(cwd, &project_root(cwd))?;
         let FileConfig {
             client,
@@ -246,6 +280,7 @@ impl Config {
 
         let extra_ca_certs = resolve_extra_ca_certs(
             origins.sourced("client.extra_ca_certs", client.extra_ca_certs),
+            check_ca_bundle,
         )?;
 
         let gateway = GatewayCompat::load()?;
@@ -359,8 +394,8 @@ impl Config {
         let stored = auth::stored_login(ClaudeCodeKeychain::SYSTEM, &trust);
         match auth::fallback(&self.base_url, stored).await {
             Ok(auth) => self.auth = Some(auth),
-            Err(CredentialError::SignedOut(e)) if can_sign_in => {
-                self.signed_out = Some(LoginUnavailable::new(&e));
+            Err(CredentialError::SignedOut { cause, .. }) if can_sign_in => {
+                self.signed_out = Some(LoginUnavailable::new(&cause));
             }
             Err(e) => return Err(e.into()),
         }
@@ -384,6 +419,12 @@ impl Config {
     pub fn apply_mode_flag(&mut self, mode: Mode) {
         self.permission.set_mode(mode);
         self.provenance.permission_mode = Source::Flag("--mode");
+    }
+
+    /// Marks the run as one nobody can answer an approval request in, so the engine denies each
+    /// call that would ask without requesting approval, and words the denial for the model.
+    pub fn set_unattended(&mut self) {
+        self.permission.set_unattended();
     }
 
     /// Descriptors for `/config` and `/status`, minus the auth secret.
@@ -413,13 +454,16 @@ impl Config {
 
 /// `OX_EXTRA_CA_CERTS` > `client.extra_ca_certs` > `NODE_EXTRA_CA_CERTS`. Node is often exported
 /// shell-wide for npm, so like Node itself, an unreadable bundle there warns and is skipped.
-fn resolve_extra_ca_certs(file: Option<Sourced<String>>) -> Result<Sourced<Option<PathBuf>>> {
+fn resolve_extra_ca_certs(
+    file: Option<Sourced<String>>,
+    check_ca_bundle: fn(&Path) -> Result<()>,
+) -> Result<Sourced<Option<PathBuf>>> {
     let explicit = env_string("OX_EXTRA_CA_CERTS")
         .map(|raw| ("OX_EXTRA_CA_CERTS", raw))
         .or(file.map(|raw| ("client.extra_ca_certs", raw)));
     if let Some((key, raw)) = explicit {
         let path = expand_user(&raw.value)
-            .and_then(|path| load_extra_ca_certs(&path).map(|_| path))
+            .and_then(|path| check_ca_bundle(&path).map(|()| path))
             .with_context(|| format!("invalid {key}"))?;
         return Ok(Sourced::new(Some(path), raw.source));
     }
@@ -427,7 +471,7 @@ fn resolve_extra_ca_certs(file: Option<Sourced<String>>) -> Result<Sourced<Optio
     let Some(raw) = env_string("NODE_EXTRA_CA_CERTS") else {
         return Ok(Sourced::fallback(None));
     };
-    match expand_user(&raw.value).and_then(|path| load_extra_ca_certs(&path).map(|_| path)) {
+    match expand_user(&raw.value).and_then(|path| check_ca_bundle(&path).map(|()| path)) {
         Ok(path) => Ok(Sourced::new(Some(path), raw.source)),
         Err(e) => {
             warn!("ignoring NODE_EXTRA_CA_CERTS: {e:#}");
@@ -1499,22 +1543,18 @@ mod tests {
             let (loaded, resolved) = temp_env::async_with_vars(vars, async {
                 let mut config = Config::load(dir.path()).expect("load reads no credential");
                 let loaded = (config.auth.is_none(), config.signed_out.is_none());
-                let resolved = config
-                    .resolve_auth(true)
-                    .await
-                    .map_err(|e| format!("{e:#}"));
-                (loaded, resolved)
+                (loaded, config.resolve_auth(true).await)
             })
             .await;
+            let err = resolved.expect_err("a gateway gets no stored login");
 
             assert_eq!(loaded, (true, true));
             assert_eq!(
-                resolved,
-                Err("no credentials for https://gateway.example.com. \
-                     Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
-                     or add `api_key` to ~/ox/config.toml. \
-                     Stored logins are sent only to the Anthropic API."
-                    .to_owned()),
+                format!("{err:#}"),
+                "no credentials for https://gateway.example.com. \
+                 Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
+                 or add `api_key` to ~/ox/config.toml. \
+                 Stored logins are sent only to the Anthropic API.",
             );
         }
 

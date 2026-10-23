@@ -22,7 +22,7 @@ Each file sets only the keys it names, and a later layer wins key by key, so a d
 
 ### Drop-Ins
 
-`config.d/` lets a dotfile manager, a Nix module, or a team script own one file without editing your `config.toml`. Drop-ins load after `config.toml`, sorted by file name byte by byte, so a numeric prefix such as `10-team.toml` or `50-nix.toml` sets their order. Hidden files, subdirectories, and files without a `.toml` extension are skipped, and a symlink loads its target.
+`config.d/` lets a dotfile manager or a team script own one file without editing your `config.toml`. When the [Home Manager module](install.md#home-manager) writes `config.toml` itself, drop-ins hold your local overrides. Drop-ins load after `config.toml`, sorted by file name byte by byte, so a numeric prefix such as `10-team.toml` or `50-local.toml` sets their order. Hidden files, subdirectories, and files without a `.toml` extension are skipped, and a symlink loads its target.
 
 Drop-ins share the `config.toml` schema and count as user config. An invalid drop-in, including a symlink whose target is missing, stops startup with an error that names the file. A malformed permission pattern or extra root names the file that holds it in the same way.
 
@@ -31,6 +31,12 @@ Drop-ins share the `config.toml` schema and count as user config. An invalid dro
 A project file comes from the checkout, so it can set only the `[client]`, `[permission]`, and `[tui]` tables. Within `[client]` it can set only `model`, `effort`, `max_tokens`, `max_tool_rounds`, `prompt_cache_ttl`, and the [`[client.compaction]`](#clientcompaction-context-compression) table, and within `[permission]` only `deny` and `ask`. Setting any other key fails the config load. This keeps a repository from redirecting your credentials, changing the endpoint or TLS trust, or widening what runs without asking. A project file may set `tui.theme.base` only to a built-in theme name, and the TUI refuses to start when it names a file. A TOML error in a project file gives only its line, column, and key, since the parser's message can quote a value.
 
 The project file must also resolve inside the project root. A `.ox/config.toml` that resolves outside it, through a symlinked file or `.ox` directory, fails the config load with an error that names only the link. A link to a file inside the repository, such as a config shared across a monorepo, still works, unless the project root is your home directory or one of its ancestors, as with a dotfiles repository at `~`. There, a project file reached through any symlink fails the load.
+
+## Checking the Config
+
+`ox config check` loads the config files that apply in the working directory along with the environment variables, validates them as startup does, and prints each file it read. Warnings, such as an unsupported model or an ignored theme override, go to stderr. An invalid value exits with status 1 and the startup error.
+
+The check skips the stored login and the CA bundle, so it never opens the keychain or connects, which lets it run in CI or a Nix build. It covers only the config, so instruction files such as `AGENTS.md` go unchecked. Other paths, such as a theme file or an extra root, resolve against the filesystem where the check runs.
 
 ## Config File
 

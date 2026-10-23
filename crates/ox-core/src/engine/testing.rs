@@ -56,6 +56,14 @@ impl Engine {
         self.tools = Arc::new(tools);
         self
     }
+
+    /// This engine for a run nobody attends, as
+    /// [`Config::set_unattended`](crate::config::Config::set_unattended) sets up.
+    #[must_use]
+    pub fn unattended(mut self) -> Self {
+        self.policy.set_unattended();
+        self
+    }
 }
 
 /// Handle to an engine whose task panicked with `engine bug`, closing both channels.
