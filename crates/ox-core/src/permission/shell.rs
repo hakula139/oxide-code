@@ -2203,15 +2203,19 @@ fn is_recursive_grep(arg: &str) -> bool {
 /// run a script [`SAFE_SED_SCRIPT`] does not accept.
 /// An option after an operand is `None` too, since BSD `sed` reads it as a file and may then take
 /// the operand before it as the script.
+/// A `--` there is a file to BSD and ends the options for GNU, which read the same script.
 fn sed_files(values: &[&str]) -> Option<Vec<String>> {
     let mut scripts = Vec::new();
     let mut files = Vec::new();
     let mut args = values.iter().copied();
     while let Some(arg) = args.next() {
-        if !files.is_empty() && arg.starts_with('-') && arg != "-" {
+        if !files.is_empty() && arg.starts_with('-') && !matches!(arg, "-" | "--") {
             return None;
         }
         if arg == "--" {
+            if !files.is_empty() {
+                files.push(arg);
+            }
             files.extend(args.by_ref());
         } else if let Some(name) = long_option(arg) {
             if ["file", "in-place"]
@@ -2295,20 +2299,29 @@ struct ReaderArgs {
 }
 
 /// Reads the arguments of reader `name`, given each word's value or `None` for one that expands.
-/// The gate cannot tell whether a GNU or a BSD build of `name` runs, so it counts each file that
-/// either would read.
+/// The gate cannot tell whether a GNU or a BSD build of `name` runs, or whether getopt stops
+/// reading options at the first operand, as BSD and `POSIXLY_CORRECT` make it, so it counts each
+/// file any of them would read.
 /// A word that expands may split into any words, so it leaves what the reader reads unknown
-/// wherever it stands.
+/// wherever it stands, as does `find -files0-from`, which reads the paths to search from a file.
 fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
     let grammar = reader_grammar(name);
     let mut args = ReaderArgs {
         files: Vec::new(),
-        unknown: values.iter().any(Option::is_none),
+        unknown: values.iter().any(Option::is_none)
+            || name == "find" && values.contains(&Some("-files0-from")),
+    };
+    let orders: &[bool] = if grammar.getopt {
+        &[true, false]
+    } else {
+        &[true]
     };
     for dialect in [Dialect::Gnu, Dialect::Bsd] {
-        let read = grammar.read(dialect, values);
-        args.files.extend(read.files);
-        args.unknown |= read.unknown;
+        for &permute in orders {
+            let read = grammar.read(dialect, permute, values);
+            args.files.extend(read.files);
+            args.unknown |= read.unknown;
+        }
     }
     args.files.sort_unstable();
     args.files.dedup();
@@ -2325,14 +2338,15 @@ enum Dialect {
 }
 
 /// A reader's option grammar, matching both its GNU and its BSD build.
-/// It lists only the options that take a value in either build,
+/// It lists the options that take a value in either build,
 /// so a missing one reads its value as a file, which can only make the gate more cautious.
+/// It also lists, as a [`switch`], each option whose full name abbreviates a listed one,
+/// since getopt takes an exact name before a prefix.
 /// An option one build rejects may stay listed, since the reader then exits before reading.
 struct ReaderGrammar {
     options: &'static [ReaderOpt],
-    /// Whether the BSD build, like every GNU one, takes options after operands until `--`.
-    /// Otherwise its first operand ends the options.
-    bsd_permutes: bool,
+    /// Whether it reads its options with getopt, which may stop at the first operand.
+    getopt: bool,
     /// Whether `-NUM` sets a count, as in `tail -20`.
     numeric: bool,
     /// Whether the first operand is a pattern or script unless an option gives one.
@@ -2342,18 +2356,18 @@ struct ReaderGrammar {
 impl ReaderGrammar {
     const NONE: Self = Self {
         options: &[],
-        bsd_permutes: false,
+        getopt: true,
         numeric: false,
         pattern: false,
     };
 
-    /// The files the `dialect` build reads from `values`.
+    /// The files the `dialect` build reads from `values`, taking options after operands until
+    /// `--` when it may `permute` them.
     /// A short option that takes a value takes the rest of its cluster or the next word,
     /// and a long one its `=` value or the next word.
     /// A long option the grammar does not list counts its `=` value as a file, and since it may be
     /// one that gives the pattern, the leading operand then counts as a file too.
-    fn read(&self, dialect: Dialect, values: &[Option<&str>]) -> ReaderArgs {
-        let permute = matches!(dialect, Dialect::Gnu) || self.bsd_permutes;
+    fn read(&self, dialect: Dialect, permute: bool, values: &[Option<&str>]) -> ReaderArgs {
         let mut args = ReaderArgs {
             files: Vec::new(),
             unknown: false,
@@ -2482,7 +2496,7 @@ fn reader_grammar(name: &str) -> &'static ReaderGrammar {
 }
 
 const FIND_GRAMMAR: ReaderGrammar = ReaderGrammar {
-    bsd_permutes: true,
+    getopt: false,
     ..ReaderGrammar::NONE
 };
 
@@ -2499,6 +2513,7 @@ const GREP_GRAMMAR: ReaderGrammar = ReaderGrammar {
         takes("--after-context"),
         takes("--before-context"),
         takes("--binary-files"),
+        switch("--binary"),
         attached("--color"),
         attached("--colour"),
         takes("--context").bsd(Value::Optional),
@@ -2515,9 +2530,9 @@ const GREP_GRAMMAR: ReaderGrammar = ReaderGrammar {
         takes("--max-count"),
         takes("--regexp").with(Role::Pattern),
     ],
-    bsd_permutes: true,
     numeric: true,
     pattern: true,
+    ..ReaderGrammar::NONE
 };
 
 const HEAD_GRAMMAR: ReaderGrammar = ReaderGrammar {
@@ -2592,7 +2607,7 @@ const WC_GRAMMAR: ReaderGrammar = ReaderGrammar {
     ..ReaderGrammar::NONE
 };
 
-/// One reader option that takes a value in either build.
+/// One reader option, which takes a value in either build unless it is a [`switch`].
 #[derive(Clone, Copy)]
 struct ReaderOpt {
     name: &'static str,
@@ -2648,6 +2663,14 @@ const fn attached(name: &'static str) -> ReaderOpt {
     ReaderOpt {
         gnu: Value::Optional,
         bsd: Value::Optional,
+        ..takes(name)
+    }
+}
+
+const fn switch(name: &'static str) -> ReaderOpt {
+    ReaderOpt {
+        gnu: Value::None,
+        bsd: Value::None,
         ..takes(name)
     }
 }
@@ -3873,6 +3896,7 @@ mod tests {
                 "sed --quiet 1p a.rs",
                 "sed -es/a/b/ a.rs",
                 "sed --exp=1p a.rs",
+                "sed 1p -- a.rs",
                 "sed -ne '3p;5q' a.rs",
                 "sed -n -- '1!G;h;$p' a.rs",
             ] {
@@ -3993,6 +4017,8 @@ mod tests {
                 ("grep", "--regexp=pat -- x"),
                 ("grep", "--reg=pat x"),
                 ("grep", "--regex pat x"),
+                ("grep", "--binary pat x"),
+                ("grep", "--exclude=*.md pat x"),
                 ("tail", "--lin 20 x"),
                 ("ls", "--sort=size x"),
                 ("sed", "-i.bak s/a/b/ x"),
@@ -4004,7 +4030,7 @@ mod tests {
         }
 
         #[test]
-        fn counts_each_file_a_gnu_or_a_bsd_build_reads() {
+        fn counts_each_file_a_gnu_or_bsd_build_reads_in_either_option_order() {
             for (reader, args, expected) in [
                 ("ls", "-I target x", &["target", "x"][..]),
                 ("ls", "-D %s x", &["%s", "x"]),
@@ -4012,6 +4038,7 @@ mod tests {
                 ("sed", "-i .bak s/a/b/ x", &["s/a/b/", "x"]),
                 ("grep", "--context 3 pat x", &["pat", "x"]),
                 ("tail", "x -n 5", &["x", "-n", "5"]),
+                ("grep", "pat x -e y", &["pat", "x", "-e", "y"]),
                 ("cat", "x -n", &["x", "-n"]),
             ] {
                 assert_eq!(files(reader, args), expected, "{reader} {args}");
@@ -4023,8 +4050,7 @@ mod tests {
             for (reader, args, expected) in [
                 ("grep", "-f patterns.txt x", &["patterns.txt", "x"][..]),
                 ("grep", "-fpats --file more y", &["pats", "more", "y"]),
-                ("grep", "pat --exclude-from=skip x", &["skip", "x"]),
-                ("grep", "pat x -e other", &["pat", "x"]),
+                ("grep", "--exclude-from=skip pat x", &["skip", "x"]),
                 ("sed", "-f script.sed x", &["script.sed", "x"]),
                 ("find", ". -name x", &[".", "x"]),
             ] {
@@ -4048,6 +4074,7 @@ mod tests {
         fn leaves_what_it_reads_unknown_for_a_file_list_or_a_word_that_expands() {
             for (reader, values) in [
                 ("wc", &[Some("--files0-from=list")][..]),
+                ("find", &[Some("-files0-from"), Some("list")]),
                 ("head", &[Some("-n"), None, Some("x")]),
                 ("grep", &[None, Some("x")]),
             ] {
