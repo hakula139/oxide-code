@@ -4,8 +4,9 @@
 use std::path::Path;
 
 use ox_core::config::load::user_config_path;
-use ox_core::config::provenance::{Layer, Source};
+use ox_core::config::provenance::{Layer, Provenance, Source, TierPattern};
 use ox_core::util::path::tildify;
+use ox_core::util::text::plural;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
@@ -104,14 +105,87 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
             labels::on_off(cfg.show_thinking).to_owned(),
             &sources.show_thinking,
         ),
+        row(
+            "Show Welcome",
+            labels::on_off(cfg.show_welcome).to_owned(),
+            &sources.show_welcome,
+        ),
+        row(
+            "Status Line",
+            cfg.status_line
+                .iter()
+                .map(|&segment| <&str>::from(segment))
+                .collect::<Vec<_>>()
+                .join(", "),
+            &sources.status_line,
+        ),
+        row("Theme", cfg.theme_name.clone(), &sources.theme),
+        (
+            "Theme Overrides".to_owned(),
+            display_overrides(cfg.theme_overrides),
+            display_sources(&sources.theme_overrides),
+        ),
     ];
-    KvOverview::new(
-        "Configuration",
-        vec![
-            KvSection::annotated(resolved).with_heading("Resolved"),
-            KvSection::new(file_rows(&sources.layers, user_path)).with_heading("Source Files"),
-        ],
-    )
+    let mut sections = vec![KvSection::annotated(resolved).with_heading("Resolved")];
+    let rules = permission_rows(sources);
+    if !rules.is_empty() {
+        sections.push(KvSection::annotated(rules).with_heading("Permission Rules"));
+    }
+    sections
+        .push(KvSection::new(file_rows(&sources.layers, user_path)).with_heading("Source Files"));
+    KvOverview::new("Configuration", sections)
+}
+
+/// The extra roots, rule patterns, and turned-off default groups the config files set.
+fn permission_rows(sources: &Provenance) -> Vec<(String, String, String)> {
+    let roots = sources.extra_roots.iter().map(|root| {
+        (
+            "extra_roots".to_owned(),
+            root.value.clone(),
+            root.source.to_string(),
+        )
+    });
+    let rules = sources.rules.iter().map(|rule| {
+        let TierPattern {
+            tier,
+            class,
+            pattern,
+        } = &rule.value;
+        (
+            format!("{tier}.{class}"),
+            pattern.clone(),
+            rule.source.to_string(),
+        )
+    });
+    let defaults = sources.disabled_defaults.iter().map(|group| {
+        (
+            format!("defaults.{}", group.value),
+            labels::on_off(false).to_owned(),
+            group.source.to_string(),
+        )
+    });
+    roots.chain(rules).chain(defaults).collect()
+}
+
+fn display_overrides(count: usize) -> String {
+    if count == 0 {
+        NONE.to_owned()
+    } else {
+        format!("{count} {}", plural(count, "slot", "slots"))
+    }
+}
+
+/// Every source joined, or the default source when there are none.
+fn display_sources(sources: &[Source]) -> String {
+    if sources.is_empty() {
+        Source::Default.to_string()
+    } else {
+        sources
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn display_names(names: &[String]) -> String {
@@ -154,7 +228,11 @@ fn layer_kind(layer: &Layer) -> &'static str {
 mod tests {
     use std::path::PathBuf;
 
+    use ox_core::config::StatusLineSegment;
+    use ox_core::config::provenance::Sourced;
     use ox_core::model::ModelSpec;
+    use ox_core::permission::defaults::Shipped;
+    use ox_core::permission::{PermissionClass, Tier};
     use ox_core::util::path::testing::HOME_VAR;
 
     use super::*;
@@ -176,6 +254,13 @@ mod tests {
     mod build_modal {
         use super::*;
 
+        fn sourced(root: &str) -> Sourced<String> {
+            Sourced {
+                value: root.to_owned(),
+                source: Source::Default,
+            }
+        }
+
         fn row<'a>(rendered: &'a str, key: &str) -> &'a str {
             rendered
                 .lines()
@@ -184,12 +269,61 @@ mod tests {
         }
 
         #[test]
-        fn height_accounts_for_both_sections() {
-            // title + blank + (heading + blank + 15 rows) + blank + (heading + blank + 1 row)
-            //   + blank + footer = 2 + 17 + 1 + 3 + 2 = 25.
+        fn height_accounts_for_every_section() {
+            // title + blank + (heading + blank + 19 rows) + blank + (heading + blank + 1 row)
+            //   + blank + footer = 2 + 21 + 1 + 3 + 2 = 29, and a rules section adds
+            //   blank + heading + blank + 1 row = 4.
+            let mut info = test_session_info();
+            let without_rules = build_modal(&info, None).height(80, u16::MAX);
+
+            info.config.provenance.extra_roots = vec![sourced("/srv/shared")];
+            let with_rules = build_modal(&info, None).height(80, u16::MAX);
+
+            assert_eq!((without_rules, with_rules), (29, 33));
+        }
+
+        #[test]
+        fn shows_tui_settings_and_their_sources() {
+            let mut info = test_session_info();
+            let user = Layer::User(PathBuf::from("/cfg/ox/config.toml"));
+            let drop_in = Layer::DropIn(PathBuf::from("/cfg/ox/config.d/10-nix.toml"));
+            info.config.show_welcome = false;
+            info.config.status_line = vec![StatusLineSegment::Model, StatusLineSegment::RunState];
+            info.config.theme_overrides = 2;
+            let sources = &mut info.config.provenance;
+            sources.show_welcome = Source::File(user.clone());
+            sources.status_line = Source::Env("OX_STATUS_LINE");
+            sources.theme = Source::Session;
+            sources.theme_overrides = vec![Source::File(user), Source::File(drop_in)];
+
+            let rendered = rendered_text(&build_modal(&info, None), 100);
+
+            for (key, expected) in [
+                ("Show Welcome", "off                          user"),
+                (
+                    "Status Line",
+                    "model, run-state             $OX_STATUS_LINE",
+                ),
+                ("Theme ", "mocha                        session"),
+                (
+                    "Theme Overrides",
+                    "2 slots                      user, config.d/10-nix.toml",
+                ),
+            ] {
+                assert!(row(&rendered, key).ends_with(expected), "{rendered}");
+            }
+        }
+
+        #[test]
+        fn shows_no_theme_overrides_from_the_default_source() {
             let info = test_session_info();
-            let m = build_modal(&info, None);
-            assert_eq!(m.height(80, u16::MAX), 25);
+
+            let rendered = rendered_text(&build_modal(&info, None), 100);
+
+            assert!(
+                row(&rendered, "Theme Overrides").ends_with("none                         default"),
+                "{rendered}"
+            );
         }
 
         #[test]
@@ -296,6 +430,49 @@ mod tests {
                 "{rendered}"
             );
             assert!(row(&rendered, "Base URL").contains("default"), "{rendered}");
+        }
+    }
+
+    mod permission_rows {
+        use super::*;
+
+        #[test]
+        fn list_roots_then_rules_then_turned_off_defaults_with_their_sources() {
+            let user = Layer::User(PathBuf::from("/cfg/ox/config.toml"));
+            let project = Layer::Project(PathBuf::from("/repo/.ox/config.toml"));
+            let sources = Provenance {
+                extra_roots: vec![Sourced {
+                    value: "~/shared".to_owned(),
+                    source: Source::File(user.clone()),
+                }],
+                rules: vec![Sourced {
+                    value: TierPattern {
+                        tier: Tier::Deny,
+                        class: PermissionClass::Read,
+                        pattern: "./secrets/**".to_owned(),
+                    },
+                    source: Source::File(project),
+                }],
+                disabled_defaults: vec![Sourced {
+                    value: Shipped::Git,
+                    source: Source::File(user),
+                }],
+                ..Provenance::default()
+            };
+
+            let rows = permission_rows(&sources);
+
+            let row = |label: &str, value: &str, source: &str| {
+                (label.to_owned(), value.to_owned(), source.to_owned())
+            };
+            assert_eq!(
+                rows,
+                [
+                    row("extra_roots", "~/shared", "user"),
+                    row("deny.read", "./secrets/**", "project"),
+                    row("defaults.git", "off", "user"),
+                ],
+            );
         }
     }
 

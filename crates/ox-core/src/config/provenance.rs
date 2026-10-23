@@ -4,6 +4,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::permission::defaults::Shipped;
+use crate::permission::{PermissionClass, Tier};
 use crate::util::env;
 
 // ── Layer ──
@@ -57,7 +59,7 @@ pub enum Source {
     File(Layer),
     Env(&'static str),
     Flag(&'static str),
-    /// Changed during the session by `/model`, `/effort`, `/mode`, or Shift+Tab.
+    /// Changed during the session by `/model`, `/effort`, `/mode`, `/theme`, or Shift+Tab.
     Session,
 }
 
@@ -83,9 +85,10 @@ impl fmt::Display for Source {
 // ── Sourced ──
 
 /// A resolved value paired with the source that set it.
-pub(super) struct Sourced<T> {
-    pub(super) value: T,
-    pub(super) source: Source,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sourced<T> {
+    pub value: T,
+    pub source: Source,
 }
 
 impl<T> Sourced<T> {
@@ -130,6 +133,25 @@ pub struct Provenance {
     pub compaction: Source,
     pub permission_mode: Source,
     pub show_thinking: Source,
+    pub show_welcome: Source,
+    pub status_line: Source,
+    pub theme: Source,
+    /// The layers that set any `[tui.theme.overrides]` slot, lowest first.
+    pub theme_overrides: Vec<Source>,
+    /// `permission.extra_roots` as written, in merged order.
+    pub extra_roots: Vec<Sourced<String>>,
+    /// The `deny`, `ask`, and `allow` patterns the config files add, grouped by tier and class.
+    pub rules: Vec<Sourced<TierPattern>>,
+    /// The shipped rule groups that `[permission.defaults]` turns off.
+    pub disabled_defaults: Vec<Sourced<Shipped>>,
+}
+
+/// One pattern in a config file's `deny`, `ask`, or `allow` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierPattern {
+    pub tier: Tier,
+    pub class: PermissionClass,
+    pub pattern: String,
 }
 
 #[cfg(test)]

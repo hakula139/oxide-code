@@ -182,21 +182,22 @@ impl KvOverview {
     }
 }
 
-/// Width of the value column that aligns a section's notes, or 0 to put each note right after its
-/// value when the aligned notes would overflow `width`.
+/// Width of the value column that aligns a section's notes: the widest value that leaves room for
+/// the widest note within `width`. A wider value puts its note right after it.
 fn note_column(section: &KvSection, label_width: usize, width: usize) -> usize {
-    let (value_width, note_width) = section
+    let annotated: Vec<(usize, usize)> = section
         .rows
         .iter()
-        .filter_map(|row| {
-            let note = row.note.as_ref()?;
-            Some((row.value.width(), note.width()))
-        })
-        .fold((0, 0), |(values, notes), (value, note)| {
-            (values.max(value), notes.max(note))
-        });
-    let aligned = label_width + COLUMN_GAP + value_width + COLUMN_GAP + note_width;
-    if aligned <= width { value_width } else { 0 }
+        .filter_map(|row| Some((row.value.width(), row.note.as_ref()?.width())))
+        .collect();
+    let note_width = annotated.iter().map(|&(_, note)| note).max().unwrap_or(0);
+    let room = width.saturating_sub(label_width + COLUMN_GAP + COLUMN_GAP + note_width);
+    annotated
+        .iter()
+        .map(|&(value, _)| value)
+        .filter(|&value| value <= room)
+        .max()
+        .unwrap_or(0)
 }
 
 impl Modal for KvOverview {
@@ -460,6 +461,30 @@ mod tests {
                 [
                     "Model     Opus  $ANTHROPIC_MODEL",
                     "Base URL  https://x.test  default",
+                ],
+            );
+        }
+
+        #[test]
+        fn keeps_the_other_notes_aligned_beside_a_value_too_wide_for_the_column() {
+            let note_row = |k: &str, v: &str, n: &str| (k.to_owned(), v.to_owned(), n.to_owned());
+            let m = KvOverview::new(
+                "Config",
+                vec![KvSection::annotated(vec![
+                    note_row("Model", "Opus", "user"),
+                    note_row("Theme", "mocha-dark", "default"),
+                    note_row("Status", "model, run-state, current-time", "env"),
+                ])],
+            );
+
+            let rows = trimmed_rows(&m, 44, m.height(44, 40));
+
+            assert_eq!(
+                rows[2..5],
+                [
+                    "Model   Opus        user",
+                    "Theme   mocha-dark  default",
+                    "Status  model, run-state, current-time  env",
                 ],
             );
         }
