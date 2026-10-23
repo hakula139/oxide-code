@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use strum::VariantArray as _;
 
 use ox_core::command;
 use ox_core::permission::Mode;
@@ -46,7 +47,7 @@ impl SlashCommand for ModeCmd {
     }
 
     fn complete_arg(&self, prefix: &str) -> Vec<ArgCompletion> {
-        rank_by_prefix(&Mode::ALL, prefix, |mode| mode.as_str())
+        rank_by_prefix(Mode::VARIANTS, prefix, |mode| mode.as_str())
             .into_iter()
             .map(|mode| ArgCompletion {
                 value: Cow::Borrowed(mode.as_str()),
@@ -105,7 +106,7 @@ struct ModePicker {
 
 impl ModePicker {
     fn new(current: Mode) -> Self {
-        let rows = Mode::ALL
+        let rows = Mode::VARIANTS
             .iter()
             .enumerate()
             .map(|(idx, &mode)| ModeRow {

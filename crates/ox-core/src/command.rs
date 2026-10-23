@@ -15,6 +15,7 @@ use crate::model::{Effort, MODELS, ModelInfo, ResolvedModelId, replacement_for};
 use crate::permission::Mode;
 use crate::protocol::{ConfigPick, Op, ResumeTarget};
 use crate::session::display::fit_title;
+use crate::util::variant;
 
 /// Canonical names of the commands [`typed_op`] parses, without their leading `/`.
 pub const NAMES: [&str; 9] = [
@@ -86,20 +87,24 @@ pub fn compact(args: &str) -> Op {
 /// `/effort <level>`, case-insensitive.
 pub fn effort(arg: &str) -> Result<Op, String> {
     let arg = required(arg, "level", "/effort <level>")?;
-    let pick = arg
-        .to_ascii_lowercase()
-        .parse()
-        .map_err(|_| format!("Unknown effort: `{arg}`. Valid: {}.", Effort::VALID_VALUES))?;
+    let pick = arg.to_ascii_lowercase().parse().map_err(|_| {
+        format!(
+            "Unknown effort: `{arg}`. Valid: {}.",
+            variant::names::<Effort>()
+        )
+    })?;
     Ok(Op::SetModel(ConfigPick::Effort(pick)))
 }
 
 /// `/mode <mode>`, case-insensitive.
 pub fn mode(arg: &str) -> Result<Op, String> {
     let arg = required(arg, "mode", "/mode <mode>")?;
-    let mode = arg
-        .to_ascii_lowercase()
-        .parse::<Mode>()
-        .map_err(|_| format!("Unknown mode: `{arg}`. Valid: {}.", Mode::VALID_VALUES))?;
+    let mode = arg.to_ascii_lowercase().parse::<Mode>().map_err(|_| {
+        format!(
+            "Unknown mode: `{arg}`. Valid: {}.",
+            variant::names::<Mode>()
+        )
+    })?;
     Ok(Op::SetMode(mode))
 }
 

@@ -2,11 +2,11 @@
 //! name files whose edits ask, the `rm` group asks about forced recursive deletes, and the rest
 //! add patterns to the deny or ask tier.
 
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
+use strum::{Display, VariantArray};
 
 use super::rule::{Rule, escaped};
 use super::{PermissionClass, folded_names, resolve};
@@ -22,8 +22,21 @@ use crate::util::path::{
 const PROCESS_ENVIRONMENTS: [&str; 2] = ["/proc/*/environ", "/proc/*/task/*/environ"];
 
 /// A named group of shipped rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Display,
+    VariantArray,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Shipped {
     Git,
     Direnv,
@@ -40,39 +53,6 @@ pub enum Shipped {
 }
 
 impl Shipped {
-    pub(super) const ALL: [Self; 12] = [
-        Self::Git,
-        Self::Direnv,
-        Self::Editors,
-        Self::Cargo,
-        Self::Shell,
-        Self::Agents,
-        Self::Ox,
-        Self::Devices,
-        Self::Rm,
-        Self::Ssh,
-        Self::Cloud,
-        Self::Credentials,
-    ];
-
-    /// The group's name, its key under `[permission.defaults]`.
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Git => "git",
-            Self::Direnv => "direnv",
-            Self::Editors => "editors",
-            Self::Cargo => "cargo",
-            Self::Shell => "shell",
-            Self::Agents => "agents",
-            Self::Ox => "ox",
-            Self::Devices => "devices",
-            Self::Rm => "rm",
-            Self::Ssh => "ssh",
-            Self::Cloud => "cloud",
-            Self::Credentials => "credentials",
-        }
-    }
-
     /// The names this group asks about when edited, or `None` for any other group.
     const fn names(self) -> Option<&'static Names> {
         match self {
@@ -161,12 +141,6 @@ impl Shipped {
             })
             .collect::<Result<_>>()?;
         Ok(Some(rules))
-    }
-}
-
-impl fmt::Display for Shipped {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -307,7 +281,7 @@ pub(super) fn protected_roots(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<(S
         .chain(extra.map(PathBuf::as_path))
         .collect();
     let mut roots: Vec<(Shipped, PathBuf)> = home_locations();
-    for group in Shipped::ALL {
+    for &group in Shipped::VARIANTS {
         let Some(names) = group.names() else {
             continue;
         };
@@ -329,8 +303,9 @@ pub(super) fn protected_roots(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<(S
 /// the cloud CLIs' config directories, whose credential helpers run commands. Each comes
 /// with its group, resolved like a target so a symlinked home or XDG base still compares equal.
 fn home_locations() -> Vec<(Shipped, PathBuf)> {
-    let app_dirs = XdgBase::ALL
-        .into_iter()
+    let app_dirs = XdgBase::VARIANTS
+        .iter()
+        .copied()
         .filter_map(app_dir)
         .map(|dir| (Shipped::Ox, dir));
     let git_dir = xdg_dir(XdgBase::Config).map(|dir| (Shipped::Git, dir.join("git")));
@@ -359,7 +334,7 @@ fn home_locations() -> Vec<(Shipped, PathBuf)> {
 }
 
 /// The groups whose protected names one of `paths` holds, or whose [`protected_roots`] it sits
-/// under, each once and in [`Shipped::ALL`] order. Names compare by
+/// under, each once and in [`Shipped::VARIANTS`] order. Names compare by
 /// [`fold_name`](super::fold_name), since a case-insensitive file system such as APFS opens
 /// `.VSCODE` and `.vſcode` as `.vscode`.
 pub(super) fn protected_by(paths: &[&Path], roots: &[(Shipped, PathBuf)]) -> Vec<Shipped> {
@@ -368,8 +343,9 @@ pub(super) fn protected_by(paths: &[&Path], roots: &[(Shipped, PathBuf)]) -> Vec
         .iter()
         .map(|(group, root)| (*group, folded_names(root)))
         .collect();
-    Shipped::ALL
-        .into_iter()
+    Shipped::VARIANTS
+        .iter()
+        .copied()
         .filter(|group| {
             folded.iter().any(|folded| {
                 let names: Vec<&str> = folded.iter().map(String::as_str).collect();
@@ -463,17 +439,13 @@ mod tests {
             );
         }
 
-        mod as_str {
-            use super::*;
-
-            #[test]
-            fn names_each_group_by_its_defaults_key() {
-                for group in Shipped::ALL {
-                    assert_eq!(
-                        toml::Value::try_from(group).unwrap().as_str(),
-                        Some(group.as_str())
-                    );
-                }
+        #[test]
+        fn names_each_group_by_its_defaults_key() {
+            for &group in Shipped::VARIANTS {
+                assert_eq!(
+                    toml::Value::try_from(group).unwrap().as_str(),
+                    Some(group.to_string().as_str())
+                );
             }
         }
 

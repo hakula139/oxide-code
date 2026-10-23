@@ -4,6 +4,7 @@
 use std::fs::{File, Metadata, OpenOptions};
 use std::path::{Path, PathBuf};
 
+use strum::Display;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::ToolCtx;
@@ -26,21 +27,12 @@ pub(super) async fn tracker_key(path: &Path) -> PathBuf {
 // ── File Target Validation ──
 
 /// What a file tool does with its target, which its refusals name.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Display)]
+#[strum(serialize_all = "lowercase")]
 pub(super) enum FileVerb {
     Read,
     Edit,
     Write,
-}
-
-impl FileVerb {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Edit => "edit",
-            Self::Write => "write",
-        }
-    }
 }
 
 /// Rejects targets the [`FileTracker`](crate::file_tracker::FileTracker) cannot gate, phrasing each
@@ -50,7 +42,6 @@ pub(super) fn validate_file_target(
     metadata: &Metadata,
     verb: FileVerb,
 ) -> Result<(), String> {
-    let verb_name = verb.as_str();
     match validate_trackable_file(metadata) {
         Ok(()) => Ok(()),
         Err(TrackableFileError::Directory) => Err(match verb {
@@ -58,16 +49,16 @@ pub(super) fn validate_file_target(
                 format!("{path} is a directory. Use the glob tool to list directory contents.")
             }
             FileVerb::Edit | FileVerb::Write => {
-                format!("{path} is a directory. Refusing to {verb_name}.")
+                format!("{path} is a directory. Refusing to {verb}.")
             }
         }),
         Err(TrackableFileError::NonRegular) => Err(format!(
-            "{path} is not a regular file (fifo, socket, or device). Refusing to {verb_name}.",
+            "{path} is not a regular file (fifo, socket, or device). Refusing to {verb}.",
         )),
         Err(TrackableFileError::TooLarge { size, max }) => {
             let (size, max) = (format_size(size), format_size(max));
             Err(format!(
-                "File is too large ({size}, max {max}). Use the bash tool to {verb_name} large files.",
+                "File is too large ({size}, max {max}). Use the bash tool to {verb} large files.",
             ))
         }
     }

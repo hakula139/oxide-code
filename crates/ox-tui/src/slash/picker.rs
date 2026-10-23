@@ -6,6 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use strum::VariantArray as _;
 
 use ox_core::config::DEFAULT_MODEL;
 use ox_core::model::{Effort, MODELS, ModelInfo, ResolvedModelId};
@@ -111,11 +112,11 @@ impl ModelEffortPicker {
     /// Steps the effort one level as the `/effort` slider does.
     fn step_effort(&mut self, direction: Direction) {
         let current = self.shown_effort();
-        let idx = Effort::ALL
+        let idx = Effort::VARIANTS
             .iter()
             .position(|level| *level == current)
-            .expect("Effort::ALL lists every level");
-        self.picked_effort = Some(Effort::ALL[step_level(idx, direction)]);
+            .expect("Effort::VARIANTS lists every level");
+        self.picked_effort = Some(Effort::VARIANTS[step_level(idx, direction)]);
     }
 
     /// Commits both axes through one atomic `SetModel`, picking only the axes that differ from the

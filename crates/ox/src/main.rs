@@ -13,6 +13,7 @@ use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::error::ErrorKind;
 use clap::{Arg, ArgGroup, Command, CommandFactory as _, Parser};
 use indoc::indoc;
+use strum::VariantArray as _;
 use time::error::IndeterminateOffset;
 use tracing::warn;
 
@@ -251,9 +252,9 @@ struct ModeParser(PossibleValuesParser);
 
 impl ModeParser {
     fn new() -> Self {
-        Self(PossibleValuesParser::new(Mode::ALL.map(|mode| {
-            PossibleValue::new(mode.as_str()).help(mode.description())
-        })))
+        Self(PossibleValuesParser::new(Mode::VARIANTS.iter().map(
+            |mode| PossibleValue::new(mode.as_str()).help(mode.description()),
+        )))
     }
 }
 

@@ -24,6 +24,7 @@ use std::str::FromStr;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use strum::{EnumString, IntoStaticStr, VariantArray};
 use tracing::warn;
 
 use self::auth::{Auth, AuthSource, CredentialError, LoginUnavailable};
@@ -40,6 +41,7 @@ use crate::util::env;
 use crate::util::git::project_root;
 use crate::util::path::{expand_user, tildify};
 use crate::util::tls::{PlatformTrust, load_extra_ca_certs};
+use crate::util::variant;
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -106,8 +108,24 @@ impl ConfigSnapshot {
 // ── Status Line ──
 
 /// User-configurable status-line segment identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    EnumString,
+    IntoStaticStr,
+    VariantArray,
+)]
 #[serde(rename_all = "kebab-case")]
+#[strum(
+    serialize_all = "kebab-case",
+    parse_err_ty = anyhow::Error,
+    parse_err_fn = unknown_segment
+)]
 pub enum StatusLineSegment {
     CurrentDir,
     GitBranch,
@@ -131,30 +149,6 @@ pub enum StatusLineSegment {
 }
 
 impl StatusLineSegment {
-    /// Names for `OX_STATUS_LINE` parsing and error messages, which must match the kebab-case names
-    /// serde gives TOML config.
-    const ALL: &'static [(Self, &'static str)] = &[
-        (Self::CurrentDir, "current-dir"),
-        (Self::GitBranch, "git-branch"),
-        (Self::PullRequest, "pull-request"),
-        (Self::PullRequestChecks, "pull-request-checks"),
-        (Self::PullRequestReview, "pull-request-review"),
-        (Self::Model, "model"),
-        (Self::ModelWithEffort, "model-with-effort"),
-        (Self::ContextUsed, "context-used"),
-        (Self::SessionCost, "session-cost"),
-        (Self::FiveHourLimit, "five-hour-limit"),
-        (Self::WeeklyLimit, "weekly-limit"),
-        (Self::PermissionMode, "permission-mode"),
-        (Self::RunState, "run-state"),
-        (Self::QueuedPrompts, "queued-prompts"),
-        (Self::TaskProgress, "task-progress"),
-        (Self::ThreadTitle, "thread-title"),
-        (Self::SessionId, "session-id"),
-        (Self::Theme, "theme"),
-        (Self::CurrentTime, "current-time"),
-    ];
-
     /// Order rationale documented in `docs/design/tui/status-line.md`.
     pub const DEFAULT: &'static [Self] = &[
         Self::CurrentDir,
@@ -167,25 +161,13 @@ impl StatusLineSegment {
         Self::RunState,
         Self::ThreadTitle,
     ];
-
-    fn names() -> String {
-        Self::ALL
-            .iter()
-            .map(|(_, name)| *name)
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
 }
 
-impl FromStr for StatusLineSegment {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        if let Some((segment, _)) = Self::ALL.iter().find(|(_, name)| *name == s) {
-            return Ok(*segment);
-        }
-        bail!("unknown segment {s:?}: expected one of {}", Self::names())
-    }
+fn unknown_segment(s: &str) -> anyhow::Error {
+    anyhow!(
+        "unknown segment {s:?}: expected one of {}",
+        variant::names::<StatusLineSegment>()
+    )
 }
 
 // ── ThemeConfig ──
@@ -505,7 +487,7 @@ fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLi
     if segments.is_empty() {
         bail!(
             "no segments. List at least one of {}, or remove it to use the default.",
-            StatusLineSegment::names()
+            variant::names::<StatusLineSegment>()
         );
     }
     Ok(segments)
@@ -771,7 +753,8 @@ mod tests {
 
         #[test]
         fn names_round_trip_through_serde_and_fromstr() {
-            for &(segment, name) in StatusLineSegment::ALL {
+            for &segment in StatusLineSegment::VARIANTS {
+                let name = <&str>::from(segment);
                 assert_eq!(serde_json::to_value(segment).unwrap(), name);
                 assert_eq!(name.parse::<StatusLineSegment>().unwrap(), segment);
             }
@@ -1586,11 +1569,11 @@ mod tests {
 
             assert_eq!(
                 format!("{err:#}"),
-                format!(
-                    "invalid OX_STATUS_LINE \"model,nope\": unknown segment \"nope\": \
-                     expected one of {}",
-                    StatusLineSegment::names()
-                ),
+                "invalid OX_STATUS_LINE \"model,nope\": unknown segment \"nope\": expected one of \
+                 current-dir, git-branch, pull-request, pull-request-checks, pull-request-review, \
+                 model, model-with-effort, context-used, session-cost, five-hour-limit, \
+                 weekly-limit, permission-mode, run-state, queued-prompts, task-progress, \
+                 thread-title, session-id, theme, current-time",
             );
         }
 
@@ -1622,9 +1605,9 @@ mod tests {
                 .await
                 .expect_err("invalid TOML segment must propagate");
 
-            let variants: Vec<_> = StatusLineSegment::ALL
+            let variants: Vec<_> = StatusLineSegment::VARIANTS
                 .iter()
-                .map(|(_, name)| format!("`{name}`"))
+                .map(|&segment| format!("`{}`", <&str>::from(segment)))
                 .collect();
             assert_eq!(
                 format!("{err:#}"),
@@ -1650,7 +1633,7 @@ mod tests {
                 format!(
                     "invalid OX_STATUS_LINE \",\": no segments. List at least one of {}, \
                      or remove it to use the default.",
-                    StatusLineSegment::names()
+                    variant::names::<StatusLineSegment>()
                 ),
             );
         }
@@ -1675,7 +1658,7 @@ mod tests {
                 format!(
                     "invalid tui.status_line: no segments. List at least one of {}, \
                      or remove it to use the default.",
-                    StatusLineSegment::names()
+                    variant::names::<StatusLineSegment>()
                 ),
             );
         }

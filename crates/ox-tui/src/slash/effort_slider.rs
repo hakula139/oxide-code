@@ -6,6 +6,7 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use strum::VariantArray as _;
 
 use ox_core::model::Effort;
 use ox_core::protocol::{ConfigPick, Op};
@@ -49,7 +50,7 @@ pub(super) fn level_color(level: Effort) -> Color {
 
 /// Opened by bare `/effort` when the active model has effort levels.
 pub(super) struct EffortSlider {
-    /// Cursor index into [`Effort::ALL`].
+    /// Cursor index into [`Effort::VARIANTS`].
     selected: usize,
     /// Effort at modal open.
     initial: Effort,
@@ -59,17 +60,17 @@ impl EffortSlider {
     /// `None` when the active model has no effort levels.
     pub(super) fn new(info: &LiveSessionInfo) -> Option<Self> {
         let initial = info.config.model.resolve_effort(info.config.effort)?;
-        let selected = Effort::ALL
+        let selected = Effort::VARIANTS
             .iter()
             .position(|e| *e == initial)
-            .expect("Effort::ALL lists every level");
+            .expect("Effort::VARIANTS lists every level");
         Some(Self { selected, initial })
     }
 
     /// No-touch Enter, or a touch that returns to the initial pick, cancels. That avoids a spurious
     /// `SetModel` that would re-resolve config defaults.
     fn submit(&self) -> ModalKey {
-        let picked = Effort::ALL[self.selected];
+        let picked = Effort::VARIANTS[self.selected];
         if picked == self.initial {
             return ModalKey::Cancelled;
         }
@@ -80,11 +81,11 @@ impl EffortSlider {
 
     /// Width every render line targets so `Alignment::Center` aligns them on a single axis.
     fn slider_width() -> usize {
-        let units: usize = Effort::ALL
+        let units: usize = Effort::VARIANTS
             .iter()
             .map(|e| GLYPH_PREFIX_WIDTH + e.as_str().len())
             .sum();
-        units + (Effort::ALL.len() - 1) * LEVEL_GAP
+        units + (Effort::VARIANTS.len() - 1) * LEVEL_GAP
     }
 
     fn line_speed_intel(theme: &Theme) -> Line<'static> {
@@ -103,8 +104,8 @@ impl EffortSlider {
     }
 
     fn line_level_labels(&self) -> Line<'static> {
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(Effort::ALL.len() * 2);
-        for (idx, level) in Effort::ALL.iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(Effort::VARIANTS.len() * 2);
+        for (idx, level) in Effort::VARIANTS.iter().enumerate() {
             if idx > 0 {
                 spans.push(Span::raw(" ".repeat(LEVEL_GAP)));
             }
@@ -181,11 +182,11 @@ pub(super) enum Direction {
     Backward,
 }
 
-/// The index one level from `idx` along [`Effort::ALL`], stopping at either end so a held key
+/// The index one level from `idx` along [`Effort::VARIANTS`], stopping at either end so a held key
 /// cannot overshoot onto the opposite end.
 pub(super) fn step_level(idx: usize, direction: Direction) -> usize {
     match direction {
-        Direction::Forward => (idx + 1).min(Effort::ALL.len() - 1),
+        Direction::Forward => (idx + 1).min(Effort::VARIANTS.len() - 1),
         Direction::Backward => idx.saturating_sub(1),
     }
 }
@@ -209,7 +210,7 @@ mod tests {
     }
 
     fn selected_level(s: &EffortSlider) -> Effort {
-        Effort::ALL[s.selected]
+        Effort::VARIANTS[s.selected]
     }
 
     mod new {
