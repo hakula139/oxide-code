@@ -57,7 +57,7 @@ Releases follow the [versioning policy](RELEASING.md#versioning), and stable rel
 
 ```bash
 # macOS aarch64 (Apple Silicon). Set VERSION to the newest tag on the Releases page.
-VERSION=v0.1.0-alpha.6
+VERSION=v0.1.0-alpha.7
 curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 

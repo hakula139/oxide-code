@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.7] - 2026-10-23
+
+### Highlights
+
+- `ANTHROPIC_MODEL` no longer selects the model. Set `OX_MODEL` instead. See Breaking changes.
+- `yolo` mode now runs tool calls like Claude Code's bypass permissions mode. Deny rules still block, and your own ask rules still prompt in an attended session. See Changed.
+- `/config` lists every resolved key, `ox config check` validates the config without starting a session, and `/login` finishes with a pasted code when the browser cannot reach `ox`.
+- Nix users can install `ox` through an overlay or a Home Manager module.
+
+### Security
+
+- _(permission)_ In `manual` mode, a `nice` option value could hide the program it runs from the rules. `nice -n {5,rm,-rf,x} true` ran without a prompt, since the rules read it as the known-safe `true` while bash ran `rm -rf x true`. Affected: v0.1.0-alpha.3 through v0.1.0-alpha.6 ([#604](https://github.com/hakula139/oxide-code/pull/604)).
+
+### Breaking changes
+
+- _(config)_ `ANTHROPIC_MODEL` no longer selects the model, and no alias remains. Set `OX_MODEL` instead ([#613](https://github.com/hakula139/oxide-code/pull/613)).
+
+### Added
+
+- _(cli)_ Validate the config without starting a session ([#600](https://github.com/hakula139/oxide-code/pull/600))
+- _(config)_ Show every resolved key and permission rule in /config ([#591](https://github.com/hakula139/oxide-code/pull/591))
+- _(config)_ List every config key and environment variable in one reference ([#615](https://github.com/hakula139/oxide-code/pull/615))
+- _(login)_ Finish /login with a pasted code when the browser cannot reach ox ([#597](https://github.com/hakula139/oxide-code/pull/597))
+- _(nix)_ Export an overlay and a Home Manager module ([#601](https://github.com/hakula139/oxide-code/pull/601))
+- _(nix)_ Validate the generated config at build time ([#606](https://github.com/hakula139/oxide-code/pull/606))
+
+### Fixed
+
+- Title /init sessions after the command and keep the head of a long first prompt ([#579](https://github.com/hakula139/oxide-code/pull/579))
+- _(config)_ Check every other setting before reading the stored login ([#575](https://github.com/hakula139/oxide-code/pull/575))
+- _(engine)_ Suggest only config changes that let an unattended call through ([#578](https://github.com/hakula139/oxide-code/pull/578))
+- _(log)_ Treat an empty RUST_LOG as unset ([#616](https://github.com/hakula139/oxide-code/pull/616))
+- _(permission)_ Read reader option values as values ([#577](https://github.com/hakula139/oxide-code/pull/577))
+- _(tools)_ Cut truncated tool output at line boundaries ([#581](https://github.com/hakula139/oxide-code/pull/581))
+- _(tui)_ Stop crossing out text between tildes in Markdown ([#599](https://github.com/hakula139/oxide-code/pull/599))
+- _(tui)_ Size the input band at the new width on the first frame after a resize ([#605](https://github.com/hakula139/oxide-code/pull/605))
+
+### Changed
+
+- _(permission)_ `yolo` mode runs tool calls unless a deny rule holds them. Built-in holds, such as protected paths and forced recursive `rm`, no longer prompt or deny, and a command ox cannot analyze runs. Your own ask rules still prompt in an attended session and are denied in an unattended run ([#587](https://github.com/hakula139/oxide-code/pull/587), [#614](https://github.com/hakula139/oxide-code/pull/614))
+
 ## [0.1.0-alpha.6] - 2026-10-23
 
 ### Highlights
@@ -309,6 +350,7 @@ The project fixes security issues publicly before 1.0, and the first two entries
 - _(deps)_ Bump rustls-webpki and rand for Dependabot alerts (#17)
 - _(deps)_ Bump rustls-webpki from 0.103.12 to 0.103.13 (#34)
 
+[0.1.0-alpha.7]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.6..v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.5..v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.4..v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.3..v0.1.0-alpha.4
