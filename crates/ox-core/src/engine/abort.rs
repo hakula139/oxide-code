@@ -1,5 +1,5 @@
 //! How an operation in flight stops early: the [`TurnAbort`] reasons, and the race of its future
-//! against the cancel and shutdown ops.
+//! against the cancel and shutdown ops, or against an op the caller takes in its place.
 
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -79,8 +79,8 @@ where
     F: Future<Output = T>,
 {
     await_or_op(fut, ops, inbox, sink, |op| {
-        // Unreachable under current wiring, and a `Resolve` here is a stale reply for an
-        // already-resolved call.
+        // A `Resolve` here is a stale reply for an already-resolved call, and a `LoginCode` a
+        // paste that arrived once the sign-in had its code.
         warn!(?op, "dropped mid-turn op");
         None
     })
@@ -117,6 +117,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::SignInCode;
     use crate::protocol::testing::CapturingSink;
 
     mod inbox {
@@ -200,7 +201,8 @@ mod tests {
         async fn ends_with_the_first_op_the_handler_takes() {
             let (tx, mut rx) = mpsc::channel(3);
             tx.try_send(Op::Clear).unwrap();
-            tx.try_send(Op::LoginCode("code#state".to_owned())).unwrap();
+            tx.try_send(Op::LoginCode(SignInCode("code#state".to_owned())))
+                .unwrap();
             tx.try_send(Op::Logout).unwrap();
             let mut inbox = Inbox::default();
             let sink = CapturingSink::default();
@@ -213,7 +215,7 @@ mod tests {
                     &mut inbox,
                     &sink,
                     |op| match op {
-                        Op::LoginCode(code) => Some(code),
+                        Op::LoginCode(SignInCode(code)) => Some(code),
                         op => {
                             passed.push(op);
                             None

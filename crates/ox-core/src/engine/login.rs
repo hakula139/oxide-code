@@ -9,7 +9,7 @@ use super::{Engine, TurnEnd, abort, report_abort};
 use crate::config::auth::{self, Auth, AuthSource};
 use crate::config::login::{Grant, PendingLogin};
 use crate::config::oauth;
-use crate::protocol::{Event, EventSink, Op};
+use crate::protocol::{Event, EventSink, Op, SignInCode};
 use crate::util::text::join_sentences;
 
 impl Engine {
@@ -149,7 +149,7 @@ async fn await_grant(
     sink: &dyn EventSink,
 ) -> AbortResult<anyhow::Result<Grant>> {
     abort::await_or_op(pending.await_redirect(), ops, inbox, sink, |op| match op {
-        Op::LoginCode(input) => match pending.paste(&input) {
+        Op::LoginCode(SignInCode(input)) => match pending.paste(&input) {
             Ok(grant) => Some(Ok(grant)),
             Err(e) => {
                 sink.emit(Event::Error(e.to_string()), "login-code-rejected");
@@ -459,22 +459,25 @@ mod tests {
     mod login {
         use super::*;
 
+        /// The value of the query parameter `name` in `url`.
+        fn query_param(url: &str, name: &str) -> String {
+            reqwest::Url::parse(url)
+                .unwrap()
+                .query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+                .unwrap()
+        }
+
         /// Returns to the sign-in listener behind `url` with `query` and its `state`, as the
         /// browser does, and reads the reply.
         async fn return_from_browser(url: &str, query: &str) -> String {
-            let url = reqwest::Url::parse(url).unwrap();
-            let param = |name: &str| {
-                url.query_pairs()
-                    .find(|(key, _)| key == name)
-                    .map(|(_, value)| value.into_owned())
-                    .unwrap()
-            };
-            let redirect = reqwest::Url::parse(&param("redirect_uri")).unwrap();
+            let redirect = reqwest::Url::parse(&query_param(url, "redirect_uri")).unwrap();
             let mut stream =
                 tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
                     .await
                     .unwrap();
-            let state = param("state");
+            let state = query_param(url, "state");
             let request = formatdoc! {"
                 GET /callback?{query}&state={state} HTTP/1.1\r
                 Host: localhost\r
@@ -546,7 +549,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn signs_in_with_a_pasted_code_after_reporting_a_mismatched_one() {
+        async fn signs_in_at_the_manual_url_with_a_pasted_code_after_a_mismatched_one() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 Mock::given(method("POST"))
@@ -574,25 +577,29 @@ mod tests {
                     let mut handle = engine.spawn();
 
                     handle.ops.send(Op::Login).await.unwrap();
-                    let (_, manual_url) = login_urls(&mut handle.events).await;
-                    let state = reqwest::Url::parse(&manual_url)
-                        .unwrap()
-                        .query_pairs()
-                        .find(|(key, _)| key == "state")
-                        .map(|(_, value)| value.into_owned())
-                        .unwrap();
-                    let foreign = Op::LoginCode("pasted-code#other-state".to_owned());
-                    handle.ops.send(foreign).await.unwrap();
+                    let (url, manual_url) = login_urls(&mut handle.events).await;
+                    let state = query_param(&manual_url, "state");
+                    let code = |code: &str| Op::LoginCode(SignInCode(code.to_owned()));
+                    handle.ops.send(Op::Clear).await.unwrap();
+                    handle.ops.send(code("pasted-code#other-state")).await.unwrap();
                     let rejected = handle.events.recv().await;
-                    let pasted = Op::LoginCode(format!("pasted-code#{state}"));
+                    let pasted = code(&format!("pasted-code#{state}"));
                     handle.ops.send(pasted).await.unwrap();
                     let signed_in = handle.events.recv().await;
                     handle.shutdown().await.unwrap();
 
                     assert!(
+                        query_param(&url, "redirect_uri").starts_with("http://localhost:"),
+                        "{url}"
+                    );
+                    assert_eq!(
+                        query_param(&manual_url, "redirect_uri"),
+                        "https://platform.claude.com/oauth/code/callback"
+                    );
+                    assert!(
                         matches!(
                             &rejected,
-                            Some(Event::Error(msg)) if msg.starts_with("That code belongs to another sign-in.")
+                            Some(Event::Error(msg)) if msg.starts_with("That code is not from this sign-in.")
                         ),
                         "{rejected:?}"
                     );

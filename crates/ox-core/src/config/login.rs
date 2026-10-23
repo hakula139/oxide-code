@@ -28,6 +28,8 @@ const SUCCESS_URL: &str = "https://platform.claude.com/oauth/code/success?app=cl
 const MANUAL_REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
 const CALLBACK_PATH: &str = "/callback";
 const LOGIN_TIMEOUT: Duration = Duration::from_mins(5);
+const INCOMPLETE_CODE: &str = "That is not a complete sign-in code. \
+                               Copy the whole code from the sign-in page and paste it again.";
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 
 // ── PendingLogin ──
@@ -98,15 +100,15 @@ impl PendingLogin {
             .split_once('#')
             .filter(|(code, state)| !code.is_empty() && !state.is_empty())
         else {
-            bail!(
-                "That is not a complete sign-in code. \
-                 Copy the whole code from the sign-in page and paste it again."
-            );
+            bail!(INCOMPLETE_CODE);
         };
         if state != self.state {
+            if self.state.starts_with(state) {
+                bail!(INCOMPLETE_CODE);
+            }
             bail!(
-                "That code belongs to another sign-in. \
-                 Paste the code from the page that this sign-in opened."
+                "That code is not from this sign-in. \
+                 Sign in at the URL above and paste the whole code it shows."
             );
         }
         Ok(Grant::Pasted(code.to_owned()))
@@ -361,21 +363,7 @@ mod tests {
         reply
     }
 
-    /// Waits for the browser redirect, then finishes the sign-in with it.
-    async fn sign_in_from_browser(pending: PendingLogin, token_url: &str) -> Result<Auth> {
-        let grant = pending.await_redirect().await?;
-        pending.finish(grant, token_url, &NoRoots).await
-    }
-
-    /// The value of the query parameter `name` in `url`.
-    fn query_param(url: &str, name: &str) -> String {
-        reqwest::Url::parse(url)
-            .unwrap()
-            .query_pairs()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.into_owned())
-            .unwrap()
-    }
+    const FAILED_PAGE: &str = "Sign-in failed. Return to the terminal for details.";
 
     async fn browse(port: u16, target: &str) -> String {
         let request = formatdoc! {"
@@ -388,6 +376,16 @@ mod tests {
 
     mod start {
         use super::*;
+
+        /// The value of the query parameter `name` in `url`.
+        fn query_param(url: &str, name: &str) -> String {
+            reqwest::Url::parse(url)
+                .unwrap()
+                .query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+                .unwrap()
+        }
 
         #[tokio::test]
         async fn points_the_redirect_at_its_own_listener_and_the_manual_page() {
@@ -432,15 +430,17 @@ mod tests {
             let pending = PendingLogin::start().await.unwrap();
             let incomplete = "That is not a complete sign-in code. \
                               Copy the whole code from the sign-in page and paste it again.";
-            let foreign = "That code belongs to another sign-in. \
-                           Paste the code from the page that this sign-in opened.";
+            let foreign = "That code is not from this sign-in. \
+                           Sign in at the URL above and paste the whole code it shows.";
             let state = pending.state.clone();
+            let truncated = &state[..state.len() - 1];
 
             for (input, expected) in [
                 ("auth-code".to_owned(), incomplete),
                 (format!("#{state}"), incomplete),
                 ("auth-code#".to_owned(), incomplete),
                 (String::new(), incomplete),
+                (format!("auth-code#{truncated}"), incomplete),
                 ("auth-code#other-state".to_owned(), foreign),
                 (format!("auth-code#{state}x"), foreign),
             ] {
@@ -455,9 +455,11 @@ mod tests {
     mod finish {
         use super::*;
 
-        /// A token endpoint nothing listens on, for flows that end before the exchange.
-        const UNUSED_TOKEN_URL: &str = "http://127.0.0.1:9/token";
-        const FAILED_PAGE: &str = "Sign-in failed. Return to the terminal for details.";
+        /// Waits for the browser redirect, then finishes the sign-in with it.
+        async fn sign_in_from_browser(pending: PendingLogin, token_url: &str) -> Result<Auth> {
+            let grant = pending.await_redirect().await?;
+            pending.finish(grant, token_url, &NoRoots).await
+        }
 
         #[tokio::test]
         async fn exchanges_the_code_and_stores_the_oxide_code_login() {
@@ -556,39 +558,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn ends_when_the_browser_returns_a_refusal() {
-            let pending = PendingLogin::start().await.unwrap();
-            let port = port(&pending);
-            let target = format!("/callback?error=access_denied&state={}", pending.state);
-
-            let (auth, reply) = tokio::join!(
-                sign_in_from_browser(pending, UNUSED_TOKEN_URL),
-                browse(port, &target),
-            );
-
-            assert_eq!(
-                auth.unwrap_err().to_string(),
-                "authorization was refused (access_denied)",
-            );
-            assert!(reply.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{reply}");
-            assert!(reply.ends_with(FAILED_PAGE), "{reply}");
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn gives_up_when_nothing_returns() {
-            let pending = PendingLogin::start().await.unwrap();
-
-            let err = sign_in_from_browser(pending, UNUSED_TOKEN_URL)
-                .await
-                .unwrap_err();
-
-            assert_eq!(
-                err.to_string(),
-                "the sign-in did not finish within 5 minutes"
-            );
-        }
-
-        #[tokio::test]
         async fn exchanges_a_pasted_code_with_the_manual_redirect() {
             let data = tempfile::tempdir().unwrap();
             let server = MockServer::start().await;
@@ -623,6 +592,37 @@ mod tests {
 
             assert_eq!(auth.unwrap().secret(), "pasted-access");
             assert!(data.path().join("ox").join("credentials.json").exists());
+        }
+    }
+
+    mod await_redirect {
+        use super::*;
+
+        #[tokio::test]
+        async fn ends_when_the_browser_returns_a_refusal() {
+            let pending = PendingLogin::start().await.unwrap();
+            let port = port(&pending);
+            let target = format!("/callback?error=access_denied&state={}", pending.state);
+
+            let (grant, reply) = tokio::join!(pending.await_redirect(), browse(port, &target));
+
+            let Err(e) = grant else {
+                panic!("a refusal must end the sign-in");
+            };
+            assert_eq!(e.to_string(), "authorization was refused (access_denied)");
+            assert!(reply.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{reply}");
+            assert!(reply.ends_with(FAILED_PAGE), "{reply}");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn gives_up_when_nothing_returns() {
+            let pending = PendingLogin::start().await.unwrap();
+
+            let Err(e) = pending.await_redirect().await else {
+                panic!("the wait must time out");
+            };
+
+            assert_eq!(e.to_string(), "the sign-in did not finish within 5 minutes");
         }
     }
 

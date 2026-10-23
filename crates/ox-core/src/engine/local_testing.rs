@@ -105,7 +105,6 @@ pub(super) fn texts(request: &serde_json::Value) -> Vec<&str> {
         .collect()
 }
 
-/// The URL `/login` announced, once the engine emits it.
 /// The `(url, manual_url)` of the next [`Event::LoginStarted`].
 pub(super) async fn login_urls(events: &mut mpsc::UnboundedReceiver<Event>) -> (String, String) {
     next_matching(events, |event| match event {

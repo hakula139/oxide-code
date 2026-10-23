@@ -321,8 +321,7 @@ impl App {
     fn open_sign_in_url(&mut self, url: &str, manual_url: &str) {
         let message = match (self.open_browser)(url) {
             Ok(()) => formatdoc! {"
-                Opened the browser to sign in. If it did not open or cannot reach this machine, \
-                sign in at this URL and paste the code it shows here:
+                Opened the browser to sign in. If it did not open or cannot reach this machine, sign in at this URL and paste the code it shows here:
                 {manual_url}"
             },
             Err(e) => {
