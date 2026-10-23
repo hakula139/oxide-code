@@ -1118,7 +1118,7 @@ pub(crate) mod testing {
     use crate::config::auth::Auth;
 
     /// A stored `claudeAiOauth` document, with no refresh token when `refresh` is `None`.
-    pub(super) fn creds_json(
+    pub(crate) fn creds_json(
         access: &str,
         refresh: Option<&str>,
         expires_at: u64,
@@ -2503,12 +2503,12 @@ mod tests {
         use super::*;
 
         #[test]
-        fn far_future_is_not_expired() {
+        fn counts_a_far_future_expiry_as_not_expired() {
             assert!(!is_expired(u64::MAX));
         }
 
         #[test]
-        fn zero_is_expired() {
+        fn counts_an_expiry_in_the_past_as_expired() {
             assert!(is_expired(0));
         }
     }
@@ -2542,7 +2542,7 @@ mod tests {
             );
 
             let received = server.received_requests().await.unwrap();
-            let body: serde_json::Value = received[0].body_json().unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
             assert_eq!(
                 body,
                 serde_json::json!({
@@ -2599,8 +2599,13 @@ mod tests {
                 .await
                 .expect_err("expected parse error");
             assert_eq!(
-                err.error.to_string(),
-                "failed to parse token refresh response"
+                format!("{:#}", err.error),
+                format!(
+                    "failed to parse token refresh response: \
+                     error decoding response body for url ({}/): \
+                     expected value at line 1 column 1",
+                    server.uri(),
+                ),
             );
             assert!(!err.transient, "a malformed reply is not retried");
         }
@@ -2699,8 +2704,7 @@ mod tests {
             )
             .unwrap();
 
-            let content = std::fs::read_to_string(&path).unwrap();
-            let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+            let json = read_json(&path);
             let oauth = &json["claudeAiOauth"];
 
             assert_eq!(oauth["accessToken"], "new-access");
@@ -2737,8 +2741,7 @@ mod tests {
             )
             .unwrap();
 
-            let content = std::fs::read_to_string(&path).unwrap();
-            let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+            let json = read_json(&path);
             assert_eq!(
                 json["claudeAiOauth"]["scopes"],
                 serde_json::json!(["user:profile", "user:inference"]),
@@ -2768,8 +2771,7 @@ mod tests {
             )
             .unwrap();
 
-            let content = std::fs::read_to_string(&path).unwrap();
-            let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+            let json = read_json(&path);
             let oauth = &json["claudeAiOauth"];
 
             assert_eq!(oauth["scopes"], serde_json::json!(["user:profile"]));

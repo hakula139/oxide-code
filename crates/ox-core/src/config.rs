@@ -769,7 +769,7 @@ mod tests {
 
     use super::compaction::testing::WINDOW_1M_THRESHOLD;
     use super::oauth::LoginError;
-    use super::oauth::testing::write_creds;
+    use super::oauth::testing::{creds_json, write_creds};
     use super::provenance::Layer;
     use super::testing::test_config;
     use super::*;
@@ -1057,7 +1057,7 @@ mod tests {
         }
 
         /// Runs both startup steps, [`Config::load`] and [`Config::resolve_auth`],
-        /// from the user config under `dir` with exactly `vars` set.
+        /// in `dir` with exactly `vars` set.
         async fn load_in(
             dir: &TempDir,
             vars: Vec<(&'static str, Option<String>)>,
@@ -1086,10 +1086,7 @@ mod tests {
         ) -> Vec<(&'static str, Option<String>)> {
             write_config(
                 data.path().join("ox").join("credentials.json"),
-                &serde_json::json!({
-                    "claudeAiOauth": { "accessToken": "ox-token", "expiresAt": expires_at },
-                })
-                .to_string(),
+                &creds_json("ox-token", None, expires_at).to_string(),
             );
             env_vars(vec![
                 xdg(config),
@@ -1333,7 +1330,7 @@ mod tests {
         #[tokio::test]
         async fn propagates_invalid_config_file() {
             let dir = tempfile::tempdir().unwrap();
-            write_user_config(
+            let user = write_user_config(
                 dir.path(),
                 indoc! {r#"
                     [client]
@@ -1341,12 +1338,21 @@ mod tests {
                     show_thinking = true
                 "#},
             );
+
             let err = load_with(&dir, &[("ANTHROPIC_API_KEY", "")])
                 .await
                 .expect_err("misplaced field must surface as an error");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("invalid config at"), "{msg}");
-            assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid config at {}: line 3, column 1, in `client`: \
+                     unknown field `show_thinking`, expected one of `api_key`, `base_url`, \
+                     `extra_ca_certs`, `model`, `effort`, `max_tokens`, `max_tool_rounds`, \
+                     `prompt_cache_ttl`, `compaction`",
+                    user.path().display()
+                ),
+            );
         }
 
         #[tokio::test]
@@ -1759,13 +1765,19 @@ mod tests {
         #[tokio::test]
         async fn status_line_invalid_segment_surfaces_parse_error() {
             let dir = tempfile::tempdir().unwrap();
+
             let err = load_with(&dir, &[("OX_STATUS_LINE", "model,nope")])
                 .await
                 .expect_err("invalid segment must propagate");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("OX_STATUS_LINE"), "{msg}");
-            assert!(msg.contains("nope"), "{msg}");
-            assert!(msg.contains("current-dir"), "{msg}");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid OX_STATUS_LINE \"model,nope\": unknown segment \"nope\": \
+                     expected one of {}",
+                    StatusLineSegment::names()
+                ),
+            );
         }
 
         #[tokio::test]
@@ -1784,36 +1796,49 @@ mod tests {
         #[tokio::test]
         async fn status_line_invalid_segment_in_file_surfaces_parse_error() {
             let dir = tempfile::tempdir().unwrap();
-            write_user_config(
+            let user = write_user_config(
                 dir.path(),
                 indoc! {r#"
                     [tui]
                     status_line = ["model", "nope"]
                 "#},
             );
+
             let err = load_with(&dir, &[])
                 .await
                 .expect_err("invalid TOML segment must propagate");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("status_line"), "{msg}");
-            assert!(msg.contains("unknown variant `nope`"), "{msg}");
-            assert!(msg.contains("current-dir"), "{msg}");
-            assert!(msg.contains("run-state"), "{msg}");
+
+            let variants: Vec<_> = StatusLineSegment::ALL
+                .iter()
+                .map(|(_, name)| format!("`{name}`"))
+                .collect();
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid config at {}: line 2, column 25, in `tui.status_line`: \
+                     unknown variant `nope`, expected one of {}",
+                    user.path().display(),
+                    variants.join(", ")
+                ),
+            );
         }
 
         #[tokio::test]
         async fn status_line_empty_env_is_rejected() {
             let dir = tempfile::tempdir().unwrap();
+
             let err = load_with(&dir, &[("OX_STATUS_LINE", ",")])
                 .await
                 .expect_err("empty status line must not launch without run-state");
-            let msg = format!("{err:#}");
-            assert!(
-                msg.starts_with(r#"invalid OX_STATUS_LINE ",": no segments. List at least one of"#),
-                "{msg}"
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid OX_STATUS_LINE \",\": no segments. List at least one of {}, \
+                     or remove it to use the default.",
+                    StatusLineSegment::names()
+                ),
             );
-            assert!(msg.contains("run-state"), "{msg}");
-            assert!(msg.ends_with("or remove it to use the default."), "{msg}");
         }
 
         #[tokio::test]
@@ -1826,15 +1851,19 @@ mod tests {
                     status_line = []
                 "},
             );
+
             let err = load_with(&dir, &[])
                 .await
                 .expect_err("empty status line must not launch without run-state");
-            let msg = format!("{err:#}");
-            assert!(
-                msg.starts_with("invalid tui.status_line: no segments. List at least one of"),
-                "{msg}"
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid tui.status_line: no segments. List at least one of {}, \
+                     or remove it to use the default.",
+                    StatusLineSegment::names()
+                ),
             );
-            assert!(msg.contains("run-state"), "{msg}");
         }
 
         #[tokio::test]

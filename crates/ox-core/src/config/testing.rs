@@ -1,4 +1,4 @@
-//! The [`Config`] fixture that every crate's tests build on.
+//! Shared [`Config`] and [`ConfigSnapshot`] fixtures for core and frontend tests.
 
 use std::path::Path;
 
@@ -14,9 +14,8 @@ use super::{
 use crate::model::ModelSpec;
 use crate::permission::{Policy, Workspace};
 
-/// Minimal [`Config`] signed in with `auth` against `base_url`: compaction off, a 128-token
-/// output cap, and the default permission policy in `/repo`. Tests override fields with struct
-/// update syntax.
+/// Minimal [`Config`] signed in with `auth` against `base_url`: no effort, compaction off,
+/// a 128-token output cap, and the default permission policy in `/repo`.
 pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
     Config {
         auth: Some(auth),
@@ -28,7 +27,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
             attribution: true,
             structured_outputs: true,
         },
-        model: ModelSpec::resolve(model.to_owned()),
+        model: ModelSpec::resolve(model),
         effort: None,
         max_tokens: Some(128),
         max_tool_rounds: None,
@@ -48,8 +47,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
     }
 }
 
-/// The snapshot of a [`test_config`] for Opus 5.5 signed in with `ANTHROPIC_API_KEY`, which
-/// frontend tests show.
+/// The [`test_config`] snapshot that frontend tests show: Opus 5.5 with `ANTHROPIC_API_KEY`.
 pub fn test_snapshot() -> ConfigSnapshot {
     test_config(
         "https://api.test.invalid",
