@@ -3314,6 +3314,7 @@ mod tests {
                 ] {
                     assert_eq!(decide(&p, EXEC, &command(case)), expected, "{case}");
                 }
+
                 let hook = path(
                     "/repo/.git/hooks/pre-commit",
                     Some(".git/hooks/pre-commit"),
@@ -3366,6 +3367,18 @@ mod tests {
                     decide(&p, PermissionClass::Mcp, &name("github/get_me")),
                     Decision::Allow
                 );
+            }
+
+            #[cfg(unix)]
+            #[test]
+            fn device_edit_asks_under_a_broad_allow_and_runs_in_yolo() {
+                let workspace = Workspace::new(Path::new("/repo"));
+                let device = Access::for_path("/dev/null", &workspace);
+
+                for mode in [Mode::Manual, Mode::Yolo] {
+                    let p = resolved_policy(mode, &[], &[], &[(EDIT, "*")], &[], &workspace);
+                    assert_eq!(decide(&p, EDIT, &device), held_by_builtin(mode), "{mode}");
+                }
             }
 
             #[test]
