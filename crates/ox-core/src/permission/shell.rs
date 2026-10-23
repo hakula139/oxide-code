@@ -2201,11 +2201,16 @@ fn is_recursive_grep(arg: &str) -> bool {
 
 /// The files a `sed` call reads, or `None` when it may edit a file in place, read a script file, or
 /// run a script [`SAFE_SED_SCRIPT`] does not accept.
+/// An option after an operand is `None` too, since BSD `sed` reads it as a file and may then take
+/// the operand before it as the script.
 fn sed_files(values: &[&str]) -> Option<Vec<String>> {
     let mut scripts = Vec::new();
     let mut files = Vec::new();
     let mut args = values.iter().copied();
     while let Some(arg) = args.next() {
+        if !files.is_empty() && arg.starts_with('-') && arg != "-" {
+            return None;
+        }
         if arg == "--" {
             files.extend(args.by_ref());
         } else if let Some(name) = long_option(arg) {
@@ -2289,98 +2294,45 @@ struct ReaderArgs {
     unknown: bool,
 }
 
-/// Reads the arguments of the reader `name`, given each word's value, or `None` for one that
-/// expands, as GNU getopt does.
+/// Reads the arguments of reader `name`, given each word's value or `None` for one that expands.
+/// The gate cannot tell whether a GNU or a BSD build of `name` runs, so it counts each file that
+/// either would read.
 /// A word that expands may split into any words, so it leaves what the reader reads unknown
 /// wherever it stands.
-/// Options and operands may mix until `--`.
-/// A short option that takes a value takes the rest of its cluster or the next word,
-/// and a long one its `=` value or the next word.
-/// A long option is matched only as spelled in full, so an abbreviated one reads as a flag,
-/// whose next word then counts as a file.
-/// A long option the grammar does not list counts its `=` value as a file too.
 fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
     let grammar = reader_grammar(name);
     let mut args = ReaderArgs {
         files: Vec::new(),
         unknown: values.iter().any(Option::is_none),
     };
-    let mut operands = Vec::new();
-    let mut pattern_given = false;
-    let mut take = |args: &mut ReaderArgs, role: Role, index: usize, value: Option<&str>| {
-        pattern_given |= matches!(role, Role::Pattern | Role::PatternFile);
-        match (role, value) {
-            (Role::File | Role::PatternFile, Some(file)) if !file.is_empty() => {
-                args.files.push((index, file.to_owned()));
-            }
-            (Role::FileList, _) => args.unknown = true,
-            _ => {}
-        }
-    };
-    let mut i = 0;
-    let mut options = true;
-    while let Some(&value) = values.get(i) {
-        let index = i;
-        i += 1;
-        let Some(arg) = value.filter(|arg| options && arg.starts_with('-') && *arg != "-") else {
-            if !matches!(value, Some("-" | "")) {
-                operands.push((index, value));
-            }
-            continue;
-        };
-        if arg == "--" {
-            options = false;
-        } else if let Some(long) = arg.strip_prefix("--") {
-            let (name, attached) = long
-                .split_once('=')
-                .map_or((long, None), |(name, value)| (name, Some(value)));
-            match (grammar.long(name), attached) {
-                (Some(option), Some(value)) => take(&mut args, option.role, index, Some(value)),
-                (Some(option), None) if option.value == Value::Required => {
-                    if let Some(&next) = values.get(i) {
-                        take(&mut args, option.role, i, next);
-                        i += 1;
-                    }
-                }
-                (Some(_), None) => {}
-                (None, attached) => take(&mut args, Role::File, index, attached),
-            }
-        } else {
-            let cluster = &arg[1..];
-            if grammar.numeric && cluster.starts_with(|c: char| c.is_ascii_digit()) {
-                continue;
-            }
-            for (offset, c) in cluster.char_indices() {
-                let Some(option) = grammar.short(c) else {
-                    continue;
-                };
-                let rest = &cluster[offset + c.len_utf8()..];
-                if !rest.is_empty() {
-                    take(&mut args, option.role, index, Some(rest));
-                } else if option.value == Value::Required
-                    && let Some(&next) = values.get(i)
-                {
-                    take(&mut args, option.role, i, next);
-                    i += 1;
-                }
-                break;
-            }
-        }
+    for dialect in [Dialect::Gnu, Dialect::Bsd] {
+        let read = grammar.read(dialect, values);
+        args.files.extend(read.files);
+        args.unknown |= read.unknown;
     }
-    let skip = usize::from(grammar.pattern && !pattern_given);
-    for (index, operand) in operands.into_iter().skip(skip) {
-        args.files
-            .extend(operand.map(|file| (index, file.to_owned())));
-    }
-    args.files.sort_by_key(|(index, _)| *index);
+    args.files.sort_unstable();
+    args.files.dedup();
     args
 }
 
-/// A reader's option grammar, from its GNU manual.
-/// It lists only the options that take a value,
+/// A build of the readers, whose option parsing can differ.
+#[derive(Clone, Copy)]
+enum Dialect {
+    /// GNU, as on Linux.
+    Gnu,
+    /// BSD, as macOS ships.
+    Bsd,
+}
+
+/// A reader's option grammar, matching both its GNU and its BSD build.
+/// It lists only the options that take a value in either build,
 /// so a missing one reads its value as a file, which can only make the gate more cautious.
+/// An option one build rejects may stay listed, since the reader then exits before reading.
 struct ReaderGrammar {
     options: &'static [ReaderOpt],
+    /// Whether the BSD build, like every GNU one, takes options after operands until `--`.
+    /// Otherwise its first operand ends the options.
+    bsd_permutes: bool,
     /// Whether `-NUM` sets a count, as in `tail -20`.
     numeric: bool,
     /// Whether the first operand is a pattern or script unless an option gives one.
@@ -2390,15 +2342,117 @@ struct ReaderGrammar {
 impl ReaderGrammar {
     const NONE: Self = Self {
         options: &[],
+        bsd_permutes: false,
         numeric: false,
         pattern: false,
     };
 
-    /// The long option `--name`.
+    /// The files the `dialect` build reads from `values`.
+    /// A short option that takes a value takes the rest of its cluster or the next word,
+    /// and a long one its `=` value or the next word.
+    /// A long option the grammar does not list counts its `=` value as a file, and since it may be
+    /// one that gives the pattern, the leading operand then counts as a file too.
+    fn read(&self, dialect: Dialect, values: &[Option<&str>]) -> ReaderArgs {
+        let permute = matches!(dialect, Dialect::Gnu) || self.bsd_permutes;
+        let mut args = ReaderArgs {
+            files: Vec::new(),
+            unknown: false,
+        };
+        let mut operands = Vec::new();
+        let mut pattern_given = false;
+        let mut take = |args: &mut ReaderArgs, role: Role, index: usize, value: Option<&str>| {
+            pattern_given |= matches!(role, Role::Pattern | Role::PatternFile);
+            match (role, value) {
+                (Role::File | Role::PatternFile, Some(file)) if !file.is_empty() => {
+                    args.files.push((index, file.to_owned()));
+                }
+                (Role::FileList, _) => args.unknown = true,
+                _ => {}
+            }
+        };
+        let mut unplaced = false;
+        let mut i = 0;
+        let mut options = true;
+        while let Some(&value) = values.get(i) {
+            let index = i;
+            i += 1;
+            let Some(arg) = value.filter(|arg| options && arg.starts_with('-') && *arg != "-")
+            else {
+                options &= permute;
+                if !matches!(value, Some("-" | "")) {
+                    operands.push((index, value));
+                }
+                continue;
+            };
+            if arg == "--" {
+                options = false;
+            } else if let Some(long) = arg.strip_prefix("--") {
+                let (name, attached) = long
+                    .split_once('=')
+                    .map_or((long, None), |(name, value)| (name, Some(value)));
+                let Some(option) = self.long(name) else {
+                    unplaced = true;
+                    take(&mut args, Role::File, index, attached);
+                    continue;
+                };
+                match (option.value(dialect), attached) {
+                    (Value::None, _) | (Value::Optional, None) => {}
+                    (_, Some(value)) => take(&mut args, option.role, index, Some(value)),
+                    (Value::Required, None) => {
+                        if let Some(&next) = values.get(i) {
+                            take(&mut args, option.role, i, next);
+                            i += 1;
+                        }
+                    }
+                }
+            } else {
+                let cluster = &arg[1..];
+                if self.numeric && cluster.starts_with(|c: char| c.is_ascii_digit()) {
+                    continue;
+                }
+                for (offset, c) in cluster.char_indices() {
+                    let Some(option) = self.short(c).filter(|o| o.value(dialect) != Value::None)
+                    else {
+                        continue;
+                    };
+                    let rest = &cluster[offset + c.len_utf8()..];
+                    if !rest.is_empty() {
+                        take(&mut args, option.role, index, Some(rest));
+                    } else if option.value(dialect) == Value::Required
+                        && let Some(&next) = values.get(i)
+                    {
+                        take(&mut args, option.role, i, next);
+                        i += 1;
+                    }
+                    break;
+                }
+            }
+        }
+        let skip = usize::from(self.pattern && !pattern_given && !unplaced);
+        for (index, operand) in operands.into_iter().skip(skip) {
+            args.files
+                .extend(operand.map(|file| (index, file.to_owned())));
+        }
+        args
+    }
+
+    /// The long option `--name`, or the one listed option `name` abbreviates, as getopt accepts.
+    /// An abbreviation getopt finds ambiguous among options the grammar leaves out makes the reader
+    /// exit before reading.
     fn long(&self, name: &str) -> Option<&ReaderOpt> {
-        self.options
-            .iter()
-            .find(|option| option.name.strip_prefix("--") == Some(name))
+        let longs = || {
+            self.options
+                .iter()
+                .filter_map(|option| Some((option.name.strip_prefix("--")?, option)))
+        };
+        if let Some((_, option)) = longs().find(|(long, _)| *long == name) {
+            return Some(option);
+        }
+        let mut abbreviated = longs().filter(|(long, _)| long.starts_with(name));
+        match (abbreviated.next(), abbreviated.next()) {
+            (Some((_, option)), None) => Some(option),
+            _ => None,
+        }
     }
 
     /// The single-letter option `-c`.
@@ -2412,10 +2466,11 @@ impl ReaderGrammar {
     }
 }
 
-/// The option grammar of the reader `name`.
-/// `cat` takes no value, and every operand of `find`'s expression counts as a file.
+/// The option grammar of reader `name`.
+/// Every operand of `find`'s expression counts as a file.
 fn reader_grammar(name: &str) -> &'static ReaderGrammar {
     match name {
+        "find" => &FIND_GRAMMAR,
         "grep" => &GREP_GRAMMAR,
         "head" => &HEAD_GRAMMAR,
         "ls" => &LS_GRAMMAR,
@@ -2425,6 +2480,11 @@ fn reader_grammar(name: &str) -> &'static ReaderGrammar {
         _ => &ReaderGrammar::NONE,
     }
 }
+
+const FIND_GRAMMAR: ReaderGrammar = ReaderGrammar {
+    bsd_permutes: true,
+    ..ReaderGrammar::NONE
+};
 
 const GREP_GRAMMAR: ReaderGrammar = ReaderGrammar {
     options: &[
@@ -2441,7 +2501,7 @@ const GREP_GRAMMAR: ReaderGrammar = ReaderGrammar {
         takes("--binary-files"),
         attached("--color"),
         attached("--colour"),
-        takes("--context"),
+        takes("--context").bsd(Value::Optional),
         takes("--devices"),
         takes("--directories"),
         takes("--exclude"),
@@ -2450,10 +2510,12 @@ const GREP_GRAMMAR: ReaderGrammar = ReaderGrammar {
         takes("--file").with(Role::PatternFile),
         takes("--group-separator"),
         takes("--include"),
+        takes("--include-dir"),
         takes("--label"),
         takes("--max-count"),
         takes("--regexp").with(Role::Pattern),
     ],
+    bsd_permutes: true,
     numeric: true,
     pattern: true,
 };
@@ -2466,9 +2528,10 @@ const HEAD_GRAMMAR: ReaderGrammar = ReaderGrammar {
 
 const LS_GRAMMAR: ReaderGrammar = ReaderGrammar {
     options: &[
-        takes("-I"),
-        takes("-T"),
-        takes("-w"),
+        takes("-D").bsd_only(),
+        takes("-I").gnu_only(),
+        takes("-T").gnu_only(),
+        takes("-w").gnu_only(),
         takes("--block-size"),
         attached("--color"),
         takes("--format"),
@@ -2490,8 +2553,9 @@ const SED_GRAMMAR: ReaderGrammar = ReaderGrammar {
     options: &[
         takes("-e").with(Role::Pattern),
         takes("-f").with(Role::PatternFile),
-        attached("-i"),
-        takes("-l"),
+        takes("-I"),
+        attached("-i").bsd(Value::Required),
+        takes("-l").gnu_only(),
         takes("--expression").with(Role::Pattern),
         takes("--file").with(Role::PatternFile),
         attached("--in-place"),
@@ -2503,9 +2567,11 @@ const SED_GRAMMAR: ReaderGrammar = ReaderGrammar {
 
 const TAIL_GRAMMAR: ReaderGrammar = ReaderGrammar {
     options: &[
+        takes("-b"),
         takes("-c"),
         takes("-n"),
         takes("-s"),
+        takes("--blocks"),
         takes("--bytes"),
         attached("--follow"),
         takes("--lines"),
@@ -2520,17 +2586,21 @@ const TAIL_GRAMMAR: ReaderGrammar = ReaderGrammar {
 const WC_GRAMMAR: ReaderGrammar = ReaderGrammar {
     options: &[
         takes("--files0-from").with(Role::FileList),
+        takes("--libxo"),
         takes("--total"),
     ],
     ..ReaderGrammar::NONE
 };
 
-/// One reader option that takes a value.
+/// One reader option that takes a value in either build.
+#[derive(Clone, Copy)]
 struct ReaderOpt {
     name: &'static str,
-    /// [`Value::Required`] for a value attached or in the next word, or [`Value::Optional`] for
-    /// one only attached.
-    value: Value,
+    /// What the GNU build takes: [`Value::Required`] for a value attached or in the next word,
+    /// [`Value::Optional`] for one only attached, or [`Value::None`] for none.
+    gnu: Value,
+    /// What the BSD build takes, in the same terms.
+    bsd: Value,
     role: Role,
 }
 
@@ -2538,19 +2608,46 @@ impl ReaderOpt {
     const fn with(self, role: Role) -> Self {
         Self { role, ..self }
     }
+
+    /// This option taking `value` in the BSD build.
+    const fn bsd(self, value: Value) -> Self {
+        Self { bsd: value, ..self }
+    }
+
+    /// This option as a flag in the BSD build.
+    const fn gnu_only(self) -> Self {
+        self.bsd(Value::None)
+    }
+
+    /// This option as a flag in the GNU build.
+    const fn bsd_only(self) -> Self {
+        Self {
+            gnu: Value::None,
+            ..self
+        }
+    }
+
+    const fn value(&self, dialect: Dialect) -> Value {
+        match dialect {
+            Dialect::Gnu => self.gnu,
+            Dialect::Bsd => self.bsd,
+        }
+    }
 }
 
 const fn takes(name: &'static str) -> ReaderOpt {
     ReaderOpt {
         name,
-        value: Value::Required,
+        gnu: Value::Required,
+        bsd: Value::Required,
         role: Role::Value,
     }
 }
 
 const fn attached(name: &'static str) -> ReaderOpt {
     ReaderOpt {
-        value: Value::Optional,
+        gnu: Value::Optional,
+        bsd: Value::Optional,
         ..takes(name)
     }
 }
@@ -3791,6 +3888,7 @@ mod tests {
                 "sed --in 's/a/b/' a.rs",
                 "sed --fi=script.sed a.rs",
                 "sed --exp='w out' p a.rs",
+                "sed 'w out' -e p a.rs",
                 "sed -ni 'p' a.rs",
                 "sed --in-place=.bak 's/a/b/' a.rs",
                 "sed -f script.sed a.rs",
@@ -3893,14 +3991,30 @@ mod tests {
                 ("grep", "--color=auto -m 1 pat x"),
                 ("grep", "-e pat x"),
                 ("grep", "--regexp=pat -- x"),
-                ("ls", "-I target x"),
+                ("grep", "--reg=pat x"),
+                ("grep", "--regex pat x"),
+                ("tail", "--lin 20 x"),
                 ("ls", "--sort=size x"),
-                ("sed", "-n -l 80 1p x"),
                 ("sed", "-i.bak s/a/b/ x"),
                 ("wc", "-l --total=never x"),
                 ("cat", "-n - x"),
             ] {
                 assert_eq!(files(reader, args), ["x"], "{reader} {args}");
+            }
+        }
+
+        #[test]
+        fn counts_each_file_a_gnu_or_a_bsd_build_reads() {
+            for (reader, args, expected) in [
+                ("ls", "-I target x", &["target", "x"][..]),
+                ("ls", "-D %s x", &["%s", "x"]),
+                ("sed", "-n -l 80 1p x", &["1p", "x"]),
+                ("sed", "-i .bak s/a/b/ x", &["s/a/b/", "x"]),
+                ("grep", "--context 3 pat x", &["pat", "x"]),
+                ("tail", "x -n 5", &["x", "-n", "5"]),
+                ("cat", "x -n", &["x", "-n"]),
+            ] {
+                assert_eq!(files(reader, args), expected, "{reader} {args}");
             }
         }
 
@@ -3921,9 +4035,9 @@ mod tests {
         #[test]
         fn reads_an_option_it_cannot_place_as_naming_a_file() {
             for (reader, args, expected) in [
-                ("tail", "--lin 20 x", &["20", "x"][..]),
-                ("tail", "-b 20 x", &["20", "x"]),
-                ("grep", "--unknown=f pat x", &["f", "x"]),
+                ("tail", "-z 20 x", &["20", "x"][..]),
+                ("grep", "--unknown=f pat x", &["f", "pat", "x"]),
+                ("grep", "--ex=a pat x", &["a", "pat", "x"]),
                 ("tail", "-n", &[]),
             ] {
                 assert_eq!(files(reader, args), expected, "{reader} {args}");

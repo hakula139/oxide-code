@@ -3707,6 +3707,8 @@ mod tests {
                 assert_eq!(decide("cat .env"), Decision::Ask);
                 assert_eq!(decide("cat secrets/key"), Decision::Ask);
                 assert_eq!(decide("grep --file=.env x"), Decision::Ask);
+                assert_eq!(decide("grep --reg=x .env"), Decision::Ask);
+                assert_eq!(decide("grep --unknown=x key .env"), Decision::Ask);
             }
 
             #[test]
