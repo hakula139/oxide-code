@@ -91,7 +91,7 @@ impl SlashPopup {
     }
 
     /// Returns the command line the selected row completes to: `/{name}` in name mode, or
-    /// `/{cmd} {value}` in arg mode.
+    /// `/{cmd} {value}` in arg mode. Hidden popups have none.
     pub(super) fn completion(&self) -> Option<String> {
         let list = self.list.as_ref()?;
         let value = &list.rows[list.selected].value;
