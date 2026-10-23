@@ -43,8 +43,11 @@ pub fn init_tracing(tui_mode: bool) -> Result<Option<WorkerGuard>> {
     }
 }
 
+/// The `RUST_LOG` directives, or `warn` when the variable is unset, empty, or invalid.
 fn make_filter() -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+    env::string("RUST_LOG")
+        .and_then(|directives| EnvFilter::try_new(directives).ok())
+        .unwrap_or_else(|| EnvFilter::new("warn"))
 }
 
 fn log_dir() -> Result<PathBuf> {
@@ -131,20 +134,6 @@ mod tests {
         use super::*;
 
         #[test]
-        fn defaults_to_warn_when_rust_log_unset() {
-            temp_env::with_var_unset("RUST_LOG", || {
-                assert_eq!(make_filter().to_string(), "warn");
-            });
-        }
-
-        #[test]
-        fn empty_rust_log_yields_empty_filter() {
-            temp_env::with_var("RUST_LOG", Some(""), || {
-                assert_eq!(make_filter().to_string(), "");
-            });
-        }
-
-        #[test]
         fn honors_rust_log_level() {
             temp_env::with_var("RUST_LOG", Some("debug"), || {
                 assert_eq!(make_filter().to_string(), "debug");
@@ -156,6 +145,15 @@ mod tests {
             temp_env::with_var("RUST_LOG", Some("info,reqwest=warn"), || {
                 assert_eq!(make_filter().to_string(), "reqwest=warn,info");
             });
+        }
+
+        #[test]
+        fn defaults_to_warn_when_rust_log_is_unset_empty_or_invalid() {
+            for value in [None, Some(""), Some("ox=loud")] {
+                let filter = temp_env::with_var("RUST_LOG", value, make_filter);
+
+                assert_eq!(filter.to_string(), "warn", "{value:?}");
+            }
         }
     }
 

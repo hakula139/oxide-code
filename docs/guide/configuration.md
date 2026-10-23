@@ -307,6 +307,7 @@ A variable that maps to a config key overrides that key in every file.
 | `OX_SHOW_THINKING`                       | `tui.show_thinking`                        | Show extended thinking                                                                        |
 | `OX_SHOW_WELCOME`                        | `tui.show_welcome`                         | Paint the welcome splash                                                                      |
 | `OX_STATUS_LINE`                         | `tui.status_line`                          | Comma-separated status-line segments                                                          |
+| `RUST_LOG`                               | -                                          | [Log filter](#logs), `warn` when unset or invalid                                             |
 | `XDG_CONFIG_HOME`                        | -                                          | Base of the user config directory, default `~/.config`                                        |
 | `XDG_DATA_HOME`                          | -                                          | Base of the sessions, the device ID, and the oxide-code login, default `~/.local/share`       |
 | `XDG_STATE_HOME`                         | -                                          | Base of the log directory, default `~/.local/state`                                           |
@@ -317,4 +318,3 @@ A variable that maps to a config key overrides that key in every file.
 
 - **`HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY`** send requests through a proxy, and `NO_PROXY` lists comma-separated hosts that skip it. The lower-case names work too, and `ALL_PROXY` applies where the variable for the request's scheme is unset.
 - **`SSL_CERT_FILE` and `SSL_CERT_DIR`** replace the system trust store on Linux with a PEM bundle or directories of certificates.
-- **`RUST_LOG`** sets the [log filter](#logs).
