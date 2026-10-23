@@ -543,6 +543,13 @@ pub(crate) mod local_testing {
             .unwrap();
     }
 
+    /// Marks the file at `path` read-only, so opening it for writing fails on every platform.
+    pub(super) fn make_read_only(path: &Path) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
     /// Denies reading the file or directory at `path` until the returned guard drops, which
     /// restores access so the temp dir can be removed.
     pub(super) fn deny_read_access(path: &Path) -> ReadDenied {
