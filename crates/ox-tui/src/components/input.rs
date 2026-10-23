@@ -919,13 +919,29 @@ mod tests {
         use super::*;
 
         #[test]
-        fn no_width_falls_back_to_logical() {
-            // Before the first render the textarea has no wrap width.
-            let mut input = test_input();
-            assert_eq!(input.visual_line_count(), 1);
+        fn returns_the_cached_count_without_remeasuring() {
+            let input = test_input();
+            input.visual_lines.set(Some(4));
 
-            input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
-            assert_eq!(input.visual_line_count(), 2);
+            assert_eq!(input.visual_line_count(), 4);
+        }
+
+        #[test]
+        fn keeps_the_count_across_same_width_renders_and_cursor_moves() {
+            let mut input = test_input();
+            type_text(&mut input, &"a".repeat(25));
+            render_to_backend(&input, 12, 6);
+            assert_eq!(input.visual_line_count(), 3);
+
+            render_to_backend(&input, 12, 6);
+            assert_eq!(
+                input.visual_lines.get(),
+                Some(3),
+                "a same-width render keeps it"
+            );
+
+            input.handle_event(&key(KeyCode::Left, KeyModifiers::NONE));
+            assert_eq!(input.visual_lines.get(), Some(3), "a cursor move keeps it");
         }
 
         #[test]
@@ -947,6 +963,16 @@ mod tests {
 
             input.set_text("a\nb\nc");
             assert_eq!(input.visual_line_count(), 3, "set_text re-measures");
+        }
+
+        #[test]
+        fn no_width_falls_back_to_logical() {
+            // Before the first render the textarea has no wrap width.
+            let mut input = test_input();
+            assert_eq!(input.visual_line_count(), 1);
+
+            input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
+            assert_eq!(input.visual_line_count(), 2);
         }
 
         #[test]
