@@ -5,7 +5,7 @@ expression: stdout
 {"type":"tool_call_start","data":{"id":"call-1","name":"look","input":{},"icon":"⟡","label":"Look"}}
 {"type":"tool_call_end","data":{"id":"call-1","content":"README.md","is_error":false,"title":null,"view":{"type":"text","data":{"content":"README.md"}}}}
 {"type":"tool_call_start","data":{"id":"call-2","name":"bash","input":{"command":"git push"},"icon":"$","label":"git push"}}
-{"type":"tool_call_end","data":{"id":"call-2","content":"The bash call was denied. This run cannot ask for approval. To allow this call, add `\"git push\"` to `permission.allow.exec` in the user config.","is_error":true,"title":null,"view":{"type":"text","data":{"content":"The bash call was denied. This run cannot ask for approval. To allow this call, add `\"git push\"` to `permission.allow.exec` in the user config."}}}}
+{"type":"tool_call_end","data":{"id":"call-2","content":"The bash call was denied because it needs approval and this run cannot ask for it. No allow pattern matches it. Do not retry it as written. To allow it, ask the user to add `\"git push\"` to `permission.allow.exec` in the user config.","is_error":true,"title":null,"view":{"type":"text","data":{"content":"The bash call was denied because it needs approval and this run cannot ask for it. No allow pattern matches it. Do not retry it as written. To allow it, ask the user to add `\"git push\"` to `permission.allow.exec` in the user config."}}}}
 {"type":"stream_token","data":"Done."}
 {"type":"usage_updated","data":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018000000000000002}}
 {"type":"turn_complete"}

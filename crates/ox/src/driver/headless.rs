@@ -112,13 +112,12 @@ where
     let prompt = Op::prompt(command::unescape_literal(prompt));
     // A send fails only once the engine has stopped, which `render_op` then reports.
     _ = handle.ops.send(prompt.clone()).await;
-    let mut approver = Unattended;
     let rendered = render_op(
         &mut handle.events,
         printer,
         &handle.ops,
         &prompt,
-        &mut approver,
+        None::<&mut Unattended>,
     );
     let (end, mut exit) = tokio::select! {
         end = rendered => match end {
@@ -454,7 +453,8 @@ mod tests {
                     let tools = bash_registry(vec![Box::new(LookTool)]);
                     let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
                         .await
-                        .with_tools(tools);
+                        .with_tools(tools)
+                        .unattended();
                     let session_id = engine.session_id().to_owned();
                     let printer =
                         Printer::new(format, false, session_id.clone(), Vec::new(), Vec::new());

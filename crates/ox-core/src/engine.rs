@@ -250,6 +250,12 @@ impl Engine {
         self.store.project_root()
     }
 
+    /// Whether a person can answer an approval request in this run, which
+    /// [`Config::set_unattended`](crate::config::Config::set_unattended) rules out.
+    pub const fn attended(&self) -> bool {
+        self.policy.attended()
+    }
+
     /// Projects the loaded transcript for a frontend to show. Takes the compaction boundary and
     /// tool metadata it loaded with, so a later call projects without them.
     pub fn take_history(&mut self) -> Vec<Interaction> {
