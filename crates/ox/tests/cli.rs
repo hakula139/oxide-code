@@ -737,6 +737,57 @@ async fn headless_mode_flag_overrides_the_configured_mode() {
     );
 }
 
+#[tokio::test]
+async fn unattended_runs_deny_a_call_that_needs_approval_and_read_no_line_as_an_answer() {
+    for (args, input, requests_sent) in [
+        (&["-p", "push it"][..], None, 2),
+        (&["--no-tui"], Some(&b"push it\ny\n"[..]), 3),
+    ] {
+        let server = MockServer::start().await;
+        mount_tool_call_once(&server, "toolu_1", "bash", r#"{"command":"git push"}"#).await;
+        mount_reply(&server, "Done.").await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = tokio::process::Command::from(ox(dir.path()));
+        command
+            .args(args)
+            .current_dir(dir.path())
+            .env("ANTHROPIC_AUTH_TOKEN", "test-token")
+            .env("ANTHROPIC_BASE_URL", server.uri())
+            .env_remove("OX_PERMISSION_MODE")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if input.is_some() {
+            command.stdin(Stdio::piped());
+        }
+        let mut child = command.spawn().unwrap();
+        if let Some(input) = input {
+            let mut stdin = child.stdin.take().unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stdin, input)
+                .await
+                .unwrap();
+        }
+
+        let output = child.wait_with_output().await.unwrap();
+
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        let requests = request_bodies(&server).await;
+        assert_eq!(
+            requests.len(),
+            requests_sent,
+            "{args:?}: a `y` line is a prompt"
+        );
+        let result = &requests[1]["messages"].as_array().unwrap().last().unwrap()["content"][0];
+        assert!(
+            result["content"].as_str().is_some_and(|content| {
+                content.starts_with(
+                "The bash call was denied because it needs approval and this run cannot ask for it."
+            )
+            }),
+            "{args:?}: {result}"
+        );
+    }
+}
+
 /// Runs `ox` with `args` until its request reaches a reply that never comes, then sends it
 /// `signal`. Returns its exit status and stdout.
 #[cfg(unix)]

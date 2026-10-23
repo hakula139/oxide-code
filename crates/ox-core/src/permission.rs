@@ -668,6 +668,8 @@ pub(crate) enum Decision {
     Allow,
     Ask,
     Deny,
+    /// Deny a call that would ask, since nobody can answer an approval request in this run.
+    Unapproved,
 }
 
 /// A call's [`Decision`] and what settled it.
@@ -780,6 +782,8 @@ pub(crate) struct Policy {
     session_allow: Vec<Rule>,
     /// The shipped groups `[permission.defaults]` leaves on.
     enabled: Vec<Shipped>,
+    /// Whether a person can answer an approval request in this run.
+    attended: bool,
 }
 
 /// A deny or ask rule, with the shipped group it comes from.
@@ -820,6 +824,7 @@ impl Default for Policy {
             allow: Vec::new(),
             session_allow: Vec::new(),
             enabled: Shipped::VARIANTS.to_vec(),
+            attended: true,
         }
     }
 }
@@ -891,6 +896,7 @@ impl Policy {
             allow,
             session_allow: Vec::new(),
             enabled: enabled().collect(),
+            attended: true,
         })
     }
 
@@ -900,6 +906,16 @@ impl Policy {
 
     pub(crate) const fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
+    }
+
+    pub(crate) const fn attended(&self) -> bool {
+        self.attended
+    }
+
+    /// Marks the run as one nobody can answer an approval request in, so each call that would ask
+    /// is [unapproved](Decision::Unapproved).
+    pub(crate) const fn set_unattended(&mut self) {
+        self.attended = false;
     }
 
     pub(crate) fn session_allow(&self) -> &[Rule] {
@@ -995,7 +1011,21 @@ impl Policy {
     /// file it writes, or a read of a file it redirects into its input. It asks at step 3 in each
     /// case [`Self::asks`] lists, and step 6 allows it only when it is not opaque and
     /// [`Self::allows_command`] holds.
+    ///
+    /// In a run nobody attends, a call that would ask is [unapproved](Decision::Unapproved).
     pub(crate) fn verdict(&self, class: PermissionClass, target: &Target<'_>) -> Verdict {
+        let verdict = self.settle(class, target);
+        if verdict.decision == Decision::Ask && !self.attended {
+            return Verdict {
+                decision: Decision::Unapproved,
+                ..verdict
+            };
+        }
+        verdict
+    }
+
+    /// The verdict of the pipeline [`Self::verdict`] lists, as if a person attended the run.
+    fn settle(&self, class: PermissionClass, target: &Target<'_>) -> Verdict {
         let verdict = |decision, basis| Verdict { decision, basis };
         if let Some(rule) = held_by(&self.deny, class, target) {
             return verdict(Decision::Deny, rule.basis(Tier::Deny));
@@ -3929,6 +3959,55 @@ mod tests {
                     (Decision::Allow, Basis::Mode(Mode::Yolo)),
                     "an edit that names no path has no protected group",
                 );
+            }
+
+            #[test]
+            fn of_an_unattended_run_leaves_only_what_would_ask_unapproved() {
+                let unattended = |mode| {
+                    let mut p = policy(mode, &[(EXEC, "rm *")], &[(EXEC, "git push *")], &[]);
+                    p.set_unattended();
+                    p
+                };
+                let manual = unattended(Mode::Manual);
+                let plan = unattended(Mode::Plan);
+
+                for (p, class, target, expected) in [
+                    (
+                        &manual,
+                        EXEC,
+                        command("rm x"),
+                        (Decision::Deny, rule_basis(Tier::Deny, EXEC, "rm *")),
+                    ),
+                    (
+                        &plan,
+                        EXEC,
+                        command("ls"),
+                        (Decision::Deny, Basis::Mode(Mode::Plan)),
+                    ),
+                    (
+                        &manual,
+                        READ,
+                        outside(&abs("/etc/hosts")),
+                        (Decision::Allow, Basis::Read),
+                    ),
+                    (
+                        &manual,
+                        EXEC,
+                        command("git push origin"),
+                        (
+                            Decision::Unapproved,
+                            rule_basis(Tier::Ask, EXEC, "git push *"),
+                        ),
+                    ),
+                    (
+                        &manual,
+                        EXEC,
+                        command("git status"),
+                        (Decision::Unapproved, Basis::Mode(Mode::Manual)),
+                    ),
+                ] {
+                    assert_eq!(verdict(p, class, &target), expected, "{target:?}");
+                }
             }
         }
     }

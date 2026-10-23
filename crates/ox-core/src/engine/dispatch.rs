@@ -373,6 +373,10 @@ impl<'r> Dispatcher<'r, '_> {
                 name,
                 format_args!("by {}", verdict.basis),
             ))),
+            Decision::Unapproved => {
+                let fix = self.dispatch_ctx.policy.config_fix(class, &prepared.access);
+                Ok(Some(unapproved_output(name, &verdict.basis, fix.as_ref())))
+            }
             Decision::Ask => {
                 let grant = self
                     .dispatch_ctx
@@ -405,13 +409,6 @@ impl<'r> Dispatcher<'r, '_> {
                     ApprovalDecision::DenyWithFeedback { feedback } => Ok(Some(ToolOutput::error(
                         format!("The user denied the {name} call and wrote: {feedback}"),
                     ))),
-                    ApprovalDecision::DenyUnattended => {
-                        let fix = self.dispatch_ctx.policy.config_fix(class, &prepared.access);
-                        Ok(Some(ToolOutput::error(format!(
-                            "The {name} call was denied. {}",
-                            unattended_reason(&verdict.basis, fix.as_ref()),
-                        ))))
-                    }
                     ApprovalDecision::Abort => Err(TurnAbort::Cancelled),
                 }
             }
@@ -464,15 +461,21 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ))
 }
 
-/// Why a run with nobody to ask denied a call, naming what a rerun would need:
-/// the config `fix` that lets the call through, the rule that made it ask,
-/// or simpler syntax for a command ox could not parse.
-fn unattended_reason(basis: &Basis, fix: Option<&ConfigFix>) -> String {
-    match (fix, basis) {
+/// The synthetic error result for a call that would ask in a run nobody attends.
+/// It names what made the call ask, then the config `fix` that lets it through, or what else the
+/// model can do.
+fn unapproved_output(name: &str, basis: &Basis, fix: Option<&ConfigFix>) -> ToolOutput {
+    let why = match basis {
+        Basis::Mode(_) => "No allow pattern matches it.".to_owned(),
+        Basis::Unparsed => "ox could not parse it, \
+                            so the permission rules may not see everything it runs."
+            .to_owned(),
+        basis => format!("It asks because of {basis}."),
+    };
+    let next = match (fix, basis) {
         (Some(ConfigFix::Allow(rule)), _) => format!(
-            "This run cannot ask for approval. \
-             To allow this call, add {} in the user config.",
-            allow_entry(rule),
+            "To allow it, ask the user to add {} in the user config.",
+            allow_entry(rule)
         ),
         (Some(ConfigFix::Disable { group, allow }), _) => {
             let allow = allow
@@ -480,32 +483,29 @@ fn unattended_reason(basis: &Basis, fix: Option<&ConfigFix>) -> String {
                 .map(|rule| format!(" and add {}", allow_entry(rule)))
                 .unwrap_or_default();
             format!(
-                "This run cannot ask for approval, and this call asks because of {basis}. \
-                 Approve it in an interactive session, \
-                 or set `permission.defaults.{group} = false`{allow} in the user config."
+                "To allow it, ask the user to set `permission.defaults.{group} = false`{allow} \
+                 in the user config."
             )
         }
-        (None, Basis::Mode(_)) => {
-            "This run cannot ask for approval, and no allow pattern matches this call. \
-             Under `permission.allow` in the user config, \
-             a chained command needs a pattern per command, \
-             and a word that expands needs a pattern ending in `*` at that word. \
-             A command that hides what it runs, \
-             such as `$(...)`, `sh -c`, or `cd /tmp/x && make`, \
-             needs approval in an interactive session."
-                .to_owned()
+        (None, Basis::Mode(_)) => "To allow it, ask the user to add a pattern \
+                                   for each of its commands under `permission.allow` \
+                                   in the user config, \
+                                   ending a pattern in `*` at a word that expands. \
+                                   No pattern covers a command that hides what it runs, \
+                                   such as `$(...)`, `sh -c`, or `cd /tmp/x && make`."
+            .to_owned(),
+        (None, Basis::Unparsed) => "Rewrite it in simpler shell syntax.".to_owned(),
+        (None, _) => {
+            "Choose a different approach or ask the user to adjust permissions.".to_owned()
         }
-        (None, Basis::Unparsed) => {
-            "This run cannot ask for approval, and ox could not parse this command, \
-             so the permission rules may not see everything it runs. \
-             Rewrite it in simpler shell syntax, or approve it in an interactive session."
-                .to_owned()
-        }
-        (None, basis) => format!(
-            "This run cannot ask for approval, and this call asks because of {basis}. \
-             Approve it in an interactive session."
-        ),
-    }
+    };
+    ToolOutput::error(format!(
+        "The {name} call was denied because it needs approval \
+         and this run cannot ask for it. \
+         {why} \
+         Do not retry it as written. \
+         {next}"
+    ))
 }
 
 /// Where the user config adds `rule`, with its pattern as a TOML string.
@@ -1241,24 +1241,23 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn deny_unattended_names_every_config_change_the_call_needs() {
+            async fn unattended_run_denies_without_asking_and_names_every_config_change() {
                 let tools = bash_registry(Vec::new());
                 let cases = [
                     (
                         "make > .git/log",
                         &["make *"][..],
-                        "The bash call was denied. This run cannot ask for approval, \
-                         and this call asks because of the built-in `git` rule. \
-                         Approve it in an interactive session, \
-                         or set `permission.defaults.git = false` in the user config.",
+                        "It asks because of the built-in `git` rule. \
+                         Do not retry it as written. \
+                         To allow it, ask the user to set `permission.defaults.git = false` \
+                         in the user config.",
                     ),
                     (
                         "rm -rf build",
                         &[],
-                        "The bash call was denied. This run cannot ask for approval, \
-                         and this call asks because of the built-in `rm` rule. \
-                         Approve it in an interactive session, \
-                         or set `permission.defaults.rm = false` \
+                        "It asks because of the built-in `rm` rule. \
+                         Do not retry it as written. \
+                         To allow it, ask the user to set `permission.defaults.rm = false` \
                          and add `\"rm -rf build\"` to `permission.allow.exec` in the user config.",
                     ),
                 ];
@@ -1267,12 +1266,7 @@ mod tests {
                     let sink = CapturingSink::default();
                     let mut dispatch_ctx =
                         dispatch_with(Mode::Manual, &[], allow, Path::new("/repo"));
-                    let (tx, mut rx) = mpsc::channel::<Op>(1);
-                    tx.try_send(Op::Resolve {
-                        id: "tool_1".to_owned(),
-                        decision: ApprovalDecision::DenyUnattended,
-                    })
-                    .unwrap();
+                    dispatch_ctx.policy.set_unattended();
 
                     let denial = gate_call(
                         &tools,
@@ -1280,14 +1274,22 @@ mod tests {
                         "bash",
                         json!({ "command": command }),
                         &sink,
-                        &mut rx,
+                        &mut inert_ops(),
                         &mut dispatch_ctx,
                     )
                     .await
                     .expect("an unattended denial resolves without abort")
                     .output();
 
-                    assert_eq!(denial.content, expected, "{command}");
+                    assert_eq!(
+                        denial.content,
+                        format!(
+                            "The bash call was denied because it needs approval \
+                             and this run cannot ask for it. {expected}"
+                        ),
+                        "{command}"
+                    );
+                    assert_eq!(approval_ids(&sink), [] as [&str; 0], "{command}");
                 }
             }
 
@@ -1408,11 +1410,11 @@ mod tests {
         }
     }
 
-    mod unattended_reason {
+    mod unapproved_output {
         use super::*;
 
         #[test]
-        fn names_the_config_fix_or_the_rule_that_made_it_ask() {
+        fn names_what_made_the_call_ask_and_the_config_fix_or_next_step() {
             let manual = Basis::Mode(Mode::Manual);
             let allow = ConfigFix::Allow(exec_grant(r#"echo "a\b""#).suggested().clone());
             let ask = Basis::Rule {
@@ -1423,49 +1425,60 @@ mod tests {
                 (
                     &manual,
                     Some(&allow),
-                    "This run cannot ask for approval. \
-                     To allow this call, \
-                     add `'''echo 'a\\b''''` to `permission.allow.exec` in the user config.",
+                    "No allow pattern matches it. \
+                     Do not retry it as written. \
+                     To allow it, ask the user to add `'''echo 'a\\b''''` \
+                     to `permission.allow.exec` in the user config.",
                 ),
                 (
                     &manual,
                     None,
-                    "This run cannot ask for approval, and no allow pattern matches this call. \
-                     Under `permission.allow` in the user config, \
-                     a chained command needs a pattern per command, \
-                     and a word that expands needs a pattern ending in `*` at that word. \
-                     A command that hides what it runs, \
-                     such as `$(...)`, `sh -c`, or `cd /tmp/x && make`, \
-                     needs approval in an interactive session.",
+                    "No allow pattern matches it. \
+                     Do not retry it as written. \
+                     To allow it, ask the user to add a pattern for each of its commands \
+                     under `permission.allow` in the user config, \
+                     ending a pattern in `*` at a word that expands. \
+                     No pattern covers a command that hides what it runs, \
+                     such as `$(...)`, `sh -c`, or `cd /tmp/x && make`.",
                 ),
                 (
                     &Basis::Unparsed,
                     None,
-                    "This run cannot ask for approval, and ox could not parse this command, \
+                    "ox could not parse it, \
                      so the permission rules may not see everything it runs. \
-                     Rewrite it in simpler shell syntax, \
-                     or approve it in an interactive session.",
+                     Do not retry it as written. \
+                     Rewrite it in simpler shell syntax.",
                 ),
                 (
                     &Basis::Builtin(Shipped::Ssh),
                     None,
-                    "This run cannot ask for approval, \
-                     and this call asks because of the built-in `ssh` rule. \
-                     Approve it in an interactive session.",
+                    "It asks because of the built-in `ssh` rule. \
+                     Do not retry it as written. \
+                     Choose a different approach or ask the user to adjust permissions.",
                 ),
                 (
                     &ask,
                     None,
-                    "This run cannot ask for approval, \
-                     and this call asks because of the `ask.exec` pattern `git push *`. \
-                     Approve it in an interactive session.",
+                    "It asks because of the `ask.exec` pattern `git push *`. \
+                     Do not retry it as written. \
+                     Choose a different approach or ask the user to adjust permissions.",
                 ),
             ];
 
             for (basis, fix, expected) in cases {
-                let reason = unattended_reason(basis, fix);
+                let output = unapproved_output("bash", basis, fix);
 
-                assert_eq!(reason, expected, "{basis:?}");
+                assert_eq!(
+                    (output.content, output.is_error),
+                    (
+                        format!(
+                            "The bash call was denied because it needs approval \
+                             and this run cannot ask for it. {expected}"
+                        ),
+                        true
+                    ),
+                    "{basis:?}"
+                );
             }
         }
     }
