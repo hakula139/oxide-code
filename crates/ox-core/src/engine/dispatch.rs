@@ -16,7 +16,7 @@ use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
-use crate::permission::{Basis, ConfigFix, Decision, Policy, SessionGrant, Workspace};
+use crate::permission::{Basis, ConfigFix, Decision, Mode, Policy, SessionGrant, Workspace};
 use crate::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::tool::spill::run_capped;
 use crate::tool::tasks::Task;
@@ -374,8 +374,14 @@ impl<'r> Dispatcher<'r, '_> {
                 format_args!("by {}", verdict.basis),
             ))),
             Decision::Unapproved => {
-                let fix = self.dispatch_ctx.policy.config_fix(class, &prepared.access);
-                Ok(Some(unapproved_output(name, &verdict.basis, fix.as_ref())))
+                let policy = &self.dispatch_ctx.policy;
+                let fix = policy.config_fix(class, &prepared.access);
+                Ok(Some(unapproved_output(
+                    name,
+                    policy.mode(),
+                    &verdict.basis,
+                    fix.as_ref(),
+                )))
             }
             Decision::Ask => {
                 let grant = self
@@ -461,10 +467,16 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ))
 }
 
-/// The synthetic error result for a call that would ask in a run nobody attends.
+/// The synthetic error result for a call that would ask in `mode` when it cannot, since `yolo` never
+/// asks or nobody attends the run.
 /// It names what made the call ask, then the config `fix` that lets it through, or what else the
 /// model can do.
-fn unapproved_output(name: &str, basis: &Basis, fix: Option<&ConfigFix>) -> ToolOutput {
+fn unapproved_output(name: &str, mode: Mode, basis: &Basis, fix: Option<&ConfigFix>) -> ToolOutput {
+    let cannot = if mode == Mode::Yolo {
+        "`yolo` mode never asks for it"
+    } else {
+        "this run cannot ask for it"
+    };
     let why = match basis {
         Basis::Mode(_) => "No allow pattern matches it.".to_owned(),
         Basis::Unparsed => "ox could not parse it, \
@@ -500,8 +512,7 @@ fn unapproved_output(name: &str, basis: &Basis, fix: Option<&ConfigFix>) -> Tool
         }
     };
     ToolOutput::error(format!(
-        "The {name} call was denied because it needs approval \
-         and this run cannot ask for it. \
+        "The {name} call was denied because it needs approval and {cannot}. \
          {why} \
          Do not retry it as written. \
          {next}"
@@ -1294,6 +1305,37 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn yolo_denies_what_a_rule_holds_without_asking() {
+                let tools = bash_registry(Vec::new());
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Yolo, &[], &[], Path::new("/repo"));
+
+                let denial = gate_call(
+                    &tools,
+                    "tool_1",
+                    "bash",
+                    json!({ "command": "rm -rf build" }),
+                    &sink,
+                    &mut inert_ops(),
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("a yolo denial resolves without abort")
+                .output();
+
+                assert_eq!(
+                    denial.content,
+                    "The bash call was denied because it needs approval \
+                     and `yolo` mode never asks for it. \
+                     It asks because of the built-in `rm` rule. \
+                     Do not retry it as written. \
+                     To allow it, ask the user to set `permission.defaults.rm = false` \
+                     in the user config."
+                );
+                assert_eq!(approval_ids(&sink), [] as [&str; 0]);
+            }
+
+            #[tokio::test]
             async fn unknown_tool_settles_without_consulting_the_policy() {
                 // An unknown tool has no permission class, so a class-wide deny must not catch it,
                 // and the model reads why the call failed.
@@ -1466,7 +1508,7 @@ mod tests {
             ];
 
             for (basis, fix, expected) in cases {
-                let output = unapproved_output("bash", basis, fix);
+                let output = unapproved_output("bash", Mode::Manual, basis, fix);
 
                 assert_eq!(
                     (output.content, output.is_error),

