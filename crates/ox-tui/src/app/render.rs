@@ -61,30 +61,25 @@ impl App {
     }
 
     pub(super) fn draw_frame(&mut self, frame: &mut Frame<'_>) {
+        let area = frame.area();
         // The status bar and one chat row stay visible. The modal, or else the input and its
         // popup, outranks the queued-prompt preview, and the preview the task panel.
-        let modal_max = frame
-            .area()
+        let modal_max = area
             .height
             .saturating_sub(StatusBar::HEIGHT + MIN_CHAT_HEIGHT);
-        let modal_height = self.modals.height(frame.area().width, modal_max);
+        let modal_height = self.modals.height(area.width, modal_max);
         // Modal owns focus, so input and popup bands collapse.
         let modal_active = self.modals.is_active();
-        let popup_height = if modal_active {
-            0
+        let (popup_height, input_height) = if modal_active {
+            (0, 0)
         } else {
-            self.input.popup_height()
-        };
-        let input_height = if modal_active {
-            0
-        } else {
-            self.input.height(frame.area().width)
+            (self.input.popup_height(), self.input.height(area.width))
         };
         let spare = modal_max.saturating_sub(modal_height + popup_height + input_height);
         let preview_height = self.preview_height().min(spare);
         let tasks_height = self.tasks.height().min(spare - preview_height);
         // Pre-fill with surface bg so unpainted gaps inherit the theme.
-        frame.render_widget(Block::default().style(self.theme.surface()), frame.area());
+        frame.render_widget(Block::default().style(self.theme.surface()), area);
         let [status, chat, tasks, preview, modal, popup, input] = Layout::vertical([
             Constraint::Length(StatusBar::HEIGHT),
             Constraint::Min(MIN_CHAT_HEIGHT),
@@ -94,7 +89,7 @@ impl App {
             Constraint::Length(popup_height),
             Constraint::Length(input_height),
         ])
-        .areas(frame.area());
+        .areas(area);
 
         self.status_bar
             .set_queued_prompts(self.queue.pending().len());

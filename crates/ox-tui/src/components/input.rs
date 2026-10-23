@@ -271,7 +271,7 @@ impl InputArea {
                 InputOutcome::Consumed
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
-                InputOutcome::Action(self.popup_submit_selected(completion))
+                InputOutcome::Action(self.clear_and_submit(completion))
             }
             _ => InputOutcome::Ignored,
         }
@@ -280,12 +280,6 @@ impl InputArea {
     fn popup_complete_to_buffer(&mut self, completion: &str) {
         self.set_text(&format!("{completion} "));
         self.refresh_popup();
-    }
-
-    fn popup_submit_selected(&mut self, completion: String) -> Action {
-        self.set_text("");
-        self.popup.set_state(None);
-        Action::Submit(completion)
     }
 
     fn refresh_popup(&mut self) {
@@ -332,11 +326,14 @@ impl InputArea {
             return None;
         }
         let submission = trim_blank_edges(&self.textarea.lines().join("\n")).to_owned();
+        Some(self.clear_and_submit(submission))
+    }
 
+    /// Empties the buffer and closes the popup, returning the action that submits `text`.
+    fn clear_and_submit(&mut self, text: String) -> Action {
         self.set_text("");
         self.popup.set_state(None);
-
-        Some(Action::Submit(submission))
+        Action::Submit(text)
     }
 }
 
