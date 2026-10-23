@@ -8,7 +8,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 4. **Project config file**: `.ox/config.toml` in the nearest directory from the working directory up to the project root that has one. The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory outside a repository.
 5. **Environment variables**: override every file. A command-line flag such as `--mode` overrides them in turn.
 
-Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$ANTHROPIC_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, or `/mode` change or a **Shift+Tab** mode switch.
+Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$ANTHROPIC_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, `/mode`, or `/theme` change or a **Shift+Tab** mode switch. Its Permissions section lists every extra root, rule, and turned-off default group the files set, each with the layer that added it, since rule lists and extra roots combine across layers and any user file can turn a default off. It shows what the files set, so it still lists extra roots when a launch from `/`, `$HOME`, or an ancestor of `$HOME` leaves the workspace without roots.
 
 ## Layers
 

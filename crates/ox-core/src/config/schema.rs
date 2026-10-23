@@ -76,8 +76,8 @@ pub(super) struct TierTable {
 }
 
 impl TierTable {
-    /// Parses every pattern of the `tier` table, naming the key and pattern of a malformed one.
-    pub(super) fn rules(&self, tier: Tier) -> Result<Vec<Rule>> {
+    /// Each class key with its patterns.
+    pub(super) const fn classes(&self) -> [(PermissionClass, &Option<Vec<String>>); 5] {
         [
             (PermissionClass::Read, &self.read),
             (PermissionClass::Edit, &self.edit),
@@ -85,18 +85,24 @@ impl TierTable {
             (PermissionClass::Net, &self.net),
             (PermissionClass::Mcp, &self.mcp),
         ]
-        .into_iter()
-        .flat_map(|(class, patterns)| {
-            patterns
-                .iter()
-                .flatten()
-                .map(move |pattern| (class, pattern))
-        })
-        .map(|(class, pattern)| {
-            Rule::parse(class, pattern)
-                .with_context(|| format!("invalid permission.{tier}.{class} pattern {pattern:?}"))
-        })
-        .collect()
+    }
+
+    /// Parses every pattern of the `tier` table, naming the key and pattern of a malformed one.
+    pub(super) fn rules(&self, tier: Tier) -> Result<Vec<Rule>> {
+        self.classes()
+            .into_iter()
+            .flat_map(|(class, patterns)| {
+                patterns
+                    .iter()
+                    .flatten()
+                    .map(move |pattern| (class, pattern))
+            })
+            .map(|(class, pattern)| {
+                Rule::parse(class, pattern).with_context(|| {
+                    format!("invalid permission.{tier}.{class} pattern {pattern:?}")
+                })
+            })
+            .collect()
     }
 }
 

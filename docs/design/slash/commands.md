@@ -12,7 +12,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary and a synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [compact.md](compact.md).
 
-- **`/config`**: Opens a [`KvOverview`](modals.md) of the resolved config, with the layer that set each value, and the config files loaded at startup. The values start from that load. A `/model`, `/effort`, or `/mode` switch, or Shift+Tab, credits the model, effort, or mode it sets to the session, while an effort the new model derives on its own shows as `default`. Values derived from the model, such as Max Tokens and Auto Compaction, and the Auth value after `/login` or `/logout` keep their loaded source.
+- **`/config`**: Opens a [`KvOverview`](modals.md) of the resolved config, with the layer that set each value, and the config files loaded at startup. The values start from that load. A `/model`, `/effort`, `/mode`, or `/theme` switch, or Shift+Tab, credits the model, effort, mode, or theme it sets to the session, while an effort the new model derives on its own shows as `default`. Values derived from the model, such as Max Tokens and Auto Compaction, and the Auth value after `/login` or `/logout` keep their loaded source.
 
 - **`/delete`**: Typed-arg only, and bare explains the missing argument. The picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), whose confirmation removes the session's JSONL and its artifact directory. Live-session refusal is layered across the picker filter, the resolver, and `session::saved::delete`.
 

@@ -33,9 +33,10 @@ use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
 use self::merge::Origins;
 use self::oauth::ClaudeCodeKeychain;
-use self::provenance::{Provenance, Source, Sourced};
+use self::provenance::{Provenance, Source, Sourced, TierPattern};
 use self::schema::{FileConfig, PermissionTable, TierTable};
 use crate::model::{Effort, ModelSpec, PromptCacheTtl};
+use crate::permission::defaults::Shipped;
 use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
 use crate::util::git::project_root;
@@ -102,6 +103,12 @@ impl ConfigSnapshot {
     pub fn apply_mode(&mut self, mode: Mode) {
         self.permission_mode = mode;
         self.provenance.permission_mode = Source::Session;
+    }
+
+    /// Applies a `/theme` switch to the built-in `name`, which `/config` credits to the session.
+    pub fn apply_theme(&mut self, name: &str) {
+        name.clone_into(&mut self.theme_name);
+        self.provenance.theme = Source::Session;
     }
 }
 
@@ -265,11 +272,11 @@ impl Config {
             .or_else(|| origins.sourced("tui.show_thinking", tui.show_thinking))
             .unwrap_or_else(|| Sourced::fallback(false));
 
-        let show_welcome = env::bool("OX_SHOW_WELCOME")?
-            .or(tui.show_welcome)
-            .unwrap_or(true);
+        let show_welcome = env_bool("OX_SHOW_WELCOME")?
+            .or_else(|| origins.sourced("tui.show_welcome", tui.show_welcome))
+            .unwrap_or_else(|| Sourced::fallback(true));
 
-        let status_line = resolve_status_line(tui.status_line)?;
+        let status_line = resolve_status_line(origins.sourced("tui.status_line", tui.status_line))?;
 
         let prompt_cache_ttl = env_parse::<PromptCacheTtl>("OX_PROMPT_CACHE_TTL")?
             .or_else(|| origins.sourced("client.prompt_cache_ttl", client.prompt_cache_ttl))
@@ -282,14 +289,14 @@ impl Config {
             model.resolve_max_tokens(max_tokens.value),
         )?;
 
-        let (permission, workspace, permission_mode) =
-            resolve_permission(permission, &origins, cwd)?;
+        let permission = resolve_permission(permission, &origins, cwd)?;
 
         let theme = ThemeConfig {
             base: tui.theme.base.unwrap_or_else(|| DEFAULT_THEME.to_owned()),
             base_source: origins.source("tui.theme.base"),
             overrides: tui.theme.overrides,
         };
+        let theme_overrides = origins.sources_under("tui.theme.overrides");
 
         let provenance = Provenance {
             layers: origins.into_layers(),
@@ -305,8 +312,15 @@ impl Config {
             max_tool_rounds: max_tool_rounds.source,
             prompt_cache_ttl: prompt_cache_ttl.source,
             compaction: compaction.source,
-            permission_mode,
+            permission_mode: permission.mode_source,
             show_thinking: show_thinking.source,
+            show_welcome: show_welcome.source,
+            status_line: status_line.source,
+            theme: theme.base_source.clone(),
+            theme_overrides,
+            extra_roots: permission.extra_roots,
+            rules: permission.rules,
+            disabled_defaults: permission.disabled_defaults,
         };
 
         Ok(Self {
@@ -321,11 +335,11 @@ impl Config {
             max_tool_rounds: max_tool_rounds.value,
             prompt_cache_ttl: prompt_cache_ttl.value,
             compaction: compaction.value,
-            permission,
-            workspace,
+            permission: permission.policy,
+            workspace: permission.workspace,
             show_thinking: show_thinking.value,
-            show_welcome,
-            status_line,
+            show_welcome: show_welcome.value,
+            status_line: status_line.value,
             theme,
             provenance,
         })
@@ -456,13 +470,18 @@ fn resolve_effort(
 }
 
 /// `OX_STATUS_LINE` > `tui.status_line` > the default roster.
-fn resolve_status_line(file: Option<Vec<StatusLineSegment>>) -> Result<Vec<StatusLineSegment>> {
-    match env::string("OX_STATUS_LINE") {
-        Some(raw) => parse_status_line_segments(&raw)
-            .with_context(|| format!("invalid OX_STATUS_LINE {raw:?}")),
-        None => validate_status_line(file.unwrap_or_else(|| StatusLineSegment::DEFAULT.to_vec()))
-            .context("invalid tui.status_line"),
+fn resolve_status_line(
+    file: Option<Sourced<Vec<StatusLineSegment>>>,
+) -> Result<Sourced<Vec<StatusLineSegment>>> {
+    if let Some(raw) = env_string("OX_STATUS_LINE") {
+        let segments = parse_status_line_segments(&raw.value)
+            .with_context(|| format!("invalid OX_STATUS_LINE {:?}", raw.value))?;
+        return Ok(Sourced::new(segments, raw.source));
     }
+    let segments = file.unwrap_or_else(|| Sourced::fallback(StatusLineSegment::DEFAULT.to_vec()));
+    let source = segments.source;
+    let segments = validate_status_line(segments.value).context("invalid tui.status_line")?;
+    Ok(Sourced::new(segments, source))
 }
 
 fn parse_status_line_segments(raw: &str) -> Result<Vec<StatusLineSegment>> {
@@ -493,36 +512,78 @@ fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLi
     Ok(segments)
 }
 
-/// Resolves the permission policy, the workspace launched in `cwd`, and the mode's source from the
-/// file config and `OX_PERMISSION_MODE`, which wins over the file mode.
+/// The resolved permission settings and where each came from.
+struct ResolvedPermission {
+    policy: Policy,
+    workspace: Workspace,
+    mode_source: Source,
+    extra_roots: Vec<Sourced<String>>,
+    rules: Vec<Sourced<TierPattern>>,
+    disabled_defaults: Vec<Sourced<Shipped>>,
+}
+
+/// Resolves the permission policy and the workspace launched in `cwd` from the file config and
+/// `OX_PERMISSION_MODE`, which wins over the file mode.
 fn resolve_permission(
     file: PermissionTable,
     origins: &Origins,
     cwd: &Path,
-) -> Result<(Policy, Workspace, Source)> {
-    let workspace = Workspace::resolve(cwd, &file.extra_roots.unwrap_or_default())?;
+) -> Result<ResolvedPermission> {
+    let roots = file.extra_roots.unwrap_or_default();
+    let workspace = Workspace::resolve(cwd, &roots)?;
+    let extra_roots = origins.sourced_elements("permission.extra_roots", roots);
     let mode = env_parse::<Mode>("OX_PERMISSION_MODE")?
         .or_else(|| origins.sourced("permission.mode", file.mode))
         .unwrap_or_else(|| Sourced::fallback(Mode::default()));
 
-    let rules = |table: Option<TierTable>, tier| {
-        table.map_or_else(|| Ok(Vec::new()), |table| table.rules(tier))
-    };
-    let disabled: Vec<_> = file
+    let tiers = [
+        (Tier::Deny, file.deny.unwrap_or_default()),
+        (Tier::Ask, file.ask.unwrap_or_default()),
+        (Tier::Allow, file.allow.unwrap_or_default()),
+    ];
+    let rules = tiers
+        .iter()
+        .flat_map(|(tier, table)| tier_patterns(*tier, table, origins))
+        .collect();
+    let disabled_defaults: Vec<_> = file
         .defaults
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|(group, on)| (!on).then_some(group))
+        .filter(|&(_, on)| !on)
+        .map(|(group, _)| {
+            Sourced::new(
+                group,
+                origins.source(&format!("permission.defaults.{group}")),
+            )
+        })
         .collect();
-    let policy = Policy::resolve(
-        mode.value,
-        rules(file.deny, Tier::Deny)?,
-        rules(file.ask, Tier::Ask)?,
-        rules(file.allow, Tier::Allow)?,
-        &disabled,
-        &workspace,
-    )?;
-    Ok((policy, workspace, mode.source))
+    let [deny, ask, allow] = tiers.map(|(tier, table)| table.rules(tier));
+    let disabled: Vec<_> = disabled_defaults.iter().map(|group| group.value).collect();
+    let policy = Policy::resolve(mode.value, deny?, ask?, allow?, &disabled, &workspace)?;
+    Ok(ResolvedPermission {
+        policy,
+        workspace,
+        mode_source: mode.source,
+        extra_roots,
+        rules,
+        disabled_defaults,
+    })
+}
+
+/// The patterns of the `tier` table, each with the layer that added it.
+fn tier_patterns(tier: Tier, table: &TierTable, origins: &Origins) -> Vec<Sourced<TierPattern>> {
+    table
+        .classes()
+        .into_iter()
+        .flat_map(|(class, patterns)| {
+            let patterns = patterns.iter().flatten().map(|pattern| TierPattern {
+                tier,
+                class,
+                pattern: pattern.clone(),
+            });
+            origins.sourced_elements(&format!("permission.{tier}.{class}"), patterns)
+        })
+        .collect()
 }
 
 // ── Env Overrides ──
@@ -717,6 +778,20 @@ mod tests {
                 assert_eq!(snap.provenance.permission_mode, Source::Session);
             }
         }
+
+        mod apply_theme {
+            use super::*;
+
+            #[test]
+            fn marks_the_switch_as_session_set() {
+                let mut snap = sample_config().snapshot();
+
+                snap.apply_theme("latte");
+
+                assert_eq!(snap.theme_name, "latte");
+                assert_eq!(snap.provenance.theme, Source::Session);
+            }
+        }
     }
 
     mod status_line_segment {
@@ -774,6 +849,12 @@ mod tests {
             let path = xdg_dir.join("ox").join("config.d").join(name);
             write_config(path.clone(), body);
             Layer::DropIn(path)
+        }
+
+        fn write_project_config(cwd: &Path, body: &str) -> Layer {
+            let path = cwd.join(".ox").join("config.toml");
+            write_config(path.clone(), body);
+            Layer::Project(path)
         }
 
         fn write_config(path: PathBuf, body: &str) {
@@ -1012,7 +1093,9 @@ mod tests {
                     max_tokens: file.clone(),
                     max_tool_rounds: file.clone(),
                     compaction: file.clone(),
-                    show_thinking: file,
+                    show_thinking: file.clone(),
+                    show_welcome: file.clone(),
+                    status_line: file,
                     ..Provenance::default()
                 },
             );
@@ -1911,8 +1994,8 @@ mod tests {
                     .collect();
                 format!("permission.extra_roots = [{}]", quoted.join(", "))
             };
-            write_user_config(dir.path(), &roots(&[&shared]));
-            write_drop_in(dir.path(), "10-docs.toml", &roots(&[&docs, &shared]));
+            let user = write_user_config(dir.path(), &roots(&[&shared]));
+            let drop_in = write_drop_in(dir.path(), "10-docs.toml", &roots(&[&docs, &shared]));
 
             let config = load_with(&dir, &[]).await.unwrap();
 
@@ -1921,6 +2004,18 @@ mod tests {
             assert_eq!(
                 config.workspace.roots(),
                 [canonical(dir.path()), canonical(&shared), canonical(&docs)],
+            );
+            let root = |path: &Path, layer: &Layer| {
+                let raw = path.to_str().unwrap().to_owned();
+                Sourced::new(raw, Source::File(layer.clone()))
+            };
+            assert_eq!(
+                config.provenance.extra_roots,
+                [
+                    root(&shared, &user),
+                    root(&docs, &drop_in),
+                    root(&shared, &drop_in)
+                ],
             );
         }
 
@@ -2027,6 +2122,116 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn records_the_layer_behind_each_tui_setting() {
+            let dir = tempfile::tempdir().unwrap();
+            let user = write_user_config(
+                dir.path(),
+                indoc! {r##"
+                    [tui]
+                    show_welcome = false
+                    status_line = ["model"]
+
+                    [tui.theme]
+                    base = "latte"
+                    overrides.text = "#ff0000"
+                "##},
+            );
+            let drop_in = write_drop_in(
+                dir.path(),
+                "10-team.toml",
+                r##"tui.theme.overrides.accent = "#00ff00""##,
+            );
+            let project =
+                write_project_config(dir.path(), r#"tui.status_line = ["model", "run-state"]"#);
+
+            let config = load_with(&dir, &[]).await.unwrap();
+
+            assert_eq!(
+                config.status_line,
+                [StatusLineSegment::Model, StatusLineSegment::RunState]
+            );
+            let sources = &config.provenance;
+            assert_eq!(sources.show_welcome, Source::File(user.clone()));
+            assert_eq!(sources.status_line, Source::File(project));
+            assert_eq!(sources.theme, Source::File(user.clone()));
+            assert_eq!(
+                sources.theme_overrides,
+                [Source::File(user), Source::File(drop_in)]
+            );
+        }
+
+        #[tokio::test]
+        async fn records_the_layer_behind_each_permission_rule() {
+            let dir = tempfile::tempdir().unwrap();
+            let user = write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [permission]
+                    deny.exec = ["git push *"]
+                    allow.exec = ["cargo *"]
+                    defaults.rm = false
+                    defaults.ssh = false
+                "#},
+            );
+            let drop_in = write_drop_in(
+                dir.path(),
+                "10-team.toml",
+                indoc! {r#"
+                    [permission]
+                    deny.exec = ["curl *"]
+                    defaults.git = false
+                    defaults.ssh = true
+                "#},
+            );
+            let project = write_project_config(
+                dir.path(),
+                indoc! {r#"
+                    [permission]
+                    deny.read = ["./secrets/**"]
+                    ask.exec = ["cargo publish *"]
+                "#},
+            );
+
+            let config = load_with(&dir, &[]).await.unwrap();
+
+            let rule = |tier, class, pattern: &str, layer: &Layer| {
+                let pattern = pattern.to_owned();
+                let source = Source::File(layer.clone());
+                Sourced::new(
+                    TierPattern {
+                        tier,
+                        class,
+                        pattern,
+                    },
+                    source,
+                )
+            };
+            assert_eq!(
+                config.provenance.rules,
+                [
+                    rule(Tier::Deny, PermissionClass::Read, "./secrets/**", &project),
+                    rule(Tier::Deny, PermissionClass::Exec, "git push *", &user),
+                    rule(Tier::Deny, PermissionClass::Exec, "curl *", &drop_in),
+                    rule(
+                        Tier::Ask,
+                        PermissionClass::Exec,
+                        "cargo publish *",
+                        &project
+                    ),
+                    rule(Tier::Allow, PermissionClass::Exec, "cargo *", &user),
+                ],
+            );
+            assert_eq!(
+                config.provenance.disabled_defaults,
+                [
+                    Sourced::new(Shipped::Git, Source::File(drop_in)),
+                    Sourced::new(Shipped::Rm, Source::File(user)),
+                ],
+                "a later layer turns `ssh` back on",
+            );
+        }
+
+        #[tokio::test]
         async fn env_sources_the_settings_it_overrides() {
             let dir = tempfile::tempdir().unwrap();
             let config = load_with(
@@ -2040,6 +2245,8 @@ mod tests {
                     ("OX_EXTRA_CA_CERTS", TEST_CA_PATH),
                     ("OX_PERMISSION_MODE", "yolo"),
                     ("OX_PROMPT_CACHE_TTL", "5m"),
+                    ("OX_SHOW_WELCOME", "0"),
+                    ("OX_STATUS_LINE", "model,run-state"),
                 ],
             )
             .await
@@ -2056,6 +2263,8 @@ mod tests {
                     prompt_cache_ttl: Source::Env("OX_PROMPT_CACHE_TTL"),
                     compaction: Source::Env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT"),
                     permission_mode: Source::Env("OX_PERMISSION_MODE"),
+                    show_welcome: Source::Env("OX_SHOW_WELCOME"),
+                    status_line: Source::Env("OX_STATUS_LINE"),
                     ..Provenance::default()
                 },
             );

@@ -28,6 +28,8 @@ pub(crate) struct LiveSessionInfo {
     /// The open background shells, as the engine last reported them.
     pub(crate) background_shells: Vec<BackgroundShell>,
     pub(crate) config: ConfigSnapshot,
+    /// The `[tui.theme.overrides]` slots that apply over every theme, leaving out the ignored ones.
+    pub(crate) theme_overrides: Vec<String>,
 }
 
 // ── Testing ──
@@ -60,6 +62,7 @@ pub(crate) mod testing {
                 compaction: CompactionConfig::with_threshold(155_000),
                 ..test_snapshot()
             },
+            theme_overrides: Vec::new(),
         }
     }
 }

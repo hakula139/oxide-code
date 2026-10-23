@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use ox_core::config::load::user_config_path;
-use ox_core::config::provenance::{Layer, Source};
+use ox_core::config::provenance::{Layer, Provenance, Source, TierPattern};
 use ox_core::util::path::tildify;
 
 use super::context::SlashContext;
@@ -61,7 +61,7 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
         ),
         row(
             "Custom Headers",
-            display_names(&cfg.gateway.custom_header_names),
+            join_or(&cfg.gateway.custom_header_names, labels::NONE),
             &sources.custom_headers,
         ),
         row(
@@ -104,21 +104,71 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
             labels::on_off(cfg.show_thinking).to_owned(),
             &sources.show_thinking,
         ),
+        row(
+            "Show Welcome",
+            labels::on_off(cfg.show_welcome).to_owned(),
+            &sources.show_welcome,
+        ),
+        row(
+            "Status Line",
+            join_or(cfg.status_line.iter().map(<&str>::from), labels::NONE),
+            &sources.status_line,
+        ),
+        row("Theme", cfg.theme_name.clone(), &sources.theme),
+        (
+            "Theme Overrides".to_owned(),
+            join_or(&info.theme_overrides, labels::NONE),
+            join_or(&sources.theme_overrides, &Source::Default.to_string()),
+        ),
     ];
-    KvOverview::new(
-        "Configuration",
-        vec![
-            KvSection::annotated(resolved).with_heading("Resolved"),
-            KvSection::new(file_rows(&sources.layers, user_path)).with_heading("Source Files"),
-        ],
-    )
+    let mut sections = vec![KvSection::annotated(resolved).with_heading("Resolved")];
+    let rules = permission_rows(sources);
+    if !rules.is_empty() {
+        sections.push(KvSection::annotated(rules).with_heading("Permissions"));
+    }
+    sections
+        .push(KvSection::new(file_rows(&sources.layers, user_path)).with_heading("Source Files"));
+    KvOverview::new("Configuration", sections)
 }
 
-fn display_names(names: &[String]) -> String {
-    if names.is_empty() {
-        labels::NONE.to_owned()
+/// The extra roots, rule patterns, and turned-off default groups the config files set.
+fn permission_rows(sources: &Provenance) -> Vec<(String, String, String)> {
+    let roots = sources.extra_roots.iter().map(|root| {
+        (
+            "extra_roots".to_owned(),
+            root.value.clone(),
+            root.source.to_string(),
+        )
+    });
+    let rules = sources.rules.iter().map(|rule| {
+        let TierPattern {
+            tier,
+            class,
+            pattern,
+        } = &rule.value;
+        (
+            format!("{tier}.{class}"),
+            pattern.clone(),
+            rule.source.to_string(),
+        )
+    });
+    let defaults = sources.disabled_defaults.iter().map(|group| {
+        (
+            format!("defaults.{}", group.value),
+            labels::on_off(false).to_owned(),
+            group.source.to_string(),
+        )
+    });
+    roots.chain(rules).chain(defaults).collect()
+}
+
+/// `items` joined with commas, or `empty` when there are none.
+fn join_or(items: impl IntoIterator<Item = impl ToString>, empty: &str) -> String {
+    let items: Vec<String> = items.into_iter().map(|item| item.to_string()).collect();
+    if items.is_empty() {
+        empty.to_owned()
     } else {
-        names.join(", ")
+        items.join(", ")
     }
 }
 
@@ -154,12 +204,16 @@ fn layer_kind(layer: &Layer) -> &'static str {
 mod tests {
     use std::path::PathBuf;
 
+    use ox_core::config::StatusLineSegment;
+    use ox_core::config::provenance::Sourced;
     use ox_core::model::ModelSpec;
+    use ox_core::permission::defaults::Shipped;
+    use ox_core::permission::{PermissionClass, Tier};
     use ox_core::util::path::testing::HOME_VAR;
 
     use super::*;
     use crate::modal::Modal as _;
-    use crate::modal::testing::rendered_text;
+    use crate::modal::testing::{render_rows, rendered_text};
     use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
 
@@ -184,12 +238,46 @@ mod tests {
         }
 
         #[test]
-        fn height_accounts_for_both_sections() {
-            // title + blank + (heading + blank + 15 rows) + blank + (heading + blank + 1 row)
-            //   + blank + footer = 2 + 17 + 1 + 3 + 2 = 25.
-            let info = test_session_info();
-            let m = build_modal(&info, None);
-            assert_eq!(m.height(80, u16::MAX), 25);
+        fn lists_every_resolved_key_with_its_source() {
+            let modal = build_modal(&test_session_info(), None);
+
+            insta::assert_debug_snapshot!(render_rows(&modal, 80, modal.height(80, u16::MAX)));
+        }
+
+        #[test]
+        fn lists_the_permission_entries_and_theme_overrides_with_their_layers() {
+            let mut info = test_session_info();
+            let user = Layer::User(PathBuf::from("/cfg/ox/config.toml"));
+            let drop_in = Layer::DropIn(PathBuf::from("/cfg/ox/config.d/10-nix.toml"));
+            let project = Layer::Project(PathBuf::from("/repo/.ox/config.toml"));
+            info.config.show_welcome = false;
+            info.config.status_line = vec![StatusLineSegment::Model, StatusLineSegment::RunState];
+            info.theme_overrides = vec!["accent".to_owned(), "error".to_owned()];
+            let sources = &mut info.config.provenance;
+            sources.layers = vec![user.clone(), drop_in.clone(), project.clone()];
+            sources.show_welcome = Source::File(user.clone());
+            sources.status_line = Source::Env("OX_STATUS_LINE");
+            sources.theme = Source::Session;
+            sources.theme_overrides = vec![Source::File(user.clone()), Source::File(drop_in)];
+            sources.extra_roots = vec![Sourced {
+                value: "~/shared".to_owned(),
+                source: Source::File(user.clone()),
+            }];
+            sources.rules = vec![Sourced {
+                value: TierPattern {
+                    tier: Tier::Deny,
+                    class: PermissionClass::Read,
+                    pattern: "./secrets/**".to_owned(),
+                },
+                source: Source::File(project),
+            }];
+            sources.disabled_defaults = vec![Sourced {
+                value: Shipped::Git,
+                source: Source::File(user),
+            }];
+            let modal = build_modal(&info, None);
+
+            insta::assert_debug_snapshot!(render_rows(&modal, 80, modal.height(80, u16::MAX)));
         }
 
         #[test]
