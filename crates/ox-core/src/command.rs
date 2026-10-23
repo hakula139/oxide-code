@@ -11,8 +11,7 @@ use std::path::Path;
 
 use indoc::formatdoc;
 
-use crate::config::Effort;
-use crate::model::{MODELS, ModelInfo, ResolvedModelId, replacement_for};
+use crate::model::{Effort, MODELS, ModelInfo, ResolvedModelId, replacement_for};
 use crate::permission::Mode;
 use crate::protocol::{ConfigPick, Op, ResumeTarget};
 use crate::session::display::fit_title;

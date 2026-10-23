@@ -4,8 +4,7 @@
 use std::borrow::Cow;
 
 use ox_core::command;
-use ox_core::config::Effort;
-use ox_core::model::ModelSpec;
+use ox_core::model::{Effort, ModelSpec};
 
 use super::context::SlashContext;
 use super::effort_slider::EffortSlider;

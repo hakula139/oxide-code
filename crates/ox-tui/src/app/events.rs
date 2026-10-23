@@ -8,10 +8,9 @@ use indoc::formatdoc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, warn};
 
-use ox_core::config::Effort;
 use ox_core::config::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
-use ox_core::model::ModelSpec;
+use ox_core::model::{Effort, ModelSpec};
 use ox_core::permission::{Basis, Mode, SessionGrant};
 use ox_core::protocol::{CompactTrigger, Event, Interaction, notice};
 use ox_core::session::display::archive_notice;

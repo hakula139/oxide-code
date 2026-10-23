@@ -7,9 +7,8 @@ use serde::Deserialize;
 use super::transport::{post_messages, with_retry};
 use super::wire::{ContentBlockInfo, OutputConfig, OutputFormat, RequestMessages};
 use super::{Client, RequestKind, RequestSpec};
-use crate::config::Effort;
 use crate::message::Message;
-use crate::model::{ModelSpec, TokenUsage};
+use crate::model::{Effort, ModelSpec, TokenUsage};
 
 // ── Client::complete ──
 

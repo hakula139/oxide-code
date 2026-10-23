@@ -4,8 +4,8 @@
 
 use super::ConfigPick;
 use crate::config::compaction::AutoCompactionConfig;
-use crate::config::{Effort, display_auto_compaction};
-use crate::model::ModelSpec;
+use crate::config::display_auto_compaction;
+use crate::model::{Effort, ModelSpec};
 use crate::permission::Mode;
 use crate::util::text::plural;
 

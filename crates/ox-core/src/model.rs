@@ -1,4 +1,5 @@
-//! Catalog of the supported Claude models, matched by exact id.
+//! Catalog of the supported Claude models, matched by exact id, and the request parameters each
+//! model takes: [`Effort`] and [`PromptCacheTtl`].
 //!
 //! Every row shares one request surface: adaptive thinking, the full `output_config.effort`
 //! ladder, `clear_thinking` context management, a 1M-token context window, and 128K output.
@@ -10,11 +11,12 @@ mod usage;
 
 pub(crate) use usage::TokenUsage;
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
+use std::str::FromStr;
 
+use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::config::Effort;
 use pricing::{FABLE_5_1_RATES, HAIKU_5_5_RATES, OPUS_5_5_RATES, SONNET_5_5_RATES, TokenCostRates};
 
 // ── ModelInfo ──
@@ -30,7 +32,7 @@ pub struct ModelInfo {
     /// UI shows the level the request actually runs at.
     pub default_effort: Effort,
     /// Whether the model accepts `thinking.display = "updates"`.
-    progress_updates: bool,
+    pub(crate) progress_updates: bool,
     /// First-party Claude API token prices in USD per million tokens.
     cost_rates: TokenCostRates,
 }
@@ -175,23 +177,6 @@ impl ModelSpec {
         pick.unwrap_or(self.info.map_or(UNKNOWN_MODEL_MAX_TOKENS, |_| MAX_TOKENS))
     }
 
-    /// Adaptive thinking for known models, dropping replayed blocks whose conversation prefix
-    /// changed. `show_thinking` opts into summarized thinking text, otherwise models with progress
-    /// updates return only those, and other models return none. `None` for unknown ids, whose
-    /// upstream may reject the field.
-    pub(crate) fn thinking(&self, show_thinking: bool) -> Option<ThinkingConfig> {
-        self.info.map(|info| ThinkingConfig::Adaptive {
-            display: if show_thinking {
-                ThinkingDisplay::Summarized
-            } else if info.progress_updates {
-                ThinkingDisplay::Updates
-            } else {
-                ThinkingDisplay::Omitted
-            },
-            block_binding: BlockBinding::DropBlock,
-        })
-    }
-
     /// The context window in tokens. `None` for unknown IDs disables default and
     /// percentage-based auto-compaction and the status-line percentage. Explicit token thresholds
     /// still apply.
@@ -257,49 +242,6 @@ impl<'de> Deserialize<'de> for ModelSpec {
     }
 }
 
-// ── ThinkingConfig ──
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ThinkingConfig {
-    /// Model decides the thinking budget.
-    Adaptive {
-        display: ThinkingDisplay,
-        block_binding: BlockBinding,
-    },
-}
-
-impl ThinkingConfig {
-    /// Returns whether the request asks for thinking text, as summaries or progress notes.
-    pub(crate) fn asks_for_text(&self) -> bool {
-        match self {
-            Self::Adaptive { display, .. } => *display != ThinkingDisplay::Omitted,
-        }
-    }
-}
-
-/// `thinking.display` values, always sent so a reply carries only the thinking text ox renders,
-/// whatever an upstream's default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ThinkingDisplay {
-    Summarized,
-    /// Only the progress notes written between tool calls come back as text. Requires the
-    /// `thinking-display-updates-2026-08-18` beta.
-    Updates,
-    /// No thinking text comes back, and the server can skip streaming it.
-    Omitted,
-}
-
-/// `thinking.block_binding`. `DropBlock` makes the API drop a replayed thinking block whose
-/// conversation prefix changed since it was produced, plus every later one, where it would
-/// otherwise reject the request. Requires the `thinking-binding-controls-2026-08-01` beta.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(tag = "prefix_mismatch_behavior", rename_all = "snake_case")]
-pub(crate) enum BlockBinding {
-    DropBlock,
-}
-
 // ── ResolvedModelId ──
 
 /// A model id a frontend picked, such as the `/model` resolver's match. The engine accepts any id,
@@ -318,10 +260,120 @@ impl ResolvedModelId {
     }
 }
 
+// ── Effort ──
+
+/// Effort level sent as `output_config.effort`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Effort {
+    pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
+    pub(crate) const VALID_VALUES: &str = "low, medium, high, xhigh, max";
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// One-line UX hint for the typed-arg popup.
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Low => "Fastest, shallow reasoning",
+            Self::Medium => "Balanced",
+            Self::High => "Deep reasoning",
+            Self::Xhigh => "Extended thinking",
+            Self::Max => "Maximum thinking",
+        }
+    }
+
+    /// Notes that the model has no effort levels, so this requested effort did not apply.
+    pub fn unapplied_notice(self) -> String {
+        format!("Effort unchanged (model has no effort levels, asked for {self})")
+    }
+}
+
+impl fmt::Display for Effort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Effort {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            _ => bail!("expected one of {}", Self::VALID_VALUES),
+        }
+    }
+}
+
+// ── PromptCacheTtl ──
+
+/// Sent as `cache_control.ttl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromptCacheTtl {
+    #[serde(rename = "5m")]
+    FiveMin,
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+impl PromptCacheTtl {
+    /// `None` for the server default (5 m).
+    pub(crate) const fn wire(self) -> Option<&'static str> {
+        match self {
+            Self::FiveMin => None,
+            Self::OneHour => Some("1h"),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::FiveMin => "5m",
+            Self::OneHour => "1h",
+        }
+    }
+}
+
+impl fmt::Display for PromptCacheTtl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PromptCacheTtl {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "5m" => Ok(Self::FiveMin),
+            "1h" => Ok(Self::OneHour),
+            _ => bail!("expected one of 5m, 1h"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::PromptCacheTtl;
 
     mod replacement_for {
         use super::*;
@@ -476,46 +528,6 @@ mod tests {
         }
     }
 
-    mod thinking {
-        use super::*;
-
-        #[test]
-        fn known_model_is_adaptive_with_display_following_show_thinking() {
-            let drop_block = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
-            for (id, hidden_display) in [
-                ("claude-fable-5-1", "updates"),
-                ("claude-opus-5-5", "updates"),
-                ("claude-sonnet-5-5", "updates"),
-                ("claude-haiku-5-5", "omitted"),
-            ] {
-                let model = ModelSpec::resolve(id);
-                assert_eq!(
-                    serde_json::to_value(model.thinking(true)).unwrap(),
-                    serde_json::json!({
-                        "type": "adaptive",
-                        "display": "summarized",
-                        "block_binding": drop_block,
-                    }),
-                    "{id}",
-                );
-                assert_eq!(
-                    serde_json::to_value(model.thinking(false)).unwrap(),
-                    serde_json::json!({
-                        "type": "adaptive",
-                        "display": hidden_display,
-                        "block_binding": drop_block,
-                    }),
-                    "{id}"
-                );
-            }
-        }
-
-        #[test]
-        fn unknown_model_is_omitted() {
-            assert!(ModelSpec::resolve("custom-model").thinking(true).is_none());
-        }
-    }
-
     mod context_window {
         use super::*;
 
@@ -624,6 +636,81 @@ mod tests {
                     "{}",
                     info.id
                 );
+            }
+        }
+    }
+
+    mod effort {
+        use super::*;
+
+        #[test]
+        fn round_trips_through_serde_and_fromstr() {
+            for (variant, token) in Effort::ALL
+                .into_iter()
+                .zip(["low", "medium", "high", "xhigh", "max"])
+            {
+                assert_eq!(serde_json::to_value(variant).unwrap(), token);
+                assert_eq!(variant.to_string(), token);
+                assert_eq!(token.parse::<Effort>().unwrap(), variant);
+            }
+        }
+
+        #[test]
+        fn round_trips_through_toml_deserialize() {
+            #[derive(Deserialize)]
+            struct Wrap {
+                effort: Effort,
+            }
+            let wrap: Wrap = toml::from_str(r#"effort = "xhigh""#).unwrap();
+            assert_eq!(wrap.effort, Effort::Xhigh);
+        }
+
+        mod from_str {
+            use super::*;
+
+            #[test]
+            fn rejects_unknown_tokens_listing_the_accepted_ones() {
+                let err = "extra-high".parse::<Effort>().expect_err("unknown token");
+                assert_eq!(
+                    format!("{err:#}"),
+                    "expected one of low, medium, high, xhigh, max"
+                );
+            }
+        }
+    }
+
+    mod prompt_cache_ttl {
+        use super::*;
+
+        #[test]
+        fn round_trips_through_serde_and_fromstr() {
+            for (variant, token) in [
+                (PromptCacheTtl::FiveMin, "5m"),
+                (PromptCacheTtl::OneHour, "1h"),
+            ] {
+                assert_eq!(serde_json::to_value(variant).unwrap(), token);
+                assert_eq!(variant.to_string(), token);
+                assert_eq!(token.parse::<PromptCacheTtl>().unwrap(), variant);
+            }
+        }
+
+        mod wire {
+            use super::*;
+
+            #[test]
+            fn omits_the_five_minute_server_default() {
+                assert_eq!(PromptCacheTtl::FiveMin.wire(), None);
+                assert_eq!(PromptCacheTtl::OneHour.wire(), Some("1h"));
+            }
+        }
+
+        mod from_str {
+            use super::*;
+
+            #[test]
+            fn rejects_unknown_tokens_listing_the_accepted_ones() {
+                let err = "30m".parse::<PromptCacheTtl>().expect_err("unknown token");
+                assert_eq!(format!("{err:#}"), "expected one of 5m, 1h");
             }
         }
     }

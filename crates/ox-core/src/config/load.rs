@@ -279,8 +279,9 @@ mod tests {
     use indoc::{formatdoc, indoc};
 
     use super::*;
+    use crate::config::StatusLineSegment;
     use crate::config::provenance::Source;
-    use crate::config::{Effort, PromptCacheTtl, StatusLineSegment};
+    use crate::model::{Effort, PromptCacheTtl};
     use crate::permission::Mode;
     use crate::permission::defaults::Shipped;
     use crate::util::fs::testing::{symlink_dir, symlink_file};

@@ -1,10 +1,9 @@
 //! Per-request `anthropic-beta` header computation.
 
 use super::RequestKind;
-use super::wire::CacheControl;
-use crate::config::PromptCacheTtl;
+use super::wire::{CacheControl, ThinkingConfig, ThinkingDisplay};
 use crate::config::auth::AuthKind;
-use crate::model::{Family, ModelSpec, ThinkingConfig, ThinkingDisplay};
+use crate::model::{Family, ModelSpec, PromptCacheTtl};
 
 const ADVISOR_TOOL_BETA_HEADER: &str = "advisor-tool-2026-03-01";
 const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
@@ -143,7 +142,7 @@ mod tests {
                 assert_eq!(
                     compute_betas(
                         &model,
-                        model.thinking(true).as_ref(),
+                        ThinkingConfig::for_model(&model, true).as_ref(),
                         AuthKind::ApiKey,
                         Agentic
                     )
@@ -188,7 +187,7 @@ mod tests {
 
             let betas = compute_betas(
                 &opus,
-                opus.thinking(false).as_ref(),
+                ThinkingConfig::for_model(&opus, false).as_ref(),
                 AuthKind::ApiKey,
                 Agentic,
             );
@@ -206,7 +205,7 @@ mod tests {
             assert!(
                 !compute_betas(
                     &haiku,
-                    haiku.thinking(false).as_ref(),
+                    ThinkingConfig::for_model(&haiku, false).as_ref(),
                     AuthKind::ApiKey,
                     Agentic
                 )

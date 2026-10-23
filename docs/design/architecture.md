@@ -16,7 +16,7 @@ Layers run from the foundation to the frontends.
 | `ox-core` | Foundation | `message`       | Conversation message and content-block types shared by the client, the engine, the session transcript, and the tools                                                |
 | `ox-core` | Foundation | `util`          | Shared helpers for environment variables, the filesystem, git probes, logging, paths, server error responses, mutex recovery, text width, local time, TLS, and TOML |
 | `ox-core` | Domain     | `config`        | Layered configuration with per-value provenance, credentials, gateway settings, and stored OAuth logins with browser sign-in                                        |
-| `ox-core` | Domain     | `model`         | Supported-model catalog, per-model request capabilities, token usage, and pricing                                                                                   |
+| `ox-core` | Domain     | `model`         | Supported-model catalog, per-model request capabilities, effort and prompt cache TTL, token usage, and pricing                                                      |
 | `ox-core` | Domain     | `permission`    | Tool permission gate: modes, deny / ask / allow rules, shipped defaults, path resolution, shell-command parsing, and project file containment                       |
 | `ox-core` | Domain     | `prompt`        | System prompt assembly, environment detection, and instruction-file discovery                                                                                       |
 | `ox-core` | Services   | `client`        | The `Wire` streaming contract and the Anthropic Messages API client: request bodies and headers, a retrying transport, SSE, and side queries                        |

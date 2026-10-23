@@ -34,9 +34,9 @@ use super::{ResponseEvent, Wire};
 use crate::config::auth::{self, Auth, AuthSource, LoginUnavailable};
 use crate::config::gateway::GatewayCompat;
 use crate::config::oauth::ClaudeCodeKeychain;
-use crate::config::{Config, Effort, PromptCacheTtl, is_first_party_base_url};
+use crate::config::{Config, is_first_party_base_url};
 use crate::message::{ContentBlock, Message, Role};
-use crate::model::{ModelSpec, ThinkingConfig};
+use crate::model::{Effort, ModelSpec, PromptCacheTtl};
 use crate::prompt::SystemPrompt;
 use crate::tool::ToolDefinition;
 use crate::util::tls::Trust;
@@ -46,7 +46,7 @@ use sse::spawn_stream;
 use transport::{MessagesRequest, messages_url};
 use wire::{
     CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
-    RequestMetadata, SystemBlock,
+    RequestMetadata, SystemBlock, ThinkingConfig,
 };
 
 // ── Constants ──
@@ -241,7 +241,7 @@ impl Client {
         breakpoint: Option<CacheControl>,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let prefix_cache = static_prefix_cache_control(self.is_first_party, self.prompt_cache_ttl);
-        let thinking = self.model.thinking(self.show_thinking);
+        let thinking = ThinkingConfig::for_model(&self.model, self.show_thinking);
         let request = self.prepare(RequestSpec {
             kind: RequestKind::Agentic,
             model: &self.model,

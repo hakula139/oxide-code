@@ -34,7 +34,7 @@ use self::merge::Origins;
 use self::oauth::ClaudeCodeKeychain;
 use self::provenance::{Provenance, Source, Sourced};
 use self::schema::{FileConfig, PermissionTable, TierTable};
-use crate::model::ModelSpec;
+use crate::model::{Effort, ModelSpec, PromptCacheTtl};
 use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
 use crate::util::git::project_root;
@@ -100,117 +100,6 @@ impl ConfigSnapshot {
     pub fn apply_mode(&mut self, mode: Mode) {
         self.permission_mode = mode;
         self.provenance.permission_mode = Source::Session;
-    }
-}
-
-// ── Effort ──
-
-/// Effort level sent as `output_config.effort`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Effort {
-    Low,
-    Medium,
-    High,
-    Xhigh,
-    Max,
-}
-
-impl Effort {
-    pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
-    pub(crate) const VALID_VALUES: &str = "low, medium, high, xhigh, max";
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Xhigh => "xhigh",
-            Self::Max => "max",
-        }
-    }
-
-    /// One-line UX hint for the typed-arg popup.
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::Low => "Fastest, shallow reasoning",
-            Self::Medium => "Balanced",
-            Self::High => "Deep reasoning",
-            Self::Xhigh => "Extended thinking",
-            Self::Max => "Maximum thinking",
-        }
-    }
-
-    /// Notes that the model has no effort levels, so this requested effort did not apply.
-    pub fn unapplied_notice(self) -> String {
-        format!("Effort unchanged (model has no effort levels, asked for {self})")
-    }
-}
-
-impl fmt::Display for Effort {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for Effort {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "low" => Ok(Self::Low),
-            "medium" => Ok(Self::Medium),
-            "high" => Ok(Self::High),
-            "xhigh" => Ok(Self::Xhigh),
-            "max" => Ok(Self::Max),
-            _ => bail!("expected one of {}", Self::VALID_VALUES),
-        }
-    }
-}
-
-// ── PromptCacheTtl ──
-
-/// Sent as `cache_control.ttl`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PromptCacheTtl {
-    #[serde(rename = "5m")]
-    FiveMin,
-    #[serde(rename = "1h")]
-    OneHour,
-}
-
-impl PromptCacheTtl {
-    /// `None` for the server default (5 m).
-    pub(crate) const fn wire(self) -> Option<&'static str> {
-        match self {
-            Self::FiveMin => None,
-            Self::OneHour => Some("1h"),
-        }
-    }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::FiveMin => "5m",
-            Self::OneHour => "1h",
-        }
-    }
-}
-
-impl fmt::Display for PromptCacheTtl {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for PromptCacheTtl {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "5m" => Ok(Self::FiveMin),
-            "1h" => Ok(Self::OneHour),
-            _ => bail!("expected one of 5m, 1h"),
-        }
     }
 }
 
@@ -873,81 +762,6 @@ mod tests {
 
                 assert_eq!(snap.permission_mode, Mode::Plan);
                 assert_eq!(snap.provenance.permission_mode, Source::Session);
-            }
-        }
-    }
-
-    mod effort {
-        use super::*;
-
-        #[test]
-        fn round_trips_through_serde_and_fromstr() {
-            for (variant, token) in Effort::ALL
-                .into_iter()
-                .zip(["low", "medium", "high", "xhigh", "max"])
-            {
-                assert_eq!(serde_json::to_value(variant).unwrap(), token);
-                assert_eq!(variant.to_string(), token);
-                assert_eq!(token.parse::<Effort>().unwrap(), variant);
-            }
-        }
-
-        #[test]
-        fn round_trips_through_toml_deserialize() {
-            #[derive(Deserialize)]
-            struct Wrap {
-                effort: Effort,
-            }
-            let wrap: Wrap = toml::from_str(r#"effort = "xhigh""#).unwrap();
-            assert_eq!(wrap.effort, Effort::Xhigh);
-        }
-
-        mod from_str {
-            use super::*;
-
-            #[test]
-            fn rejects_unknown_tokens_listing_the_accepted_ones() {
-                let err = "extra-high".parse::<Effort>().expect_err("unknown token");
-                assert_eq!(
-                    format!("{err:#}"),
-                    "expected one of low, medium, high, xhigh, max"
-                );
-            }
-        }
-    }
-
-    mod prompt_cache_ttl {
-        use super::*;
-
-        #[test]
-        fn round_trips_through_serde_and_fromstr() {
-            for (variant, token) in [
-                (PromptCacheTtl::FiveMin, "5m"),
-                (PromptCacheTtl::OneHour, "1h"),
-            ] {
-                assert_eq!(serde_json::to_value(variant).unwrap(), token);
-                assert_eq!(variant.to_string(), token);
-                assert_eq!(token.parse::<PromptCacheTtl>().unwrap(), variant);
-            }
-        }
-
-        mod wire {
-            use super::*;
-
-            #[test]
-            fn omits_the_five_minute_server_default() {
-                assert_eq!(PromptCacheTtl::FiveMin.wire(), None);
-                assert_eq!(PromptCacheTtl::OneHour.wire(), Some("1h"));
-            }
-        }
-
-        mod from_str {
-            use super::*;
-
-            #[test]
-            fn rejects_unknown_tokens_listing_the_accepted_ones() {
-                let err = "30m".parse::<PromptCacheTtl>().expect_err("unknown token");
-                assert_eq!(format!("{err:#}"), "expected one of 5m, 1h");
             }
         }
     }

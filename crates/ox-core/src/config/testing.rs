@@ -8,10 +8,8 @@ use super::auth::{Auth, AuthSource};
 use super::compaction::CompactionConfig;
 use super::gateway::GatewayCompat;
 use super::provenance::{Provenance, Source};
-use super::{
-    Config, ConfigSnapshot, DEFAULT_THEME, PromptCacheTtl, StatusLineSegment, ThemeConfig,
-};
-use crate::model::ModelSpec;
+use super::{Config, ConfigSnapshot, DEFAULT_THEME, StatusLineSegment, ThemeConfig};
+use crate::model::{ModelSpec, PromptCacheTtl};
 use crate::permission::{Policy, Workspace};
 
 /// Minimal [`Config`] signed in with `auth` against `base_url`: no effort, compaction off,

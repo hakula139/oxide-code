@@ -517,7 +517,6 @@ mod tests {
     use crate::client::anthropic::local_testing::{serve, test_client};
     use crate::client::anthropic::testing::{api_key, sse_response};
     use crate::client::testing::five_hour_limit;
-    use crate::config::Effort;
     use crate::config::compaction::CompactionConfig;
     use crate::engine::dispatch::NOT_RUN;
     use crate::engine::local_testing::{
@@ -526,7 +525,7 @@ mod tests {
     };
     use crate::engine::testing::MODEL;
     use crate::message::{Replay, Role};
-    use crate::model::ResolvedModelId;
+    use crate::model::{Effort, ResolvedModelId};
     use crate::prompt::SystemPrompt;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{ApprovalDecision, ConfigPick, ResumeTarget, ToolCall, ToolResult};

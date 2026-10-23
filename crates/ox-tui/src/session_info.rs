@@ -36,9 +36,10 @@ pub(crate) struct LiveSessionInfo {
 pub(crate) mod testing {
     use std::path::PathBuf;
 
+    use ox_core::config::ConfigSnapshot;
     use ox_core::config::compaction::CompactionConfig;
     use ox_core::config::testing::test_snapshot;
-    use ox_core::config::{ConfigSnapshot, Effort};
+    use ox_core::model::Effort;
 
     use super::LiveSessionInfo;
 

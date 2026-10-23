@@ -7,8 +7,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use ox_core::config::{DEFAULT_MODEL, Effort};
-use ox_core::model::{MODELS, ModelInfo, ResolvedModelId};
+use ox_core::config::DEFAULT_MODEL;
+use ox_core::model::{Effort, MODELS, ModelInfo, ResolvedModelId};
 use ox_core::protocol::{ConfigPick, Op};
 
 use super::effort_slider::{Direction, level_color, step_level};

@@ -7,7 +7,8 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use ox_core::client::{RateLimitWindow, RateLimits};
-use ox_core::config::{Effort, StatusLineSegment};
+use ox_core::config::StatusLineSegment;
+use ox_core::model::Effort;
 use ox_core::permission::Mode;
 use ox_core::protocol::UsageSnapshot;
 use ox_core::session::display::id_prefix;

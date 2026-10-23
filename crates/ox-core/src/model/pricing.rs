@@ -4,8 +4,8 @@
 //! account discounts, marketplace billing, data-residency multipliers, fast-mode adjustments, and
 //! server-side tool surcharges.
 
+use super::PromptCacheTtl;
 use super::TokenUsage;
-use crate::config::PromptCacheTtl;
 
 /// A model's price list. Some models switch to a higher card once a single request's prompt, its
 /// [`TokenUsage::context_tokens`], crosses a size threshold, so callers price each request alone.

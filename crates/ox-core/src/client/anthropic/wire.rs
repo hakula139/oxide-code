@@ -4,9 +4,8 @@ use serde::ser::SerializeSeq as _;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::client::{StopDetails, StopReason};
-use crate::config::Effort;
 use crate::message::{ContentBlock, Message, Role, WireKind};
-use crate::model::{ThinkingConfig, TokenUsage};
+use crate::model::{Effort, ModelSpec, TokenUsage};
 use crate::tool::ToolDefinition;
 
 // ── Request Types ──
@@ -264,6 +263,64 @@ pub(super) struct CacheControl {
     pub(super) ttl: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(super) enum ThinkingConfig {
+    /// Model decides the thinking budget.
+    Adaptive {
+        display: ThinkingDisplay,
+        block_binding: BlockBinding,
+    },
+}
+
+impl ThinkingConfig {
+    /// Adaptive thinking for known models, dropping replayed blocks whose conversation prefix
+    /// changed. `show_thinking` opts into summarized thinking text, otherwise models with progress
+    /// updates return only those, and other models return none. `None` for unknown ids, whose
+    /// upstream may reject the field.
+    pub(super) fn for_model(model: &ModelSpec, show_thinking: bool) -> Option<Self> {
+        model.info().map(|info| Self::Adaptive {
+            display: if show_thinking {
+                ThinkingDisplay::Summarized
+            } else if info.progress_updates {
+                ThinkingDisplay::Updates
+            } else {
+                ThinkingDisplay::Omitted
+            },
+            block_binding: BlockBinding::DropBlock,
+        })
+    }
+
+    /// Returns whether the request asks for thinking text, as summaries or progress notes.
+    pub(super) fn asks_for_text(&self) -> bool {
+        match self {
+            Self::Adaptive { display, .. } => *display != ThinkingDisplay::Omitted,
+        }
+    }
+}
+
+/// `thinking.display` values, always sent so a reply carries only the thinking text ox renders,
+/// whatever an upstream's default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ThinkingDisplay {
+    Summarized,
+    /// Only the progress notes written between tool calls come back as text. Requires the
+    /// `thinking-display-updates-2026-08-18` beta.
+    Updates,
+    /// No thinking text comes back, and the server can skip streaming it.
+    Omitted,
+}
+
+/// `thinking.block_binding`. `DropBlock` makes the API drop a replayed thinking block whose
+/// conversation prefix changed since it was produced, plus every later one, where it would
+/// otherwise reject the request. Requires the `thinking-binding-controls-2026-08-01` beta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "prefix_mismatch_behavior", rename_all = "snake_case")]
+pub(super) enum BlockBinding {
+    DropBlock,
+}
+
 // ── SSE Response Types ──
 
 /// One frame in the streaming response. `Unknown` swallows future event types so an upstream
@@ -396,8 +453,8 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::betas::conversation_cache_control;
-    use crate::config::PromptCacheTtl;
     use crate::message::Replay;
+    use crate::model::PromptCacheTtl;
 
     mod request_messages {
         use super::*;
@@ -671,6 +728,52 @@ mod tests {
                 let v = serde_json::to_value(&fmt).unwrap();
 
                 assert_eq!(v, json!({"type": "json_schema", "schema": schema}));
+            }
+        }
+    }
+
+    mod thinking_config {
+        use super::*;
+
+        mod for_model {
+            use super::*;
+
+            #[test]
+            fn known_model_is_adaptive_with_display_following_show_thinking() {
+                let drop_block = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
+                for (id, hidden_display) in [
+                    ("claude-fable-5-1", "updates"),
+                    ("claude-opus-5-5", "updates"),
+                    ("claude-sonnet-5-5", "updates"),
+                    ("claude-haiku-5-5", "omitted"),
+                ] {
+                    let model = ModelSpec::resolve(id);
+                    assert_eq!(
+                        serde_json::to_value(ThinkingConfig::for_model(&model, true)).unwrap(),
+                        serde_json::json!({
+                            "type": "adaptive",
+                            "display": "summarized",
+                            "block_binding": drop_block,
+                        }),
+                        "{id}",
+                    );
+                    assert_eq!(
+                        serde_json::to_value(ThinkingConfig::for_model(&model, false)).unwrap(),
+                        serde_json::json!({
+                            "type": "adaptive",
+                            "display": hidden_display,
+                            "block_binding": drop_block,
+                        }),
+                        "{id}"
+                    );
+                }
+            }
+
+            #[test]
+            fn unknown_model_is_omitted() {
+                assert!(
+                    ThinkingConfig::for_model(&ModelSpec::resolve("custom-model"), true).is_none()
+                );
             }
         }
     }
