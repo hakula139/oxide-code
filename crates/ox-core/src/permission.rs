@@ -700,10 +700,9 @@ pub enum Basis {
     SafeRead,
     /// An allowed command, by what let each of its simple commands and its writes through.
     Command(Vec<Basis>),
-    /// A command holding `construct`, which the analysis does not recognize, so no allow rule
-    /// covers it.
-    /// It asks in `manual`, while `yolo` runs it unless a deny rule or a configured ask rule holds
-    /// what ox sees.
+    /// A command holding `construct`, which the analysis does not recognize,
+    /// so no allow rule covers it.
+    /// `manual` asks, and `yolo` runs it unless a deny or configured ask rule holds what ox sees.
     Unrecognized { construct: String },
 }
 
@@ -1002,7 +1001,8 @@ impl Policy {
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
     /// 2. `plan` denies an edit, exec, or net call.
-    /// 3. A call [`Self::asks`] holds asks, or in `yolo` what [`Self::yolo_hold`] settles.
+    /// 3. Outside `yolo`, a call [`Self::asks`] holds asks.
+    ///    In `yolo`, a call [`Self::yolo_hold`] holds asks or is denied.
     /// 4. A read-class call allows.
     /// 5. An edit-class call inside a workspace root allows.
     /// 6. An allow rule or a session allow rule allows.
@@ -1077,7 +1077,7 @@ impl Policy {
 
     /// What holds the call in the ask tier: an ask rule, the protected group of a path the call
     /// edits or a command writes, a command the analysis does not recognize, the
-    /// [`read` rule](Self::read_holder) for a file a reader opens, or the `rm` group for a
+    /// [`read` rule](read_holder) for a file a reader opens, or the `rm` group for a
     /// [forced recursive delete](Segment::removes_recursively_by_force).
     fn asks(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
         if let Some(rule) = held_by(&self.ask.iter(), class, target) {
@@ -1110,7 +1110,7 @@ impl Policy {
                 command
                     .segments()
                     .iter()
-                    .find_map(|segment| self.read_holder(segment, &tiers))
+                    .find_map(|segment| read_holder(segment, &tiers))
             })
             .or_else(|| {
                 (self.enabled.contains(&Shipped::Rm)
@@ -1122,9 +1122,9 @@ impl Policy {
             })
     }
 
-    /// What holds a call in `yolo` past the deny tier, which runs whatever only the built-in ask
-    /// rules or the analysis would hold: a deny `read` rule naming a file a reader opens denies,
-    /// and a configured ask rule asks.
+    /// What holds a call in `yolo` past the deny tier:
+    /// a deny `read` rule matching a file a reader names denies, and a configured ask rule asks.
+    /// `yolo` runs what only the built-in ask rules, protected paths, or the analysis would hold.
     fn yolo_hold(&self, class: PermissionClass, target: &Target<'_>) -> Option<Verdict> {
         let segments = match target {
             Target::Command(command) => command.segments(),
@@ -1133,7 +1133,7 @@ impl Policy {
         let deny = self.deny.iter().map(|rule| (rule, Tier::Deny));
         if let Some(basis) = segments
             .iter()
-            .find_map(|segment| self.read_holder(segment, &deny))
+            .find_map(|segment| named_read_holder(segment, &deny))
         {
             return Some(Verdict {
                 decision: Decision::Deny,
@@ -1147,43 +1147,11 @@ impl Policy {
                 let ask = configured.map(|rule| (rule, Tier::Ask));
                 segments
                     .iter()
-                    .find_map(|segment| self.read_holder(segment, &ask))
+                    .find_map(|segment| named_read_holder(segment, &ask))
             })
             .map(|basis| Verdict {
                 decision: Decision::Ask,
                 basis,
-            })
-    }
-
-    /// The `read` rule among `tiers` that holds a file `segment` may read, or outside `yolo` the
-    /// first `read` rule among them when it may read any file.
-    fn read_holder<'a>(
-        &self,
-        segment: &Segment,
-        tiers: &(impl Iterator<Item = (&'a TierRule, Tier)> + Clone),
-    ) -> Option<Basis> {
-        segment
-            .reads()
-            .iter()
-            .find_map(|read| {
-                let read = read.as_target();
-                tiers
-                    .clone()
-                    .find(|(rule, _)| {
-                        rule.rule
-                            .matches(PermissionClass::Read, &read, MatchDiscipline::Deny)
-                    })
-                    .map(|(rule, tier)| rule.basis(tier))
-            })
-            .or_else(|| {
-                (self.mode != Mode::Yolo && segment.reads_anything())
-                    .then(|| {
-                        tiers
-                            .clone()
-                            .find(|(rule, _)| rule.rule.class() == PermissionClass::Read)
-                            .map(|(rule, tier)| rule.basis(tier))
-                    })
-                    .flatten()
             })
     }
 
@@ -1283,6 +1251,42 @@ fn held_by<'a>(
                         .find_map(|read| held_by(rules, PermissionClass::Read, &read.as_target()))
                 })
         })
+}
+
+/// The first `read` rule among the deny or ask `tiers` that matches a file `segment` names,
+/// or the first `read` rule among them when the segment may read any file.
+fn read_holder<'a>(
+    segment: &Segment,
+    tiers: &(impl Iterator<Item = (&'a TierRule, Tier)> + Clone),
+) -> Option<Basis> {
+    named_read_holder(segment, tiers).or_else(|| {
+        segment
+            .reads_anything()
+            .then(|| {
+                tiers
+                    .clone()
+                    .find(|(rule, _)| rule.rule.class() == PermissionClass::Read)
+                    .map(|(rule, tier)| rule.basis(tier))
+            })
+            .flatten()
+    })
+}
+
+/// The first `read` rule among the deny or ask `tiers` that matches a file `segment` names.
+fn named_read_holder<'a>(
+    segment: &Segment,
+    tiers: &(impl Iterator<Item = (&'a TierRule, Tier)> + Clone),
+) -> Option<Basis> {
+    segment.reads().iter().find_map(|read| {
+        let read = read.as_target();
+        tiers
+            .clone()
+            .find(|(rule, _)| {
+                rule.rule
+                    .matches(PermissionClass::Read, &read, MatchDiscipline::Deny)
+            })
+            .map(|(rule, tier)| rule.basis(tier))
+    })
 }
 
 /// An approval's "allow for this session" offer: the suggested rule, plus the call that any edit

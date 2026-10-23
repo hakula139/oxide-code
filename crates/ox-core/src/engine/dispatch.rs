@@ -463,8 +463,8 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
 }
 
 /// The synthetic error result for a call that would ask in a run nobody attends.
-/// It names what made the call ask, then the config `fix` that lets it through, or what else the
-/// model can do.
+/// It names what made the call ask, then the config `fix` that lets it through,
+/// or what else the model can do.
 fn unapproved_output(name: &str, basis: &Basis, fix: Option<&ConfigFix>) -> ToolOutput {
     let why = match basis {
         Basis::Mode(_) => "No allow pattern matches it.".to_owned(),
