@@ -359,8 +359,8 @@ impl Config {
         let stored = auth::stored_login(ClaudeCodeKeychain::SYSTEM, &trust);
         match auth::fallback(&self.base_url, stored).await {
             Ok(auth) => self.auth = Some(auth),
-            Err(CredentialError::SignedOut(e)) if can_sign_in => {
-                self.signed_out = Some(LoginUnavailable::new(&e));
+            Err(CredentialError::SignedOut { cause, .. }) if can_sign_in => {
+                self.signed_out = Some(LoginUnavailable::new(&cause));
             }
             Err(e) => return Err(e.into()),
         }

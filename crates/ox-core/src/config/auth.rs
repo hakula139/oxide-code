@@ -287,16 +287,30 @@ impl Credential {
 
 // ── Resolution ──
 
-/// Why no credential resolved.
+/// Why no credential resolved. Each variant builds its message when it is constructed, since the
+/// message names config paths that the environment of that moment resolves.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum CredentialError {
-    /// `base_url` is a gateway, which never receives a stored login.
-    #[error("{}", gateway_error(.0))]
-    Gateway(String),
+    /// The base URL is a gateway, which never receives a stored login.
+    #[error("{message}")]
+    Gateway { message: String },
     /// No stored login supplied a token. A TUI session starts signed out, since `/login` can sign
     /// it in.
-    #[error("{}", signed_out_error(.0))]
-    SignedOut(LoginError),
+    #[error("{message}")]
+    SignedOut { cause: LoginError, message: String },
+}
+
+impl CredentialError {
+    fn gateway(base_url: &str) -> Self {
+        Self::Gateway {
+            message: gateway_error(base_url),
+        }
+    }
+
+    fn signed_out(cause: LoginError) -> Self {
+        let message = signed_out_error(&cause);
+        Self::SignedOut { cause, message }
+    }
 }
 
 fn gateway_error(base_url: &str) -> String {
@@ -401,9 +415,9 @@ pub(super) async fn fallback(
     stored: impl Future<Output = Result<Auth, LoginError>>,
 ) -> Result<Auth, CredentialError> {
     if !super::is_first_party_base_url(base_url) {
-        return Err(CredentialError::Gateway(base_url.to_owned()));
+        return Err(CredentialError::gateway(base_url));
     }
-    stored.await.map_err(CredentialError::SignedOut)
+    stored.await.map_err(CredentialError::signed_out)
 }
 
 /// Loads the stored login to fall back on, trying oxide-code's own before Claude Code's. A login
@@ -808,19 +822,16 @@ mod tests {
         async fn refuses_stored_login_for_third_party_host_without_reading_it() {
             let config = abs("/srv/cfg");
 
-            let (err, message) =
+            let err =
                 temp_env::async_with_vars([("XDG_CONFIG_HOME", Some(config.as_str()))], async {
-                    let err = fallback(GATEWAY, unreachable_store())
-                        .await
-                        .expect_err("stored login must not go to a gateway");
-                    let message = format!("{err:#}");
-                    (err, message)
+                    fallback(GATEWAY, unreachable_store()).await
                 })
-                .await;
+                .await
+                .expect_err("stored login must not go to a gateway");
 
-            assert!(matches!(err, CredentialError::Gateway(_)), "{err:?}");
+            assert!(matches!(err, CredentialError::Gateway { .. }), "{err:?}");
             assert_eq!(
-                message,
+                format!("{err:#}"),
                 format!(
                     "no credentials for {GATEWAY}. \
                      Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
@@ -836,27 +847,28 @@ mod tests {
             let claude_dir = abs("/srv/claude");
             let config = abs("/srv/cfg");
 
-            let (err, message) = temp_env::async_with_vars(
+            let err = temp_env::async_with_vars(
                 [
                     ("CLAUDE_CONFIG_DIR", Some(claude_dir.as_str())),
                     ("XDG_CONFIG_HOME", Some(config.as_str())),
                 ],
-                async {
-                    let err = fallback(FIRST_PARTY, async { Err(LoginError::Missing) })
-                        .await
-                        .expect_err("no credential anywhere");
-                    let message = format!("{err:#}");
-                    (err, message)
-                },
+                fallback(FIRST_PARTY, async { Err(LoginError::Missing) }),
             )
-            .await;
+            .await
+            .expect_err("no credential anywhere");
 
             assert!(
-                matches!(err, CredentialError::SignedOut(LoginError::Missing)),
+                matches!(
+                    err,
+                    CredentialError::SignedOut {
+                        cause: LoginError::Missing,
+                        ..
+                    }
+                ),
                 "{err:?}"
             );
             assert_eq!(
-                message,
+                format!("{err:#}"),
                 format!(
                     "no credentials found: \
                      no API key or token is set, no oxide-code login is stored, \
