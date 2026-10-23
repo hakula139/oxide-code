@@ -9,7 +9,7 @@
 mod pricing;
 mod usage;
 
-pub(crate) use usage::TokenUsage;
+pub(crate) use self::usage::TokenUsage;
 
 use std::fmt::Write as _;
 

@@ -5,8 +5,8 @@
 mod view;
 
 #[cfg(test)]
-pub(crate) use view::testing;
-pub(crate) use view::{DiffRow, WorkingTreeDiff};
+pub(crate) use self::view::testing;
+pub(crate) use self::view::{DiffRow, WorkingTreeDiff};
 
 use std::path::{Path, PathBuf};
 use std::process::Output;

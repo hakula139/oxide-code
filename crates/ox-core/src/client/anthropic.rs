@@ -1700,10 +1700,7 @@ mod tests {
 
         #[test]
         fn orders_billing_then_identity_then_extras() {
-            let cache = CacheControl {
-                scope: Some("global"),
-                ttl: Some("1h"),
-            };
+            let cache = CacheControl::static_prefix(true, PromptCacheTtl::OneHour);
 
             let blocks = build_system_blocks(
                 Some("billing"),

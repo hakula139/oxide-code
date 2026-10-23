@@ -474,14 +474,6 @@ mod tests {
     use crate::util::tls::local_testing::no_roots;
     use crate::util::tls::testing::NoRoots;
 
-    /// Every source in resolution order.
-    const ALL_SOURCES: &[AuthSource] = AuthSource::VARIANTS;
-
-    /// `f` of every source, in resolution order.
-    fn each_source<T>(f: impl Fn(AuthSource) -> T) -> Vec<T> {
-        ALL_SOURCES.iter().copied().map(f).collect()
-    }
-
     #[test]
     fn debug_omits_secret() {
         let debug = format!("{:?}", Auth::new(AuthSource::ApiKeyEnv, "sk-must-not-leak"));
@@ -491,6 +483,11 @@ mod tests {
 
     mod auth_source {
         use super::*;
+
+        /// `f` of every source, in resolution order.
+        fn each_source<T>(f: impl Fn(AuthSource) -> T) -> Vec<T> {
+            AuthSource::VARIANTS.iter().copied().map(f).collect()
+        }
 
         #[test]
         fn display_names_kind_and_origin_for_each_source() {
@@ -564,21 +561,18 @@ mod tests {
 
             #[test]
             fn names_where_to_fix_each_source() {
-                for (source, expected) in [
-                    (AuthSource::AuthTokenEnv, "ANTHROPIC_AUTH_TOKEN"),
-                    (AuthSource::ApiKeyEnv, "ANTHROPIC_API_KEY"),
-                    (AuthSource::ApiKeyFile, "client.api_key in your user config"),
-                    (AuthSource::OAuthTokenEnv, "claude setup-token"),
-                    (AuthSource::OxLogin, "Run `/login`"),
-                    (AuthSource::ClaudeCodeLogin, "Run `claude`"),
-                ] {
-                    let hint = source.rejection_hint();
-                    assert!(hint.contains(expected), "{source:?}: {hint}");
-                }
-                assert!(
-                    AuthSource::OAuthTokenEnv
-                        .rejection_hint()
-                        .starts_with("CLAUDE_CODE_OAUTH_TOKEN")
+                assert_eq!(
+                    each_source(AuthSource::rejection_hint),
+                    [
+                        "Check ANTHROPIC_AUTH_TOKEN.",
+                        "Check ANTHROPIC_API_KEY.",
+                        "Check client.api_key in your user config. \
+                         `/config` shows which file sets it.",
+                        "CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
+                         Generate a new one with `claude setup-token`.",
+                        "Run `/login` to sign in again.",
+                        "Run `claude` to sign in again.",
+                    ],
                 );
             }
         }
@@ -758,7 +752,7 @@ mod tests {
         use super::*;
 
         fn explicit(present: &[AuthSource]) -> Vec<(AuthSource, Option<String>)> {
-            ALL_SOURCES[..4]
+            AuthSource::EXPLICIT
                 .iter()
                 .map(|&source| {
                     let value = present
@@ -773,10 +767,10 @@ mod tests {
         fn picks_the_highest_precedence_credential() {
             // Each row drops the previous winner, so every adjacent precedence pair is exercised.
             for (present, winner) in [
-                (&ALL_SOURCES[..4], AuthSource::AuthTokenEnv),
-                (&ALL_SOURCES[1..4], AuthSource::ApiKeyEnv),
-                (&ALL_SOURCES[2..4], AuthSource::ApiKeyFile),
-                (&ALL_SOURCES[3..4], AuthSource::OAuthTokenEnv),
+                (&AuthSource::EXPLICIT[..], AuthSource::AuthTokenEnv),
+                (&AuthSource::EXPLICIT[1..], AuthSource::ApiKeyEnv),
+                (&AuthSource::EXPLICIT[2..], AuthSource::ApiKeyFile),
+                (&AuthSource::EXPLICIT[3..], AuthSource::OAuthTokenEnv),
             ] {
                 let auth = first_explicit(explicit(present)).unwrap();
 

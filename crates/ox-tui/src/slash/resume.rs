@@ -1,5 +1,6 @@
 //! `/resume` (alias `/continue`) opens a [`SearchableList`] session picker, and
-//! `/resume <id-prefix>` resumes directly. `ox -r` without a session opens the same picker at startup.
+//! `/resume <id-prefix>` resumes directly.
+//! `ox -r` without a session opens the same picker at startup.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -1925,7 +1926,8 @@ mod tests {
             assert!(
                 matches!(
                     &deleted,
-                    Some(ModalAction::SystemMessage(msg)) if msg == "Deleted session 22222222: second"
+                    Some(ModalAction::SystemMessage(msg))
+                        if msg == "Deleted session 22222222: second"
                 ),
                 "{deleted:?}",
             );
