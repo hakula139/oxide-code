@@ -3398,6 +3398,9 @@ mod tests {
                 for (case, expected) in [
                     ("./build.sh", Decision::Allow),
                     ("cd x && cargo build", Decision::Allow),
+                    ("cd x && cargo build 2>&1 | tail -20", Decision::Allow),
+                    ("cd x && cargo build | grep -A 5 error", Decision::Allow),
+                    ("cd x && cargo build | tail -20 log", Decision::Ask),
                     ("cd /tmp/evil && ./build.sh", Decision::Ask),
                     ("cd x && ./build.sh", Decision::Ask),
                     ("cd x && ./nice cargo build", Decision::Ask),
@@ -3704,6 +3707,10 @@ mod tests {
                 assert_eq!(decide("cat .env"), Decision::Ask);
                 assert_eq!(decide("cat secrets/key"), Decision::Ask);
                 assert_eq!(decide("grep --file=.env x"), Decision::Ask);
+                assert_eq!(decide("grep --reg=x .env"), Decision::Ask);
+                assert_eq!(decide("grep --binary x .env"), Decision::Ask);
+                assert_eq!(decide("grep x README.md -e .env"), Decision::Ask);
+                assert_eq!(decide("grep --unknown=x key .env"), Decision::Ask);
             }
 
             #[test]
