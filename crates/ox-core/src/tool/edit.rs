@@ -1008,6 +1008,23 @@ mod tests {
             );
         }
 
+        #[tokio::test]
+        async fn fails_if_write_is_rejected() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("readonly.txt");
+            fs::write(&path, "hello world").unwrap();
+            let ctx = seeded_ctx(&path);
+            local_testing::make_read_only(&path);
+
+            let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
+                .await
+                .unwrap_err();
+
+            let cause = fs::OpenOptions::new().write(true).open(&path).unwrap_err();
+            assert_eq!(err, format!("Failed to write {}: {cause}", path.display()));
+            assert_eq!(fs::read_to_string(&path).unwrap(), "hello world");
+        }
+
         #[cfg(unix)]
         #[tokio::test]
         async fn accepts_a_read_through_a_symlinked_directory() {
@@ -1048,28 +1065,6 @@ mod tests {
                     path.display(),
                 ),
             );
-        }
-
-        #[cfg(unix)]
-        #[tokio::test]
-        async fn fails_if_write_is_rejected() {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            let dir = canonical_tempdir();
-            let path = dir.path().join("readonly.txt");
-            fs::write(&path, "hello world").unwrap();
-            let ctx = seeded_ctx(&path);
-
-            let mut perms = fs::metadata(&path).unwrap().permissions();
-            perms.set_mode(0o444);
-            fs::set_permissions(&path, perms).unwrap();
-
-            let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
-                .await
-                .unwrap_err();
-
-            let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::EACCES as i32);
-            assert_eq!(err, format!("Failed to write {}: {cause}", path.display()));
         }
     }
 

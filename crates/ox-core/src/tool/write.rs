@@ -607,6 +607,24 @@ mod tests {
             assert!(!target.exists(), "the link target must not be created");
         }
 
+        #[tokio::test]
+        async fn fails_on_read_only_file() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("locked.txt");
+            fs::write(&path, "original").unwrap();
+            let ctx = temp_ctx();
+            seed_full_read(&ctx.tracker, &path);
+            local_testing::make_read_only(&path);
+
+            let err = write_file(path.to_str().unwrap(), "overwrite", &ctx)
+                .await
+                .unwrap_err();
+
+            let cause = fs::OpenOptions::new().write(true).open(&path).unwrap_err();
+            assert_eq!(err, format!("Failed to write {}: {cause}", path.display()));
+            assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        }
+
         #[cfg(unix)]
         #[tokio::test]
         async fn records_a_new_file_under_its_canonical_key() {
@@ -645,27 +663,6 @@ mod tests {
                     path.display(),
                 ),
             );
-        }
-
-        #[cfg(unix)]
-        #[tokio::test]
-        async fn fails_on_read_only_file() {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            let dir = canonical_tempdir();
-            let path = dir.path().join("locked.txt");
-            fs::write(&path, "original").unwrap();
-            let ctx = temp_ctx();
-            seed_full_read(&ctx.tracker, &path);
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
-
-            let err = write_file(path.to_str().unwrap(), "overwrite", &ctx)
-                .await
-                .unwrap_err();
-
-            let cause = fs::OpenOptions::new().write(true).open(&path).unwrap_err();
-            assert_eq!(err, format!("Failed to write {}: {cause}", path.display()));
-            assert_eq!(fs::read_to_string(&path).unwrap(), "original");
         }
 
         #[cfg(unix)]
