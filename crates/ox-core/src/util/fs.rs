@@ -80,7 +80,8 @@ pub(crate) mod testing {
     use std::fs::{self, File};
     use std::path::{Path, PathBuf};
 
-    /// A symlink to a file. Windows needs Developer Mode or admin rights for it, which CI has.
+    /// Creates `link` as a symlink to the file `target`.
+    /// Windows needs Developer Mode or admin rights for it, which CI has.
     pub(crate) fn symlink_file(target: &Path, link: &Path) {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
@@ -88,7 +89,8 @@ pub(crate) mod testing {
         std::os::windows::fs::symlink_file(target, link).unwrap();
     }
 
-    /// A symlink to a directory, needing the same Windows rights as [`symlink_file`].
+    /// Creates `link` as a symlink to the directory `target`,
+    /// needing the same Windows rights as [`symlink_file`].
     pub(crate) fn symlink_dir(target: &Path, link: &Path) {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
@@ -96,8 +98,7 @@ pub(crate) mod testing {
         std::os::windows::fs::symlink_dir(target, link).unwrap();
     }
 
-    /// Denies reading the file or directory at `path` until the returned guard drops, which
-    /// restores access so the temp dir can be removed.
+    /// Denies reading the file or directory at `path` until the returned guard drops.
     pub(crate) fn deny_read_access(path: &Path) -> AccessDenied {
         #[cfg(unix)]
         let denied = AccessDenied::with_mode(path, 0o000);
@@ -114,8 +115,7 @@ pub(crate) mod testing {
         denied
     }
 
-    /// Denies creating subdirectories in `dir` until the returned guard drops, which restores
-    /// access.
+    /// Denies creating subdirectories in `dir` until the returned guard drops.
     pub(crate) fn deny_subdir_creation(dir: &Path) -> AccessDenied {
         #[cfg(unix)]
         let denied = AccessDenied::with_mode(dir, 0o555);
@@ -123,15 +123,13 @@ pub(crate) mod testing {
         #[cfg(windows)]
         let denied = AccessDenied::with_right(dir, "(AD)");
 
-        assert!(
-            fs::create_dir(dir.join("probe")).is_err(),
-            "{} accepted a subdirectory",
-            dir.display()
-        );
+        let created = fs::create_dir(dir.join("probe")).is_ok();
+        assert!(!created, "{} accepted a subdirectory", dir.display());
         denied
     }
 
-    /// Access denied by [`deny_read_access`] or [`deny_subdir_creation`], restored on drop.
+    /// Access denied by [`deny_read_access`] or [`deny_subdir_creation`],
+    /// restored on drop so the temp dir can be removed.
     pub(crate) struct AccessDenied {
         path: PathBuf,
         #[cfg(unix)]
@@ -186,11 +184,8 @@ pub(crate) mod testing {
             .args(args)
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
     }
 }
 

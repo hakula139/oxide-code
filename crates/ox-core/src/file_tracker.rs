@@ -865,6 +865,20 @@ mod tests {
         }
 
         #[test]
+        fn unreadable_file_drops_snapshot() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("a.rs");
+            std::fs::write(&path, b"content").unwrap();
+            let snap = snapshot(&path, b"content", OffsetDateTime::now_utc());
+            let _denied = deny_read_access(&path);
+
+            let (tracker, dropped) = FileTracker::restored(vec![snap]);
+
+            assert_eq!(dropped, vec![path.clone()]);
+            assert_eq!(tracker.snapshot_all(), []);
+        }
+
+        #[test]
         fn reports_dropped_paths_in_sorted_order() {
             let dir = tempfile::tempdir().unwrap();
             let kept_path = dir.path().join("kept.rs");
@@ -918,20 +932,6 @@ mod tests {
                     "newer recorded_at wins"
                 );
             }
-        }
-
-        #[test]
-        fn unreadable_file_drops_snapshot() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("a.rs");
-            std::fs::write(&path, b"content").unwrap();
-            let snap = snapshot(&path, b"content", OffsetDateTime::now_utc());
-            let _denied = deny_read_access(&path);
-
-            let (tracker, dropped) = FileTracker::restored(vec![snap]);
-
-            assert_eq!(dropped, vec![path.clone()]);
-            assert_eq!(tracker.snapshot_all(), []);
         }
     }
 
