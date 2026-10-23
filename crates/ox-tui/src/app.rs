@@ -311,6 +311,21 @@ mod tests {
     mod new {
         use super::*;
 
+        /// [`App::new`] on `session_info` and `history`, without [`test_app`]'s test doubles.
+        fn new_app(session_info: LiveSessionInfo, history: AppHistory) -> App {
+            let (_event_tx, events) = mpsc::unbounded_channel::<Event>();
+            let (ops, _op_rx) = mpsc::channel::<Op>(1);
+            App::new(
+                Theme::default(),
+                ThemeOverrides::default(),
+                session_info,
+                None,
+                events,
+                ops,
+                history,
+            )
+        }
+
         #[test]
         fn plumbs_resumed_title_and_branch_into_status_bar() {
             let (app, _rx, _event_tx) = test_app(Some("Resumed title"));
@@ -340,26 +355,32 @@ mod tests {
 
         #[test]
         fn after_resume_unarchived_the_session_opens_with_a_notice() {
-            let (_event_tx, events) = mpsc::unbounded_channel::<Event>();
-            let (ops, _op_rx) = mpsc::channel::<Op>(1);
+            let history = AppHistory {
+                interactions: vec![Interaction::UserText("earlier".to_owned())],
+                title: None,
+                prior: ArchiveState::Archived,
+            };
 
-            let mut app = App::new(
-                Theme::default(),
-                ThemeOverrides::default(),
-                unknown_model_session_info(),
-                None,
-                events,
-                ops,
-                AppHistory {
-                    interactions: vec![Interaction::UserText("earlier".to_owned())],
-                    title: None,
-                    prior: ArchiveState::Archived,
-                },
-            );
+            let mut app = new_app(unknown_model_session_info(), history);
 
             assert_eq!(app.chat.entry_count(), 2);
             let text = rendered_text(&mut app, 80, 12);
             assert!(text.contains("Unarchived session test-ses"), "{text}");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn schedules_the_git_probes_the_status_line_reads() {
+            let mut info = unknown_model_session_info();
+            info.config.status_line = vec![StatusLineSegment::PullRequest];
+            let history = AppHistory {
+                interactions: Vec::new(),
+                title: None,
+                prior: ArchiveState::Active,
+            };
+
+            let app = new_app(info, history);
+
+            assert_eq!(app.git_probes.next_poll(), Some(now()));
         }
     }
 
