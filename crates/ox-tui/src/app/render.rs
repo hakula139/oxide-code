@@ -779,20 +779,15 @@ mod tests {
         fn sizes_the_input_at_the_new_width_on_the_first_frame_after_a_resize() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.input.set_text(&"a".repeat(25));
-            let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
-            terminal.draw(|frame| app.draw_frame(frame)).unwrap();
+            _ = render_app(&mut app, 80, 12);
 
-            terminal.backend_mut().resize(14, 12);
-            terminal.draw(|frame| app.draw_frame(frame)).unwrap();
+            let text = rendered_text(&mut app, 14, 12);
 
-            let rows = buffer_rows(terminal.backend().buffer());
+            let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
             let rule = "─".repeat(14);
             assert_eq!(
-                rows[7..]
-                    .iter()
-                    .map(|row| row.trim_end())
-                    .collect::<Vec<_>>(),
-                [&rule, "❯ aaaaaaaaaaaa", "  aaaaaaaaaaaa", "  a", &rule],
+                rows[7..],
+                [&*rule, "❯ aaaaaaaaaaaa", "  aaaaaaaaaaaa", "  a", &rule]
             );
         }
 

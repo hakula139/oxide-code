@@ -401,7 +401,11 @@ mod tests {
             let mut input = test_input();
             type_text(&mut input, "aaaaaa bbbbbb cccccc dddddd");
 
-            assert_eq!(input.height(12), 4 + BORDER_ROWS, "4 word-wrapped rows");
+            assert_eq!(
+                input.height(14),
+                4 + BORDER_ROWS,
+                "4 rows word-wrapped in the 12 columns past the prompt"
+            );
         }
 
         #[test]
