@@ -10,7 +10,7 @@ use ratatui::text::Text;
 use crate::theme::Theme;
 use render::MarkdownRenderer;
 
-const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TABLES);
+const OPTIONS: Options = Options::ENABLE_TABLES;
 
 /// Renders markdown into styled ratatui [`Text`].
 ///
