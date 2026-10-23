@@ -82,10 +82,49 @@ Or as a flake input from another project:
 
 ```nix
 inputs.oxide-code.url = "github:hakula139/oxide-code";
-# Outputs: packages.${system}.{default, oxide-code}
+# Outputs: packages.${system}.{default, oxide-code}, overlays.default, homeModules.default
 ```
 
 A ref without a tag builds the `main` branch. Tags from `v0.1.0-alpha.2` onward include the flake, so adding a `/vX.Y.Z` suffix to the flake input pins a release.
+
+### Home Manager
+
+The flake's Home Manager module installs `ox` and writes its configuration from Nix options. Add the flake input, pointing each `follows` at your own input of that name and dropping those you don't have:
+
+```nix
+inputs.oxide-code = {
+  url = "github:hakula139/oxide-code";
+  inputs = {
+    nixpkgs.follows = "nixpkgs";
+    rust-overlay.follows = "rust-overlay";
+    git-hooks-nix.follows = "git-hooks-nix";
+    home-manager.follows = "home-manager";
+  };
+};
+```
+
+Then import the module in your Home Manager configuration:
+
+```nix
+imports = [ inputs.oxide-code.homeModules.default ];
+
+programs.oxide-code = {
+  enable = true;
+  settings.permission.mode = "yolo";
+  context = "Prefer small commits.";
+};
+```
+
+| Option     | Default                           | Purpose                                                                    |
+| ---------- | --------------------------------- | -------------------------------------------------------------------------- |
+| `enable`   | `false`                           | Install and configure `ox`                                                 |
+| `package`  | Built from this flake with `pkgs` | Package to install, or `null` to manage only configuration                 |
+| `settings` | `{ }`                             | TOML configuration written to `ox/config.toml` when nonempty               |
+| `context`  | `""`                              | Inline instructions or a file path written to `ox/AGENTS.md` when nonempty |
+
+File paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. A tag in the input URL pins the module together with the binary. The module owns `config.toml`, so keep local overrides in `~/.config/ox/config.d/`, where they take precedence.
+
+The module builds its default package without an overlay. To wrap or patch the package, apply `inputs.oxide-code.overlays.default` to your package set and set `programs.oxide-code.package` to your wrapper around `pkgs.oxide-code`.
 
 ## Verify Your Installation
 

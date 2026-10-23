@@ -20,6 +20,11 @@
 
     flake-utils.url = "github:numtide/flake-utils";
 
+    home-manager = {
+      url = "github:nix-community/home-manager/release-26.05";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -36,8 +41,10 @@
   # ------------------------------------------------------------------------------------------------
   outputs =
     {
+      self,
       nixpkgs,
       flake-utils,
+      home-manager,
       rust-overlay,
       git-hooks-nix,
       ...
@@ -49,16 +56,42 @@
         "aarch64-linux"
         "x86_64-linux"
       ];
+
+      # Builds ox against pkgs with the toolchain rust-toolchain.toml pins.
+      mkOxideCode =
+        pkgs:
+        let
+          toolchain =
+            (rust-overlay.lib.mkRustBin { } pkgs.buildPackages).fromRustupToolchainFile
+              ./rust-toolchain.toml;
+        in
+        pkgs.callPackage ./nix/package.nix {
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = toolchain;
+            rustc = toolchain;
+          };
+        };
     in
-    flake-utils.lib.eachSystem systems (
+    # ----------------------------------------------------------------------------------------------
+    # Overlay and Home Manager Module
+    # ----------------------------------------------------------------------------------------------
+    {
+      overlays.default = final: _: { oxide-code = mkOxideCode final; };
+
+      homeModules.default = {
+        _class = "homeManager";
+        _file = "${self}/flake.nix#homeModules.default";
+        imports = [ (import ./nix/home-manager.nix { inherit mkOxideCode; }) ];
+      };
+    }
+    // flake-utils.lib.eachSystem systems (
       system:
       let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [ rust-overlay.overlays.default ];
-        };
+        pkgs = nixpkgs.legacyPackages.${system};
 
-        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        rustBin = rust-overlay.lib.mkRustBin { } pkgs;
+        rustToolchain = rustBin.fromRustupToolchainFile ./rust-toolchain.toml;
+
         rustDevToolchain = rustToolchain.override (prev: {
           extensions = prev.extensions ++ [
             "rust-analyzer"
@@ -66,12 +99,7 @@
           ];
         });
 
-        oxide-code = pkgs.callPackage ./package.nix {
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = rustToolchain;
-            rustc = rustToolchain;
-          };
-        };
+        oxide-code = mkOxideCode pkgs;
 
         # ------------------------------------------------------------------------------------------
         # Pre-commit Hooks
@@ -203,7 +231,14 @@
         # ------------------------------------------------------------------------------------------
         # Checks
         # ------------------------------------------------------------------------------------------
-        checks.pre-commit = preCommitCheck;
+        checks = {
+          pre-commit = preCommitCheck;
+
+          home-manager = import ./nix/tests/home-manager.nix {
+            inherit home-manager pkgs;
+            homeModule = self.homeModules.default;
+          };
+        };
 
         # ------------------------------------------------------------------------------------------
         # Formatter

@@ -26,6 +26,8 @@ Each file sets only the keys it names, and a later layer wins key by key, so a d
 
 Drop-ins share the `config.toml` schema and count as user config. An invalid drop-in, including a symlink whose target is missing, stops startup with an error that names the file. A malformed permission pattern or extra root names the file that holds it in the same way.
 
+The [Home Manager module](install.md#home-manager) writes `config.toml` itself, so keep local overrides beside it in a drop-in.
+
 ### Project Config
 
 A project file comes from the checkout, so it can set only the `[client]`, `[permission]`, and `[tui]` tables. Within `[client]` it can set only `model`, `effort`, `max_tokens`, `max_tool_rounds`, `prompt_cache_ttl`, and the [`[client.compaction]`](#clientcompaction-context-compression) table, and within `[permission]` only `deny` and `ask`. Setting any other key fails the config load. This keeps a repository from redirecting your credentials, changing the endpoint or TLS trust, or widening what runs without asking. A project file may set `tui.theme.base` only to a built-in theme name, and the TUI refuses to start when it names a file. A TOML error in a project file gives only its line, column, and key, since the parser's message can quote a value.
