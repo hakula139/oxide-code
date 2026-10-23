@@ -62,7 +62,7 @@ pub fn resolve_theme(config: &ThemeConfig) -> Result<ResolvedTheme> {
     let mut notices = Vec::new();
     for (slot_name, patch) in &config.overrides {
         match parse_override(slot_name, patch) {
-            Ok(entry) => overrides.0.push(entry),
+            Ok((slot, patch)) => overrides.0.push((slot_name.clone(), slot, patch)),
             Err(e) => {
                 let reason = format!("{e:#}");
                 notices.push(format!(
@@ -147,14 +147,19 @@ super::for_each_slot!(define_slot_accessor);
 /// The `[tui.theme.overrides]` patches that parsed, which apply over any base theme, so a theme
 /// swap keeps them.
 #[derive(Debug, Default)]
-pub struct ThemeOverrides(Vec<(SlotAccessor, Patch)>);
+pub struct ThemeOverrides(Vec<(String, SlotAccessor, Patch)>);
 
 impl ThemeOverrides {
     pub(crate) fn apply(&self, theme: &mut Theme) {
-        for (slot, patch) in &self.0 {
+        for (_, slot, patch) in &self.0 {
             let slot = slot(theme);
             *slot = patch.apply(*slot);
         }
+    }
+
+    /// The names of the slots the overrides patch.
+    pub(crate) fn slots(&self) -> Vec<String> {
+        self.0.iter().map(|(name, ..)| name.clone()).collect()
     }
 }
 
@@ -573,6 +578,21 @@ mod tests {
                 notices,
                 [r#"Ignored the `purple_thing` theme override: unknown slot "purple_thing""#]
             );
+        }
+
+        #[test]
+        fn keeps_the_names_of_only_the_overrides_that_parsed() {
+            let overrides = indoc! {r##"
+                accent = "#00ff00"
+                error = "#ff0000"
+                purple_thing = "#ff0000"
+                success = {}
+            "##};
+
+            let ResolvedTheme { overrides, .. } =
+                resolve_theme(&config("mocha", overrides)).unwrap();
+
+            assert_eq!(overrides.slots(), ["accent", "error"]);
         }
 
         #[test]

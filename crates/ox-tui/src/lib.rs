@@ -76,6 +76,11 @@ pub async fn run<S: Debug>(
 ) -> Result<Option<S>> {
     terminal::install_panic_hook();
 
+    let ResolvedTheme {
+        theme,
+        overrides,
+        notices: theme_notices,
+    } = theme;
     let cwd = engine.cwd();
     let session_info = LiveSessionInfo {
         cwd: cwd.to_owned(),
@@ -87,16 +92,12 @@ pub async fn run<S: Debug>(
         auto_compaction_paused_after: None,
         background_shells: Vec::new(),
         config,
+        theme_overrides: overrides.slots(),
     };
     let interactions = engine.take_history();
 
     let mut tui = terminal::init()?;
     let EngineHandle { ops, events, task } = engine.spawn();
-    let ResolvedTheme {
-        theme,
-        overrides,
-        notices: theme_notices,
-    } = theme;
     let mut app = App::new(
         theme,
         overrides,

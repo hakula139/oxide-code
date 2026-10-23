@@ -1,5 +1,6 @@
 //! Layer merging. Tables merge by key, permission lists concatenate, and any other value a higher
-//! layer sets replaces the lower one. Records the layer behind each key and appended element.
+//! layer sets replaces the lower one.
+//! Records the layer behind each key and appended element.
 
 use std::collections::HashMap;
 use std::iter;
@@ -41,6 +42,15 @@ impl Origins {
             .map_or(Source::Default, |&index| self.layer_source(index))
     }
 
+    /// Pairs a merged value with the layer that set `key`.
+    pub(super) fn sourced<T>(&self, key: &str, value: Option<T>) -> Option<Sourced<T>> {
+        debug_assert!(
+            value.is_none() || self.keys.contains_key(key),
+            "no layer recorded for `{key}`, which a merged value sets"
+        );
+        value.map(|value| Sourced::new(value, self.source(key)))
+    }
+
     /// Pairs each element of the concatenated array at `key` with the layer that added it.
     pub(super) fn sourced_elements<T>(
         &self,
@@ -77,21 +87,21 @@ impl Origins {
             .collect()
     }
 
+    pub(super) fn into_layers(self) -> Vec<Layer> {
+        self.layers
+    }
+
     fn layer_source(&self, index: usize) -> Source {
         Source::File(self.layers[index].clone())
     }
 
-    /// Pairs a merged value with the layer that set `key`.
-    pub(super) fn sourced<T>(&self, key: &str, value: Option<T>) -> Option<Sourced<T>> {
-        debug_assert!(
-            value.is_none() || self.keys.contains_key(key),
-            "no layer recorded for `{key}`, which a merged value sets"
-        );
-        value.map(|value| Sourced::new(value, self.source(key)))
-    }
-
-    pub(super) fn into_layers(self) -> Vec<Layer> {
-        self.layers
+    /// Attributes `count` elements appended to the array at `path` to `layer`.
+    fn append(&mut self, path: String, layer: usize, count: usize) {
+        self.elements
+            .entry(path.clone())
+            .or_default()
+            .extend(iter::repeat_n(layer, count));
+        self.keys.insert(path, layer);
     }
 
     /// Drops the attributions at or under `path`, whose value is being replaced.
@@ -164,12 +174,7 @@ fn merge_table(
                 merge_table(base, overlay, &path, layer, origins);
             }
             (Some(Value::Array(base)), Value::Array(overlay)) if is_appended(&path) => {
-                origins
-                    .elements
-                    .entry(path.clone())
-                    .or_default()
-                    .extend(iter::repeat_n(layer, overlay.len()));
-                origins.keys.insert(path, layer);
+                origins.append(path, layer, overlay.len());
                 base.extend(overlay);
             }
             (_, value) => {
@@ -188,7 +193,7 @@ fn clear_exclusive(base: &mut Table, overlay: &Table, prefix: &str, origins: &mu
         }
         for key in *group {
             base.remove(*key);
-            origins.keys.remove(&format!("{prefix}.{key}"));
+            origins.forget(&format!("{prefix}.{key}"));
         }
     }
 }
@@ -201,36 +206,105 @@ mod tests {
 
     use super::*;
 
-    mod merge {
+    fn layer(name: &str) -> Layer {
+        Layer::DropIn(PathBuf::from(format!("/ox/config.d/{name}.toml")))
+    }
+
+    fn merged(layers: &[(&str, &str)]) -> (Table, Origins) {
+        merge(
+            layers
+                .iter()
+                .map(|(name, body)| (layer(name), body.parse::<Table>().unwrap()))
+                .collect(),
+        )
+    }
+
+    fn get<'a>(table: &'a Table, path: &str) -> Option<&'a Value> {
+        let mut parts = path.split('.');
+        let first = table.get(parts.next()?)?;
+        parts.try_fold(first, |value, key| value.get(key))
+    }
+
+    fn strings(table: &Table, path: &str) -> Vec<String> {
+        get(table, path)
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// `value` from the layer `name`.
+    fn from(value: &str, name: &str) -> Sourced<String> {
+        Sourced::new(value.to_owned(), Source::File(layer(name)))
+    }
+
+    mod origins {
         use super::*;
 
-        fn layer(name: &str) -> Layer {
-            Layer::DropIn(PathBuf::from(format!("/ox/config.d/{name}.toml")))
+        mod sourced_elements {
+            use super::*;
+
+            #[test]
+            fn pairs_each_element_with_the_layer_that_appended_it() {
+                let (table, origins) = merged(&[
+                    ("a", r#"permission.deny.exec = ["rm *"]"#),
+                    ("b", r#"permission.mode = "plan""#),
+                    ("c", r#"permission.deny.exec = ["curl *", "rm *"]"#),
+                ]);
+                let key = "permission.deny.exec";
+
+                let sourced = origins.sourced_elements(key, strings(&table, key));
+
+                assert_eq!(
+                    sourced,
+                    [from("rm *", "a"), from("curl *", "c"), from("rm *", "c")]
+                );
+            }
+
+            #[test]
+            fn forgets_the_elements_a_value_of_another_shape_replaced() {
+                let (_, origins) = merged(&[
+                    ("a", r#"permission.extra_roots = ["/srv/a"]"#),
+                    ("b", r#"permission.extra_roots = "/srv/b""#),
+                ]);
+
+                let sourced =
+                    origins.sourced_elements("permission.extra_roots", Vec::<String>::new());
+
+                assert_eq!(sourced, []);
+            }
         }
 
-        fn merged(layers: &[(&str, &str)]) -> (Table, Origins) {
-            merge(
-                layers
-                    .iter()
-                    .map(|(name, body)| (layer(name), body.parse::<Table>().unwrap()))
-                    .collect(),
-            )
-        }
+        mod sources_under {
+            use super::*;
 
-        fn get<'a>(table: &'a Table, path: &str) -> Option<&'a Value> {
-            let mut parts = path.split('.');
-            let first = table.get(parts.next()?)?;
-            parts.try_fold(first, |value, key| value.get(key))
-        }
+            #[test]
+            fn lists_each_layer_under_the_table_once_lowest_first() {
+                let (_, origins) = merged(&[
+                    (
+                        "a",
+                        r##"tui.theme.overrides.error = { fg = "#aaaaaa", bold = true }"##,
+                    ),
+                    ("b", r#"client.model = "high-model""#),
+                    ("c", r##"tui.theme.overrides.accent = "#cccccc""##),
+                ]);
 
-        fn strings(table: &Table, path: &str) -> Vec<String> {
-            get(table, path)
-                .and_then(Value::as_array)
-                .unwrap()
-                .iter()
-                .map(|value| value.as_str().unwrap().to_owned())
-                .collect()
+                let sources = origins.sources_under("tui.theme.overrides");
+
+                assert_eq!(
+                    sources,
+                    [Source::File(layer("a")), Source::File(layer("c"))]
+                );
+                assert_eq!(origins.sources_under("tui.theme"), sources);
+                assert_eq!(origins.sources_under("tui.theme.over"), []);
+                assert_eq!(origins.sources_under("client.compaction"), []);
+            }
         }
+    }
+
+    mod merge {
+        use super::*;
 
         #[test]
         fn tables_by_key_with_the_higher_layer_winning_each_key() {
@@ -292,11 +366,6 @@ mod tests {
                 Source::File(layer("b"))
             );
             assert_eq!(origins.source("client.effort"), Source::Default);
-            assert_eq!(
-                origins.sources_under("tui.theme.overrides"),
-                [Source::File(layer("a")), Source::File(layer("b"))]
-            );
-            assert_eq!(origins.sources_under("client.compaction"), []);
             assert_eq!(origins.into_layers(), [layer("a"), layer("b")]);
         }
 
@@ -340,15 +409,9 @@ mod tests {
                 Source::File(layer("c"))
             );
             let sourced = |key: &str| origins.sourced_elements(key, strings(&table, key));
-            let from =
-                |value: &str, name: &str| Sourced::new(value.to_owned(), Source::File(layer(name)));
             assert_eq!(
                 sourced("permission.extra_roots"),
                 [from("/srv/a", "a"), from("/srv/b", "c")]
-            );
-            assert_eq!(
-                sourced("permission.deny.exec"),
-                [from("rm *", "a"), from("curl *", "c"), from("rm *", "c")]
             );
             assert_eq!(sourced("permission.ask.edit"), [from("./Cargo.toml", "c")]);
         }

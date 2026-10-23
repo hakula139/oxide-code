@@ -114,7 +114,8 @@ impl<T> Sourced<Option<T>> {
 
 // ── Provenance ──
 
-/// The config files that loaded and the source of each setting `/config` lists.
+/// The config files that loaded, the source of each setting `/config` lists, and each entry of the
+/// permission lists the files set, with the layer that added it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Provenance {
     /// Lowest precedence first.

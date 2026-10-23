@@ -73,8 +73,6 @@ pub struct ConfigSnapshot {
     pub status_line: Vec<StatusLineSegment>,
     /// Resolved theme base name, either a built-in catalog key or a filesystem path.
     pub theme_name: String,
-    /// How many slots `[tui.theme.overrides]` patches.
-    pub theme_overrides: usize,
     pub provenance: Provenance,
 }
 
@@ -107,8 +105,7 @@ impl ConfigSnapshot {
         self.provenance.permission_mode = Source::Session;
     }
 
-    /// Applies a `/theme` switch to the built-in `name`, which `/config` then credits to the
-    /// session.
+    /// Applies a `/theme` switch to the built-in `name`, which `/config` credits to the session.
     pub fn apply_theme(&mut self, name: &str) {
         name.clone_into(&mut self.theme_name);
         self.provenance.theme = Source::Session;
@@ -315,7 +312,7 @@ impl Config {
             max_tool_rounds: max_tool_rounds.source,
             prompt_cache_ttl: prompt_cache_ttl.source,
             compaction: compaction.source,
-            permission_mode: permission.mode,
+            permission_mode: permission.mode_source,
             show_thinking: show_thinking.source,
             show_welcome: show_welcome.source,
             status_line: status_line.source,
@@ -407,7 +404,6 @@ impl Config {
             show_welcome: self.show_welcome,
             status_line: self.status_line.clone(),
             theme_name: self.theme.base.clone(),
-            theme_overrides: self.theme.overrides.len(),
             provenance: self.provenance.clone(),
         }
     }
@@ -520,7 +516,7 @@ fn validate_status_line(segments: Vec<StatusLineSegment>) -> Result<Vec<StatusLi
 struct ResolvedPermission {
     policy: Policy,
     workspace: Workspace,
-    mode: Source,
+    mode_source: Source,
     extra_roots: Vec<Sourced<String>>,
     rules: Vec<Sourced<TierPattern>>,
     disabled_defaults: Vec<Sourced<Shipped>>,
@@ -533,12 +529,9 @@ fn resolve_permission(
     origins: &Origins,
     cwd: &Path,
 ) -> Result<ResolvedPermission> {
-    let extra_roots = origins.sourced_elements(
-        "permission.extra_roots",
-        file.extra_roots.unwrap_or_default(),
-    );
-    let raw_roots: Vec<String> = extra_roots.iter().map(|root| root.value.clone()).collect();
-    let workspace = Workspace::resolve(cwd, &raw_roots)?;
+    let roots = file.extra_roots.unwrap_or_default();
+    let workspace = Workspace::resolve(cwd, &roots)?;
+    let extra_roots = origins.sourced_elements("permission.extra_roots", roots);
     let mode = env_parse::<Mode>("OX_PERMISSION_MODE")?
         .or_else(|| origins.sourced("permission.mode", file.mode))
         .unwrap_or_else(|| Sourced::fallback(Mode::default()));
@@ -570,7 +563,7 @@ fn resolve_permission(
     Ok(ResolvedPermission {
         policy,
         workspace,
-        mode: mode.source,
+        mode_source: mode.source,
         extra_roots,
         rules,
         disabled_defaults,
@@ -783,6 +776,20 @@ mod tests {
 
                 assert_eq!(snap.permission_mode, Mode::Plan);
                 assert_eq!(snap.provenance.permission_mode, Source::Session);
+            }
+        }
+
+        mod apply_theme {
+            use super::*;
+
+            #[test]
+            fn marks_the_switch_as_session_set() {
+                let mut snap = sample_config().snapshot();
+
+                snap.apply_theme("latte");
+
+                assert_eq!(snap.theme_name, "latte");
+                assert_eq!(snap.provenance.theme, Source::Session);
             }
         }
     }
