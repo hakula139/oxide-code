@@ -1175,9 +1175,10 @@ impl Policy {
         }
     }
 
-    /// What lets every part of a command through, when each does: the analysis recognizes it, it
-    /// runs at least one simple command, each simple command is allowed by a rule or is a known-safe
-    /// read, and each file it writes is inside a workspace root or allowed for editing.
+    /// What lets every part of a command through, when each does:
+    /// the analysis recognizes it, it runs at least one simple command,
+    /// each simple command is allowed by a rule or is a known-safe read,
+    /// and each file it writes is inside a workspace root or allowed for editing.
     fn allows_command(&self, command: &CommandTarget) -> Option<Basis> {
         if command.unrecognized().is_some() || command.segments().is_empty() {
             return None;

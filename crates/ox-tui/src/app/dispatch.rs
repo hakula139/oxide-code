@@ -468,8 +468,8 @@ impl App {
     }
 
     /// Shows a slash command's chat output or modal, or starts its background task.
-    /// Returns a forwarded action, or the [`Action::SlashPrompt`] that runs a built prompt under the
-    /// typed `line`, unapplied.
+    /// Returns a forwarded action,
+    /// or the [`Action::SlashPrompt`] that runs a built prompt under the typed `line`, unapplied.
     /// Must run inside a tokio runtime.
     fn apply_slash_outcome(
         &mut self,
@@ -1742,8 +1742,9 @@ mod tests {
 
         #[tokio::test]
         async fn resume_forwards_to_the_engine_and_stays_busy_until_event() {
-            // Between forwarding `Resume` and the `SessionResumed` event, a submit only queues, so a
-            // typed prompt doesn't push into chat just before `apply_session_resumed` clears it.
+            // Between forwarding `Resume` and the `SessionResumed` event, a submit only queues,
+            // so a typed prompt doesn't push into chat
+            // just before `apply_session_resumed` clears it.
             let (mut app, mut rx, _event_tx) = test_app(None);
             let action = Op::Resume {
                 target: ResumeTarget::Path("resume-target.jsonl".into()),

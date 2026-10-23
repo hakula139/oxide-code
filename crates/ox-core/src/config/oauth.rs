@@ -757,7 +757,8 @@ impl TokenResponse {
     }
 }
 
-/// The authorization-code grant `/login` sends once the browser returns or the user pastes the code.
+/// The authorization-code grant `/login` sends
+/// once the browser returns or the user pastes the code.
 #[derive(Serialize)]
 pub(super) struct CodeGrant<'a> {
     pub(super) code: &'a str,
@@ -878,8 +879,8 @@ async fn request_tokens(
         .with_context(|| format!("failed to parse {what} response"))?)
 }
 
-/// What a token endpoint's error `body` says, [condensed](condense): RFC 6749's `error_description`,
-/// or else its `error` code, or else [`response::body_details`].
+/// What a token endpoint's error `body` says, [condensed](condense):
+/// RFC 6749's `error_description`, or else its `error` code, or else [`response::body_details`].
 fn token_error_details(body: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct TokenError {

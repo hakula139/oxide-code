@@ -2459,9 +2459,10 @@ mod tests {
             Key,
         }
 
-        /// A deserializer that leads `FileConfig` along `path`, one field per table, and records
-        /// the shape of the value at its end. A struct, such as `[client]`, is a table, and any
-        /// other value is a key, even an optional table such as `permission.allow`.
+        /// A deserializer that leads `FileConfig` along `path`, one field per table,
+        /// and records the shape of the value at its end.
+        /// A struct, such as `[client]`, is a table,
+        /// and any other value is a key, even an optional table such as `permission.allow`.
         #[derive(Clone, Copy)]
         struct Probe<'a> {
             path: &'a [&'static str],

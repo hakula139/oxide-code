@@ -1050,8 +1050,9 @@ impl Walk<'_> {
                         declared_name(word, src).is_some_and(|name| SAFE_VARIABLES.contains(&name))
                     })
             }
-            // `-i` evaluates each later value as arithmetic, `-n` sends later writes to the variable
-            // a value names, and `-x` exports the variable.
+            // `-i` evaluates each later value as arithmetic,
+            // `-n` sends later writes to the variable a value names,
+            // and `-x` exports the variable.
             "declare" | "local" | "readonly" | "typeset" => {
                 builtin_options(args, src, "", "", "inx").is_some_and(|(_, operands)| {
                     operands
@@ -2078,11 +2079,14 @@ fn literal_script(args: &[Word]) -> Option<String> {
         .map(|values| values.join(" "))
 }
 
-/// The variables a builtin's options name and the operands after them, read past option clusters
-/// where each letter in `valued` takes a value, and each in `naming` takes a variable's name. `None`
-/// when an option holds a letter in `refused`, whose effect the analysis does not follow, or a word
-/// that expands may be an option or a name. A word written from a letter or `_`, as an assignment
-/// with an array value is, cannot expand to an option. `--` ends the options.
+/// The variables a builtin's options name and the operands after them,
+/// read past option clusters where each letter in `valued` takes a value,
+/// and each in `naming` takes a variable's name.
+/// `None` when an option holds a letter in `refused`, whose effect the analysis does not follow,
+/// or a word that expands may be an option or a name.
+/// A word written from a letter or `_`, as an assignment with an array value is,
+/// cannot expand to an option.
+/// `--` ends the options.
 fn builtin_options<'w>(
     args: &'w [Word],
     src: &str,
