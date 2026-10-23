@@ -560,8 +560,10 @@ mod tests {
 
         #[test]
         fn respects_char_boundary() {
-            // Each `中` is 3 bytes, so cutting at byte 5 without `floor_char_boundary` would split a
-            // codepoint and panic on `&s[..5]`. Rounding down to byte 3 yields one `中` + `...`.
+            // Each `中` is 3 bytes,
+            // so cutting at byte 5 without `floor_char_boundary` would split a codepoint
+            // and panic on `&s[..5]`.
+            // Rounding down to byte 3 yields one `中` + `...`.
             let input = "中中中中";
             let result = truncate_to_bytes(input, 5);
             assert_eq!(result, "中...");

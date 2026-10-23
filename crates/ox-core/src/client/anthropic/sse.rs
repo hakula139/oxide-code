@@ -559,7 +559,8 @@ mod tests {
             assert_eq!(
                 format!("{err:#}"),
                 format!(
-                    "Anthropic API stream failed: unterminated SSE frame exceeded {MAX_SSE_FRAME_BYTES} bytes"
+                    "Anthropic API stream failed: \
+                     unterminated SSE frame exceeded {MAX_SSE_FRAME_BYTES} bytes"
                 ),
             );
             assert_eq!(request_count(&server).await, 1);

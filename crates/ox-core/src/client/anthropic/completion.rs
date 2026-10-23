@@ -1,5 +1,5 @@
-//! Non-streaming `/v1/messages` side-query path. Returns flattened assistant text and the response's
-//! usage.
+//! Non-streaming `/v1/messages` side-query path.
+//! Returns flattened assistant text and the response's usage.
 
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
