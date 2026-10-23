@@ -1657,11 +1657,12 @@ mod tests {
         #[tokio::test]
         async fn leaves_the_stored_login_to_resolve_auth() {
             let dir = tempfile::tempdir().unwrap();
-            let vars = env_vars(vec![
+            let mut vars = env_vars(vec![
                 xdg(&dir),
                 ("ANTHROPIC_API_KEY", None),
                 env("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
             ]);
+            vars.push((HOME_VAR, Some(dir.path().to_string_lossy().into_owned())));
 
             let (loaded, resolved) = temp_env::async_with_vars(vars, async {
                 let mut config = Config::load(dir.path()).expect("load reads no credential");
@@ -1677,13 +1678,11 @@ mod tests {
             assert_eq!(loaded, (true, true));
             assert_eq!(
                 resolved,
-                Err(format!(
-                    "no credentials for https://gateway.example.com. \
+                Err("no credentials for https://gateway.example.com. \
                      Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
-                     or add `api_key` to {}. \
-                     Stored logins are sent only to the Anthropic API.",
-                    dir.path().join("ox").join("config.toml").display(),
-                )),
+                     or add `api_key` to ~/ox/config.toml. \
+                     Stored logins are sent only to the Anthropic API."
+                    .to_owned()),
             );
         }
 
