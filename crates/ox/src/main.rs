@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use anyhow::{Context as _, Result, bail};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::error::ErrorKind;
-use clap::{Arg, ArgGroup, Command, CommandFactory as _, Parser};
+use clap::{Arg, ArgGroup, CommandFactory as _, Parser, Subcommand};
 use indoc::indoc;
 use strum::VariantArray as _;
 use time::error::IndeterminateOffset;
@@ -28,6 +28,7 @@ use ox_core::session::resolver::{SessionTarget, resolve_session};
 use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope, ProjectScope};
 use ox_core::util;
+use ox_core::util::path::tildify;
 use ox_core::util::tls::PlatformTrust;
 use ox_tui::Startup;
 use ox_tui::slash::ResumePicker;
@@ -41,6 +42,8 @@ use driver::headless::OutputFormat;
 #[command(
     name = "ox",
     version,
+    args_conflicts_with_subcommands = true,
+    disable_help_subcommand = true,
     about = "A terminal-based AI coding assistant",
     long_about = indoc! {"
         A terminal-based AI coding assistant.
@@ -54,6 +57,7 @@ use driver::headless::OutputFormat;
           ox -c                                 Continue the latest session in this project
           ox -r                                 Pick a session to resume
           git diff | ox -p \"Review this diff\"   Answer once, with the diff attached from stdin
+          ox config check                       Validate the config files and exit
 
         Guides: https://github.com/hakula139/oxide-code/tree/main/docs/guide"
     }
@@ -73,6 +77,9 @@ use driver::headless::OutputFormat;
     reason = "each bool is an independent CLI switch that clap parses into its own field"
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Start with this prompt, or with `--print`, answer it.
     #[arg(value_parser = non_blank)]
     prompt: Option<String>,
@@ -263,7 +270,7 @@ impl TypedValueParser for ModeParser {
 
     fn parse_ref(
         &self,
-        cmd: &Command,
+        cmd: &clap::Command,
         arg: Option<&Arg>,
         value: &OsStr,
     ) -> Result<Mode, clap::Error> {
@@ -277,6 +284,21 @@ impl TypedValueParser for ModeParser {
     fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
         self.0.possible_values()
     }
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Inspect the configuration.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Validate the config files and environment variables without starting a session.
+    Check,
 }
 
 fn main() -> ExitCode {
@@ -311,6 +333,12 @@ fn try_main() -> Result<ExitCode> {
 
 async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let cli = Cli::parse_valid();
+    if let Some(Command::Config {
+        action: ConfigAction::Check,
+    }) = cli.command
+    {
+        return check_config();
+    }
 
     let tui_mode = cli.tui_mode()?;
     let _log_guard = util::log::init_tracing(tui_mode)?;
@@ -410,6 +438,26 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     ))
     .await?;
     Ok(signal.map_or(Exit::Success, Exit::Signal))
+}
+
+/// Runs `ox config check`: loads the config as [`Config::check`] does, resolves the theme, and
+/// prints the startup notices, each file read, and a verdict.
+fn check_config() -> Result<Exit> {
+    _ = util::log::init_tracing(false)?;
+    let cwd = env::current_dir().context("failed to read the current working directory")?;
+    let check = Config::check(&cwd)?;
+    resolve_theme(&check.theme)?;
+
+    let mut stderr = io::stderr().lock();
+    for notice in &check.notices {
+        writeln!(stderr, "warning: {notice}")?;
+    }
+    let mut stdout = io::stdout().lock();
+    for file in &check.files {
+        writeln!(stdout, "Read {}", tildify(file))?;
+    }
+    writeln!(stdout, "Config is valid")?;
+    Ok(Exit::Success)
 }
 
 #[cfg(test)]
@@ -577,6 +625,34 @@ mod tests {
                 parse_error(&["ox", "-c", "-r", "a1b2"]),
                 Some(ErrorKind::ArgumentConflict),
             );
+        }
+
+        #[test]
+        fn config_check_parses_as_a_subcommand_only_without_session_arguments() {
+            let cli = Cli::try_parse_from(["ox", "config", "check"]).unwrap();
+
+            assert!(matches!(
+                cli.command,
+                Some(Command::Config {
+                    action: ConfigAction::Check,
+                })
+            ));
+            assert_eq!(cli.prompt, None);
+            assert_eq!(
+                parse_error(&["ox", "config"]),
+                Some(ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand),
+            );
+            assert_eq!(
+                parse_error(&["ox", "-p", "hi", "config", "check"]),
+                Some(ErrorKind::ArgumentConflict),
+            );
+
+            let escaped = Cli::try_parse_from(["ox", "--", "config"]).unwrap();
+            let help = Cli::try_parse_from(["ox", "help"]).unwrap();
+
+            assert_eq!(escaped.prompt.as_deref(), Some("config"));
+            assert!(escaped.command.is_none());
+            assert_eq!(help.prompt.as_deref(), Some("help"));
         }
 
         mod validate {

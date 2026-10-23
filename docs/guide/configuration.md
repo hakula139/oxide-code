@@ -32,6 +32,10 @@ A project file comes from the checkout, so it can set only the `[client]`, `[per
 
 The project file must also resolve inside the project root. A `.ox/config.toml` that resolves outside it, through a symlinked file or `.ox` directory, fails the config load with an error that names only the link. A link to a file inside the repository, such as a config shared across a monorepo, still works, unless the project root is your home directory or one of its ancestors, as with a dotfiles repository at `~`. There, a project file reached through any symlink fails the load.
 
+### Checking Files
+
+`ox config check` loads every layer that applies in the working directory along with the environment variables, validates them as startup does, prints each file it read, and exits with status 1 and the startup error when a value is invalid. It skips the stored login and the CA bundle, so it never opens the keychain, reads a credential file, or connects, which lets it run in CI or a Nix build.
+
 ## Config File
 
 All fields are optional. Only specify the values you want to override.

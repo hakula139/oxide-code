@@ -190,6 +190,18 @@ pub struct ThemeConfig {
     pub overrides: toml::Table,
 }
 
+// ── ConfigCheck ──
+
+/// What `ox config check` reports about a configuration that loads.
+#[derive(Debug, Clone)]
+pub struct ConfigCheck {
+    /// The config files read, in load order.
+    pub files: Vec<PathBuf>,
+    /// Startup notices, such as an unsupported model.
+    pub notices: Vec<String>,
+    pub theme: ThemeConfig,
+}
+
 // ── Config ──
 
 /// Resolved configuration.
@@ -232,6 +244,27 @@ impl Config {
     /// A TOML or env parse error fails the load.
     /// Only an explicit credential resolves here, and [`Config::resolve_auth`] adds the rest.
     pub fn load(cwd: &Path) -> Result<Self> {
+        Self::resolve(cwd, |path| load_extra_ca_certs(path).map(drop))
+    }
+
+    /// Resolves the config as [`Config::load`] does without reading the CA bundle it names, which
+    /// may be a secret the caller cannot read. Like `load`, it reads no stored login.
+    pub fn check(cwd: &Path) -> Result<ConfigCheck> {
+        let config = Self::resolve(cwd, |_| Ok(()))?;
+        Ok(ConfigCheck {
+            files: config
+                .provenance
+                .layers
+                .iter()
+                .map(|layer| layer.path().to_owned())
+                .collect(),
+            notices: config.notices(),
+            theme: config.theme,
+        })
+    }
+
+    /// Resolves the config, checking each explicit CA bundle with `check_ca_bundle`.
+    fn resolve(cwd: &Path, check_ca_bundle: fn(&Path) -> Result<()>) -> Result<Self> {
         let Loaded { config, origins } = load::load(cwd, &project_root(cwd))?;
         let FileConfig {
             client,
@@ -246,6 +279,7 @@ impl Config {
 
         let extra_ca_certs = resolve_extra_ca_certs(
             origins.sourced("client.extra_ca_certs", client.extra_ca_certs),
+            check_ca_bundle,
         )?;
 
         let gateway = GatewayCompat::load()?;
@@ -413,13 +447,16 @@ impl Config {
 
 /// `OX_EXTRA_CA_CERTS` > `client.extra_ca_certs` > `NODE_EXTRA_CA_CERTS`. Node is often exported
 /// shell-wide for npm, so like Node itself, an unreadable bundle there warns and is skipped.
-fn resolve_extra_ca_certs(file: Option<Sourced<String>>) -> Result<Sourced<Option<PathBuf>>> {
+fn resolve_extra_ca_certs(
+    file: Option<Sourced<String>>,
+    check_ca_bundle: fn(&Path) -> Result<()>,
+) -> Result<Sourced<Option<PathBuf>>> {
     let explicit = env_string("OX_EXTRA_CA_CERTS")
         .map(|raw| ("OX_EXTRA_CA_CERTS", raw))
         .or(file.map(|raw| ("client.extra_ca_certs", raw)));
     if let Some((key, raw)) = explicit {
         let path = expand_user(&raw.value)
-            .and_then(|path| load_extra_ca_certs(&path).map(|_| path))
+            .and_then(|path| check_ca_bundle(&path).map(|()| path))
             .with_context(|| format!("invalid {key}"))?;
         return Ok(Sourced::new(Some(path), raw.source));
     }
@@ -427,7 +464,7 @@ fn resolve_extra_ca_certs(file: Option<Sourced<String>>) -> Result<Sourced<Optio
     let Some(raw) = env_string("NODE_EXTRA_CA_CERTS") else {
         return Ok(Sourced::fallback(None));
     };
-    match expand_user(&raw.value).and_then(|path| load_extra_ca_certs(&path).map(|_| path)) {
+    match expand_user(&raw.value).and_then(|path| check_ca_bundle(&path).map(|()| path)) {
         Ok(path) => Ok(Sourced::new(Some(path), raw.source)),
         Err(e) => {
             warn!("ignoring NODE_EXTRA_CA_CERTS: {e:#}");

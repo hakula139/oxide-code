@@ -30,7 +30,7 @@ Early development. What works today:
 - **[Sessions](docs/guide/sessions.md)**: JSONL logs with AI-generated titles, listing, archiving, and resume
 - **File-change tracking**: a Read-before-Edit gate and on-disk drift detection
 - **[Authentication](docs/guide/configuration.md#authentication)**: an Anthropic API key, browser sign-in with `/login`, the Claude Code login or a long-lived OAuth token, or an LLM gateway bearer token with custom headers
-- **[Configuration](docs/guide/configuration.md)**: layered TOML from user, drop-in, and project files, with environment variable overrides
+- **[Configuration](docs/guide/configuration.md)**: layered TOML from user, drop-in, and project files, with environment variable overrides, checked by `ox config check`
 
 ## Scope
 

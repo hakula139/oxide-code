@@ -3,10 +3,10 @@
 #[path = "support/env.rs"]
 mod env;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use indoc::indoc;
+use indoc::{formatdoc, indoc};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -81,6 +81,203 @@ async fn startup_error_escapes_control_characters_a_project_file_supplies() {
         "{stderr}"
     );
     assert!(!stderr.contains(['\u{1b}', '\u{7}']), "{stderr:?}");
+}
+
+/// Runs `ox config check` from an empty `work/` directory under `root`.
+fn config_check(root: &Path) -> Command {
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).expect("the scratch work directory can be created");
+    let mut command = ox(root);
+    command.args(["config", "check"]).current_dir(work);
+    command
+}
+
+/// Writes `body` to the user config file under `root` and returns the file's path.
+fn write_user_config(root: &Path, body: &str) -> PathBuf {
+    let dir = root.join("config").join("ox");
+    std::fs::create_dir_all(&dir).expect("the scratch config directory can be created");
+    let file = dir.join("config.toml");
+    std::fs::write(&file, body).expect("the scratch config file can be written");
+    file
+}
+
+#[test]
+fn config_check_lists_each_file_read_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let user_file = write_user_config(root, "[tui]\nshow_thinking = true\n");
+    let drop_in = root
+        .join("config")
+        .join("ox")
+        .join("config.d")
+        .join("50-a.toml");
+    std::fs::create_dir(drop_in.parent().unwrap()).unwrap();
+    std::fs::write(&drop_in, "[client]\neffort = \"high\"\n").unwrap();
+
+    let output = config_check(root).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let user_file = user_file.display();
+    let drop_in = drop_in.display();
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        formatdoc! {"
+            Read {user_file}
+            Read {drop_in}
+            Config is valid
+        "},
+    );
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    assert!(!root.join("data").exists());
+    assert!(!root.join("state").exists());
+}
+
+#[test]
+fn config_check_skips_the_credential_that_a_session_needs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    let output = config_check(root)
+        .env("ANTHROPIC_BASE_URL", "https://gw.example.com")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    assert_eq!(output.stdout, b"Config is valid\n");
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+
+    let output = ox(root)
+        .args(["-p", "hello"])
+        .current_dir(root.join("work"))
+        .env("ANTHROPIC_BASE_URL", "https://gw.example.com")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("no credentials for https://gw.example.com. Set ANTHROPIC_AUTH_TOKEN"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn config_check_skips_the_ca_bundle_that_a_session_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let missing = root.join("missing.pem");
+    write_user_config(
+        root,
+        &format!("[client]\nextra_ca_certs = '{}'\n", missing.display()),
+    );
+
+    let output = config_check(root).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let output = ox(root)
+        .args(["-p", "hello"])
+        .current_dir(root.join("work"))
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let headline = format!(
+        "Error: invalid client.extra_ca_certs: failed to read extra CA bundle at {}: ",
+        missing.display()
+    );
+    assert!(stderr.starts_with(&headline), "{stderr}");
+}
+
+#[test]
+fn config_check_rejects_an_unknown_key_with_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let file = write_user_config(root, "[client]\nshow_thinking = true\n");
+
+    let output = config_check(root).output().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.starts_with("Error:"), "{stderr}");
+    assert!(stderr.contains(&file.display().to_string()), "{stderr}");
+    assert!(stderr.contains("unknown field `show_thinking`"), "{stderr}");
+}
+
+#[test]
+fn config_check_rejects_an_invalid_environment_variable() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = config_check(dir.path())
+        .env("OX_EFFORT", "extreme")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "Error: invalid OX_EFFORT \"extreme\": expected one of low, medium, high, xhigh, max\n",
+    );
+}
+
+#[test]
+fn config_check_rejects_a_theme_that_does_not_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_user_config(root, "[tui.theme]\nbase = \"nope\"\n");
+
+    let output = config_check(root).output().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.starts_with("Error: invalid [tui.theme] base \"nope\": neither a built-in theme ("),
+        "{stderr}",
+    );
+}
+
+#[test]
+fn config_check_applies_the_project_layer_and_its_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let work = root.join("work");
+    std::fs::create_dir_all(work.join(".git")).unwrap();
+    std::fs::create_dir(work.join(".ox")).unwrap();
+    std::fs::write(
+        work.join(".ox/config.toml"),
+        "[client]\nbase_url = \"https://gw.example.com\"\n",
+    )
+    .unwrap();
+
+    let output = config_check(root).output().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("cannot set client.base_url."), "{stderr}");
+}
+
+#[test]
+fn config_check_warns_about_an_unsupported_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_user_config(root, "[client]\nmodel = \"claude-opus-4\"\n");
+
+    let output = config_check(root).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "warning: `claude-opus-4` is not a supported model, \
+         so requests go without thinking, effort, and context management, \
+         and auto-compaction and cost tracking stay off. \
+         Did you mean `claude-opus-5-5` (Claude Opus 5.5)?\n",
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.ends_with("Config is valid\n"), "{stdout}");
 }
 
 #[tokio::test]
