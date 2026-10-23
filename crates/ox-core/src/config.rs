@@ -394,8 +394,8 @@ impl Config {
         let stored = auth::stored_login(ClaudeCodeKeychain::SYSTEM, &trust);
         match auth::fallback(&self.base_url, stored).await {
             Ok(auth) => self.auth = Some(auth),
-            Err(CredentialError::SignedOut(e)) if can_sign_in => {
-                self.signed_out = Some(LoginUnavailable::new(&e));
+            Err(CredentialError::SignedOut { cause, .. }) if can_sign_in => {
+                self.signed_out = Some(LoginUnavailable::new(&cause));
             }
             Err(e) => return Err(e.into()),
         }
@@ -1543,22 +1543,18 @@ mod tests {
             let (loaded, resolved) = temp_env::async_with_vars(vars, async {
                 let mut config = Config::load(dir.path()).expect("load reads no credential");
                 let loaded = (config.auth.is_none(), config.signed_out.is_none());
-                let resolved = config
-                    .resolve_auth(true)
-                    .await
-                    .map_err(|e| format!("{e:#}"));
-                (loaded, resolved)
+                (loaded, config.resolve_auth(true).await)
             })
             .await;
+            let err = resolved.expect_err("a gateway gets no stored login");
 
             assert_eq!(loaded, (true, true));
             assert_eq!(
-                resolved,
-                Err("no credentials for https://gateway.example.com. \
-                     Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
-                     or add `api_key` to ~/ox/config.toml. \
-                     Stored logins are sent only to the Anthropic API."
-                    .to_owned()),
+                format!("{err:#}"),
+                "no credentials for https://gateway.example.com. \
+                 Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
+                 or add `api_key` to ~/ox/config.toml. \
+                 Stored logins are sent only to the Anthropic API.",
             );
         }
 

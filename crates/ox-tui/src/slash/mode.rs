@@ -239,7 +239,7 @@ mod tests {
                         "",
                         "  1. manual    Ask before tool calls that no permission rule allows or denies",
                         "> 2. plan    ✓ Read-only: deny edits and commands",
-                        "  3. yolo      Run tool calls without asking unless a rule denies or asks",
+                        "  3. yolo      Never ask: run tool calls unless a rule denies or asks",
                         "",
                         "Enter to confirm  ·  Esc to cancel",
                     ]

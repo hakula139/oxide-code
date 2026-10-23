@@ -1914,8 +1914,9 @@ fn assignment_word(node: Node<'_>, src: &str) -> ShellWord {
     }
 }
 
-/// `node`'s value and whether it globs, for [`Word`]. Tilde expansion applies to a `leading` word
-/// alone, and `~user` has no value, since the analysis does not look users up.
+/// `node`'s value and whether it globs, for [`Word`]. Tilde expansion and a `$HOME` or `${HOME}`
+/// expansion, which bash also reads from `HOME`, apply to a `leading` word alone, and `~user` has
+/// no value, since the analysis does not look users up.
 fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
     let text = &src[node.byte_range()];
     match node.kind() {
@@ -1923,15 +1924,26 @@ fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
         "number" | "==" | "=~" => Some((text.to_owned(), false)),
         "raw_string" => Some((text.get(1..text.len() - 1)?.to_owned(), false)),
         "ansi_c_string" => Some((unquote_ansi_c(text.get(2..text.len() - 1)?)?, false)),
+        "simple_expansion" | "expansion" if leading && is_home(text) => Some((home()?, false)),
         "string" => {
             let mut cursor = node.walk();
-            if !node
-                .named_children(&mut cursor)
-                .all(|part| part.kind() == "string_content")
-            {
+            let mut parts = node.named_children(&mut cursor).peekable();
+            let home = parts
+                .next_if(|part| {
+                    leading
+                        && part.start_byte() == node.start_byte() + 1
+                        && is_home(&src[part.byte_range()])
+                })
+                .map(|part| (home(), part.end_byte()));
+            if !parts.all(|part| part.kind() == "string_content") {
                 return None;
             }
-            Some((unquote_double(text.get(1..text.len() - 1)?), false))
+            let (prefix, start) = match home {
+                Some((home, end)) => (home?, end),
+                None => (String::new(), node.start_byte() + 1),
+            };
+            let inner = src.get(start..node.end_byte() - 1)?;
+            Some((prefix + &unquote_double(inner), false))
         }
         "concatenation" => {
             let mut cursor = node.walk();
@@ -1961,6 +1973,16 @@ fn unquote_parts<'t>(
         previous = Some(part);
     }
     Some((value, glob))
+}
+
+/// Returns whether `text` expands `HOME` in a plain form, as `$HOME` or `${HOME}`.
+fn is_home(text: &str) -> bool {
+    matches!(text, "$HOME" | "${HOME}")
+}
+
+/// The home directory a leading `~` expands to, or `None` without one.
+fn home() -> Option<String> {
+    Some(expand_user("~").ok()?.to_string_lossy().into_owned())
 }
 
 /// An unquoted word's value, with backslash escapes removed and a leading `~` expanded.
@@ -2830,9 +2852,9 @@ mod tests {
                 assert_eq!(
                     words(indoc! {r#"
                         "rm" -rf 'a b' c\ d "e\"f\
-                        g\h" "$HOME"
+                        g\h" "$X"
                     "#}),
-                    ["rm", "-rf", "a b", "c d", "e\"fg\\h", "\"$HOME\""]
+                    ["rm", "-rf", "a b", "c d", "e\"fg\\h", "\"$X\""]
                 );
                 assert!(texts("FOO=1").is_empty(), "an assignment runs no command");
             }
@@ -2982,9 +3004,10 @@ mod tests {
             }
 
             #[test]
-            fn expands_a_leading_tilde_only() {
+            fn expands_a_leading_tilde_or_home_only() {
                 temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
-                    let expanded = PathBuf::from(abs("/home/u")).join("x");
+                    let home = abs("/home/u");
+                    let expanded = PathBuf::from(&home).join("x");
                     assert_eq!(
                         words(r#"cat ~/x "~/y" a~b"#),
                         [
@@ -2995,13 +3018,25 @@ mod tests {
                         ]
                     );
                     assert_eq!(words("cat ~u/x"), ["cat", "~u/x"], "kept as written");
+                    assert_eq!(
+                        words(r#"cat $HOME/x "${HOME}/y z" "$HOME" a$HOME $HOMES "$HOME$X""#),
+                        [
+                            "cat".to_owned(),
+                            format!("{home}/x"),
+                            format!("{home}/y z"),
+                            home.clone(),
+                            "a$HOME".to_owned(),
+                            "$HOMES".to_owned(),
+                            "\"$HOME$X\"".to_owned(),
+                        ]
+                    );
                 });
             }
 
             #[test]
             fn marks_each_word_that_expands_or_globs_as_not_literal() {
                 let command = temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
-                    parse(r#"FOO="a b" BAR=$X EMPTY= a[$i]=1 cat 'x*' *.rs "$HOME" ~/n"#)
+                    parse(r#"FOO="a b" BAR=$X EMPTY= a[$i]=1 cat 'x*' *.rs "$X" ~/n"#)
                 });
                 let segment = &command.segments[0];
                 let named: Vec<(&str, bool)> = segment
@@ -3023,13 +3058,13 @@ mod tests {
                         ("cat", true),
                         ("x*", true),
                         ("*.rs", false),
-                        ("\"$HOME\"", false),
+                        ("\"$X\"", false),
                         (home.as_str(), true),
                     ]
                 );
                 assert_eq!(
                     joined(program(segment)),
-                    format!("cat x* *.rs \"$HOME\" {home}")
+                    format!("cat x* *.rs \"$X\" {home}")
                 );
             }
 
@@ -3953,7 +3988,7 @@ mod tests {
         fn flag_a_reader_word_whose_files_are_unknown() {
             for command in [
                 "cat $F",
-                r#"cat "$HOME/.ssh/id_rsa""#,
+                r#"cat "$X/.ssh/id_rsa""#,
                 "/bin/cat $F",
                 "grep -r x $DIR",
                 "head -n $N a",
