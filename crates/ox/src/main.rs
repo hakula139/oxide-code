@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
-use clap::error::ErrorKind;
+use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{Arg, ArgGroup, CommandFactory as _, Parser, Subcommand};
 use indoc::indoc;
 use strum::VariantArray as _;
@@ -147,7 +147,9 @@ impl Cli {
     /// Parses the command line, exiting with a usage error as clap does for a combination clap
     /// cannot express.
     fn parse_valid() -> Self {
-        let cli = Self::parse();
+        let cli = Self::try_parse()
+            .map_err(unexpected_word)
+            .unwrap_or_else(|e| e.exit());
         if let Err(e) = cli.validate() {
             e.exit();
         }
@@ -243,6 +245,25 @@ impl Cli {
             _ => self.r#continue.then_some(SessionTarget::Latest),
         }
     }
+}
+
+/// Reports a stray word after the prompt as an unexpected argument. With
+/// `args_conflicts_with_subcommands`, clap blames any such word on a subcommand of that name, even
+/// when none exists.
+fn unexpected_word(error: clap::Error) -> clap::Error {
+    if error.kind() != ErrorKind::ArgumentConflict {
+        return error;
+    }
+    let Some(ContextValue::String(word)) = error.get(ContextKind::InvalidSubcommand) else {
+        return error;
+    };
+    if Cli::command().find_subcommand(word).is_some() {
+        return error;
+    }
+    Cli::command().error(
+        ErrorKind::UnknownArgument,
+        format!("unexpected argument '{word}' found. Quote a prompt that has spaces."),
+    )
 }
 
 /// Parses a prompt or session, which must hold more than whitespace.
@@ -440,17 +461,17 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     Ok(signal.map_or(Exit::Success, Exit::Signal))
 }
 
-/// Runs `ox config check`: loads the config as [`Config::check`] does, resolves the theme, and
-/// prints the startup notices, each file read, and a verdict.
+/// Runs `ox config check`: loads the config as [`Config::check`] does and resolves the theme.
+/// Then it prints the startup and theme notices, each file read, and a verdict.
 fn check_config() -> Result<Exit> {
     _ = util::log::init_tracing(false)?;
     let cwd = env::current_dir().context("failed to read the current working directory")?;
     let check = Config::check(&cwd)?;
-    resolve_theme(&check.theme)?;
+    let theme = resolve_theme(&check.theme)?;
 
     let mut stderr = io::stderr().lock();
-    for notice in &check.notices {
-        writeln!(stderr, "warning: {notice}")?;
+    for notice in check.notices.iter().chain(&theme.notices) {
+        writeln!(stderr, "Warning: {}", util::text::escape_controls(notice))?;
     }
     let mut stdout = io::stdout().lock();
     for file in &check.files {
@@ -473,7 +494,10 @@ mod tests {
 
         /// The kind of error `args` fail to parse with, or `None` when they parse.
         fn parse_error(args: &[&str]) -> Option<ErrorKind> {
-            Cli::try_parse_from(args).err().map(|error| error.kind())
+            Cli::try_parse_from(args)
+                .map_err(unexpected_word)
+                .err()
+                .map(|error| error.kind())
         }
 
         #[test]
@@ -653,6 +677,22 @@ mod tests {
             assert_eq!(escaped.prompt.as_deref(), Some("config"));
             assert!(escaped.command.is_none());
             assert_eq!(help.prompt.as_deref(), Some("help"));
+        }
+
+        #[test]
+        fn a_stray_word_after_the_prompt_is_an_unexpected_argument() {
+            let error = Cli::try_parse_from(["ox", "-p", "fix", "the", "bug"])
+                .map_err(unexpected_word)
+                .err()
+                .expect("an unquoted prompt fails");
+
+            assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+            assert!(
+                error.to_string().starts_with(
+                    "error: unexpected argument 'the' found. Quote a prompt that has spaces.\n"
+                ),
+                "{error}",
+            );
         }
 
         mod validate {

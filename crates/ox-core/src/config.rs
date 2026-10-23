@@ -247,8 +247,9 @@ impl Config {
         Self::resolve(cwd, |path| load_extra_ca_certs(path).map(drop))
     }
 
-    /// Resolves the config as [`Config::load`] does without reading the CA bundle it names, which
-    /// may be a secret the caller cannot read. Like `load`, it reads no stored login.
+    /// Resolves the config as [`Config::load`] does,
+    /// except that it never reads the CA bundle, which may be a secret the caller cannot read.
+    /// Like `load`, it reads no stored login.
     pub fn check(cwd: &Path) -> Result<ConfigCheck> {
         let config = Self::resolve(cwd, |_| Ok(()))?;
         Ok(ConfigCheck {
@@ -263,7 +264,7 @@ impl Config {
         })
     }
 
-    /// Resolves the config, checking each explicit CA bundle with `check_ca_bundle`.
+    /// Resolves the config, checking the CA bundle it picks with `check_ca_bundle`.
     fn resolve(cwd: &Path, check_ca_bundle: fn(&Path) -> Result<()>) -> Result<Self> {
         let Loaded { config, origins } = load::load(cwd, &project_root(cwd))?;
         let FileConfig {
