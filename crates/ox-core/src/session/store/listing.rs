@@ -340,6 +340,7 @@ mod tests {
         isolated_store, listed_ids, seed_test_session, set_modified, test_header, test_project_dir,
         test_store,
     };
+    use crate::util::fs::testing::deny_read_access;
     use crate::util::path::testing::HOME_VAR;
 
     /// Builds `count` sessions whose mtimes and file names both ascend in seed order.
@@ -868,18 +869,15 @@ mod tests {
             assert!(page.has_more());
         }
 
-        #[cfg(unix)]
         #[test]
         fn all_skips_stray_files_and_unreadable_project_dirs() {
-            use std::os::unix::fs::PermissionsExt as _;
-
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let _own = store.create(&sample_header("own"), &[]).unwrap();
             fs::write(dir.path().join("stray.jsonl"), "").unwrap();
             let locked = dir.path().join("locked-project");
             fs::create_dir(&locked).unwrap();
-            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+            let _denied = deny_read_access(&locked);
 
             let page = store.list_paged(
                 None,
@@ -888,7 +886,6 @@ mod tests {
                     ..ListScope::default()
                 },
             );
-            fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
 
             let ids: Vec<_> = page
                 .unwrap()

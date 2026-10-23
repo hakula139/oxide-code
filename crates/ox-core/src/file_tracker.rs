@@ -426,13 +426,12 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt as _;
     use std::thread;
     use std::time::Duration;
 
     use super::testing::tracker;
     use super::*;
+    use crate::util::fs::testing::deny_read_access;
 
     /// Writes `bytes` to `path` and returns them under `path` as the tracker key.
     async fn write_file(path: PathBuf, bytes: &[u8]) -> std::io::Result<(PathBuf, Vec<u8>)> {
@@ -921,19 +920,16 @@ mod tests {
             }
         }
 
-        #[cfg(unix)]
         #[test]
         fn unreadable_file_drops_snapshot() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("a.rs");
             std::fs::write(&path, b"content").unwrap();
             let snap = snapshot(&path, b"content", OffsetDateTime::now_utc());
-
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let _denied = deny_read_access(&path);
 
             let (tracker, dropped) = FileTracker::restored(vec![snap]);
 
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
             assert_eq!(dropped, vec![path.clone()]);
             assert_eq!(tracker.snapshot_all(), []);
         }

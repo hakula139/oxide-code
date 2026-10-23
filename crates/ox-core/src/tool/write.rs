@@ -194,7 +194,7 @@ mod tests {
     use crate::tool::local_testing::{self, ctx, temp_ctx};
     use crate::tool::read::ReadTool;
     use crate::tool::view::{DiffChunk, NumberedLine};
-    use crate::util::fs::testing::symlink_file;
+    use crate::util::fs::testing::{deny_subdir_creation, symlink_file};
     use crate::util::path::local_testing::canonical_tempdir;
 
     mod approval_preview {
@@ -625,6 +625,28 @@ mod tests {
             assert_eq!(fs::read_to_string(&path).unwrap(), "original");
         }
 
+        #[tokio::test]
+        async fn fails_when_parent_creation_is_denied() {
+            // The missing target passes the stat, so the denial on its ancestor fails
+            // `create_dir_all`.
+            let dir = canonical_tempdir();
+            let locked = dir.path().join("locked");
+            fs::create_dir(&locked).unwrap();
+            let nested = locked.join("nested");
+            let path = nested.join("file.txt");
+            let _denied = deny_subdir_creation(&locked);
+
+            let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
+                .await
+                .unwrap_err();
+
+            let cause = fs::create_dir(&nested).unwrap_err();
+            assert_eq!(
+                err,
+                format!("Failed to create directory {}: {cause}", nested.display()),
+            );
+        }
+
         #[cfg(unix)]
         #[tokio::test]
         async fn records_a_new_file_under_its_canonical_key() {
@@ -662,31 +684,6 @@ mod tests {
                     "{} is not a regular file (fifo, socket, or device). Refusing to write.",
                     path.display(),
                 ),
-            );
-        }
-
-        #[cfg(unix)]
-        #[tokio::test]
-        async fn fails_when_parent_creation_is_denied() {
-            // The missing target passes the stat, so the read-only ancestor denies
-            // `create_dir_all`. It stays empty, so the temp dir still cleans up.
-            use std::os::unix::fs::PermissionsExt as _;
-
-            let dir = canonical_tempdir();
-            let readonly = dir.path().join("readonly");
-            fs::create_dir(&readonly).unwrap();
-            let path = readonly.join("nested").join("file.txt");
-            fs::set_permissions(&readonly, fs::Permissions::from_mode(0o555)).unwrap();
-
-            let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
-                .await
-                .unwrap_err();
-
-            let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::EACCES as i32);
-            let nested = readonly.join("nested");
-            assert_eq!(
-                err,
-                format!("Failed to create directory {}: {cause}", nested.display()),
             );
         }
     }

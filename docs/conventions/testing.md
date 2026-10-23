@@ -37,7 +37,7 @@ These rules apply to unit-test modules (`mod tests`), while the integration test
 
 Every test must run and pass wherever the suite runs: on each supported OS, in CI, and in the Nix build sandbox, which has no network access or system services such as macOS trustd. Never skip, `#[ignore]`, retry, or `cfg`-gate a test to get it past its environment. Restructure tests that depend on their environment until they pass everywhere. For example, move the dependency behind a trait fake, as `util::tls` does for the Security framework, or pin what the test reads. Use a platform `cfg` gate only for a test of code that exists only on that platform.
 
-Run the suite as a non-root user, an environment requirement like having `git` installed. Root ignores the read denials that `tool::local_testing::deny_read_access` sets up and the read-only files that the `make_read_only` fixtures in `tool::local_testing` and `ox-tui`'s `slash::testing` set up, so the tests built on them fail.
+Run the suite as a non-root user, an environment requirement like having `git` installed. Root ignores the access denials that `util::fs::testing::deny_read_access` and `deny_subdir_creation` set up and the read-only files that the `make_read_only` fixtures in `tool::local_testing` and `ox-tui`'s `slash::testing` set up, so the tests built on them fail.
 
 The [live tests](#live-tests) are the sole exception because they send paid requests to a real endpoint.
 
