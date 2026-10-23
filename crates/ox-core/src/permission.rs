@@ -973,15 +973,11 @@ impl Policy {
         })
     }
 
-    /// The user config change that lets through a call that asks because of `basis`, for a run
-    /// that cannot ask. A shipped deny-tier group guards secrets, so no fix turns one off.
-    pub(crate) fn config_fix(
-        &self,
-        class: PermissionClass,
-        target: &Access,
-        basis: &Basis,
-    ) -> Option<ConfigFix> {
-        let Basis::Builtin(group) = *basis else {
+    /// The user config change that lets a call through in a run that cannot ask.
+    /// `None` when something else would still hold the call, or when the group that holds it
+    /// guards secrets.
+    pub(crate) fn config_fix(&self, class: PermissionClass, target: &Access) -> Option<ConfigFix> {
+        let Basis::Builtin(group) = self.verdict(class, &target.as_target()).basis else {
             return self
                 .session_grant(class, target)
                 .map(|grant| ConfigFix::Allow(grant.suggested));
@@ -991,9 +987,7 @@ impl Policy {
         }
         let mut trial = self.clone();
         trial.enabled.retain(|enabled| *enabled != group);
-        for rules in [&mut trial.deny, &mut trial.ask] {
-            rules.retain(|entry| entry.builtin != Some(group));
-        }
+        trial.ask.retain(|entry| entry.builtin != Some(group));
         if trial.decide(class, &target.as_target()) == Decision::Allow {
             return Some(ConfigFix::Disable { group, allow: None });
         }
@@ -2805,8 +2799,6 @@ mod tests {
         mod config_fix {
             use super::*;
 
-            const RM: Basis = Basis::Builtin(Shipped::Rm);
-
             #[test]
             fn turns_off_the_group_alone_when_the_call_then_runs() {
                 let target = command("rm -rf build");
@@ -2816,7 +2808,7 @@ mod tests {
                     policy(Mode::Yolo, &[], &[], &[]),
                 ] {
                     assert_eq!(
-                        p.config_fix(EXEC, &target, &RM),
+                        p.config_fix(EXEC, &target),
                         Some(ConfigFix::Disable {
                             group: Shipped::Rm,
                             allow: None,
@@ -2831,7 +2823,7 @@ mod tests {
             fn adds_the_allow_rule_the_mode_still_needs_once_the_group_is_off() {
                 let p = policy(Mode::Manual, &[], &[], &[]);
 
-                let fix = p.config_fix(EXEC, &command("rm -rf build"), &RM);
+                let fix = p.config_fix(EXEC, &command("rm -rf build"));
 
                 assert_eq!(
                     fix,
@@ -2846,7 +2838,7 @@ mod tests {
             fn suggests_the_allow_rule_for_a_call_no_group_holds() {
                 let p = policy(Mode::Manual, &[], &[], &[]);
 
-                let fix = p.config_fix(EXEC, &command("cargo test"), &Basis::Mode(Mode::Manual));
+                let fix = p.config_fix(EXEC, &command("cargo test"));
 
                 assert_eq!(
                     fix,
@@ -2857,33 +2849,33 @@ mod tests {
             #[test]
             fn offers_nothing_for_a_group_that_guards_secrets_or_a_call_still_held() {
                 let p = policy(Mode::Yolo, &[], &[], &[]);
-                let target = command("rm -rf build > .git/log");
-                let git = Basis::Builtin(Shipped::Git);
-                assert_eq!(p.verdict(EXEC, &target.as_target()).basis, git);
-
-                assert_eq!(p.config_fix(EXEC, &target, &git), None);
+                let held = command("rm -rf build > .git/log");
+                let ssh_rc = path("/home/u/.ssh/rc", None, Zone::Outside, &[Shipped::Ssh]);
                 assert_eq!(
-                    p.config_fix(EXEC, &target, &Basis::Builtin(Shipped::Ssh)),
-                    None
+                    p.verdict(EXEC, &held.as_target()).basis,
+                    Basis::Builtin(Shipped::Git)
                 );
+                assert_eq!(
+                    p.verdict(EDIT, &ssh_rc.as_target()).basis,
+                    Basis::Builtin(Shipped::Ssh)
+                );
+
+                assert_eq!(p.config_fix(EXEC, &held), None);
+                assert_eq!(p.config_fix(EDIT, &ssh_rc), None);
             }
 
             #[cfg(unix)]
             #[test]
             fn drops_the_patterns_of_the_group_it_turns_off() {
-                let p = resolved_policy(
-                    Mode::Yolo,
-                    &[],
-                    &[],
-                    &[],
-                    &[],
-                    &Workspace::new(Path::new("/repo")),
+                let workspace = Workspace::new(Path::new("/repo"));
+                let p = resolved_policy(Mode::Yolo, &[], &[], &[], &[], &workspace);
+                let target = Access::for_path("/dev/null", &workspace);
+                assert_eq!(
+                    p.verdict(EDIT, &target.as_target()).basis,
+                    Basis::Builtin(Shipped::Devices)
                 );
-                let target = Access::for_path("/dev/null", &Workspace::new(Path::new("/repo")));
-                let devices = Basis::Builtin(Shipped::Devices);
-                assert_eq!(p.verdict(EDIT, &target.as_target()).basis, devices);
 
-                let fix = p.config_fix(EDIT, &target, &devices);
+                let fix = p.config_fix(EDIT, &target);
 
                 assert_eq!(
                     fix,

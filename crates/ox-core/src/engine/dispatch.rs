@@ -406,11 +406,7 @@ impl<'r> Dispatcher<'r, '_> {
                         format!("The user denied the {name} call and wrote: {feedback}"),
                     ))),
                     ApprovalDecision::DenyUnattended => {
-                        let fix = self.dispatch_ctx.policy.config_fix(
-                            class,
-                            &prepared.access,
-                            &verdict.basis,
-                        );
+                        let fix = self.dispatch_ctx.policy.config_fix(class, &prepared.access);
                         Ok(Some(ToolOutput::error(format!(
                             "The {name} call was denied. {}",
                             unattended_reason(&verdict.basis, fix.as_ref()),
@@ -1245,12 +1241,12 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn unattended_denial_names_every_config_change_the_call_needs() {
+            async fn deny_unattended_names_every_config_change_the_call_needs() {
                 let tools = bash_registry(Vec::new());
                 let cases = [
                     (
-                        "echo x > .git/log",
-                        &["echo *"][..],
+                        "make > .git/log",
+                        &["make *"][..],
                         "The bash call was denied. This run cannot ask for approval, \
                          and this call asks because of the built-in `git` rule. \
                          Approve it in an interactive session, \
@@ -1419,16 +1415,6 @@ mod tests {
         fn names_the_config_fix_or_the_rule_that_made_it_ask() {
             let manual = Basis::Mode(Mode::Manual);
             let allow = ConfigFix::Allow(exec_grant(r#"echo "a\b""#).suggested().clone());
-            let git = Basis::Builtin(Shipped::Git);
-            let disable_git = ConfigFix::Disable {
-                group: Shipped::Git,
-                allow: None,
-            };
-            let rm = Basis::Builtin(Shipped::Rm);
-            let disable_rm = ConfigFix::Disable {
-                group: Shipped::Rm,
-                allow: Some(Rule::parse(PermissionClass::Exec, "rm -rf build").unwrap()),
-            };
             let ask = Basis::Rule {
                 tier: Tier::Ask,
                 rule: Rule::parse(PermissionClass::Exec, "git push *").unwrap(),
@@ -1451,23 +1437,6 @@ mod tests {
                      A command that hides what it runs, \
                      such as `$(...)`, `sh -c`, or `cd /tmp/x && make`, \
                      needs approval in an interactive session.",
-                ),
-                (
-                    &git,
-                    Some(&disable_git),
-                    "This run cannot ask for approval, \
-                     and this call asks because of the built-in `git` rule. \
-                     Approve it in an interactive session, \
-                     or set `permission.defaults.git = false` in the user config.",
-                ),
-                (
-                    &rm,
-                    Some(&disable_rm),
-                    "This run cannot ask for approval, \
-                     and this call asks because of the built-in `rm` rule. \
-                     Approve it in an interactive session, \
-                     or set `permission.defaults.rm = false` \
-                     and add `\"rm -rf build\"` to `permission.allow.exec` in the user config.",
                 ),
                 (
                     &Basis::Unparsed,
