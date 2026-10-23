@@ -294,6 +294,7 @@ mod tests {
     use super::*;
     use crate::permission::Access;
     use crate::tool::local_testing::{self, ctx, deny_reads, search_root, temp_ctx};
+    use crate::util::fs::testing::deny_read_access;
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::slash_separated;
 
@@ -829,7 +830,7 @@ mod tests {
             let locked = dir.path().join("locked");
             fs::create_dir(&locked).unwrap();
             fs::write(locked.join("b.rs"), "").unwrap();
-            let _denied = local_testing::deny_read_access(&locked);
+            let _denied = deny_read_access(&locked);
 
             let result = glob_in("*.rs", None, dir.path(), &ReadFilter::default()).unwrap();
 
@@ -859,7 +860,7 @@ mod tests {
             fs::write(dir.path().join("a.rs"), "").unwrap();
             let secrets = dir.path().join("secrets");
             fs::create_dir(&secrets).unwrap();
-            let _denied = local_testing::deny_read_access(&secrets);
+            let _denied = deny_read_access(&secrets);
 
             let result = glob_in("*.rs", None, dir.path(), &deny_reads(&["secrets"])).unwrap();
 

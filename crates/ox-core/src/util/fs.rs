@@ -77,9 +77,11 @@ pub(crate) fn open_private_append(path: &Path) -> io::Result<File> {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use std::path::Path;
+    use std::fs::{self, File};
+    use std::path::{Path, PathBuf};
 
-    /// A symlink to a file. Windows needs Developer Mode or admin rights for it, which CI has.
+    /// Creates `link` as a symlink to the file `target`.
+    /// Windows needs Developer Mode or admin rights for it, which CI has.
     pub(crate) fn symlink_file(target: &Path, link: &Path) {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
@@ -87,12 +89,103 @@ pub(crate) mod testing {
         std::os::windows::fs::symlink_file(target, link).unwrap();
     }
 
-    /// A symlink to a directory, needing the same Windows rights as [`symlink_file`].
+    /// Creates `link` as a symlink to the directory `target`,
+    /// needing the same Windows rights as [`symlink_file`].
     pub(crate) fn symlink_dir(target: &Path, link: &Path) {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(target, link).unwrap();
+    }
+
+    /// Denies reading the file or directory at `path` until the returned guard drops.
+    pub(crate) fn deny_read_access(path: &Path) -> AccessDenied {
+        #[cfg(unix)]
+        let denied = AccessDenied::with_mode(path, 0o000);
+        // `(RD)` is the right to read a file's data or list a directory.
+        #[cfg(windows)]
+        let denied = AccessDenied::with_right(path, "(RD)");
+
+        let readable = if path.is_dir() {
+            fs::read_dir(path).is_ok()
+        } else {
+            File::open(path).is_ok()
+        };
+        assert!(!readable, "{} stayed readable", path.display());
+        denied
+    }
+
+    /// Denies creating subdirectories in `dir` until the returned guard drops.
+    pub(crate) fn deny_subdir_creation(dir: &Path) -> AccessDenied {
+        #[cfg(unix)]
+        let denied = AccessDenied::with_mode(dir, 0o555);
+        // `(AD)` is the right to create a subdirectory.
+        #[cfg(windows)]
+        let denied = AccessDenied::with_right(dir, "(AD)");
+
+        let created = fs::create_dir(dir.join("probe")).is_ok();
+        assert!(!created, "{} accepted a subdirectory", dir.display());
+        denied
+    }
+
+    /// Access denied by [`deny_read_access`] or [`deny_subdir_creation`],
+    /// restored on drop so the temp dir can be removed.
+    pub(crate) struct AccessDenied {
+        path: PathBuf,
+        #[cfg(unix)]
+        mode: u32,
+    }
+
+    impl AccessDenied {
+        /// Sets the permission bits of `path` to `mode`, keeping the old bits to restore.
+        #[cfg(unix)]
+        fn with_mode(path: &Path, mode: u32) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let old = fs::metadata(path).unwrap().permissions().mode();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+            Self {
+                path: path.to_owned(),
+                mode: old,
+            }
+        }
+
+        /// Denies Everyone the `icacls` `right` on `path`.
+        #[cfg(windows)]
+        fn with_right(path: &Path, right: &str) -> Self {
+            icacls(path, &["/deny", format!("{EVERYONE}:{right}").as_str()]);
+            Self {
+                path: path.to_owned(),
+            }
+        }
+    }
+
+    impl Drop for AccessDenied {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+
+                fs::set_permissions(&self.path, fs::Permissions::from_mode(self.mode)).unwrap();
+            }
+            #[cfg(windows)]
+            icacls(&self.path, &["/remove:d", EVERYONE]);
+        }
+    }
+
+    /// The well-known SID of Everyone. A deny entry for it binds the file's owner too.
+    #[cfg(windows)]
+    const EVERYONE: &str = "*S-1-1-0";
+
+    #[cfg(windows)]
+    fn icacls(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("icacls")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
     }
 }
 

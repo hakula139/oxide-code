@@ -20,8 +20,10 @@ use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
 use super::{App, AppHistory};
 use crate::clipboard::{self, Clipboard, Environment};
+use crate::git_probes::GitProbes;
 use crate::modal::approval::ApprovalModal;
 use crate::modal::{Modal, ModalKey};
+use crate::now;
 use crate::session_info::LiveSessionInfo;
 use crate::session_info::testing::test_session_info;
 use crate::testing::buffer_rows;
@@ -58,6 +60,8 @@ pub(super) fn test_app_with(
         },
     );
     app.open_browser = |_| Ok(());
+    // With no segments to serve, the probes never spawn `git` or `gh`.
+    app.git_probes = GitProbes::new(app.session_info.cwd.clone(), &[], now());
     // A remote session outside tmux copies only through OSC 52, leaving the system clipboard and
     // tmux alone.
     app.clipboard = Clipboard::new(Environment {

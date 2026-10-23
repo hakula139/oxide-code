@@ -754,7 +754,7 @@ mod tests {
     use super::*;
     use crate::permission::Access;
     use crate::tool::local_testing::{self, ctx, deny_reads, search_root, temp_ctx};
-    use crate::util::fs::testing::symlink_file;
+    use crate::util::fs::testing::{deny_read_access, symlink_file};
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::slash_separated;
 
@@ -1264,10 +1264,7 @@ mod tests {
             fs::write(locked.join("b.rs"), "hit\n").unwrap();
             let secret = dir.path().join("secret.rs");
             fs::write(&secret, "hit\n").unwrap();
-            let _denied = [
-                local_testing::deny_read_access(&locked),
-                local_testing::deny_read_access(&secret),
-            ];
+            let _denied = [deny_read_access(&locked), deny_read_access(&secret)];
 
             let GrepOutput {
                 content: result,
@@ -1302,7 +1299,7 @@ mod tests {
             fs::write(dir.path().join("a.rs"), "hit\n").unwrap();
             let secrets = dir.path().join("secrets");
             fs::create_dir(&secrets).unwrap();
-            let _denied = local_testing::deny_read_access(&secrets);
+            let _denied = deny_read_access(&secrets);
             let mut p = params("hit", dir.path());
             p.read_filter = deny_reads(&["secrets"]);
 
@@ -1323,7 +1320,7 @@ mod tests {
             let dir = canonical_tempdir();
             let secret = dir.path().join("secret.rs");
             fs::write(&secret, "hit\n").unwrap();
-            let _denied = local_testing::deny_read_access(&secret);
+            let _denied = deny_read_access(&secret);
 
             let result = grep_files(&params("hit", dir.path())).unwrap().content;
 
@@ -1730,7 +1727,7 @@ mod tests {
             let dir = canonical_tempdir();
             let secret = dir.path().join("secret.txt");
             fs::write(&secret, "x").unwrap();
-            let _denied = local_testing::deny_read_access(&secret);
+            let _denied = deny_read_access(&secret);
             let files = [dir.path().join("gone.txt"), secret.clone()];
             let cancel = CancellationToken::new();
             let mut unreadable = Vec::new();
