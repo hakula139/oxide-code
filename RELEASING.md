@@ -17,6 +17,7 @@ Within a minor version, stable releases keep these compatible:
 
 - CLI flags, subcommands, and exit codes
 - Config keys and file locations, plus environment variables
+- The flake's `packages`, `overlays.default`, and `homeModules.default` outputs, and the module's options
 - Persisted formats: session JSONL, versioned by its header entry, and theme TOML
 - Output from headless mode (`-p`), as defined in the [compatibility notes](docs/guide/headless.md#compatibility)
 - Release asset names, which install scripts and the Homebrew formula depend on
