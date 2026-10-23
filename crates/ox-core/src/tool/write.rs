@@ -405,6 +405,45 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn after_read_overwrites_existing() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("existing.txt");
+            fs::write(&path, "old content").unwrap();
+
+            let ctx = temp_ctx();
+            seed_full_read(&ctx.tracker, &path);
+
+            let mode = write_file(path.to_str().unwrap(), "new content", &ctx)
+                .await
+                .unwrap();
+
+            assert_eq!(mode, WriteMode::Overwrite);
+            assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
+        }
+
+        #[tokio::test]
+        async fn creates_parent_directories() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("a").join("b").join("c.txt");
+
+            write_file(path.to_str().unwrap(), "deep", &temp_ctx())
+                .await
+                .unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "deep");
+        }
+
+        #[tokio::test]
+        async fn empty_content_creates_empty_file() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("empty.txt");
+
+            write_file(path.to_str().unwrap(), "", &temp_ctx())
+                .await
+                .unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        }
+
+        #[tokio::test]
         async fn existing_without_read_is_rejected() {
             let dir = canonical_tempdir();
             let path = dir.path().join("existing.txt");
@@ -422,23 +461,6 @@ mod tests {
                 ),
             );
             assert_eq!(fs::read_to_string(&path).unwrap(), "old content");
-        }
-
-        #[tokio::test]
-        async fn after_read_overwrites_existing() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("existing.txt");
-            fs::write(&path, "old content").unwrap();
-
-            let ctx = temp_ctx();
-            seed_full_read(&ctx.tracker, &path);
-
-            let mode = write_file(path.to_str().unwrap(), "new content", &ctx)
-                .await
-                .unwrap();
-
-            assert_eq!(mode, WriteMode::Overwrite);
-            assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
         }
 
         #[tokio::test]
@@ -505,28 +527,6 @@ mod tests {
                 ),
             );
             assert_eq!(fs::read_to_string(&path).unwrap(), "external edit");
-        }
-
-        #[tokio::test]
-        async fn creates_parent_directories() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("a").join("b").join("c.txt");
-
-            write_file(path.to_str().unwrap(), "deep", &temp_ctx())
-                .await
-                .unwrap();
-            assert_eq!(fs::read_to_string(&path).unwrap(), "deep");
-        }
-
-        #[tokio::test]
-        async fn empty_content_creates_empty_file() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("empty.txt");
-
-            write_file(path.to_str().unwrap(), "", &temp_ctx())
-                .await
-                .unwrap();
-            assert_eq!(fs::read_to_string(&path).unwrap(), "");
         }
 
         #[tokio::test]

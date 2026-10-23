@@ -734,6 +734,93 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn replace_all_numbers_the_first_hunk_and_lists_every_location() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("grow.txt");
+            fs::write(
+                &path,
+                indoc! {"
+                    A
+                    B
+                    C
+                    B
+                "},
+            )
+            .unwrap();
+
+            let edited = edit_file(
+                path.to_str().unwrap(),
+                "B",
+                "X\nY",
+                true,
+                &seeded_ctx(&path),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(edited.replacements, 2);
+            assert_eq!(
+                edited.diff,
+                EditDiff {
+                    chunk: DiffChunk {
+                        old: vec![line(2, "B")],
+                        new: vec![line(2, "X"), line(3, "Y")],
+                    },
+                    locations: vec![2, 4],
+                },
+            );
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                indoc! {"
+                    A
+                    X
+                    Y
+                    C
+                    X
+                    Y
+                "},
+            );
+        }
+
+        #[tokio::test]
+        async fn accepts_a_read_under_another_spelling_of_the_path() {
+            let dir = canonical_tempdir();
+            fs::create_dir(dir.path().join("sub")).unwrap();
+            let path = dir.path().join("test.txt");
+            fs::write(&path, "hello world").unwrap();
+            let ctx = temp_ctx();
+
+            let read =
+                local_testing::run(&ReadTool, serde_json::json!({"file_path": path}), &ctx).await;
+            assert!(!read.is_error, "{}", read.content);
+
+            let detour = dir.path().join("sub").join("..").join("test.txt");
+            edit_file(detour.to_str().unwrap(), "hello", "goodbye", false, &ctx)
+                .await
+                .unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
+        }
+
+        #[tokio::test]
+        async fn accepts_a_partial_read_of_current_content() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("test.txt");
+            fs::write(&path, "hello world\nsecond line\n").unwrap();
+            let bytes = fs::read(&path).unwrap();
+            let ctx = temp_ctx();
+            ctx.tracker
+                .record_read(&path, &bytes, LastView::lines(1, 1, 2), "toolu_test");
+
+            edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
+                .await
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "goodbye world\nsecond line\n",
+            );
+        }
+
+        #[tokio::test]
         async fn rejects_empty_old_string() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
@@ -837,44 +924,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn accepts_a_read_under_another_spelling_of_the_path() {
-            let dir = canonical_tempdir();
-            fs::create_dir(dir.path().join("sub")).unwrap();
-            let path = dir.path().join("test.txt");
-            fs::write(&path, "hello world").unwrap();
-            let ctx = temp_ctx();
-
-            let read =
-                local_testing::run(&ReadTool, serde_json::json!({"file_path": path}), &ctx).await;
-            assert!(!read.is_error, "{}", read.content);
-
-            let detour = dir.path().join("sub").join("..").join("test.txt");
-            edit_file(detour.to_str().unwrap(), "hello", "goodbye", false, &ctx)
-                .await
-                .unwrap();
-            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
-        }
-
-        #[tokio::test]
-        async fn accepts_a_partial_read_of_current_content() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("test.txt");
-            fs::write(&path, "hello world\nsecond line\n").unwrap();
-            let bytes = fs::read(&path).unwrap();
-            let ctx = temp_ctx();
-            ctx.tracker
-                .record_read(&path, &bytes, LastView::lines(1, 1, 2), "toolu_test");
-
-            edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
-                .await
-                .unwrap();
-            assert_eq!(
-                fs::read_to_string(&path).unwrap(),
-                "goodbye world\nsecond line\n",
-            );
-        }
-
-        #[tokio::test]
         async fn rejects_nonexistent_file() {
             let path = "/nonexistent/file.txt";
 
@@ -960,56 +1009,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn replace_all_numbers_the_first_hunk_and_lists_every_location() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("grow.txt");
-            fs::write(
-                &path,
-                indoc! {"
-                    A
-                    B
-                    C
-                    B
-                "},
-            )
-            .unwrap();
-
-            let edited = edit_file(
-                path.to_str().unwrap(),
-                "B",
-                "X\nY",
-                true,
-                &seeded_ctx(&path),
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(edited.replacements, 2);
-            assert_eq!(
-                edited.diff,
-                EditDiff {
-                    chunk: DiffChunk {
-                        old: vec![line(2, "B")],
-                        new: vec![line(2, "X"), line(3, "Y")],
-                    },
-                    locations: vec![2, 4],
-                },
-            );
-            assert_eq!(
-                fs::read_to_string(&path).unwrap(),
-                indoc! {"
-                    A
-                    X
-                    Y
-                    C
-                    X
-                    Y
-                "},
-            );
-        }
-
-        #[tokio::test]
-        async fn fails_if_write_is_rejected() {
+        async fn fails_on_read_only_file() {
             let dir = canonical_tempdir();
             let path = dir.path().join("readonly.txt");
             fs::write(&path, "hello world").unwrap();
