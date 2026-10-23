@@ -7,7 +7,7 @@ use std::path::Path;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
-use strum::{Display, IntoStaticStr, VariantArray};
+use strum::{Display, VariantArray};
 
 use super::view::ToolResultView;
 use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, invalid_input};
@@ -26,9 +26,7 @@ pub struct Task {
     pub status: TaskStatus,
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, IntoStaticStr, VariantArray,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, VariantArray)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum TaskStatus {
@@ -140,7 +138,7 @@ fn input_schema() -> serde_json::Value {
                         },
                         "status": {
                             "type": "string",
-                            "enum": TaskStatus::VARIANTS.iter().map(|&status| <&str>::from(status)).collect::<Vec<_>>()
+                            "enum": TaskStatus::VARIANTS
                         }
                     },
                     "required": ["content", "status"]
@@ -294,13 +292,8 @@ mod tests {
 
         #[test]
         fn names_each_status_the_way_serde_does() {
-            for (&status, name) in
-                TaskStatus::VARIANTS
-                    .iter()
-                    .zip(["pending", "in_progress", "completed"])
-            {
-                assert_eq!(serde_json::to_value(status).unwrap(), name);
-                assert_eq!(<&str>::from(status), name);
+            for &status in TaskStatus::VARIANTS {
+                assert_eq!(serde_json::to_value(status).unwrap(), status.to_string());
             }
         }
     }

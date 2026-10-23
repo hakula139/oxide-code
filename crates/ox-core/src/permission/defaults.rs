@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
-use strum::{Display, IntoStaticStr, VariantArray};
+use strum::{Display, VariantArray};
 
 use super::rule::{Rule, escaped};
 use super::{PermissionClass, folded_names, resolve};
@@ -33,7 +33,6 @@ const PROCESS_ENVIRONMENTS: [&str; 2] = ["/proc/*/environ", "/proc/*/task/*/envi
     Serialize,
     Deserialize,
     Display,
-    IntoStaticStr,
     VariantArray,
 )]
 #[serde(rename_all = "snake_case")]
@@ -440,17 +439,13 @@ mod tests {
             );
         }
 
-        mod as_str {
-            use super::*;
-
-            #[test]
-            fn names_each_group_by_its_defaults_key() {
-                for &group in Shipped::VARIANTS {
-                    assert_eq!(
-                        toml::Value::try_from(group).unwrap().as_str(),
-                        Some(group.into())
-                    );
-                }
+        #[test]
+        fn names_each_group_by_its_defaults_key() {
+            for &group in Shipped::VARIANTS {
+                assert_eq!(
+                    toml::Value::try_from(group).unwrap().as_str(),
+                    Some(group.to_string().as_str())
+                );
             }
         }
 

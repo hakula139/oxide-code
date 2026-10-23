@@ -607,12 +607,9 @@ mod tests {
 
         #[test]
         fn round_trips_through_serde_and_fromstr() {
-            for (&variant, token) in Effort::VARIANTS
-                .iter()
-                .zip(["low", "medium", "high", "xhigh", "max"])
-            {
+            for &variant in Effort::VARIANTS {
+                let token = variant.to_string();
                 assert_eq!(serde_json::to_value(variant).unwrap(), token);
-                assert_eq!(variant.to_string(), token);
                 assert_eq!(token.parse::<Effort>().unwrap(), variant);
             }
         }
@@ -646,12 +643,9 @@ mod tests {
 
         #[test]
         fn round_trips_through_serde_and_fromstr() {
-            for (variant, token) in [
-                (PromptCacheTtl::FiveMin, "5m"),
-                (PromptCacheTtl::OneHour, "1h"),
-            ] {
+            for &variant in PromptCacheTtl::VARIANTS {
+                let token = variant.to_string();
                 assert_eq!(serde_json::to_value(variant).unwrap(), token);
-                assert_eq!(variant.to_string(), token);
                 assert_eq!(token.parse::<PromptCacheTtl>().unwrap(), variant);
             }
         }

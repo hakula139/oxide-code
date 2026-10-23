@@ -1,6 +1,6 @@
 //! Shared utilities: env var lookup, private file writes, git probes, tracing init, path display,
 //! server error bodies, mutex recovery, text width, the local-offset cache, extra TLS trust
-//! anchors, and TOML errors that omit the source.
+//! anchors, TOML errors that omit the source, and enum variant names for messages.
 
 pub mod env;
 pub(crate) mod fs;

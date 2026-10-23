@@ -754,7 +754,7 @@ mod tests {
         #[test]
         fn names_round_trip_through_serde_and_fromstr() {
             for &segment in StatusLineSegment::VARIANTS {
-                let name: &str = segment.into();
+                let name = <&str>::from(segment);
                 assert_eq!(serde_json::to_value(segment).unwrap(), name);
                 assert_eq!(name.parse::<StatusLineSegment>().unwrap(), segment);
             }
@@ -1569,11 +1569,11 @@ mod tests {
 
             assert_eq!(
                 format!("{err:#}"),
-                format!(
-                    "invalid OX_STATUS_LINE \"model,nope\": unknown segment \"nope\": \
-                     expected one of {}",
-                    variant::names::<StatusLineSegment>()
-                ),
+                "invalid OX_STATUS_LINE \"model,nope\": unknown segment \"nope\": expected one of \
+                 current-dir, git-branch, pull-request, pull-request-checks, pull-request-review, \
+                 model, model-with-effort, context-used, session-cost, five-hour-limit, \
+                 weekly-limit, permission-mode, run-state, queued-prompts, task-progress, \
+                 thread-title, session-id, theme, current-time",
             );
         }
 

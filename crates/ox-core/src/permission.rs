@@ -1486,14 +1486,20 @@ mod tests {
     mod mode {
         use super::*;
 
+        #[test]
+        fn round_trips_through_serde_and_fromstr() {
+            for &mode in Mode::VARIANTS {
+                let token = mode.to_string();
+                assert_eq!(serde_json::to_value(mode).unwrap(), token);
+                assert_eq!(token.parse::<Mode>().unwrap(), mode);
+            }
+        }
+
         mod from_str {
             use super::*;
 
             #[test]
-            fn parses_every_valid_value_and_names_them_for_any_other() {
-                for &mode in Mode::VARIANTS {
-                    assert_eq!(mode.as_str().parse::<Mode>().unwrap(), mode);
-                }
+            fn names_every_valid_value_for_an_unknown_one() {
                 let err = "bypass".parse::<Mode>().unwrap_err().to_string();
                 assert_eq!(err, "expected one of manual, plan, yolo");
             }
