@@ -1,8 +1,9 @@
 //! `bash` command analysis for the permission gate. tree-sitter-bash splits a command into the
 //! simple commands it runs and the files its output redirections write, so rules weigh each simple
-//! command on its own. Leading assignments and transparent wrappers are stripped first. A command
-//! the analysis cannot vouch for is opaque: rules may deny it or leave it to ask, but never allow
-//! it. `exec` patterns parse here too, so they read words the way commands do.
+//! command on its own. Leading assignments and transparent wrappers are stripped first. The walk
+//! recognizes bash syntax by an allowlist, and a construct outside it leaves the command
+//! unrecognized: rules may deny it or leave it to ask, but never allow it. `exec` patterns parse
+//! here too, so they read words the way commands do.
 
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -16,16 +17,20 @@ use tree_sitter::{Node, Parser, Tree};
 use super::{Access, Target, Workspace, Zone, fold_name};
 use crate::util::path::expand_user;
 
-/// Shells and the commands that start one as another user, whose `-c` script, script file, or
-/// stdin is code the analysis does not see.
+/// Shells and the commands that start one as another user, whose literal `-c` script the walk
+/// follows, so deny rules see the commands inside it.
 const SHELLS: &[&str] = &[
     "ash", "bash", "csh", "dash", "fish", "hush", "ksh", "mksh", "pwsh", "runuser", "sh", "su",
     "tcsh", "zsh",
 ];
 
-/// Builtins that run a string or a file as shell code, or evaluate one as arithmetic, which can
-/// itself hold a substitution.
-const CODE_BUILTINS: &[&str] = &[".", "eval", "let", "source", "trap"];
+/// Builtins that change how bash finds or runs later commands, run code from a trap, the history,
+/// or completion, or evaluate arithmetic, which may run a substitution, so a command that runs one
+/// is unrecognized.
+const DISPATCH_BUILTINS: &[&str] = &[
+    "alias", "bind", "compgen", "complete", "compopt", "enable", "fc", "hash", "history", "let",
+    "shopt", "trap",
+];
 
 /// Builtins that change the working directory, after which a relative redirection target no longer
 /// names the file the gate resolved.
@@ -38,7 +43,7 @@ const READERS: &[&str] = &["cat", "find", "grep", "head", "ls", "sed", "tail", "
 /// Files one globbing word may match before the analysis gives up on listing them.
 const MAX_GLOB_MATCHES: usize = 1024;
 
-/// Variables a leading assignment may set without changing what a rule names, since none of them
+/// Variables a command may set or export without changing what a rule names, since none of them
 /// changes which program runs, what it loads, or where it writes.
 const SAFE_VARIABLES: &[&str] = &[
     "BLOCKSIZE",
@@ -73,36 +78,14 @@ const SAFE_VARIABLES: &[&str] = &[
     "TZ",
 ];
 
-/// Variables bash itself reads to find or start commands, expand words, set its options, or run
-/// startup code, so setting one changes what later words run, from the bash manual's Shell
-/// Variables. `BASH_CMDS` and `BASH_ALIASES` are its command hash table and aliases.
-const SHELL_VARIABLES: &[&str] = &[
-    "BASHOPTS",
-    "BASH_ALIASES",
-    "BASH_CMDS",
-    "BASH_COMPAT",
-    "BASH_ENV",
-    "BASH_LOADABLES_PATH",
-    "CDPATH",
-    "ENV",
-    "EXECIGNORE",
-    "GLOBIGNORE",
-    "GLOBSORT",
-    "HOME",
-    "IFS",
-    "OLDPWD",
-    "PATH",
-    "POSIXLY_CORRECT",
-    "PS4",
-    "PWD",
-    "SHELLOPTS",
-];
-
 /// Redirection operators that write their target.
 const WRITE_OPERATORS: &[&str] = &[">", ">>", ">|", "&>", "&>>", ">&"];
 
 /// Redirection targets that are devices, so redirecting to or from them touches no file.
 const DEVICES: &[&str] = &["/dev/null", "/dev/stderr", "/dev/stdout", "/dev/tty"];
+
+/// Characters of an unrecognized construct a prompt names before cutting it short.
+const MAX_CONSTRUCT_CHARS: usize = 40;
 
 /// Wrappers that run a command given after their own options, so rules see through them.
 const WRAPPERS: &[Wrapper] = &[
@@ -125,12 +108,7 @@ const WRAPPERS: &[Wrapper] = &[
     },
     Wrapper {
         name: "doas",
-        options: &[
-            valued("-a"),
-            flag("-n"),
-            flag("-s").with(Effect::Shell),
-            valued("-u"),
-        ],
+        options: &[valued("-a"), flag("-n"), flag("-s"), valued("-u")],
         ..Wrapper::RUNNER
     },
     Wrapper {
@@ -207,12 +185,12 @@ const WRAPPERS: &[Wrapper] = &[
             flag("-b"),
             valued("-c"),
             valued("-g"),
-            flag("-i").with(Effect::Shell),
+            flag("-i"),
             flag("-k"),
             flag("-n"),
             valued("-p"),
             valued("-r"),
-            flag("-s").with(Effect::Shell),
+            flag("-s"),
             valued("-t"),
             valued("-u"),
             flag("--askpass"),
@@ -224,7 +202,7 @@ const WRAPPERS: &[Wrapper] = &[
             valued("--command-timeout"),
             valued("--group"),
             valued("--login-class"),
-            flag("--login").with(Effect::Shell),
+            flag("--login"),
             flag("--no-update"),
             flag("--non-interactive"),
             optional("--preserve-env"),
@@ -233,7 +211,7 @@ const WRAPPERS: &[Wrapper] = &[
             flag("--reset-timestamp"),
             valued("--role"),
             flag("--set-home"),
-            flag("--shell").with(Effect::Shell),
+            flag("--shell"),
             flag("--stdin"),
             valued("--type"),
             valued("--user"),
@@ -367,34 +345,35 @@ pub(crate) struct CommandTarget {
     writes: Vec<Access>,
     /// The files its input redirections read, resolved like a read's path.
     reads: Vec<Access>,
-    /// Whether it runs code the analysis does not see or cannot place.
-    opaque: bool,
-    /// Whether tree-sitter-bash failed to parse it or a script nested in it, or parsed a shape
-    /// whose word boundaries differ from bash's or that it has no grammar for, such as `coproc`,
-    /// so the words a rule sees may not be the words bash runs.
-    unparsed: bool,
-    /// Whether it sets one of the [`SHELL_VARIABLES`] or declares a name reference, so the words a
-    /// rule sees may not be the commands bash runs.
-    sets_shell_variable: bool,
+    /// The first construct the analysis does not recognize, as [`construct`] cuts it for a prompt.
+    unrecognized: Option<String>,
 }
 
 impl CommandTarget {
     /// Parses `command`, resolving the files it reads and writes in `workspace`.
     pub(crate) fn parse(command: &str, workspace: &Workspace) -> Self {
+        Self::parse_inheriting(command, workspace, &|name| std::env::var_os(name).is_some())
+    }
+
+    /// Parses `command` as [`Self::parse`] does, where `inherited` tells whether the environment
+    /// `bash` starts with sets a variable.
+    fn parse_inheriting(
+        command: &str,
+        workspace: &Workspace,
+        inherited: &dyn Fn(&str) -> bool,
+    ) -> Self {
         let mut walk = Walk {
             workspace,
+            inherited,
             segments: Vec::new(),
             writes: Vec::new(),
             reads: Vec::new(),
-            opaque: false,
-            changes_dir: false,
+            dir_change: None,
             leaves_workspace: false,
             repeats: 0,
             relative_path: false,
             expands: false,
-            unparsed: false,
-            sets_shell_variable: false,
-            statement_assignment: false,
+            unrecognized: None,
         };
         walk.script(command);
         if walk.expands {
@@ -408,19 +387,14 @@ impl CommandTarget {
                 .iter()
                 .flat_map(Segment::programs)
                 .any(|program| !DIRECTORY_CHANGERS.contains(&program[0].text.as_str()));
-        let opaque = walk.opaque
-            || walk.unparsed
-            || walk.sets_shell_variable
-            || (walk.statement_assignment && !walk.segments.is_empty())
-            || (walk.changes_dir && walk.relative_path)
-            || runs_elsewhere;
+        let moved = walk
+            .dir_change
+            .filter(|_| walk.relative_path || runs_elsewhere);
         Self {
             segments: walk.segments,
             writes: walk.writes,
             reads: walk.reads,
-            opaque,
-            unparsed: walk.unparsed,
-            sets_shell_variable: walk.sets_shell_variable,
+            unrecognized: walk.unrecognized.or(moved),
         }
     }
 
@@ -436,16 +410,12 @@ impl CommandTarget {
         &self.reads
     }
 
-    pub(super) const fn is_opaque(&self) -> bool {
-        self.opaque
-    }
-
-    pub(super) const fn is_unparsed(&self) -> bool {
-        self.unparsed
-    }
-
-    pub(super) const fn sets_shell_variable(&self) -> bool {
-        self.sets_shell_variable
+    /// The first construct the analysis does not recognize, or `None` when it recognizes the whole
+    /// command, which only then may an allow rule cover. A directory change counts when a relative
+    /// path or another program follows it outside the workspace, since the rules would then weigh
+    /// other files or programs than the ones bash finds.
+    pub(super) fn unrecognized(&self) -> Option<&str> {
+        self.unrecognized.as_deref()
     }
 }
 
@@ -572,107 +542,155 @@ impl ShellWord {
 
 // ── Walk ──
 
+/// Node kinds the walk recognizes by walking their children: the statements, words, and
+/// redirection parts that only group or spell what the kinds it weighs on their own hold.
+const WALKED_KINDS: &[&str] = &[
+    "ansi_c_string",
+    "brace_expression",
+    "case_item",
+    "case_statement",
+    "command_name",
+    "command_substitution",
+    "comment",
+    "compound_statement",
+    "concatenation",
+    "do_group",
+    "elif_clause",
+    "else_clause",
+    "extglob_pattern",
+    "file_descriptor",
+    "heredoc_body",
+    "heredoc_content",
+    "heredoc_end",
+    "heredoc_redirect",
+    "heredoc_start",
+    "herestring_redirect",
+    "if_statement",
+    "list",
+    "negated_command",
+    "number",
+    "pipeline",
+    "process_substitution",
+    "program",
+    "raw_string",
+    "regex",
+    "special_variable_name",
+    "string",
+    "string_content",
+    "subshell",
+    "test_operator",
+    "translated_string",
+    "variable_assignments",
+    "variable_name",
+    "word",
+];
+
 /// What one command and the scripts nested in it run and write, gathered over its syntax tree.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "each bool records an independent fact the walk finds anywhere in the tree"
-)]
 struct Walk<'a> {
     workspace: &'a Workspace,
+    /// Whether the environment `bash` starts with sets a variable.
+    inherited: &'a dyn Fn(&str) -> bool,
     segments: Vec<Segment>,
     writes: Vec<Access>,
     reads: Vec<Access>,
-    opaque: bool,
-    /// Whether some segment changes the working directory.
-    changes_dir: bool,
+    /// The first directory change, as [`construct`] cuts it for a prompt.
+    dir_change: Option<String>,
     /// Whether some directory change may leave the workspace. Only a first `cd` or `pushd`
     /// that runs once, to a target [`Walk::enters_workspace`] accepts, stays inside.
     leaves_workspace: bool,
-    /// How many loop or function bodies enclose the node the walk is at,
-    /// where a directory change may run more than once.
+    /// How many loop bodies enclose the node the walk is at, where a directory change may run more
+    /// than once.
     repeats: usize,
-    /// Whether some redirection, reader operand, or program spelled with a directory
+    /// Whether some redirection, reader operand, sourced file, or program spelled with a directory
     /// names a relative path.
     relative_path: bool,
     /// Whether any part of the command expands a variable at run time, wherever the value ends up.
     expands: bool,
-    /// Whether the command or a script nested in it failed to parse, or parsed with word
-    /// boundaries that differ from bash's or as a `coproc` the grammar cannot read.
-    unparsed: bool,
-    sets_shell_variable: bool,
-    /// Whether it sets a variable at statement level, outside any command's prefix, so a later
-    /// command bash runs may read a value the rules did not weigh.
-    statement_assignment: bool,
+    /// The first construct the walk does not recognize, as [`construct`] cuts it for a prompt.
+    unrecognized: Option<String>,
 }
 
 impl Walk<'_> {
     fn script(&mut self, source: &str) {
         let tree = parse_tree(source);
         let root = tree.root_node();
-        self.unparsed |= root.has_error() || !splits_words_like_bash(root, source);
+        if root.has_error() {
+            let error = first_error(root).map_or("", |node| &source[node.byte_range()]);
+            self.mark_unrecognized(if error.trim().is_empty() {
+                source
+            } else {
+                error
+            });
+        } else if !splits_words_like_bash(root, source) {
+            self.mark_unrecognized(source);
+        }
         self.visit(root, source);
     }
 
+    /// Records `text` as the construct that leaves the command unrecognized, unless an earlier one
+    /// already has.
+    fn mark_unrecognized(&mut self, text: &str) {
+        self.unrecognized.get_or_insert_with(|| construct(text));
+    }
+
+    /// Returns whether a command may set the variable `name` and stay recognized: it is one of the
+    /// [`SAFE_VARIABLES`], or a local name, which only later `$name` expansions read, as
+    /// [`is_local_name`] decides.
+    fn may_set(&self, name: &str) -> bool {
+        SAFE_VARIABLES.contains(&name) || is_local_name(name, self.inherited)
+    }
+
+    /// Visits `node`, recognizing it by its kind. Each kind the walk does not recognize leaves the
+    /// command unrecognized, and the walk still visits its children, so deny rules see the commands
+    /// inside it.
     fn visit(&mut self, node: Node<'_>, src: &str) {
         match node.kind() {
             "command" => self.command(node, &[], src),
-            "file_redirect" => self.redirect(node, src),
-            "variable_name" => {
-                self.sets_shell_variable |=
-                    SHELL_VARIABLES.contains(&&src[node.byte_range()]) && is_set(node);
-            }
-            "subscript" => {
-                self.sets_shell_variable |= node
-                    .child_by_field_name("index")
-                    .is_some_and(|index| names_a_shell_variable(&src[index.byte_range()]));
-                self.visit_children(node, src);
-            }
-            "declaration_command" => {
-                let mut cursor = node.walk();
-                let nameref = !src[node.byte_range()].starts_with("export")
-                    && node.named_children(&mut cursor).any(|child| {
-                        child.kind() == "word" && is_nameref_option(&src[child.byte_range()])
-                    });
-                self.sets_shell_variable |= nameref
-                    || node.named_children(&mut cursor).any(|child| {
-                        let text = &src[child.byte_range()];
-                        text.contains('=') && names_a_shell_variable(text)
-                    });
-                self.opaque |= node.named_children(&mut cursor).any(|child| {
-                    let text = &src[child.byte_range()];
-                    match child.kind() {
-                        "variable_assignment" => !SAFE_VARIABLES.contains(&assigned(text)),
-                        "variable_name" => !SAFE_VARIABLES.contains(&text),
-                        _ => text.contains('='),
-                    }
-                });
-                self.visit_children(node, src);
-            }
             "redirected_statement" => self.redirected_statement(node, Vec::new(), src),
-            "c_style_for_statement"
-            | "for_statement"
-            | "function_definition"
-            | "while_statement" => {
-                self.opaque |= runs_hidden_code(node);
-                self.repeats += 1;
+            "file_redirect" => self.redirect(node, src),
+            "declaration_command" | "unset_command" => self.declaration(node, src),
+            "test_command" => self.test(node, src),
+            "expansion" => self.expansion(node, src),
+            "simple_expansion" => {
+                self.expands = true;
                 self.visit_children(node, src);
-                self.repeats -= 1;
             }
             "variable_assignment" => {
-                self.statement_assignment |=
-                    !SAFE_VARIABLES.contains(&assigned(&src[node.byte_range()]));
+                let local = node
+                    .child_by_field_name("name")
+                    .is_some_and(|name| self.may_set(&src[name.byte_range()]));
+                if !local {
+                    self.mark_unrecognized(&src[node.byte_range()]);
+                }
                 self.visit_children(node, src);
             }
-            _ => {
-                self.opaque |= runs_hidden_code(node);
-                match node.kind() {
-                    "simple_expansion" => self.expands = true,
-                    "expansion" => {
-                        self.expands = true;
-                        self.opaque |= !reads_a_variable_plainly(node);
+            "array" => {
+                let mut cursor = node.walk();
+                for element in node.named_children(&mut cursor) {
+                    if keys_by_arithmetic(element, src) {
+                        self.mark_unrecognized(&src[element.byte_range()]);
                     }
-                    _ => {}
                 }
+                self.visit_children(node, src);
+            }
+            "for_statement" => {
+                let local = node.child(0).is_some_and(|keyword| keyword.kind() == "for")
+                    && node
+                        .child_by_field_name("variable")
+                        .is_some_and(|name| self.may_set(&src[name.byte_range()]));
+                if !local {
+                    self.mark_unrecognized(&src[node.byte_range()]);
+                }
+                self.repeated(node, src);
+            }
+            "while_statement" => self.repeated(node, src),
+            "compound_statement" if node.child(0).is_some_and(|open| open.kind() == "((") => {
+                self.mark_unrecognized(&src[node.byte_range()]);
+                self.visit_children(node, src);
+            }
+            kind if WALKED_KINDS.contains(&kind) => self.visit_children(node, src),
+            _ => {
+                self.mark_unrecognized(&src[node.byte_range()]);
                 self.visit_children(node, src);
             }
         }
@@ -683,6 +701,13 @@ impl Walk<'_> {
         for child in node.named_children(&mut cursor) {
             self.visit(child, src);
         }
+    }
+
+    /// Visits the children of a loop, whose body may run a directory change more than once.
+    fn repeated(&mut self, node: Node<'_>, src: &str) {
+        self.repeats += 1;
+        self.visit_children(node, src);
+        self.repeats -= 1;
     }
 
     /// Visits a redirected `statement`, whose redirections may carry words bash passes to the
@@ -715,7 +740,7 @@ impl Walk<'_> {
     /// Visits `node`, handing the `trailing` words a redirection carries to the simple command
     /// bash gives them: the last one of a pipeline or list, the one a `!` negates, or a new one
     /// after any assignments that stand alone. Under any other statement, which bash rejects, they
-    /// leave the command unknown.
+    /// leave the command unrecognized.
     fn statement<'t>(&mut self, node: Node<'t>, trailing: Vec<Node<'t>>, src: &str) {
         if trailing.is_empty() {
             return self.visit(node, src);
@@ -739,7 +764,7 @@ impl Walk<'_> {
                 self.parts(&assignments, &trailing, src);
             }
             _ => {
-                self.opaque = true;
+                self.mark_unrecognized(&src[node.byte_range()]);
                 self.visit(node, src);
             }
         }
@@ -747,7 +772,9 @@ impl Walk<'_> {
 
     fn command<'t>(&mut self, node: Node<'t>, trailing: &[Node<'t>], src: &str) {
         let parts = command_parts(node);
-        self.unparsed |= runs_a_reserved_word(&parts, src);
+        if runs_a_reserved_word(&parts, src) {
+            self.mark_unrecognized(&src[node.byte_range()]);
+        }
         self.parts(&parts, trailing, src);
     }
 
@@ -777,12 +804,86 @@ impl Walk<'_> {
                 }
                 assignments.push(assignment_word(part, src));
                 self.visit_children(part, src);
-            } else {
+            } else if part.is_named() {
                 self.visit(part, src);
             }
         }
 
         self.simple_command(&words, assignments, unsafe_assignment, None, src);
+    }
+
+    /// Records a `declare`, `export`, `local`, `readonly`, `typeset`, or `unset` command, which the
+    /// grammar parses apart from other simple commands, as the simple command bash runs.
+    fn declaration(&mut self, node: Node<'_>, src: &str) {
+        let mut cursor = node.walk();
+        let mut children = node.children(&mut cursor);
+        let keyword = children
+            .next()
+            .expect("a declaration command starts with its keyword");
+        let parts: Vec<Node<'_>> = children.filter(Node::is_named).collect();
+        let mut all = vec![Word::token(keyword, src)];
+        all.extend(words(&parts, src));
+        for &part in &parts {
+            if part.kind() == "variable_assignment" {
+                self.visit_children(part, src);
+            } else {
+                self.visit(part, src);
+            }
+        }
+        self.simple_command(&all, Vec::new(), None, None, src);
+    }
+
+    /// Records a `[ ... ]` test as the simple command of the `[` builtin, whose words are the
+    /// tokens between the brackets in source order. `[[ ... ]]` evaluates its operands as
+    /// arithmetic, and a token the grammar reads as an operator where bash reads a redirection or
+    /// a list operator, such as `>` or `&&`, means the rules would weigh other words than bash
+    /// runs, so either leaves the command unrecognized.
+    fn test(&mut self, node: Node<'_>, src: &str) {
+        let mut cursor = node.walk();
+        let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+        let mut tokens = Vec::new();
+        let recognized = match children.as_slice() {
+            [open, inner @ .., close] if open.kind() == "[" && close.kind() == "]" => inner
+                .iter()
+                .all(|&child| test_tokens(child, &mut tokens))
+                .then_some((*open, *close)),
+            _ => None,
+        };
+        let Some((open, close)) = recognized else {
+            self.mark_unrecognized(&src[node.byte_range()]);
+            self.visit_children(node, src);
+            return;
+        };
+        for &token in &tokens {
+            if token.is_named() {
+                self.visit(token, src);
+            }
+        }
+        let mut all = vec![Word::token(open, src)];
+        all.extend(words(&tokens, src));
+        all.push(Word::token(close, src));
+        self.simple_command(&all, Vec::new(), None, None, src);
+    }
+
+    /// Weighs a `${...}` expansion, which leaves its word expanding, and the words of its operands.
+    /// It stays recognized when it only substitutes text, as [`substitutes_text`] decides.
+    fn expansion(&mut self, node: Node<'_>, src: &str) {
+        self.expands = true;
+        if !substitutes_text(node, src) {
+            self.mark_unrecognized(&src[node.byte_range()]);
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            match child.kind() {
+                "special_variable_name" | "variable_name" => {}
+                "subscript" => {
+                    if let Some(index) = child.child_by_field_name("index") {
+                        self.visit(index, src);
+                    }
+                }
+                _ => self.visit(child, src),
+            }
+        }
     }
 
     /// Records the simple command of `all` and the commands it runs through `find`, led by the
@@ -800,7 +901,7 @@ impl Walk<'_> {
         if all.is_empty() {
             return;
         }
-        let mut unwrapped = self.unwrap(all);
+        let mut unwrapped = self.unwrap(all, src);
         unwrapped
             .replaces
             .extend(found.map(|placeholder| (0, placeholder)));
@@ -809,21 +910,27 @@ impl Walk<'_> {
             .split_first()
             .filter(|_| !pinned)
             .and_then(|(first, args)| {
-                safe_operands(first.value.as_deref().filter(|_| !first.glob)?, args)
+                let name = first.value.as_deref().filter(|_| !first.glob)?;
+                if matches!(name, "cd" | "pushd") {
+                    self.enters_workspace(args).then(Vec::new)
+                } else {
+                    safe_operands(name, args)
+                }
             });
         let mut operands = unwrapped.reads.clone();
         let mut reads_anything = false;
         let mut finds = Vec::new();
         for (i, &start) in unwrapped.starts.iter().enumerate() {
-            let Some((first, args)) = all[start..].split_first() else {
-                self.opaque = true;
+            let Some(first) = all.get(start) else {
                 continue;
             };
             let Some(name) = first.value.as_deref().filter(|_| !first.glob) else {
-                self.opaque = true;
+                if i == 0 {
+                    self.mark_unrecognized(span_text(&all[start..], src));
+                }
                 continue;
             };
-            self.program(name, args, src);
+            self.program(name, &all[start..], i == 0, src);
             let folded = fold_name(basename(name));
             if folded == "find" {
                 finds.push(start + 1);
@@ -831,7 +938,8 @@ impl Walk<'_> {
             match &safe {
                 Some(files) if i == 0 => operands.extend(files.iter().cloned()),
                 _ if READERS.contains(&folded.as_str()) => {
-                    let (files, anything) = reader_operands(&folded, args, self.workspace.cwd());
+                    let (files, anything) =
+                        reader_operands(&folded, &all[start + 1..], self.workspace.cwd());
                     operands.extend(files);
                     reads_anything |= anything || unwrapped.passes_input();
                 }
@@ -884,42 +992,110 @@ impl Walk<'_> {
         }
     }
 
-    /// Weighs the program `name` runs: a shell or builtin that runs code, a directory change,
-    /// or a path relative to the working directory.
-    fn program(&mut self, name: &str, args: &[Word], src: &str) {
+    /// Weighs the program `name` that `words` run with their arguments: a shell whose literal
+    /// script the walk follows, a directory change, a path relative to the working directory, and,
+    /// at the `primary` start bash runs, a builtin, as [`Self::builtin`] weighs it.
+    fn program(&mut self, name: &str, words: &[Word], primary: bool, src: &str) {
+        let args = &words[1..];
         self.relative_path |= is_relative_program(name);
         let base = basename(name);
         let folded = fold_name(base);
-        let runner = [base, folded.as_str()]
+        if let Some(shell) = [base, folded.as_str()]
             .into_iter()
-            .find(|runner| SHELLS.contains(runner) || CODE_BUILTINS.contains(runner));
-        if let Some(runner) = runner {
-            self.opaque = true;
-            self.nested_script(runner, args, src);
+            .find(|shell| SHELLS.contains(shell))
+        {
+            self.nested_script(shell, args, src);
+        }
+        if primary && !self.builtin(name, args, src) {
+            self.mark_unrecognized(span_text(words, src));
         }
         if DIRECTORY_CHANGERS.contains(&name) {
-            self.change_dir(self.enters_workspace(args));
+            self.change_dir(self.enters_workspace(args), words, src);
         }
-        // `shopt` can turn on `dotglob` or `globstar`, which change what a glob matches.
-        self.opaque |= name == "shopt";
-        let names = name_arguments(base, args);
-        // `test` and `[` only query whether `-v`'s name is set, so they read it without setting it.
-        self.sets_shell_variable |= !matches!(base, "test" | "[")
-            && names
-                .iter()
-                .any(|word| word.value.as_deref().is_some_and(names_a_shell_variable));
-        self.opaque |= names.iter().any(|word| {
-            word.value
-                .as_deref()
-                .is_none_or(|value| value.contains(['[', '!']))
-        });
     }
 
-    /// Records a directory change, which may leave the workspace
-    /// unless it is the first, it runs once, and `inside` holds.
-    fn change_dir(&mut self, inside: bool) {
-        self.leaves_workspace |= self.changes_dir || self.repeats > 0 || !inside;
-        self.changes_dir = true;
+    /// Returns whether the walk recognizes running `name` with `args`, which holds for any name no
+    /// builtin has. The [`DISPATCH_BUILTINS`] are unrecognized, as is a builtin that sets a
+    /// variable other than one [`Self::may_set`] admits, or tests a variable whose name may hold a
+    /// subscript, since a subscript is an arithmetic context that may run a substitution. `eval`
+    /// is recognized with a literal script, which the walk follows, `source` with a literal path,
+    /// `set` only with the options [`sets_only_tracing_options`] admits, and `export` only for the
+    /// [`SAFE_VARIABLES`].
+    fn builtin(&mut self, name: &str, args: &[Word], src: &str) -> bool {
+        let local = |word: Option<&Word>| {
+            word.and_then(|word| word.value.as_deref())
+                .is_some_and(|name| self.may_set(name))
+        };
+        match name {
+            _ if DISPATCH_BUILTINS.contains(&name) => false,
+            "." | "source" => match args.first().filter(|path| !path.glob) {
+                Some(Word {
+                    value: Some(path), ..
+                }) => {
+                    self.relative_path |= Path::new(path).is_relative();
+                    true
+                }
+                _ => false,
+            },
+            "eval" => match literal_script(args) {
+                Some(script) => {
+                    self.script(&script);
+                    true
+                }
+                None => false,
+            },
+            "export" => {
+                !args.is_empty()
+                    && args.iter().all(|word| {
+                        declared_name(word, src).is_some_and(|name| SAFE_VARIABLES.contains(&name))
+                    })
+            }
+            // `-i` evaluates each later value as arithmetic, `-n` sends later writes to the variable
+            // a value names, and `-x` exports the variable.
+            "declare" | "local" | "readonly" | "typeset" => {
+                builtin_options(args, src, "", "", "inx").is_some_and(|(_, operands)| {
+                    operands
+                        .iter()
+                        .all(|word| declared_name(word, src).is_some_and(|name| self.may_set(name)))
+                })
+            }
+            "getopts" => local(args.get(1)),
+            "jobs" => builtin_options(args, src, "", "", "x").is_some(),
+            "mapfile" | "readarray" => builtin_options(args, src, "cdnOsu", "", "C")
+                .is_some_and(|(_, operands)| operands.iter().all(|word| local(Some(word)))),
+            "printf" => match args {
+                [first, rest @ ..] => match first.value.as_deref() {
+                    Some(option) if option.starts_with("-v") => match &option[2..] {
+                        "" => local(rest.first()),
+                        attached => self.may_set(attached),
+                    },
+                    Some(_) => true,
+                    None => rest.first().is_none_or(|word| local(Some(word))),
+                },
+                [] => true,
+            },
+            "read" => {
+                builtin_options(args, src, "dinNptu", "a", "").is_some_and(|(names, operands)| {
+                    names.iter().all(|name| self.may_set(name))
+                        && operands.iter().all(|word| local(Some(word)))
+                })
+            }
+            "set" => sets_only_tracing_options(args),
+            "test" | "[" => !may_test_a_subscript(args),
+            "unset" => builtin_options(args, src, "", "", "")
+                .is_some_and(|(_, operands)| operands.iter().all(|word| local(Some(word)))),
+            "wait" => builtin_options(args, src, "", "p", "")
+                .is_some_and(|(names, _)| names.iter().all(|name| self.may_set(name))),
+            _ => true,
+        }
+    }
+
+    /// Records a directory change by `words`, which may leave the workspace unless it is the first,
+    /// it runs once, and `inside` holds.
+    fn change_dir(&mut self, inside: bool, words: &[Word], src: &str) {
+        self.leaves_workspace |= self.dir_change.is_some() || self.repeats > 0 || !inside;
+        self.dir_change
+            .get_or_insert_with(|| construct(span_text(words, src)));
     }
 
     /// Returns whether `args` name one literal directory inside a workspace root without `..`,
@@ -950,11 +1126,11 @@ impl Walk<'_> {
     }
 
     /// Strips the wrappers that lead `words`. The named words keep every wrapper from the first one
-    /// allow rules do not see through, that sets a variable outside [`SAFE_VARIABLES`], or that is
-    /// spelled with a directory, since `./nice` may be any program. A wrapper option the analysis
-    /// does not know hides where the command starts, so it turns the command opaque, and the
-    /// program may then start at any later word.
-    fn unwrap(&mut self, words: &[Word]) -> Unwrapped {
+    /// allow rules do not see through, that sets a variable outside [`SAFE_VARIABLES`], that is
+    /// spelled with a directory, since `./nice` may be any program, or whose options the analysis
+    /// cannot read. An option it does not know hides where the command starts, so the program may
+    /// then start at any later word.
+    fn unwrap(&mut self, words: &[Word], src: &str) -> Unwrapped {
         let mut unwrapped = Unwrapped::default();
         let mut pending = vec![0];
         // Every word from here on has been pending, so an unknown option past it adds none.
@@ -971,7 +1147,6 @@ impl Walk<'_> {
                 let run = match wrapper.invocation(args) {
                     Ok(run) => run,
                     Err(unknown) => {
-                        self.opaque = true;
                         unwrapped.appends |= wrapper.kind == Kind::Input;
                         let from = at + 1 + unknown;
                         if from < spread {
@@ -981,9 +1156,8 @@ impl Walk<'_> {
                         break;
                     }
                 };
-                self.opaque |= run.shell;
                 if run.elsewhere {
-                    self.change_dir(false);
+                    self.change_dir(false, &words[at..], src);
                 }
                 unwrapped.reads.extend(run.reads);
                 if run.start == args.len() {
@@ -992,16 +1166,11 @@ impl Walk<'_> {
                     unwrapped.appends |= input && run.replace.is_none();
                     break;
                 }
-                let assignments = || {
-                    args[..run.start]
-                        .iter()
-                        .filter_map(|word| word.value.as_deref())
-                        .filter(|arg| is_assignment(arg))
-                        .map(assigned)
-                };
-                self.sets_shell_variable |=
-                    assignments().any(|name| SHELL_VARIABLES.contains(&name));
-                let sets_unsafe = assignments().any(|name| !SAFE_VARIABLES.contains(&name));
+                let sets_unsafe = args[..run.start]
+                    .iter()
+                    .filter_map(|word| word.value.as_deref())
+                    .filter(|arg| is_assignment(arg))
+                    .any(|arg| !SAFE_VARIABLES.contains(&assigned(arg)));
                 at += 1 + run.start;
                 if wrapper.kind == Kind::Input {
                     match run.replace {
@@ -1032,23 +1201,14 @@ impl Walk<'_> {
     }
 
     /// Records the commands `find`'s `-exec`, `-execdir`, `-ok`, and `-okdir` actions run, each up
-    /// to its `;`, or its `+` after `{}`. A word that expands may be such an action, so it turns
-    /// the command opaque.
+    /// to its `;`, or its `+` after `{}`.
     fn find_actions(&mut self, args: &[Word], src: &str) {
-        self.opaque |= args.iter().any(|word| word.value.is_none());
         let mut rest = args;
         while let Some(at) = rest.iter().position(|word| {
             word.value
                 .as_deref()
                 .is_some_and(|value| FIND_RUNNERS.contains(&value))
         }) {
-            if rest[at]
-                .value
-                .as_deref()
-                .is_some_and(|value| value.ends_with("dir"))
-            {
-                self.change_dir(false);
-            }
             let body = &rest[at + 1..];
             let end = body
                 .iter()
@@ -1059,6 +1219,13 @@ impl Walk<'_> {
                     _ => false,
                 })
                 .unwrap_or(body.len());
+            if rest[at]
+                .value
+                .as_deref()
+                .is_some_and(|value| value.ends_with("dir"))
+            {
+                self.change_dir(false, &rest[at..at + 1 + end], src);
+            }
             let found = Placeholder {
                 text: DEFAULT_REPLACE.to_owned(),
                 whole: false,
@@ -1068,8 +1235,8 @@ impl Walk<'_> {
         }
     }
 
-    /// Walks the literal script a shell's `-c` or `--command` option or `eval` runs, and the
-    /// command `runuser -u` runs without a shell, so deny rules see the commands inside them.
+    /// Walks the literal script a shell's `-c` or `--command` option runs, and the command
+    /// `runuser -u` runs without a shell, so deny rules see the commands inside them.
     fn nested_script(&mut self, runner: &str, args: &[Word], src: &str) {
         if runner == "runuser"
             && let Ok(run) = RUNUSER.invocation(args)
@@ -1082,24 +1249,15 @@ impl Walk<'_> {
             self.simple_command(&args[run.start..], Vec::new(), None, None, src);
             return;
         }
-        let script = if runner == "eval" {
-            args.iter()
-                .map(|word| word.value.as_deref())
-                .collect::<Option<Vec<_>>>()
-                .map(|values| values.join(" "))
-        } else if SHELLS.contains(&runner) {
-            args.iter().enumerate().find_map(|(i, word)| {
-                let arg = word.value.as_deref()?;
-                if let Some(script) = arg.strip_prefix("--command=") {
-                    return Some(script.to_owned());
-                }
-                (is_command_option(arg) || arg == "--command")
-                    .then(|| args.get(i + 1)?.value.clone())
-                    .flatten()
-            })
-        } else {
-            None
-        };
+        let script = args.iter().enumerate().find_map(|(i, word)| {
+            let arg = word.value.as_deref()?;
+            if let Some(script) = arg.strip_prefix("--command=") {
+                return Some(script.to_owned());
+            }
+            (is_command_option(arg) || arg == "--command")
+                .then(|| args.get(i + 1)?.value.clone())
+                .flatten()
+        });
         if let Some(script) = script {
             self.script(&script);
         }
@@ -1129,7 +1287,7 @@ impl Walk<'_> {
 
         let word = Word::new(&[destination], src);
         let Some(path) = word.value.filter(|_| !word.glob) else {
-            self.opaque = true;
+            self.mark_unrecognized(&src[node.byte_range()]);
             return;
         };
         if operator == ">&" && (destination.kind() == "number" || path == "-") {
@@ -1304,6 +1462,7 @@ fn dropped_dash(last: Node<'_>, src: &str) -> Option<Word> {
         span: dash,
         value: Some("-".to_owned()),
         glob: false,
+        splits: false,
     })
 }
 
@@ -1362,16 +1521,146 @@ fn runs_a_reserved_word(parts: &[Node<'_>], src: &str) -> bool {
     false
 }
 
-/// Returns whether `node` runs code no simple command shows: a substitution, or arithmetic, which
-/// evaluates a variable's value as an expression that can itself hold a substitution.
-fn runs_hidden_code(node: Node<'_>) -> bool {
+/// The first node under `root`, in source order, that tree-sitter-bash could not parse or inserted
+/// to recover from an error.
+fn first_error(root: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = root.walk();
+    loop {
+        let node = cursor.node();
+        if node.is_error() || node.is_missing() {
+            return Some(node);
+        }
+        if node.has_error() && cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return None;
+            }
+        }
+    }
+}
+
+/// The first line of `text`, cut to [`MAX_CONSTRUCT_CHARS`] characters, as a prompt names an
+/// unrecognized construct.
+fn construct(text: &str) -> String {
+    let text = text.trim();
+    let line = text.lines().next().unwrap_or_default();
+    match line.char_indices().nth(MAX_CONSTRUCT_CHARS) {
+        Some((end, _)) => format!("{}...", &line[..end]),
+        None if line.len() < text.len() => format!("{line}..."),
+        None => line.to_owned(),
+    }
+}
+
+/// The source `words` span, from the first one's start to the last one's end.
+fn span_text<'s>(words: &[Word], src: &'s str) -> &'s str {
+    let start = words.iter().map(|word| word.span.start).min().unwrap_or(0);
+    let end = words
+        .iter()
+        .map(|word| word.span.end)
+        .max()
+        .unwrap_or(start);
+    &src[start..end]
+}
+
+/// Collects into `tokens` the tokens of `node`, part of a `[ ... ]` test, that bash passes to `[`
+/// as words, or returns `false` when one is a token bash reads otherwise, as a redirection or a
+/// list operator, or that only `[[ ... ]]` and arithmetic have.
+fn test_tokens<'t>(node: Node<'t>, tokens: &mut Vec<Node<'t>>) -> bool {
     match node.kind() {
-        "arithmetic_expansion"
-        | "c_style_for_statement"
+        "binary_expression" | "unary_expression" => {
+            let mut cursor = node.walk();
+            let children: Vec<Node<'t>> = node.children(&mut cursor).collect();
+            children.into_iter().all(|child| test_tokens(child, tokens))
+        }
+        "!"
+        | "!="
+        | "="
+        | "=="
+        | "ansi_c_string"
         | "command_substitution"
-        | "process_substitution"
-        | "test_command" => true,
-        "compound_statement" => node.child(0).is_some_and(|open| open.kind() == "(("),
+        | "concatenation"
+        | "expansion"
+        | "extglob_pattern"
+        | "number"
+        | "raw_string"
+        | "simple_expansion"
+        | "string"
+        | "test_operator"
+        | "word" => {
+            tokens.push(node);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Operators a `${...}` expansion may apply and still only substitute text: a default, an
+/// alternate, or an error for an unset or empty value, a pattern removed or replaced, or a change
+/// of case. The grammar names each after the variable.
+const TEXT_OPERATORS: &[&str] = &[
+    ":-", "-", ":+", "+", ":?", "?", "#", "##", "%", "%%", "/", "//", "/#", "/%", "^", "^^", ",",
+    ",,",
+];
+
+/// Returns whether `expansion`, a `${...}` node, only substitutes text: it names a value as
+/// [`names_a_value`] reads one, led by at most a `#` for its length or followed by at most one of
+/// the [`TEXT_OPERATORS`]. Any other form assigns, evaluates an arithmetic context that may run a
+/// substitution, as an offset or another subscript does, follows a name to another variable, or
+/// transforms the value, as `@P` prompt expansion does. The grammar leaves a pattern operand as one
+/// `regex` token even where bash expands a `$` or a backquote in it, so such a pattern counts as
+/// unrecognized too.
+fn substitutes_text(expansion: Node<'_>, src: &str) -> bool {
+    let mut cursor = expansion.walk();
+    let parts: Vec<Node<'_>> = expansion
+        .children(&mut cursor)
+        .filter(|part| !matches!(part.kind(), "${" | "}"))
+        .collect();
+    let rest = match parts.as_slice() {
+        // `${#}` and `${!}`, the argument count and the last background process.
+        [only] if matches!(only.kind(), "#" | "!") => return true,
+        [length, name] if length.kind() == "#" => return names_a_value(*name, src),
+        [name, rest @ ..] if names_a_value(*name, src) => rest,
+        _ => return false,
+    };
+    match rest {
+        [] => true,
+        [operator, operands @ ..] => {
+            let replaces = operator.kind().starts_with('/');
+            TEXT_OPERATORS.contains(&operator.kind())
+                && operands.iter().all(|operand| match operand.kind() {
+                    "/" => replaces,
+                    "regex" => !src[operand.byte_range()].contains(['$', '`']),
+                    _ => operand.is_named(),
+                })
+        }
+    }
+}
+
+/// Returns whether `node`, the name in a `${...}` expansion, names a value without evaluating
+/// anything: a variable, a special parameter, or an array element by number or all elements by
+/// `@` or `*`.
+fn names_a_value(node: Node<'_>, src: &str) -> bool {
+    match node.kind() {
+        "special_variable_name" | "variable_name" => true,
+        "subscript" => node.child_by_field_name("index").is_some_and(|index| {
+            index.kind() == "number" || matches!(&src[index.byte_range()], "@" | "*")
+        }),
+        _ => false,
+    }
+}
+
+/// Returns whether `element`, part of an `( ... )` array value, sets a key other than a number,
+/// which an indexed array evaluates as arithmetic, where a name's value may run a substitution.
+fn keys_by_arithmetic(element: Node<'_>, src: &str) -> bool {
+    let mut cursor = element.walk();
+    let parts: Vec<Node<'_>> = element.children(&mut cursor).collect();
+    let text = |node: &Node<'_>| &src[node.byte_range()];
+    match parts.as_slice() {
+        [open, rest @ ..] if element.kind() == "concatenation" && text(open) == "[" => {
+            !matches!(rest, [key, close, ..] if key.kind() == "number" && text(close) == "]")
+        }
         _ => false,
     }
 }
@@ -1437,8 +1726,18 @@ impl Wrapper {
     };
 
     /// Parses the options that lead `args`, or returns the index of the first word that hides
-    /// where the command starts: an option the grammar does not know, or one that expands.
+    /// where the command starts: an option the grammar does not know or one that expands, or any
+    /// word before the command that bash may expand into other than one word.
     fn invocation(&self, args: &[Word]) -> Result<Invocation, usize> {
+        let parsed = self.options(args);
+        let end = parsed.as_ref().map_or_else(|&at| at, |run| run.start);
+        match args[..end].iter().position(|word| word.splits) {
+            Some(at) => Err(at),
+            None => parsed,
+        }
+    }
+
+    fn options(&self, args: &[Word]) -> Result<Invocation, usize> {
         let mut run = Invocation {
             start: args.len(),
             elsewhere: self.elsewhere,
@@ -1629,8 +1928,6 @@ enum Effect {
     None,
     /// The command runs in another directory.
     Directory,
-    /// A shell runs the command, after reading its startup files.
-    Shell,
     /// The value is a placeholder that each input word replaces, in place of being appended.
     Replace,
     /// The value is a placeholder that the input words replace when it stands as a whole word, as
@@ -1647,7 +1944,6 @@ struct Invocation {
     /// runs none.
     start: usize,
     elsewhere: bool,
-    shell: bool,
     /// The placeholder that input words replace, when an option sets one.
     replace: Option<Placeholder>,
     /// The files an option names for the wrapper to read.
@@ -1661,7 +1957,6 @@ impl Invocation {
         match effect {
             Effect::None => {}
             Effect::Directory => self.elsewhere = true,
-            Effect::Shell => self.shell = true,
             Effect::Replace | Effect::Insert => {
                 let text = match value {
                     Arg::None => DEFAULT_REPLACE.to_owned(),
@@ -1726,109 +2021,6 @@ impl Unwrapped {
     }
 }
 
-/// Returns whether the variable `name` names is set where it appears: anywhere but a `$` expansion
-/// that only reads it, which `${NAME=...}` and `${NAME:=...}` do not.
-fn is_set(name: Node<'_>) -> bool {
-    let mut parent = name.parent();
-    if parent.is_some_and(|node| node.kind() == "subscript") {
-        parent = parent.and_then(|node| node.parent());
-    }
-    match parent.map(|node| (node.kind(), node)) {
-        Some(("simple_expansion", _)) => false,
-        Some(("expansion", expansion)) => {
-            let mut cursor = expansion.walk();
-            expansion
-                .children(&mut cursor)
-                .any(|child| matches!(child.kind(), "=" | ":="))
-        }
-        _ => true,
-    }
-}
-
-/// Returns whether `option` is an option cluster of `declare`, `local`, or `typeset` that holds
-/// `-n`, which makes a name a reference to whatever variable its value names.
-fn is_nameref_option(option: &str) -> bool {
-    option
-        .strip_prefix('-')
-        .is_some_and(|flags| flags.contains('n'))
-}
-
-/// Operators in a `${...}` expansion that read a variable without running code or evaluating an
-/// arithmetic context: the plain default and alternate forms. The grammar names them after the
-/// variable, so an expansion with only one of these and a plain `variable_name` substitutes a
-/// value the way `${name}` does.
-const PLAIN_EXPANSION_OPERATORS: &[&str] = &[":-", "-", ":+", "+"];
-
-/// Returns whether `expansion`, a `${...}` node, only substitutes a variable's value: it names a
-/// plain `variable_name` and applies at most a [`PLAIN_EXPANSION_OPERATORS`] operator. Other
-/// operators run a substring, replacement, or transformation, and a subscript, offset, indirection,
-/// or length evaluates an arithmetic context that can hold a command substitution, so they leave
-/// the command opaque.
-fn reads_a_variable_plainly(expansion: Node<'_>) -> bool {
-    let mut cursor = expansion.walk();
-    let mut names_a_variable = false;
-    for child in expansion.children(&mut cursor) {
-        match child.kind() {
-            "variable_name" => names_a_variable = true,
-            "${" | "}" => {}
-            operator if PLAIN_EXPANSION_OPERATORS.contains(&operator) => {}
-            "word"
-            | "string"
-            | "simple_expansion"
-            | "expansion"
-            | "command_substitution"
-            | "arithmetic_expansion" => {}
-            _ => return false,
-        }
-    }
-    names_a_variable
-}
-
-/// The arguments a builtin reads as a variable name, which it may evaluate as an arithmetic
-/// subscript and so run code the rules do not see. `printf`, `test`, and `[` name the word after
-/// `-v`; `read` names its operands, past each option that takes a value of its own; `declare`,
-/// `local`, `typeset`, `export`, and the rest name every operand, which catches a wrapped form such
-/// as `builtin declare ...` that reaches here when the `declaration_command` handler does not see
-/// it. Returns nothing for a command that is not one of these builtins.
-fn name_arguments<'w>(base: &str, args: &'w [Word]) -> Vec<&'w Word> {
-    let after_v = || {
-        args.iter()
-            .position(|word| word.value.as_deref() == Some("-v"))
-            .and_then(|at| args.get(at + 1))
-            .into_iter()
-            .collect()
-    };
-    let operands = |value_options: &[&str]| {
-        let mut names = Vec::new();
-        let mut skip = false;
-        for word in args {
-            if std::mem::take(&mut skip) {
-                continue;
-            }
-            match word.value.as_deref() {
-                Some(option) if value_options.contains(&option) => skip = true,
-                Some(option) if option.starts_with('-') => {}
-                _ => names.push(word),
-            }
-        }
-        names
-    };
-    match base {
-        "printf" | "test" | "[" => after_v(),
-        "read" => operands(&["-d", "-i", "-n", "-N", "-p", "-t", "-u"]),
-        "declare" | "export" | "getopts" | "let" | "local" | "mapfile" | "readarray"
-        | "readonly" | "typeset" | "unset" => operands(&[]),
-        _ => Vec::new(),
-    }
-}
-
-/// Returns whether `text` holds one of the [`SHELL_VARIABLES`] as a name of its own, as an
-/// arithmetic subscript or a variable builtin's argument may.
-fn names_a_shell_variable(text: &str) -> bool {
-    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .any(|name| SHELL_VARIABLES.contains(&name))
-}
-
 /// The variable a `NAME=VALUE`, `NAME+=VALUE`, or `NAME[i]=VALUE` assignment sets.
 fn assigned(assignment: &str) -> &str {
     assignment
@@ -1843,9 +2035,147 @@ fn is_sudo_assignment(arg: &str) -> bool {
 
 /// Returns whether `arg` is a `NAME=VALUE` environment assignment.
 fn is_assignment(arg: &str) -> bool {
-    arg.split_once('=').is_some_and(|(name, _)| {
-        name.starts_with(|c: char| c == '_' || c.is_ascii_alphabetic())
-            && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+    arg.split_once('=')
+        .is_some_and(|(name, _)| is_identifier(name))
+}
+
+/// Returns whether `name` is a shell identifier: a letter or `_`, then letters, digits, or `_`.
+fn is_identifier(name: &str) -> bool {
+    name.starts_with(|c: char| c == '_' || c.is_ascii_alphabetic())
+        && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// Returns whether a write to the variable `name` can only change later `$name` expansions, which
+/// the analysis already reads as unknown: it is an identifier with a lowercase letter, which no
+/// variable a noninteractive bash reads has, and the environment `bash` starts with does not set
+/// it, as `inherited` tells, so the write exports nothing.
+fn is_local_name(name: &str, inherited: &dyn Fn(&str) -> bool) -> bool {
+    is_identifier(name) && name.bytes().any(|b| b.is_ascii_lowercase()) && !inherited(name)
+}
+
+/// The variable a `declare`-family or `export` argument names: its value up to an `=` or `+=`, or
+/// when the value expands, the identifier it is written with before an `=`. `None` for an option,
+/// a name the analysis cannot read, or a literal value that assigns `(...)`, which the builtin
+/// parses again as an array whose keys and values may run substitutions the walk never sees.
+fn declared_name<'w>(word: &'w Word, src: &'w str) -> Option<&'w str> {
+    let text = word.value.as_deref().unwrap_or(&src[word.span.clone()]);
+    let (name, value) = text.split_once('=').unwrap_or((text, ""));
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let reparsed = word.value.is_some() && value.starts_with('(');
+    (is_identifier(name) && !reparsed).then_some(name)
+}
+
+/// The script `eval` runs from `args`, joined by spaces after a leading `--`, which `eval` drops,
+/// or `None` when one of them expands.
+fn literal_script(args: &[Word]) -> Option<String> {
+    let args = match args {
+        [first, rest @ ..] if first.value.as_deref() == Some("--") => rest,
+        _ => args,
+    };
+    args.iter()
+        .map(|word| word.value.as_deref())
+        .collect::<Option<Vec<_>>>()
+        .map(|values| values.join(" "))
+}
+
+/// The variables a builtin's options name and the operands after them, read past option clusters
+/// where each letter in `valued` takes a value, and each in `naming` takes a variable's name. `None`
+/// when an option holds a letter in `refused`, whose effect the analysis does not follow, or a word
+/// that expands may be an option or a name. A word written from a letter or `_`, as an assignment
+/// with an array value is, cannot expand to an option. `--` ends the options.
+fn builtin_options<'w>(
+    args: &'w [Word],
+    src: &str,
+    valued: &str,
+    naming: &str,
+    refused: &str,
+) -> Option<(Vec<&'w str>, &'w [Word])> {
+    let mut names = Vec::new();
+    let mut at = 0;
+    while let Some(word) = args.get(at) {
+        let Some(value) = word.value.as_deref() else {
+            src[word.span.clone()]
+                .starts_with(|c: char| c == '_' || c.is_ascii_alphabetic())
+                .then_some(())?;
+            break;
+        };
+        let Some(cluster) = value
+            .strip_prefix('-')
+            .filter(|cluster| !cluster.is_empty())
+        else {
+            break;
+        };
+        at += 1;
+        if cluster == "-" {
+            break;
+        }
+        for (offset, letter) in cluster.char_indices() {
+            if refused.contains(letter) {
+                return None;
+            }
+            if !valued.contains(letter) && !naming.contains(letter) {
+                continue;
+            }
+            let attached = &cluster[offset + letter.len_utf8()..];
+            let value = if attached.is_empty() {
+                at += 1;
+                args.get(at - 1).map(|word| word.value.as_deref())
+            } else {
+                Some(Some(attached))
+            };
+            if naming.contains(letter) {
+                names.push(value.flatten()?);
+            }
+            break;
+        }
+    }
+    Some((names, &args[at.min(args.len())..]))
+}
+
+/// Returns whether `args` only turn on or off the `set` options that make a script stop on errors
+/// or trace what it runs: `e`, `u`, `v`, and `x` as letters, and `errexit`, `nounset`, `pipefail`,
+/// `verbose`, and `xtrace` by name after `-o` or `+o`.
+fn sets_only_tracing_options(args: &[Word]) -> bool {
+    let mut values = args.iter().map(|word| word.value.as_deref());
+    let mut any = false;
+    while let Some(value) = values.next() {
+        let Some(cluster) = value
+            .and_then(|value| value.strip_prefix(['-', '+']))
+            .filter(|cluster| !cluster.is_empty())
+        else {
+            return false;
+        };
+        let (letters, named) = cluster
+            .strip_suffix('o')
+            .map_or((cluster, false), |letters| (letters, true));
+        if !letters.chars().all(|letter| "euvx".contains(letter)) {
+            return false;
+        }
+        if named
+            && !values.next().flatten().is_some_and(|name| {
+                ["errexit", "nounset", "pipefail", "verbose", "xtrace"].contains(&name)
+            })
+        {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// Returns whether `test` or `[` may evaluate a word as a variable's name with `-v` or `-R`, whose
+/// subscript runs any substitution in it: a word that is or may expand to either operator, followed
+/// by one that expands or holds a `[`.
+fn may_test_a_subscript(args: &[Word]) -> bool {
+    args.windows(2).any(|pair| {
+        pair[0]
+            .value
+            .as_deref()
+            .is_none_or(|operator| matches!(operator, "-v" | "-R"))
+            && pair[1]
+                .value
+                .as_deref()
+                .is_none_or(|name| name.contains('['))
     })
 }
 
@@ -1860,6 +2190,8 @@ struct Word {
     value: Option<String>,
     /// Whether an unquoted `*`, `?`, `[`, or `{` leaves the word to pathname or brace expansion.
     glob: bool,
+    /// Whether bash may expand the word into other than one word, as [`splits`] decides.
+    splits: bool,
 }
 
 impl Word {
@@ -1871,6 +2203,18 @@ impl Word {
             span: parts[0].start_byte()..parts[parts.len() - 1].end_byte(),
             value,
             glob: glob.unwrap_or(false),
+            splits: parts.iter().any(|&part| splits(part, src)),
+        }
+    }
+
+    /// The literal word an anonymous token spells, such as a declaration's keyword or a test's
+    /// bracket.
+    fn token(node: Node<'_>, src: &str) -> Self {
+        Self {
+            span: node.byte_range(),
+            value: Some(src[node.byte_range()].to_owned()),
+            glob: false,
+            splits: false,
         }
     }
 
@@ -1921,7 +2265,13 @@ fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
     let text = &src[node.byte_range()];
     match node.kind() {
         "word" => unquote_word(text, leading),
-        "number" | "==" | "=~" => Some((text.to_owned(), false)),
+        "!" | "!=" | "=" | "==" | "=~" | "number" | "test_operator" | "variable_name" => {
+            Some((text.to_owned(), false))
+        }
+        "variable_assignment" => {
+            let word = assignment_word(node, src);
+            word.literal.then_some((word.text, false))
+        }
         "raw_string" => Some((text.get(1..text.len() - 1)?.to_owned(), false)),
         "ansi_c_string" => Some((unquote_ansi_c(text.get(2..text.len() - 1)?)?, false)),
         "simple_expansion" | "expansion" if leading && is_home(text) => Some((home()?, false)),
@@ -2007,6 +2357,38 @@ fn unquote_word(text: &str, leading: bool) -> Option<(String, bool)> {
         value = expand_user(&value).ok()?.to_string_lossy().into_owned();
     }
     Some((value, glob))
+}
+
+/// Returns whether bash may expand the word part `node` into other than one word: by splitting an
+/// unquoted expansion or substitution, by pathname expansion, or by brace expansion, which any
+/// unquoted `{` but the literal `{}` may open.
+fn splits(node: Node<'_>, src: &str) -> bool {
+    match node.kind() {
+        "arithmetic_expansion"
+        | "brace_expression"
+        | "command_substitution"
+        | "expansion"
+        | "simple_expansion" => true,
+        "concatenation" => {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).any(|part| splits(part, src))
+        }
+        "word" => {
+            let mut chars = src[node.byte_range()].chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '*' | '?' | '[' => return true,
+                    '{' if chars.peek() != Some(&'}') => return true,
+                    _ => {}
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 /// A double-quoted string's value: a backslash escapes only `$`, `` ` ``, `"`, `\`, and newlines.
@@ -2187,9 +2569,14 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
 
 // ── Known-Safe Commands ──
 
+/// The operators and the closing `]` of a `test` or `[` call.
+const TEST_OPERATORS: &[&str] = &["!", "!=", "(", ")", "<", "=", "==", ">", "]"];
+
 /// The words that may name a file read by the shipped known-safe read-only command `name`, or
 /// `None` when `name` is no such command or `args` take it out of the safe set. Every argument
-/// must be literal and free of globs, so each file it reads is one the gate can check.
+/// must be literal and free of globs, so each file it reads is one the gate can check. Every word
+/// of a `test` or `[` call other than an option or a [`TEST_OPERATORS`] word counts as a file, so a
+/// string it compares reads as one too.
 fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<String>> {
     let values = args
         .iter()
@@ -2201,7 +2588,15 @@ fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<String>> {
         (!operands.unknown).then(|| operands.files.into_iter().map(|(_, file)| file).collect())
     };
     match name {
-        "echo" | "false" | "pwd" | "true" => Some(Vec::new()),
+        ":" | "echo" | "export" | "false" | "printf" | "pwd" | "true" => Some(Vec::new()),
+        "set" => sets_only_tracing_options(args).then(Vec::new),
+        "[" | "test" => Some(
+            values
+                .iter()
+                .filter(|value| !value.starts_with('-') && !TEST_OPERATORS.contains(value))
+                .map(|&value| value.to_owned())
+                .collect(),
+        ),
         "cat" | "head" | "ls" | "tail" | "wc" => files(),
         "find" if !values.iter().any(|value| FIND_ACTIONS.contains(value)) => files(),
         "grep" if !values.iter().any(|value| is_recursive_grep(value)) => files(),
@@ -2769,7 +3164,14 @@ mod tests {
     use crate::util::path::testing::HOME_VAR;
 
     fn parse(command: &str) -> CommandTarget {
-        CommandTarget::parse(command, &Workspace::new(Path::new("/repo")))
+        parse_inheriting(command, &[])
+    }
+
+    /// Parses `command` where the environment `bash` starts with sets only `inherited`.
+    fn parse_inheriting(command: &str, inherited: &[&str]) -> CommandTarget {
+        CommandTarget::parse_inheriting(command, &Workspace::new(Path::new("/repo")), &|name| {
+            inherited.contains(&name)
+        })
     }
 
     fn is_safe(command: &str) -> bool {
@@ -2843,7 +3245,7 @@ mod tests {
                 ] {
                     assert_eq!(texts(command), expected, "{command:?}");
                 }
-                assert!(!parse("cargo test --all").is_opaque());
+                assert!(parse("cargo test --all").unrecognized().is_none());
             }
 
             #[test]
@@ -2868,6 +3270,12 @@ mod tests {
                         "cat",
                     ),
                     ("GIT_PAGER=sh git log", "GIT_PAGER=sh git log", "git"),
+                    ("PATH=/tmp ls", "PATH=/tmp ls", "ls"),
+                    (
+                        "env BASH_ENV=./x.sh ./build.sh",
+                        "env BASH_ENV=./x.sh ./build.sh",
+                        "./build.sh",
+                    ),
                     (
                         "nice env LD_PRELOAD=./x.so nohup cat a",
                         "env LD_PRELOAD=./x.so nohup cat a",
@@ -2879,7 +3287,7 @@ mod tests {
                     assert_eq!(joined(segment.named()), text, "{command:?}");
                     assert_eq!(program(segment)[0].text(), name, "{command:?}");
                     assert!(segment.safe_reads().is_none(), "{command:?}");
-                    assert!(!command.is_opaque(), "{command:?}");
+                    assert!(command.unrecognized().is_none(), "{command:?}");
                 }
                 assert!(is_safe("LANG=C TZ=UTC env NO_COLOR=1 cat a"));
             }
@@ -2891,9 +3299,9 @@ mod tests {
                     "BASH_CMDS+=([ls]=/bin/rm); ls -rf x",
                     "declare -A BASH_CMDS=([ls]=/bin/rm); ls -rf x",
                     "POSIXLY_CORRECT=1\nBASH_ALIASES[ls]=rm\nls -rf x",
-                    "PATH=/tmp ls",
                     "export PATH=/tmp:$PATH; ls",
-                    "env BASH_ENV=./x.sh ./build.sh",
+                    "export -n FOO",
+                    "X=1; echo hi",
                     "for IFS in x; do ls; done",
                     "local -n r=BASH_CMDS",
                     ": ${BASH_CMDS[ls]:=/bin/rm}",
@@ -2911,26 +3319,27 @@ mod tests {
                     "unset PATH",
                     "let PATH=1",
                     "sh -c 'BASH_CMDS[ls]=/bin/rm; ls -rf x'",
+                    "declare -a 'x=([$(id)]=1)'",
+                    "declare 'x=($(id))'",
+                    "local x='([0]=$(id))'",
+                    "typeset -A m+='([k]=$(id))'",
+                    "export 'RUST_LOG=($(id))'",
                 ] {
-                    let command = parse(command);
-                    assert!(command.sets_shell_variable(), "{command:?}");
-                    assert!(command.is_opaque(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_some(), "{command:?}");
                 }
                 for command in [
-                    "echo $PATH ${PATH:-x} ${#PATH} ${BASH_CMDS[ls]}",
-                    "X=1; echo hi",
+                    "echo $PATH ${PATH:-x} ${#PATH} ${BASH_CMDS[0]}",
+                    "x=1; echo hi",
                     "LANG=C ls",
                     "export RUST_LOG=debug; cargo test",
-                    "declare -a list=(a b)",
-                    "export -n FOO",
+                    "declare -a list=([2]=a b)",
                     "read -r line",
                     "read -p 'ENV? ' answer",
                     "printf '%s\\n' 'Set HOME first'",
-                    "let count=1",
                     "test -v PATH",
                     "[ -v HOME ]",
                 ] {
-                    assert!(!parse(command).sets_shell_variable(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_none(), "{command:?}");
                 }
             }
 
@@ -2939,19 +3348,24 @@ mod tests {
                 for command in [
                     "GIT_EDITOR='rm -rf y'; git commit --amend",
                     "EDITOR=vi; git rebase -i HEAD~2",
-                    "http_proxy=http://x; curl example.com",
                     "FOO=bar\ncat file",
+                    "FOO=bar",
                 ] {
-                    assert!(parse(command).is_opaque(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_some(), "{command:?}");
                 }
                 for command in [
                     "RUST_LOG=debug; cargo test",
                     "LANG=C; ls",
-                    "FOO=bar",
                     "FOO=bar ls",
+                    "http_proxy=http://x; curl example.com",
                 ] {
-                    assert!(!parse(command).is_opaque(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_none(), "{command:?}");
                 }
+                assert!(
+                    parse_inheriting("http_proxy=http://x; curl example.com", &["http_proxy"])
+                        .unrecognized()
+                        .is_some()
+                );
             }
 
             #[test]
@@ -2961,28 +3375,31 @@ mod tests {
                     "echo ${arr[n]}",
                     "echo ${!n}",
                     "echo ${x@P}",
-                    "echo ${#x}",
-                    "echo ${x/a/b}",
                     "echo ${x:1:2}",
+                    "echo ${x%$(id)}",
+                    "echo ${arr[k]}",
+                    "a=([k]=v)",
                     "test -v \"$n\"",
                     "[ -v \"$n\" ]",
                     "printf -v \"$n\" hi",
                     "read -r 'a[$(rm -rf y)]'",
                 ] {
-                    assert!(parse(command).is_opaque(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_some(), "{command:?}");
                 }
                 for command in [
                     "echo $x ${x} ${x:-a} ${x-a} ${x:+a} ${x+a}",
+                    "echo ${#x} ${x/a/b} ${x//a} ${x%.txt} ${x^^} ${arr[@]} ${#} ${!}",
+                    "a=([0]=x \"$y\" z)",
                     "cargo build ${profile:-release}",
                     "test -f file",
                     "read -r line",
                 ] {
-                    assert!(!parse(command).is_opaque(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_none(), "{command:?}");
                 }
             }
 
             #[test]
-            fn turns_a_variable_the_shell_or_a_later_program_reads_opaque() {
+            fn leaves_a_variable_the_shell_or_a_later_program_reads_unrecognized() {
                 for command in [
                     "PATH=.; ls",
                     "HOME=/; cat ~/x",
@@ -2993,13 +3410,13 @@ mod tests {
                     "declare 'BASH_CMDS'[ls]=/bin/rm; ls -rf x",
                     "for PATH in .; do ls; done",
                 ] {
-                    assert!(parse(command).is_opaque(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_some(), "{command:?}");
                 }
                 for command in [
                     "export RUST_LOG=debug; cargo test",
                     "for f in a b; do cat \"$f\"; done",
                 ] {
-                    assert!(!parse(command).is_opaque(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_none(), "{command:?}");
                 }
             }
 
@@ -3114,7 +3531,7 @@ mod tests {
                     "r\\\nm x",
                     "sh -c 'echo  \\  x'",
                 ] {
-                    assert!(parse(command).is_unparsed(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_some(), "{command:?}");
                 }
             }
 
@@ -3128,7 +3545,7 @@ mod tests {
                     "time -- ! rm -rf x",
                     "time time if true; then rm -rf x; fi",
                 ] {
-                    assert!(parse(command).is_unparsed(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_some(), "{command:?}");
                 }
             }
 
@@ -3151,7 +3568,7 @@ mod tests {
                     "help coproc",
                     "echo if then fi",
                 ] {
-                    assert!(!parse(command).is_unparsed(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_none(), "{command:?}");
                 }
             }
 
@@ -3218,7 +3635,7 @@ mod tests {
                         "rm -rf x",
                         "{command:?}"
                     );
-                    assert!(!command.is_opaque(), "{command:?}");
+                    assert!(command.unrecognized().is_none(), "{command:?}");
                 }
                 assert_eq!(texts("env --chdir=/tmp rm -rf x"), ["rm -rf x"]);
             }
@@ -3264,7 +3681,7 @@ mod tests {
                         "{command:?}"
                     );
                     assert!(segment.safe_reads().is_none(), "{command:?}");
-                    assert!(!parsed.is_opaque(), "{command:?}");
+                    assert!(parsed.unrecognized().is_none(), "{command:?}");
                 }
                 assert_eq!(texts("nice sudo nohup cat a"), ["sudo nohup cat a"]);
                 assert_eq!(
@@ -3287,7 +3704,7 @@ mod tests {
                         "rm -rf x",
                         "{command:?}"
                     );
-                    assert!(!parsed.is_opaque(), "{command:?}");
+                    assert!(parsed.unrecognized().is_none(), "{command:?}");
                 }
             }
 
@@ -3302,32 +3719,29 @@ mod tests {
                     let parsed = parse(command);
 
                     assert_eq!(joined(program(&parsed.segments[0])), runs, "{command:?}");
-                    assert!(!parsed.is_opaque(), "{command:?}");
+                    assert!(parsed.unrecognized().is_none(), "{command:?}");
                 }
             }
 
             #[test]
-            fn turns_a_wrapper_option_value_it_cannot_read_opaque() {
-                for command in [
-                    "sudo --background=x rm",
-                    "xargs -I $P cp $P d",
-                    "xargs -a $F echo",
-                ] {
-                    assert!(parse(command).is_opaque(), "{command:?}");
-                }
-            }
-
-            #[test]
-            fn turns_a_wrapper_that_runs_a_shell_or_moves_the_command_opaque() {
-                for command in [
-                    "sudo -s rm -rf x",
-                    "sudo --login rm -rf x",
-                    "doas -s",
-                    "sudo -D /tmp cat a",
-                    "pkexec cat a",
+            fn pins_the_named_words_at_a_wrapper_whose_options_hide_what_it_runs() {
+                for (command, named) in [
+                    ("sudo --background=x rm", "sudo --background=x rm"),
+                    ("xargs -I $P cp $P d", "xargs -I $P cp $P d <input>"),
+                    ("xargs -a $F echo", "xargs -a $F echo <input>"),
+                    ("sudo -s rm -rf x", "sudo -s rm -rf x"),
+                    ("sudo --login rm -rf x", "sudo --login rm -rf x"),
+                    ("doas -s", "doas -s"),
+                    ("env -S 'rm -rf x'", "env -S rm -rf x"),
+                    ("nice --weird rm", "nice --weird rm"),
+                    ("nice $LEVEL rm", "nice $LEVEL rm"),
+                    ("timeout --what 5 rm", "timeout --what 5 rm"),
+                    ("find . $ACTION rm", "find . $ACTION rm"),
                 ] {
                     let parsed = parse(command);
-                    assert!(parsed.is_opaque(), "{command:?}");
+
+                    assert_eq!(joined(parsed.segments[0].named()), named, "{command:?}");
+                    assert!(parsed.unrecognized().is_none(), "{command:?}");
                 }
                 assert_eq!(
                     joined(program(&parse("sudo -i rm -rf x").segments[0])),
@@ -3353,7 +3767,7 @@ mod tests {
                     assert_eq!(joined(segment.named()), named, "{command:?}");
                     assert_eq!(joined(program(segment)), runs, "{command:?}");
                     assert!(!segment.named().last().unwrap().is_literal(), "{command:?}");
-                    assert!(!parsed.is_opaque(), "{command:?}");
+                    assert!(parsed.unrecognized().is_none(), "{command:?}");
                 }
             }
 
@@ -3409,7 +3823,7 @@ mod tests {
 
                     let last = segment.programs().last().unwrap();
                     assert_eq!(joined(last), "<input>", "{command:?}");
-                    assert!(parsed.is_opaque(), "{command:?}");
+                    assert_eq!(joined(segment.named()), format!("{command} <input>"));
                 }
             }
 
@@ -3430,7 +3844,10 @@ mod tests {
                         "x",
                     ]
                 );
-                assert!(parsed.is_opaque());
+                assert_eq!(
+                    joined(parsed.segments[0].named()),
+                    "sudo --weird value rm -rf x"
+                );
                 assert_eq!(
                     parse("sudo --x nice --y rm -rf x").segments[0]
                         .programs()
@@ -3438,6 +3855,29 @@ mod tests {
                         .count(),
                     1
                 );
+            }
+
+            #[test]
+            fn lets_the_program_start_at_any_word_past_a_wrapper_word_bash_may_split() {
+                for command in [
+                    "nice -n {5,rm,-rf,x} true",
+                    "nice -n $n true",
+                    "timeout * true",
+                    "env $assignment true",
+                    "nice -n {5,rm,-rf,x}",
+                ] {
+                    let parsed = parse(command);
+
+                    assert_eq!(joined(parsed.segments[0].named()), command, "{command:?}");
+                    assert!(!is_safe(command), "{command:?}");
+                }
+                for command in ["nice -n \"$n\" true", "nice -n '{5,rm}' true"] {
+                    assert_eq!(
+                        joined(parse(command).segments[0].named()),
+                        "true",
+                        "{command:?}"
+                    );
+                }
             }
 
             #[test]
@@ -3462,46 +3902,41 @@ mod tests {
                     (r"find . -exec \;", &[r"find . -exec ;"]),
                 ] {
                     assert_eq!(texts(command), expected, "{command:?}");
-                    assert!(!parse(command).is_opaque(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_none(), "{command:?}");
                 }
-                for command in [r"find . -execdir cat x \;", "find . $ACTION rm"] {
-                    assert!(parse(command).is_opaque(), "{command:?}");
-                }
+                assert!(parse(r"find . -execdir cat x \;").unrecognized().is_some());
             }
 
             #[test]
-            fn keeps_a_wrapper_that_runs_no_command_and_turns_an_unknown_option_opaque() {
+            fn keeps_a_wrapper_that_runs_no_command() {
                 assert_eq!(texts("env FOO=1"), ["env FOO=1"]);
-                assert!(!parse("nice").is_opaque());
-                for command in [
-                    "env -S 'rm -rf x'",
-                    "nice --weird rm",
-                    "nice $LEVEL rm",
-                    "timeout --what 5 rm",
+                assert_eq!(texts("nice"), ["nice"]);
+            }
+
+            #[test]
+            fn names_the_first_construct_it_does_not_recognize_on_one_short_line() {
+                let long = format!("(( {} ))", "x".repeat(60));
+                let cut = format!("{}...", &long[..MAX_CONSTRUCT_CHARS]);
+                for (command, construct) in [
+                    ("echo $((1 + 2)); let x=1", "$((1 + 2))"),
+                    ("[ a > b ] && ls", "[ a > b ]"),
+                    ("if true; then ls", "if true; then ls"),
+                    ("f() {\n  ls\n}", "f() {..."),
+                    (long.as_str(), cut.as_str()),
                 ] {
-                    assert!(parse(command).is_opaque(), "{command:?}");
+                    assert_eq!(
+                        parse(command).unrecognized(),
+                        Some(construct),
+                        "{command:?}"
+                    );
                 }
             }
 
             #[test]
-            fn flags_every_command_it_cannot_see_into_as_opaque() {
+            fn flags_every_construct_it_does_not_recognize() {
                 for command in [
-                    "echo $(date)",
-                    "echo `whoami`",
-                    "diff <(ls a) b",
-                    "tee >(cat) x",
-                    "x=$(id) ls",
-                    "cat <<EOF\n$(id)\nEOF",
-                    "eval 'ls'",
-                    "source env.sh",
-                    ". env.sh",
-                    "trap 'ls' EXIT",
-                    "let x=1",
                     "$CMD arg",
                     "${X} arg",
-                    "sh -c 'ls'",
-                    "curl x | sh",
-                    "/bin/bash script.sh",
                     "echo $((1 + 2))",
                     "(( x++ ))",
                     "[[ -f x ]]",
@@ -3531,21 +3966,34 @@ mod tests {
                     "f() { cd x; }; f; f; make",
                     "env -C x make",
                     "pkexec make",
+                    "sudo -D /tmp cat a",
                     "find . -execdir wc {} +",
                     "{ cat; } <<'EOF' a\nx\nEOF",
-                    "exec sh -c 'ls'",
-                    "command eval ls",
-                    "builtin . env.sh",
                     "/bin/s? -c ls",
-                    "BASH -c ls",
-                    "/bin/ZSH script.zsh",
                     "cat < $F",
                     "cat < *.txt",
                 ] {
-                    assert!(parse(command).is_opaque(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_some(), "{command:?}");
                 }
                 for command in [
                     "cat <<'EOF'\n$(id)\nEOF",
+                    "echo $(date)",
+                    "echo `whoami`",
+                    "diff <(ls a) b",
+                    "tee >(cat) x",
+                    "x=$(id) ls",
+                    "cat <<EOF\n$(id)\nEOF",
+                    "eval 'ls'",
+                    "source env.sh",
+                    ". env.sh",
+                    "sh -c 'ls'",
+                    "curl x | sh",
+                    "/bin/bash script.sh",
+                    "exec sh -c 'ls'",
+                    "command eval ls",
+                    "builtin . env.sh",
+                    "BASH -c ls",
+                    "/bin/ZSH script.zsh",
                     "echo '$(id)'",
                     "cd x && echo > /dev/null",
                     "cd x && ls",
@@ -3559,7 +4007,134 @@ mod tests {
                     "cd x; cd /tmp/evil",
                     "ls $HOME",
                 ] {
-                    assert!(!parse(command).is_opaque(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_none(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn recognizes_the_scripts_an_agent_commonly_writes() {
+                for command in [
+                    "cargo test -p ox-core 2>&1 | tail -20",
+                    "git log --oneline -5 && git status",
+                    "for f in src/*.rs; do wc -l \"$f\"; done",
+                    "count=0; for x in a b; do echo \"$x\"; done",
+                    "if [ -f Cargo.toml ]; then cargo build; fi",
+                    "test -d build || mkdir build",
+                    "find . -name '*.rs' | xargs grep -n TODO",
+                    "source .venv/bin/activate && pytest -q",
+                    "name=$(basename \"$path\" .txt); echo \"${name%.tmp}\"",
+                    "while read -r line; do echo \"$line\"; done < list.txt",
+                    "case \"$1\" in start) make run;; *) echo usage;; esac",
+                    "export RUST_BACKTRACE=1; cargo run",
+                    "set -euo pipefail; make",
+                    "cd crates/ox && cargo test",
+                    "diff <(sort a) <(sort b)",
+                    "cat <<'EOF' > notes.md\nhello\nEOF",
+                    "files=(a b c); printf '%s\\n' \"${files[@]}\" | sort -u",
+                    "echo {1..3} $\"hello\"",
+                    "sh -c 'npm ci && npm test'",
+                    "ls -la ~/.config 2>/dev/null || true",
+                ] {
+                    assert!(parse(command).unrecognized().is_none(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn recognizes_a_bash_builtin_unless_it_may_run_hidden_code_or_rebind_a_name() {
+                for command in [
+                    "alias ll=ls",
+                    "bind -x '\"\\C-t\": ls'",
+                    "compgen -C ls x",
+                    "complete -C ls x",
+                    "compopt -o default x",
+                    "enable -f ./x.so x",
+                    "fc -s",
+                    "hash -p /tmp/x ls",
+                    "history -s ls",
+                    "let x=1",
+                    "shopt -s expand_aliases",
+                    "trap ls EXIT",
+                    "jobs -x ls",
+                    "mapfile -C ls x",
+                    "source \"$f\"",
+                    "source *.sh",
+                    "eval \"$x\"",
+                    "export PATH=/x",
+                    "declare -n r=x",
+                    "declare -i n",
+                    "declare -x foo=1",
+                    "set -o posix",
+                    "set foo",
+                    "read 'a[$(id)]'",
+                    "read -a \"$n\"",
+                    "printf -v PATH x",
+                    "printf -vPATH x",
+                    "printf \"$f\" PATH",
+                    "unset PATH",
+                    "getopts ab PATH",
+                    "wait -p PATH",
+                    "wait -np 'a[$(id)]'",
+                    "wait \"$p\"",
+                    "test -v 'a[$(id)]'",
+                ] {
+                    assert!(parse(command).unrecognized().is_some(), "{command:?}");
+                }
+                for command in [
+                    ". ./env.sh",
+                    ":",
+                    "[ -f x ]",
+                    "bg",
+                    "break",
+                    "builtin echo",
+                    "caller",
+                    "cd src",
+                    "command ls",
+                    "continue",
+                    "declare -a list",
+                    "dirs",
+                    "disown",
+                    "echo",
+                    "exec ls",
+                    "exit 1",
+                    "false",
+                    "fg",
+                    "getopts ab opt",
+                    "help cd",
+                    "jobs",
+                    "kill 1",
+                    "local -r x=1",
+                    "logout",
+                    "mapfile lines",
+                    "popd",
+                    "printf x",
+                    "printf",
+                    "printf -vx %s y",
+                    "printf \"$f\" out",
+                    "read -ax",
+                    "unset -- x",
+                    "pushd src",
+                    "pwd",
+                    "read line",
+                    "readarray lines",
+                    "readonly x",
+                    "return",
+                    "set -e",
+                    "shift",
+                    "source ./env.sh",
+                    "suspend",
+                    "test -f x",
+                    "times",
+                    "true",
+                    "type ls",
+                    "typeset x",
+                    "ulimit -n",
+                    "umask 022",
+                    "unalias ll",
+                    "unset x",
+                    "wait",
+                    "wait -n -p job 1 2",
+                ] {
+                    assert!(parse(command).unrecognized().is_none(), "{command:?}");
                 }
             }
 
@@ -3570,6 +4145,7 @@ mod tests {
                     "sh -c 'rm -rf /'",
                     "bash -lc \"rm -rf /\"",
                     "eval rm -rf /",
+                    "eval -- 'rm -rf /'",
                     "exec sh -c 'rm -rf /'",
                     "busybox sh -c 'rm -rf /'",
                     "su -c 'rm -rf /' root",
@@ -3643,7 +4219,64 @@ mod tests {
         use super::*;
 
         mod visit {
+            use std::collections::BTreeSet;
+
+            use tree_sitter::Language;
+
             use super::*;
+
+            #[test]
+            fn leaves_unrecognized_only_the_grammar_kinds_that_evaluate_arithmetic_or_define_a_function()
+             {
+                let language: Language = tree_sitter_bash::LANGUAGE.into();
+                let kinds: BTreeSet<&str> = (0..language.node_kind_count())
+                    .filter_map(|id| u16::try_from(id).ok())
+                    .filter(|&id| {
+                        language.node_kind_is_named(id) && language.node_kind_is_visible(id)
+                    })
+                    .filter_map(|id| language.node_kind_for_id(id))
+                    .collect();
+                let weighed = [
+                    "array",
+                    "command",
+                    "declaration_command",
+                    "expansion",
+                    "file_redirect",
+                    "for_statement",
+                    "redirected_statement",
+                    "simple_expansion",
+                    "test_command",
+                    "unset_command",
+                    "variable_assignment",
+                    "while_statement",
+                ];
+
+                let unknown: Vec<&&str> = WALKED_KINDS
+                    .iter()
+                    .chain(&weighed)
+                    .filter(|kind| !kinds.contains(**kind))
+                    .collect();
+                let unrecognized: Vec<&str> = kinds
+                    .into_iter()
+                    .filter(|kind| !WALKED_KINDS.contains(kind) && !weighed.contains(kind))
+                    .collect();
+
+                assert!(unknown.is_empty(), "{unknown:?}");
+                assert_eq!(
+                    unrecognized,
+                    [
+                        "arithmetic_expansion",
+                        "binary_expression",
+                        "c_style_for_statement",
+                        "function_definition",
+                        "parenthesized_expression",
+                        "postfix_expression",
+                        "subscript",
+                        "ternary_expression",
+                        "unary_expression",
+                    ]
+                );
+            }
 
             #[test]
             fn withholds_safety_from_every_segment_once_anything_expands_a_variable() {
@@ -3739,9 +4372,9 @@ mod tests {
 
                 assert_eq!(spelled(target.reads.clone()), ["in.txt", "more.txt"]);
                 assert_eq!(spelled(target.writes.clone()), ["out.txt"]);
-                assert!(!target.is_opaque());
+                assert!(target.unrecognized().is_none());
                 assert!(
-                    parse("cd x && cat < in.txt").is_opaque(),
+                    parse("cd x && cat < in.txt").unrecognized().is_some(),
                     "a relative input after a cd may name another file"
                 );
             }
@@ -3761,16 +4394,18 @@ mod tests {
                     assert!(writes(command, cwd).is_empty(), "{command:?}");
                     assert!(reads(command, cwd).is_empty(), "{command:?}");
                     assert!(
-                        !CommandTarget::parse(command, &Workspace::new(cwd)).is_opaque(),
+                        CommandTarget::parse(command, &Workspace::new(cwd))
+                            .unrecognized()
+                            .is_none(),
                         "{command:?}"
                     );
                 }
             }
 
             #[test]
-            fn to_a_target_it_cannot_place_is_opaque() {
+            fn to_a_target_it_cannot_place_is_unrecognized() {
                 for command in ["echo > \"$OUT\"", "echo > *.txt"] {
-                    assert!(parse(command).is_opaque(), "{command:?}");
+                    assert!(parse(command).unrecognized().is_some(), "{command:?}");
                 }
             }
         }
@@ -3891,6 +4526,27 @@ mod tests {
                 "./cat a",
                 "git status",
             ] {
+                assert!(!is_safe(command), "{command:?}");
+            }
+        }
+
+        #[test]
+        fn admits_builtins_that_only_print_test_files_or_trace() {
+            let at = |name: &str| Access::for_path(name, &Workspace::new(Path::new("/repo")));
+            for (command, reads) in [
+                (": done", &[][..]),
+                ("printf '%s\\n' a", &[]),
+                ("export RUST_LOG=debug", &[]),
+                ("set -eux -o pipefail", &[]),
+                ("[ -f Cargo.toml ]", &[at("Cargo.toml")]),
+                ("test ! -d /etc -a x = y", &[at("/etc"), at("x"), at("y")]),
+            ] {
+                let parsed = parse(command);
+
+                assert_eq!(parsed.segments[0].safe_reads(), Some(reads), "{command:?}");
+                assert!(parsed.unrecognized().is_none(), "{command:?}");
+            }
+            for command in ["set -o posix", "set -a", "[ -f $F ]"] {
                 assert!(!is_safe(command), "{command:?}");
             }
         }

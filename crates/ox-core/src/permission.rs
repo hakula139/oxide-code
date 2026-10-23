@@ -700,13 +700,10 @@ pub enum Basis {
     SafeRead,
     /// An allowed command, by what let each of its simple commands and its writes through.
     Command(Vec<Basis>),
-    /// A command ox could not parse, so the rules may not see everything it runs.
+    /// A command holding `construct`, which the analysis does not recognize, so no allow rule
+    /// covers it.
     /// It asks in `manual`, while `yolo` runs it unless a deny or ask rule holds what ox sees.
-    Unparsed,
-    /// A command that sets a variable bash reads to find, start, or expand commands, so the rules
-    /// may not see what it runs.
-    /// It asks in `manual`, while `yolo` runs it unless a deny or ask rule holds what ox sees.
-    ShellVariable,
+    Unrecognized { construct: String },
 }
 
 impl Basis {
@@ -715,14 +712,9 @@ impl Basis {
     pub fn reason(&self) -> Option<String> {
         match self {
             Self::Mode(_) => None,
-            Self::Unparsed => Some(
-                "ox could not parse this command, so the permission rules may not see everything it runs"
-                    .to_owned(),
-            ),
-            Self::ShellVariable => Some(
-                "This command sets a variable bash reads to find or expand commands, so the permission rules may not see what it runs"
-                    .to_owned(),
-            ),
+            Self::Unrecognized { .. } => Some(format!(
+                "Asks because of {self}, so no permission rule can allow this command"
+            )),
             basis => Some(format!("Asks because of {basis}")),
         }
     }
@@ -759,11 +751,19 @@ impl fmt::Display for Basis {
                 }
                 Ok(())
             }
-            Self::Unparsed => f.write_str("a command ox could not parse"),
-            Self::ShellVariable => {
-                f.write_str("a command that sets a variable bash reads to find or expand commands")
+            Self::Unrecognized { construct } => {
+                write!(f, "{}, which ox cannot analyze", code_span(construct))
             }
         }
+    }
+}
+
+/// `text` as a Markdown code span, with a fence of two backticks and padding when it holds one.
+fn code_span(text: &str) -> String {
+    if text.contains('`') {
+        format!("`` {text} ``")
+    } else {
+        format!("`{text}`")
     }
 }
 
@@ -1010,7 +1010,7 @@ impl Policy {
     ///
     /// A `bash` command is denied when a deny rule matches one of its simple commands, an edit of a
     /// file it writes, or a read of a file it redirects into its input. It asks at step 3 in each
-    /// case [`Self::asks`] lists, and step 6 allows it only when it is not opaque and
+    /// case [`Self::asks`] lists, and step 6 allows it only when the analysis recognizes it and
     /// [`Self::allows_command`] holds.
     ///
     /// A call that would ask is [unapproved](Decision::Unapproved) in `yolo`, which never asks, and
@@ -1073,11 +1073,10 @@ impl Policy {
     }
 
     /// What holds the call in the ask tier: an ask rule, the protected group of a path the call
-    /// edits or a command writes, a command that failed to parse or sets a shell variable, the
+    /// edits or a command writes, a command the analysis does not recognize, the
     /// [`read` rule](Self::read_holder) for a file a reader opens, or the `rm` group for a
     /// [forced recursive delete](Segment::removes_recursively_by_force).
-    /// `yolo` holds only what the rules see, so it runs a command that failed to parse or that
-    /// sets a shell variable.
+    /// `yolo` holds only what the rules see, so it runs a command the analysis does not recognize.
     fn asks(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
         if let Some(rule) = held_by(&self.ask, class, target) {
             return Some(rule.basis(Tier::Ask));
@@ -1090,13 +1089,12 @@ impl Policy {
         let Target::Command(command) = target else {
             return None;
         };
-        if self.mode != Mode::Yolo {
-            if command.is_unparsed() {
-                return Some(Basis::Unparsed);
-            }
-            if command.sets_shell_variable() {
-                return Some(Basis::ShellVariable);
-            }
+        if self.mode != Mode::Yolo
+            && let Some(construct) = command.unrecognized()
+        {
+            return Some(Basis::Unrecognized {
+                construct: construct.to_owned(),
+            });
         }
         command
             .writes()
@@ -1171,11 +1169,11 @@ impl Policy {
         }
     }
 
-    /// What lets every part of a command through, when each does: it is not opaque and runs at
-    /// least one simple command, each simple command is allowed by a rule or is a known-safe read,
-    /// and each file it writes is inside a workspace root or allowed for editing.
+    /// What lets every part of a command through, when each does: the analysis recognizes it, it
+    /// runs at least one simple command, each simple command is allowed by a rule or is a known-safe
+    /// read, and each file it writes is inside a workspace root or allowed for editing.
     fn allows_command(&self, command: &CommandTarget) -> Option<Basis> {
-        if command.is_opaque() || command.segments().is_empty() {
+        if command.unrecognized().is_some() || command.segments().is_empty() {
             return None;
         }
         let segments = command.segments().iter().map(|segment| {
@@ -2388,10 +2386,17 @@ mod tests {
                     Basis::Command(vec![Basis::SafeRead, Basis::Session(make)]),
                     "a known-safe read, the session `allow.exec` pattern `make *`",
                 ),
-                (Basis::Unparsed, "a command ox could not parse"),
                 (
-                    Basis::ShellVariable,
-                    "a command that sets a variable bash reads to find or expand commands",
+                    Basis::Unrecognized {
+                        construct: "$((1 + 2))".to_owned(),
+                    },
+                    "`$((1 + 2))`, which ox cannot analyze",
+                ),
+                (
+                    Basis::Unrecognized {
+                        construct: "echo `id`".to_owned(),
+                    },
+                    "`` echo `id` ``, which ox cannot analyze",
                 ),
             ] {
                 assert_eq!(basis.to_string(), expected);
@@ -2417,21 +2422,16 @@ mod tests {
             }
 
             #[test]
-            fn says_that_a_command_sets_a_variable_bash_finds_commands_by() {
-                assert_eq!(
-                    Basis::ShellVariable.reason().as_deref(),
-                    Some(
-                        "This command sets a variable bash reads to find or expand commands, so the permission rules may not see what it runs"
-                    ),
-                );
-            }
+            fn says_that_no_rule_can_allow_a_command_ox_cannot_analyze() {
+                let basis = Basis::Unrecognized {
+                    construct: "alias ls=rm".to_owned(),
+                };
 
-            #[test]
-            fn says_that_ox_could_not_parse_a_command() {
                 assert_eq!(
-                    Basis::Unparsed.reason().as_deref(),
+                    basis.reason().as_deref(),
                     Some(
-                        "ox could not parse this command, so the permission rules may not see everything it runs"
+                        "Asks because of `alias ls=rm`, which ox cannot analyze, \
+                         so no permission rule can allow this command"
                     ),
                 );
             }
@@ -3380,10 +3380,10 @@ mod tests {
             }
 
             #[test]
-            fn command_never_allows_an_opaque_command_but_still_denies_one() {
+            fn command_never_allows_an_unrecognized_command_but_still_denies_one() {
                 let p = policy(Mode::Manual, &[(EXEC, "rm -rf *")], &[], &[(EXEC, "*")]);
                 assert_eq!(decide(&p, EXEC, &command("ls")), Decision::Allow);
-                assert_eq!(decide(&p, EXEC, &command("eval ls")), Decision::Ask);
+                assert_eq!(decide(&p, EXEC, &command("eval \"$CMD\"")), Decision::Ask);
                 for case in [
                     "echo $(rm -rf /)",
                     "sh -c 'rm -rf /'",
@@ -3451,37 +3451,6 @@ mod tests {
             }
 
             #[test]
-            fn command_setting_a_variable_bash_finds_commands_by_asks_in_manual_and_runs_in_yolo() {
-                let cases = [
-                    "BASH_CMDS[ls]=/bin/rm; ls -rf x",
-                    "BASH_CMDS+=([ls]=/bin/rm); ls -rf x",
-                    "POSIXLY_CORRECT=1\nBASH_ALIASES[ls]=rm\nls -rf x",
-                    "PATH=/tmp ls",
-                    "builtin declare \"BASH_CMDS[ls]=/bin/rm\"; ls -rf x",
-                ];
-                for mode in [Mode::Manual, Mode::Yolo] {
-                    let p = policy(mode, &[(EXEC, "rm *")], &[], &[]);
-                    for case in cases {
-                        let verdict = p.verdict(EXEC, &command(case).as_target());
-                        let expected = match mode {
-                            Mode::Yolo => (Decision::Allow, Basis::Mode(Mode::Yolo)),
-                            _ => (Decision::Ask, Basis::ShellVariable),
-                        };
-                        assert_eq!(
-                            (verdict.decision, verdict.basis),
-                            expected,
-                            "{mode} {case:?}"
-                        );
-                    }
-                    assert_eq!(
-                        decide(&p, EXEC, &command("PATH=/tmp rm -rf x")),
-                        Decision::Deny,
-                        "{mode}"
-                    );
-                }
-            }
-
-            #[test]
             fn an_allow_rule_cannot_allow_a_command_that_hides_a_program_from_the_rules() {
                 let allow = &[
                     (EXEC, "git commit *"),
@@ -3510,19 +3479,32 @@ mod tests {
             }
 
             #[test]
-            fn command_asks_in_manual_and_runs_in_yolo_when_ox_cannot_parse_it_unless_denied() {
-                let unparsed = [
-                    "true <<EOF x; git push\nx\nEOF",
-                    "ls 'unterminated",
-                    "sh -c 'ls (('",
+            fn command_asks_in_manual_and_runs_in_yolo_when_ox_cannot_analyze_it_unless_denied() {
+                let unrecognized = [
+                    ("BASH_CMDS[ls]=/bin/rm; ls -rf x", "BASH_CMDS[ls]=/bin/rm"),
+                    (
+                        "BASH_CMDS+=([ls]=/bin/rm); ls -rf x",
+                        "BASH_CMDS+=([ls]=/bin/rm)",
+                    ),
+                    (
+                        "builtin declare \"BASH_CMDS[ls]=/bin/rm\"; ls -rf x",
+                        "declare \"BASH_CMDS[ls]=/bin/rm\"",
+                    ),
+                    ("ls 'unterminated", "'unterminated"),
+                    ("sh -c 'ls (('", "(("),
                 ];
                 for mode in [Mode::Manual, Mode::Yolo] {
                     let p = policy(mode, &[(EXEC, "rm *")], &[], &[(EXEC, "*")]);
-                    for case in unparsed {
+                    for (case, construct) in unrecognized {
                         let verdict = p.verdict(EXEC, &command(case).as_target());
                         let expected = match mode {
                             Mode::Yolo => (Decision::Allow, Basis::Mode(Mode::Yolo)),
-                            _ => (Decision::Ask, Basis::Unparsed),
+                            _ => (
+                                Decision::Ask,
+                                Basis::Unrecognized {
+                                    construct: construct.to_owned(),
+                                },
+                            ),
                         };
                         assert_eq!(
                             (verdict.decision, verdict.basis),
@@ -3530,25 +3512,15 @@ mod tests {
                             "{mode} {case:?}"
                         );
                     }
-                    assert_eq!(
-                        decide(&p, EXEC, &command("rm x; ls 'unterminated")),
-                        Decision::Deny,
-                        "{mode}"
-                    );
+                    for case in ["rm x; ls 'unterminated", "PATH=/tmp rm -rf x"] {
+                        assert_eq!(decide(&p, EXEC, &command(case)), Decision::Deny, "{mode}");
+                    }
                     assert_eq!(
                         decide(&p, EXEC, &command("ls 'done'")),
                         Decision::Allow,
                         "{mode}"
                     );
                 }
-                let yolo = policy(Mode::Yolo, &[], &[], &[]);
-                assert_eq!(
-                    yolo.verdict(EXEC, &command("sh -c 'ls'").as_target()),
-                    Verdict {
-                        decision: Decision::Allow,
-                        basis: Basis::Mode(Mode::Yolo),
-                    }
-                );
             }
 
             #[test]
