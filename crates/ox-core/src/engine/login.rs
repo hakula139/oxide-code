@@ -2,13 +2,14 @@
 
 use anyhow::anyhow;
 use tokio::sync::mpsc;
+use tracing::warn;
 
-use super::abort::{Inbox, TurnAbort};
+use super::abort::{AbortResult, Inbox, TurnAbort};
 use super::{Engine, TurnEnd, abort, report_abort};
 use crate::config::auth::{self, Auth, AuthSource};
-use crate::config::login::PendingLogin;
+use crate::config::login::{Grant, PendingLogin};
 use crate::config::oauth;
-use crate::protocol::{Event, EventSink, Op};
+use crate::protocol::{Event, EventSink, Op, SignInCode};
 use crate::util::text::join_sentences;
 
 impl Engine {
@@ -62,13 +63,20 @@ impl Engine {
         sink.emit(
             Event::LoginStarted {
                 url: pending.url().to_owned(),
+                manual_url: pending.manual_url().to_owned(),
             },
             "login-started",
         );
 
         let mut inbox = Inbox::default();
-        let finish = pending.finish(&self.oauth_token_url, self.client.trust());
-        let signed_in = abort::await_unless_aborted(finish, ops, &mut inbox, sink).await;
+        let signed_in = match await_grant(&pending, ops, &mut inbox, sink).await {
+            Ok(Ok(grant)) => {
+                let finish = pending.finish(grant, &self.oauth_token_url, self.client.trust());
+                abort::await_unless_aborted(finish, ops, &mut inbox, sink).await
+            }
+            Ok(Err(e)) => Ok(Err(e)),
+            Err(abort) => Err(abort),
+        };
         self.adopt_mode(&mut inbox);
         match signed_in {
             Ok(Ok(auth)) => {
@@ -132,6 +140,30 @@ impl Engine {
     }
 }
 
+/// Waits for the browser to return to the listener of `pending` or for an [`Op::LoginCode`] that
+/// matches it. A code that does not match reports why on `sink`, and the wait goes on.
+async fn await_grant(
+    pending: &PendingLogin,
+    ops: &mut mpsc::Receiver<Op>,
+    inbox: &mut Inbox,
+    sink: &dyn EventSink,
+) -> AbortResult<anyhow::Result<Grant>> {
+    abort::await_or_op(pending.await_redirect(), ops, inbox, sink, |op| match op {
+        Op::LoginCode(SignInCode(input)) => match pending.paste(&input) {
+            Ok(grant) => Some(Ok(grant)),
+            Err(e) => {
+                sink.emit(Event::Error(e.to_string()), "login-code-rejected");
+                None
+            }
+        },
+        op => {
+            warn!(?op, "dropped mid-login op");
+            None
+        }
+    })
+    .await
+}
+
 fn signed_out() -> TurnAbort {
     TurnAbort::Failed(anyhow!(auth::SIGNED_OUT))
 }
@@ -156,7 +188,7 @@ mod tests {
 
     use super::*;
     use crate::config::oauth::testing::write_creds;
-    use crate::engine::local_testing::{inert_ops, login_url, submit, tool_heavy_transcript};
+    use crate::engine::local_testing::{inert_ops, login_urls, submit, tool_heavy_transcript};
     use crate::engine::testing::{engine, mount_reply, with_pinned_home};
     use crate::permission::Mode;
     use crate::protocol::testing::CapturingSink;
@@ -427,22 +459,25 @@ mod tests {
     mod login {
         use super::*;
 
+        /// The value of the query parameter `name` in `url`.
+        fn query_param(url: &str, name: &str) -> String {
+            reqwest::Url::parse(url)
+                .unwrap()
+                .query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+                .unwrap()
+        }
+
         /// Returns to the sign-in listener behind `url` with `query` and its `state`, as the
         /// browser does, and reads the reply.
         async fn return_from_browser(url: &str, query: &str) -> String {
-            let url = reqwest::Url::parse(url).unwrap();
-            let param = |name: &str| {
-                url.query_pairs()
-                    .find(|(key, _)| key == name)
-                    .map(|(_, value)| value.into_owned())
-                    .unwrap()
-            };
-            let redirect = reqwest::Url::parse(&param("redirect_uri")).unwrap();
+            let redirect = reqwest::Url::parse(&query_param(url, "redirect_uri")).unwrap();
             let mut stream =
                 tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
                     .await
                     .unwrap();
-            let state = param("state");
+            let state = query_param(url, "state");
             let request = formatdoc! {"
                 GET /callback?{query}&state={state} HTTP/1.1\r
                 Host: localhost\r
@@ -483,7 +518,7 @@ mod tests {
                     let mut handle = engine.spawn();
 
                     handle.ops.send(Op::Login).await.unwrap();
-                    let url = login_url(&mut handle.events).await;
+                    let (url, _) = login_urls(&mut handle.events).await;
                     let reply = return_from_browser(&url, "code=auth-code").await;
                     let signed_in = handle.events.recv().await;
                     let turn = submit(&mut handle, "hi").await;
@@ -514,6 +549,76 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn signs_in_at_the_manual_url_with_a_pasted_code_after_a_mismatched_one() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/token"))
+                    .and(body_partial_json(serde_json::json!({
+                        "code": "pasted-code",
+                        "redirect_uri": "https://platform.claude.com/oauth/code/callback",
+                    })))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "access_token": "pasted-access",
+                        "refresh_token": "pasted-refresh",
+                        "expires_in": 3600,
+                        "scope": "user:inference",
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let dir = tempfile::tempdir().unwrap();
+                let data = tempfile::tempdir().unwrap();
+                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                    let mut engine =
+                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    engine.client.set_auth(None);
+                    engine.oauth_token_url = format!("{}/token", server.uri());
+                    let mut handle = engine.spawn();
+
+                    handle.ops.send(Op::Login).await.unwrap();
+                    let (url, manual_url) = login_urls(&mut handle.events).await;
+                    let state = query_param(&manual_url, "state");
+                    let code = |code: &str| Op::LoginCode(SignInCode(code.to_owned()));
+                    handle.ops.send(Op::Clear).await.unwrap();
+                    handle.ops.send(code("pasted-code#other-state")).await.unwrap();
+                    let rejected = handle.events.recv().await;
+                    let pasted = code(&format!("pasted-code#{state}"));
+                    handle.ops.send(pasted).await.unwrap();
+                    let signed_in = handle.events.recv().await;
+                    handle.shutdown().await.unwrap();
+
+                    assert!(
+                        query_param(&url, "redirect_uri").starts_with("http://localhost:"),
+                        "{url}"
+                    );
+                    assert_eq!(
+                        query_param(&manual_url, "redirect_uri"),
+                        "https://platform.claude.com/oauth/code/callback"
+                    );
+                    assert!(
+                        matches!(
+                            &rejected,
+                            Some(Event::Error(msg)) if msg.starts_with("That code is not from this sign-in.")
+                        ),
+                        "{rejected:?}"
+                    );
+                    assert!(
+                        matches!(
+                            signed_in,
+                            Some(Event::SignedIn {
+                                auth: AuthSource::OxLogin
+                            })
+                        ),
+                        "{signed_in:?}"
+                    );
+                })
+                .await;
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn fails_the_sign_in_when_the_browser_returns_a_refusal() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -522,7 +627,7 @@ mod tests {
                 let mut handle = engine.spawn();
 
                 handle.ops.send(Op::Login).await.unwrap();
-                let url = login_url(&mut handle.events).await;
+                let (url, _) = login_urls(&mut handle.events).await;
                 let reply = return_from_browser(&url, "error=access_denied").await;
                 let failed = handle.events.recv().await;
                 handle.shutdown().await.unwrap();

@@ -6,6 +6,7 @@
 
 pub mod notice;
 
+use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
@@ -67,6 +68,11 @@ pub enum Op {
     /// Starts a browser sign-in for the oxide-code login, announced with [`Event::LoginStarted`].
     /// [`Self::Interrupt`] cancels it like a turn.
     Login,
+    /// Finishes the waiting [`Self::Login`] with the `code#state` the sign-in page shows when the
+    /// browser cannot reach the sign-in listener. A code from another sign-in, or an incomplete
+    /// one, reports [`Event::Error`] and the sign-in keeps waiting. With no sign-in waiting, the
+    /// engine ignores it.
+    LoginCode(SignInCode),
     /// Removes the oxide-code login.
     Logout,
     /// Ends any running operation without a terminal event, finalizes the live session, and stops
@@ -81,6 +87,18 @@ impl Op {
             text: text.into(),
             title: None,
         }
+    }
+}
+
+/// The `code#state` an [`Op::LoginCode`] carries, as the user pasted it. `Debug` leaves it out, so
+/// a logged op never records the code.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SignInCode(pub String);
+
+impl fmt::Debug for SignInCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SignInCode(..)")
     }
 }
 
@@ -174,8 +192,8 @@ pub struct UsageSnapshot {
 /// - [`Op::SetModel`] ends with [`Self::ConfigChanged`].
 /// - [`Op::SetMode`] ends with [`Self::ModeChanged`].
 ///
-/// [`Op::Queue`], [`Op::Interrupt`], and [`Op::Resolve`] act on the op in flight and have no
-/// terminal event of their own.
+/// [`Op::Queue`], [`Op::Interrupt`], [`Op::Resolve`], and [`Op::LoginCode`] act on the op in flight
+/// and have no terminal event of their own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
@@ -288,8 +306,10 @@ pub enum Event {
     },
     /// The permission mode after an [`Op::SetMode`].
     ModeChanged(Mode),
-    /// An [`Op::Login`] waits for sign-in at `url`, which the frontend opens in a browser.
-    LoginStarted { url: String },
+    /// An [`Op::Login`] waits for sign-in at `url`, which returns to a listener on this machine
+    /// and which the frontend opens in a browser. A browser anywhere can sign in at `manual_url`,
+    /// whose page shows the code to send back on [`Op::LoginCode`].
+    LoginStarted { url: String, manual_url: String },
     /// An [`Op::Login`] stored a new oxide-code login. `auth` is the credential requests now use,
     /// which stays an env var or `client.api_key` when one outranks the login.
     SignedIn { auth: AuthSource },
@@ -536,6 +556,7 @@ mod tests {
                 Op::Resume { .. } => "resume",
                 Op::Rename { .. } => "rename",
                 Op::Login => "login",
+                Op::LoginCode(_) => "login_code",
                 Op::Logout => "logout",
                 Op::Shutdown => "shutdown",
             }
@@ -599,9 +620,19 @@ mod tests {
                     title: "Title".to_owned(),
                 },
                 Op::Login,
+                Op::LoginCode(SignInCode("code#state".to_owned())),
                 Op::Logout,
                 Op::Shutdown,
             ]
+        }
+
+        #[test]
+        fn hides_a_sign_in_code_from_debug_output() {
+            let op = Op::LoginCode(SignInCode("secret-code#state".to_owned()));
+
+            let debug = format!("{op:?}");
+
+            assert_eq!(debug, "LoginCode(SignInCode(..))");
         }
 
         #[test]
@@ -883,6 +914,7 @@ mod tests {
                 Event::ModeChanged(Mode::Yolo),
                 Event::LoginStarted {
                     url: "https://claude.ai/oauth/authorize?state=s".to_owned(),
+                    manual_url: "https://claude.ai/oauth/authorize?code=true&state=s".to_owned(),
                 },
                 Event::SignedIn {
                     auth: AuthSource::OxLogin,

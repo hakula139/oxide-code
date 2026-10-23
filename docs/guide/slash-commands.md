@@ -63,7 +63,7 @@ After compaction:
 
 ## Signing In
 
-`/login` opens the Claude sign-in page in your browser and prints its URL in case the browser does not open. Sign-in returns to a local address, so complete it in a browser on the machine running `ox`. Signing in from a browser on another machine, such as over SSH, is tracked in [#239](https://github.com/hakula139/oxide-code/issues/239). Press **Esc** to cancel. Sign-in also ends automatically after 5 minutes.
+`/login` opens the Claude sign-in page in your browser, which returns to `ox` when you finish. If the browser does not open or runs on another machine, such as when `ox` runs over SSH, open the printed URL in any browser instead. After you sign in there, the page shows a code. Paste it at the prompt and press **Enter**. While sign-in waits, the prompt takes only the code, so send other prompts after sign-in ends. Other text stays in the input, and slash commands still run. Press **Esc** to cancel. Sign-in also ends automatically after 5 minutes.
 
 After you approve access, oxide-code stores the login in `$XDG_DATA_HOME/ox/credentials.json` (default: `~/.local/share/ox/credentials.json`) and uses it for the current and later sessions.
 
