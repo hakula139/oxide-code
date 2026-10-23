@@ -16,6 +16,10 @@ use crate::util::text::format_size;
 
 pub(super) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
+/// Bytes within which a cut moves to a line boundary, so the lines beside an omission marker are
+/// whole unless one line spans the window.
+const LINE_SNAP_BYTES: usize = 1024;
+
 /// Runs the prepared call on `tool`, applying [`cap_output`] after each tool's row caps,
 /// with the call's `.txt` spill file keeping the full output.
 pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
@@ -34,7 +38,8 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
 }
 
 /// Writes `content`, which must be longer than [`MAX_OUTPUT_BYTES`], whole to `spill`, and returns
-/// equal parts of each end at UTF-8 boundaries around an omission marker, all within the cap.
+/// up to half the room from each end around an omission marker, all within the cap.
+/// Each part ends at a line boundary near its cut, or else at a UTF-8 boundary.
 fn cap_output(content: &str, mut spill: Spill) -> String {
     spill.write(content.as_bytes());
     let note = spill.note("output");
@@ -43,6 +48,10 @@ fn cap_output(content: &str, mut spill: Spill) -> String {
     let half = (MAX_OUTPUT_BYTES - reserve) / 2;
     let head_end = content.floor_char_boundary(half);
     let tail_start = content.ceil_char_boundary(content.len() - half);
+    let bytes = content.as_bytes();
+    let head_end = whole_line_head(&bytes[..head_end]).len();
+    let starts_line = bytes[tail_start - 1] == b'\n';
+    let tail_start = content.len() - whole_line_tail(&bytes[tail_start..], starts_line).len();
 
     let marker = omission_marker(tail_start - head_end, &note);
     let mut capped = String::with_capacity(MAX_OUTPUT_BYTES);
@@ -56,6 +65,28 @@ fn cap_output(content: &str, mut spill: Spill) -> String {
 /// full output is kept.
 pub(super) fn omission_marker(omitted: usize, note: &str) -> String {
     format!("... [{omitted} bytes omitted, {note}] ...")
+}
+
+/// The part of `head` before its last line break within [`LINE_SNAP_BYTES`] of its end, or all of
+/// `head` when no break lies that close.
+pub(super) fn whole_line_head(head: &[u8]) -> &[u8] {
+    let window = head.len().saturating_sub(LINE_SNAP_BYTES);
+    head[window..]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(head, |pos| &head[..window + pos])
+}
+
+/// The part of `tail` after its first line break within [`LINE_SNAP_BYTES`] of its start, or all
+/// of `tail` when it `starts_line` or no break lies that close.
+pub(super) fn whole_line_tail(tail: &[u8], starts_line: bool) -> &[u8] {
+    if starts_line {
+        return tail;
+    }
+    tail.iter()
+        .take(LINE_SNAP_BYTES)
+        .position(|&b| b == b'\n')
+        .map_or(tail, |pos| &tail[pos + 1..])
 }
 
 // ── Output Spill ──
@@ -287,7 +318,7 @@ mod tests {
             let output = run_fixed(&full, &ctx(dir.path())).await;
 
             let (head, marker, tail) = split_capped(&output.content);
-            assert_eq!(head.len(), tail.len());
+            assert!(head.len().abs_diff(tail.len()) < "line 000000\n".len());
             assert!(full.starts_with(head) && full.ends_with(tail));
             let omitted = full.len() - head.len() - tail.len();
             let path = spill_path(dir.path(), ".txt");
@@ -298,7 +329,9 @@ mod tests {
                     path.display()
                 ),
             );
-            assert!((MAX_OUTPUT_BYTES - 1..=MAX_OUTPUT_BYTES).contains(&output.content.len()));
+            // Each end gives up at most one line to reach a line boundary.
+            let floor = MAX_OUTPUT_BYTES - 1 - 2 * "line 000000\n".len();
+            assert!((floor..=MAX_OUTPUT_BYTES).contains(&output.content.len()));
             assert_eq!(fs::read_to_string(&path).unwrap(), full);
         }
 
@@ -392,6 +425,25 @@ mod tests {
         }
 
         #[test]
+        fn cuts_both_ends_at_line_boundaries() {
+            let dir = tempfile::tempdir().unwrap();
+            let content = (0..20_000).fold(String::new(), |mut content, i| {
+                _ = writeln!(content, "line number {i}");
+                content
+            });
+
+            let out = cap_output(&content, ctx(dir.path()).spills().file(".txt"));
+
+            let (head, marker, tail) = split_capped(&out);
+            assert!(content.starts_with(&format!("{head}\n")), "{head}");
+            let tail_start = content.len() - tail.len();
+            assert!(content[..tail_start].ends_with('\n') && content.ends_with(tail));
+            let omitted = tail_start - head.len();
+            assert!(marker.starts_with(&format!("{omitted} bytes omitted, ")));
+            assert!(out.len() <= MAX_OUTPUT_BYTES, "{}", out.len());
+        }
+
+        #[test]
         fn fits_the_cap_beside_a_long_spill_path() {
             let dir = tempfile::tempdir().unwrap();
             let cwd = (0..3).fold(dir.path().to_owned(), |cwd, _| cwd.join("d".repeat(100)));
@@ -420,6 +472,46 @@ mod tests {
             let failed = format!("saving the full output to {} failed: ", path.display());
             assert!(marker.contains(&failed), "{marker}");
             assert!(out.len() <= MAX_OUTPUT_BYTES, "{}", out.len());
+        }
+    }
+
+    mod whole_line_head {
+        use super::*;
+
+        #[test]
+        fn ends_before_the_last_line_break_near_the_end() {
+            assert_eq!(whole_line_head(b"one\ntwo\n333"), b"one\ntwo");
+            assert_eq!(whole_line_head(b"one\ntwo\n"), b"one\ntwo");
+        }
+
+        #[test]
+        fn keeps_the_char_cut_when_no_line_break_is_near() {
+            let head = [b"\n".as_slice(), &[b'a'; LINE_SNAP_BYTES]].concat();
+            assert_eq!(whole_line_head(&head), head);
+            let near = [b"\n".as_slice(), &[b'a'; LINE_SNAP_BYTES - 1]].concat();
+            assert_eq!(whole_line_head(&near), b"");
+        }
+    }
+
+    mod whole_line_tail {
+        use super::*;
+
+        #[test]
+        fn starts_after_the_first_line_break_near_the_start() {
+            assert_eq!(whole_line_tail(b"33\nfour\nfive\n", false), b"four\nfive\n");
+        }
+
+        #[test]
+        fn keeps_a_tail_that_starts_a_line() {
+            assert_eq!(whole_line_tail(b"four\nfive\n", true), b"four\nfive\n");
+        }
+
+        #[test]
+        fn keeps_the_char_cut_when_no_line_break_is_near() {
+            let tail = [&[b'b'; LINE_SNAP_BYTES], b"\n".as_slice()].concat();
+            assert_eq!(whole_line_tail(&tail, false), tail);
+            let near = [&[b'b'; LINE_SNAP_BYTES - 1], b"\nc".as_slice()].concat();
+            assert_eq!(whole_line_tail(&near, false), b"c");
         }
     }
 
