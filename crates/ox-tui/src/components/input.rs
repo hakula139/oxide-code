@@ -950,6 +950,20 @@ mod tests {
         }
 
         #[test]
+        fn keeps_the_count_across_same_width_renders_and_cursor_moves() {
+            let mut input = test_input();
+            type_text(&mut input, &"a".repeat(25));
+            render_to_backend(&input, 12, 6);
+            assert_eq!(input.visual_line_count(), 3);
+
+            render_to_backend(&input, 12, 6);
+            input.handle_event(&key(KeyCode::Left, KeyModifiers::NONE));
+
+            assert_eq!(input.visual_lines.get(), Some(3));
+            assert_eq!(input.visual_line_count(), 3);
+        }
+
+        #[test]
         fn breaks_at_word_boundaries() {
             // 27 chars fit 3 rows of 10 by width alone, but words cannot straddle a row break.
             let mut input = test_input();
