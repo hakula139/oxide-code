@@ -169,10 +169,7 @@ async fn edit_file(
     }
 
     let file_path = ctx.cwd().join(path);
-    let (_, content_bytes) = super::file::read_validated(&file_path, path, |metadata| {
-        super::file::validate_file_target(path, metadata, FileVerb::Edit)
-    })
-    .await?;
+    let (_, content_bytes) = super::file::read_validated(&file_path, path, FileVerb::Edit).await?;
     let key = super::file::tracker_key(&file_path).await;
     ctx.tracker
         .verify_current_content(&key, &content_bytes, GatePurpose::Edit)
@@ -186,9 +183,18 @@ async fn edit_file(
     };
     let (updated, edited) = super::run_blocking(move || replacement.apply(content_bytes)).await?;
 
-    super::file::write_tracked(ctx, &file_path, updated.into_bytes(), WriteMode::Overwrite)
+    ctx.tracker
+        .write_and_record(
+            &ctx.tool_use_id,
+            super::file::write_file(
+                file_path,
+                path.to_owned(),
+                updated.into_bytes(),
+                WriteMode::Overwrite,
+            ),
+        )
         .await
-        .map_err(|e| format!("Failed to write {path}: {e}"))?;
+        .map_err(|error| format!("{error:#}"))?;
     Ok(edited)
 }
 
