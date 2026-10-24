@@ -76,6 +76,7 @@ fn write_with(
 
     #[cfg(unix)]
     {
+        staged.verify_name()?;
         if original.is_some() {
             fs::rename(&staged.path, path)
         } else {
@@ -84,7 +85,9 @@ fn write_with(
     }
     #[cfg(windows)]
     {
-        native::publish(&staged.file, path, original.is_some())
+        native::publish(&staged.file, path, original.is_some())?;
+        staged.published = true;
+        Ok(())
     }
 }
 
@@ -142,10 +145,11 @@ fn bytes_match(file: &mut File, expected: &[u8]) -> io::Result<bool> {
 }
 
 struct Staged {
-    // Windows denies delete sharing until File drops, so cleanup must drop the handle first.
     file: File,
     path: TempPath,
     _directory: Option<TempDir>,
+    #[cfg(windows)]
+    published: bool,
 }
 
 impl Staged {
@@ -178,8 +182,33 @@ impl Staged {
                 file,
                 path,
                 _directory: None,
+                published: false,
             })
         }
+    }
+
+    #[cfg(unix)]
+    fn verify_name(&self) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let named = fs::symlink_metadata(&self.path)?;
+        let held = self.file.metadata()?;
+        if !named.is_file() || (named.dev(), named.ino()) != (held.dev(), held.ino()) {
+            return Err(io::Error::other(
+                "the prepared file's pathname changed before publication",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if !self.published {
+            _ = native::discard(&self.file);
+        }
+        self.path.disable_cleanup(true);
     }
 }
 
@@ -347,6 +376,78 @@ mod tests {
                     assert_eq!(entries(dir.path()), before);
                     if existing {
                         assert_eq!(fs::read(&path).unwrap(), b"original");
+                    } else {
+                        assert!(!path.exists());
+                    }
+                }
+            }
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn refuses_substituted_stage_names_without_recording_a_write() {
+            use crate::file_tracker::testing::{seed_full_read, tracker};
+            use crate::util::fs::testing::symlink_file;
+
+            for existing in [false, true] {
+                for symlink in [false, true] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("target");
+                    let victim = dir.path().join("victim");
+                    fs::write(&victim, b"victim").unwrap();
+                    let tracker = tracker();
+                    let original = if existing {
+                        fs::write(&path, b"original").unwrap();
+                        seed_full_read(&tracker, &path);
+                        Some(File::open(&path).unwrap())
+                    } else {
+                        None
+                    };
+                    let before = tracker.snapshot_all();
+                    let names = entries(dir.path());
+                    let destination = path.clone();
+                    let target = victim.clone();
+
+                    let error = tracker
+                        .write_and_record("toolu_replace", async move {
+                            write_with(
+                                &destination,
+                                b"ours",
+                                existing.then_some(b"original".as_slice()),
+                                |phase, _| {
+                                    if phase == Phase::Validated {
+                                        let directory =
+                                            fs::read_dir(destination.parent().unwrap())?
+                                                .map(Result::unwrap)
+                                                .find(|entry| entry.file_type().unwrap().is_dir())
+                                                .unwrap();
+                                        let staged =
+                                            fs::read_dir(directory.path())?.next().unwrap()?.path();
+                                        fs::remove_file(&staged)?;
+                                        if symlink {
+                                            symlink_file(&target, &staged);
+                                        } else {
+                                            fs::write(&staged, b"substituted")?;
+                                        }
+                                    }
+                                    Ok(())
+                                },
+                            )?;
+                            Ok((destination, b"ours".to_vec()))
+                        })
+                        .await
+                        .unwrap_err();
+
+                    assert!(error.to_string().contains("pathname changed"), "{error}");
+                    assert_eq!(tracker.snapshot_all(), before);
+                    assert_eq!(entries(dir.path()), names);
+                    assert_eq!(fs::read(&victim).unwrap(), b"victim");
+                    if let Some(original) = original {
+                        assert_eq!(fs::read(&path).unwrap(), b"original");
+                        assert_eq!(
+                            native::identity(&File::open(&path).unwrap()).unwrap(),
+                            native::identity(&original).unwrap()
+                        );
                     } else {
                         assert!(!path.exists());
                     }
