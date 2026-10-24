@@ -389,7 +389,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::testing::tracker_seeded;
     use crate::file_tracker::{LastView, MAX_TRACKED_FILE_SIZE};
-    use crate::tool::local_testing::{self, ctx_with, temp_ctx};
+    use crate::tool::local_testing::{self, WorkspaceWrite, ctx_with, temp_ctx};
     use crate::tool::read::ReadTool;
     use crate::util::path::local_testing::canonical_tempdir;
 
@@ -529,20 +529,31 @@ mod tests {
                 "old_string": "hello",
                 "new_string": "goodbye"
             });
+            let ctx = seeded_ctx(&path);
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&path);
 
-            let output = local_testing::run(&EditTool, input, &seeded_ctx(&path)).await;
+            let output = local_testing::run(&EditTool, input, &ctx).await;
 
-            assert!(!output.is_error);
-            assert_eq!(
-                output.content,
-                format!("Successfully edited {}.", path.display())
-            );
-            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
-            assert_eq!(
-                output.metadata.title.as_deref(),
-                Some("Edited test.txt"),
-                "success path attaches the Edited title",
-            );
+            if attempt.acl_available {
+                assert!(!output.is_error);
+                assert_eq!(
+                    output.content,
+                    format!("Successfully edited {}.", path.display())
+                );
+                assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
+                assert_eq!(
+                    output.metadata.title.as_deref(),
+                    Some("Edited test.txt"),
+                    "success path attaches the Edited title",
+                );
+            } else {
+                assert!(output.is_error);
+                attempt.assert_refusal(&output.content, path.to_str().unwrap());
+                assert_eq!(output.metadata.title, None);
+                assert_eq!(output.metadata.diff, None);
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
@@ -556,14 +567,26 @@ mod tests {
                 "new_string": "ccc",
                 "replace_all": true,
             });
+            let ctx = seeded_ctx(&path);
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&path);
 
-            let output = run(input, &seeded_ctx(&path)).await;
+            let output = run(input, &ctx).await;
 
-            assert_eq!(
-                output.content,
-                format!("Replaced 2 occurrences in {}.", path.display())
-            );
-            assert_eq!(fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
+            if attempt.acl_available {
+                assert!(!output.is_error);
+                assert_eq!(
+                    output.content,
+                    format!("Replaced 2 occurrences in {}.", path.display())
+                );
+                assert_eq!(fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
+            } else {
+                assert!(output.is_error);
+                attempt.assert_refusal(&output.content, path.to_str().unwrap());
+                assert_eq!(output.metadata.title, None);
+                assert_eq!(output.metadata.diff, None);
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
@@ -577,14 +600,26 @@ mod tests {
                 "new_string": "goodbye",
                 "replace_all": true,
             });
+            let ctx = seeded_ctx(&path);
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&path);
 
-            let output = run(input, &seeded_ctx(&path)).await;
+            let output = run(input, &ctx).await;
 
-            assert_eq!(
-                output.content,
-                format!("Successfully edited {}.", path.display())
-            );
-            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
+            if attempt.acl_available {
+                assert!(!output.is_error);
+                assert_eq!(
+                    output.content,
+                    format!("Successfully edited {}.", path.display())
+                );
+                assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
+            } else {
+                assert!(output.is_error);
+                attempt.assert_refusal(&output.content, path.to_str().unwrap());
+                assert_eq!(output.metadata.title, None);
+                assert_eq!(output.metadata.diff, None);
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
@@ -650,168 +685,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn replaces_unique_string() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("test.txt");
-            fs::write(
-                &path,
-                indoc! {"
-                    fn foo() {}
-                    fn bar() {}
-                "},
-            )
-            .unwrap();
-
-            edit_file(
-                path.to_str().unwrap(),
-                "fn foo() {}",
-                "fn foo() -> i32 { 42 }",
-                false,
-                &seeded_ctx(&path),
-            )
-            .await
-            .unwrap();
-
-            let content = fs::read_to_string(&path).unwrap();
-            assert_eq!(
-                content,
-                indoc! {"
-                    fn foo() -> i32 { 42 }
-                    fn bar() {}
-                "}
-            );
-        }
-
-        #[tokio::test]
-        async fn crlf_matching_preserves_line_endings() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("test.txt");
-            fs::write(&path, "line1\r\nline2\r\n").unwrap();
-
-            edit_file(
-                path.to_str().unwrap(),
-                "line1\nline2",
-                "a\nb",
-                false,
-                &seeded_ctx(&path),
-            )
-            .await
-            .unwrap();
-
-            let bytes = fs::read(&path).unwrap();
-            assert_eq!(bytes, b"a\r\nb\r\n");
-        }
-
-        #[tokio::test]
-        async fn crlf_in_new_string_not_doubled() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("test.txt");
-            fs::write(&path, "aaa\r\nbbb\r\n").unwrap();
-
-            edit_file(
-                path.to_str().unwrap(),
-                "aaa",
-                "x\r\ny",
-                false,
-                &seeded_ctx(&path),
-            )
-            .await
-            .unwrap();
-
-            let bytes = fs::read(&path).unwrap();
-            assert_eq!(bytes, b"x\r\ny\r\nbbb\r\n");
-        }
-
-        #[tokio::test]
-        async fn mixed_eol_normalized_to_dominant() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("mixed.txt");
-            fs::write(&path, "aaa\nbbb\r\nreplace_me\r\n").unwrap();
-
-            edit_file(
-                path.to_str().unwrap(),
-                "replace_me",
-                "replaced",
-                false,
-                &seeded_ctx(&path),
-            )
-            .await
-            .unwrap();
-
-            let bytes = fs::read(&path).unwrap();
-            assert_eq!(bytes, b"aaa\r\nbbb\r\nreplaced\r\n");
-        }
-
-        #[tokio::test]
-        async fn mixed_eol_multiline_match() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("mixed.txt");
-            fs::write(&path, "foo\nbar\r\nbaz\r\n").unwrap();
-
-            edit_file(
-                path.to_str().unwrap(),
-                "foo\nbar",
-                "a\nb",
-                false,
-                &seeded_ctx(&path),
-            )
-            .await
-            .unwrap();
-
-            let bytes = fs::read(&path).unwrap();
-            assert_eq!(bytes, b"a\r\nb\r\nbaz\r\n");
-        }
-
-        #[tokio::test]
-        async fn replace_all_numbers_the_first_hunk_and_lists_every_location() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("grow.txt");
-            fs::write(
-                &path,
-                indoc! {"
-                    A
-                    B
-                    C
-                    B
-                "},
-            )
-            .unwrap();
-
-            let edited = edit_file(
-                path.to_str().unwrap(),
-                "B",
-                "X\nY",
-                true,
-                &seeded_ctx(&path),
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(edited.replacements, 2);
-            assert_eq!(
-                edited.diff,
-                EditDiff {
-                    chunk: DiffChunk {
-                        old: vec![line(2, "B")],
-                        new: vec![line(2, "X"), line(3, "Y")],
-                    },
-                    locations: vec![2, 4],
-                },
-            );
-            assert_eq!(
-                fs::read_to_string(&path).unwrap(),
-                indoc! {"
-                    A
-                    X
-                    Y
-                    C
-                    X
-                    Y
-                "},
-            );
-        }
-
-        #[tokio::test]
         async fn accepts_a_read_under_another_spelling_of_the_path() {
             let dir = canonical_tempdir();
             fs::create_dir(dir.path().join("sub")).unwrap();
@@ -824,10 +697,18 @@ mod tests {
             assert!(!read.is_error, "{}", read.content);
 
             let detour = dir.path().join("sub").join("..").join("test.txt");
-            edit_file(detour.to_str().unwrap(), "hello", "goodbye", false, &ctx)
-                .await
-                .unwrap();
-            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
+            let attempt = WorkspaceWrite::new(&path);
+            let before = ctx.tracker.snapshot_all();
+
+            let result = edit_file(detour.to_str().unwrap(), "hello", "goodbye", false, &ctx).await;
+
+            if attempt.acl_available {
+                result.unwrap();
+                assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
+            } else {
+                attempt.assert_refusal(&result.unwrap_err(), detour.to_str().unwrap());
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
@@ -839,14 +720,21 @@ mod tests {
             let ctx = temp_ctx();
             ctx.tracker
                 .record_read(&path, &bytes, LastView::lines(1, 1, 2), "toolu_test");
+            let attempt = WorkspaceWrite::new(&path);
+            let before = ctx.tracker.snapshot_all();
 
-            edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
-                .await
-                .unwrap();
-            assert_eq!(
-                fs::read_to_string(&path).unwrap(),
-                "goodbye world\nsecond line\n",
-            );
+            let result = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx).await;
+
+            if attempt.acl_available {
+                result.unwrap();
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap(),
+                    "goodbye world\nsecond line\n",
+                );
+            } else {
+                attempt.assert_refusal(&result.unwrap_err(), path.to_str().unwrap());
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
@@ -1069,11 +957,18 @@ mod tests {
                 local_testing::run(&ReadTool, serde_json::json!({"file_path": via_link}), &ctx)
                     .await;
             assert!(!read.is_error, "{}", read.content);
+            let attempt = WorkspaceWrite::new(&path);
+            let before = ctx.tracker.snapshot_all();
 
-            edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
-                .await
-                .unwrap();
-            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
+            let result = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx).await;
+
+            if attempt.acl_available {
+                result.unwrap();
+                assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
+            } else {
+                attempt.assert_refusal(&result.unwrap_err(), path.to_str().unwrap());
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[cfg(unix)]
@@ -1094,6 +989,102 @@ mod tests {
                     path.display(),
                 ),
             );
+        }
+    }
+
+    mod replacement {
+        use super::*;
+
+        mod apply {
+            use super::*;
+
+            #[test]
+            fn preserves_dominant_line_endings_without_doubling_crlf() {
+                for (name, content, old, new, expected) in [
+                    (
+                        "unique",
+                        "fn foo() {}\nfn bar() {}\n",
+                        "fn foo() {}",
+                        "fn foo() -> i32 { 42 }",
+                        "fn foo() -> i32 { 42 }\nfn bar() {}\n",
+                    ),
+                    (
+                        "crlf",
+                        "line1\r\nline2\r\n",
+                        "line1\nline2",
+                        "a\nb",
+                        "a\r\nb\r\n",
+                    ),
+                    (
+                        "new crlf",
+                        "aaa\r\nbbb\r\n",
+                        "aaa",
+                        "x\r\ny",
+                        "x\r\ny\r\nbbb\r\n",
+                    ),
+                    (
+                        "mixed",
+                        "aaa\nbbb\r\nreplace_me\r\n",
+                        "replace_me",
+                        "replaced",
+                        "aaa\r\nbbb\r\nreplaced\r\n",
+                    ),
+                    (
+                        "mixed multiline",
+                        "foo\nbar\r\nbaz\r\n",
+                        "foo\nbar",
+                        "a\nb",
+                        "a\r\nb\r\nbaz\r\n",
+                    ),
+                ] {
+                    let replacement = Replacement {
+                        path: "test.txt".to_owned(),
+                        old_string: old.to_owned(),
+                        new_string: new.to_owned(),
+                        replace_all: false,
+                    };
+
+                    let (updated, edited) = replacement.apply(content.as_bytes()).unwrap();
+
+                    assert_eq!(updated, expected, "{name}");
+                    assert_eq!(edited.replacements, 1, "{name}");
+                }
+            }
+
+            #[test]
+            fn replace_all_numbers_the_first_hunk_and_lists_every_location() {
+                let replacement = Replacement {
+                    path: "grow.txt".to_owned(),
+                    old_string: "B".to_owned(),
+                    new_string: "X\nY".to_owned(),
+                    replace_all: true,
+                };
+
+                let (updated, edited) = replacement.apply(b"A\nB\nC\nB\n").unwrap();
+
+                assert_eq!(edited.replacements, 2);
+                assert_eq!(
+                    edited.diff,
+                    EditDiff {
+                        chunk: DiffChunk {
+                            old: vec![line(2, "B")],
+                            new: vec![line(2, "X"), line(3, "Y")],
+                        },
+                        locations: vec![2, 4],
+                    }
+                );
+                assert_eq!(
+                    updated,
+                    indoc! {"
+                        A
+                        X
+                        Y
+                        C
+                        X
+                        Y
+                    "}
+                );
+            }
         }
     }
 

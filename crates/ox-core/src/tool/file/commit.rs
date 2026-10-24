@@ -250,6 +250,8 @@ impl Drop for TemporaryFile {
 mod tests {
     use super::*;
 
+    use crate::tool::local_testing::WorkspaceWrite;
+
     mod write {
         use super::*;
 
@@ -281,12 +283,15 @@ mod tests {
                         None
                     };
                     let before = entries(dir.path());
+                    let attempt = WorkspaceWrite::new(&path);
+                    let mut visited = Vec::new();
 
                     let error = write_with(
                         &path,
                         b"replacement",
                         existing.then_some(b"original".as_slice()),
                         |at, file| {
+                            visited.push(at);
                             if at == phase {
                                 let mut file = file;
                                 file.set_len(0)?;
@@ -298,7 +303,13 @@ mod tests {
                     )
                     .unwrap_err();
 
-                    assert!(error.to_string().contains("injected"), "{phase:?}");
+                    if attempt.acl_available {
+                        assert!(error.to_string().contains("injected"), "{phase:?}");
+                        assert_eq!(visited.last(), Some(&phase));
+                    } else {
+                        attempt.assert_native_refusal(&error);
+                        assert_eq!(visited, []);
+                    }
                     assert_eq!(entries(dir.path()), before, "{phase:?}");
                     if let Some(original) = original {
                         assert_eq!(fs::read(&path).unwrap(), b"original", "{phase:?}");
@@ -320,34 +331,50 @@ mod tests {
             let path = dir.path().join("target");
             fs::write(&path, b"original").unwrap();
             let mut original = File::open(&path).unwrap();
-            let snapshot = Snapshot::capture(&original).unwrap();
+            let snapshot = Snapshot::capture(&original);
+            let attempt = WorkspaceWrite::new(&path);
 
-            write(&path, b"new", Some(b"original")).unwrap();
+            let result = write(&path, b"new", Some(b"original"));
 
             let mut bytes = Vec::new();
             original.read_to_end(&mut bytes).unwrap();
             assert_eq!(bytes, b"original");
-            let replacement = File::open(&path).unwrap();
-            assert_ne!(
-                native::identity(&replacement).unwrap(),
-                native::identity(&original).unwrap()
-            );
-            snapshot.verify(&replacement).unwrap();
-            assert_eq!(fs::read(&path).unwrap(), b"new");
+            if attempt.acl_available {
+                result.unwrap();
+                let replacement = File::open(&path).unwrap();
+                assert_ne!(
+                    native::identity(&replacement).unwrap(),
+                    native::identity(&original).unwrap()
+                );
+                snapshot.unwrap().verify(&replacement).unwrap();
+                assert_eq!(fs::read(&path).unwrap(), b"new");
+            } else {
+                attempt.assert_native_refusal(&snapshot.unwrap_err());
+                attempt.assert_native_refusal(&result.unwrap_err());
+            }
             assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
         }
 
         #[test]
         fn new_file_and_empty_replacement_publish_complete_bytes() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("target");
+            for (existing, bytes) in [(false, b"new".as_slice()), (true, b"")] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                if existing {
+                    fs::write(&path, b"original").unwrap();
+                }
+                let attempt = WorkspaceWrite::new(&path);
 
-            write(&path, b"new", None).unwrap();
-            assert_eq!(fs::read(&path).unwrap(), b"new");
-            write(&path, b"", Some(b"new")).unwrap();
+                let result = write(&path, bytes, existing.then_some(b"original".as_slice()));
 
-            assert_eq!(fs::read(&path).unwrap(), b"");
-            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+                if attempt.acl_available {
+                    result.unwrap();
+                    assert_eq!(fs::read(&path).unwrap(), bytes);
+                    assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+                } else {
+                    attempt.assert_native_refusal(&result.unwrap_err());
+                }
+            }
         }
 
         #[test]
@@ -359,10 +386,16 @@ mod tests {
                 if existing {
                     fs::write(&path, b"original").unwrap();
                 }
+                let attempt = WorkspaceWrite::new(&path);
 
-                write(&path, &bytes, existing.then_some(b"original".as_slice())).unwrap();
+                let result = write(&path, &bytes, existing.then_some(b"original".as_slice()));
 
-                assert_eq!(fs::read(&path).unwrap(), bytes, "existing={existing}");
+                if attempt.acl_available {
+                    result.unwrap();
+                    assert_eq!(fs::read(&path).unwrap(), bytes, "existing={existing}");
+                } else {
+                    attempt.assert_native_refusal(&result.unwrap_err());
+                }
             }
         }
 
@@ -376,12 +409,15 @@ mod tests {
                         fs::write(&path, b"original").unwrap();
                     }
                     let before = entries(dir.path());
+                    let attempt = WorkspaceWrite::new(&path);
+                    let mut visited = Vec::new();
 
                     let error = write_with(
                         &path,
                         b"ours",
                         existing.then_some(b"original".as_slice()),
                         |phase, mut staged| {
+                            visited.push(phase);
                             if phase == Phase::Validated {
                                 staged.set_len(0)?;
                                 staged.rewind()?;
@@ -392,10 +428,16 @@ mod tests {
                     )
                     .unwrap_err();
 
-                    assert!(
-                        error.to_string().contains("prepared file changed"),
-                        "{error}"
-                    );
+                    if attempt.acl_available {
+                        assert!(
+                            error.to_string().contains("prepared file changed"),
+                            "{error}"
+                        );
+                        assert_eq!(visited.last(), Some(&Phase::Validated));
+                    } else {
+                        attempt.assert_native_refusal(&error);
+                        assert_eq!(visited, []);
+                    }
                     assert_eq!(entries(dir.path()), before);
                     if existing {
                         assert_eq!(fs::read(&path).unwrap(), b"original");
@@ -409,6 +451,11 @@ mod tests {
         #[cfg(unix)]
         #[tokio::test]
         async fn refuses_substituted_stage_names_without_recording_a_write() {
+            use std::sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            };
+
             use crate::file_tracker::testing::{seed_full_read, tracker};
             use crate::util::fs::testing::symlink_file;
 
@@ -428,6 +475,9 @@ mod tests {
                     };
                     let before = tracker.snapshot_all();
                     let names = entries(dir.path());
+                    let attempt = WorkspaceWrite::new(&path);
+                    let checkpoints = Arc::new(AtomicUsize::new(0));
+                    let observed = Arc::clone(&checkpoints);
                     let destination = path.clone();
                     let target = victim.clone();
 
@@ -438,6 +488,7 @@ mod tests {
                                 b"ours",
                                 existing.then_some(b"original".as_slice()),
                                 |phase, _| {
+                                    observed.fetch_add(1, Ordering::Relaxed);
                                     if phase == Phase::Validated {
                                         let directory =
                                             fs::read_dir(destination.parent().unwrap())?
@@ -461,7 +512,13 @@ mod tests {
                         .await
                         .unwrap_err();
 
-                    assert!(error.to_string().contains("pathname changed"), "{error}");
+                    if attempt.acl_available {
+                        assert!(error.to_string().contains("pathname changed"), "{error}");
+                        assert_eq!(checkpoints.load(Ordering::Relaxed), 5);
+                    } else {
+                        attempt.assert_native_refusal(error.downcast_ref::<io::Error>().unwrap());
+                        assert_eq!(checkpoints.load(Ordering::Relaxed), 0);
+                    }
                     assert_eq!(tracker.snapshot_all(), before);
                     assert_eq!(entries(dir.path()), names);
                     assert_eq!(fs::read(&victim).unwrap(), b"victim");
@@ -508,8 +565,11 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("target");
                 fs::write(&path, b"original").unwrap();
+                let attempt = WorkspaceWrite::new(&path);
+                let mut visited = Vec::new();
 
                 let result = write_with(&path, b"ours", Some(b"original"), |phase, _| {
+                    visited.push(phase);
                     if phase == Phase::Synced {
                         if replace {
                             let other = dir.path().join("other");
@@ -522,10 +582,23 @@ mod tests {
                     Ok(())
                 });
 
-                assert!(result.is_err(), "replace={replace}");
+                if attempt.acl_available {
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        if replace {
+                            "the file was replaced while preparing the write"
+                        } else {
+                            "the file changed while preparing the write. Read it again."
+                        }
+                    );
+                    assert_eq!(visited.last(), Some(&Phase::Synced));
+                } else {
+                    attempt.assert_native_refusal(&result.unwrap_err());
+                    assert_eq!(visited, []);
+                }
                 assert_eq!(
                     fs::read(&path).unwrap(),
-                    if replace {
+                    if replace || !attempt.acl_available {
                         b"original".as_slice()
                     } else {
                         b"theirs"
@@ -539,17 +612,26 @@ mod tests {
         fn concurrent_create_is_never_replaced() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("target");
+            let attempt = WorkspaceWrite::new(&path);
+            let mut visited = Vec::new();
 
             let result = write_with(&path, b"ours", None, |phase, _| {
+                visited.push(phase);
                 if phase == Phase::Validated {
                     fs::write(&path, b"theirs")?;
                 }
                 Ok(())
             });
 
-            assert!(result.is_err());
-            assert_eq!(fs::read(&path).unwrap(), b"theirs");
-            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+            if attempt.acl_available {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+                assert_eq!(visited.last(), Some(&Phase::Validated));
+                assert_eq!(fs::read(&path).unwrap(), b"theirs");
+                assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+            } else {
+                attempt.assert_native_refusal(&result.unwrap_err());
+                assert_eq!(visited, []);
+            }
         }
 
         #[cfg(unix)]
@@ -570,14 +652,46 @@ mod tests {
             fs::write(&path, b"original").unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o751)).unwrap();
             let file = File::open(&path).unwrap();
-            file.set_xattr("user.ox.binary", b"\x00\xff").unwrap();
-            file.set_xattr("user.ox.empty", b"").unwrap();
-            let snapshot = Snapshot::capture(&file).unwrap();
+            let attributes_supported = match file.set_xattr("user.ox.binary", b"\x00\xff") {
+                Ok(()) => {
+                    file.set_xattr("user.ox.empty", b"").unwrap();
+                    true
+                }
+                Err(error) => {
+                    assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
+                    false
+                }
+            };
+            let snapshot = Snapshot::capture(&file);
+            let attempt = WorkspaceWrite::new(&path);
 
-            write(&path, b"new", Some(b"original")).unwrap();
+            let result = write(&path, b"new", Some(b"original"));
 
-            snapshot.verify(&File::open(&path).unwrap()).unwrap();
-            assert_eq!(fs::read(&path).unwrap(), b"new");
+            if attempt.acl_available {
+                result.unwrap();
+                let current = File::open(&path).unwrap();
+                snapshot.unwrap().verify(&current).unwrap();
+                assert_eq!(fs::read(&path).unwrap(), b"new");
+                if attributes_supported {
+                    assert_eq!(
+                        current.get_xattr("user.ox.binary").unwrap(),
+                        Some(b"\x00\xff".to_vec())
+                    );
+                    assert_eq!(
+                        current.get_xattr("user.ox.empty").unwrap(),
+                        Some(Vec::new())
+                    );
+                } else {
+                    assert_eq!(
+                        current.list_xattr().unwrap_err().raw_os_error(),
+                        Some(nix::libc::EOPNOTSUPP)
+                    );
+                }
+            } else {
+                attempt.assert_native_refusal(&snapshot.unwrap_err());
+                attempt.assert_native_refusal(&result.unwrap_err());
+            }
+            assert_eq!(entries(dir.path()), [path.file_name().unwrap()]);
         }
 
         #[cfg(unix)]
@@ -590,8 +704,11 @@ mod tests {
                 let path = dir.path().join("target");
                 fs::write(&path, b"original").unwrap();
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                let attempt = WorkspaceWrite::new(&path);
+                let mut visited = Vec::new();
 
                 let result = write_with(&path, b"ours", Some(b"original"), |phase, staged| {
+                    visited.push(phase);
                     if source && phase == Phase::Synced {
                         fs::set_permissions(&path, fs::Permissions::from_mode(0o640))?;
                     } else if !source && phase == Phase::Validated {
@@ -600,7 +717,24 @@ mod tests {
                     Ok(())
                 });
 
-                assert!(result.is_err(), "source={source}");
+                if attempt.acl_available {
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "the file's access policy or metadata could not be preserved",
+                        "source={source}"
+                    );
+                    assert_eq!(
+                        visited.last(),
+                        Some(&if source {
+                            Phase::Synced
+                        } else {
+                            Phase::Validated
+                        })
+                    );
+                } else {
+                    attempt.assert_native_refusal(&result.unwrap_err());
+                    assert_eq!(visited, []);
+                }
                 assert_eq!(fs::read(&path).unwrap(), b"original");
                 assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
             }
@@ -608,20 +742,26 @@ mod tests {
 
         #[cfg(unix)]
         #[test]
-        fn requires_parent_write_access_and_refuses_set_id_files() {
-            use std::os::unix::fs::PermissionsExt as _;
-
+        fn requires_parent_write_access() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("target");
             fs::write(&path, b"original").unwrap();
+            let identity = native::identity(&File::open(&path).unwrap()).unwrap();
+            let attempt = WorkspaceWrite::new(&path);
             let denied = crate::util::fs::testing::deny_subdir_creation(dir.path());
 
-            assert!(write(&path, b"new", Some(b"original")).is_err());
-            drop(denied);
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o4755)).unwrap();
             let error = write(&path, b"new", Some(b"original")).unwrap_err();
+            drop(denied);
 
-            assert!(error.to_string().contains("set-ID"));
+            if attempt.acl_available {
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            } else {
+                attempt.assert_native_refusal(&error);
+            }
+            assert_eq!(
+                native::identity(&File::open(&path).unwrap()).unwrap(),
+                identity
+            );
             assert_eq!(fs::read(&path).unwrap(), b"original");
             assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
         }
@@ -635,43 +775,55 @@ mod tests {
             let ordinary = dir.path().join("ordinary");
             let atomic = dir.path().join("atomic");
             fs::write(&ordinary, b"").unwrap();
+            let attempt = WorkspaceWrite::new(&atomic);
 
-            write(&atomic, b"content", None).unwrap();
+            let result = write(&atomic, b"content", None);
 
-            assert_eq!(
-                fs::metadata(&atomic).unwrap().permissions().mode(),
-                fs::metadata(&ordinary).unwrap().permissions().mode()
-            );
+            if attempt.acl_available {
+                result.unwrap();
+                assert_eq!(
+                    fs::metadata(&atomic).unwrap().permissions().mode(),
+                    fs::metadata(&ordinary).unwrap().permissions().mode()
+                );
+            } else {
+                attempt.assert_native_refusal(&result.unwrap_err());
+            }
         }
 
         #[cfg(target_os = "macos")]
         #[test]
         fn preserves_explicit_and_inherited_acls_and_parent_inheritance() {
-            fn chmod(path: &Path, arguments: &[&str]) {
-                let output = std::process::Command::new("/bin/chmod")
-                    .args(arguments)
-                    .arg(path)
-                    .output()
-                    .unwrap();
-                assert!(
-                    output.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
+            use std::os::unix::fs::PermissionsExt as _;
+
+            use nix::unistd::{AccessFlags, access};
+
+            fn set_acl(path: &Path, text: &str) {
+                let text = std::ffi::CString::new(text).unwrap();
+                native::set_test_acl(&File::open(path).unwrap(), &text).unwrap();
             }
 
             let dir = tempfile::tempdir().unwrap();
-            chmod(
+            set_acl(
                 dir.path(),
-                &["+a", "everyone allow read,file_inherit,directory_inherit"],
+                indoc::indoc! {"
+                    !#acl 1
+                    group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:::allow,file_inherit,directory_inherit:read
+                "},
             );
             let inherited = dir.path().join("inherited");
             let explicit = dir.path().join("explicit");
             for path in [&inherited, &explicit] {
                 fs::write(path, b"original").unwrap();
             }
-            chmod(&explicit, &["-N"]);
-            chmod(&explicit, &["+a", "everyone deny execute"]);
+            fs::set_permissions(&explicit, fs::Permissions::from_mode(0o755)).unwrap();
+            access(&explicit, AccessFlags::X_OK).unwrap();
+            set_acl(
+                &explicit,
+                indoc::indoc! {"
+                    !#acl 1
+                    group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:::deny:execute
+                "},
+            );
             let source = Snapshot::capture(&File::open(&explicit).unwrap()).unwrap();
             let inherited_source = Snapshot::capture(&File::open(&inherited).unwrap()).unwrap();
             assert_ne!(source, inherited_source);
@@ -682,6 +834,10 @@ mod tests {
             write(&created, b"new", None).unwrap();
 
             source.verify(&File::open(&explicit).unwrap()).unwrap();
+            assert_eq!(
+                access(&explicit, AccessFlags::X_OK),
+                Err(nix::errno::Errno::EACCES)
+            );
             inherited_source
                 .verify(&File::open(&inherited).unwrap())
                 .unwrap();
@@ -714,23 +870,54 @@ mod tests {
                 bytes
             };
             let file = File::open(&path).unwrap();
-            file.set_xattr("system.posix_acl_access", &acl(6)).unwrap();
-            let snapshot = Snapshot::capture(&file).unwrap();
-            File::open(dir.path())
-                .unwrap()
-                .set_xattr("system.posix_acl_default", &acl(7))
-                .unwrap();
+            let attributes_supported = match file.set_xattr("system.posix_acl_access", &acl(6)) {
+                Ok(()) => true,
+                Err(error) => {
+                    assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
+                    false
+                }
+            };
+            let snapshot = Snapshot::capture(&file);
+            let attempt = WorkspaceWrite::new(&path);
+            if attributes_supported {
+                File::open(dir.path())
+                    .unwrap()
+                    .set_xattr("system.posix_acl_default", &acl(7))
+                    .unwrap();
+            }
 
-            write(&path, b"new", Some(b"original")).unwrap();
+            let result = write(&path, b"new", Some(b"original"));
 
-            snapshot.verify(&File::open(&path).unwrap()).unwrap();
-            File::open(&path)
-                .unwrap()
-                .remove_xattr("system.posix_acl_access")
-                .unwrap();
-            let without_acl = Snapshot::capture(&File::open(&path).unwrap()).unwrap();
-            write(&path, b"again", Some(b"new")).unwrap();
-            without_acl.verify(&File::open(&path).unwrap()).unwrap();
+            if attempt.acl_available {
+                result.unwrap();
+                snapshot
+                    .unwrap()
+                    .verify(&File::open(&path).unwrap())
+                    .unwrap();
+                assert_eq!(fs::read(&path).unwrap(), b"new");
+                let current = File::open(&path).unwrap();
+                if attributes_supported {
+                    assert_eq!(
+                        current.get_xattr("system.posix_acl_access").unwrap(),
+                        Some(acl(6))
+                    );
+                    current.remove_xattr("system.posix_acl_access").unwrap();
+                    let without_acl = Snapshot::capture(&current).unwrap();
+
+                    write(&path, b"again", Some(b"new")).unwrap();
+
+                    let current = File::open(&path).unwrap();
+                    without_acl.verify(&current).unwrap();
+                    assert_eq!(current.get_xattr("system.posix_acl_access").unwrap(), None);
+                    assert_eq!(fs::read(&path).unwrap(), b"again");
+                } else {
+                    assert_eq!(current.get_xattr("system.posix_acl_access").unwrap(), None);
+                }
+            } else {
+                attempt.assert_native_refusal(&snapshot.unwrap_err());
+                attempt.assert_native_refusal(&result.unwrap_err());
+            }
+            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
         }
     }
 }

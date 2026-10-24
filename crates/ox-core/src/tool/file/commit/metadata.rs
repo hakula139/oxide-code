@@ -38,11 +38,7 @@ impl Snapshot {
         {
             let metadata = file.metadata()?;
             let mode = metadata.mode() & 0o7777;
-            if mode & 0o6000 != 0 {
-                return Err(io::Error::other(
-                    "refusing to replace a file with set-ID permissions",
-                ));
-            }
+            validate_mode(mode)?;
             Ok(Self {
                 owner: (metadata.uid(), metadata.gid()),
                 mode,
@@ -107,16 +103,25 @@ impl Snapshot {
 }
 
 #[cfg(unix)]
+fn validate_mode(mode: u32) -> io::Result<()> {
+    if mode & 0o6000 != 0 {
+        Err(io::Error::other(
+            "refusing to replace a file with set-ID permissions",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
 fn attributes(file: &File) -> io::Result<BTreeMap<OsString, Vec<u8>>> {
     let names = match file.list_xattr() {
-        Ok(names) => names,
-        Err(error) if error.raw_os_error() == Some(nix::errno::Errno::EOPNOTSUPP as i32) => {
-            return Ok(BTreeMap::new());
-        }
+        Ok(names) => Some(names),
+        Err(error) if error.raw_os_error() == Some(nix::errno::Errno::EOPNOTSUPP as i32) => None,
         Err(error) => return Err(error),
     };
     let mut attributes = BTreeMap::new();
-    for name in names {
+    for name in names.into_iter().flatten() {
         if let Some(value) = file.get_xattr(&name)? {
             attributes.insert(name, value);
         } else {
@@ -127,10 +132,11 @@ fn attributes(file: &File) -> io::Result<BTreeMap<OsString, Vec<u8>>> {
     }
     #[cfg(target_os = "linux")]
     {
-        for name in ["system.posix_acl_access", "security.selinux"] {
-            if let Some(value) = supported_attribute(file, name)? {
-                attributes.insert(name.into(), value);
-            }
+        if let Some(value) = file.get_xattr("system.posix_acl_access")? {
+            attributes.insert("system.posix_acl_access".into(), value);
+        }
+        if let Some(value) = supported_attribute(file, "security.selinux")? {
+            attributes.insert("security.selinux".into(), value);
         }
         for name in [
             "security.capability",
@@ -170,23 +176,78 @@ fn supported_attribute(file: &File, name: &str) -> io::Result<Option<Vec<u8>>> {
 mod tests {
     use super::*;
 
+    use crate::tool::local_testing::WorkspaceWrite;
+
     mod apply {
         use super::*;
 
         #[test]
-        fn restores_changed_values_and_removes_extra_attributes() {
+        fn restores_available_attributes_and_refuses_unavailable_storage() {
+            use super::super::super::{Phase, native, write_with};
+
             let dir = tempfile::tempdir().unwrap();
-            let source = File::create(dir.path().join("source")).unwrap();
-            source.set_xattr("user.ox.value", b"\x00\xff").unwrap();
-            source.set_xattr("user.ox.empty", b"").unwrap();
-            let snapshot = Snapshot::capture(&source).unwrap();
-            let staged = File::create(dir.path().join("staged")).unwrap();
-            staged.set_xattr("user.ox.value", b"incorrect").unwrap();
-            staged.set_xattr("user.ox.extra", b"extra").unwrap();
+            let path = dir.path().join("source");
+            std::fs::write(&path, b"original").unwrap();
+            let source = File::open(&path).unwrap();
+            match source.set_xattr("user.ox.value", b"\x00\xff") {
+                Ok(()) => {
+                    source.set_xattr("user.ox.empty", b"").unwrap();
+                    let snapshot = Snapshot::capture(&source).unwrap();
+                    let staged = File::create(dir.path().join("staged")).unwrap();
+                    staged.set_xattr("user.ox.value", b"incorrect").unwrap();
+                    staged.set_xattr("user.ox.extra", b"extra").unwrap();
 
-            snapshot.apply(&staged).unwrap();
+                    snapshot.apply(&staged).unwrap();
 
-            snapshot.verify(&staged).unwrap();
+                    snapshot.verify(&staged).unwrap();
+                    assert_eq!(
+                        staged.get_xattr("user.ox.value").unwrap(),
+                        Some(b"\x00\xff".to_vec())
+                    );
+                    assert_eq!(staged.get_xattr("user.ox.empty").unwrap(), Some(Vec::new()));
+                    assert_eq!(staged.get_xattr("user.ox.extra").unwrap(), None);
+                }
+                Err(error) => {
+                    assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
+                    let attempt = WorkspaceWrite::new(&path);
+                    let original = Snapshot::capture(&source);
+                    let identity = native::identity(&source).unwrap();
+                    let mut visited = Vec::new();
+
+                    let error = write_with(&path, b"changed", Some(b"original"), |phase, file| {
+                        visited.push(phase);
+                        if phase == Phase::Prepared {
+                            let mut required = original.as_ref().unwrap().clone();
+                            required
+                                .attributes
+                                .insert("user.ox.value".into(), b"\x00\xff".to_vec());
+                            required.apply(file)?;
+                        }
+                        Ok(())
+                    })
+                    .unwrap_err();
+
+                    assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
+                    let current = File::open(&path).unwrap();
+                    assert_eq!(native::identity(&current).unwrap(), identity);
+                    if attempt.acl_available {
+                        let original = original.unwrap();
+                        assert_eq!(original.attributes, BTreeMap::new());
+                        original.verify(&current).unwrap();
+                        assert_eq!(visited, [Phase::Prepared]);
+                    } else {
+                        attempt.assert_native_refusal(&original.unwrap_err());
+                        attempt.assert_native_refusal(&error);
+                        assert_eq!(visited, []);
+                    }
+                    assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                    let entries: Vec<_> = std::fs::read_dir(dir.path())
+                        .unwrap()
+                        .map(|entry| entry.unwrap().file_name())
+                        .collect();
+                    assert_eq!(entries, [OsString::from("source")]);
+                }
+            }
         }
 
         #[test]
@@ -195,15 +256,47 @@ mod tests {
             let path = dir.path().join("source");
             std::fs::write(&path, b"original").unwrap();
             let file = File::open(&path).unwrap();
-            let original = Snapshot::capture(&file).unwrap();
-            let mut desired = original.clone();
-            desired.owner.0 += 1;
+            let attempt = WorkspaceWrite::new(&path);
+            let original = Snapshot::capture(&file);
+            let metadata = file.metadata().unwrap();
+            let desired = Snapshot {
+                owner: (metadata.uid() + 1, metadata.gid()),
+                mode: metadata.mode() & 0o7777,
+                attributes: BTreeMap::new(),
+                #[cfg(target_os = "macos")]
+                acl: native::acl(&file).unwrap(),
+                #[cfg(target_os = "macos")]
+                flags: std::os::macos::fs::MetadataExt::st_flags(&metadata) & !0x20,
+            };
 
             let error = desired.apply(&file).unwrap_err();
 
-            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-            original.verify(&file).unwrap();
-            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+            assert!(matches!(
+                error.raw_os_error(),
+                Some(nix::libc::EPERM | nix::libc::EINVAL)
+            ));
+            if attempt.acl_available {
+                original.unwrap().verify(&file).unwrap();
+            } else {
+                attempt.assert_native_refusal(&original.unwrap_err());
+            }
+            attempt.assert_unchanged();
+        }
+    }
+
+    mod validate_mode {
+        use super::*;
+
+        #[test]
+        fn accepts_ordinary_permissions_and_refuses_either_set_id_bit() {
+            for mode in [0o600, 0o751, 0o1777] {
+                validate_mode(mode).unwrap();
+            }
+            for mode in [0o4755, 0o2755, 0o6755] {
+                let error = validate_mode(mode).unwrap_err();
+
+                assert!(error.to_string().contains("set-ID"), "mode={mode:o}");
+            }
         }
     }
 }

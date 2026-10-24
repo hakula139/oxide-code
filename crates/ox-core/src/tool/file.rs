@@ -240,24 +240,65 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("file.txt");
             fs::write(&path, "a much longer original").unwrap();
+            let attempt = crate::tool::local_testing::WorkspaceWrite::new(&path);
 
-            commit::write(&path, b"short", Some(b"a much longer original")).unwrap();
-            assert_eq!(fs::read_to_string(&path).unwrap(), "short");
+            let result = commit::write(&path, b"short", Some(b"a much longer original"));
+
+            if attempt.acl_available {
+                result.unwrap();
+                assert_eq!(fs::read_to_string(&path).unwrap(), "short");
+            } else {
+                attempt.assert_native_refusal(&result.unwrap_err());
+            }
         }
 
         #[test]
         fn create_new_refuses_existing_entries_and_dangling_links() {
+            let identity = |path: &Path| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+
+                    let metadata = fs::symlink_metadata(path).unwrap();
+                    (metadata.dev(), metadata.ino())
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt as _;
+
+                    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+                    let file = fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                        .open(path)
+                        .unwrap();
+                    crate::util::fs::file_id(&file).unwrap()
+                }
+            };
             let dir = tempfile::tempdir().unwrap();
             let existing = dir.path().join("existing.txt");
             fs::write(&existing, "original").unwrap();
             let target = dir.path().join("target.txt");
             let link = dir.path().join("link.txt");
             symlink_file(&target, &link);
+            let attempt = crate::tool::local_testing::WorkspaceWrite::new(&existing);
 
-            assert!(commit::write(&existing, b"x", None).is_err());
-            assert_eq!(fs::read_to_string(&existing).unwrap(), "original");
-            assert!(commit::write(&link, b"x", None).is_err());
-            assert!(!target.exists(), "the link target must not be created");
+            for path in [&existing, &link] {
+                let before = identity(path);
+
+                let error = commit::write(path, b"x", None).unwrap_err();
+
+                if attempt.acl_available {
+                    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+                } else {
+                    attempt.assert_native_refusal(&error);
+                }
+                assert_eq!(identity(path), before);
+                attempt.assert_unchanged();
+                assert_eq!(fs::read_link(&link).unwrap(), target);
+                assert!(!target.exists(), "the link target must not be created");
+            }
         }
 
         #[test]

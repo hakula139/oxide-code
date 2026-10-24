@@ -29,6 +29,7 @@ direnv
 disambiguable
 doas
 EACCES
+einval
 ELOOP
 ENOENT
 ENOTDIR

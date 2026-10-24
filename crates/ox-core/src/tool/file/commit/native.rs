@@ -69,6 +69,8 @@ unsafe extern "C" {
     ) -> isize;
     fn acl_copy_int(buffer: *const std::ffi::c_void) -> *mut std::ffi::c_void;
     fn acl_free(acl: *mut std::ffi::c_void) -> i32;
+    #[cfg(test)]
+    fn acl_from_text(text: *const std::ffi::c_char) -> *mut std::ffi::c_void;
 }
 
 #[cfg(target_os = "macos")]
@@ -138,6 +140,19 @@ pub(super) fn set_acl(file: &File, bytes: &[u8]) -> io::Result<()> {
     };
     let acl = Acl::from_pointer(pointer)?;
     // The descriptor and owned ACL stay alive for the duration of this call.
+    zero_result(unsafe { acl_set_fd(file.as_raw_fd(), acl.0.as_ptr()) })
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[expect(
+    unsafe_code,
+    reason = "construct a native ACL fixture without an external executable or identity lookup"
+)]
+pub(super) fn set_test_acl(file: &File, text: &std::ffi::CStr) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    // The text is terminated. The guard owns the parsed ACL through the descriptor-bound setter.
+    let acl = Acl::from_pointer(unsafe { acl_from_text(text.as_ptr()) })?;
     zero_result(unsafe { acl_set_fd(file.as_raw_fd(), acl.0.as_ptr()) })
 }
 
@@ -376,33 +391,68 @@ fn set_access(file: &File, access: &Access) -> io::Result<()> {
     if access.label != current.label {
         information |= WinSecurity::LABEL_SECURITY_INFORMATION;
     }
-    let protection = if access.control & WinSecurity::SE_DACL_PROTECTED != 0 {
-        WinSecurity::PROTECTED_DACL_SECURITY_INFORMATION
-    } else {
-        WinSecurity::UNPROTECTED_DACL_SECURITY_INFORMATION
-    };
+    if information != 0 {
+        // These pointers borrow aligned descriptor components. DACL restoration is separate.
+        let error = unsafe {
+            WinSecurity::Authorization::SetSecurityInfo(
+                file.as_raw_handle(),
+                WinSecurity::Authorization::SE_FILE_OBJECT,
+                information,
+                NativeBytes::pointer(access.owner.as_ref()),
+                NativeBytes::pointer(access.group.as_ref()),
+                std::ptr::null_mut(),
+                NativeBytes::pointer(access.label.as_ref()).cast(),
+            )
+        };
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error.cast_signed()));
+        }
+    }
     if access.dacl != current.dacl || access.control != current.control {
-        information |= WinSecurity::DACL_SECURITY_INFORMATION | protection;
+        set_dacl(file, access)?;
     }
-    if information == 0 {
-        return Ok(());
-    }
-    // Each pointer borrows an aligned SID or ACL captured by GetSecurityInfo. Null ACLs stay null.
-    let error = unsafe {
-        WinSecurity::Authorization::SetSecurityInfo(
-            file.as_raw_handle(),
-            WinSecurity::Authorization::SE_FILE_OBJECT,
-            information,
-            NativeBytes::pointer(access.owner.as_ref()),
-            NativeBytes::pointer(access.group.as_ref()),
+    Ok(())
+}
+
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "restore the exact captured leaf DACL through its existing handle without merging parent ACEs"
+)]
+fn set_dacl(file: &File, access: &Access) -> io::Result<()> {
+    use windows_sys::Wdk::Storage::FileSystem::NtSetSecurityObject;
+
+    let mut descriptor = WinSecurity::SECURITY_DESCRIPTOR::default();
+    let pointer = (&raw mut descriptor).cast();
+    let controls = WinSecurity::SE_DACL_PROTECTED | WinSecurity::SE_DACL_AUTO_INHERIT_REQ;
+    // The initialized absolute descriptor borrows the captured ACL for this synchronous call.
+    unsafe {
+        windows_result(WinSecurity::InitializeSecurityDescriptor(
+            pointer,
+            SystemServices::SECURITY_DESCRIPTOR_REVISION,
+        ))?;
+        windows_result(WinSecurity::SetSecurityDescriptorDacl(
+            pointer,
+            i32::from(access.control & WinSecurity::SE_DACL_PRESENT != 0),
             NativeBytes::pointer(access.dacl.as_ref()).cast(),
-            NativeBytes::pointer(access.label.as_ref()).cast(),
-        )
-    };
-    if error == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::from_raw_os_error(error.cast_signed()))
+            0,
+        ))?;
+        windows_result(WinSecurity::SetSecurityDescriptorControl(
+            pointer,
+            controls,
+            access.control & controls,
+        ))?;
+        let status = NtSetSecurityObject(
+            file.as_raw_handle(),
+            WinSecurity::DACL_SECURITY_INFORMATION,
+            pointer,
+        );
+        if status >= 0 {
+            Ok(())
+        } else {
+            let error = Foundation::RtlNtStatusToDosError(status);
+            Err(io::Error::from_raw_os_error(error.cast_signed()))
+        }
     }
 }
 
@@ -980,6 +1030,35 @@ mod tests {
 
     #[expect(
         unsafe_code,
+        reason = "exercise native inheritance propagation from a parent ACL fixture"
+    )]
+    fn set_parent_acl(file: &File, access: &Access) -> io::Result<()> {
+        let protection = if access.control & WinSecurity::SE_DACL_PROTECTED != 0 {
+            WinSecurity::PROTECTED_DACL_SECURITY_INFORMATION
+        } else {
+            WinSecurity::UNPROTECTED_DACL_SECURITY_INFORMATION
+        };
+        // The File owns the live handle, and the aligned captured ACL outlives this synchronous call.
+        let error = unsafe {
+            WinSecurity::Authorization::SetSecurityInfo(
+                file.as_raw_handle(),
+                WinSecurity::Authorization::SE_FILE_OBJECT,
+                WinSecurity::DACL_SECURITY_INFORMATION | protection,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                NativeBytes::pointer(access.dacl.as_ref()).cast(),
+                std::ptr::null_mut(),
+            )
+        };
+        if error == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(error.cast_signed()))
+        }
+    }
+
+    #[expect(
+        unsafe_code,
         reason = "install an unprivileged resource-attribute fixture using its owned ACL buffer"
     )]
     fn set_resource_attributes(file: &File) -> io::Result<()> {
@@ -1029,26 +1108,91 @@ mod tests {
         use super::*;
 
         #[test]
-        fn null_and_empty_acl_states_remain_distinct() {
+        fn retains_explicit_inherited_and_mixed_entries_without_merging_the_parent() {
             let dir = tempfile::tempdir().unwrap();
-            let file = create_private(&dir.path().join("file")).unwrap();
-            let mut desired = access(&file).unwrap();
-            desired.control = WinSecurity::SE_DACL_PRESENT | WinSecurity::SE_DACL_PROTECTED;
+            let parent = fs::OpenOptions::new()
+                .access_mode(Foundation::GENERIC_READ | FileSystem::WRITE_DAC)
+                .custom_flags(FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+                .open(dir.path())
+                .unwrap();
+            let mut policy = access(&parent).unwrap();
+            policy.dacl = descriptor_acl("D:P(A;OICI;FA;;;OW)", false);
+            policy.control |= WinSecurity::SE_DACL_PROTECTED;
+            set_parent_acl(&parent, &policy).unwrap();
+            let source = dir.path().join("source");
+            fs::write(&source, b"source").unwrap();
+            let inherited = access(&File::open(&source).unwrap()).unwrap();
 
-            for dacl in [
-                None,
-                Some(NativeBytes(vec![u32::from_ne_bytes([2, 0, 8, 0]), 0])),
+            for (name, dacl, executable) in [
+                ("explicit", descriptor_acl("D:(A;;FA;;;OW)", false), true),
+                ("inherited", inherited.dacl.clone(), true),
+                (
+                    "mixed",
+                    descriptor_acl("D:(D;;0x00000020;;;WD)(A;ID;FA;;;OW)", false),
+                    false,
+                ),
             ] {
-                desired.dacl = dacl;
+                for protected in [false, true] {
+                    let staged = TemporaryFile::staged(dir.path()).unwrap();
+                    (&staged.file).write_all(b"staged").unwrap();
+                    let mut desired = inherited.clone();
+                    desired.dacl.clone_from(&dacl);
+                    if protected {
+                        desired.control |= WinSecurity::SE_DACL_PROTECTED;
+                    } else {
+                        desired.control &= !WinSecurity::SE_DACL_PROTECTED;
+                    }
+
+                    set_access(&staged.file, &desired).unwrap();
+
+                    assert_eq!(
+                        access(&staged.file).unwrap(),
+                        desired,
+                        "{name}, protected={protected}"
+                    );
+                    assert_eq!(fs::read(&staged.path).unwrap(), b"staged");
+                    assert_eq!(
+                        fs::OpenOptions::new()
+                            .access_mode(FileSystem::FILE_EXECUTE)
+                            .open(&staged.path)
+                            .is_ok(),
+                        executable,
+                        "{name}, protected={protected}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn null_and_empty_acl_states_remain_distinct() {
+            for protected in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("file");
+                let file = create_private(&path).unwrap();
+                let mut desired = access(&file).unwrap();
+                desired.control = WinSecurity::SE_DACL_PRESENT
+                    | if protected {
+                        WinSecurity::SE_DACL_PROTECTED
+                    } else {
+                        0
+                    };
+                for dacl in [
+                    None,
+                    Some(NativeBytes(vec![u32::from_ne_bytes([2, 0, 8, 0]), 0])),
+                ] {
+                    desired.dacl = dacl;
+
+                    set_access(&file, &desired).unwrap();
+
+                    assert_eq!(access(&file).unwrap(), desired, "protected={protected}");
+                }
+                assert!(File::open(&path).is_err());
+                desired.dacl = None;
+
                 set_access(&file, &desired).unwrap();
 
-                assert_eq!(access(&file).unwrap(), desired);
+                assert!(File::open(&path).is_ok());
             }
-            let path = dir.path().join("file");
-            assert!(File::open(&path).is_err());
-            desired.dacl = None;
-            set_access(&file, &desired).unwrap();
-            assert!(File::open(&path).is_ok());
         }
 
         #[test]
@@ -1394,7 +1538,7 @@ mod tests {
                 let mut policy = original.clone();
                 policy.dacl = descriptor_acl("D:P(A;OICI;FA;;;OW)", false);
                 policy.control |= WinSecurity::SE_DACL_PROTECTED;
-                set_access(&parent, &policy).unwrap();
+                set_parent_acl(&parent, &policy).unwrap();
                 let ordinary = dir.path().join("ordinary");
                 let atomic = dir.path().join("atomic");
                 for path in [&ordinary, &atomic] {
@@ -1421,7 +1565,7 @@ mod tests {
                         false,
                     );
 
-                    set_access(&parent, &policy).unwrap();
+                    set_parent_acl(&parent, &policy).unwrap();
 
                     assert_eq!(
                         access(&File::open(&atomic).unwrap()).unwrap(),
@@ -1437,7 +1581,7 @@ mod tests {
                         );
                     }
                 }
-                set_access(&parent, &original).unwrap();
+                set_parent_acl(&parent, &original).unwrap();
             }
         }
 
@@ -1460,7 +1604,7 @@ mod tests {
                     false,
                 );
                 policy.control |= WinSecurity::SE_DACL_PROTECTED;
-                set_access(&parent, &policy).unwrap();
+                set_parent_acl(&parent, &policy).unwrap();
                 let reference = fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -1509,7 +1653,7 @@ mod tests {
                         access(&File::open(&path).unwrap()).unwrap(),
                     )
                 });
-                set_access(&parent, &original_parent).unwrap();
+                set_parent_acl(&parent, &original_parent).unwrap();
 
                 if fail {
                     let error = result.unwrap_err();
@@ -1686,7 +1830,7 @@ mod tests {
             let mut parent_policy = original_parent.clone();
             parent_policy.dacl = descriptor_acl("D:P(D;;0x00000040;;;WD)(A;;FA;;;OW)", false);
             parent_policy.control |= WinSecurity::SE_DACL_PROTECTED;
-            set_access(&parent, &parent_policy).unwrap();
+            set_parent_acl(&parent, &parent_policy).unwrap();
             let mut file_policy = original_file.clone();
             file_policy.dacl = descriptor_acl("D:P(D;;0x00010000;;;WD)(A;;FA;;;OW)", false);
             file_policy.control |= WinSecurity::SE_DACL_PROTECTED;
@@ -1707,7 +1851,7 @@ mod tests {
                 .map(|entry| entry.unwrap().file_name())
                 .collect();
             set_access(&file, &original_file).unwrap();
-            set_access(&parent, &original_parent).unwrap();
+            set_parent_acl(&parent, &original_parent).unwrap();
 
             assert!(error.to_string().contains("injected failure"), "{error}");
             assert_eq!(names, [std::ffi::OsString::from("source")]);
