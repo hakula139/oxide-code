@@ -88,7 +88,7 @@ fn effort_unapplied(requested: Effort) -> String {
 }
 
 /// The message that reports a session-writer failure.
-pub(crate) fn session_write_failed(failure: &str) -> String {
+pub fn session_write_failed(failure: &str) -> String {
     format!("Session write failed: {failure}")
 }
 
