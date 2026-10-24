@@ -31,7 +31,7 @@ Every format also writes tool calls, the task list, retries, notices, and errors
 | Status              | Meaning                                                                        |
 | ------------------- | ------------------------------------------------------------------------------ |
 | `0`                 | The turn completed                                                             |
-| `1`                 | The turn failed, or `ox` could not start it                                    |
+| `1`                 | The turn failed, output could not be written, or `ox` could not start the turn |
 | `2`                 | The command line was invalid, such as an unknown `--output`, or gave no prompt |
 | `101`               | `ox` crashed, and the JSON formats still print a `failed` result               |
 | `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM stopped the run                                     |
@@ -40,10 +40,23 @@ If `ox` cannot start a run, for example because of a configuration or credential
 
 ## Result
 
-The result is the line printed by `json` and the final line of `stream-json`:
+The `json` and `stream-json` formats emit this result shape:
 
 ```json
-{"type":"result","data":{"stop_reason":"completed","error":null,"message":"Done.","usage":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018},"session_id":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"}}
+{
+  "type": "result",
+  "data": {
+    "stop_reason": "completed",
+    "error": null,
+    "message": "Done.",
+    "usage": {
+      "context_tokens": 1000,
+      "context_window": 1000000,
+      "estimated_cost_usd": 0.018
+    },
+    "session_id": "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"
+  }
+}
 ```
 
 | Field         | Description                                                                                                                          |
@@ -58,7 +71,7 @@ The result is the line printed by `json` and the final line of `stream-json`:
 
 - **`context_tokens`**: The input size of the latest request, including cached tokens. It shows how full the context window is.
 - **`context_window`**: The model's context window, measured in tokens.
-- **`estimated_cost_usd`**: The estimated cost of all requests in the run at public per-token rates, or `null` for models with unknown rates.
+- **`estimated_cost_usd`**: The cumulative estimated session cost at public per-token rates, restored on resume, or `null` when no positive estimate is available.
 
 A turn reports usage when it ends and before each automatic compaction inside it, so after a signal, `usage` omits the requests sent since the latest report.
 
@@ -141,4 +154,4 @@ Display text can change in any release. This includes a tool call's `icon`, `lab
 - **Commands**: A subset of the slash commands runs, as listed in [When Commands Run](slash-commands.md#when-commands-run).
 - **Approvals**: In a terminal, a call that needs approval prints its command or diff, and the rule that made it ask when one did, then waits for a letter: `y` approves, `a` allows matching calls for the rest of the session when the call offers that, `n` denies, `f` denies with feedback for the model, and `x` aborts the turn. With piped input, no approval is requested, and those calls are denied as in a `-p` run.
 - **Interrupting**: In a terminal, **Ctrl+C** during a turn stops it and returns to the prompt, and at the prompt it discards the line, as in a shell. With piped input, **Ctrl+C** ends the run.
-- **Exit status**: The end of input or `/exit` exits with `1` if a prompt failed or a command was rejected, and with `0` otherwise. A signal that ends the run exits with the status listed in the [table](#exit-status).
+- **Exit status**: The end of input or `/exit` exits with `1` if a prompt failed, a command was rejected, or output could not be written, and with `0` otherwise. A signal that ends the run exits with the status listed in the [table](#exit-status).
