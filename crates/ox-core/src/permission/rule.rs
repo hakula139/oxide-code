@@ -589,6 +589,10 @@ mod tests {
         Rule::parse(class, pattern).unwrap()
     }
 
+    fn edit(pattern: &str) -> Rule {
+        rule(PermissionClass::Edit, pattern)
+    }
+
     fn exec(pattern: &str) -> Rule {
         rule(PermissionClass::Exec, pattern)
     }
@@ -889,10 +893,6 @@ mod tests {
 
     mod matches {
         use super::*;
-
-        fn edit(pattern: &str) -> Rule {
-            rule(PermissionClass::Edit, pattern)
-        }
 
         fn holds(rule: &Rule, command: &str) -> bool {
             rule.matches(
