@@ -195,6 +195,7 @@ impl TemporaryFile {
 
             // Creation grants the requested DELETE access even when the inherited DACL denies it.
             OpenOptions::new()
+                .write(true)
                 .create_new(true)
                 .access_mode(
                     FileSystem::FILE_GENERIC_READ

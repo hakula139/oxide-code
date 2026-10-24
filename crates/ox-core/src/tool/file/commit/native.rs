@@ -1496,6 +1496,7 @@ mod tests {
                 policy.control |= WinSecurity::SE_DACL_PROTECTED;
                 set_access(&parent, &policy).unwrap();
                 let reference = fs::OpenOptions::new()
+                    .write(true)
                     .create_new(true)
                     .access_mode(
                         Foundation::GENERIC_READ
@@ -1547,7 +1548,7 @@ mod tests {
                 if fail {
                     let error = result.unwrap_err();
                     assert!(error.to_string().contains("injected new-file"), "{error}");
-                    assert!(names.is_empty(), "{names:?}");
+                    assert_eq!(names, []);
                     assert!(actual.is_none());
                 } else {
                     result.unwrap();
