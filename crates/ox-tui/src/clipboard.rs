@@ -104,8 +104,8 @@ pub(crate) enum Delivery {
     /// The terminal applies this OSC 52 sequence once it is written.
     Osc52 {
         sequence: String,
-        /// Whether the terminal applies the sequence only once the user allows clipboard access,
-        /// as iTerm2 does with "Applications in terminal may access clipboard".
+        /// Whether the terminal applies the sequence only once the user allows clipboard access, as
+        /// iTerm2 does with "Applications in terminal may access clipboard".
         needs_permission: bool,
     },
 }

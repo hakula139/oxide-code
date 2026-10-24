@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Check that no credential from the environment appears in ox's logs or session files.
 #
-# Run it after the TUI checklist in docs/conventions/testing.md, in the environment the sessions
-# used. Like the live tests, it checks ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY,
-# CLAUDE_CODE_OAUTH_TOKEN, and each ANTHROPIC_CUSTOM_HEADERS value of 8 or more characters.
-# It prints only variable names, and exits 1 on a leak and 2 on an error.
+# Run after the TUI checklist in docs/conventions/testing.md, in the same environment. Like the live
+# tests, it checks ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, and each
+# ANTHROPIC_CUSTOM_HEADERS value of 8 or more characters. It prints only variable names and exits 1
+# on a leak and 2 on an error.
 
 set -euo pipefail
 

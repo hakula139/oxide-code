@@ -1,6 +1,4 @@
-//! Frame layout and drawing: the status bar, chat or welcome screen, task panel, queued-prompt
-//! preview, modal, and input bands, plus the copy and jump-to-bottom overlays, status-line
-//! hyperlinks, and OSC 52 clipboard writes.
+//! Frame layout, drawing, and terminal escape-sequence output.
 
 use anyhow::Result;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -62,8 +60,8 @@ impl App {
 
     pub(super) fn draw_frame(&mut self, frame: &mut Frame<'_>) {
         let area = frame.area();
-        // The status bar and one chat row stay visible. The modal, or else the input and its
-        // popup, outranks the queued-prompt preview, and the preview the task panel.
+        // The status bar and one chat row stay visible. The modal, or else the input and its popup,
+        // outranks the queued-prompt preview, and the preview the task panel.
         let modal_max = area
             .height
             .saturating_sub(StatusBar::HEIGHT + MIN_CHAT_HEIGHT);

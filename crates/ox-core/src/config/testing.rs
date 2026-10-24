@@ -12,8 +12,8 @@ use super::{Config, ConfigSnapshot, DEFAULT_THEME, StatusLineSegment, ThemeConfi
 use crate::model::{ModelSpec, PromptCacheTtl};
 use crate::permission::{Policy, Workspace};
 
-/// Minimal [`Config`] signed in with `auth` against `base_url`: no effort, compaction off,
-/// a 128-token output cap, and the default permission policy in `/repo`.
+/// Minimal [`Config`] signed in with `auth` against `base_url`: no effort, compaction off, a
+/// 128-token output cap, and the default permission policy in `/repo`.
 pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
     Config {
         auth: Some(auth),

@@ -1,6 +1,4 @@
-//! Browser sign-in for the oxide-code login: the OAuth authorization-code flow with PKCE, a
-//! loopback listener for the redirect, a pasted code for a browser that cannot reach it, and the
-//! code exchange.
+//! OAuth sign-in with PKCE, a loopback callback or pasted code, and credential storage.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -92,8 +90,8 @@ impl PendingLogin {
         Ok(Grant::Browser(browser, code))
     }
 
-    /// Takes the `code#state` the manual redirect page shows, as the user pasted it. The error is
-    /// a complete message with its recovery step.
+    /// Takes the `code#state` the manual redirect page shows, as the user pasted it. The error is a
+    /// complete message with its recovery step.
     pub(crate) fn paste(&self, input: &str) -> Result<Grant> {
         let Some((code, state)) = input
             .trim()

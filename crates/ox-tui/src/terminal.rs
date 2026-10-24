@@ -164,8 +164,8 @@ pub(crate) fn write_status_hyperlinks(
     out: &mut impl Write,
     links: &[StatusHyperlink],
 ) -> io::Result<()> {
-    // Plain OSC 8 suits tmux as well: 3.4+ maps it to pane cells and forwards it to outer
-    // terminals with the `hyperlinks` feature, and older versions drop the OSC but keep the text.
+    // Plain OSC 8 suits tmux as well: 3.4+ maps it to pane cells and forwards it to outer terminals
+    // with the `hyperlinks` feature, and older versions drop the OSC but keep the text.
     let mut wrote_any = false;
     for link in links {
         let safe_url: String = link.url.chars().filter(|c| !c.is_control()).collect();
@@ -261,11 +261,10 @@ enum PanicRoute {
     Deferred,
 }
 
-/// Installs a panic hook that restores the terminal before delegating to the previous hook when
-/// the calling (UI) thread panics.
+/// Installs a panic hook that restores the terminal before reporting a UI-thread panic.
 ///
-/// tokio catches a spawned task's panic and the TUI keeps running, so that report goes to the log
-/// and waits for [`restore`]. Printing it mid-session would scribble over the frame.
+/// Background task panics are logged and deferred until [`restore`], since tokio catches them while
+/// the TUI keeps running.
 pub(crate) fn install_panic_hook() {
     let ui_thread = std::thread::current().id();
     let original_hook = std::panic::take_hook();

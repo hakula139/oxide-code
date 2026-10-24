@@ -83,8 +83,8 @@ pub fn resolve_theme(config: &ThemeConfig) -> Result<ResolvedTheme> {
 /// Theme bodies hold one line per slot, so a larger file is not a theme.
 const MAX_THEME_FILE_BYTES: u64 = 64 * 1024;
 
-/// Resolves a `base` to a TOML body. Built-in catalog first, then a filesystem path with
-/// `~/` expanded to `$HOME`.
+/// Resolves a `base` to a TOML body. Built-in catalog first, then a filesystem path with `~/`
+/// expanded to `$HOME`.
 fn load_base_body(name: &str) -> Result<String> {
     if let Some(theme) = builtin::find(name) {
         return Ok(theme.body.to_owned());
@@ -175,12 +175,10 @@ enum SlotPatch {
     Inline(InlinePatch),
 }
 
-/// Inline TOML patch with every field optional.
-/// `Option<bool>` distinguishes "no change" / "set" / "clear".
-/// [`parse_override`] rejects an empty override (`error = {}`),
-/// so the slot warns and keeps its base value.
-/// Serde's untagged enum dispatcher would swallow a `Deserialize`-time message,
-/// so that check runs after deserialization.
+/// Inline TOML patch with every field optional. `Option<bool>` distinguishes "no change" / "set" /
+/// "clear". [`parse_override`] rejects an empty override (`error = {}`), so the slot warns and
+/// keeps its base value. Serde's untagged enum dispatcher would swallow a `Deserialize`-time
+/// message, so that check runs after deserialization.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InlinePatch {

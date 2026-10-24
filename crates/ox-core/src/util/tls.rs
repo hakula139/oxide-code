@@ -68,9 +68,8 @@ fn apply_extra_ca_certs_with(
         .with_context(|| format!("failed to trust extra CA bundle at {}", path.display()))
 }
 
-/// Reads a PEM-encoded bundle from disk and returns one certificate per `BEGIN CERTIFICATE` block.
-/// Empty bundles and blocks that are not X.509 certificates surface as explicit errors so silent
-/// misconfiguration does not degrade into "still rejecting the corp CA".
+/// Reads a PEM bundle with one certificate per `BEGIN CERTIFICATE` block. Rejects an empty bundle
+/// or invalid X.509 certificates.
 pub(crate) fn load_extra_ca_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read extra CA bundle at {}", path.display()))?;
@@ -160,8 +159,8 @@ struct ExtraCaVerifier {
 
 #[cfg(target_os = "macos")]
 impl ExtraCaVerifier {
-    /// Exempts the bundle CAs other than Apple's built-in roots, or none when those roots cannot
-    /// be read.
+    /// Exempts the bundle CAs other than Apple's built-in roots, or none when those roots cannot be
+    /// read.
     fn new(
         bundle: Vec<CertificateDer<'static>>,
         provider: &Arc<CryptoProvider>,
@@ -653,8 +652,8 @@ mod tests {
         }
     }
 
-    /// An owned copy of a [`BasicEvaluation`], with the leaf leading the chain and the anchors
-    /// in DER.
+    /// An owned copy of a [`BasicEvaluation`], with the leaf leading the chain and the anchors in
+    /// DER.
     #[cfg(target_os = "macos")]
     #[derive(Debug, Clone, PartialEq)]
     struct RecordedEvaluation {
@@ -741,16 +740,16 @@ mod tests {
         other_error("\u{201c}localhost\u{201d} certificate is not standards compliant: -67901")
     }
 
-    /// Returns an error carrying `message` the way the platform verifier reports a code that
-    /// rustls has no variant for.
+    /// Returns an error carrying `message` the way the platform verifier reports a code that rustls
+    /// has no variant for.
     #[cfg(target_os = "macos")]
     fn other_error(message: &str) -> Error {
         let message: Box<dyn std::error::Error + Send + Sync> = message.into();
         Error::InvalidCertificate(CertificateError::Other(OtherError(Arc::from(message))))
     }
 
-    /// Returns the message of an error that carries a code rustls has no variant for.
-    /// `OtherError` never compares equal, so tests compare this.
+    /// Returns the message of an error that carries a code rustls has no variant for. `OtherError`
+    /// never compares equal, so tests compare this.
     #[cfg(target_os = "macos")]
     fn other_message(err: &Error) -> String {
         match err {

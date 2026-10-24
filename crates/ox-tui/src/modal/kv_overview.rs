@@ -241,8 +241,7 @@ impl KvOverview {
 }
 
 /// Width of the value column that aligns a section's notes: the widest value that leaves room for
-/// the widest note within `width`.
-/// A wider value puts its note right after it.
+/// the widest note within `width`. A wider value puts its note right after it.
 fn note_column(section: &KvSection, label_width: usize, width: usize) -> usize {
     let annotated: Vec<(usize, usize)> = section
         .rows

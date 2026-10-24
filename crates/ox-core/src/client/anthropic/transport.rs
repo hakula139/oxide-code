@@ -106,8 +106,8 @@ pub(super) async fn post_messages(
     error_for_status(response, request.auth.source()).await
 }
 
-/// Retries a stored login's refresh that a later attempt may complete. Any other failure to
-/// produce a credential is fatal.
+/// Retries a stored login's refresh that a later attempt may complete. Any other failure to produce
+/// a credential is fatal.
 fn credential_failure(error: anyhow::Error) -> AttemptError {
     if auth::is_transient(&error) {
         AttemptError::retryable("Token refresh failed", error)
@@ -174,9 +174,9 @@ impl From<anyhow::Error> for AttemptError {
     }
 }
 
-/// Runs `attempt` until it succeeds, fails fatally, or exhausts [`MAX_RETRIES`]. `attempt`
-/// receives the zero-based retry count for `x-stainless-retry-count`, and `on_retry` hears of each
-/// retry before its delay starts.
+/// Runs `attempt` until it succeeds, fails fatally, or exhausts [`MAX_RETRIES`]. `attempt` receives
+/// the zero-based retry count for `x-stainless-retry-count`, and `on_retry` hears of each retry
+/// before its delay starts.
 pub(super) async fn with_retry<T, F, Fut, R>(mut attempt: F, mut on_retry: R) -> Result<T>
 where
     F: FnMut(u32) -> Fut,

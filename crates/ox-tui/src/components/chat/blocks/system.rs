@@ -136,7 +136,6 @@ mod tests {
 
         #[test]
         fn per_logical_line_wraps_independently() {
-            // Joining input lines would render two source lines as one paragraph.
             let theme = Theme::default();
             let block = SystemMessageBlock::new(
                 "first really long line of text\nsecond really long line of text",

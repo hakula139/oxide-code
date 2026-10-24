@@ -1,6 +1,6 @@
 //! The synthetic user message that opens a compacted transcript. Compaction writes it with the
-//! summary as its first block, and the resumed display strips that block again, since the
-//! boundary block shows the summary.
+//! summary as its first block, and the resumed display strips that block again, since the boundary
+//! block shows the summary.
 
 use indoc::formatdoc;
 
@@ -16,8 +16,8 @@ const SUMMARY_PREFIX: &str = "This conversation has been compacted. \
                               Continue from here without re-asking the engineer what to do.";
 
 /// Composes the synthetic post-compact root message, reminding the model of the task list and the
-/// open background shells the summarized transcript leaves.
-/// After a [`CompactTrigger::MidTurn`] compaction it also tells the model to resume its turn.
+/// open background shells the summarized transcript leaves. After a [`CompactTrigger::MidTurn`]
+/// compaction it also tells the model to resume its turn.
 pub(crate) fn synthesize_post_compact_message(
     summary: &str,
     tasks: &[Task],
@@ -30,7 +30,6 @@ pub(crate) fn synthesize_post_compact_message(
 
         {summary}
     "});
-    // Adapts Claude Code's continuation after an automatic compaction.
     let continuation = (trigger == CompactTrigger::MidTurn).then(|| {
         system_reminder(
             "You were partway through your turn when the conversation was compacted. \
@@ -65,8 +64,8 @@ fn task_reminder(tasks: &[Task]) -> Option<String> {
     }))
 }
 
-/// The block that lists the open background shells after the summary, since the calls that
-/// started them are gone. `None` when none are open.
+/// The block that lists the open background shells after the summary, since the calls that started
+/// them are gone. `None` when none are open.
 fn shell_reminder(shells: &[BackgroundShell]) -> Option<String> {
     if shells.is_empty() {
         return None;

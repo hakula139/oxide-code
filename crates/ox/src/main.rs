@@ -464,8 +464,8 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     Ok(signal.map_or(Exit::Success, Exit::Signal))
 }
 
-/// Runs `ox config check`: loads the config as [`Config::check`] does and resolves the theme.
-/// Then it prints the startup and theme notices, each file read, and a verdict.
+/// Runs `ox config check`: loads the config as [`Config::check`] does and resolves the theme. Then
+/// it prints the startup and theme notices, each file read, and a verdict.
 fn check_config() -> Result<Exit> {
     _ = util::log::init_tracing(false)?;
     let cwd = env::current_dir().context("failed to read the current working directory")?;

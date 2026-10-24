@@ -60,8 +60,8 @@ const FULL_MIN: u16 = 60;
 const COLLAPSED_MIN: u16 = 40;
 const NARROW_MIN: u16 = 25;
 
-/// Minimum height for the starters and tip block. Shorter areas drop the block, so the env and
-/// cwd column centers on its own width.
+/// Minimum height for the starters and tip block. Shorter areas drop the block, so the env and cwd
+/// column centers on its own width.
 const STARTERS_MIN_HEIGHT: u16 = 13;
 
 // ── Picks ──

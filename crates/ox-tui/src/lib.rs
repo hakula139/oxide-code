@@ -1,9 +1,4 @@
 //! Terminal UI built on ratatui and crossterm, driven by a `tokio::select!` event loop.
-//!
-//! [`run`] drives the engine through its handle, with [`app::App`] as the root state.
-//! [`components`] holds the chat, input, status, task, and welcome views, and [`modal`] the
-//! overlays. [`slash`] runs the slash commands, [`markdown`] renders assistant text, [`clipboard`]
-//! copies selections, and [`theme`] centralizes styling.
 
 mod action;
 mod app;
@@ -64,9 +59,9 @@ pub struct Startup {
 }
 
 /// Runs the TUI until the user quits or `shutdown` resolves, then waits for the engine to finalize
-/// the live session. Shows the notices of `theme` in the chat. Returns what `shutdown` resolved
-/// to, or `None` when the user quit. An engine panic is returned after the
-/// terminal is restored, which prints the deferred panic report.
+/// the live session. Shows the notices of `theme` in the chat. Returns what `shutdown` resolved to,
+/// or `None` when the user quit. An engine panic is returned after the terminal is restored, which
+/// prints the deferred panic report.
 pub async fn run<S: Debug>(
     mut engine: Engine,
     theme: ResolvedTheme,

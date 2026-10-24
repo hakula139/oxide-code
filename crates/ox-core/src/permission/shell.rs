@@ -282,8 +282,8 @@ const WRAPPERS: &[Wrapper] = &[
     },
 ];
 
-/// The placeholder `xargs -i` and `--replace` replace when given no value, and `find` replaces
-/// with each path it finds.
+/// The placeholder `xargs -i` and `--replace` replace when given no value, and `find` replaces with
+/// each path it finds.
 const DEFAULT_REPLACE: &str = "{}";
 
 /// The word that stands for the arguments `xargs` reads from its input.
@@ -318,9 +318,9 @@ const RUNUSER: Wrapper = Wrapper {
 /// `find` primaries that run the command after them.
 const FIND_RUNNERS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
-/// A `sed` script of commands that only print, delete, substitute, or move text between buffers.
-/// It leaves out `r`, `w`, and `e`, and the `w` and `e` substitution flags, which read a file,
-/// write one, or run a command.
+/// A `sed` script of commands that only print, delete, substitute, or move text between buffers. It
+/// leaves out `r`, `w`, and `e`, and the `w` and `e` substitution flags, which read a file, write
+/// one, or run a command.
 static SAFE_SED_SCRIPT: LazyLock<Regex> = LazyLock::new(|| {
     let text = r"(?:[^/\\\n]|\\.)*";
     let address = format!(r"(?:\d+(?:~\d+)?|\$|/{text}/I?)");
@@ -542,8 +542,8 @@ impl ShellWord {
 
 // ── Walk ──
 
-/// Node kinds the walk recognizes by walking their children: the statements, words, and
-/// redirection parts that only group or spell what the kinds it weighs on their own hold.
+/// Node kinds the walk recognizes by walking their children: the statements, words, and redirection
+/// parts that only group or spell what the kinds it weighs on their own hold.
 const WALKED_KINDS: &[&str] = &[
     "ansi_c_string",
     "brace_expression",
@@ -595,8 +595,8 @@ struct Walk<'a> {
     reads: Vec<Access>,
     /// The first directory change, as [`construct`] cuts it for a prompt.
     dir_change: Option<String>,
-    /// Whether some directory change may leave the workspace. Only a first `cd` or `pushd`
-    /// that runs once, to a target [`Walk::enters_workspace`] accepts, stays inside.
+    /// Whether some directory change may leave the workspace. Only a first `cd` or `pushd` that
+    /// runs once, to a target [`Walk::enters_workspace`] accepts, stays inside.
     leaves_workspace: bool,
     /// How many loop bodies enclose the node the walk is at, where a directory change may run more
     /// than once.
@@ -737,10 +737,10 @@ impl Walk<'_> {
         }
     }
 
-    /// Visits `node`, handing the `trailing` words a redirection carries to the simple command
-    /// bash gives them: the last one of a pipeline or list, the one a `!` negates, or a new one
-    /// after any assignments that stand alone. Under any other statement, which bash rejects, they
-    /// leave the command unrecognized.
+    /// Visits `node`, handing the `trailing` words a redirection carries to the simple command bash
+    /// gives them: the last one of a pipeline or list, the one a `!` negates, or a new one after
+    /// any assignments that stand alone. Under any other statement, which bash rejects, they leave
+    /// the command unrecognized.
     fn statement<'t>(&mut self, node: Node<'t>, trailing: Vec<Node<'t>>, src: &str) {
         if trailing.is_empty() {
             return self.visit(node, src);
@@ -778,9 +778,8 @@ impl Walk<'_> {
         self.parts(&parts, trailing, src);
     }
 
-    /// Records the simple command whose assignments, name, arguments, and redirections are
-    /// `parts`, in source order, followed by the `trailing` words its statement's redirections
-    /// carry.
+    /// Records the simple command whose assignments, name, arguments, and redirections are `parts`,
+    /// in source order, followed by the `trailing` words its statement's redirections carry.
     fn parts<'t>(&mut self, parts: &[Node<'t>], trailing: &[Node<'t>], src: &str) {
         let nodes: Vec<Node<'t>> = parts
             .iter()
@@ -835,9 +834,9 @@ impl Walk<'_> {
 
     /// Records a `[ ... ]` test as the simple command of the `[` builtin, whose words are the
     /// tokens between the brackets in source order. `[[ ... ]]` evaluates its operands as
-    /// arithmetic, and a token the grammar reads as an operator where bash reads a redirection or
-    /// a list operator, such as `>` or `&&`, means the rules would weigh other words than bash
-    /// runs, so either leaves the command unrecognized.
+    /// arithmetic, and a token the grammar reads as an operator where bash reads a redirection or a
+    /// list operator, such as `>` or `&&`, means the rules would weigh other words than bash runs,
+    /// so either leaves the command unrecognized.
     fn test(&mut self, node: Node<'_>, src: &str) {
         let mut cursor = node.walk();
         let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
@@ -1017,8 +1016,8 @@ impl Walk<'_> {
     /// Returns whether the walk recognizes running `name` with `args`, which holds for any name no
     /// builtin has. The [`DISPATCH_BUILTINS`] are unrecognized, as is a builtin that sets a
     /// variable other than one [`Self::may_set`] admits, or tests a variable whose name may hold a
-    /// subscript, since a subscript is an arithmetic context that may run a substitution. `eval`
-    /// is recognized with a literal script, which the walk follows, `source` with a literal path,
+    /// subscript, since a subscript is an arithmetic context that may run a substitution. `eval` is
+    /// recognized with a literal script, which the walk follows, `source` with a literal path,
     /// `set` only with the options [`sets_only_tracing_options`] admits, and `export` only for the
     /// [`SAFE_VARIABLES`].
     fn builtin(&mut self, name: &str, args: &[Word], src: &str) -> bool {
@@ -1050,9 +1049,8 @@ impl Walk<'_> {
                         declared_name(word, src).is_some_and(|name| SAFE_VARIABLES.contains(&name))
                     })
             }
-            // `-i` evaluates each later value as arithmetic,
-            // `-n` sends later writes to the variable a value names,
-            // and `-x` exports the variable.
+            // `-i` evaluates each later value as arithmetic, `-n` sends later writes to the
+            // variable a value names, and `-x` exports the variable.
             "declare" | "local" | "readonly" | "typeset" => {
                 builtin_options(args, src, "", "", "inx").is_some_and(|(_, operands)| {
                     operands
@@ -1307,9 +1305,9 @@ impl Walk<'_> {
     }
 }
 
-/// The children of `command` that make up its simple command: assignments, name, redirections,
-/// and arguments, including an argument the grammar reads as an anonymous token, such as a bare
-/// `==`, which bash passes as a word.
+/// The children of `command` that make up its simple command: assignments, name, redirections, and
+/// arguments, including an argument the grammar reads as an anonymous token, such as a bare `==`,
+/// which bash passes as a word.
 fn command_parts(command: Node<'_>) -> Vec<Node<'_>> {
     let mut cursor = command.walk();
     command
@@ -1420,8 +1418,8 @@ fn node_splits_words_like_bash(node: Node<'_>, src: &str, quoted: bool) -> bool 
             .all(|&child| node_splits_words_like_bash(child, src, quoted))
 }
 
-/// Returns whether bash reads the source between the sibling tokens `left` and `right` of
-/// `parent` as tree-sitter-bash does.
+/// Returns whether bash reads the source between the sibling tokens `left` and `right` of `parent`
+/// as tree-sitter-bash does.
 fn separates_like_bash(parent: Node<'_>, left: Node<'_>, right: Node<'_>, src: &str) -> bool {
     let text = &src[left.end_byte()..right.start_byte()];
     match Gap::of(text) {
@@ -1450,8 +1448,8 @@ fn is_dropped_dash(gap: &str) -> bool {
     gap.starts_with(blank) && gap.ends_with(blank) && gap.trim_matches(blank) == "-"
 }
 
-/// The lone `-` bash passes after `last`, the last part of a simple command, when
-/// tree-sitter-bash drops it, as [`is_dropped_dash`] describes.
+/// The lone `-` bash passes after `last`, the last part of a simple command, when tree-sitter-bash
+/// drops it, as [`is_dropped_dash`] describes.
 fn dropped_dash(last: Node<'_>, src: &str) -> Option<Word> {
     let rest = &src[last.end_byte()..];
     let start = last.end_byte() + rest.find(|c| c != ' ' && c != '\t')?;
@@ -1640,8 +1638,8 @@ fn substitutes_text(expansion: Node<'_>, src: &str) -> bool {
 }
 
 /// Returns whether `node`, the name in a `${...}` expansion, names a value without evaluating
-/// anything: a variable, a special parameter, or an array element by number or all elements by
-/// `@` or `*`.
+/// anything: a variable, a special parameter, or an array element by number or all elements by `@`
+/// or `*`.
 fn names_a_value(node: Node<'_>, src: &str) -> bool {
     match node.kind() {
         "special_variable_name" | "variable_name" => true,
@@ -1681,8 +1679,8 @@ fn basename(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
 }
 
-/// Returns whether bash runs the program `name` from a path relative to the working directory,
-/// as it does for a name with a `/` that does not start at the root, such as `./build.sh`.
+/// Returns whether bash runs the program `name` from a path relative to the working directory, as
+/// it does for a name with a `/` that does not start at the root, such as `./build.sh`.
 fn is_relative_program(name: &str) -> bool {
     name.contains('/') && Path::new(name).is_relative()
 }
@@ -1726,9 +1724,9 @@ impl Wrapper {
         ..Self::TRANSPARENT
     };
 
-    /// Parses the options that lead `args`, or returns the index of the first word that hides
-    /// where the command starts: an option the grammar does not know or one that expands, or any
-    /// word before the command that bash may expand into other than one word.
+    /// Parses the options that lead `args`, or returns the index of the first word that hides where
+    /// the command starts: an option the grammar does not know or one that expands, or any word
+    /// before the command that bash may expand into other than one word.
     fn invocation(&self, args: &[Word]) -> Result<Invocation, usize> {
         let parsed = self.options(args);
         let end = parsed.as_ref().map_or_else(|&at| at, |run| run.start);
@@ -1892,8 +1890,8 @@ enum Assignments {
     None,
     /// After the options, as `env` takes them.
     After,
-    /// Before, between, and after the options, as `sudo` takes any word holding a `=` that does
-    /// not start with `/` or `=`.
+    /// Before, between, and after the options, as `sudo` takes any word holding a `=` that does not
+    /// start with `/` or `=`.
     Among,
 }
 
@@ -1904,8 +1902,8 @@ enum Kind {
     Transparent,
     /// It changes who runs the command, so it stays in the words an allow rule must name.
     Runner,
-    /// It appends the words it reads from its input to the command, as `xargs` does, so it stays
-    /// in the words an allow rule must name too.
+    /// It appends the words it reads from its input to the command, as `xargs` does, so it stays in
+    /// the words an allow rule must name too.
     Input,
 }
 
@@ -1941,8 +1939,8 @@ enum Effect {
 /// How a wrapper runs its command, from the options before it.
 #[derive(Default)]
 struct Invocation {
-    /// Where the command starts among the wrapper's arguments, which is past them all when it
-    /// runs none.
+    /// Where the command starts among the wrapper's arguments, which is past them all when it runs
+    /// none.
     start: usize,
     elsewhere: bool,
     /// The placeholder that input words replace, when an option sets one.
@@ -2055,9 +2053,9 @@ fn is_local_name(name: &str, inherited: &dyn Fn(&str) -> bool) -> bool {
 }
 
 /// The variable a `declare`-family or `export` argument names: its value up to an `=` or `+=`, or
-/// when the value expands, the identifier it is written with before an `=`. `None` for an option,
-/// a name the analysis cannot read, or a literal value that assigns `(...)`, which the builtin
-/// parses again as an array whose keys and values may run substitutions the walk never sees.
+/// when the value expands, the identifier it is written with before an `=`. `None` for an option, a
+/// name the analysis cannot read, or a literal value that assigns `(...)`, which the builtin parses
+/// again as an array whose keys and values may run substitutions the walk never sees.
 fn declared_name<'w>(word: &'w Word, src: &'w str) -> Option<&'w str> {
     let text = word.value.as_deref().unwrap_or(&src[word.span.clone()]);
     let (name, value) = text.split_once('=').unwrap_or((text, ""));
@@ -2079,14 +2077,11 @@ fn literal_script(args: &[Word]) -> Option<String> {
         .map(|values| values.join(" "))
 }
 
-/// The variables a builtin's options name and the operands after them,
-/// read past option clusters where each letter in `valued` takes a value,
-/// and each in `naming` takes a variable's name.
-/// `None` when an option holds a letter in `refused`, whose effect the analysis does not follow,
-/// or a word that expands may be an option or a name.
-/// A word written from a letter or `_`, as an assignment with an array value is,
-/// cannot expand to an option.
-/// `--` ends the options.
+/// The variables a builtin's options name and the operands after them, read past option clusters
+/// where each letter in `valued` takes a value, and each in `naming` takes a variable's name.
+/// `None` when an option holds a letter in `refused`, whose effect the analysis does not follow, or
+/// a word that expands may be an option or a name. A word written from a letter or `_`, as an
+/// assignment with an array value is, cannot expand to an option. `--` ends the options.
 fn builtin_options<'w>(
     args: &'w [Word],
     src: &str,
@@ -2189,8 +2184,8 @@ fn may_test_a_subscript(args: &[Word]) -> bool {
 struct Word {
     /// Where the word is written in the source.
     span: Range<usize>,
-    /// The value the shell gives the word after tilde expansion and quote removal, or `None`
-    /// when part of it expands at run time.
+    /// The value the shell gives the word after tilde expansion and quote removal, or `None` when
+    /// part of it expands at run time.
     value: Option<String>,
     /// Whether an unquoted `*`, `?`, `[`, or `{` leaves the word to pathname or brace expansion.
     glob: bool,
@@ -2233,9 +2228,9 @@ impl Word {
     }
 }
 
-/// A leading `NAME=VALUE` assignment as a word, with its value unquoted and a leading `~`
-/// expanded. Neither pathname nor brace expansion applies to an assignment, so only a value or a
-/// subscript that expands keeps it from being literal.
+/// A leading `NAME=VALUE` assignment as a word, with its value unquoted and a leading `~` expanded.
+/// Neither pathname nor brace expansion applies to an assignment, so only a value or a subscript
+/// that expands keeps it from being literal.
 fn assignment_word(node: Node<'_>, src: &str) -> ShellWord {
     let written = || ShellWord {
         text: src[node.byte_range()].to_owned(),
@@ -2577,9 +2572,9 @@ pub(super) fn pattern_words(pattern: &str) -> Result<Vec<PatternWord>> {
 const TEST_OPERATORS: &[&str] = &["!", "!=", "(", ")", "<", "=", "==", ">", "]"];
 
 /// The words that may name a file read by the shipped known-safe read-only command `name`, or
-/// `None` when `name` is no such command or `args` take it out of the safe set. Every argument
-/// must be literal and free of globs, so each file it reads is one the gate can check. Every word
-/// of a `test` or `[` call other than an option or a [`TEST_OPERATORS`] word counts as a file, so a
+/// `None` when `name` is no such command or `args` take it out of the safe set. Every argument must
+/// be literal and free of globs, so each file it reads is one the gate can check. Every word of a
+/// `test` or `[` call other than an option or a [`TEST_OPERATORS`] word counts as a file, so a
 /// string it compares reads as one too.
 fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<String>> {
     let values = args
@@ -2621,10 +2616,9 @@ fn is_recursive_grep(arg: &str) -> bool {
 }
 
 /// The files a `sed` call reads, or `None` when it may edit a file in place, read a script file, or
-/// run a script [`SAFE_SED_SCRIPT`] does not accept.
-/// An option after an operand is `None` too, since BSD `sed` reads it as a file and may then take
-/// the operand before it as the script.
-/// A `--` there is a file to BSD and ends the options for GNU, which read the same script.
+/// run a script [`SAFE_SED_SCRIPT`] does not accept. An option after an operand is `None` too,
+/// since BSD `sed` reads it as a file and may then take the operand before it as the script. A `--`
+/// there is a file to BSD and ends the options for GNU, which read the same script.
 fn sed_files(values: &[&str]) -> Option<Vec<String>> {
     let mut scripts = Vec::new();
     let mut files = Vec::new();
@@ -2677,8 +2671,8 @@ fn sed_files(values: &[&str]) -> Option<Vec<String>> {
     safe.then(|| files.into_iter().map(str::to_owned).collect())
 }
 
-/// The name of a long option such as `--name` or `--name=value`, which GNU tools accept
-/// abbreviated to any prefix that names one option.
+/// The name of a long option such as `--name` or `--name=value`, which GNU tools accept abbreviated
+/// to any prefix that names one option.
 fn long_option(arg: &str) -> Option<&str> {
     let option = arg.strip_prefix("--")?;
     let name = option.split_once('=').map_or(option, |(name, _)| name);
@@ -2687,10 +2681,10 @@ fn long_option(arg: &str) -> Option<&str> {
 
 // ── Readers ──
 
-/// The files the reader `name` that is no known-safe read may read, from `args`:
-/// each file [`reader_args`] finds, with each globbing one also expanded in `cwd` as bash does.
-/// The second value is whether it may read a file the arguments do not name,
-/// or a word globs to files [`expand_glob`] cannot list, which leaves what it reads unknown.
+/// The files the reader `name` that is no known-safe read may read, from `args`: each file
+/// [`reader_args`] finds, with each globbing one also expanded in `cwd` as bash does. The second
+/// value is whether it may read a file the arguments do not name, or a word globs to files
+/// [`expand_glob`] cannot list, which leaves what it reads unknown.
 fn reader_operands(name: &str, args: &[Word], cwd: &Path) -> (Vec<String>, bool) {
     let values: Vec<Option<&str>> = args.iter().map(|word| word.value.as_deref()).collect();
     let operands = reader_args(name, &values);
@@ -2722,9 +2716,9 @@ struct ReaderArgs {
 /// Reads the arguments of reader `name`, given each word's value or `None` for one that expands.
 /// The gate cannot tell whether a GNU or a BSD build of `name` runs, or whether getopt stops
 /// reading options at the first operand, as BSD and `POSIXLY_CORRECT` make it, so it counts each
-/// file any of them would read.
-/// A word that expands may split into any words, so it leaves what the reader reads unknown
-/// wherever it stands, as does `find -files0-from`, which reads the paths to search from a file.
+/// file any of them would read. A word that expands may split into any words, so it leaves what the
+/// reader reads unknown wherever it stands, as does `find -files0-from`, which reads the paths to
+/// search from a file.
 fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
     let grammar = reader_grammar(name);
     let mut args = ReaderArgs {
@@ -2758,12 +2752,11 @@ enum Dialect {
     Bsd,
 }
 
-/// A reader's option grammar, matching both its GNU and its BSD build.
-/// It lists the options that take a value in either build,
-/// so a missing one reads its value as a file, which can only make the gate more cautious.
-/// It also lists, as a [`switch`], each option whose full name abbreviates a listed one,
-/// since getopt takes an exact name before a prefix.
-/// An option one build rejects may stay listed, since the reader then exits before reading.
+/// A reader's option grammar, matching both its GNU and its BSD build. It lists the options that
+/// take a value in either build, so a missing one reads its value as a file, which can only make
+/// the gate more cautious. It also lists, as a [`switch`], each option whose full name abbreviates
+/// a listed one, since getopt takes an exact name before a prefix. An option one build rejects may
+/// stay listed, since the reader then exits before reading.
 struct ReaderGrammar {
     options: &'static [ReaderOpt],
     /// Whether it reads its options with getopt, which may stop at the first operand.
@@ -2782,12 +2775,11 @@ impl ReaderGrammar {
         pattern: false,
     };
 
-    /// The files the `dialect` build reads from `values`, taking options after operands until
-    /// `--` when it may `permute` them.
-    /// A short option that takes a value takes the rest of its cluster or the next word,
-    /// and a long one its `=` value or the next word.
-    /// A long option the grammar does not list counts its `=` value as a file, and since it may be
-    /// one that gives the pattern, the leading operand then counts as a file too.
+    /// The files the `dialect` build reads from `values`, taking options after operands until `--`
+    /// when it may `permute` them. A short option that takes a value takes the rest of its cluster
+    /// or the next word, and a long one its `=` value or the next word. A long option the grammar
+    /// does not list counts its `=` value as a file, and since it may be one that gives the
+    /// pattern, the leading operand then counts as a file too.
     fn read(&self, dialect: Dialect, permute: bool, values: &[Option<&str>]) -> ReaderArgs {
         let mut args = ReaderArgs {
             files: Vec::new(),
@@ -2871,8 +2863,8 @@ impl ReaderGrammar {
         args
     }
 
-    /// The long option `--name`, or the one listed option `name` abbreviates, as getopt accepts.
-    /// An abbreviation getopt finds ambiguous among options the grammar leaves out makes the reader
+    /// The long option `--name`, or the one listed option `name` abbreviates, as getopt accepts. An
+    /// abbreviation getopt finds ambiguous among options the grammar leaves out makes the reader
     /// exit before reading.
     fn long(&self, name: &str) -> Option<&ReaderOpt> {
         let longs = || {
@@ -2901,8 +2893,7 @@ impl ReaderGrammar {
     }
 }
 
-/// The option grammar of reader `name`.
-/// Every operand of `find`'s expression counts as a file.
+/// The option grammar of reader `name`. Every operand of `find`'s expression counts as a file.
 fn reader_grammar(name: &str) -> &'static ReaderGrammar {
     match name {
         "find" => &FIND_GRAMMAR,

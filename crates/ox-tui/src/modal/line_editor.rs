@@ -25,8 +25,8 @@ pub(crate) struct LineEditor {
     textarea: TextArea<'static>,
     max_width: usize,
     placeholder: Option<&'static str>,
-    /// First grapheme cluster shown when the text overflows its row. `Cell` because it settles
-    /// at render.
+    /// First grapheme cluster shown when the text overflows its row. `Cell` because it settles at
+    /// render.
     scroll: Cell<usize>,
 }
 
@@ -121,9 +121,9 @@ impl LineEditor {
         !is_blocked_key(event)
     }
 
-    /// Inserts pasted `text` at the cursor as one line, with each run of control characters such
-    /// as a line break collapsed to a space. Keeps what fits under the cap and returns whether
-    /// the text changed.
+    /// Inserts pasted `text` at the cursor as one line, with each run of control characters such as
+    /// a line break collapsed to a space. Keeps what fits under the cap and returns whether the
+    /// text changed.
     pub(crate) fn paste(&mut self, text: &str) -> bool {
         let room = self.max_width.saturating_sub(self.text().width());
         let flat = text
@@ -242,8 +242,8 @@ fn char_deletion(event: &KeyEvent) -> Option<Side> {
     }
 }
 
-/// Returns whether the textarea maps the key to a line break or an indent, neither of which fits
-/// a one-line field.
+/// Returns whether the textarea maps the key to a line break or an indent, neither of which fits a
+/// one-line field.
 fn is_blocked_key(event: &KeyEvent) -> bool {
     match event.code {
         KeyCode::Enter | KeyCode::Tab | KeyCode::Char('\n' | '\r') => true,

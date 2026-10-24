@@ -71,9 +71,8 @@ const SEPARATOR: &str = " · ";
 /// Widest [`format_short_relative_time`] output, an ISO date.
 pub(super) const SHORT_RELATIVE_TIME_WIDTH: usize = "2026-01-01".len();
 
-/// `{id_prefix} · {when} · {N msgs} · {branch} · {project}`,
-/// omitting each trailing component whose input is zero or `None`.
-/// `when` is relative to `now`, and a date is in its offset.
+/// `{id_prefix} · {when} · {N msgs} · {branch} · {project}`, omitting each trailing component whose
+/// input is zero or `None`. `when` is relative to `now`, and a date is in its offset.
 pub(super) fn format_metadata_line(
     session_id: &str,
     last_active_at: OffsetDateTime,
@@ -100,9 +99,8 @@ pub(super) fn format_metadata_line(
     meta
 }
 
-/// [`format_relative_time`] with each unit cut to its first letter, as in `3h ago`,
-/// for a time column [`SHORT_RELATIVE_TIME_WIDTH`] wide.
-/// The date is in `now`'s offset.
+/// [`format_relative_time`] with each unit cut to its first letter, as in `3h ago`, for a time
+/// column [`SHORT_RELATIVE_TIME_WIDTH`] wide. The date is in `now`'s offset.
 pub(super) fn format_short_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
     let ts = ts.to_offset(now.offset());
     match elapsed(ts, now) {
@@ -111,8 +109,7 @@ pub(super) fn format_short_relative_time(ts: OffsetDateTime, now: OffsetDateTime
     }
 }
 
-/// Compact "N units ago", or the ISO date past 30 days.
-/// A future `ts` reads as 0 seconds ago.
+/// Compact "N units ago", or the ISO date past 30 days. A future `ts` reads as 0 seconds ago.
 fn format_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
     match elapsed(ts, now) {
         Some((n, (unit, units))) => format!("{n} {} ago", plural(n, unit, units)),
@@ -120,9 +117,8 @@ fn format_relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
     }
 }
 
-/// The time from `ts` to `now` in whole units of the largest unit that fits,
-/// with the unit's singular and plural names, or `None` past 30 days.
-/// A future `ts` reads as 0 seconds.
+/// The time from `ts` to `now` in whole units of the largest unit that fits, with the unit's
+/// singular and plural names, or `None` past 30 days. A future `ts` reads as 0 seconds.
 fn elapsed(ts: OffsetDateTime, now: OffsetDateTime) -> Option<(i64, (&'static str, &'static str))> {
     let secs = (now - ts).whole_seconds().max(0);
     Some(if secs < 60 {

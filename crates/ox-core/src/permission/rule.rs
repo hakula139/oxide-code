@@ -52,9 +52,9 @@ enum Pattern {
     Tool(GlobMatcher),
 }
 
-/// A `read` / `edit` glob that also matches everything below a path it matches, compiled as
-/// written and over [`fold_name`]-folded names. Allow matches the first alone, and deny matches
-/// either, so a case or normalization variant cannot slip past.
+/// A `read` / `edit` glob that also matches everything below a path it matches, compiled as written
+/// and over [`fold_name`]-folded names. Allow matches the first alone, and deny matches either, so
+/// a case or normalization variant cannot slip past.
 #[derive(Debug, Clone)]
 struct PathGlob {
     /// The glob, `/`-separated, without the copy that matches below it.
@@ -197,9 +197,9 @@ impl Rule {
     }
 
     /// This rule plus a copy of its path glob rooted where the glob's literal prefix (the
-    /// components before the first glob character) resolves, wherever that differs from the
-    /// prefix as written. An anchored glob resolves from each of `anchors`, the anchor directories
-    /// as spelled, and only absolute anchors count.
+    /// components before the first glob character) resolves, wherever that differs from the prefix
+    /// as written. An anchored glob resolves from each of `anchors`, the anchor directories as
+    /// spelled, and only absolute anchors count.
     pub(super) fn with_resolved_prefixes(mut self, anchors: &[PathBuf]) -> Result<Self> {
         let Pattern::Path(globs) = &mut self.pattern else {
             return Ok(self);

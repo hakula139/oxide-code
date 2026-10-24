@@ -1,7 +1,7 @@
 //! Prefixed rows shared by the chat blocks. [`prefixed_row`] wraps text under its prefix, and
 //! [`body_row`] indents it as a tool or `/diff` body row. [`wrapped_row`] wraps a prebuilt line
-//! under a continuation prefix, and [`NumberedRows`] puts a line number and a separator between
-//! the bar and the text.
+//! under a continuation prefix, and [`NumberedRows`] puts a line number and a separator between the
+//! bar and the text.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -533,7 +533,6 @@ mod tests {
 
         #[test]
         fn wraps_with_aligned_continuation_prefix() {
-            // Continuation lines carry the bar plus padding aligned under the text column.
             let theme = Theme::default();
             let ctx = RenderCtx::new(14, &theme);
             let renderer = NumberedRows::new(&ctx, theme.tool_border(), 10);
@@ -560,10 +559,7 @@ mod tests {
 
         #[test]
         fn respects_char_boundary() {
-            // Each `中` is 3 bytes,
-            // so cutting at byte 5 without `floor_char_boundary` would split a codepoint
-            // and panic on `&s[..5]`.
-            // Rounding down to byte 3 yields one `中` + `...`.
+            // Each `中` is 3 bytes, so a 5-byte limit must round down to a character boundary.
             let input = "中中中中";
             let result = truncate_to_bytes(input, 5);
             assert_eq!(result, "中...");

@@ -209,8 +209,8 @@ mod tests {
             }
         }
 
-        /// Contrast ratios multiply across a color between two others, so the strongest
-        /// highlight that keeps `dim` at 3:1 reaches a third of `dim`'s contrast with the base.
+        /// Contrast ratios multiply across a color between two others, so the strongest highlight
+        /// that keeps `dim` at 3:1 reaches a third of `dim`'s contrast with the base.
         #[test]
         fn selection_comes_within_2_percent_of_the_strongest_highlight() {
             for (name, theme, base) in palettes() {

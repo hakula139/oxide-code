@@ -62,8 +62,8 @@ pub fn set_archived(
 }
 
 /// Deletes the session file at `path` and the session's artifact directory. Refuses the live
-/// session's file, which callers already filter out, so a bug upstream cannot unlink the file
-/// under its open writer.
+/// session's file, which callers already filter out, so a bug upstream cannot unlink the file under
+/// its open writer.
 pub fn delete(path: &Path, session_id: &str, live_id: &str) -> Result<(), SavedError> {
     if session_id == live_id {
         return Err(SavedError::live(session_id));

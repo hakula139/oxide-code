@@ -90,10 +90,9 @@ impl ChainBuilder {
         self.tip = Tip::Rewound(tip);
     }
 
-    /// Flattens the branch ending at the tip: the tip of a rewind no message followed in the file,
-    /// or else the newest leaf no rewind abandoned, with UUID order breaking timestamp ties so
-    /// every load picks the same branch. The walk takes each node out of the map, so a cycle or an
-    /// orphan parent ends it at a missing node. A pure cycle, which has no leaf, yields no chain.
+    /// Resolves the latest rewind not followed by a message, or the newest non-abandoned leaf,
+    /// breaking timestamp ties by UUID. Traversal stops at a missing or revisited parent. A cycle
+    /// without a leaf yields an empty chain.
     pub(super) fn resolve(mut self) -> Chain {
         let tip = match self.tip {
             Tip::NewestLeaf => self.newest_leaf(),

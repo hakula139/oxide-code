@@ -1,6 +1,4 @@
-//! Engine events and background task results: chat and status updates, the turn lifecycle they
-//! drive, session swaps, config changes, sign-in results, git probe updates, copy reports, and
-//! background slash-command output.
+//! Engine and background events that update TUI state.
 
 use std::time::Instant;
 
@@ -164,11 +162,10 @@ impl App {
         }
     }
 
-    /// Ends a failed operation.
-    /// A turn whose automatic compaction failed goes idle with the queue held.
-    /// A turn that never reached the model, or that the engine rolled back, does the same
-    /// and hands its prompts back, one into the empty input for another try.
-    /// A slash command handed back that way gets a note that Enter runs it again.
+    /// Ends a failed operation. A turn whose automatic compaction failed goes idle with the queue
+    /// held. A turn that never reached the model, or that the engine rolled back, does the same and
+    /// hands its prompts back, one into the empty input for another try. A slash command handed
+    /// back that way gets a note that Enter runs it again.
     fn apply_turn_failed(&mut self, msg: &str) {
         self.chat.push_error(msg);
         match self.queue.fail_turn(self.input.is_empty()) {
@@ -251,10 +248,9 @@ impl App {
         old_id
     }
 
-    /// Repaints chat with one boundary block after a manual or automatic compaction.
-    /// Queued prompts survive because the session identity stays the same.
-    /// A mid-turn compaction also leaves open modals alone, since the user may have opened one at
-    /// any point of a long turn.
+    /// Repaints chat with one boundary block after a manual or automatic compaction. Queued prompts
+    /// survive because the session identity stays the same. A mid-turn compaction also leaves open
+    /// modals alone, since the user may have opened one at any point of a long turn.
     fn apply_session_compacted(
         &mut self,
         summary: &str,
@@ -1149,8 +1145,6 @@ mod tests {
             app.handle_engine_event(Event::Cancelled);
 
             assert_eq!(app.status, Status::Idle);
-            // commit_streaming pushes the partial text as an AssistantText block, and
-            // push_interrupted_marker pushes the marker, adding two entries to whatever was there.
             assert_eq!(
                 app.chat.entry_count(),
                 entries_before + 2,
@@ -1163,10 +1157,8 @@ mod tests {
 
         #[test]
         fn cancelling_status_is_sticky_against_late_buffered_events() {
-            // After the user dispatches Interrupt, the event channel may still hold StreamToken /
-            // ToolCallStart events the engine emitted before its select arm dropped the turn
-            // future. Those buffered events must not flip the bar back to Streaming / ToolRunning,
-            // or the cancel acknowledgment flickers off until `Cancelled` finally arrives.
+            // Events buffered before an interrupt must not clear the cancellation status before
+            // `Cancelled` arrives.
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("hi".to_owned()));
             app.dispatch_action(Action::Op(Op::Interrupt));
@@ -1784,8 +1776,6 @@ mod tests {
 
         #[test]
         fn config_changed_model_swap_refreshes_status_and_chat() {
-            // Three surfaces refresh in one shot: status-bar label, `session_info` (backs `/status`
-            // / `/config`), and a chat confirmation block.
             let (mut app, _rx, _event_tx) = test_app(None);
             let sonnet = ModelSpec::resolve("claude-sonnet-5-5");
 
@@ -1817,8 +1807,6 @@ mod tests {
 
         #[test]
         fn config_changed_effort_only_keeps_status_bar_model_label() {
-            // An effort-only swap leaves the cached model label alone, so only the snapshot effort
-            // and chat confirmation update.
             let (mut app, _rx, _event_tx) = test_app(None);
             let original_model = app.status_bar.model().to_owned();
 
@@ -2149,9 +2137,8 @@ mod tests {
 
         #[test]
         fn evicts_orphaned_pending_calls() {
-            // A `ToolCallStart` without a matching `ToolCallEnd` by the turn's end is an orphan
-            // (crashed tool, agent-loop bug, mid-turn abort). The pending entry must be discarded
-            // so long sessions don't accumulate stale IDs across turns.
+            // Turn boundaries discard calls whose results never arrived, preventing stale IDs from
+            // accumulating.
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_engine_event(bash_call_start("orphan", "ls"));
             assert_eq!(app.chat.pending_call_count(), 1);

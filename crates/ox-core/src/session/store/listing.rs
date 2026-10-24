@@ -148,8 +148,8 @@ impl SessionStore {
         Ok(self.walk(scope)?.next())
     }
 
-    /// Readable sessions whose ID starts with `prefix`, most recently active first. IDs are
-    /// matched on file names, so only the matching files are parsed.
+    /// Readable sessions whose ID starts with `prefix`, most recently active first. IDs are matched
+    /// on file names, so only the matching files are parsed.
     pub(crate) fn list_matching(
         &self,
         prefix: &str,
@@ -169,8 +169,8 @@ impl SessionStore {
         (projects == ProjectScope::Current).then(|| self.project.clone())
     }
 
-    /// Session files paired with their mtimes, most recently active first. The home project's
-    /// files are in its own directory and, for older sessions, the launch directory's.
+    /// Session files paired with their mtimes, most recently active first. The home project's files
+    /// are in its own directory and, for older sessions, the launch directory's.
     fn session_paths(&self, projects: ProjectScope) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
         let mut paths = match projects {
             ProjectScope::Current => {
@@ -252,9 +252,9 @@ const TITLE_LINE_PREFIX: &str = r#"{"type":"title""#;
 const ARCHIVE_LINE_PREFIX: &str = r#"{"type":"archive""#;
 const SUMMARY_LINE_PREFIX: &str = r#"{"type":"summary""#;
 
-/// Reads the header, the latest title and summary, and the archive state, or `None` past the
-/// header for a session that `project` does not own. `last_active_at` is the mtime the walk
-/// sorted by, so the listed time matches the order.
+/// Reads the header, the latest title and summary, and the archive state, or `None` past the header
+/// for a session that `project` does not own. `last_active_at` is the mtime the walk sorted by, so
+/// the listed time matches the order.
 fn read_session_info(
     path: &Path,
     last_active_at: OffsetDateTime,

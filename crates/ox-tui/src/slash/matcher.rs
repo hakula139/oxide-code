@@ -81,8 +81,8 @@ fn on_alias(cmd: &dyn SlashCommand, alias: &'static str) -> MatchedCommand {
     }
 }
 
-/// Two-tier prefix-then-substring rank over a curated roster, case-insensitive, preserving
-/// declared order within each tier. Empty `query` returns every item in declared order.
+/// Two-tier prefix-then-substring rank over a curated roster, case-insensitive, preserving declared
+/// order within each tier. Empty `query` returns every item in declared order.
 pub(super) fn rank_by_prefix<'a, T>(
     items: &'a [T],
     query: &str,

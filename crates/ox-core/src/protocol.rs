@@ -32,9 +32,8 @@ use crate::tool::view::{ApprovalPreview, ToolResultView};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Op {
-    /// Starts a turn with `text`.
-    /// A fresh session takes `title` as its first-prompt title in place of `text`,
-    /// so a prompt a slash command built lists under the command line that built it.
+    /// Starts a turn with `text`. On a fresh session, `title` supplies the first-prompt title, so a
+    /// synthesized slash-command prompt can retain the typed command as its title.
     Prompt { text: String, title: Option<String> },
     /// Adds a prompt typed while a turn runs. The turn splices it in at its next round boundary and
     /// confirms with [`Event::PromptDrained`]. The frontend keeps every unconfirmed prompt and
@@ -108,8 +107,8 @@ impl fmt::Debug for SignInCode {
 pub enum ResumeTarget {
     /// The session file at this path.
     Path(PathBuf),
-    /// The one saved session other than the live one whose id starts with this prefix, searched
-    /// for in the current project first and then in every project.
+    /// The one saved session other than the live one whose id starts with this prefix, searched for
+    /// in the current project first and then in every project.
     Prefix(String),
 }
 
@@ -173,8 +172,8 @@ pub struct UsageSnapshot {
     pub estimated_cost_usd: Option<f64>,
 }
 
-/// Notifications from the engine to a frontend, which receives them on the `events` channel of
-/// the [`EngineHandle`](crate::engine::EngineHandle) it drives.
+/// Notifications from the engine to a frontend, which receives them on the `events` channel of the
+/// [`EngineHandle`](crate::engine::EngineHandle) it drives.
 ///
 /// Unless [`Op::Shutdown`] stops it first, the engine ends each op below with one terminal event,
 /// sent last:
@@ -196,8 +195,8 @@ pub struct UsageSnapshot {
 pub enum Event {
     /// Assistant text chunk to append to the in-flight reply.
     StreamToken(String),
-    /// Extended-thinking chunk rendered separately from `StreamToken` and only when the user
-    /// has thinking display enabled.
+    /// Extended-thinking chunk rendered separately from `StreamToken` and only when the user has
+    /// thinking display enabled.
     ThinkingToken(String),
     /// Progress note the model wrote before a tool call, emitted as that call's block starts
     /// streaming. Sinks drop it when thinking display is on, since the same text already streamed
@@ -215,16 +214,12 @@ pub enum Event {
     PromptDrained(String),
     /// Turn ended cleanly with a final assistant reply (no further tool rounds).
     TurnComplete,
-    /// The model refused the turn in flight, so the engine removed it from the conversation along
-    /// with its prompt and the [`Self::PromptDrained`] prompts it took in, and a
-    /// [`Self::TurnFailed`] follows.
-    /// The frontend hands the removed prompts back to the user.
-    /// After a [`CompactTrigger::MidTurn`] compaction the engine removes only what followed the
-    /// summary, since the summary already covers the prompt and the prompts drained before it.
+    /// A refusal rolled back the turn and its drained prompts. The frontend returns the removed
+    /// prompts to the user, then [`Self::TurnFailed`] ends the operation. After
+    /// [`CompactTrigger::MidTurn`], only content after the summary is removed.
     TurnRolledBack,
-    /// The automatic compaction ahead of an [`Op::Prompt`] failed, so the engine never sent the
-    /// prompt, and a [`Self::TurnFailed`] follows.
-    /// The frontend hands the prompt back to the user.
+    /// Automatic compaction failed before the prompt was sent. The frontend returns the prompt to
+    /// the user, then [`Self::TurnFailed`] ends the operation.
     PromptUnsent,
     /// The in-flight prompt, compaction, resume, archive, sign-in, or sign-out failed. Like
     /// [`Self::TurnComplete`] and [`Self::Cancelled`], it ends the operation.
@@ -237,8 +232,7 @@ pub enum Event {
     /// reply is truncated, and frontends mark where it stopped.
     Cancelled,
     /// Automatic compaction started, ahead of the submitted prompt or at a round boundary of the
-    /// turn in flight.
-    /// The frontend shows compacting status while the summarizer request streams.
+    /// turn in flight. The frontend shows compacting status while the summarizer request streams.
     AutoCompactionStarted,
     /// Automatic compaction failed `failures` times in a row, so later prompts go out without it
     /// until [`Self::AutoCompactionResumed`].
@@ -258,28 +252,23 @@ pub enum Event {
     /// An [`Op::Rename`] could not record its title, so the title stays. Ends the rename as
     /// [`Self::SessionTitleUpdated`] does.
     RenameFailed(String),
-    /// An [`Op::Clear`] or [`Op::Archive`] rolled the session, making a new session UUID active.
-    /// `old_session` is the state the roll left the old session in,
-    /// so the frontend can name the session an archive roll archived.
+    /// [`Op::Clear`] or [`Op::Archive`] started session `id`. `old_session` reports the prior
+    /// session's archive state for the frontend's notice.
     SessionRolled {
         id: String,
         old_session: ArchiveState,
     },
-    /// An [`Op::Resume`] swapped to an existing session in place.
-    /// Payload carries the target's transcript projected for display,
-    /// so the frontend can rebuild chat without restarting the process.
-    /// `prior` is the target's state before this resume, which always leaves it active.
+    /// [`Op::Resume`] switched to an existing session. `history` rebuilds the frontend's chat, and
+    /// `prior` reports the session's archive state before resuming made it active.
     SessionResumed {
         id: String,
         title: Option<String>,
         prior: ArchiveState,
         history: Vec<Interaction>,
     },
-    /// A compaction finished.
-    /// The in-memory transcript has already been swapped to the synthetic continuation,
-    /// so the frontend clears its chat and replays a single boundary block.
-    /// After an automatic compaction the frontend stays busy,
-    /// since the prompt it ran ahead of or the rest of the turn it paused goes out next.
+    /// Compaction replaced the transcript with a synthetic continuation. The frontend clears its
+    /// chat and shows the summary boundary. Automatic compaction leaves the frontend busy while the
+    /// pending prompt or turn continues.
     SessionCompacted {
         summary: String,
         pre_count: u32,
@@ -288,12 +277,11 @@ pub enum Event {
     },
     /// Ends an [`Op::Clear`], [`Op::Archive`], [`Op::Resume`], or [`Op::Compact`] that replaced the
     /// transcript. Follows the swap event, [`Self::SessionRolled`], [`Self::SessionResumed`], or
-    /// [`Self::SessionCompacted`], and every event that reports the new transcript's state, such
-    /// as its usage, task list, and notices.
+    /// [`Self::SessionCompacted`], and every event that reports the new transcript's state, such as
+    /// its usage, task list, and notices.
     SessionReady,
-    /// Live config after an [`Op::SetModel`]. `effort` is the resolved value, `requested` is the
-    /// op's pick, whose effort an unknown model drops, and `notice` confirms the change against the
-    /// settings before it.
+    /// Live config after [`Op::SetModel`]. `requested` records the user's pick, `effort` its
+    /// resolved value, and `notice` explains the change. Unknown models drop the requested effort.
     ConfigChanged {
         model: ModelSpec,
         effort: Option<Effort>,
@@ -303,16 +291,15 @@ pub enum Event {
     },
     /// The permission mode after an [`Op::SetMode`].
     ModeChanged(Mode),
-    /// An [`Op::Login`] waits for sign-in at `url`, which returns to a listener on this machine
-    /// and which the frontend opens in a browser. A browser anywhere can sign in at `manual_url`,
-    /// whose page shows the code to send back on [`Op::LoginCode`].
+    /// Sign-in is waiting. The frontend opens `url`, which redirects to the local listener. A
+    /// browser on another machine can use `manual_url` and return its code through
+    /// [`Op::LoginCode`].
     LoginStarted { url: String, manual_url: String },
     /// An [`Op::Login`] stored a new oxide-code login. `auth` is the credential requests now use,
     /// which stays an env var or `client.api_key` when one outranks the login.
     SignedIn { auth: AuthSource },
-    /// A prompt or compaction in a session that a transient failure signed out
-    /// loaded the stored login, which requests now use as `auth`.
-    /// The prompt or compaction goes on.
+    /// A stored login recovered from a transient failure. The pending prompt or compaction
+    /// continues with `auth`.
     LoginRestored { auth: AuthSource },
     /// An [`Op::Logout`] finished. `removed` reports whether an oxide-code login was stored, and
     /// `auth` is the credential requests now use, `None` when none is left. `fallback_error` says
@@ -394,8 +381,8 @@ pub struct ToolResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Interaction {
-    /// The boundary a compaction left, which the rest of the transcript continues from.
-    /// Renders like a live [`Event::SessionCompacted`].
+    /// The boundary a compaction left, which the rest of the transcript continues from. Renders
+    /// like a live [`Event::SessionCompacted`].
     Compacted {
         summary: String,
         pre_count: u32,
@@ -537,8 +524,6 @@ mod tests {
     mod op {
         use super::*;
 
-        /// Each [`Op`]'s wire tag. The match has no wildcard arm, so a new variant fails to compile
-        /// here until it gets a tag and a case in `every_op`.
         fn op_tag(op: &Op) -> &'static str {
             match op {
                 Op::Prompt { .. } => "prompt",
@@ -778,8 +763,6 @@ mod tests {
             history
         }
 
-        /// Each [`Event`]'s wire tag. The match has no wildcard arm, so a new variant fails to
-        /// compile here until it gets a tag and a case in `every_event`.
         fn event_tag(event: &Event) -> &'static str {
             match event {
                 Event::StreamToken(_) => "stream_token",

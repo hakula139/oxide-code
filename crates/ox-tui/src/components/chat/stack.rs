@@ -112,8 +112,8 @@ impl CachedBlock {
 
 // ── SlotTops ──
 
-/// A stack row named by the block slot that holds it, so a later stack can find the same row
-/// after blocks change height.
+/// A stack row named by the block slot that holds it, so a later stack can find the same row after
+/// blocks change height.
 #[derive(Clone, Copy)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(super) struct Anchor {
@@ -177,8 +177,8 @@ impl SlotTops {
     }
 
     /// The row `anchor` names here, like [`Self::offset_of`], except that a row in a slot whose
-    /// height changed keeps its index, up to the slot's last row. A block that expands or
-    /// collapses keeps its head, so the rows there stay put.
+    /// height changed keeps its index, up to the slot's last row. A block that expands or collapses
+    /// keeps its head, so the rows there stay put.
     pub(super) fn offset_keeping_row(&self, anchor: Anchor) -> usize {
         let row = match (anchor.slot_height, self.slot(anchor.block)) {
             (Some(_), Some(slot)) => anchor.row.min(slot.len().saturating_sub(1)),
@@ -246,8 +246,8 @@ impl<'a> Stack<'a> {
         }
     }
 
-    /// Stacks a separator row. One that opens the next slot, or the rows past the last block,
-    /// joins the slot before it.
+    /// Stacks a separator row. One that opens the next slot, or the rows past the last block, joins
+    /// the slot before it.
     pub(super) fn push_blank(&mut self) {
         let top = self.height;
         self.push(&BLANK);

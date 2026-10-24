@@ -42,8 +42,8 @@ pub(super) struct SessionState {
     /// Loaded count on resume (`0` for fresh). `finish_entries` skips the summary when unchanged.
     initial_message_count: u32,
     message_count: u32,
-    /// Whether the session has seen its first user text, after which no message emits another
-    /// title entry.
+    /// Whether the session has seen its first user text, after which no message emits another title
+    /// entry.
     first_user_prompt_seen: bool,
     finished: bool,
     persistence_stopped: bool,
@@ -115,9 +115,9 @@ impl SessionState {
         None
     }
 
-    /// Builds entries for one message and returns the AI-title seed on first user text.
-    /// The first-prompt title is `title`, or else that text.
-    /// `manual_title_set` skips both the first-prompt title and the AI-title seed.
+    /// Builds entries for one message and returns the AI-title seed on first user text. The
+    /// first-prompt title is `title`, or else that text. `manual_title_set` skips both the
+    /// first-prompt title and the AI-title seed.
     pub(super) fn queue_message_entries(
         &mut self,
         message: &Message,

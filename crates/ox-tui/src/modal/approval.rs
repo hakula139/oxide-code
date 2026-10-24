@@ -49,8 +49,8 @@ const CONTINUATION_INDENT: usize = 2;
 /// Stands in for each character of a whitespace run a plain space would misrepresent.
 const WHITESPACE_MARKER: char = '·';
 
-/// Quiet period before the modal answers keys. Keys inside it drop and restart it, since a burst
-/// of them was typed or pasted for the input the modal covers.
+/// Quiet period before the modal answers keys. Keys inside it drop and restart it, since a burst of
+/// them was typed or pasted for the input the modal covers.
 const TYPE_AHEAD_GUARD: Duration = Duration::from_millis(300);
 
 // ── ApprovalModal ──
@@ -296,8 +296,8 @@ impl ApprovalModal {
         })
     }
 
-    /// The scroll a line or page key asks for. Home and End are not among them, since the
-    /// editors move their cursor with them.
+    /// The scroll a line or page key asks for. Home and End are not among them, since the editors
+    /// move their cursor with them.
     fn line_scroll(&self, code: KeyCode) -> Option<isize> {
         match code {
             KeyCode::Up => Some(-1),

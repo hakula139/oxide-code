@@ -1,5 +1,4 @@
-//! `/init`'s typed form, which finds the project's instruction files and builds the prompt asking
-//! the model to create one or to propose changes to the existing ones as a diff.
+//! `/init` instruction-file discovery and prompts for creating a file or proposing a diff.
 
 use std::path::{Path, PathBuf};
 
@@ -20,8 +19,8 @@ pub fn no_file_sentence() -> String {
     format!("This project has no {first} or {second}.")
 }
 
-/// [`resolve`] for a frontend without a picker, where a bare `/init` in a project with no
-/// instruction file errors naming both files.
+/// Resolves `/init` without a picker. A bare command without an instruction file returns an error
+/// naming the files it can create.
 pub(super) fn parse(args: &str, root: &Path) -> Result<Op, String> {
     resolve(args, root)?.map(Op::prompt).ok_or_else(|| {
         let no_file = no_file_sentence();
@@ -30,10 +29,10 @@ pub(super) fn parse(args: &str, root: &Path) -> Result<Op, String> {
     })
 }
 
-/// The prompt `/init [<file>]` sends at the project `root`: the create prompt for `<file>` when the
-/// project has no instruction file, or else the update prompt, which a named `<file>` gets only
-/// when one of the existing files has that name. `<file>` matches ignoring ASCII case. `None` for
-/// a bare `/init` in a project with no instruction file, which must first pick the file to create.
+/// Builds the create or update prompt for `/init [<file>]` at `root`. File names match without
+/// ASCII case. An existing instruction file makes this an update, and a named file must then be one
+/// of the existing files. A bare command without an instruction file returns `None` so the caller
+/// can ask which file to create.
 pub fn resolve(args: &str, root: &Path) -> Result<Option<String>, String> {
     let file = match args.trim() {
         "" => None,
@@ -63,9 +62,8 @@ fn file_choice(arg: &str) -> Result<&'static str, String> {
         })
 }
 
-/// The files at `root` that hold instructions loading would read, as root-relative paths in the
-/// order loading tries them. Paths that resolve to the same file are listed once, under a path
-/// that is not a symlink when one exists.
+/// Instruction files with content at `root`, as relative paths in discovery order. Deduplicates
+/// resolved paths, preferring a non-symlink spelling when available.
 fn existing_instruction_files(root: &Path) -> Vec<PathBuf> {
     let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
     for path in instructions::project_candidates(Path::new("")) {
@@ -119,8 +117,8 @@ const RUBRIC: &str = indoc! {"
     If a `README.md`, `.cursor/rules/`, `.cursorrules`, or `.github/copilot-instructions.md` exists, extract the load-bearing parts (commands, conventions, gotchas) and merge them into the instructions without duplication. Skip prose that restates language defaults."
 };
 
-/// The prompt asking the model to create `file` at `root`, for a project with no instruction
-/// file yet.
+/// The prompt asking the model to create `file` at `root`, for a project with no instruction file
+/// yet.
 pub fn create_prompt(root: &Path, file: &str) -> String {
     let root = root.display();
     formatdoc! {"
@@ -138,8 +136,8 @@ pub fn create_prompt(root: &Path, file: &str) -> String {
     }
 }
 
-/// The prompt asking the model to propose changes to the `existing` instruction files at `root`
-/// as a diff, and to apply them only once the user confirms.
+/// The prompt asking the model to propose changes to the `existing` instruction files at `root` as
+/// a diff, and to apply them only once the user confirms.
 fn update_prompt(root: &Path, existing: &[PathBuf]) -> String {
     let root = root.display();
     let files = existing

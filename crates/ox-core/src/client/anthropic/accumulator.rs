@@ -17,8 +17,8 @@ use crate::model::TokenUsage;
 pub(super) struct ReplySpec {
     /// The model the request names, which the reply's reasoning blocks record as their producer.
     pub(super) model: String,
-    /// Whether the request asked for thinking text. Text it did not ask for, which an upstream
-    /// may still send, stays in the reply's blocks but is not streamed.
+    /// Whether the request asked for thinking text. Text it did not ask for, which an upstream may
+    /// still send, stays in the reply's blocks but is not streamed.
     pub(super) thinking_text: bool,
 }
 
@@ -52,8 +52,8 @@ impl ResponseAccumulator {
         !self.blocks.is_empty()
     }
 
-    /// Folds in one stream event, returning the event to forward, if any. `message_stop` yields
-    /// the completed reply, and an in-band `error` comes back as `Err`.
+    /// Folds in one stream event, returning the event to forward, if any. `message_stop` yields the
+    /// completed reply, and an in-band `error` comes back as `Err`.
     pub(super) fn apply(&mut self, event: StreamEvent) -> Result<Option<ResponseEvent>, ApiError> {
         let forward = match event {
             StreamEvent::MessageStart { message } => {
@@ -329,8 +329,8 @@ impl BlockAccumulator {
     }
 }
 
-/// Returns an empty object and the parse error on failure. An empty buffer is a call that
-/// streamed no input, which reads as `{}`.
+/// Returns an empty object and the parse error on failure. An empty buffer is a call that streamed
+/// no input, which reads as `{}`.
 fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
     let error = match serde_json::from_str(json_buf) {
         Ok(value) => return (value, None),

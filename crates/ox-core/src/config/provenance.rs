@@ -17,8 +17,8 @@ pub enum Layer {
     User(PathBuf),
     /// A `$XDG_CONFIG_HOME/ox/config.d/*.toml` drop-in, applied in name order after the user file.
     DropIn(PathBuf),
-    /// `.ox/config.toml` in the nearest directory from the working directory up to the project
-    /// root that has one.
+    /// `.ox/config.toml` in the nearest directory from the working directory up to the project root
+    /// that has one.
     Project(PathBuf),
 }
 

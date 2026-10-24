@@ -49,8 +49,8 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-/// `text`, which ends in variable external content, then the sentence `next`, with a period
-/// between them unless `text` already ends a sentence. Never pass our own literal as `text`.
+/// `text`, which ends in variable external content, then the sentence `next`, with a period between
+/// them unless `text` already ends a sentence. Never pass our own literal as `text`.
 pub(crate) fn join_sentences(text: &str, next: &str) -> String {
     let separator = if text.ends_with(['.', '?', '!', HORIZONTAL_ELLIPSIS, '。', '？', '！']) {
         " "
@@ -69,8 +69,8 @@ pub fn trim_blank_edges(text: &str) -> &str {
     &text[start..]
 }
 
-/// Truncates `s` to `max_width` display columns between grapheme clusters, appending
-/// [`ELLIPSIS`] when shortened unless the ellipsis alone would overflow `max_width`.
+/// Truncates `s` to `max_width` display columns between grapheme clusters, appending [`ELLIPSIS`]
+/// when shortened unless the ellipsis alone would overflow `max_width`.
 pub fn truncate_to_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_owned();
@@ -83,8 +83,8 @@ pub fn truncate_to_width(s: &str, max_width: usize) -> String {
     out
 }
 
-/// Truncates `s` to `max_width` columns by replacing its middle with [`ELLIPSIS`], falling back
-/// to [`truncate_to_width`] when neither side has room for a grapheme.
+/// Truncates `s` to `max_width` columns by replacing its middle with [`ELLIPSIS`], falling back to
+/// [`truncate_to_width`] when neither side has room for a grapheme.
 pub fn center_truncate_to_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_owned();

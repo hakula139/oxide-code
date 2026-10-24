@@ -7,10 +7,10 @@ use time::{OffsetDateTime, UtcOffset};
 
 static LOCAL_OFFSET: OnceLock<UtcOffset> = OnceLock::new();
 
-/// Caches the offset [`local_offset`] returns, falling back to UTC and returning the error when
-/// the host's offset is indeterminate. The binary calls this before the tokio runtime starts,
-/// since the lookup's `localtime_r` reads `TZ`, which a concurrent environment write can race on
-/// Unix systems other than macOS, illumos, and NetBSD.
+/// Caches the offset [`local_offset`] returns, falling back to UTC and returning the error when the
+/// host's offset is indeterminate. The binary calls this before the tokio runtime starts, since the
+/// lookup's `localtime_r` reads `TZ`, which a concurrent environment write can race on Unix systems
+/// other than macOS, illumos, and NetBSD.
 pub fn init_local_offset() -> Result<(), IndeterminateOffset> {
     let offset = UtcOffset::current_local_offset();
     _ = LOCAL_OFFSET.set(offset.unwrap_or(UtcOffset::UTC));

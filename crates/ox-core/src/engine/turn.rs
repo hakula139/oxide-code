@@ -1,7 +1,7 @@
 //! Agent turn loop.
-//! Streams the model response, runs each round's tool calls through [`super::dispatch`],
-//! records to the session, and stops on a text-only response, the optional per-turn round cap,
-//! or a context that needs compacting before the next round.
+//! Streams the model response, runs each round's tool calls through [`super::dispatch`], records to
+//! the session, and stops on a text-only response, the optional per-turn round cap, or a context
+//! that needs compacting before the next round.
 
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
@@ -22,8 +22,8 @@ use crate::util::text::join_sentences;
 
 // ── Agent Turn ──
 
-/// What one turn leaves for the engine: the usage its requests reported and the task list its
-/// tool calls set.
+/// What one turn leaves for the engine: the usage its requests reported and the task list its tool
+/// calls set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TurnReport {
     /// Every request's usage in order, including one that failed or was cancelled partway. Some
@@ -114,21 +114,17 @@ pub(super) struct TurnContext<'a> {
     /// When the context needs compacting before the next round.
     pub(super) auto_compaction: AutoCompactionConfig,
     /// The rounds the turn ran before its latest mid-turn compaction, which count toward
-    /// `max_tool_rounds`.
-    /// Nonzero means the summary now holds the prompt.
+    /// `max_tool_rounds`. Nonzero means the summary now holds the prompt.
     pub(super) rounds_run: u32,
 }
 
-/// Drives one user prompt to a final assistant text reply, re-requesting after a `pause_turn` stop.
-/// [`Op::Queue`]s splice in as user messages at round boundaries,
-/// and an [`Op::SetMode`] waits in `inbox` for the next gated call.
-/// An abort mid-stream commits none of the reply,
-/// while an abort mid-round commits the round with the unfinished calls marked interrupted.
-/// Either way the transcript then ends on [`Message::interruption`].
-/// A refusal commits none of the reply and ends the turn with [`TurnAbort::Refused`],
-/// so the caller can roll the turn back.
-/// Once a round leaves the context at the auto-compaction threshold,
-/// the turn stops with [`TurnStop::Compact`] for the caller to compact and call again.
+/// Drives a prompt through tool rounds and `pause_turn` continuations. Queued prompts enter at
+/// round boundaries, and a queued mode switch applies at the next gated call.
+///
+/// A mid-stream abort discards the unfinished reply. A mid-round abort commits the round with
+/// unfinished calls marked interrupted. Both append [`Message::interruption`]. A refusal discards
+/// the reply and returns [`TurnAbort::Refused`] for rollback. Reaching the auto-compaction
+/// threshold returns [`TurnStop::Compact`] so the caller can compact and resume.
 pub(super) async fn agent_turn(
     turn: TurnContext<'_>,
     messages: &mut Vec<Message>,
@@ -254,8 +250,8 @@ enum StopAction {
     Finish(TurnAbort),
 }
 
-/// Handles the stop reasons that end or pause a round before any tool runs.
-/// `compacted` says a mid-turn compaction summarized the turn's prompt.
+/// Handles the stop reasons that end or pause a round before any tool runs. `compacted` says a
+/// mid-turn compaction summarized the turn's prompt.
 async fn settle_stop_reason(
     stop_reason: Option<StopReason>,
     stop_details: Option<&StopDetails>,
@@ -270,8 +266,8 @@ async fn settle_stop_reason(
         Some(StopReason::Refusal) => {
             StopAction::Finish(TurnAbort::Refused(refusal_message(stop_details, compacted)))
         }
-        // Running a cut-off call, or asking the model to retry it, would repeat the same
-        // oversized output, so the round stops and keeps only the finished prose.
+        // Running a cut-off call, or asking the model to retry it, would repeat the same oversized
+        // output, so the round stops and keeps only the finished prose.
         Some(reason @ (StopReason::MaxTokens | StopReason::ModelContextWindowExceeded)) => {
             let error = truncation_error(reason, &blocks);
             let prose = blocks
@@ -320,8 +316,8 @@ async fn interrupt_turn(
     TurnOutcome::aborted(report, abort)
 }
 
-/// Records and appends [`Message::interruption`] after whatever an aborted turn committed,
-/// so later requests leave the abandoned prompts unanswered.
+/// Records and appends [`Message::interruption`] after whatever an aborted turn committed, so later
+/// requests leave the abandoned prompts unanswered.
 pub(super) async fn record_interruption(
     session: &SessionHandle,
     sink: &dyn EventSink,
@@ -332,11 +328,10 @@ pub(super) async fn record_interruption(
     messages.push(marker);
 }
 
-/// User-facing notice for a `refusal` stop,
-/// naming the policy category and explanation when the API supplied them.
-/// The API keeps refusing while the turn stays in the conversation,
-/// so the notice says the engine removed it,
-/// or, once `compacted` says a mid-turn summary holds the request, that only `/clear` removes it.
+/// User-facing notice for a `refusal` stop, naming the policy category and explanation when the API
+/// supplied them. The API keeps refusing while the turn stays in the conversation, so the notice
+/// says the engine removed it, or, once `compacted` says a mid-turn summary holds the request, that
+/// only `/clear` removes it.
 fn refusal_message(details: Option<&StopDetails>, compacted: bool) -> String {
     let next = if compacted {
         "The work since this turn's compaction was removed from the conversation, \
@@ -477,9 +472,9 @@ async fn stream_response(
     collect_response(rx, sink, usage).await
 }
 
-/// Forwards one response stream's deltas to `sink` and returns its completed reply. `usage`
-/// tracks what the wire has reported so far, so it stays accurate when the stream fails or the
-/// caller drops the future.
+/// Forwards one response stream's deltas to `sink` and returns its completed reply. `usage` tracks
+/// what the wire has reported so far, so it stays accurate when the stream fails or the caller
+/// drops the future.
 pub(super) async fn collect_response(
     mut rx: mpsc::Receiver<Result<ResponseEvent>>,
     sink: &dyn EventSink,
@@ -897,7 +892,6 @@ mod tests {
 
         #[tokio::test]
         async fn dead_session_surfaces_write_failure_on_first_call() {
-            // Write errors must not abort the turn.
             let session = dead_test_session();
             let client = FakeClient::new(vec![text_turn("Hello!")]);
             let tools = ToolRegistry::new(vec![]);
@@ -1272,8 +1266,8 @@ mod tests {
             .into_result()
             .expect("turn must complete");
 
-            // user → assistant(tool_use) → user(tool_result) → user("first")
-            // → user("second") → assistant("done").
+            // user → assistant(tool_use) → user(tool_result) → user("first") → user("second") →
+            // assistant("done").
             assert_eq!(messages.len(), 6, "{messages:#?}");
             assert!(matches!(
                 &messages[3].content[0],

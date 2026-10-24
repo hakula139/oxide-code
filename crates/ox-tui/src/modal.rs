@@ -34,8 +34,8 @@ pub(crate) trait Modal: Send {
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme);
 
-    /// Routes one key event. Returns whether the modal consumed it, was cancelled, or submitted
-    /// a typed action. The stack pops on cancel or submit.
+    /// Routes one key event. Returns whether the modal consumed it, was cancelled, or submitted a
+    /// typed action. The stack pops on cancel or submit.
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey;
 
     /// Receives bracketed-paste text. Default no-op, so a paste never answers a prompt.
@@ -46,25 +46,23 @@ pub(crate) trait Modal: Send {
     fn on_focus_regained(&mut self) {}
 
     /// Fires on frame ticks while the modal is on top, for state that changes with time, such as a
-    /// notice that expires or rows loading in the background.
-    /// Returns whether the modal needs a repaint.
-    /// An override reports when it next has work through [`Self::next_tick`], since an idle loop
-    /// ticks only then.
-    /// Default no-op.
+    /// notice that expires or rows loading in the background. Returns whether the modal needs a
+    /// repaint. An override reports when it next has work through [`Self::next_tick`], since an
+    /// idle loop ticks only then. Default no-op.
     fn tick(&mut self, _now: Instant) -> bool {
         false
     }
 
-    /// When [`Self::tick`] next has work, or `None` when only input changes the modal.
-    /// A time at or before `now` asks for a tick every frame.
+    /// When [`Self::tick`] next has work, or `None` when only input changes the modal. A time at or
+    /// before `now` asks for a tick every frame.
     fn next_tick(&self, _now: Instant) -> Option<Instant> {
         None
     }
 
-    /// Fires when the modal leaves the stack without submitting: universal-cancel (Esc / Ctrl+C),
-    /// a [`ModalKey::Cancelled`], or [`ModalStack::clear`]. Returns an action to dispatch in place
-    /// of the silent [`ModalAction::Cancelled`]. The approval modal overrides this to resolve a
-    /// blocked agent to `Deny`. Default no-op.
+    /// Fires when the modal leaves the stack without submitting: universal-cancel (Esc / Ctrl+C), a
+    /// [`ModalKey::Cancelled`], or [`ModalStack::clear`]. Returns an action to dispatch in place of
+    /// the silent [`ModalAction::Cancelled`]. The approval modal returns `Abort` to stop the
+    /// blocked turn. Default no-op.
     fn on_cancel(&mut self) -> Option<ModalAction> {
         None
     }
@@ -98,7 +96,6 @@ pub(crate) enum ModalKey {
     Push(Box<dyn Modal>),
 }
 
-/// Hand-rolled because `Box<dyn Modal>` can't derive `Debug` without forcing every impl to.
 impl fmt::Debug for ModalKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

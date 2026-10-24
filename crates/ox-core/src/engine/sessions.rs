@@ -159,8 +159,8 @@ impl Engine {
     }
 
     /// Shows what a session carries as the engine starts on it: its usage and task list, the
-    /// warnings its prompt raised, the tracked files that drifted, and a transcript that ends on
-    /// an interrupted response. Follows the event that swaps the session, which clears the chat.
+    /// warnings its prompt raised, the tracked files that drifted, and a transcript that ends on an
+    /// interrupted response. Follows the event that swaps the session, which clears the chat.
     pub(super) fn emit_session_start(&mut self, sink: &dyn EventSink) {
         self.emit_usage_update(sink);
         self.emit_restored_tasks(sink);

@@ -1,9 +1,8 @@
 //! TOML parse errors reported without the parsed source.
 
-/// Describes a parse error in `content` as ``line L, column C, in `key`: message``, leaving out
-/// the position or key `err` does not record. `toml`'s own `Display` quotes the offending source
-/// line, which would print a line of an unrelated file when the input is a mistyped path or a
-/// symlink.
+/// Describes a parse error in `content` as ``line L, column C, in `key`: message``, leaving out the
+/// position or key `err` does not record. `toml`'s own `Display` quotes the offending source line,
+/// which would print a line of an unrelated file when the input is a mistyped path or a symlink.
 pub fn describe_error(content: &str, err: &toml::de::Error) -> String {
     let message = err.message();
     match locate_error(content, err) {

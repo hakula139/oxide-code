@@ -152,8 +152,8 @@ async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<WriteMod
     Ok(mode)
 }
 
-/// Validates an existing target's `metadata`. The gate pinned the path to its resolved location,
-/// so a symlink there appeared afterward and is refused.
+/// Validates an existing target's `metadata`. The gate pinned the path to its resolved location, so
+/// a symlink there appeared afterward and is refused.
 fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
     if metadata.file_type().is_symlink() {
         return Err(format!(

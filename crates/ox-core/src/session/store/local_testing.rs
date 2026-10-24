@@ -72,8 +72,8 @@ pub(crate) fn saved_snapshot_paths(entries: &[Entry]) -> Vec<&Path> {
         .collect()
 }
 
-/// Writes an unparsable session file with ID `corrupt`, whose name and mtime both carry a time
-/// past every seeded session, so it sorts first.
+/// Writes an unparsable session file with ID `corrupt`, whose name and mtime both carry a time past
+/// every seeded session, so it sorts first.
 pub(crate) fn write_newest_corrupt_session(dir: &Path) {
     const NEWEST: i64 = 9_999_999_999;
     let path = test_project_dir(dir).join(format!("{NEWEST}-corrupt.jsonl"));

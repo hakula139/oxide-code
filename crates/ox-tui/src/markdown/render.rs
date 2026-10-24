@@ -21,14 +21,10 @@ use crate::wrap::{expand_tabs_in_spans, longest_word_width, wrap_line, wrap_line
 
 // ── Renderer ──
 
-/// Stateful walker over a `pulldown-cmark` event stream that materializes each block as one or
-/// more styled [`Line`]s.
+/// Single-pass renderer for a `pulldown-cmark` event stream.
 ///
-/// The renderer is single-pass: every `Event::Start` pushes onto the relevant stack
-/// (`indent_stack` for blockquote / list nesting, `inline_styles` for emphasis / strong / heading
-/// modifiers), every `Event::End` pops, and inline events append spans to `lines.last_mut()`.
-/// Block boundaries set `needs_newline = true` so the next block opener emits a separator
-/// without producing trailing blanks.
+/// Block and inline-style stacks track nesting. Separators are deferred until the next block opens,
+/// so the output has no trailing blank rows.
 pub(super) struct MarkdownRenderer<'t, I> {
     iter: I,
     theme: &'t Theme,
@@ -51,8 +47,8 @@ pub(super) struct MarkdownRenderer<'t, I> {
     /// unordered (`- `).
     list_stack: Vec<Option<u64>>,
     /// List-item markers queued by `start_item`, each with the `indent_stack` depth of its item.
-    /// The next line built by `prefixed` prints every marker in place of the continuation indent
-    /// at its depth, so an item whose first child adds a prefix keeps its marker in front.
+    /// The next line built by `prefixed` prints every marker in place of the continuation indent at
+    /// its depth, so an item whose first child adds a prefix keeps its marker in front.
     pending_markers: Vec<(usize, Vec<Span<'static>>)>,
     /// Index into `lines` where each open blockquote starts.
     blockquote_starts: Vec<usize>,
@@ -822,8 +818,8 @@ fn measure_columns(rows: &[Vec<Cell>], col_count: usize) -> Vec<ColumnWidth> {
     columns
 }
 
-/// Fits the columns into a table `width` wide, borders included, or returns `None` when even
-/// their minimums don't fit.
+/// Fits the columns into a table `width` wide, borders included, or returns `None` when even their
+/// minimums don't fit.
 fn fit_column_widths(columns: &[ColumnWidth], width: usize) -> Option<Vec<usize>> {
     let budget = width.checked_sub(1 + TABLE_COLUMN_OVERHEAD * columns.len())?;
     let natural: usize = columns.iter().map(|column| column.natural).sum();

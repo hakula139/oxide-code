@@ -36,15 +36,13 @@ const DRAIN_GRACE: Duration = Duration::from_millis(250);
 /// which session started it.
 const SESSION_ID_VAR: &str = "OX_SESSION_ID";
 
-/// Editor variables each command's environment points at `true`, so a command that opens an
-/// editor, such as `git commit` without `-m` or `git rebase --continue`, keeps its default text and
-/// moves on. Nobody can type into an editor started here, and a GUI one such as `code --wait`
-/// would open on the user's screen and hold the call until its timeout. `GIT_EDITOR` outranks
-/// git's `core.editor`, which outranks `VISUAL` and `EDITOR`.
+/// Editor variables set to `true` so commands keep their default text without opening an unattended
+/// editor. `GIT_EDITOR` also overrides git's `core.editor`, which takes precedence over `VISUAL`
+/// and `EDITOR`.
 const EDITOR_VARS: [&str; 3] = ["EDITOR", "GIT_EDITOR", "VISUAL"];
 
-/// The variable each command's environment drops, so `cd sub` reaches the `sub` the permission
-/// gate checked, where an exported `CDPATH` would look elsewhere first.
+/// The variable each command's environment drops, so `cd sub` reaches the `sub` the permission gate
+/// checked, where an exported `CDPATH` would look elsewhere first.
 const CDPATH_VAR: &str = "CDPATH";
 
 /// Bytes of pipe output one call renders, less the spill paths its omission markers name. The
@@ -375,12 +373,9 @@ fn split_budget(first: usize, second: usize, budget: usize) -> (usize, usize) {
     (first.min(budget - second), second)
 }
 
-/// Renders the pipe called `name`, whose [`PipeCapture::kept_bytes`] are `kept`, within `budget`
-/// bytes, decoding each invalid UTF-8 sequence as U+FFFD, and counts every raw byte it drops in the
-/// omission marker.
-/// Each end moves to a line boundary near the cut.
-/// A cut spills the pipe's kept bytes if it has not spilled yet, so its marker can always name a
-/// file with the full output.
+/// Renders `name` within `budget` decoded bytes, replacing invalid UTF-8 with U+FFFD. Cuts move to
+/// nearby line boundaries, and omission markers count raw bytes. A truncated pipe spills its
+/// [`PipeCapture::kept_bytes`] in `kept` if needed so the marker names the full output.
 fn render_pipe(pipe: &mut PipeCapture, kept: &[u8], budget: usize, name: &str) -> String {
     let text = if pipe.omitted == 0 && decoded_len(kept) <= budget {
         String::from_utf8_lossy(kept).into_owned()
@@ -407,8 +402,8 @@ fn render_pipe(pipe: &mut PipeCapture, kept: &[u8], budget: usize, name: &str) -
 }
 
 /// The start of `head` and the end of `tail` to keep around a cut between them, decoding within
-/// `budget` bytes, with each end moved to a line boundary near the cut.
-/// `tail_starts_line` says whether the byte before `tail` is a line break.
+/// `budget` bytes, with each end moved to a line boundary near the cut. `tail_starts_line` says
+/// whether the byte before `tail` is a line break.
 fn ends_within<'a>(
     head: &'a [u8],
     tail: &'a [u8],
@@ -526,9 +521,8 @@ impl PipeCapture {
     }
 
     /// Where the [`Self::kept_bytes`] `kept` split into a head and tail to render, and whether the
-    /// tail starts a line.
-    /// A pipe that dropped nothing splits at the start of the line its head ends in, so a short
-    /// tail holds that whole line.
+    /// tail starts a line. A pipe that dropped nothing splits at the start of the line its head
+    /// ends in, so a short tail holds that whole line.
     fn split(&self, kept: &[u8]) -> (usize, bool) {
         if self.omitted > 0 {
             return (self.head.len(), self.dropped_line_break);
@@ -1580,8 +1574,8 @@ mod tests {
     mod shell_tree {
         use super::*;
 
-        /// A process tree whose first `live` signals reach a member and whose later ones find
-        /// none, with a count of the signals it has received.
+        /// A process tree whose first `live` signals reach a member and whose later ones find none,
+        /// with a count of the signals it has received.
         fn fake_tree(live: usize) -> (ShellTree, Arc<AtomicUsize>) {
             let signals = Arc::new(AtomicUsize::new(0));
             let child = FakeChild {

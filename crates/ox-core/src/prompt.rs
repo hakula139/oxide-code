@@ -30,8 +30,8 @@ pub(crate) struct PromptParts {
 }
 
 impl PromptParts {
-    /// Returns a reminder of how `fresh` differs from what the model has seen, then counts
-    /// `fresh` as seen.
+    /// Returns a reminder of how `fresh` differs from what the model has seen, then counts `fresh`
+    /// as seen.
     pub(crate) fn catch_up(&mut self, fresh: UserContext) -> Option<String> {
         if fresh == self.seen {
             return None;
@@ -41,9 +41,8 @@ impl PromptParts {
         Some(reminder)
     }
 
-    /// The prompt state that re-renders `user_context` from `fresh`, for a transcript no earlier
-    /// request started with.
-    /// [`Self::adopt`] switches to it.
+    /// Re-renders `user_context` from `fresh` for a transcript no earlier request started with.
+    /// [`Self::adopt`] installs it.
     pub(crate) fn refreshed(&self, fresh: UserContext) -> SessionContext {
         SessionContext {
             environment: self.environment.clone(),
@@ -111,15 +110,15 @@ pub(crate) struct SessionContext {
     seen: UserContext,
 }
 
-/// Detects the environment and loads instruction files for a new session. Also returns the
-/// warnings [`UserContext::load`] does.
+/// Detects the environment and loads instruction files for a new session. Also returns the warnings
+/// [`UserContext::load`] does.
 pub(crate) async fn build_prompt(model: &ModelSpec, cwd: &Path) -> (PromptParts, Vec<String>) {
     let git_root = repo_root(cwd).await;
     assemble(model, cwd, git_root.as_deref()).await
 }
 
-/// Rebuilds the prompt `stored` describes, so a resumed session sends the prefix it sent before.
-/// A session recorded in another directory gets a freshly detected environment.
+/// Rebuilds the prompt `stored` describes, so a resumed session sends the prefix it sent before. A
+/// session recorded in another directory gets a freshly detected environment.
 pub(crate) async fn restore_prompt(stored: SessionContext, cwd: &Path) -> PromptParts {
     let SessionContext {
         mut environment,

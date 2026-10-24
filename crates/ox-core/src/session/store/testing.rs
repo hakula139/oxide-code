@@ -133,9 +133,9 @@ pub(super) fn set_modified(path: &Path, at: OffsetDateTime) {
         .expect("the mtime is set");
 }
 
-/// Seeds a session created and last active at `created_at`,
-/// holding a header and, when given, a title and a summary of `message_count`,
-/// so a `None` `message_count` leaves the session unfinished.
+/// Seeds a session created and last active at `created_at`, holding a header and, when given, a
+/// title and a summary of `message_count`, so a `None` `message_count` leaves the session
+/// unfinished.
 pub fn seed_test_session(
     store: &SessionStore,
     session_id: &str,

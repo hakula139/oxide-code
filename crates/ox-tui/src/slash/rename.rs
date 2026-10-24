@@ -1,6 +1,6 @@
 //! `/rename` sets the session title, from a modal pre-filled with the current title or directly
-//! as `/rename <title>`. A manual title stops AI titles for the rest of the session, so a late
-//! one cannot overwrite it.
+//! as `/rename <title>`. A manual title stops AI titles for the rest of the session, so a late one
+//! cannot overwrite it.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;

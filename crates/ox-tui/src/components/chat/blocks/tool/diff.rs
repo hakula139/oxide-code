@@ -78,8 +78,8 @@ fn max_line_number(chunk: &DiffChunk) -> usize {
         .unwrap_or(0)
 }
 
-/// Lists the lines each chunk applied at. A compact list that leaves some out ends with the
-/// expand hint and expands the block when clicked.
+/// Lists the lines each chunk applied at. A compact list that leaves some out ends with the expand
+/// hint and expands the block when clicked.
 fn render_locations_footer(
     out: &mut BlockRows,
     ctx: &RenderCtx<'_>,

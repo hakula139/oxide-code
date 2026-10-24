@@ -32,11 +32,10 @@ enum ResumeMode<'a> {
     Path(&'a Path),
 }
 
-/// Starts a new session, or resumes the one `target` names.
-/// A fresh session records `git_branch`.
-/// A prefix matches in the current project first and then in every project,
-/// as `/resume <prefix>` does, while [`ProjectScope::Every`] searches every project at once
-/// for both a prefix and the latest session.
+/// Starts a new session, or resumes the one `target` names. A fresh session records `git_branch`. A
+/// prefix matches in the current project first and then in every project, as `/resume <prefix>`
+/// does, while [`ProjectScope::Every`] searches every project at once for both a prefix and the
+/// latest session.
 pub fn resolve_session(
     store: &SessionStore,
     model: &str,
@@ -138,8 +137,8 @@ pub enum ResolveError {
     },
 }
 
-/// Matches `prefix` against session IDs other than `live_id`, first in the current project, then
-/// in every project.
+/// Matches `prefix` against session IDs other than `live_id`, first in the current project, then in
+/// every project.
 fn resolve_prefix_to_info(
     store: &SessionStore,
     prefix: &str,

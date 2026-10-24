@@ -27,9 +27,9 @@ pub(super) struct Loaded {
     pub(super) origins: Origins,
 }
 
-/// Loads the user file, its drop-ins in name order,
-/// then the project file nearest `cwd` within `project_root`.
-/// Later layers win per key, and a project file may set only the keys its allowlists name.
+/// Loads the user file, its drop-ins in name order, then the project file nearest `cwd` within
+/// `project_root`. Later layers win per key, and a project file may set only the keys its
+/// allowlists name.
 pub(super) fn load(cwd: &Path, project_root: &Path) -> Result<Loaded> {
     let user_dir = app_dir(XdgBase::Config);
     let layers = discover(user_dir.as_deref(), Some((cwd, project_root)))?;
@@ -53,8 +53,8 @@ fn load_layers(layers: Vec<Layer>) -> Result<Loaded> {
 
 // ── Discovery ──
 
-/// Every config file that may apply, lowest precedence first.
-/// The user file may be missing, and `project` pairs the working directory with its project root.
+/// Every config file that may apply, lowest precedence first. The user file may be missing, and
+/// `project` pairs the working directory with its project root.
 fn discover(user_dir: Option<&Path>, project: Option<(&Path, &Path)>) -> Result<Vec<Layer>> {
     let mut layers = Vec::new();
     if let Some(dir) = user_dir {
@@ -71,8 +71,8 @@ fn discover(user_dir: Option<&Path>, project: Option<(&Path, &Path)>) -> Result<
     Ok(layers)
 }
 
-/// `*.toml` files in `dir`, sorted by name, skipping hidden files and directories.
-/// A missing directory has none.
+/// `*.toml` files in `dir`, sorted by name, skipping hidden files and directories. A missing
+/// directory has none.
 fn drop_ins(dir: &Path) -> Result<Vec<PathBuf>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -99,8 +99,8 @@ fn drop_ins(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// The `.ox/config.toml` in the nearest directory from `cwd` up to `root` that has one.
-/// It must be a file [`resolve_project_file`] lets the checkout supply.
+/// The `.ox/config.toml` in the nearest directory from `cwd` up to `root` that has one. It must be
+/// a file [`resolve_project_file`] lets the checkout supply.
 fn project_layer(cwd: &Path, root: &Path) -> Result<Option<Layer>> {
     let Some(path) = cwd
         .ancestors()
@@ -144,9 +144,8 @@ pub fn user_config_path() -> Option<PathBuf> {
 
 // ── Reading ──
 
-/// Parses one layer. `Ok(None)` when the user file is missing, and `Err` when a file is unreadable,
-/// including a drop-in symlink whose target is gone, is a project file setting a user-only key,
-/// fails the schema, or holds a malformed pattern or extra root.
+/// Parses and validates one layer. A missing user file returns `Ok(None)`. Unreadable files,
+/// dangling drop-in symlinks, forbidden project keys, and invalid values return errors.
 fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     let path = layer.path();
     let content = match std::fs::read_to_string(path) {
@@ -159,8 +158,8 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
         }
     };
 
-    // The typed parse reports unknown keys and bad values with their line and column, and the
-    // rules and roots resolve here so a malformed one names its file before the lists concatenate.
+    // The typed parse reports unknown keys and bad values with their line and column, and the rules
+    // and roots resolve here so a malformed one names its file before the lists concatenate.
     let invalid = || format!("invalid config at {}", path.display());
     // A project file can link to another file in the checkout, and a parser message can quote one
     // of its values, as in `invalid type: string "..."`, so a project error gives only where it is.
@@ -197,9 +196,8 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     Ok(Some(table))
 }
 
-/// The tables a project file may set.
-/// A key joins one of these lists only when it cannot change credentials, the endpoint,
-/// TLS trust, or what runs without asking, so every other key stays user-only.
+/// Project-config allowlists. Keys that can change credentials, endpoints, TLS trust, or permission
+/// grants remain user-only.
 const PROJECT_TABLES: &[&str] = &["client", "permission", "tui"];
 const PROJECT_CLIENT_KEYS: &[&str] = &[
     "model",
@@ -243,8 +241,8 @@ fn reject_project_keys(table: &Table, path: &Path) -> Result<()> {
     )
 }
 
-/// The dotted names of the keys in the `section` table of `table`, the root when empty,
-/// that are not in `allowed`.
+/// The dotted names of the keys in the `section` table of `table`, the root when empty, that are
+/// not in `allowed`.
 fn keys_outside(table: &Table, section: &str, allowed: &[&str]) -> Vec<String> {
     let section_table = section
         .split('.')

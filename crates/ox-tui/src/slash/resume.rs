@@ -1,6 +1,6 @@
 //! `/resume` (alias `/continue`) opens a [`SearchableList`] session picker, and
-//! `/resume <id-prefix>` resumes directly.
-//! `ox -r` without a session opens the same picker at startup.
+//! `/resume <id-prefix>` resumes directly. `ox -r` without a session opens the same picker at
+//! startup.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -118,8 +118,7 @@ struct SessionRow {
     session_id: String,
     path: PathBuf,
     last_active_at: OffsetDateTime,
-    /// When the listing started, in local time.
-    /// The row's relative times count from here.
+    /// When the listing started, in local time. The row's relative times count from here.
     listed_at: OffsetDateTime,
     title: String,
     /// `0` when no `Summary` line was found, as in a session that never finalized.
@@ -195,9 +194,9 @@ impl SessionRow {
     }
 
     /// The columns a `width`-column row shows, and the title's width. Columns drop in
-    /// [`Column::DROP_ORDER`] until the title keeps [`TITLE_FLOOR`] columns, and the time drops
-    /// too when the title would still fall below [`TITLE_MIN`]. The project shows only when the
-    /// picker spans every project.
+    /// [`Column::DROP_ORDER`] until the title keeps [`TITLE_FLOOR`] columns, and the time drops too
+    /// when the title would still fall below [`TITLE_MIN`]. The project shows only when the picker
+    /// spans every project.
     fn layout(&self, width: usize) -> (Vec<Column>, usize) {
         let mut columns: Vec<Column> = Column::VARIANTS
             .iter()
@@ -491,8 +490,8 @@ pub struct ResumePicker {
     pages: Pages,
     /// When the last reload started, in local time, which every page's rows count from.
     listed_at: OffsetDateTime,
-    /// Last reload's failure, surfaced inline so failures don't disguise themselves as "no
-    /// sessions found". Cleared on the next successful reload.
+    /// Last reload's failure, surfaced inline so failures don't disguise themselves as "no sessions
+    /// found". Cleared on the next successful reload.
     load_error: Option<String>,
     notice: Option<Notice>,
 }
@@ -542,8 +541,8 @@ impl ResumePicker {
         picker
     }
 
-    /// Restarts the listing for the current scope and view, with the cursor and scroll back at
-    /// the top. Rows arrive as pages load.
+    /// Restarts the listing for the current scope and view, with the cursor and scroll back at the
+    /// top. Rows arrive as pages load.
     fn reload(&mut self) {
         self.listed_at = now_local();
         self.pages = match self.store.walk(self.scope) {
@@ -835,8 +834,8 @@ mod tests {
     use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::make_read_only;
 
-    /// Seeds one titled session per `(byte, title)` under [`stamped_id`],
-    /// each last active `byte` seconds after a fixed time, so a higher byte sorts newer.
+    /// Seeds one titled session per `(byte, title)` under [`stamped_id`], each last active `byte`
+    /// seconds after a fixed time, so a higher byte sorts newer.
     fn seed_titled(store: &SessionStore, sessions: &[(u8, &str)]) {
         for &(byte, title) in sessions {
             seed_test_session(
@@ -849,9 +848,9 @@ mod tests {
         }
     }
 
-    /// Seeds active sessions `0x11` and `0x22`, then archived sessions `0x33` and `0x44`,
-    /// each last active a day before the previous one.
-    /// The fixed dates fall outside the relative-time window, so each row reads the same every run.
+    /// Seeds active sessions `0x11` and `0x22`, then archived sessions `0x33` and `0x44`, each last
+    /// active a day before the previous one. The fixed dates fall outside the relative-time window,
+    /// so each row reads the same every run.
     fn seed_active_and_archived(store: &SessionStore) {
         let sessions = [
             (0x11, "Fix login redirect", 12, false),
@@ -880,8 +879,8 @@ mod tests {
         rows.last().unwrap().trim_end().to_owned()
     }
 
-    /// Seeds `count` sessions titled `session`, the newest first in the walk, and returns
-    /// their IDs in list order.
+    /// Seeds `count` sessions titled `session`, the newest first in the walk, and returns their IDs
+    /// in list order.
     fn seed_many(store: &SessionStore, count: usize) -> Vec<String> {
         let mut ids: Vec<_> = (1..=count)
             .map(|i| {

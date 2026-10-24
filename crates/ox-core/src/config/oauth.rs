@@ -101,8 +101,8 @@ pub(super) enum LoginError {
     /// The token expired, and no refresh token is stored.
     #[error("{0} has expired. {step}", step = .0.sign_in_step())]
     Expired(Login),
-    /// The token expired while another process held the store's lock for all of [`LOCK_WAIT`],
-    /// so that process may still be refreshing it.
+    /// The token expired while another process held the store's lock for all of [`LOCK_WAIT`], so
+    /// that process may still be refreshing it.
     #[error(
         "failed to refresh the expired {login}: another process held {} for over {} s. \
          Try again in a moment.",
@@ -190,8 +190,8 @@ struct Token {
     unsaved: Option<UnsavedRefresh>,
 }
 
-/// A rotated refresh token that the store failed to save, which reloads send in place of the
-/// stored one it replaced.
+/// A rotated refresh token that the store failed to save, which reloads send in place of the stored
+/// one it replaced.
 #[cfg_attr(test, derive(Debug))]
 #[derive(Clone)]
 struct UnsavedRefresh {
@@ -223,8 +223,8 @@ impl<'a> StoredCredentials<'a> {
         })
     }
 
-    /// Puts the session's `held` tokens in place of the stored ones while the store still holds
-    /// the refresh token they replaced.
+    /// Puts the session's `held` tokens in place of the stored ones while the store still holds the
+    /// refresh token they replaced.
     fn prefer_unsaved(&mut self, held: Option<&Token>) {
         if let Some(held) = held
             && let Some(unsaved) = &held.unsaved
@@ -359,8 +359,8 @@ pub(super) fn login_stores() -> String {
 
 // ── SessionLogin ──
 
-/// A stored login as a session sends it: the store it lives in, the endpoint that refreshes it,
-/// and its current access token. The store is read again only near expiry or after a 401.
+/// A stored login as a session sends it: the store it lives in, the endpoint that refreshes it, and
+/// its current access token. The store is read again only near expiry or after a 401.
 pub(super) struct SessionLogin {
     store: Store<'static>,
     refresh_url: String,
@@ -434,11 +434,9 @@ impl SessionLogin {
             .await
     }
 
-    /// Reloads `token` from the store on a task in `reloads`, so the session can wait for it before
-    /// exiting. The task holds the lock until it finishes. A refresh invalidates the stored refresh
-    /// token, so the rotated tokens must reach the store and `token` even when the request awaiting
-    /// them is dropped. Nothing aborts the task, so awaiting it fails only when it panics, and the
-    /// panic resumes in the caller.
+    /// Reloads under `token`'s lock in a task tracked by `reloads`. Refresh-token rotation must
+    /// update both the store and `token` even if the waiting request is dropped, and the session
+    /// waits for the task at exit. The task is never aborted, so a join failure resumes its panic.
     async fn reload_detached(
         &self,
         mut token: OwnedMutexGuard<Token>,
@@ -878,8 +876,8 @@ async fn request_tokens(
         .with_context(|| format!("failed to parse {what} response"))?)
 }
 
-/// What a token endpoint's error `body` says, [condensed](condense):
-/// RFC 6749's `error_description`, or else its `error` code, or else [`response::body_details`].
+/// What a token endpoint's error `body` says, [condensed](condense): RFC 6749's
+/// `error_description`, or else its `error` code, or else [`response::body_details`].
 fn token_error_details(body: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct TokenError {
@@ -944,10 +942,9 @@ fn now_millis() -> Option<u64> {
 
 // ── File Locking ──
 
-/// A held credentials lock, whose mtime a background task keeps fresh so other processes do not
-/// take it for abandoned. Dropping it stops the task and removes the lock. Like `proper-lockfile`,
-/// it stops refreshing and leaves the lock alone once the mtime is no longer the one it last set,
-/// since another process then took the lock for stale, as after this one was suspended.
+/// Credential lock kept fresh by a background heartbeat. Drop stops the heartbeat and removes the
+/// lock while still owned. Like `proper-lockfile`, a changed mtime signals takeover, so the
+/// heartbeat stops and leaves the new owner's lock intact.
 struct LockGuard {
     path: PathBuf,
     /// The mtime this process last gave the lock, `None` once another process took it over.
@@ -1019,9 +1016,8 @@ async fn acquire_lock(path: &Path) -> Result<LockGuard> {
     }
 }
 
-/// Takes the lock at `path`, retrying for up to [`LOCK_WAIT`] while another process holds it. A
-/// lock whose mtime is older than [`LOCK_STALE_THRESHOLD`] was abandoned by a crashed process and
-/// is cleared.
+/// Acquires `path`, waiting up to [`LOCK_WAIT`] and clearing locks whose mtime is older than
+/// [`LOCK_STALE_THRESHOLD`].
 async fn wait_for_lock(path: &Path) -> Result<LockGuard, Unlocked> {
     let deadline = tokio::time::Instant::now() + LOCK_WAIT;
     loop {
@@ -1596,8 +1592,8 @@ mod tests {
                     .await;
                 let dir = tempfile::tempdir().unwrap();
                 let near_expiry = now_millis().unwrap() + 60_000;
-                // The refused write-back leaves the store stale, so only the shared token
-                // stops a second refresh.
+                // The refused write-back leaves the store stale, so only the shared token stops a
+                // second refresh.
                 let (login, _) = unwritable_login(
                     dir.path(),
                     &server.uri(),

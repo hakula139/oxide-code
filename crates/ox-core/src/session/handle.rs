@@ -33,8 +33,8 @@ const CHANNEL_CAPACITY: usize = 1024;
 
 // ── SessionHandle ──
 
-/// Cheap to clone because clones share one actor task. Every write method returns after the
-/// batch flush that its cmd lands in.
+/// Cheap to clone because clones share one actor task. Every write method returns after the batch
+/// flush that its cmd lands in.
 #[derive(Clone)]
 pub struct SessionHandle {
     cmd_tx: mpsc::Sender<SessionCmd>,
@@ -53,11 +53,10 @@ pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
     persistence_stop_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
-    /// Whether a `/rename` titled the session.
-    /// [`SessionHandle::set_manual_title`] sets it before it sends the title,
-    /// so no AI or first-prompt title follows.
-    /// The title generator checks it before appending, and the actor checks again on arrival,
-    /// since a `/rename` can land in between.
+    /// Whether a `/rename` titled the session. [`SessionHandle::set_manual_title`] sets it before
+    /// it sends the title, so no AI or first-prompt title follows. The title generator checks it
+    /// before appending, and the actor checks again on arrival, since a `/rename` can land in
+    /// between.
     manual_title_set: AtomicBool,
     /// Most recent flush error, threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: Mutex<Option<String>>,
@@ -159,8 +158,8 @@ impl SessionHandle {
         self.record_prompt(msg, None, None).await
     }
 
-    /// Records the user prompt `msg`, with the prompt state it is the first to carry.
-    /// A fresh session takes `title` as its first-prompt title in place of `msg`'s text.
+    /// Records the user prompt `msg`, with the prompt state it is the first to carry. A fresh
+    /// session takes `title` as its first-prompt title in place of `msg`'s text.
     pub(crate) async fn record_prompt(
         &self,
         msg: Message,
@@ -185,9 +184,8 @@ impl SessionHandle {
 
     /// Moves the session's tip back to `checkpoint`, abandoning the messages recorded after it.
     /// `checkpoint` must come from the last compaction or a later record, because the loader cannot
-    /// rewind across a boundary.
-    /// A rewind to before the first user prompt stops the title request that prompt started,
-    /// so the next prompt titles the session.
+    /// rewind across a boundary. A rewind to before the first user prompt stops the title request
+    /// that prompt started, so the next prompt titles the session.
     pub(crate) async fn rewind(&self, checkpoint: Checkpoint) -> Outcome {
         if !checkpoint.first_user_prompt_seen {
             self.stop_title_task().await;
@@ -235,9 +233,8 @@ impl SessionHandle {
     }
 
     /// Writes the compaction boundary and the synthetic post-compact message, then resets the chain
-    /// anchor.
-    /// The caller swaps in the summary only once [`CompactOutcome::checkpoint`]
-    /// says the boundary took effect.
+    /// anchor. The caller swaps in the summary only once [`CompactOutcome::checkpoint`] says the
+    /// boundary took effect.
     pub(crate) async fn compact(
         &self,
         boundary: CompactBoundary,
@@ -300,8 +297,8 @@ impl SessionHandle {
         }
     }
 
-    /// Sends [`SessionCmd::Shutdown`] so the actor breaks after the current batch, then awaits
-    /// the join handle. Cmd-driven exit keeps a clone held elsewhere from pinning the actor.
+    /// Sends [`SessionCmd::Shutdown`] so the actor breaks after the current batch, then awaits the
+    /// join handle. Cmd-driven exit keeps a clone held elsewhere from pinning the actor.
     pub(crate) async fn shutdown(self) {
         let Self {
             cmd_tx, actor_join, ..

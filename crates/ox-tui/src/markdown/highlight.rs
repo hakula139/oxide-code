@@ -15,12 +15,11 @@ use tracing::debug;
 use crate::theme::Theme;
 
 // Loaded once on first highlight (a few hundred ms of grammar parsing) and reused for the rest of
-// the process.
-// Keeping it lazy avoids paying that cost when no fenced block is rendered.
+// the process. Keeping it lazy avoids paying that cost when no fenced block is rendered.
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 
-/// Highlighter state after the complete lines of the last highlighted block, so a fenced block
-/// that is still streaming in only highlights the lines added since the previous frame.
+/// Highlighter state after the complete lines of the last highlighted block, so a fenced block that
+/// is still streaming in only highlights the lines added since the previous frame.
 struct Resume {
     syntax: &'static SyntaxReference,
     theme: &'static SyntaxTheme,
@@ -37,9 +36,9 @@ thread_local! {
 /// Highlights `code` with the theme's syntax colors, returning one [`Line`] per source line.
 ///
 /// `lang` is a fenced-block info string whose first token, ending at whitespace or a comma, names
-/// the language (`rust,no_run` and `rust ignore` both resolve to `rust`).
-/// Unknown or empty languages fall back to the theme's `code` style with no per-token coloring,
-/// so plain fenced blocks render uniformly without ragged background fills.
+/// the language (`rust,no_run` and `rust ignore` both resolve to `rust`). Unknown or empty
+/// languages fall back to the theme's `code` style with no per-token coloring, so plain fenced
+/// blocks render uniformly without ragged background fills.
 pub(super) fn highlight_code(lang: &str, code: &str, theme: &Theme) -> Vec<Line<'static>> {
     let syntax = lang
         .split(|c: char| c.is_whitespace() || c == ',')
@@ -57,9 +56,9 @@ pub(super) fn highlight_code(lang: &str, code: &str, theme: &Theme) -> Vec<Line<
 }
 
 /// Highlights `code`, reusing `resume` when it holds a line-aligned prefix of `code` highlighted
-/// with the same syntax and theme, and leaves the state after `code`'s complete lines in it.
-/// Once syntect fails on a line, its parse state no longer matches the text, so that line and the
-/// rest of the block render plain in `fallback` and nothing is kept for reuse.
+/// with the same syntax and theme, and leaves the state after `code`'s complete lines in it. Once
+/// syntect fails on a line, its parse state no longer matches the text, so that line and the rest
+/// of the block render plain in `fallback` and nothing is kept for reuse.
 fn highlight_resuming(
     resume: &mut Option<Resume>,
     syntax: &'static SyntaxReference,
@@ -156,8 +155,7 @@ mod tests {
     use super::*;
     use crate::theme::builtin::find;
 
-    /// Joins each row's raw span text.
-    /// `Line::to_string` would drop a line ending left in a span.
+    /// Joins each row's raw span text. `Line::to_string` would drop a line ending left in a span.
     fn all_text(lines: &[Line<'_>]) -> String {
         lines
             .iter()

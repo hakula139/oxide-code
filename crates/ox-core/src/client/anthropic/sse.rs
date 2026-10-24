@@ -14,8 +14,8 @@ use super::transport::{
 use super::wire::{ApiError, StreamEvent};
 use crate::client::ResponseEvent;
 
-/// Events a stream may queue ahead of its consumer. The SSE pump waits while the queue is full,
-/// but drops a retry notice so the retry never waits on the consumer.
+/// Events a stream may queue ahead of its consumer. The SSE pump waits while the queue is full, but
+/// drops a retry notice so the retry never waits on the consumer.
 const STREAM_BUFFER: usize = 64;
 
 /// A misbehaving upstream that never ends a frame would otherwise grow until OOM.
@@ -55,10 +55,10 @@ async fn forward_sse(
 /// retrying an attempt that fails before any content block arrives. Each retry forwards a
 /// [`ResponseEvent::Retrying`] notice first.
 ///
-/// Returns `Ok(())` once the completed reply is forwarded or the receiver drops. Returns `Err`
-/// for transport / HTTP failures, an in-band `error` event, a stream that ends before
-/// `message_stop`, and the frame-size guard. Single malformed frames are logged and skipped so
-/// they do not poison the rest of the turn.
+/// Returns `Ok(())` once the completed reply is forwarded or the receiver drops. Returns `Err` for
+/// transport / HTTP failures, an in-band `error` event, a stream that ends before `message_stop`,
+/// and the frame-size guard. Single malformed frames are logged and skipped so they do not poison
+/// the rest of the turn.
 async fn stream_sse(
     http: &reqwest::Client,
     request: &MessagesRequest,
@@ -164,8 +164,8 @@ struct FrameDecoder {
     buf: Vec<u8>,
     /// Bytes already searched without finding a frame boundary.
     scanned: usize,
-    /// Whether the previous byte was a CR, which makes an immediately following LF part of its
-    /// line ending.
+    /// Whether the previous byte was a CR, which makes an immediately following LF part of its line
+    /// ending.
     after_cr: bool,
     /// Longest unterminated frame to buffer before failing.
     max_frame_bytes: usize,
@@ -213,9 +213,9 @@ impl FrameDecoder {
     }
 }
 
-/// Parses one SSE frame (lines up to a blank-line separator). Returns `Ok(None)` for frames with
-/// no `data:` line (comments, heartbeats). Per the SSE spec, multiple `data:` lines concatenate
-/// with `\n`. Both `data: payload` and `data:payload` (no leading space) are accepted because some
+/// Parses one SSE frame (lines up to a blank-line separator). Returns `Ok(None)` for frames with no
+/// `data:` line (comments, heartbeats). Per the SSE spec, multiple `data:` lines concatenate with
+/// `\n`. Both `data: payload` and `data:payload` (no leading space) are accepted because some
 /// gateways drop the space.
 fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
     let mut data_lines: Vec<&str> = Vec::new();

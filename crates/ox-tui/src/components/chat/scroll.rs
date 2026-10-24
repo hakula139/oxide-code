@@ -119,9 +119,9 @@ impl ChatView {
 // ── Placement ──
 
 impl ChatView {
-    /// Places the paint on `stack`: the tail under auto-scroll, else the anchored row moved by
-    /// the pending scroll and clamped to the content. After blocks expand or collapse, the
-    /// anchored row keeps its index in its block.
+    /// Places the paint on `stack`: the tail under auto-scroll, else the anchored row moved by the
+    /// pending scroll and clamped to the content. After blocks expand or collapse, the anchored row
+    /// keeps its index in its block.
     pub(super) fn place(&self, stack: &Stack<'_>, anchor: Option<Anchor>) -> Placement {
         let viewport = usize::from(self.viewport.height);
         let max_offset = stack.height().saturating_sub(viewport);

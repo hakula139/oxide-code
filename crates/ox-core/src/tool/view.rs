@@ -34,8 +34,8 @@ pub enum ToolResultView {
     },
 }
 
-/// One line of a file with its 1-based line number,
-/// as a read excerpt or either side of a diff hunk shows it.
+/// One line of a file with its 1-based line number, as a read excerpt or either side of a diff hunk
+/// shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NumberedLine {
     pub number: usize,

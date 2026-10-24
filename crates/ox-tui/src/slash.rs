@@ -1,6 +1,6 @@
 //! Slash commands: [`parse_slash`](ox_core::command::parse_slash) detects them, and [`dispatch`]
-//! runs them through the registry of [`registry::SlashCommand`] impls. No command writes the
-//! config files, so a setting one changes reverts on restart.
+//! runs them through the registry of [`registry::SlashCommand`] impls. No command writes the config
+//! files, so a setting one changes reverts on restart.
 
 mod archive;
 mod clear;
@@ -62,8 +62,8 @@ pub(crate) fn echoes_input(parsed: &Parsed) -> bool {
         .is_none_or(|cmd| cmd.echoes_input(&parsed.args))
 }
 
-/// Resolves and runs `parsed` against the built-in registry. `Err` carries the chat-ready
-/// message for an unknown or failed command, as does a failed [`SlashOutcome::Background`] task.
+/// Resolves and runs `parsed` against the built-in registry. `Err` carries the chat-ready message
+/// for an unknown or failed command, as does a failed [`SlashOutcome::Background`] task.
 pub(crate) fn dispatch(parsed: &Parsed, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
     dispatch_with(registry::BUILT_INS, parsed, ctx)
 }

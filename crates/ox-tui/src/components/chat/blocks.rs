@@ -67,8 +67,8 @@ impl RenderCtx<'_> {
         if self.expanded { usize::MAX } else { compact }
     }
 
-    /// `text` as one body row shows it: cut to [`MAX_ROW_BYTES`] in the compact view, or whole
-    /// when expanded.
+    /// `text` as one body row shows it: cut to [`MAX_ROW_BYTES`] in the compact view, or whole when
+    /// expanded.
     pub(super) fn cap_row(&self, text: &str) -> String {
         if self.expanded {
             text.to_owned()
@@ -119,13 +119,13 @@ impl BlockRows {
 /// Render contract for one chat block (assistant prose, tool call, error marker, etc.).
 ///
 /// A block's state is fixed once the chat pushes it. `render` and `render_rows` must be pure
-/// functions of that state and the [`RenderCtx`], since the chat caches their rows until the
-/// width, theme, or view changes.
+/// functions of that state and the [`RenderCtx`], since the chat caches their rows until the width,
+/// theme, or view changes.
 pub(super) trait ChatBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>;
 
-    /// Renders the block with the rows a click expands it from. The default marks none, for a
-    /// block that always shows in full.
+    /// Renders the block with the rows a click expands it from. The default marks none, for a block
+    /// that always shows in full.
     fn render_rows(&self, ctx: &RenderCtx<'_>) -> BlockRows {
         BlockRows {
             lines: self.render(ctx),
@@ -176,8 +176,8 @@ struct SectionStyles {
     body: Style,
 }
 
-/// Renders `header` and the markdown `body` behind a left bar, with a bar-only row between them.
-/// A blank body leaves the header alone.
+/// Renders `header` and the markdown `body` behind a left bar, with a bar-only row between them. A
+/// blank body leaves the header alone.
 fn bar_section(
     ctx: &RenderCtx<'_>,
     prefix: &str,

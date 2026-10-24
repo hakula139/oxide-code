@@ -1,6 +1,5 @@
-//! Slash-command input shared by the TUI's slash commands and the bare REPL: the line parser, the
-//! command aliases, and the typed forms parsed into the [`Op`] each one runs. The TUI adds the
-//! pickers and modals behind the bare forms.
+//! Slash-command parsing, aliases, and typed [`Op`] forms shared by the TUI and bare REPL. The TUI
+//! adds pickers and modals.
 
 pub mod init;
 mod parser;
@@ -29,10 +28,8 @@ const ALIASES: [(&str, &[&str]); 3] = [
     ("resume", &["continue"]),
 ];
 
-/// The op the typed form of `parsed` runs at `project_root`, with an alias resolved to its command
-/// and an error prefixed by the name the user typed.
-/// A prompt it starts takes the command line as its first-prompt title.
-/// `None` when the command has no typed form.
+/// Resolves aliases and parses `parsed` into an op at `project_root`. Errors use the typed command
+/// name, and prompts use the command line as their title. `None` without a typed form.
 pub fn typed_op(parsed: &Parsed, project_root: &Path) -> Option<Result<Op, String>> {
     let mut op = parse(canonical(&parsed.name), &parsed.args, project_root)?;
     if let Ok(Op::Prompt { title, .. }) = &mut op {
@@ -57,10 +54,8 @@ pub fn aliases(name: &str) -> &'static [&'static str] {
         .map_or(&[], |&(_, aliases)| aliases)
 }
 
-/// Parses the typed form of the command `name`, canonical and without its `/`, into the op it
-/// runs, where `/init` reads the instruction files at `project_root`. `None` when `name` is not
-/// one of [`NAMES`]. `Err` carries the message for a malformed form, including a bare form only a
-/// picker can complete.
+/// Parses a canonical command name without `/`. `/init` reads instructions at `project_root`.
+/// Returns `None` for names outside [`NAMES`] and an error for malformed or picker-only forms.
 fn parse(name: &str, args: &str, project_root: &Path) -> Option<Result<Op, String>> {
     Some(match name {
         "clear" => Ok(Op::Clear),
@@ -108,8 +103,8 @@ pub fn mode(arg: &str) -> Result<Op, String> {
     Ok(Op::SetMode(mode))
 }
 
-/// `/model <id>`. Matches an exact catalog ID, then a unique substring of one, so family names
-/// such as `opus` work as aliases.
+/// `/model <id>`. Matches an exact catalog ID, then a unique substring of one, so family names such
+/// as `opus` work as aliases.
 pub fn model(arg: &str) -> Result<Op, String> {
     let arg = required(arg, "model ID", "/model <id>")?.to_ascii_lowercase();
     let hits: Vec<&ModelInfo> = match MODELS.iter().find(|info| info.id == arg) {
@@ -176,8 +171,8 @@ fn required<'a>(arg: &'a str, what: &str, usage: &str) -> Result<&'a str, String
     Ok(arg)
 }
 
-/// The error for a form typed without its `what` argument, pointing at its `usage` and, when
-/// given, an `alternative` that needs no argument.
+/// The error for a form typed without its `what` argument, pointing at its `usage` and, when given,
+/// an `alternative` that needs no argument.
 pub fn missing(what: &str, usage: &str, alternative: Option<&str>) -> String {
     let alternative = alternative
         .map(|alt| format!(", or {alt}"))

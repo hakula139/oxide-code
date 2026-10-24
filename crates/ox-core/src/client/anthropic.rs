@@ -53,8 +53,8 @@ use crate::util::tls::Trust;
 
 const API_VERSION: &str = "2023-06-01";
 
-/// Claude Code release the user agent, billing header, and agentic beta sequence all mirror.
-/// Some relay gateways enforce a `cc_version` floor. Bump it only with a fresh beta capture.
+/// Claude Code release the user agent, billing header, and agentic beta sequence all mirror. Some
+/// relay gateways enforce a `cc_version` floor. Bump it only with a fresh beta capture.
 const CLAUDE_CLI_VERSION: &str = "2.1.296";
 const STAINLESS_PACKAGE_VERSION: &str = "0.81.0";
 const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
@@ -65,17 +65,14 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 
 // ── Client ──
 
-/// Shareable HTTP client for the Anthropic Messages API, holding the endpoint and what each
-/// request sends. `Clone` is cheap because `reqwest::Client` shares its connection pool, and clones
-/// share a stored login's token. Callers keep one per session and swap `session_id` / `model` /
-/// `effort` / `auth` via `set_*`.
+/// Per-session Anthropic client. Clones share the connection pool and stored-login token.
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
     /// The `/v1/messages` endpoint under the configured base URL.
     messages_url: String,
-    /// Whether the client talks to the Anthropic API, which alone gets `scope: "global"` and
-    /// `cch`, as in Claude Code.
+    /// Whether the client talks to the Anthropic API, which alone gets `scope: "global"` and `cch`,
+    /// as in Claude Code.
     is_first_party: bool,
     gateway: GatewayCompat,
     /// `None` while signed out.
@@ -179,8 +176,8 @@ impl Client {
         self.session_id = id;
     }
 
-    /// Swaps the active model and re-resolves effort. Thinking, betas, context management, and
-    /// the default `max_tokens` derive from the model per request.
+    /// Swaps the active model and re-resolves effort. Thinking, betas, context management, and the
+    /// default `max_tokens` derive from the model per request.
     pub(crate) fn set_model(&mut self, id: String) {
         let model = ModelSpec::resolve(id);
         self.effort = model.resolve_effort(self.effort);
@@ -200,9 +197,8 @@ impl Client {
         self.auth = auth;
     }
 
-    /// Loads the first stored login again on a reload task.
-    /// Dropping the returned future stops only the wait,
-    /// since a refresh must still write the rotated tokens back.
+    /// Loads the first stored login again on a reload task. Dropping the returned future stops only
+    /// the wait, since a refresh must still write the rotated tokens back.
     pub(crate) fn retry_stored_login(
         &self,
         keychain: ClaudeCodeKeychain,
@@ -225,8 +221,8 @@ impl Client {
         self.reloads.wait().await;
     }
 
-    /// Streams one conversation request. The receiver closes when the stream ends, the receiver
-    /// is dropped, or an unrecoverable error is forwarded as a final `Err`.
+    /// Streams one conversation request. The receiver closes when the stream ends, the receiver is
+    /// dropped, or an unrecoverable error is forwarded as a final `Err`.
     ///
     /// The stable `system` text always carries a `cache_control` breakpoint, shared across
     /// sessions. `breakpoint` marks the last content block of the final message. `user_context`
@@ -300,8 +296,8 @@ impl Wire for Client {
 
 // ── HTTP Client ──
 
-/// Builds the HTTP client with shared request headers and TLS trust.
-/// Each request adds its own credential.
+/// Builds the HTTP client with shared request headers and TLS trust. Each request adds its own
+/// credential.
 fn build_http(gateway: &GatewayCompat, trust: &dyn Trust) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
     headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
@@ -343,10 +339,10 @@ fn build_http(gateway: &GatewayCompat, trust: &dyn Trust) -> Result<reqwest::Cli
 
     headers.extend(gateway.custom_headers.clone());
 
-    // No whole-request timeout because responses can run for minutes. The 60 s read timeout
-    // catches slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams.
-    // reqwest strips only `Authorization` and `Cookie` on a cross-host redirect, so following
-    // one would carry `x-api-key` and the custom headers to another host.
+    // No whole-request timeout because responses can run for minutes. The 60 s read timeout catches
+    // slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams. reqwest strips
+    // only `Authorization` and `Cookie` on a cross-host redirect, so following one would carry
+    // `x-api-key` and the custom headers to another host.
     let builder = reqwest::Client::builder()
         .default_headers(headers)
         .redirect(reqwest::redirect::Policy::none())
@@ -410,10 +406,7 @@ struct RequestSpec<'a> {
 }
 
 impl Client {
-    /// Builds the `/v1/messages` call `spec` describes. The body gains the attribution and
-    /// identity blocks ahead of `spec.system`, the metadata, and on first-party requests the `cch`
-    /// hash. The kind decides streaming, `context_management`, and the betas, and the thinking
-    /// betas derive from `spec.thinking`.
+    /// Builds an attributed request. The kind selects streaming, context management, and betas.
     fn prepare(&self, spec: RequestSpec<'_>) -> Result<MessagesRequest> {
         let RequestSpec {
             kind,
@@ -464,8 +457,8 @@ impl Client {
 }
 
 /// The `system[0]` attribution text. First-party requests carry a `cch` placeholder that
-/// [`billing::inject_cch`] fills once the body is serialized. Like Claude Code since 2.1.181,
-/// other base URLs get a stable block without it, so gateways that cache on the body still hit.
+/// [`billing::inject_cch`] fills once the body is serialized. Like Claude Code since 2.1.181, other
+/// base URLs get a stable block without it, so gateways that cache on the body still hit.
 fn attribution_text(first_user_text: &str, is_first_party: bool) -> String {
     let fingerprint = billing::compute_fingerprint(first_user_text, CLAUDE_CLI_VERSION);
     billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint, is_first_party)
@@ -481,8 +474,8 @@ fn first_user_text(messages: &[Message]) -> &str {
         .unwrap_or("")
 }
 
-/// Some relay gateways admit a request without the billing block only when `user_id` holds a
-/// JSON object with `session_id`.
+/// Some relay gateways admit a request without the billing block only when `user_id` holds a JSON
+/// object with `session_id`.
 fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
     #[derive(Serialize)]
     struct UserId<'a> {
@@ -701,8 +694,6 @@ mod tests {
 
             #[test]
             fn surfaces_extra_ca_certs_error_with_path() {
-                // An unreadable trust anchor must fail the client build and cite the configured
-                // path so the user can debug it without inspecting TLS internals.
                 let cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
                 let trust = PlatformTrust(Some("/no/such/bundle.pem".into()));
 

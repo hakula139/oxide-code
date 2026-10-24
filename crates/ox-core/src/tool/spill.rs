@@ -20,8 +20,8 @@ pub(super) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 /// whole unless one line spans the window.
 const LINE_SNAP_BYTES: usize = 1024;
 
-/// Runs the prepared call on `tool`, applying [`cap_output`] after each tool's row caps,
-/// with the call's `.txt` spill file keeping the full output.
+/// Runs the prepared call on `tool`, applying [`cap_output`] after each tool's row caps, with the
+/// call's `.txt` spill file keeping the full output.
 pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
     let mut output = tool.run(prepared, ctx).await;
     if output.content.len() <= MAX_OUTPUT_BYTES {
@@ -38,8 +38,8 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
 }
 
 /// Writes `content`, which must be longer than [`MAX_OUTPUT_BYTES`], whole to `spill`, and returns
-/// up to half the cap left beside an omission marker from each end, all within the cap.
-/// Each part meets the marker at a line boundary near its cut, or else at a UTF-8 boundary.
+/// up to half the cap left beside an omission marker from each end, all within the cap. Each part
+/// meets the marker at a line boundary near its cut, or else at a UTF-8 boundary.
 fn cap_output(content: &str, mut spill: Spill) -> String {
     spill.write(content.as_bytes());
     let note = spill.note("output");
@@ -81,8 +81,8 @@ pub(super) fn whole_line_head(head: &[u8], ends_line: bool) -> &[u8] {
         .map_or(head, |pos| &head[..window + pos])
 }
 
-/// The part of `tail` after its first line break within [`LINE_SNAP_BYTES`] of its start, or all
-/// of `tail` when it `starts_line` or no break lies that close.
+/// The part of `tail` after its first line break within [`LINE_SNAP_BYTES`] of its start, or all of
+/// `tail` when it `starts_line` or no break lies that close.
 pub(super) fn whole_line_tail(tail: &[u8], starts_line: bool) -> &[u8] {
     if starts_line {
         return tail;

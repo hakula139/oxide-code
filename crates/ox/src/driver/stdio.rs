@@ -27,8 +27,8 @@ use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 /// Renders `events` on `sink` until `op`, already sent, ends, returning how it ended, or `None`
 /// once the engine has stopped. Approval requests go to `approver` in place of `sink`, and its
 /// answer goes back on `ops`. Events that arrive while `approver` decides wait until it answers,
-/// unless one ends `op`, such as the cancellation an interrupt causes, which drops the question.
-/// An engine for a run nobody attends requests no approval, so such a run passes no `approver`.
+/// unless one ends `op`, such as the cancellation an interrupt causes, which drops the question. An
+/// engine for a run nobody attends requests no approval, so such a run passes no `approver`.
 pub(super) async fn render_op<A: Approver>(
     events: &mut mpsc::UnboundedReceiver<Event>,
     sink: &dyn EventSink,
@@ -108,9 +108,7 @@ fn render(sink: &dyn EventSink, event: Event) {
     }
 }
 
-/// The approver of a run nobody attends, which never needs one, since its engine requests no
-/// approval.
-/// Uninhabited, so only `None` names it.
+/// Uninhabited approval type for unattended runs, which pass no approver.
 pub(super) enum Unattended {}
 
 impl Approver for Unattended {
@@ -285,8 +283,8 @@ impl StdioSink {
         stderr.flush()
     }
 
-    /// Writes reply or thinking `text` to `stdout` between `start` and `end` styles, noting
-    /// whether it leaves the line open.
+    /// Writes reply or thinking `text` to `stdout` between `start` and `end` styles, noting whether
+    /// it leaves the line open.
     fn write_reply(
         &self,
         stdout: &mut impl Write,
@@ -361,8 +359,8 @@ impl EventSink for StdioSink {
     }
 }
 
-/// A progress header, one marked line per task, and a closing blank line, or nothing for a
-/// cleared list.
+/// A progress header, one marked line per task, and a closing blank line, or nothing for a cleared
+/// list.
 fn task_lines(tasks: &[Task]) -> String {
     let Some(progress) = Progress::of(tasks) else {
         return String::new();

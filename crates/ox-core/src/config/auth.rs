@@ -245,8 +245,8 @@ impl fmt::Debug for Auth {
     }
 }
 
-/// Whether `error`, from [`Auth::credential`] or [`Auth::reload`], is a stored login's refresh
-/// that a later attempt may complete.
+/// Whether `error`, from [`Auth::credential`] or [`Auth::reload`], is a stored login's refresh that
+/// a later attempt may complete.
 pub(crate) fn is_transient(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<LoginError>()
@@ -288,16 +288,15 @@ impl Credential {
 
 // ── Resolution ──
 
-/// Why no credential resolved.
-/// The constructors format each message when the error is raised,
-/// since the config paths it names depend on the environment at that moment.
+/// Credential resolution failure. Messages capture config paths when the error is constructed
+/// because those paths depend on the current environment.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum CredentialError {
     /// The base URL is a gateway, which never receives a stored login.
     #[error("{message}")]
     Gateway { message: String },
-    /// No stored login supplied a token.
-    /// A TUI session starts signed out, since `/login` can sign it in.
+    /// No stored login supplied a token. A TUI session starts signed out, since `/login` can sign
+    /// it in.
     #[error("{message}")]
     SignedOut { cause: LoginError, message: String },
 }
