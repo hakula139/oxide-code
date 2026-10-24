@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, VariantArray};
 
 use super::rule::{Rule, escaped};
-use super::{PermissionClass, folded_names, resolve};
+use super::{
+    DirectoryAliases, PermissionClass, folded_components, folded_names, relative_to_folded, resolve,
+};
 use crate::util::path::{
     CLAUDE_CREDENTIALS, XdgBase, app_dir, claude_dir, lexical_normalize, xdg_dir,
 };
@@ -333,29 +335,57 @@ fn home_locations() -> Vec<(Shipped, PathBuf)> {
         .collect()
 }
 
-/// The groups whose protected names one of `paths` holds, or whose [`protected_roots`] it sits
-/// under, each once and in [`Shipped::VARIANTS`] order. Names compare by
-/// [`fold_name`](super::fold_name), since a case-insensitive file system such as APFS opens
-/// `.VSCODE` and `.vſcode` as `.vscode`.
-pub(super) fn protected_by(paths: &[&Path], roots: &[(Shipped, PathBuf)]) -> Vec<Shipped> {
-    let folded: Vec<Vec<String>> = paths.iter().map(|path| folded_names(path)).collect();
-    let roots: Vec<(Shipped, Vec<String>)> = roots
-        .iter()
-        .map(|(group, root)| (*group, folded_names(root)))
-        .collect();
-    Shipped::VARIANTS
-        .iter()
-        .copied()
-        .filter(|group| {
-            folded.iter().any(|folded| {
-                let names: Vec<&str> = folded.iter().map(String::as_str).collect();
-                group.names().is_some_and(|own| own.hold(&names))
-                    || roots
-                        .iter()
-                        .any(|(owner, root)| owner == group && folded.starts_with(root))
+/// Protected locations with their [`fold_name`](super::fold_name)-folded component names.
+pub(super) struct ProtectedRoots(Vec<(Shipped, PathBuf, Vec<String>)>);
+
+impl From<Vec<(Shipped, PathBuf)>> for ProtectedRoots {
+    fn from(roots: Vec<(Shipped, PathBuf)>) -> Self {
+        Self(
+            roots
+                .into_iter()
+                .map(|(group, root)| {
+                    let folded = folded_components(&root);
+                    (group, root, folded)
+                })
+                .collect(),
+        )
+    }
+}
+
+impl ProtectedRoots {
+    /// The groups whose protected names one of `paths` holds, or whose roots it sits under, each
+    /// once and in [`Shipped::VARIANTS`] order.
+    pub(super) fn protected_by(
+        &self,
+        paths: &[&Path],
+        aliases: &mut DirectoryAliases,
+    ) -> Vec<Shipped> {
+        let folded: Vec<_> = paths
+            .iter()
+            .map(|path| (folded_names(path), folded_components(path)))
+            .collect();
+        Shipped::VARIANTS
+            .iter()
+            .copied()
+            .filter(|group| {
+                folded.iter().any(|(names, components)| {
+                    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                    group.names().is_some_and(|own| own.hold(&names))
+                        || self
+                            .0
+                            .iter()
+                            .any(|(owner, _, root)| owner == group && components.starts_with(root))
+                }) || self.0.iter().any(|(owner, root, folded)| {
+                    owner == group
+                        && paths.iter().any(|path| {
+                            aliases.respell(path, root).is_some_and(|aliased| {
+                                aliased != *path && relative_to_folded(&aliased, folded).is_some()
+                            })
+                        })
+                })
             })
-        })
-        .collect()
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -364,6 +394,10 @@ mod tests {
     use crate::util::path::local_testing::abs;
     use crate::util::path::slash_separated;
     use crate::util::path::testing::HOME_VAR;
+
+    fn protected_by(paths: &[&Path], roots: &[(Shipped, PathBuf)]) -> Vec<Shipped> {
+        ProtectedRoots::from(roots.to_vec()).protected_by(paths, &mut DirectoryAliases::default())
+    }
 
     /// The process-environment patterns `credentials` adds on Unix, spelled out.
     const PROC_ENVIRONS: [&str; 2] = ["/proc/*/environ", "/proc/*/task/*/environ"];

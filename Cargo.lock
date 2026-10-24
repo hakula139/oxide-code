@@ -1930,6 +1930,7 @@ dependencies = [
  "platform-info",
  "process-wrap",
  "regex",
+ "regex-syntax",
  "reqwest",
  "rustls",
  "rustls-platform-verifier",

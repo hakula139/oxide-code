@@ -209,43 +209,54 @@ mod tests {
             });
         }
 
-        #[test]
-        fn confirming_deletes_the_file_the_prefix_matched() {
+        #[tokio::test(start_paused = true)]
+        async fn confirming_deletes_the_file_the_prefix_matched() {
             // A renamed file keeps its header ID, so deleting by that ID would unlink whichever
             // file is named after it.
-            with_isolated_xdg(|_| {
-                let store = open_store(&test_session_info()).unwrap();
-                let header_id = stamped_id(0xab);
-                seed_test_session(
-                    &store,
-                    &header_id,
-                    Some("Renamed"),
-                    Some(3),
-                    datetime!(2026-04-18 09:00:00 UTC),
-                );
-                let original = store.find_session_path(&header_id).unwrap();
-                let renamed = original.with_file_name("1776502800-renamed.jsonl");
-                std::fs::rename(&original, &renamed).unwrap();
-                seed_test_session(
-                    &store,
-                    &header_id,
-                    Some("Bystander"),
-                    Some(1),
-                    datetime!(2026-04-18 09:00:05 UTC),
-                );
-                let bystander = store.find_session_path(&header_id).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let (mut modal, renamed, bystander) =
+                temp_env::with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
+                    let store = open_store(&test_session_info()).unwrap();
+                    let header_id = stamped_id(0xab);
+                    seed_test_session(
+                        &store,
+                        &header_id,
+                        Some("Renamed"),
+                        Some(3),
+                        datetime!(2026-04-18 09:00:00 UTC),
+                    );
+                    let original = store.find_session_path(&header_id).unwrap();
+                    let renamed = original.with_file_name("1776502800-renamed.jsonl");
+                    std::fs::rename(&original, &renamed).unwrap();
+                    seed_test_session(
+                        &store,
+                        &header_id,
+                        Some("Bystander"),
+                        Some(1),
+                        datetime!(2026-04-18 09:00:05 UTC),
+                    );
+                    let bystander = store.find_session_path(&header_id).unwrap();
 
-                let mut modal = run_execute(&DeleteCmd, "renamed").unwrap().into_modal();
-                modal.handle_key(&crossterm::event::KeyEvent::from(
-                    crossterm::event::KeyCode::Char('y'),
-                ));
+                    let modal = run_execute(&DeleteCmd, "renamed").unwrap().into_modal();
+                    (modal, renamed, bystander)
+                });
+            target_rows(&*modal);
+            tokio::time::advance(crate::modal::acceptance::TYPE_AHEAD_GUARD).await;
 
-                assert!(!renamed.exists(), "the matched file is deleted");
-                assert!(
-                    bystander.exists(),
-                    "the file named after the header ID survives"
-                );
-            });
+            let outcome = modal.handle_key(&crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char('y'),
+            ));
+
+            assert!(
+                matches!(outcome, crate::modal::ModalKey::Submitted(crate::modal::ModalAction::SystemMessage(ref text))
+                    if text == "Deleted session abababab: Renamed"),
+                "{outcome:?}"
+            );
+            assert!(!renamed.exists(), "the matched file is deleted");
+            assert!(
+                bystander.exists(),
+                "the file named after the header ID survives"
+            );
         }
 
         #[test]

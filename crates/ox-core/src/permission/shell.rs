@@ -14,7 +14,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser, Tree};
 
-use super::{Access, Target, Workspace, Zone, fold_name};
+use super::{Access, PathResolver, Target, Workspace, Zone, fold_name};
 use crate::util::path::expand_user;
 
 /// Shells and the commands that start one as another user, whose literal `-c` script the walk
@@ -364,6 +364,7 @@ impl CommandTarget {
     ) -> Self {
         let mut walk = Walk {
             workspace,
+            paths: PathResolver::new(workspace),
             inherited,
             segments: Vec::new(),
             writes: Vec::new(),
@@ -588,6 +589,7 @@ const WALKED_KINDS: &[&str] = &[
 /// What one command and the scripts nested in it run and write, gathered over its syntax tree.
 struct Walk<'a> {
     workspace: &'a Workspace,
+    paths: PathResolver<'a>,
     /// Whether the environment `bash` starts with sets a variable.
     inherited: &'a dyn Fn(&str) -> bool,
     segments: Vec<Segment>,
@@ -948,7 +950,7 @@ impl Walk<'_> {
         self.relative_path |= operands.iter().any(|path| Path::new(path).is_relative());
         let reads = operands
             .iter()
-            .map(|operand| Access::for_path(operand, self.workspace))
+            .map(|operand| self.paths.resolve(operand))
             .collect();
 
         let mut words: Vec<ShellWord> = all
@@ -1009,7 +1011,8 @@ impl Walk<'_> {
             self.mark_unrecognized(span_text(words, src));
         }
         if DIRECTORY_CHANGERS.contains(&name) {
-            self.change_dir(self.enters_workspace(args), words, src);
+            let inside = self.enters_workspace(args);
+            self.change_dir(inside, words, src);
         }
     }
 
@@ -1099,7 +1102,7 @@ impl Walk<'_> {
 
     /// Returns whether `args` name one literal directory inside a workspace root without `..`,
     /// which bash's `cd` applies to the spelled path while the gate resolves symlinks first.
-    fn enters_workspace(&self, args: &[Word]) -> bool {
+    fn enters_workspace(&mut self, args: &[Word]) -> bool {
         let [target] = args else {
             return false;
         };
@@ -1115,7 +1118,7 @@ impl Walk<'_> {
             })
             .is_some_and(|path| {
                 matches!(
-                    Access::for_path(path, self.workspace).as_target(),
+                    self.paths.resolve(path).as_target(),
                     Target::Path {
                         zone: Zone::Workspace,
                         ..
@@ -1296,7 +1299,7 @@ impl Walk<'_> {
             return;
         }
         self.relative_path |= Path::new(&path).is_relative();
-        let access = Access::for_path(&path, self.workspace);
+        let access = self.paths.resolve(&path);
         if reads {
             self.reads.push(access);
         } else {
