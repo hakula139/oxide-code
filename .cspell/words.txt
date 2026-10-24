@@ -127,6 +127,7 @@ shopt
 SIGTTIN
 smol
 statix
+stdenv
 substituters
 swatinem
 syntect
