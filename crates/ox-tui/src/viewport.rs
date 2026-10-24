@@ -1,5 +1,4 @@
-//! List navigation: wrapping cursor steps shared by the modal pickers and the slash popup, and the
-//! scroll window modal lists size from whatever height each render receives.
+//! Wrapping list navigation and render-sized scroll windows.
 
 use std::cell::Cell;
 use std::ops::Range;
@@ -14,8 +13,8 @@ pub(crate) fn wrap_prev(index: usize, len: usize) -> usize {
     index.checked_sub(1).unwrap_or(len - 1)
 }
 
-/// Scroll window over a list. `Cell`-backed because the window settles during `render(&self)`,
-/// when the granted height is finally known.
+/// Scroll window over a list. `Cell`-backed because the window settles during `render(&self)`, when
+/// the granted height is finally known.
 #[derive(Debug, Default)]
 pub(crate) struct Viewport {
     offset: Cell<usize>,

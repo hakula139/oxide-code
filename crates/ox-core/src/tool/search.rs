@@ -23,9 +23,8 @@ pub(super) fn prepare_search_root(input: serde_json::Value, ctx: &ToolCtx) -> Pr
     Prepared { input, access }
 }
 
-/// The root a search call's `path` argument names, the cwd by default, read as [`tool_path`]
-/// reads it.
-/// The gate and the walk both take the root from here, so they see one spelling.
+/// Resolves the search root through [`tool_path`], defaulting to cwd. Shared by the gate and the
+/// walk so both use the same spelling.
 pub(super) fn search_path(path: Option<&str>) -> PathBuf {
     tool_path(path.unwrap_or("."))
 }
@@ -224,8 +223,8 @@ pub(super) fn push_unreadable_note(content: &mut String, unreadable: &[Unreadabl
     push_path_note(content, "Could not read:", &lines);
 }
 
-/// Appends the note a search tool adds when read deny or ask rules withheld `count` of the files
-/// it found. The note counts them without naming any.
+/// Appends the note a search tool adds when read deny or ask rules withheld `count` of the files it
+/// found. The note counts them without naming any.
 pub(super) fn push_withheld_note(content: &mut String, count: usize) {
     if count == 0 {
         return;

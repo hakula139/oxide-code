@@ -1,6 +1,6 @@
 //! `/diff` shows uncommitted git changes inline. Runs `git diff HEAD`, or `git diff --cached` and
-//! `git diff` before the first commit, then lists untracked files. Git runs off the event loop
-//! from the repository root, and its output reaches chat as a [`WorkingTreeDiff`].
+//! `git diff` before the first commit, then lists untracked files. Git runs off the event loop from
+//! the repository root, and its output reaches chat as a [`WorkingTreeDiff`].
 
 mod view;
 
@@ -48,8 +48,8 @@ impl SlashCommand for DiffCmd {
 
 // ── Execution ──
 
-/// The tracked diff and the untracked paths of the work tree containing `dir`. Every call after
-/// the first runs from the work tree's root, since `ls-files` lists only the paths under its cwd.
+/// The tracked diff and the untracked paths of the work tree containing `dir`. Every call after the
+/// first runs from the work tree's root, since `ls-files` lists only the paths under its cwd.
 async fn collect_diff(dir: &Path) -> Result<WorkingTreeDiff> {
     let root = work_tree_root(dir).await?;
     let root = root.as_path();
@@ -88,8 +88,8 @@ async fn collect_diff(dir: &Path) -> Result<WorkingTreeDiff> {
 
 // ── Git Helpers ──
 
-/// The root of the work tree containing `dir`, resolved on each run so a repository git refused
-/// at startup is found once the user applies the fix git names, as for dubious ownership. Fails
+/// The root of the work tree containing `dir`, resolved on each run so a repository git refused at
+/// startup is found once the user applies the fix git names, as for dubious ownership. Fails
 /// outside a work tree with git's own message.
 async fn work_tree_root(dir: &Path) -> Result<PathBuf> {
     let out = run_git_in(dir, &["rev-parse", "--show-toplevel"]).await?;
@@ -225,8 +225,8 @@ mod tests {
 
         #[tokio::test]
         async fn lists_the_whole_repository_when_the_project_root_is_a_subdirectory() {
-            // The startup probe falls back to the working directory when git refused the
-            // repository then, so the project root can be a subdirectory.
+            // The startup probe falls back to the working directory when git refused the repository
+            // then, so the project root can be a subdirectory.
             let (_dir, repo) = fresh_repo();
             std::fs::create_dir(repo.join("sub")).unwrap();
             commit_file(&repo, "sub/kept.txt", "k\n");

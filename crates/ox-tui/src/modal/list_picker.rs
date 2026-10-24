@@ -49,8 +49,7 @@ pub(crate) fn numeric_hint(index: usize) -> Option<char> {
 /// Columns kept clear between a description and the right edge of its row.
 const RIGHT_MARGIN: usize = 2;
 
-/// Selectable list with a cursor and an active-row marker.
-/// Rows past the granted height scroll.
+/// Selectable list with a cursor and an active-row marker. Rows past the granted height scroll.
 /// Every picker lists a fixed roster, so the list is never empty and always has a selected row.
 pub(crate) struct ListPicker<T: PickerItem> {
     header: Header,
@@ -92,10 +91,9 @@ impl<T: PickerItem> ListPicker<T> {
         self.cursor
     }
 
-    /// Moves the cursor for a navigation key: Up / `k` and Down / `j` step with wrap,
-    /// and a digit jumps to the row it labels.
-    /// Returns whether the cursor landed on a row,
-    /// which a key outside these or a digit past the roster does not.
+    /// Moves the cursor for a navigation key: Up / `k` and Down / `j` step with wrap, and a digit
+    /// jumps to the row it labels. Returns whether the cursor landed on a row, which a key outside
+    /// these or a digit past the roster does not.
     pub(crate) fn navigate(&mut self, event: &KeyEvent) -> bool {
         match event.code {
             KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
@@ -211,8 +209,8 @@ mod tests {
     use super::*;
     use crate::modal::testing::render_rows_with;
 
-    /// Minimal `PickerItem` covering all trait methods so tests can pin behavior without
-    /// coupling to any concrete picker.
+    /// Minimal `PickerItem` covering all trait methods so tests can pin behavior without coupling
+    /// to any concrete picker.
     struct FakeItem {
         label: &'static str,
         description: Option<&'static str>,

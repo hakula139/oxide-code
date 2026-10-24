@@ -104,8 +104,8 @@ impl Status {
 /// Status bar at the top of the TUI.
 pub(crate) struct StatusBar {
     line: StatusLine,
-    /// Minute of the local day the current-time segment shows, or `None` when the line has no
-    /// such segment.
+    /// Minute of the local day the current-time segment shows, or `None` when the line has no such
+    /// segment.
     current_minute: Option<u16>,
     model: String,
     effort: Option<Effort>,
@@ -275,8 +275,8 @@ impl StatusBar {
         self.rate_limits
     }
 
-    /// Returns `true` when the time, the usage limits, or the spinner changed and the caller
-    /// should repaint.
+    /// Returns `true` when the time, the usage limits, or the spinner changed and the caller should
+    /// repaint.
     pub(crate) fn tick(&mut self, now: Instant) -> bool {
         let mut dirty = self.refresh_current_time();
         dirty |= self.expire_rate_limits();
@@ -288,9 +288,8 @@ impl StatusBar {
         dirty
     }
 
-    /// When [`Self::tick`] next changes the bar, on the event loop's clock: the next spinner
-    /// frame while busy, the next minute the current-time segment shows, or the next usage-limit
-    /// reset.
+    /// When [`Self::tick`] next changes the bar, on the event loop's clock: the next spinner frame
+    /// while busy, the next minute the current-time segment shows, or the next usage-limit reset.
     pub(crate) fn next_tick(&self, now: Instant) -> Option<Instant> {
         let spinner = self.status.is_busy().then_some(self.next_spinner_frame);
         let minute = self

@@ -252,8 +252,8 @@ fn strip_line_ending(line: &str) -> &str {
     line.strip_suffix('\r').unwrap_or(line)
 }
 
-/// Returns whether `line` is an extended header between `diff --git` and the first `@@`, which
-/// the file row covers.
+/// Returns whether `line` is an extended header between `diff --git` and the first `@@`, which the
+/// file row covers.
 fn is_file_header(line: &str) -> bool {
     [
         "index ",
@@ -268,8 +268,8 @@ fn is_file_header(line: &str) -> bool {
     .any(|prefix| line.starts_with(prefix))
 }
 
-/// The path of a `diff --git a/P b/P` line, whose two halves match unless the file was renamed.
-/// Git quotes both halves when the path holds a control character, `"`, or `\`.
+/// The path of a `diff --git a/P b/P` line, whose two halves match unless the file was renamed. Git
+/// quotes both halves when the path holds a control character, `"`, or `\`.
 fn parse_diff_git_path(line: &str) -> Option<String> {
     let rest = line.strip_prefix("diff --git ")?;
     if rest.starts_with('"') {
@@ -345,8 +345,8 @@ fn parse_hunk_range(s: &str) -> Option<HunkRange> {
     Some(HunkRange { start, count })
 }
 
-/// The text of a context line. Under `diff.suppressBlankEmpty`, git writes a blank context line
-/// as an empty line.
+/// The text of a context line. Under `diff.suppressBlankEmpty`, git writes a blank context line as
+/// an empty line.
 fn context_text(line: &str) -> Option<&str> {
     if line.is_empty() {
         Some("")

@@ -77,9 +77,9 @@ impl AutoCompactFailures {
     }
 
     /// Counts a failed attempt at `point`, reporting [`Event::AutoCompactionPaused`] if it pauses
-    /// auto-compaction, and returns the abort that fails the unsent prompt or the turn.
-    /// `cause` is why the summary failed,
-    /// and `None` means the summary succeeded but its boundary was not saved.
+    /// auto-compaction, and returns the abort that fails the unsent prompt or the turn. `cause` is
+    /// why the summary failed, and `None` means the summary succeeded but its boundary was not
+    /// saved.
     fn fail(
         &mut self,
         sink: &dyn EventSink,
@@ -169,9 +169,8 @@ impl Engine {
     }
 
     /// Compacts the transcript ahead of a prompt once [`auto_compaction_due`] holds for the stored
-    /// context estimate.
-    /// A failure counts toward the pause, reports [`Event::PromptUnsent`],
-    /// and fails the unsent prompt.
+    /// context estimate. A failure counts toward the pause, reports [`Event::PromptUnsent`], and
+    /// fails the unsent prompt.
     pub(super) async fn auto_compact(
         &mut self,
         sink: &dyn EventSink,
@@ -196,9 +195,9 @@ impl Engine {
     }
 
     /// Compacts the transcript at a round boundary of a turn whose context crossed the threshold,
-    /// so the turn goes on from the summary, and returns the summary's checkpoint.
-    /// A cancel ends the turn on [`Message::interruption`] as at any other round boundary,
-    /// and a failure counts toward the pause and fails the turn.
+    /// so the turn goes on from the summary, and returns the summary's checkpoint. A cancel ends
+    /// the turn on [`Message::interruption`] as at any other round boundary, and a failure counts
+    /// toward the pause and fails the turn.
     pub(super) async fn compact_mid_turn(
         &mut self,
         sink: &dyn EventSink,
@@ -270,10 +269,9 @@ impl Engine {
         report_abort(sink, abort, "compact-failed")
     }
 
-    /// Summarizes the transcript and swaps the summary in once its boundary is saved,
-    /// starting the new transcript from a fresh user context, and returns the summary's checkpoint.
-    /// Bills each summary request and shows the usage
-    /// once any request reported it or the transcript changed.
+    /// Summarizes the transcript and swaps the summary in once its boundary is saved, starting the
+    /// new transcript from a fresh user context, and returns the summary's checkpoint. Bills each
+    /// summary request and shows the usage once any request reported it or the transcript changed.
     async fn run_compaction(
         &mut self,
         sink: &dyn EventSink,
@@ -317,8 +315,8 @@ impl Engine {
             Ok(Err(e)) => Err(CompactFailure::Summary(e)),
             Err(abort) => Err(CompactFailure::Aborted(abort)),
         };
-        // Bills after the boundary, so a write error it surfaces follows the compaction event
-        // that clears the TUI's chat.
+        // Bills after the boundary, so a write error it surfaces follows the compaction event that
+        // clears the TUI's chat.
         self.bill(sink, &spent).await;
         if compacted.is_ok() {
             self.reset_context_usage(sink);
@@ -329,13 +327,11 @@ impl Engine {
         compacted
     }
 
-    /// Saves the compaction boundary and swaps the transcript to the summary message,
-    /// which lists the open background shells and, after a mid-turn `trigger`, asks the model
-    /// to resume the turn.
-    /// It then clears the file tracker, reports the compaction under `trigger`,
-    /// and returns the summary's checkpoint.
-    /// A failed write discards the streamed summary and leaves the transcript unchanged,
-    /// unless persistence has stopped, when the swap happens in memory alone.
+    /// Saves the compaction boundary and swaps the transcript to the summary message, which lists
+    /// the open background shells and, after a mid-turn `trigger`, asks the model to resume the
+    /// turn. It then clears the file tracker, reports the compaction under `trigger`, and returns
+    /// the summary's checkpoint. A failed write discards the streamed summary and leaves the
+    /// transcript unchanged, unless persistence has stopped, when the swap happens in memory alone.
     async fn replace_with_summary(
         &mut self,
         sink: &dyn EventSink,
@@ -378,9 +374,8 @@ impl Engine {
 }
 
 /// Whether auto-compaction under `config` replaces `transcript`, whose next request holds about
-/// `context_tokens`, never when that size is unknown.
-/// The transcript must also reach the `/compact` size floor,
-/// below which the system prompt, instructions, and tools fill most of the context.
+/// `context_tokens`, never when that size is unknown. The transcript must also reach the `/compact`
+/// size floor, below which the system prompt, instructions, and tools fill most of the context.
 pub(super) fn auto_compaction_due(
     config: AutoCompactionConfig,
     context_tokens: Option<u32>,
@@ -551,8 +546,8 @@ impl Drop for RequestUsage<'_> {
 
 // ── Overflow Retries ──
 
-/// Tokens a summary request ran over the context window by, or `Some(0)` when the API did not
-/// say. `None` when the request fit.
+/// Tokens a summary request ran over the context window by, or `Some(0)` when the API did not say.
+/// `None` when the request fit.
 fn overflow_tokens(result: &Result<Response>) -> Option<u32> {
     match result {
         Ok(response) => {
@@ -634,8 +629,8 @@ fn without_thinking(message: &Message) -> Option<Message> {
     })
 }
 
-/// Estimates the tokens of a whole request from its parts,
-/// for a transcript no request has reported usage on.
+/// Estimates the tokens of a whole request from its parts, for a transcript no request has reported
+/// usage on.
 pub(super) fn request_tokens(
     prompt: &PromptParts,
     tools: &[ToolDefinition],

@@ -210,14 +210,14 @@ pub struct Config {
     pub model: ModelSpec,
     /// `None` for models outside the catalog.
     pub(crate) effort: Option<Effort>,
-    /// `None` until [`Config::resolve_auth`] finds a stored login,
-    /// and while signed out, which only a session that can run `/login` starts in.
+    /// `None` until [`Config::resolve_auth`] finds a stored login, and while signed out, which only
+    /// a session that can run `/login` starts in.
     pub(crate) auth: Option<Auth>,
     /// Why the session started signed out.
     pub(crate) signed_out: Option<LoginUnavailable>,
     pub(crate) base_url: String,
-    /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the
-    /// client trusts only the platform roots.
+    /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the client
+    /// trusts only the platform roots.
     pub extra_ca_certs: Option<PathBuf>,
     pub(crate) gateway: GatewayCompat,
     /// User-set output cap. `None` defers to [`ModelSpec::resolve_max_tokens`].
@@ -229,8 +229,8 @@ pub struct Config {
     pub(crate) permission: Policy,
     /// The launch directory and the workspace roots the tools run in.
     pub(crate) workspace: Workspace,
-    /// Whether adaptive thinking opts into summarized text. The request's `thinking` field
-    /// derives from this plus the model.
+    /// Whether adaptive thinking opts into summarized text. The request's `thinking` field derives
+    /// from this plus the model.
     pub show_thinking: bool,
     pub(crate) show_welcome: bool,
     pub(crate) status_line: Vec<StatusLineSegment>,
@@ -239,17 +239,15 @@ pub struct Config {
 }
 
 impl Config {
-    /// Resolves config from env, the config files [`load::load`] finds from `cwd`
-    /// within its [`project_root`], and built-in defaults.
-    /// A TOML or env parse error fails the load.
-    /// Only an explicit credential resolves here, and [`Config::resolve_auth`] adds the rest.
+    /// Resolves defaults, user and project config files, and environment values. Project discovery
+    /// stays within `cwd`'s [`project_root`]. Invalid TOML or environment values fail the load.
+    /// Resolves explicit credentials only, leaving stored logins to [`Config::resolve_auth`].
     pub fn load(cwd: &Path) -> Result<Self> {
         Self::resolve(cwd, |path| load_extra_ca_certs(path).map(drop))
     }
 
-    /// Resolves the config as [`Config::load`] does,
-    /// except that it never reads the CA bundle, which may be a secret the caller cannot read.
-    /// Like `load`, it reads no stored login.
+    /// Checks config as [`Config::load`] does without reading a CA bundle or stored login. The
+    /// bundle may be a secret the caller cannot read.
     pub fn check(cwd: &Path) -> Result<ConfigCheck> {
         let config = Self::resolve(cwd, |_| Ok(()))?;
         Ok(ConfigCheck {
@@ -380,12 +378,10 @@ impl Config {
         })
     }
 
-    /// Falls back to a stored login when no explicit credential is set.
-    /// Startup runs this last, after every check that can fail without it,
-    /// so a bad setting fails before a Keychain prompt or a token refresh.
-    /// Without a credential, a session that `can_sign_in` with `/login`,
-    /// which only the TUI can, starts signed out unless `base_url` is a gateway.
-    /// Any other session fails.
+    /// Falls back to a stored login when no explicit credential is set. Run after other startup
+    /// checks so invalid settings fail before a Keychain prompt or token refresh. A TUI that
+    /// `can_sign_in` may start signed out against the first-party API. Other sessions and gateways
+    /// require credentials.
     pub async fn resolve_auth(&mut self, can_sign_in: bool) -> Result<()> {
         if self.auth.is_some() {
             return Ok(());
@@ -480,9 +476,9 @@ fn resolve_extra_ca_certs(
     }
 }
 
-/// The explicit credential and its source, rejecting a custom header that would replace it.
-/// Without one, the source is the default, since [`Config::resolve_auth`] falls back to a stored
-/// login, and the header check covers the OAuth header that a stored login or `/login` sends.
+/// The explicit credential and its source, rejecting a custom header that would replace it. Without
+/// one, the source is the default, since [`Config::resolve_auth`] falls back to a stored login, and
+/// the header check covers the OAuth header that a stored login or `/login` sends.
 fn resolve_explicit_auth(
     file_api_key: Option<String>,
     origins: &Origins,
@@ -944,16 +940,16 @@ mod tests {
             (key, Some(value.to_owned()))
         }
 
-        /// Loads a session that cannot sign in
-        /// from the user config under `dir` and the baseline env plus `overrides`.
+        /// Loads a session that cannot sign in from the user config under `dir` and the baseline
+        /// env plus `overrides`.
         async fn load_with(dir: &TempDir, overrides: &[(&'static str, &str)]) -> Result<Config> {
             let overrides = overrides.iter().map(|&(key, value)| env(key, value));
             let vars = env_vars([xdg(dir)].into_iter().chain(overrides));
             load_in(dir, vars, false).await
         }
 
-        /// Runs both startup steps, [`Config::load`] and [`Config::resolve_auth`],
-        /// in `dir` with exactly `vars` set.
+        /// Runs both startup steps, [`Config::load`] and [`Config::resolve_auth`], in `dir` with
+        /// exactly `vars` set.
         async fn load_in(
             dir: &TempDir,
             vars: Vec<(&'static str, Option<String>)>,
@@ -1578,8 +1574,8 @@ mod tests {
 
         #[tokio::test]
         async fn malformed_custom_headers_fail_before_credentials_resolve() {
-            // No credential exists for the gateway, so reaching auth would fail
-            // with a different error.
+            // No credential exists for the gateway, so reaching auth would fail with a different
+            // error.
             let dir = tempfile::tempdir().unwrap();
             let vars = env_vars(vec![
                 xdg(&dir),
@@ -2459,10 +2455,9 @@ mod tests {
             Key,
         }
 
-        /// A deserializer that leads `FileConfig` along `path`, one field per table,
-        /// and records the shape of the value at its end.
-        /// A struct, such as `[client]`, is a table,
-        /// and any other value is a key, even an optional table such as `permission.allow`.
+        /// A deserializer that leads `FileConfig` along `path`, one field per table, and records
+        /// the shape of the value at its end. A struct, such as `[client]`, is a table, and any
+        /// other value is a key, even an optional table such as `permission.allow`.
         #[derive(Clone, Copy)]
         struct Probe<'a> {
             path: &'a [&'static str],

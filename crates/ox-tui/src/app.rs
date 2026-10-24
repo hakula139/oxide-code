@@ -1,13 +1,7 @@
-//! Root TUI application.
+//! Root TUI application and event loop.
 //!
-//! [`App`] owns every component, holds the cross-task channels, and runs the `tokio::select!`
-//! loop multiplexing crossterm events, engine events, git probe results, clipboard reports,
-//! background slash-command results, and a render tick.
-//! The tick runs at up to 60 FPS while a redraw is pending and otherwise sleeps until the next
-//! timed change.
-//! A dirty flag coalesces redraws so each state change renders once.
-//! Input, engine events, drawing, and the prompt queue live in the `dispatch`, `events`, `render`,
-//! and `queue` submodules.
+//! Input and background events update state and request a redraw. The frame clock coalesces redraws
+//! at up to 60 FPS and sleeps until the next timed change when idle.
 
 mod dispatch;
 mod events;
@@ -250,8 +244,8 @@ impl App {
     }
 
     /// When the loop next ticks: one frame after `last_tick` while a redraw is pending, and
-    /// otherwise at the earliest deadline a component reports, never sooner than that frame.
-    /// `None` when only an event can change what the app shows.
+    /// otherwise at the earliest deadline a component reports, never sooner than that frame. `None`
+    /// when only an event can change what the app shows.
     fn next_tick(&self, last_tick: Instant) -> Option<Instant> {
         let frame = last_tick + TICK_INTERVAL;
         if self.dirty {

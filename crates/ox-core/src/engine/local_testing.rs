@@ -1,5 +1,4 @@
-//! Test fixtures that this crate's engine test modules share. They drive turns through an engine
-//! handle, build dispatch contexts and dead sessions, and seed transcripts large enough to compact.
+//! Shared engine fixtures for turns, dispatch, and persisted sessions.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -94,8 +93,8 @@ pub(super) async fn submit(handle: &mut EngineHandle, text: &str) -> Vec<Event> 
     turn_events(&mut handle.events).await
 }
 
-/// The first text block of each message in `request`, empty for a message that opens with
-/// another block.
+/// The first text block of each message in `request`, empty for a message that opens with another
+/// block.
 pub(super) fn texts(request: &serde_json::Value) -> Vec<&str> {
     request["messages"]
         .as_array()

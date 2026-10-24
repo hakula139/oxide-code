@@ -63,8 +63,8 @@ pub(super) enum SessionCmd {
         synthetic_message: Message,
         ack: oneshot::Sender<CompactOutcome>,
     },
-    /// Drains pending writes, acks, then exits the actor loop so shutdown returns without
-    /// waiting for orphaned clones to drop.
+    /// Drains pending writes, acks, then exits the actor loop so shutdown returns without waiting
+    /// for orphaned clones to drop.
     Shutdown {
         ack: oneshot::Sender<()>,
     },
@@ -269,8 +269,8 @@ impl Batch {
         });
     }
 
-    /// Queues one sidecar per item, skipping default metadata since it adds no display fields.
-    /// Acks at once when nothing needs a flush.
+    /// Queues one sidecar per item, skipping default metadata since it adds no display fields. Acks
+    /// at once when nothing needs a flush.
     fn absorb_tool_metadata(
         &mut self,
         items: Vec<(String, ToolMetadata)>,
@@ -360,8 +360,8 @@ fn settle_acks(
     }
 }
 
-/// Carries the first flush failure and the first failure after persistence stopped. Later ones
-/// stay in the warn-log.
+/// Carries the first flush failure and the first failure after persistence stopped. Later ones stay
+/// in the warn-log.
 fn surface_failure(failure: Option<&str>, stopped: bool, shared: &SharedState) -> Option<String> {
     let msg = failure?;
     let first = if stopped {

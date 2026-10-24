@@ -64,8 +64,7 @@ mod tests {
     mod compute_fingerprint {
         use super::*;
 
-        // Verified via `echo -n "59cf53e54c78'li2.1.37" | shasum -a 256` → "9e71...".
-        // Chars at indices [4, 7, 20] of "Say 'hello'..." are `'`, `l`, `i`.
+        // Indices 4, 7, and 20 of "Say 'hello'..." select `'`, `l`, and `i`.
         #[test]
         fn matches_a_known_vector() {
             let fp = compute_fingerprint("Say 'hello' and nothing else.", "2.1.37");
@@ -96,8 +95,6 @@ mod tests {
             assert_eq!(compute_fingerprint("Hello", "2.1.37"), "a74");
         }
 
-        // Expected values in the UTF-16 tests come from Claude Code's fingerprint function run
-        // under both Bun and Node.
         #[test]
         fn counts_utf16_code_units() {
             // 📦 takes two code units, which puts the `t` of "to" at index 20.

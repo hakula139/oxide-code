@@ -188,7 +188,6 @@ mod tests {
 
         #[test]
         fn propagates_io_error_other_than_not_found() {
-            // Reading a directory as a file errors with IsADirectory.
             let dir = tempdir().unwrap();
             let err = read_existing(dir.path()).unwrap_err();
             assert_eq!(

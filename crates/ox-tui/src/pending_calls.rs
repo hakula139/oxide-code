@@ -6,8 +6,8 @@ use std::collections::HashMap;
 /// arrives without its `ToolCallStart` or a resumed transcript lost the call.
 const FALLBACK_RESULT_HEADER: &str = "(result)";
 
-/// Picks the display header for a tool result, preferring the tool's own post-execution title,
-/// then the label its call showed, then the generic fallback.
+/// Picks the display header for a tool result, preferring the tool's own post-execution title, then
+/// the label its call showed, then the generic fallback.
 pub(crate) fn result_header(title: Option<String>, call_label: Option<String>) -> String {
     title
         .or(call_label)

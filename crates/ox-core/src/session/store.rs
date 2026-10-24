@@ -32,15 +32,15 @@ const SESSIONS_DIR: &str = "sessions";
 
 // ── SessionStore ──
 
-/// Low-level session file operations scoped to one project, the Git repository root of the
-/// launch directory or the launch directory itself outside a repository.
+/// Low-level session file operations scoped to one project, the Git repository root of the launch
+/// directory or the launch directory itself outside a repository.
 #[derive(Clone)]
 pub struct SessionStore {
     sessions_dir: PathBuf,
     /// Where new sessions go, named for the project root.
     project_dir: PathBuf,
-    /// Where releases up to 0.1.0-alpha.5 put sessions started in the launch directory, named
-    /// for it, when that differs from `project_dir`.
+    /// Where releases up to 0.1.0-alpha.5 put sessions started in the launch directory, named for
+    /// it, when that differs from `project_dir`.
     cwd_dir: Option<PathBuf>,
     project_root: PathBuf,
     project: Project,
@@ -134,8 +134,8 @@ pub(super) fn open_append_at(path: &Path) -> Result<SessionWriter> {
     })
 }
 
-/// Loads session data from an explicit path with DAG-based chain resolution.
-/// The file must begin with a header in a format version this build reads.
+/// Loads session data from an explicit path with DAG-based chain resolution. The file must begin
+/// with a header in a format version this build reads.
 pub(super) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut lines = JsonlLines::new(BufReader::new(file));
@@ -165,9 +165,9 @@ pub(super) fn read_session_id_from_path(path: &Path) -> Result<String> {
     Ok(header.session_id)
 }
 
-/// The directory beside `session_file` that holds the artifacts of session `session_id`,
-/// such as spilled tool output.
-/// It exists only once the session writes an artifact, and [`delete_at`] removes it with the file.
+/// The directory beside `session_file` that holds the artifacts of session `session_id`, such as
+/// spilled tool output. It exists only once the session writes an artifact, and [`delete_at`]
+/// removes it with the file.
 pub(crate) fn artifact_dir(session_file: &Path, session_id: &str) -> PathBuf {
     session_file.with_file_name(session_id)
 }
@@ -191,9 +191,8 @@ pub(crate) fn delete_at(path: &Path) -> Result<()> {
         .with_context(|| format!("failed to remove session file {}", path.display()))
 }
 
-/// Sets the archive state of the session file at `path`.
-/// The file keeps its mtime, since listings order sessions by activity and toggling the state is
-/// not activity.
+/// Sets the archive state of the session file at `path`. The file keeps its mtime, since listings
+/// order sessions by activity and toggling the state is not activity.
 pub(super) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
     let mut writer = open_append_at(path)?;
     let modified = fs::metadata(path)
@@ -290,8 +289,8 @@ pub(crate) struct SessionData {
     pub(crate) session_id: String,
     pub(crate) messages: Vec<Message>,
     pub(crate) last_uuid: Option<Uuid>,
-    /// Prompt state recorded on the resolved chain, `None` for a transcript that predates
-    /// recording or whose last compaction no user message followed.
+    /// Prompt state recorded on the resolved chain, `None` for a transcript that predates recording
+    /// or whose last compaction no user message followed.
     pub(crate) context: Option<SessionContext>,
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<TitleInfo>,
@@ -472,8 +471,8 @@ impl SessionDataBuilder {
 // ── File Opening ──
 
 /// Options for a readable handle that [`Appender`] writes through. On Windows, `append(true)`
-/// strips the `FILE_WRITE_DATA` access that `set_len` needs to roll back a partial write, so
-/// the handle opens for plain writing there and each write targets the end of the file.
+/// strips the `FILE_WRITE_DATA` access that `set_len` needs to roll back a partial write, so the
+/// handle opens for plain writing there and each write targets the end of the file.
 fn append_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.read(true);

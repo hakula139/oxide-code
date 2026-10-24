@@ -29,8 +29,8 @@ pub(crate) trait Wire: Send + Sync {
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>>;
 
-    /// Streams a request no later request extends, so caching its transcript tail would only add
-    /// a write premium. Defaults to [`Self::stream_message`] for wires that do no caching.
+    /// Streams a request no later request extends, so caching its transcript tail would only add a
+    /// write premium. Defaults to [`Self::stream_message`] for wires that do no caching.
     fn stream_one_shot(
         &self,
         messages: &[Message],
@@ -54,8 +54,8 @@ pub(crate) enum ResponseEvent {
     /// What the model says it is about to do, sent as the tool call it introduces starts.
     Progress(String),
     /// The request's usage so far. Each snapshot replaces the last, including one from an attempt
-    /// that was retried. Usage streams apart from the reply so a request that fails or is
-    /// cancelled midway still bills.
+    /// that was retried. Usage streams apart from the reply so a request that fails or is cancelled
+    /// midway still bills.
     Usage(TokenUsage),
     /// The account's usage limits as of this request, from a wire that meters subscription use.
     RateLimits(RateLimits),

@@ -110,9 +110,9 @@ pub(super) fn row_text(task: &Task) -> String {
     format!("{} {}", task_marker(task.status), task.content)
 }
 
-/// The tasks a view of at most `rows` rows shows: from the one before the task in progress, or
-/// else before the first unfinished task, so the step just finished stays beside the work ahead.
-/// A single row shows that task alone.
+/// The tasks a view of at most `rows` rows shows: from the one before the task in progress, or else
+/// before the first unfinished task, so the step just finished stays beside the work ahead. A
+/// single row shows that task alone.
 pub(super) fn window(tasks: &[Task], rows: usize) -> Range<usize> {
     if tasks.len() <= rows {
         return 0..tasks.len();

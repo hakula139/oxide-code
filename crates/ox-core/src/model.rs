@@ -1,10 +1,9 @@
-//! Catalog of the supported Claude models, matched by exact ID, and the request parameters
-//! resolved or priced per model: [`Effort`] and [`PromptCacheTtl`].
+//! Claude model catalog, capabilities, pricing, and request parameters.
 //!
-//! Every row shares one request surface: adaptive thinking, the full `output_config.effort`
-//! ladder, `clear_thinking` context management, a 1M-token context window, and 128K output.
-//! Other IDs (custom gateway names, retired models) pass through verbatim with no known
-//! capabilities, so their requests carry none of those opt-ins and auto-compaction stays off.
+//! Catalog models support adaptive thinking, the full `output_config.effort` ladder,
+//! `clear_thinking` context management, a 1M-token context window, and 128K output. Unknown IDs
+//! pass through unchanged without these opt-ins or default and percentage-based auto-compaction.
+//! Explicit token thresholds still apply.
 
 mod pricing;
 mod usage;
@@ -30,8 +29,8 @@ pub struct ModelInfo {
     pub display_name: &'static str,
     pub(crate) family: Family,
     pub(crate) cutoff: &'static str,
-    /// The API's own default when a request omits `output_config.effort`. Sent explicitly so the
-    /// UI shows the level the request actually runs at.
+    /// The API's own default when a request omits `output_config.effort`. Sent explicitly so the UI
+    /// shows the level the request actually runs at.
     pub default_effort: Effort,
     /// Whether the model accepts `thinking.display = "updates"`.
     pub(crate) progress_updates: bool,
@@ -60,8 +59,8 @@ impl Family {
 }
 
 const CONTEXT_WINDOW: u32 = 1_000_000;
-/// Half the 128K output ceiling every catalog model shares. `effort` steers thinking depth, so
-/// this only bounds runaway output.
+/// Half the 128K output ceiling every catalog model shares. `effort` steers thinking depth, so this
+/// only bounds runaway output.
 const MAX_TOKENS: u32 = 64_000;
 /// Fits the lower output ceilings of the older or smaller models an unknown ID may name.
 const UNKNOWN_MODEL_MAX_TOKENS: u32 = 16_000;
@@ -142,8 +141,8 @@ pub(crate) fn cost_rates(id: &str) -> Option<TokenCostRates> {
 // ── ModelSpec ──
 
 /// A model ID resolved against [`MODELS`] once. Every model-derived request field (effort,
-/// thinking, betas, context management) and every label reads from here, so a swap re-derives
-/// them all together.
+/// thinking, betas, context management) and every label reads from here, so a swap re-derives them
+/// all together.
 #[derive(Debug, Clone)]
 pub struct ModelSpec {
     id: String,
@@ -173,15 +172,14 @@ impl ModelSpec {
         self.info.map(|info| pick.unwrap_or(info.default_effort))
     }
 
-    /// Output cap to send: the user's `pick`, else 64K for catalog models and 16K for unknown
-    /// IDs, whose models may cap output lower.
+    /// Output cap to send: the user's `pick`, else 64K for catalog models and 16K for unknown IDs,
+    /// whose models may cap output lower.
     pub fn resolve_max_tokens(&self, pick: Option<u32>) -> u32 {
         pick.unwrap_or(self.info.map_or(UNKNOWN_MODEL_MAX_TOKENS, |_| MAX_TOKENS))
     }
 
-    /// The context window in tokens. `None` for unknown IDs disables default and
-    /// percentage-based auto-compaction and the status-line percentage. Explicit token thresholds
-    /// still apply.
+    /// The context window in tokens. `None` for unknown IDs disables default and percentage-based
+    /// auto-compaction and the status-line percentage. Explicit token thresholds still apply.
     pub(crate) fn context_window(&self) -> Option<u32> {
         self.info.map(|_| CONTEXT_WINDOW)
     }
@@ -377,9 +375,9 @@ mod tests {
 
         #[test]
         fn route_each_model_to_its_own_card() {
-            // 50K input + 50K cache reads + 1M output stays within Haiku's base card: Fable
-            // $0.50 + $0.0125 + $50, Opus $0.20 + $0.01 + $20, Sonnet $0.10 + $0.005 + $10, and
-            // Haiku $0.005 + $0.0005 + $0.50.
+            // 50K input + 50K cache reads + 1M output stays within Haiku's base card: Fable $0.50 +
+            // $0.0125 + $50, Opus $0.20 + $0.01 + $20, Sonnet $0.10 + $0.005 + $10, and Haiku
+            // $0.005 + $0.0005 + $0.50.
             let usage = TokenUsage {
                 cache_read_input_tokens: 50_000,
                 ..TokenUsage::new(50_000, 1_000_000)

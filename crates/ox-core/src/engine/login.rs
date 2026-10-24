@@ -13,10 +13,9 @@ use crate::protocol::{Event, EventSink, Op, SignInCode};
 use crate::util::text::join_sentences;
 
 impl Engine {
-    /// Fails while signed out.
-    /// A session that a transient failure signed out first loads the stored login again,
-    /// and keeps doing so on later prompts and compactions while the failure stays transient.
-    /// An interrupt or a closed channel stops only the wait.
+    /// Fails while signed out. A session that a transient failure signed out first loads the stored
+    /// login again, and keeps doing so on later prompts and compactions while the failure stays
+    /// transient. An interrupt or a closed channel stops only the wait.
     pub(super) async fn ensure_signed_in(
         &mut self,
         sink: &dyn EventSink,
@@ -218,8 +217,8 @@ mod tests {
                 .to_owned()
         }
 
-        /// Stores an expired, refreshable oxide-code login under `data` and holds its lock,
-        /// so loading it fails transiently after the lock wait.
+        /// Stores an expired, refreshable oxide-code login under `data` and holds its lock, so
+        /// loading it fails transiently after the lock wait.
         fn hold_expired_ox_login(data: &Path) {
             let file = store_ox_login(data);
             write_creds(&file, "dead", Some("refresh"), 0);

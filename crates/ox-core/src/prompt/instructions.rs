@@ -42,9 +42,9 @@ pub(crate) struct Found {
     content: String,
 }
 
-/// Loads the user's file, then one file per directory from `project_root` down to `cwd`, so files
-/// closer to `cwd` appear later. A file loads once however many locations resolve to it. Also
-/// returns a warning for each candidate that exists but cannot or may not be read.
+/// Loads global instructions, then project instructions from `project_root` through `cwd`,
+/// collecting warnings for skipped files. Each location uses its first readable, nonblank
+/// candidate, and resolved files load once.
 pub(super) async fn load(cwd: &Path, project_root: &Path) -> (String, Vec<String>) {
     let slots = candidate_slots(cwd, project_root);
     let (files, warnings) = tokio::task::spawn_blocking(|| load_files(slots))
@@ -125,8 +125,8 @@ fn candidate_slots(cwd: &Path, project_root: &Path) -> Vec<Slot> {
     iter::once(user).chain(projects).collect()
 }
 
-/// oxide-code's user file, then Claude Code's, so existing Claude Code instructions apply until
-/// the user writes their own.
+/// oxide-code's user file, then Claude Code's, so existing Claude Code instructions apply until the
+/// user writes their own.
 fn user_candidates() -> Vec<PathBuf> {
     let ox = app_dir(XdgBase::Config).map(|dir| dir.join(AGENTS_MD));
     let claude = claude_dir().map(|dir| dir.join(CLAUDE_MD));
@@ -149,9 +149,8 @@ fn walk_root_to_cwd(root: &Path, cwd: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// The first file with instructions in each slot, and a warning for each candidate that cannot or
-/// may not be read. A slot whose candidate is skipped falls back to the next one, while a slot
-/// whose file an earlier slot loaded contributes nothing.
+/// Loads the first readable, nonblank file in each slot and collects skipped-file warnings. A file
+/// already loaded by an earlier slot ends the slot without adding another copy.
 fn load_files(slots: Vec<Slot>) -> (Vec<InstructionFile>, Vec<String>) {
     let mut files = Vec::new();
     let mut warnings = Vec::new();

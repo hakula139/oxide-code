@@ -42,8 +42,8 @@ pub(crate) struct FileState {
     pub(crate) last_view: LastView,
     #[serde(with = "time::serde::rfc3339")]
     pub(crate) recorded_at: OffsetDateTime,
-    /// The tool call that recorded this state. Resume restores the state only while the
-    /// transcript still holds that call's result.
+    /// The tool call that recorded this state. Resume restores the state only while the transcript
+    /// still holds that call's result.
     pub(crate) tool_use_id: String,
 }
 
@@ -84,8 +84,8 @@ impl FileTracker {
     }
 
     /// Returns `CacheHit` when a file already tracked as `Full` is read in full again unchanged.
-    /// Reads of unchanged content accumulate their line windows, and changed content starts over.
-    /// A read that returns content attributes the state to its tool call, `tool_use_id`.
+    /// Reads of unchanged content accumulate their line windows, and changed content starts over. A
+    /// read that returns content attributes the state to its tool call, `tool_use_id`.
     pub(crate) fn record_read(
         &self,
         path: &Path,
@@ -314,8 +314,8 @@ pub(crate) enum TrackableFileError {
     TooLarge { size: u64, max: u64 },
 }
 
-/// Checks that `metadata` names a regular file within [`MAX_TRACKED_FILE_SIZE`]. A FIFO, socket,
-/// or device can report `len() == 0`, so the size check alone would let it through.
+/// Checks that `metadata` names a regular file within [`MAX_TRACKED_FILE_SIZE`]. A FIFO, socket, or
+/// device can report `len() == 0`, so the size check alone would let it through.
 pub(crate) fn validate_trackable_file(metadata: &Metadata) -> Result<(), TrackableFileError> {
     let file_type = metadata.file_type();
     if file_type.is_dir() {
@@ -336,9 +336,7 @@ pub(crate) fn validate_trackable_file(metadata: &Metadata) -> Result<(), Trackab
 
 // ── FileSnapshot ──
 
-/// JSONL-persisted record of one tracked file. Written into the session log on `finish` and read
-/// back on resume by [`FileTracker::restored`], which rehashes each path before re-admitting it
-/// to the live tracker.
+/// Tracked file state persisted at session finish and revalidated against disk on resume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
@@ -358,8 +356,7 @@ pub(crate) enum RecordRead {
     CacheHit,
 }
 
-/// Reasons the Read-before-Edit / Write gate refuses a tool call. Each variant's `#[error]`
-/// message tells the model how to recover (Read first / Read the rest / re-Read).
+/// Read-before-Edit / Write failures with recovery instructions for the model.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum GateError {
     #[error(

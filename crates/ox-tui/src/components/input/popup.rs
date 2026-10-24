@@ -1,13 +1,13 @@
 //! Slash-command autocomplete popup. Two modes:
 //!
-//! - **Name**: typing `/cmd`. Rows are matched commands. Aliases parenthesize only the typed
-//!   alias (`/clear (new)`). Tab inserts `/{name} ` into the buffer.
-//! - **Arg**: typing `/cmd <prefix>`. Rows are arg completions from the command's curated
-//!   roster (`/model`, `/effort`, `/theme`). Tab replaces the prefix with `/{cmd} {value} `.
+//! - **Name**: typing `/cmd`. Rows are matched commands. Aliases parenthesize only the typed alias
+//!   (`/clear (new)`). Tab inserts `/{name} ` into the buffer.
+//! - **Arg**: typing `/cmd <prefix>`. Rows are arg completions from the command's curated roster
+//!   (`/model`, `/effort`, `/theme`). Tab replaces the prefix with `/{cmd} {value} `.
 //!
-//! Selected row paints in `text` + BOLD. Other rows dim so contrast stands in for a prefix glyph
-//! or fill. Lists past [`MAX_VISIBLE_ROWS`] scroll with a centered cursor (Claude Code
-//! typeahead style).
+//! Selected row paints in `text` + BOLD. Other rows dim so contrast stands in for a prefix glyph or
+//! fill. Lists past [`MAX_VISIBLE_ROWS`] scroll with a centered cursor (Claude Code typeahead
+//! style).
 
 use std::borrow::Cow;
 
@@ -32,8 +32,8 @@ const MAX_VISIBLE_ROWS: usize = 8;
 /// overlay so it doesn't bleed into whatever sits above (welcome, chat, preview).
 const CHROME_ROWS: u16 = 1;
 
-/// In-progress popup context: `Name` while the user types the command name, and `Arg` once a
-/// space follows it. `None` for plain prompts and the `//` escape.
+/// In-progress popup context: `Name` while the user types the command name, and `Arg` once a space
+/// follows it. `None` for plain prompts and the `//` escape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PopupState<'a> {
     Name(&'a str),
@@ -50,8 +50,8 @@ enum PopupMode {
     },
 }
 
-/// One popup row. `value` is the bare token (command name or arg value). The renderer adds
-/// `/` and any matched-alias suffix in name mode.
+/// One popup row. `value` is the bare token (command name or arg value). The renderer adds `/` and
+/// any matched-alias suffix in name mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PopupRow {
     value: Cow<'static, str>,
@@ -76,8 +76,8 @@ struct PopupList {
 impl SlashPopup {
     pub(super) fn set_state(&mut self, state: Option<&PopupState<'_>>) {
         let mut list = state.and_then(PopupList::new);
-        // Mode transitions, including a switch to another command's args, reset to row 0 since
-        // the rosters are unrelated. Query or prefix changes clamp instead, so the cursor sticks.
+        // Mode transitions, including a switch to another command's args, reset to row 0 since the
+        // rosters are unrelated. Query or prefix changes clamp instead, so the cursor sticks.
         if let (Some(old), Some(new)) = (&self.list, &mut list)
             && old.mode == new.mode
         {
@@ -636,7 +636,6 @@ mod tests {
 
         #[test]
         fn after_scroll_shows_window_starting_at_offset() {
-            // Moving to row 8 of 12 scrolls `cmd0` out and `cmd8` in, so slice and offset agree.
             let mut popup = long_popup(12);
             for _ in 0..8 {
                 popup.select_next();

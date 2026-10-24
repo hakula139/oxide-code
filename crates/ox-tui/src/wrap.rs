@@ -118,8 +118,8 @@ fn greedy_word_wrap<'a>(
     lines
 }
 
-/// Measures one visual line starting at `start`, returning its end and the next line's start.
-/// Rows break after whitespace and around wide characters, never in the first `lead_width` columns.
+/// Measures one visual line starting at `start`, returning its end and the next line's start. Rows
+/// break after whitespace and around wide characters, never in the first `lead_width` columns.
 fn take_one_line(
     graphemes: &[(&str, Style)],
     start: usize,
@@ -171,8 +171,8 @@ fn is_whitespace(grapheme: &str) -> bool {
 }
 
 /// Returns whether a row may end between `before` and `after` without whitespace. CJK text has no
-/// spaces, so a wide grapheme can break from either neighbor unless opening punctuation precedes
-/// or closing punctuation follows.
+/// spaces, so a wide grapheme can break from either neighbor unless opening punctuation precedes or
+/// closing punctuation follows.
 fn breaks_around_wide(before: &str, after: &str) -> bool {
     !is_whitespace(before)
         && !is_whitespace(after)

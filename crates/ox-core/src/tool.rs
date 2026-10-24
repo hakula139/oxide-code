@@ -232,8 +232,8 @@ pub trait Tool: Send + Sync {
         }
     }
 
-    /// Returns the structured shape of a successful tool result for richer UI rendering, with
-    /// paths shown relative to `cwd`, or `None` to fall back to [`ToolResultView::Text`]. Errors
+    /// Returns the structured shape of a successful tool result for richer UI rendering, with paths
+    /// shown relative to `cwd`, or `None` to fall back to [`ToolResultView::Text`]. Errors
     /// short-circuit to text in the registry.
     fn result_view(
         &self,
@@ -384,9 +384,8 @@ fn invalid_input(error: &serde_json::Error) -> String {
 
 // ── Path Utilities ──
 
-/// A file tool's path argument with a leading `~` or `~/` expanded to the home directory, as
-/// config patterns read it.
-/// With no home directory, `~` stays literal.
+/// A file tool's path argument with a leading `~` or `~/` expanded to the home directory, as config
+/// patterns read it. With no home directory, `~` stays literal.
 fn tool_path(raw: &str) -> PathBuf {
     expand_user(raw).unwrap_or_else(|_| PathBuf::from(raw))
 }

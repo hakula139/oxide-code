@@ -7,9 +7,8 @@ use ox_core::config::ConfigSnapshot;
 use ox_core::permission::rule::Rule;
 use ox_core::tool::bash::background::BackgroundShell;
 
-/// The running session's state, which the App keeps current from engine events and hands to
-/// every slash command.
-/// The saved record `--list` reads is [`ox_core::session::entry::SessionInfo`].
+/// The running session's state, which the App keeps current from engine events and hands to every
+/// slash command. The saved record `--list` reads is [`ox_core::session::entry::SessionInfo`].
 pub(crate) struct LiveSessionInfo {
     /// The working directory, which the git probes and the session store use.
     pub(crate) cwd: PathBuf,

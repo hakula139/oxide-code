@@ -1,5 +1,5 @@
-//! Slash-command line parser. Splits `/cmd args...` into a name and args. Names accept ASCII
-//! alphanumerics, `_`, `-`, `:`, and `.`, so namespaced names such as `/plugin:cmd` parse.
+//! Slash-command parsing. Names accept ASCII alphanumerics, `_`, `-`, `:`, and `.`, including
+//! namespaced forms such as `/plugin:cmd`.
 
 /// `name` with its leading `/` removed, and the trimmed `args`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,7 +14,7 @@ impl Parsed {
         format!("/{}: {msg}", self.name)
     }
 
-    /// The command line as the user typed it, with one space between the name and any args.
+    /// Reconstructs the command line with one space between the name and any trimmed arguments.
     pub(super) fn line(&self) -> String {
         if self.args.is_empty() {
             format!("/{}", self.name)
@@ -36,10 +36,9 @@ pub fn parse_slash(input: &str) -> Option<Parsed> {
     })
 }
 
-/// Splits a slash-command line into its name and, once whitespace follows the name, the text after
-/// that whitespace with its start trimmed. `None` for plain prompts, the `//` escape, and names
-/// with disallowed chars. The name may be empty, as for a bare `/`, which a caller completing a
-/// name accepts and [`parse_slash`] rejects.
+/// Splits a slash command into its name and optional arguments with leading whitespace removed.
+/// Returns `None` for plain prompts, `//` escapes, or invalid name characters. Accepts an empty
+/// name for completion, while [`parse_slash`] rejects it.
 pub fn split_slash(input: &str) -> Option<(&str, Option<&str>)> {
     let rest = input.trim_start().strip_prefix('/')?;
     if rest.starts_with('/') {

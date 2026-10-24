@@ -1,9 +1,8 @@
-//! Tool permission gate. A resolved [`Policy`] (mode plus the deny, ask, and allow rule tiers) and
-//! a [`Target`] describing a tool call resolve to a [`Verdict`] through the pure
-//! [`Policy::verdict`] pipeline: a [`Decision`] of allow / ask / deny and the [`Basis`] that
-//! settled it.
+//! Tool permission checks. [`Policy::verdict`] combines a call's [`Target`] with its mode and rule
+//! tiers to produce a [`Decision`] and the [`Basis`] that settled it.
 //!
-//! oxide-code has no sandbox, so this gate is the whole safety boundary around a tool call.
+//! oxide-code has no OS sandbox. Command rules are guardrails because an allowed program can access
+//! files or run other programs beyond what its command line reveals.
 
 pub mod defaults;
 pub(crate) mod project;
@@ -112,16 +111,16 @@ pub enum Tier {
 
 // ── Workspace ──
 
-/// Where a session's tools run: the launch directory, which relative paths resolve against, and
-/// the roots inside which an edit needs no rule. The roots are the launch directory plus
+/// Where a session's tools run: the launch directory, which relative paths resolve against, and the
+/// roots inside which an edit needs no rule. The roots are the launch directory plus
 /// `permission.extra_roots`, each resolved the way a path target is, and there are none when the
 /// launch directory is `/`, `$HOME`, or an ancestor of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Workspace {
     cwd: PathBuf,
     roots: Vec<PathBuf>,
-    /// The directories anchored patterns apply below: the cwd, then each extra root while there
-    /// are roots.
+    /// The directories anchored patterns apply below: the cwd, then each extra root while there are
+    /// roots.
     anchors: Vec<Anchor>,
 }
 
@@ -271,8 +270,8 @@ pub(crate) enum Access {
         /// Where the call lands with every symlink followed. Allow rules, the zone, and the tool's
         /// run use this spelling alone.
         canonical: String,
-        /// `canonical` as the file system names it, kept only when a name in it is not valid
-        /// UTF-8, which `canonical` spells with replacement characters.
+        /// `canonical` as the file system names it, kept only when a name in it is not valid UTF-8,
+        /// which `canonical` spells with replacement characters.
         #[serde(skip)]
         exact: Option<PathBuf>,
         /// `canonical` under the resolved cwd, set only while it sits inside it.
@@ -302,9 +301,9 @@ impl Access {
 
     /// Builds a path target for the location the tool will touch, resolving `path` against the
     /// workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling with
-    /// no rooted forms, so it never auto-allows. The tool follows native filesystem behavior.
-    /// A resolved path that is not valid UTF-8 never auto-allows either, since the input a file
-    /// tool opens can only pin its lossy spelling.
+    /// no rooted forms, so it never auto-allows. The tool follows native filesystem behavior. A
+    /// resolved path that is not valid UTF-8 never auto-allows either, since the input a file tool
+    /// opens can only pin its lossy spelling.
     pub(crate) fn for_path(path: impl AsRef<Path>, workspace: &Workspace) -> Self {
         let joined = workspace.cwd().join(path);
         let requested = lexical_normalize(&joined);
@@ -700,9 +699,9 @@ pub enum Basis {
     SafeRead,
     /// An allowed command, by what let each of its simple commands and its writes through.
     Command(Vec<Basis>),
-    /// A command holding `construct`, which the analysis does not recognize,
-    /// so no allow rule covers it.
-    /// `manual` asks, and `yolo` runs it unless a deny or configured ask rule holds what ox sees.
+    /// A command holding `construct`, which the analysis does not recognize, so no allow rule
+    /// covers it. `manual` asks, and `yolo` runs it unless a deny or configured ask rule holds what
+    /// ox sees.
     Unrecognized { construct: String },
 }
 
@@ -952,9 +951,8 @@ impl Policy {
         })
     }
 
-    /// The user config change that lets a call through in a run nobody attends.
-    /// `None` when something else would still hold the call, or when the group that holds it
-    /// guards secrets.
+    /// The user config change that lets a call through in a run nobody attends. `None` when
+    /// something else would still hold the call, or when the group that holds it guards secrets.
     pub(crate) fn config_fix(&self, class: PermissionClass, target: &Access) -> Option<ConfigFix> {
         let Basis::Builtin(group) = self.verdict(class, &target.as_target()).basis else {
             return self
@@ -1001,8 +999,8 @@ impl Policy {
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
     /// 2. `plan` denies an edit, exec, or net call.
-    /// 3. Outside `yolo`, a call [`Self::asks`] holds asks.
-    ///    In `yolo`, a call [`Self::yolo_hold`] holds asks or is denied.
+    /// 3. Outside `yolo`, a call [`Self::asks`] holds asks. In `yolo`, a call [`Self::yolo_hold`]
+    ///    holds asks or is denied.
     /// 4. A read-class call allows.
     /// 5. An edit-class call inside a workspace root allows.
     /// 6. An allow rule or a session allow rule allows.
@@ -1076,9 +1074,9 @@ impl Policy {
     }
 
     /// What holds the call in the ask tier: an ask rule, the protected group of a path the call
-    /// edits or a command writes, a command the analysis does not recognize, the
-    /// [`read` rule](read_holder) for a file a reader opens, or the `rm` group for a
-    /// [forced recursive delete](Segment::removes_recursively_by_force).
+    /// edits or a command writes, a command the analysis does not recognize, the [`read`
+    /// rule](read_holder) for a file a reader opens, or the `rm` group for a [forced recursive
+    /// delete](Segment::removes_recursively_by_force).
     fn asks(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
         if let Some(rule) = held_by(&self.ask.iter(), class, target) {
             return Some(rule.basis(Tier::Ask));
@@ -1122,9 +1120,9 @@ impl Policy {
             })
     }
 
-    /// What holds a call in `yolo` past the deny tier:
-    /// a deny `read` rule matching a file a reader names denies, and a configured ask rule asks.
-    /// `yolo` runs what only the built-in ask rules, protected paths, or the analysis would hold.
+    /// What holds a call in `yolo` past the deny tier: a deny `read` rule matching a file a reader
+    /// names denies, and a configured ask rule asks. `yolo` runs what only the built-in ask rules,
+    /// protected paths, or the analysis would hold.
     fn yolo_hold(&self, class: PermissionClass, target: &Target<'_>) -> Option<Verdict> {
         let segments = match target {
             Target::Command(command) => command.segments(),
@@ -1166,8 +1164,8 @@ impl Policy {
         }
     }
 
-    /// The allow rule or session allow rule that matches the call, or for a command what lets
-    /// each of its parts through.
+    /// The allow rule or session allow rule that matches the call, or for a command what lets each
+    /// of its parts through.
     fn allows(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
         match target {
             Target::Command(command) => self.allows_command(command),
@@ -1175,10 +1173,9 @@ impl Policy {
         }
     }
 
-    /// What lets every part of a command through, when each does:
-    /// the analysis recognizes it, it runs at least one simple command,
-    /// each simple command is allowed by a rule or is a known-safe read,
-    /// and each file it writes is inside a workspace root or allowed for editing.
+    /// What lets every part of a command through, when each does: the analysis recognizes it, it
+    /// runs at least one simple command, each simple command is allowed by a rule or is a
+    /// known-safe read, and each file it writes is inside a workspace root or allowed for editing.
     fn allows_command(&self, command: &CommandTarget) -> Option<Basis> {
         if command.unrecognized().is_some() || command.segments().is_empty() {
             return None;
@@ -1227,8 +1224,8 @@ impl Policy {
     }
 }
 
-/// The first of the deny or ask `rules` that matches the call, or, for a command, an edit of a
-/// file it writes or a read of a file it redirects into its input.
+/// The first of the deny or ask `rules` that matches the call, or, for a command, an edit of a file
+/// it writes or a read of a file it redirects into its input.
 fn held_by<'a>(
     rules: &(impl Iterator<Item = &'a TierRule> + Clone),
     class: PermissionClass,
@@ -1254,8 +1251,8 @@ fn held_by<'a>(
         })
 }
 
-/// The first `read` rule among the deny or ask `tiers` that matches a file `segment` names,
-/// or the first `read` rule among them when the segment may read any file.
+/// The first `read` rule among the deny or ask `tiers` that matches a file `segment` names, or the
+/// first `read` rule among them when the segment may read any file.
 fn read_holder<'a>(
     segment: &Segment,
     tiers: &(impl Iterator<Item = (&'a TierRule, Tier)> + Clone),
@@ -1290,8 +1287,8 @@ fn named_read_holder<'a>(
     })
 }
 
-/// An approval's "allow for this session" offer: the suggested rule, plus the call that any edit
-/// of it must keep covering.
+/// An approval's "allow for this session" offer: the suggested rule, plus the call that any edit of
+/// it must keep covering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionGrant {
     class: PermissionClass,

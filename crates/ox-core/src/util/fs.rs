@@ -80,8 +80,8 @@ pub(crate) mod testing {
     use std::fs::{self, File};
     use std::path::{Path, PathBuf};
 
-    /// Creates `link` as a symlink to the file `target`.
-    /// Windows needs Developer Mode or admin rights for it, which CI has.
+    /// Creates `link` as a symlink to the file `target`. Windows needs Developer Mode or admin
+    /// rights for it, which CI has.
     pub(crate) fn symlink_file(target: &Path, link: &Path) {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
@@ -89,8 +89,8 @@ pub(crate) mod testing {
         std::os::windows::fs::symlink_file(target, link).unwrap();
     }
 
-    /// Creates `link` as a symlink to the directory `target`,
-    /// needing the same Windows rights as [`symlink_file`].
+    /// Creates `link` as a symlink to the directory `target`, needing the same Windows rights as
+    /// [`symlink_file`].
     pub(crate) fn symlink_dir(target: &Path, link: &Path) {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
@@ -128,8 +128,8 @@ pub(crate) mod testing {
         denied
     }
 
-    /// Access denied by [`deny_read_access`] or [`deny_subdir_creation`],
-    /// restored on drop so the temp dir can be removed.
+    /// Access denied by [`deny_read_access`] or [`deny_subdir_creation`], restored on drop so the
+    /// temp dir can be removed.
     pub(crate) struct AccessDenied {
         path: PathBuf,
         #[cfg(unix)]

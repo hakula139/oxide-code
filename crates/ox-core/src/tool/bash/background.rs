@@ -309,9 +309,9 @@ impl ShellOutput {
             .await;
     }
 
-    /// Renders what the shell printed since the last read, bounded like a foreground call's
-    /// output, and starts the next read empty. The render waits only for a spill write already in
-    /// flight, so its markers name complete files.
+    /// Renders what the shell printed since the last read, bounded like a foreground call's output,
+    /// and starts the next read empty. The render waits only for a spill write already in flight,
+    /// so its markers name complete files.
     fn take(&self) -> String {
         let unread = {
             let mut unread = self.lock();
@@ -347,8 +347,8 @@ fn lock_pipe(capture: &Mutex<PipeCapture>) -> MutexGuard<'_, PipeCapture> {
 
 /// Runs one shell: pumps its pipes into `output` and publishes its state once the shell exits. A
 /// stop kills the whole tree while the shell runs or a descendant still holds one of its pipes.
-/// Once the shell has exited and its pipes have closed, the tree is released as a foreground
-/// call's is, so a descendant that redirected its output keeps running.
+/// Once the shell has exited and its pipes have closed, the tree is released as a foreground call's
+/// is, so a descendant that redirected its output keeps running.
 async fn supervise(
     mut tree: ShellTree,
     output: Arc<ShellOutput>,

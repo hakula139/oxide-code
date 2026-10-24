@@ -110,8 +110,8 @@ mod tests {
                          advisor-tool-2026-03-01,\
                          effort-2025-11-24";
             for (id, captured) in [
-                // Uncaptured on this release, so it reuses the Opus 5.5 sequence
-                // `compute_betas` cites.
+                // Uncaptured on this release, so it reuses the Opus 5.5 sequence `compute_betas`
+                // cites.
                 ("claude-fable-5-1", claude_code),
                 ("claude-opus-5-5", claude_code),
                 ("claude-sonnet-5-5", claude_code),

@@ -112,9 +112,8 @@ impl Selection {
     }
 
     /// Whether a drag past the edge of the chat `viewport` scrolls up or down, and when its next
-    /// row is due.
-    /// `None` when the pointer is inside the chat, the view already shows that end, or the drag
-    /// spent its rows.
+    /// row is due. `None` when the pointer is inside the chat, the view already shows that end, or
+    /// the drag spent its rows.
     fn edge_scroll(
         &self,
         viewport: Rect,

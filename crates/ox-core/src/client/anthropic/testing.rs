@@ -9,8 +9,8 @@ use crate::config::auth::{Auth, AuthSource};
 
 pub(crate) const DEVICE_ID: &str = "did";
 
-/// Streamed `end_turn` reply whose text opens as `start_text` and ends with one `delta_text`
-/// delta, billed at 1,000 input and 100 output tokens.
+/// Streamed `end_turn` reply whose text opens as `start_text` and ends with one `delta_text` delta,
+/// billed at 1,000 input and 100 output tokens.
 pub(crate) fn text_stream_body(start_text: &str, delta_text: &str) -> String {
     sse_body(&[
         serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-sonnet-5-5", "usage": {"input_tokens": 1_000, "output_tokens": 0}}}),

@@ -10,7 +10,7 @@ Conventions for comments, docstrings, documentation, commit and PR text, and str
 - When editing, delete comments that repeat the code and correct any that have become misleading. Before deleting a comment that records a constraint, check whether the constraint still applies.
 - Delete commented-out code because version control preserves it.
 - Write `//` comments as prose. A docstring may use a Markdown list for parallel options or a sequence.
-- Wrap comments, docstrings, and prose literals continued across lines by hand at 100 columns, matching rustfmt's `max_width`, since stable rustfmt wraps none of them. Fill each paragraph up to the limit, as editors' fill commands and rustfmt's `wrap_comments` do, so sentences continue on the same line and a blank comment line separates paragraphs. Break a line early only where that clearly reads better, such as to keep a code span, link, or short parenthetical whole, or to give each item of a list-like sentence its own line. Reword when the last line would hold one short word. Comments in shell, Nix, YAML, and TOML files follow the same rule.
+- Wrap comment and docstring prose at 100 columns, including indentation and comment markers. Fill each paragraph naturally, allowing sentences to share a line, and separate paragraphs with a blank comment line. Break early when it improves readability, such as to keep a code span or link together. Reword a paragraph whose last line would contain one short word. Preserve intentional layout in code examples, lists, tables, and diagrams. Apply the same rule to shell, Nix, YAML, and TOML comments, and to prose literals continued by hand.
 
 ## Docstrings
 

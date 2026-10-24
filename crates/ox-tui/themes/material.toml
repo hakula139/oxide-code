@@ -1,10 +1,8 @@
-# Material Design 2 — baseline dark theme.
+# Material Design 2, baseline dark theme.
 # https://m2.material.io/design/color/dark-theme.html
 # Palette: https://m2.material.io/design/color/the-color-system.html
 #
-# Colors are taken directly from Google's M2 baseline dark scheme and the
-# Material palette, mostly its 200 tones (recommended for dark surfaces),
-# except the text grays, which are tuned for contrast on the dark surface.
+# Uses Google's M2 baseline dark scheme and Material 200 tones, with text grays tuned for contrast.
 
 # Text hierarchy (87% / 77% / 54% white)
 text = "#dedede"

@@ -80,9 +80,8 @@ async fn read_input(
     Ok(text)
 }
 
-/// The prompt a headless run sends: `prompt` followed by `stdin` in a `<stdin>` block, or
-/// whichever of the two is given. Blank stdin counts as absent, so `None` means neither holds
-/// text.
+/// The prompt a headless run sends: `prompt` followed by `stdin` in a `<stdin>` block, or whichever
+/// of the two is given. Blank stdin counts as absent, so `None` means neither holds text.
 fn compose_prompt(prompt: Option<&str>, stdin: Option<&str>) -> Option<String> {
     let stdin = stdin
         .filter(|text| !text.trim().is_empty())

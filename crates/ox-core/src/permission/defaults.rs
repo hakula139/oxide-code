@@ -1,6 +1,6 @@
 //! The rules oxide-code ships, in named groups that `[permission.defaults]` turns off. Most groups
-//! name files whose edits ask, the `rm` group asks about forced recursive deletes, and the rest
-//! add patterns to the deny or ask tier.
+//! name files whose edits ask, the `rm` group asks about forced recursive deletes, and the rest add
+//! patterns to the deny or ask tier.
 
 use std::path::{Path, PathBuf};
 
@@ -16,9 +16,9 @@ use crate::util::path::{
 
 // ── Shipped ──
 
-/// The Linux files that hold each process's environment, with every secret it started with. A
-/// path through `/proc/self` or `/proc/thread-self` resolves to one of these. They ship on every
-/// Unix, like `/dev/**`, and match nothing where `/proc` has no such files.
+/// The Linux files that hold each process's environment, with every secret it started with. A path
+/// through `/proc/self` or `/proc/thread-self` resolves to one of these. They ship on every Unix,
+/// like `/dev/**`, and match nothing where `/proc` has no such files.
 const PROCESS_ENVIRONMENTS: [&str; 2] = ["/proc/*/environ", "/proc/*/task/*/environ"];
 
 /// A named group of shipped rules.
@@ -225,9 +225,9 @@ const SHELL: Names = Names {
     nested_files: &[("fish", "config.fish")],
 };
 
-/// Codex's project config, Claude Code's hooks and the settings that register them, and the
-/// files that register MCP servers it starts. The rest of `.claude`, such as worktrees and plans,
-/// stays editable.
+/// Codex's project config, Claude Code's hooks and the settings that register them, and the files
+/// that register MCP servers it starts. The rest of `.claude`, such as worktrees and plans, stays
+/// editable.
 const AGENTS: Names = Names {
     dirs: &[".codex"],
     files: &[".claude.json", ".mcp.json"],
@@ -298,10 +298,10 @@ pub(super) fn protected_roots(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<(S
 }
 
 /// oxide-code's own config, data, and state directories, the XDG git directory and the git
-/// credential store, Claude Code's user settings and hooks wherever `CLAUDE_CONFIG_DIR` moves
-/// them, `~/.ssh`, whose `authorized_keys`, `rc`, and `environment` set what a login runs, and
-/// the cloud CLIs' config directories, whose credential helpers run commands. Each comes
-/// with its group, resolved like a target so a symlinked home or XDG base still compares equal.
+/// credential store, Claude Code's user settings and hooks wherever `CLAUDE_CONFIG_DIR` moves them,
+/// `~/.ssh`, whose `authorized_keys`, `rc`, and `environment` set what a login runs, and the cloud
+/// CLIs' config directories, whose credential helpers run commands. Each comes with its group,
+/// resolved like a target so a symlinked home or XDG base still compares equal.
 fn home_locations() -> Vec<(Shipped, PathBuf)> {
     let app_dirs = XdgBase::VARIANTS
         .iter()

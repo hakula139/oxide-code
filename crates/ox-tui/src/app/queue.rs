@@ -9,9 +9,8 @@ use ox_core::command;
 /// A prompt the TUI holds: the line the user typed and the text the engine receives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QueuedPrompt {
-    /// The line as typed, or the `/init <file>` a picker choice stands for, which Esc and a
-    /// failed turn hand back.
-    /// A typed line unescapes to the text the chat shows.
+    /// The line as typed, or the `/init <file>` a picker choice stands for, which Esc and a failed
+    /// turn hand back. A typed line unescapes to the text the chat shows.
     line: String,
     /// The prompt a slash command built from `line`, which the engine receives in its place.
     built: Option<String>,
@@ -66,9 +65,9 @@ impl PartialEq<&str> for QueuedPrompt {
 /// The active prompt and the prompts queued behind it.
 #[derive(Default)]
 pub(super) struct PromptQueue {
-    /// Prompt already painted for the in-flight turn.
-    /// Replayed if auto-compaction clears chat, handed back if the turn fails before it is sent
-    /// or is rolled back, and dropped once a mid-turn compaction summarizes it.
+    /// Prompt already painted for the in-flight turn. Replayed if auto-compaction clears chat,
+    /// handed back if the turn fails before it is sent or is rolled back, and dropped once a
+    /// mid-turn compaction summarizes it.
     active: Option<QueuedPrompt>,
     /// What a failure of the active prompt hands back to the user.
     hand_back: HandBack,
@@ -77,8 +76,8 @@ pub(super) struct PromptQueue {
     forwarded: usize,
     /// Queued prompts the in-flight turn took in, which a rolled-back turn hands back.
     drained: Vec<QueuedPrompt>,
-    /// How many leading `pending` prompts were queued before a requested session switch.
-    /// They belong to the session it leaves, and the queue only grows while the switch runs.
+    /// How many leading `pending` prompts were queued before a requested session switch. They
+    /// belong to the session it leaves, and the queue only grows while the switch runs.
     before_switch: Option<usize>,
 }
 
@@ -88,8 +87,8 @@ enum HandBack {
     /// Nothing, since the prompt ran and the queue goes on.
     #[default]
     Nothing,
-    /// Nothing, but the queue waits for the user, since an automatic compaction is running
-    /// and after its failure the next prompt would start another summary request.
+    /// Nothing, but the queue waits for the user, since an automatic compaction is running and
+    /// after its failure the next prompt would start another summary request.
     HeldQueue,
     /// The prompt, since the automatic compaction ahead of it failed, so the engine never sent it.
     UnsentPrompt,
@@ -142,9 +141,8 @@ impl PromptQueue {
         self.hand_back = HandBack::Nothing;
     }
 
-    /// Forgets the active prompt and the prompts the turn took in,
-    /// once a mid-turn compaction summarizes them,
-    /// so a rollback hands back only the prompts drained after it.
+    /// Forgets the active prompt and the prompts the turn took in, once a mid-turn compaction
+    /// summarizes them, so a rollback hands back only the prompts drained after it.
     pub(super) fn mark_summarized(&mut self) {
         self.active = None;
         self.drained.clear();
@@ -188,8 +186,8 @@ impl PromptQueue {
     }
 
     /// Moves the queue head into the in-flight turn once the engine confirms it drained `text`,
-    /// returning what the chat shows for it.
-    /// Only a forwarded head matches, since the engine drains prompts in the order it took them.
+    /// returning what the chat shows for it. Only a forwarded head matches, since the engine drains
+    /// prompts in the order it took them.
     pub(super) fn confirm_drained(&mut self, text: String) -> String {
         if self.forwarded > 0
             && self
@@ -211,12 +209,11 @@ impl PromptQueue {
         }
     }
 
-    /// Settles a failed turn by what it marked.
-    /// A failed automatic compaction holds the queue.
-    /// An unsent prompt returns for the input when the input and the queue are empty,
-    /// so Enter sends it again, and otherwise heads the queue so it still runs first.
-    /// A rolled-back turn returns the queued prompts it took in to the queue head,
-    /// and its own prompt for the input when `input_empty`, or else ahead of them.
+    /// Settles a failed turn by what it marked. A failed automatic compaction holds the queue. An
+    /// unsent prompt returns for the input when the input and the queue are empty, so Enter sends
+    /// it again, and otherwise heads the queue so it still runs first. A rolled-back turn returns
+    /// the queued prompts it took in to the queue head, and its own prompt for the input when
+    /// `input_empty`, or else ahead of them.
     pub(super) fn fail_turn(&mut self, input_empty: bool) -> FailedTurn {
         match self.hand_back {
             HandBack::Nothing => FailedTurn::Ran,
@@ -252,9 +249,8 @@ impl PromptQueue {
         self.before_switch = None;
     }
 
-    /// Notes that a session switch starts.
-    /// The prompts queued so far belong to the session it leaves,
-    /// and the ones queued while it runs to the session it reaches.
+    /// Notes that a session switch starts. The prompts queued so far belong to the session it
+    /// leaves, and the ones queued while it runs to the session it reaches.
     pub(super) fn mark_switch(&mut self) {
         self.before_switch = Some(self.pending.len());
     }

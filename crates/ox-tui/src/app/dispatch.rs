@@ -1,5 +1,4 @@
-//! Terminal input and the actions it produces: modal and Esc routing, prompt submission, slash
-//! commands, and the ops sent to the engine.
+//! Terminal input routing, prompt submission, and engine dispatch.
 
 use std::time::Instant;
 
@@ -226,9 +225,9 @@ impl App {
         }
     }
 
-    /// Routes an input, slash-command, or modal action.
-    /// A submit runs as a slash command or a prompt, a built prompt starts a turn, an op goes
-    /// through [`Self::dispatch_op`], and the rest apply to TUI state.
+    /// Routes an input, slash-command, or modal action. A submit runs as a slash command or a
+    /// prompt, a built prompt starts a turn, an op goes through [`Self::dispatch_op`], and the rest
+    /// apply to TUI state.
     pub(crate) fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Submit(text) => self.handle_submit_prompt(&text),
@@ -242,9 +241,8 @@ impl App {
         }
     }
 
-    /// Applies the op's local state change, then sends it to the engine.
-    /// Prompts reach the engine only through the prompt queue, by [`Self::start_turn`] and
-    /// [`Self::forward_queued_prompts`].
+    /// Applies the op's local state change, then sends it to the engine. Prompts reach the engine
+    /// only through the prompt queue, by [`Self::start_turn`] and [`Self::forward_queued_prompts`].
     pub(super) fn dispatch_op(&mut self, op: Op) {
         match &op {
             Op::Interrupt => self.set_status(Status::Cancelling),
@@ -290,8 +288,8 @@ impl App {
                 debug!("the engine stopped, so the TUI quits");
                 self.should_quit = true;
             }
-            // An approval decision is a control-plane reply the engine is waiting for, so a
-            // dropped one leaves the turn blocked until the user cancels it.
+            // An approval decision is a control-plane reply the engine is waiting for, so a dropped
+            // one leaves the turn blocked until the user cancels it.
             TrySendError::Full(Op::Resolve { .. }) => {
                 self.chat.push_error(
                     "Approval could not be delivered. Press Esc to cancel the blocked turn.",
@@ -430,10 +428,9 @@ impl App {
         self.forward_queued_prompts();
     }
 
-    /// Forwards the queued prompts the in-flight turn lacks, in order.
-    /// A prompt that a full channel turns away stays queued for a later call,
-    /// and a closed channel quits.
-    /// Holds them during an op that runs no turn to splice them into, or while cancelling.
+    /// Forwards the queued prompts the in-flight turn lacks, in order. A prompt that a full channel
+    /// turns away stays queued for a later call, and a closed channel quits. Holds them during an
+    /// op that runs no turn to splice them into, or while cancelling.
     pub(super) fn forward_queued_prompts(&mut self) {
         if matches!(
             &self.status,
@@ -467,10 +464,9 @@ impl App {
         self.apply_slash_outcome(outcome, line)
     }
 
-    /// Shows a slash command's chat output or modal, or starts its background task.
-    /// Returns a forwarded action,
-    /// or the [`Action::SlashPrompt`] that runs a built prompt under the typed `line`, unapplied.
-    /// Must run inside a tokio runtime.
+    /// Shows a slash command's chat output or modal, or starts its background task. Returns a
+    /// forwarded action, or the [`Action::SlashPrompt`] that runs a built prompt under the typed
+    /// `line`, unapplied. Must run inside a tokio runtime.
     fn apply_slash_outcome(
         &mut self,
         outcome: Result<SlashOutcome, String>,
@@ -645,7 +641,6 @@ mod tests {
                 "no Op must reach ops for a key the modal consumed"
             );
 
-            // Modal submit flows through the normal dispatch path.
             app.handle_crossterm_event(&key_event(KeyCode::Char('s'), KeyModifiers::NONE));
 
             let forwarded = rx.try_recv().expect("modal-submitted action forwarded");
@@ -721,7 +716,6 @@ mod tests {
                 "Cancelled must not dispatch any Op"
             );
 
-            // With the modal closed, later keys reach the input.
             app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
 
             assert_eq!(app.input.lines(), vec!["y".to_owned()]);
@@ -966,8 +960,8 @@ mod tests {
 
         #[test]
         fn popup_tab_completes_canonical_name_into_buffer() {
-            // Tab inserts `/{name} ` and hides the popup. Filter to /help so the test pins
-            // the completion shape independent of BUILT_INS ordering.
+            // Tab inserts `/{name} ` and hides the popup. Filter to /help so the test pins the
+            // completion shape independent of BUILT_INS ordering.
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
             app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
@@ -1096,7 +1090,6 @@ mod tests {
 
         #[test]
         fn resize_schedules_dirty_for_relayout() {
-            // Resize falls through to `dirty = true` so the next tick re-splits with the new area.
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dirty = false;
 
@@ -1141,9 +1134,8 @@ mod tests {
 
         #[test]
         fn system_message_action_pushes_into_chat() {
-            // Destructive-action modals (e.g. confirm-delete) report success via SystemMessage so
-            // the user has chat-stream evidence the action ran. Pin the body verbatim so a future
-            // routing change that drops the message or pushes an empty block fails here.
+            // Destructive-action modals report success in chat so the user can confirm the action
+            // ran.
             let (mut app, _rx, _event_tx) = test_app(None);
             let entries_before = app.chat.entry_count();
             let body = "Deleted session abc12345: Fix auth flow".to_owned();
@@ -1516,7 +1508,6 @@ mod tests {
 
         #[tokio::test]
         async fn init_forwards_synthesized_prompt_and_flips_to_streaming() {
-            // Chat shows only `/init`, while the engine must receive the synthesized body.
             let root = tempfile::tempdir().unwrap();
             std::fs::write(root.path().join("AGENTS.md"), "# AGENTS.md\n").unwrap();
             let (mut app, mut rx, _event_tx) = test_app(None);
@@ -1713,7 +1704,6 @@ mod tests {
 
         #[tokio::test]
         async fn interrupt_flips_status_to_cancelling_and_forwards() {
-            // An interrupt flips status immediately, and `Event::Cancelled` later returns to idle.
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("hi".to_owned()));
             rx.try_recv().expect("submit forwarded");
@@ -1736,15 +1726,13 @@ mod tests {
 
             assert!(app.should_quit);
             assert_eq!(app.chat.entry_count(), 0);
-            // Shutdown skips streaming setup so tear-down doesn't have to un-spinner.
             assert_eq!(app.status, Status::Idle);
         }
 
         #[tokio::test]
         async fn resume_forwards_to_the_engine_and_stays_busy_until_event() {
-            // Between forwarding `Resume` and the `SessionResumed` event, a submit only queues,
-            // so a typed prompt doesn't push into chat
-            // just before `apply_session_resumed` clears it.
+            // Between forwarding `Resume` and the `SessionResumed` event, a submit only queues, so
+            // a typed prompt doesn't push into chat just before `apply_session_resumed` clears it.
             let (mut app, mut rx, _event_tx) = test_app(None);
             let action = Op::Resume {
                 target: ResumeTarget::Path("resume-target.jsonl".into()),
@@ -2096,8 +2084,6 @@ mod tests {
 
         #[test]
         fn slash_theme_opens_the_picker() {
-            // Bare `/theme` is the ReadOnly modal-opening branch, so its `SlashOutcome::Modal` must
-            // land on `App::modals`.
             let (mut app, _rx, _event_tx) = test_app(None);
             assert!(!app.modals.is_active(), "stack starts empty");
 
@@ -2108,7 +2094,6 @@ mod tests {
 
         #[test]
         fn slash_typed_swap_theme_routes_through_local_handler() {
-            // A synthesized TUI-only action like `/theme latte` runs its `dispatch_action` arm.
             let (mut app, mut rx, _event_tx) = test_app(None);
 
             app.dispatch_action(Action::Submit("/theme latte".to_owned()));

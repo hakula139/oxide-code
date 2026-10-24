@@ -73,8 +73,8 @@ impl fmt::Display for KeyChord {
 pub(crate) struct KeyAction<A, V> {
     pub(crate) action: A,
     pub(crate) key: KeyChord,
-    /// Hint text after the key, such as `to resume`, for the state `V`. `None` hides the hint
-    /// while the action has nothing to act on, such as a row action over an empty list.
+    /// Hint text after the key, such as `to resume`, for the state `V`. `None` hides the hint while
+    /// the action has nothing to act on, such as a row action over an empty list.
     pub(crate) label: fn(&V) -> Option<&'static str>,
 }
 

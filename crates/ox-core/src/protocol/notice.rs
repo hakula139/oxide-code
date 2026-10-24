@@ -31,8 +31,8 @@ pub fn compacted(pre_count: u32, instructions: Option<&str>) -> String {
     }
 }
 
-/// The settings an [`Event::ConfigChanged`](super::Event::ConfigChanged) notice compares, before
-/// or after the change.
+/// The settings an [`Event::ConfigChanged`](super::Event::ConfigChanged) notice compares, before or
+/// after the change.
 pub(crate) struct ConfigSettings {
     pub(crate) model: ModelSpec,
     pub(crate) effort: Option<Effort>,

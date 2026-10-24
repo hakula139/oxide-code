@@ -246,8 +246,8 @@ impl Replacement {
 // ── Diff Production ──
 
 /// The diff of replacing every `old_string` in `original` with `new_string`, counted in one pass
-/// over `original`. Old-side numbers count lines of `original`, and new-side numbers count lines
-/// of the edited text.
+/// over `original`. Old-side numbers count lines of `original`, and new-side numbers count lines of
+/// the edited text.
 fn build_diff(original: &str, old_string: &str, new_string: &str) -> EditDiff {
     let hunk = synthesize_chunk(old_string, new_string);
     let old_breaks = old_string.matches('\n').count();
@@ -276,9 +276,8 @@ fn build_diff(original: &str, old_string: &str, new_string: &str) -> EditDiff {
     }
 }
 
-/// The line a replacement whose text starts at `old_line` before the edit and at `new_line` after
-/// it applied at, given its `hunk` numbered from line 1: the first removed line, or for a pure
-/// insertion the first added one. `None` when the hunk trims to nothing.
+/// The first removed line, or first added line for an insertion, offset from the hunk's 1-based
+/// numbering by `old_line` or `new_line`. `None` for an empty hunk.
 fn anchor_line(hunk: &DiffChunk, old_line: usize, new_line: usize) -> Option<usize> {
     let old = hunk.old.first().map(|line| line.number + old_line - 1);
     old.or_else(|| hunk.new.first().map(|line| line.number + new_line - 1))

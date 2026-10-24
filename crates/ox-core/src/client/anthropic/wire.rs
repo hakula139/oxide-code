@@ -34,8 +34,8 @@ pub(super) struct CreateMessageRequest<'a> {
 }
 
 /// Serializes `messages` in the request shape. A user message holding `user_context` leads when
-/// set, and `breakpoint` marks the last content block of the final message. Both exist only on
-/// the wire, so the transcript never stores the context or cache state.
+/// set, and `breakpoint` marks the last content block of the final message. Both exist only on the
+/// wire, so the transcript never stores the context or cache state.
 pub(super) struct RequestMessages<'a> {
     pub(super) user_context: Option<&'a str>,
     pub(super) messages: &'a [Message],
@@ -112,8 +112,8 @@ enum RequestBlock<'a> {
 }
 
 impl<'a> RequestBlock<'a> {
-    /// The shape `block` takes in a request. Reasoning goes back unchanged whichever model
-    /// produced it, since the API drops or ignores the blocks the request's model cannot read.
+    /// The shape `block` takes in a request. Reasoning goes back unchanged whichever model produced
+    /// it, since the API drops or ignores the blocks the request's model cannot read.
     fn of(block: &'a ContentBlock) -> Self {
         match block {
             ContentBlock::Thinking { thinking, replay } => match replay.wire {
@@ -405,8 +405,8 @@ pub(super) enum ContentBlockInfo {
     /// An MCP connector result, skipped along with the `mcp_tool_use` call it answers. The call
     /// reads as unknown, so a reply never keeps one without the other.
     McpToolResult {},
-    /// A server tool's result, such as `web_search_tool_result`, which streams no deltas. Any
-    /// other block type carrying a `tool_use_id` reads as one.
+    /// A server tool's result, such as `web_search_tool_result`, which streams no deltas. Any other
+    /// block type carrying a `tool_use_id` reads as one.
     #[serde(untagged)]
     ServerToolResult {
         r#type: String,
@@ -414,8 +414,8 @@ pub(super) enum ContentBlockInfo {
         #[serde(flatten)]
         fields: serde_json::Map<String, serde_json::Value>,
     },
-    /// Serde tries the untagged variants after a tagged one fails, so a malformed known block
-    /// lands here too. `type` is raw JSON because such a block may carry any.
+    /// Serde tries the untagged variants after a tagged one fails, so a malformed known block lands
+    /// here too. `type` is raw JSON because such a block may carry any.
     #[serde(untagged)]
     Unknown {
         #[serde(default)]

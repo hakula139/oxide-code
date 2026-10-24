@@ -9,20 +9,19 @@ use crate::message::{ContentBlock, Message, Role};
 
 // ── Constants ──
 
-/// Stub appended after a trailing tool-result-only user turn so the next API call has a
-/// valid assistant follow-up.
+/// Stub appended after a trailing tool-result-only user turn so the next API call has a valid
+/// assistant follow-up.
 const RESUME_CONTINUATION_SENTINEL: &str = "[Previous turn was interrupted. Continuing.]";
 
-/// Stub prepended when sanitization leaves an assistant as the first message, since the API
-/// rejects transcripts that start with assistant.
+/// Stub prepended when sanitization leaves an assistant as the first message, since the API rejects
+/// transcripts that start with assistant.
 const RESUME_HEAD_SENTINEL: &str = "[Previous session prefix lost in recovery.]";
 
 // ── Entry Point ──
 
-/// Repairs a transcript loaded from JSONL so the next API call won't 400. Pass order matters.
-/// Unresolved `tool_use` drops first, so a `tool_result` paired only with a dropped call is
-/// orphaned in the next pass. Roles collapse after both filters, so emptied messages can't desync
-/// the alternation. Sentinels run last, once the head / tail shape has settled.
+/// Repairs a loaded transcript for the next API request. Removes unresolved calls before orphaned
+/// results, then merges adjacent roles and repairs the head and tail. This order prevents dropped
+/// calls from leaving orphaned results or empty messages from breaking alternation.
 pub(super) fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
     drop_unresolved_tool_uses(messages);
     drop_orphan_tool_results(messages);
@@ -112,8 +111,8 @@ fn insert_resume_sentinels(messages: &mut Vec<Message>) {
 }
 
 /// Tool-use IDs by where the call ran, since IDs pair only on their own side. A client call's
-/// result comes back in a user `tool_result`. A server call's comes back in an assistant reply,
-/// the next one when a `pause_turn` or a client call in the same reply deferred it.
+/// result comes back in a user `tool_result`. A server call's comes back in an assistant reply, the
+/// next one when a `pause_turn` or a client call in the same reply deferred it.
 #[derive(Default)]
 struct ToolIds {
     client: HashSet<String>,

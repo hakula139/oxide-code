@@ -20,13 +20,11 @@ use super::stdio::{Approver, StdioSink, render_op, render_queued};
 use super::{Exit, Shutdown, shutdown_signal};
 
 /// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session.
-/// EOF after an operation failed or a command was rejected exits with failure.
-/// An attended `engine` asks its approvals on stdin, while an unattended one asks none, so a piped
-/// line is never taken as an answer.
-/// In an attended run, SIGINT interrupts the running operation or discards the line at the prompt,
-/// as shells do.
-/// Every other signal ends the run.
-/// `first`, when given, runs as the first input line.
+/// EOF after an operation failed or a command was rejected exits with failure. An attended `engine`
+/// asks its approvals on stdin, while an unattended one asks none, so a piped line is never taken
+/// as an answer. In an attended run, SIGINT interrupts the running operation or discards the line
+/// at the prompt, as shells do. Every other signal ends the run. `first`, when given, runs as the
+/// first input line.
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,
@@ -177,8 +175,7 @@ const GRANT_CHOICES: &str =
     "[y] approve  [a] allow for session  [n] deny  [f] feedback  [x] abort: ";
 
 /// Answers approvals with lines read from the REPL's input, writing the call and its choices to
-/// `out`.
-/// The input ending aborts the turn.
+/// `out`. The input ending aborts the turn.
 struct Prompter<'a, R, W> {
     lines: &'a mut Lines<R>,
     out: W,
@@ -261,8 +258,8 @@ impl<R: AsyncBufRead + Unpin, W: Write> Prompter<'_, R, W> {
     }
 }
 
-/// Writes the call `preview` shows, one line per command line or diff row, then why `basis` made
-/// it ask when a rule holds it.
+/// Writes the call `preview` shows, one line per command line or diff row, then why `basis` made it
+/// ask when a rule holds it.
 fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis) -> io::Result<()> {
     writeln!(out, "{} needs approval:", escape_hidden(&preview.title))?;
     match &preview.body {

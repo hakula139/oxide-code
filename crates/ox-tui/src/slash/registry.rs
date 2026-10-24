@@ -49,7 +49,6 @@ pub(crate) enum ChatOutput {
     GitDiff(WorkingTreeDiff),
 }
 
-/// Hand-rolled because `Box<dyn Modal>` and futures can't derive `Debug`.
 impl std::fmt::Debug for SlashOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -113,8 +112,8 @@ pub(crate) struct ArgCompletion {
     pub(crate) description: Cow<'static, str>,
 }
 
-/// A locally dispatched `/name args` command. Every method that takes `args` receives them
-/// trimmed, as [`command::parse_slash`] leaves them.
+/// A locally dispatched `/name args` command. Every method that takes `args` receives them trimmed,
+/// as [`command::parse_slash`] leaves them.
 pub(super) trait SlashCommand: Sync {
     fn name(&self) -> &'static str;
 

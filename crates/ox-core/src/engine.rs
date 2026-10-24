@@ -112,8 +112,8 @@ pub struct Engine {
     oauth_token_url: String,
     /// The Keychain `/logout` checks for the Claude Code login before its file, none in tests.
     claude_code_keychain: ClaudeCodeKeychain,
-    /// Whether the next prompt or compaction loads the stored login again,
-    /// since a transient failure signed the session out.
+    /// Whether the next prompt or compaction loads the stored login again, since a transient
+    /// failure signed the session out.
     retry_login: bool,
     tools: Arc<ToolRegistry>,
     store: SessionStore,
@@ -151,9 +151,9 @@ pub struct Engine {
     /// Whether fresh sessions get an AI title in the background, which only the TUI shows.
     generates_titles: bool,
     auto_compaction_failures: AutoCompactFailures,
-    /// [`TurnReport::context_estimate`] of the latest turn the transcript keeps.
-    /// Before any such turn, an estimate from the parts of the next request.
-    /// `None` when the latest turn reported no usage.
+    /// [`TurnReport::context_estimate`] of the latest turn the transcript keeps. Before any such
+    /// turn, an estimate from the parts of the next request. `None` when the latest turn reported
+    /// no usage.
     context_estimate: Option<u32>,
     /// The latest usage any turn the transcript keeps reported, which the status line shows.
     displayed_usage: Option<TokenUsage>,
@@ -323,10 +323,9 @@ impl Engine {
     }
 
     /// Runs `text` through auto-compaction and one agent turn, rolling back a refused turn, and
-    /// reports how it ended on `sink`.
-    /// A fresh session takes `title` as its first-prompt title.
-    /// The turn compacts at each round boundary that leaves the context at the threshold,
-    /// then goes on from the summary.
+    /// reports how it ended on `sink`. A fresh session takes `title` as its first-prompt title. The
+    /// turn compacts at each round boundary that leaves the context at the threshold, then goes on
+    /// from the summary.
     async fn submit_prompt<S>(
         &mut self,
         text: &str,
@@ -505,8 +504,8 @@ impl Engine {
         context
     }
 
-    /// Keeps the instruction file `warnings` of the latest load,
-    /// showing each one the previous load did not raise.
+    /// Keeps the instruction file `warnings` of the latest load, showing each one the previous load
+    /// did not raise.
     fn show_instruction_warnings(&mut self, sink: &dyn EventSink, warnings: Vec<String>) {
         let previous = std::mem::replace(&mut self.instruction_warnings, warnings);
         for warning in &self.instruction_warnings {
@@ -737,8 +736,7 @@ mod tests {
     }
 
     /// Answers the next Messages request only after a minute, so it stays in flight until the test
-    /// cancels or quits it.
-    /// Mount it before the reply that should follow.
+    /// cancels or quits it. Mount it before the reply that should follow.
     async fn mount_stalled_reply_once(server: &MockServer) {
         Mock::given(method("POST"))
             .and(path("/v1/messages"))

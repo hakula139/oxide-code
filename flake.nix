@@ -129,8 +129,8 @@
           };
         };
 
-        # These hooks run the tools pinned in node_modules, which the Nix sandbox lacks.
-        # The flake check leaves them to CI's Lint job.
+        # These hooks run tools pinned in node_modules, which the Nix sandbox lacks. The flake check
+        # leaves them to CI's Lint job.
         nodeHook =
           name: cmd:
           pkgs.lib.getExe (
@@ -207,11 +207,10 @@
             pnpm
           ]);
 
-          # git-hooks.nix stores a hooks path relative to the main checkout, which linked worktrees
-          # can't resolve (cachix/git-hooks.nix#688), so unset it to fall back to the shared hooks
-          # directory.
-          # The lock keeps a concurrent load from setting it while `pre-commit install` runs,
-          # since pre-commit refuses to install with the path set.
+          # git-hooks.nix sets a hooks path relative to the main checkout, which linked worktrees
+          # cannot resolve (cachix/git-hooks.nix#688). Unset it to use the shared hooks directory.
+          # The lock prevents concurrent loads from setting the path during `pre-commit install`,
+          # which rejects it.
           shellHook = ''
             if common=$(${git} rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
               (

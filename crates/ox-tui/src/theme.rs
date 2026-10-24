@@ -16,11 +16,9 @@ use ox_core::tool::tasks::TaskStatus;
 
 use crate::glyphs::SEGMENT_SEPARATOR;
 
-/// One theme slot with optional fg, bg, and modifiers composed into a [`Style`].
+/// A theme slot whose optional colors and modifiers compose into a [`Style`].
 ///
-/// Each component is independently optional so an override can patch one axis (e.g., bg only)
-/// without forcing callers to also restate the other two. [`Slot::style`] folds the three into
-/// a ratatui `Style`, leaving unset axes as the terminal's default.
+/// Overrides patch each component independently. Unset colors use the terminal defaults.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Slot {
     pub(crate) fg: Option<Color>,
@@ -128,8 +126,6 @@ for_each_slot!(define_theme_struct);
 
 impl Default for Theme {
     fn default() -> Self {
-        // Cache the parsed Mocha palette in a `LazyLock` so the TOML parse runs at most once per
-        // process. Clones are cheap (every `Slot` is `Copy`).
         static MOCHA: LazyLock<Theme> = LazyLock::new(|| {
             loader::parse_theme(builtin::MOCHA).expect("vendored mocha.toml must parse")
         });

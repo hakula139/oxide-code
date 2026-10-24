@@ -84,9 +84,9 @@ const RESERVED: &[&str] = &[
     "x-claude-code-session-id",
 ];
 
-/// Parses `ANTHROPIC_CUSTOM_HEADERS`: newline-separated `Name: value` lines, skipping blank
-/// ones. Errors name the 1-based line and never echo a value, since custom headers often carry
-/// gateway secrets. Values are marked sensitive so `Debug` redacts them too.
+/// Parses `ANTHROPIC_CUSTOM_HEADERS`: newline-separated `Name: value` lines, skipping blank ones.
+/// Errors name the 1-based line and never echo a value, since custom headers often carry gateway
+/// secrets. Values are marked sensitive so `Debug` redacts them too.
 pub(super) fn parse_headers(raw: &str) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     for (index, line) in raw.lines().enumerate() {

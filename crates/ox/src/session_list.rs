@@ -26,8 +26,8 @@ const MIN_TITLE_BUDGET: usize = 12;
 
 const PROJECT_COL_MIN: usize = "Project".len() + 1;
 
-/// Project column cap. A deeper path overflows the column in its own row, so the title column
-/// keeps its width in every other row.
+/// Project column cap. A deeper path overflows the column in its own row, so the title column keeps
+/// its width in every other row.
 const PROJECT_COL_MAX: usize = 40;
 
 /// Writes the sessions of `store`'s project, or of every project when `scope` spans them all, to
@@ -53,8 +53,8 @@ pub(crate) fn write(
 }
 
 /// The `--list` table of `sessions`, with a `Project` column when `scope` spans every project and a
-/// `... more` footer when `more` is set. A `term_width` of `None` skips title truncation
-/// for piped output.
+/// `... more` footer when `more` is set. A `term_width` of `None` skips title truncation for piped
+/// output.
 fn render(
     sessions: &[SessionInfo],
     more: bool,

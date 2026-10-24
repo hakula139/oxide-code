@@ -377,8 +377,8 @@ fn texts<'a>(
 }
 
 /// The text of the file at `path`, or `None` when it is binary. The open refuses a symlink and
-/// never blocks on a fifo, and the opened file must be a regular file within `size_limit` bytes,
-/// so an entry swapped after the walk checked it is not read through.
+/// never blocks on a fifo, and the opened file must be a regular file within `size_limit` bytes, so
+/// an entry swapped after the walk checked it is not read through.
 fn read_text(path: &Path, size_limit: u64) -> io::Result<Option<String>> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -444,8 +444,8 @@ fn format_content<'a>(
 }
 
 /// The content rows a search keeps: one past `head_limit`, which proves more output exists, so the
-/// footer appears only when a row was dropped, and at most about [`MAX_SPILL_BYTES`], the most
-/// the dispatcher keeps of a result, so `head_limit: 0` cannot buffer every match of a large tree.
+/// footer appears only when a row was dropped, and at most about [`MAX_SPILL_BYTES`], the most the
+/// dispatcher keeps of a result, so `head_limit: 0` cannot buffer every match of a large tree.
 struct Rows {
     kept: Vec<String>,
     bytes: u64,
@@ -469,8 +469,8 @@ impl Rows {
         self.kept.len() > self.head_limit || self.bytes >= MAX_SPILL_BYTES
     }
 
-    /// Keeps `row`, a line that matched the pattern when `is_match`
-    /// and a context line or range separator otherwise.
+    /// Keeps `row`, a line that matched the pattern when `is_match` and a context line or range
+    /// separator otherwise.
     fn push(&mut self, row: String, is_match: bool) {
         if is_match && self.kept.len() < self.head_limit {
             self.matches += 1;
@@ -479,8 +479,8 @@ impl Rows {
         self.kept.push(row);
     }
 
-    /// The kept rows, cut to `head_limit`, with a footer naming the limit that dropped any,
-    /// titled with the match count they show.
+    /// The kept rows, cut to `head_limit`, with a footer naming the limit that dropped any, titled
+    /// with the match count they show.
     fn render(mut self) -> GrepOutput {
         if self.kept.is_empty() {
             return GrepOutput {
@@ -1532,8 +1532,8 @@ mod tests {
             p.head_limit = Some(3);
             let result = grep_files(&p).unwrap().content;
 
-            // Files with the same mtime may come in either order,
-            // so the rows name whichever came first.
+            // Files with the same mtime may come in either order, so the rows name whichever came
+            // first.
             let (rows, footer) = result.split_once("\n\n").unwrap();
             let (file, _) = rows.split_once(':').unwrap();
 

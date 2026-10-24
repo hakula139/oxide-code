@@ -84,8 +84,8 @@ pub fn tildify(path: &Path) -> String {
     }
 }
 
-/// Expands a leading `~` or `~/` (`~\` on Windows) to the home directory, passing `~alice/...`
-/// and paths without a tilde through unchanged. Errors when there is no home directory, since the
+/// Expands a leading `~` or `~/` (`~\` on Windows) to the home directory, passing `~alice/...` and
+/// paths without a tilde through unchanged. Errors when there is no home directory, since the
 /// literal path would fail later with a misleading filesystem error.
 pub fn expand_user(raw: &str) -> Result<PathBuf> {
     let Some(tail) = raw.strip_prefix('~') else {
@@ -170,9 +170,8 @@ pub mod testing {
     /// The variable [`std::env::home_dir`] reads first, so tests can point it at a fixture.
     pub const HOME_VAR: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
 
-    /// Variables for `temp_env` that point the home directory at `home` and unset
-    /// `XDG_CONFIG_HOME` and `CLAUDE_CONFIG_DIR`, so user-level config and instructions resolve
-    /// under `home` alone.
+    /// Variables for `temp_env` that point the home directory at `home` and unset `XDG_CONFIG_HOME`
+    /// and `CLAUDE_CONFIG_DIR`, so user-level config and instructions resolve under `home` alone.
     pub fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 3] {
         [
             (HOME_VAR, Some(home)),

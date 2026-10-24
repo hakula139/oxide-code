@@ -145,8 +145,8 @@ impl ChatView {
         self.spinner = spinner;
     }
 
-    /// Switches between the compact and expanded views, returning each block expanded by a click
-    /// to the view. A paused paint keeps the row on top in place.
+    /// Switches between the compact and expanded views, returning each block expanded by a click to
+    /// the view. A paused paint keeps the row on top in place.
     pub(crate) fn toggle_expanded(&mut self) {
         self.settings.expanded = !self.settings.expanded;
         for block in &mut self.blocks {
@@ -205,8 +205,8 @@ impl ChatView {
 
     /// Appends a streamed token to the current assistant response.
     ///
-    /// Pending thinking is committed first so a `Thinking → Text` boundary always lands at a
-    /// block split. Auto-scroll only follows the tail when the user hasn't manually scrolled up.
+    /// Pending thinking is committed first so a `Thinking → Text` boundary always lands at a block
+    /// split. Auto-scroll only follows the tail when the user hasn't manually scrolled up.
     pub(crate) fn append_stream_token(&mut self, token: &str) {
         self.commit_thinking_buffer();
         if self.streaming.is_none() {
@@ -391,8 +391,8 @@ impl ChatView {
 // ── Rendering ──
 
 impl ChatView {
-    /// Lays out the chat for `area`, follows the tail while auto-scroll is on, and paints only
-    /// the rows inside the viewport.
+    /// Lays out the chat for `area`, follows the tail while auto-scroll is on, and paints only the
+    /// rows inside the viewport.
     ///
     /// Blocks render only once the paint can reach them. While scrolled up, the paint anchors on
     /// the row the last frame showed on top, then moves by the pending scroll. Each pass renders

@@ -1,6 +1,5 @@
-//! Layer merging. Tables merge by key, permission lists concatenate, and any other value a higher
-//! layer sets replaces the lower one.
-//! Records the layer behind each key and appended element.
+//! Config layering and provenance. Tables merge by key, permission lists concatenate, and higher
+//! layers replace other values.
 
 use std::collections::HashMap;
 use std::iter;
@@ -16,9 +15,8 @@ const APPENDED_TABLES: &[&str] = &["permission.deny", "permission.ask", "permiss
 /// Arrays outside [`APPENDED_TABLES`] that concatenate the same way.
 const APPENDED: &[&str] = &["permission.extra_roots"];
 
-/// Keys under one table that replace each other: a layer that sets any of them clears the rest
-/// from lower layers, so a project's percent threshold takes precedence over a user's token
-/// threshold.
+/// Keys under one table that replace each other: a layer that sets any of them clears the rest from
+/// lower layers, so a project's percent threshold takes precedence over a user's token threshold.
 const EXCLUSIVE: &[(&str, &[&str])] = &[(
     "client.compaction",
     &["auto_threshold_tokens", "auto_threshold_percent"],

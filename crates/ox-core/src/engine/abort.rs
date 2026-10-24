@@ -7,8 +7,8 @@ use tracing::warn;
 use crate::permission::Mode;
 use crate::protocol::{Event, EventSink, Op};
 
-/// Why a turn ended without a clean assistant reply. The engine keeps serving after `Cancelled`
-/// but stops on `Shutdown`.
+/// Why a turn ended without a clean assistant reply. The engine keeps serving after `Cancelled` but
+/// stops on `Shutdown`.
 #[derive(Debug)]
 pub(super) enum TurnAbort {
     Cancelled,
@@ -79,8 +79,8 @@ where
     F: Future<Output = T>,
 {
     await_or_op(fut, ops, inbox, sink, |op| {
-        // A `Resolve` here is a stale reply for an already-resolved call, and a `LoginCode` a
-        // paste that arrived once the sign-in had its code.
+        // A `Resolve` here is a stale reply for an already-resolved call, and a `LoginCode` a paste
+        // that arrived once the sign-in had its code.
         warn!(?op, "dropped mid-turn op");
         None
     })

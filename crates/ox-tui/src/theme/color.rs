@@ -1,8 +1,8 @@
 //! Color string parsing for theme TOML values. Case-insensitive.
 //!
 //! - **6-digit hex**: `"#rrggbb"` for true color (24-bit RGB).
-//! - **ANSI 16 named**: `"red"`, `"bright_blue"`, `"dark_gray"`, ... (`light_X` aliases
-//!   `bright_X`, `grey` aliases `gray`).
+//! - **ANSI 16 named**: `"red"`, `"bright_blue"`, `"dark_gray"`, ... (`light_X` aliases `bright_X`,
+//!   `grey` aliases `gray`).
 //! - **Indexed 256-color**: `"ansi:N"` where `N` is 0-255.
 //! - **Terminal default**: `"reset"` follows the user's terminal palette.
 //!
@@ -23,7 +23,6 @@ pub(super) fn parse_color(input: &str) -> Result<Color> {
         bail!("empty color value");
     }
 
-    // Lowercases once so `ANSI:5` and `#FFAABB` match the prefixes their parsers check.
     let s = trimmed.to_ascii_lowercase();
 
     if let Some(hex) = s.strip_prefix('#') {

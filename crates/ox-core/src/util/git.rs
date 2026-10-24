@@ -113,8 +113,8 @@ impl PullRequestDetail {
 }
 
 /// Probes the open pull request for `cwd`'s current branch via `gh pr view`, reading `detail`.
-/// Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open. Dropping
-/// the future kills the child process.
+/// Returns `None` when `gh` is missing, the user is unauthenticated, or no PR is open. Dropping the
+/// future kills the child process.
 pub async fn current_pull_request(cwd: &Path, detail: PullRequestDetail) -> Option<PullRequest> {
     let args = ["pr", "view", "--json", detail.json_fields()];
     let output = probe("gh pr", cwd, "gh", &args).await?;
@@ -242,8 +242,8 @@ async fn probe(name: &str, cwd: &Path, program: &str, args: &[&str]) -> Option<O
     check_output(name, cwd, output_async(program, args, cwd).await)
 }
 
-/// Logs a spawn failure or non-zero exit and returns the successful output or `None`.
-/// `cwd` rides along on the log records so a user can pinpoint which worktree the probe failed in.
+/// Logs a spawn failure or non-zero exit and returns the successful output or `None`. `cwd` rides
+/// along on the log records so a user can pinpoint which worktree the probe failed in.
 fn check_output(name: &str, cwd: &Path, result: io::Result<Output>) -> Option<Output> {
     let output = match result {
         Ok(output) => output,

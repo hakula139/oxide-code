@@ -22,8 +22,7 @@ use crate::tool::spill::run_capped;
 use crate::tool::tasks::Task;
 use crate::tool::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry, ToolSpec};
 
-/// What each call of a round runs against: the policy that gates it, which gains the session allow
-/// rules the user grants, and the session-wide parts of its [`ToolCtx`].
+/// Session-wide tool context and policy, including rules granted during approvals.
 pub(super) struct DispatchContext<'a> {
     pub(super) policy: &'a mut Policy,
     pub(super) workspace: Arc<Workspace>,
@@ -306,8 +305,8 @@ impl<'r> Dispatcher<'r, '_> {
         None
     }
 
-    /// Prepares one call and runs it through the permission gate. Returns the call ready to run,
-    /// a synthetic output for one that does not run, or an abort on an interrupt, a shutdown, or an
+    /// Prepares one call and runs it through the permission gate. Returns the call ready to run, a
+    /// synthetic output for one that does not run, or an abort on an interrupt, a shutdown, or an
     /// [`ApprovalDecision::Abort`] while an approval is outstanding.
     async fn gate(
         &mut self,
@@ -462,9 +461,8 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ))
 }
 
-/// The synthetic error result for a call that would ask in a run nobody attends.
-/// It names what made the call ask, then the config `fix` that lets it through,
-/// or what else the model can do.
+/// The synthetic error result for a call that would ask in a run nobody attends. It names what made
+/// the call ask, then the config `fix` that lets it through, or what else the model can do.
 fn unapproved_output(name: &str, basis: &Basis, fix: Option<&ConfigFix>) -> ToolOutput {
     let why = match basis {
         Basis::Mode(_) => "No allow pattern matches it.".to_owned(),
@@ -517,9 +515,9 @@ fn allow_entry(rule: &Rule) -> String {
     )
 }
 
-/// Blocks on `ops` for the [`Op::Resolve`] matching `id`, while [`Inbox::absorb`] handles the
-/// other ops. A decision for a different ID is a stale reply for an already-resolved call, so it
-/// is ignored, like any op the gate must not act on mid-approval. Cancel-safe by drop.
+/// Blocks on `ops` for the [`Op::Resolve`] matching `id`, while [`Inbox::absorb`] handles the other
+/// ops. A decision for a different ID is a stale reply for an already-resolved call, so it is
+/// ignored, like any op the gate must not act on mid-approval. Cancel-safe by drop.
 async fn await_approval(
     id: &str,
     ops: &mut mpsc::Receiver<Op>,
