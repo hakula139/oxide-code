@@ -4,6 +4,7 @@
 use ratatui::style::Style;
 
 use ox_core::tool::view::GrepFileGroup;
+use ox_core::util::text::escape_line;
 
 use super::{MAX_TOOL_OUTPUT_LINES, overflow_footer};
 use crate::components::chat::blocks::rows::{NumberedRows, body_row};
@@ -42,7 +43,7 @@ pub(super) fn render(
             &mut out.lines,
             ctx,
             border_style,
-            &group.path,
+            escape_line(&group.path),
             ctx.theme.muted(),
         );
         emitted += 1;
@@ -133,6 +134,37 @@ mod tests {
                 theme.dim(),
                 "a context line is dim"
             );
+        }
+
+        #[test]
+        fn keeps_native_path_spans_separate_from_line_numbers_and_context() {
+            for (path, shown) in [
+                ("src/name:12:part.rs", "src/name:12:part.rs"),
+                ("src/name:12-part.rs", "src/name:12-part.rs"),
+                ("src/line\nname.rs", r"src/line\nname.rs"),
+                ("src/tab\tname.rs", r"src/tab\tname.rs"),
+            ] {
+                let theme = Theme::default();
+                let ctx = RenderCtx::new(80, &theme);
+                let groups = [group(path, &[(4, "before", false), (5, "hit", true)])];
+                let mut out = BlockRows::default();
+
+                render(&mut out, &ctx, theme.tool_border(), &groups, false);
+
+                assert_eq!(out.lines[0].spans[1].content, shown, "{path:?}");
+                let rows: Vec<_> = out.lines.iter().map(ToString::to_string).collect();
+                assert_eq!(
+                    rows,
+                    [
+                        format!("▎   {shown}"),
+                        "▎   4 │ before".to_owned(),
+                        "▎   5 │ hit".to_owned()
+                    ],
+                    "{path:?}",
+                );
+                assert_eq!(out.lines[1].spans[3].style, theme.dim(), "{path:?}");
+                assert_eq!(out.lines[2].spans[3].style, theme.text(), "{path:?}");
+            }
         }
 
         #[test]
