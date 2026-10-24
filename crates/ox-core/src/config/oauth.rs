@@ -1343,23 +1343,20 @@ mod tests {
             use super::*;
 
             #[test]
-            fn keeps_a_positive_value() {
-                let cred = OAuthCredential {
-                    access_token: String::new(),
-                    refresh_token: None,
-                    expires_at: 1_700_000_000_000,
-                };
-                assert_eq!(cred.expires_at_ms(), 1_700_000_000_000);
-            }
+            fn keeps_nonnegative_expiry_and_clamps_negative_expiry() {
+                for (case, expires_at, expected) in [
+                    ("positive", 1_700_000_000_000, 1_700_000_000_000),
+                    ("zero", 0, 0),
+                    ("negative", -1, 0),
+                ] {
+                    let cred = OAuthCredential {
+                        access_token: String::new(),
+                        refresh_token: None,
+                        expires_at,
+                    };
 
-            #[test]
-            fn negative_clamps_to_zero() {
-                let cred = OAuthCredential {
-                    access_token: String::new(),
-                    refresh_token: None,
-                    expires_at: -1,
-                };
-                assert_eq!(cred.expires_at_ms(), 0);
+                    assert_eq!(cred.expires_at_ms(), expected, "{case}");
+                }
             }
         }
     }
@@ -2556,13 +2553,11 @@ mod tests {
         use super::*;
 
         #[test]
-        fn counts_a_far_future_expiry_as_not_near() {
-            assert!(!is_near_expiry(u64::MAX));
-        }
-
-        #[test]
-        fn counts_an_expiry_in_the_past_as_near() {
-            assert!(is_near_expiry(0));
+        fn distinguishes_past_and_future() {
+            for (case, expires_at, expected) in [("far future", u64::MAX, false), ("past", 0, true)]
+            {
+                assert_eq!(is_near_expiry(expires_at), expected, "{case}");
+            }
         }
     }
 
@@ -2570,13 +2565,11 @@ mod tests {
         use super::*;
 
         #[test]
-        fn counts_a_far_future_expiry_as_not_expired() {
-            assert!(!is_expired(u64::MAX));
-        }
-
-        #[test]
-        fn counts_an_expiry_in_the_past_as_expired() {
-            assert!(is_expired(0));
+        fn distinguishes_past_and_future() {
+            for (case, expires_at, expected) in [("far future", u64::MAX, false), ("past", 0, true)]
+            {
+                assert_eq!(is_expired(expires_at), expected, "{case}");
+            }
         }
     }
 

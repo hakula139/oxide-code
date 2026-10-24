@@ -90,61 +90,37 @@ mod tests {
         use super::*;
 
         #[test]
-        fn bare_name_has_empty_args() {
-            let parsed = parse_slash("/help").unwrap();
-            assert_eq!(parsed.name, "help");
-            assert_eq!(parsed.args, "");
-        }
+        fn distinguishes_commands_from_literal_prompts() {
+            for (case, input, expected) in [
+                ("bare command", "/help", Some(("help", ""))),
+                (
+                    "inner whitespace",
+                    "/init  please  write CLAUDE.md  ",
+                    Some(("init", "please  write CLAUDE.md")),
+                ),
+                ("leading whitespace", "   /help", Some(("help", ""))),
+                ("trailing whitespace", "/help   ", Some(("help", ""))),
+                (
+                    "plugin namespace",
+                    "/context7-plugin:docs",
+                    Some(("context7-plugin:docs", "")),
+                ),
+                ("plain prompt", "hello", None),
+                ("embedded path", "explain /etc/hosts", None),
+                ("bare slash", "/", None),
+                ("blank slash", "  /  ", None),
+                ("escaped slash", "//help", None),
+                ("non-ASCII name", "/foo🦀", None),
+                ("special character", "/foo!", None),
+                ("comma in name", "/foo,bar", None),
+            ] {
+                let expected = expected.map(|(name, args)| Parsed {
+                    name: name.to_owned(),
+                    args: args.to_owned(),
+                });
 
-        #[test]
-        fn name_with_args_keeps_inner_whitespace() {
-            let parsed = parse_slash("/init  please  write CLAUDE.md  ").unwrap();
-
-            assert_eq!(parsed.name, "init");
-            assert_eq!(parsed.args, "please  write CLAUDE.md");
-        }
-
-        #[test]
-        fn tolerates_leading_whitespace() {
-            let parsed = parse_slash("   /help").unwrap();
-            assert_eq!(parsed.name, "help");
-        }
-
-        #[test]
-        fn trailing_whitespace_in_args_is_trimmed() {
-            let parsed = parse_slash("/help   ").unwrap();
-            assert_eq!(parsed.args, "");
-        }
-
-        #[test]
-        fn plain_prompt_is_not_a_command() {
-            assert!(parse_slash("hello").is_none());
-            assert!(parse_slash("explain /etc/hosts").is_none());
-        }
-
-        #[test]
-        fn bare_slash_is_not_a_command() {
-            assert!(parse_slash("/").is_none());
-            assert!(parse_slash("  /  ").is_none());
-        }
-
-        #[test]
-        fn double_slash_is_not_a_command() {
-            assert!(parse_slash("//help").is_none());
-        }
-
-        #[test]
-        fn accepts_plugin_namespace_in_name() {
-            let parsed = parse_slash("/context7-plugin:docs").unwrap();
-            assert_eq!(parsed.name, "context7-plugin:docs");
-            assert_eq!(parsed.args, "");
-        }
-
-        #[test]
-        fn rejects_non_ascii_or_special_chars_in_name() {
-            assert!(parse_slash("/foo🦀").is_none());
-            assert!(parse_slash("/foo!").is_none());
-            assert!(parse_slash("/foo,bar").is_none());
+                assert_eq!(parse_slash(input), expected, "{case}");
+            }
         }
     }
 

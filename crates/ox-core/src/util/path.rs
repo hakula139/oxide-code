@@ -378,35 +378,23 @@ mod tests {
         use super::*;
 
         #[test]
-        fn resolves_dot_and_dot_dot_components() {
-            assert_eq!(
-                lexical_normalize(Path::new("/work/./src/../lib/a.rs")),
-                PathBuf::from("/work/lib/a.rs"),
-            );
-        }
-
-        #[test]
-        fn drops_a_leading_dot_in_relative_paths() {
-            assert_eq!(
-                lexical_normalize(Path::new("./src/a.rs")),
-                PathBuf::from("src/a.rs")
-            );
-        }
-
-        #[test]
-        fn clamps_dot_dot_at_the_root() {
-            assert_eq!(
-                lexical_normalize(Path::new("/a/../../b")),
-                PathBuf::from("/b")
-            );
-        }
-
-        #[test]
-        fn keeps_leading_dot_dot_in_relative_paths() {
-            assert_eq!(
-                lexical_normalize(Path::new("../x/./../y")),
-                PathBuf::from("../y")
-            );
+        fn resolves_dot_components_with_root_and_relative_boundaries() {
+            for (case, input, expected) in [
+                (
+                    "dot components",
+                    "/work/./src/../lib/a.rs",
+                    "/work/lib/a.rs",
+                ),
+                ("relative leading dot", "./src/a.rs", "src/a.rs"),
+                ("parent clamps at root", "/a/../../b", "/b"),
+                ("relative leading parent", "../x/./../y", "../y"),
+            ] {
+                assert_eq!(
+                    lexical_normalize(Path::new(input)),
+                    PathBuf::from(expected),
+                    "{case}"
+                );
+            }
         }
     }
 }
