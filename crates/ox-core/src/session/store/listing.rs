@@ -278,31 +278,13 @@ fn read_session_info(
     let mut archived = false;
     while let Some((_, line)) = lines.next_line()? {
         if line.starts_with(TITLE_LINE_PREFIX)
-            && let Ok(Entry::Title {
-                title: text,
-                updated_at,
-            }) = serde_json::from_str(line)
+            && let Ok(Entry::Title(record)) = serde_json::from_str(line)
         {
-            keep_newer(
-                &mut title,
-                TitleInfo {
-                    title: text,
-                    updated_at,
-                },
-            );
+            keep_newer(&mut title, record);
         } else if line.starts_with(SUMMARY_LINE_PREFIX)
-            && let Ok(Entry::Summary {
-                message_count,
-                updated_at,
-            }) = serde_json::from_str(line)
+            && let Ok(Entry::Summary(record)) = serde_json::from_str(line)
         {
-            keep_newer(
-                &mut exit,
-                ExitInfo {
-                    message_count,
-                    updated_at,
-                },
-            );
+            keep_newer(&mut exit, record);
         } else if line.starts_with(ARCHIVE_LINE_PREFIX)
             && let Ok(Entry::Archive {
                 archived: state, ..
@@ -576,16 +558,16 @@ mod tests {
             let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("retitled"), &[]).unwrap();
             writer
-                .append(&[Entry::Title {
+                .append(&[Entry::Title(TitleInfo {
                     title: "original prompt".to_owned(),
                     updated_at: datetime!(2026-04-16 12:00:00 UTC),
-                }])
+                })])
                 .unwrap();
             writer
-                .append(&[Entry::Title {
+                .append(&[Entry::Title(TitleInfo {
                     title: "AI generated".to_owned(),
                     updated_at: datetime!(2026-04-16 12:01:00 UTC),
-                }])
+                })])
                 .unwrap();
 
             let sessions = store.list().unwrap();
@@ -600,10 +582,10 @@ mod tests {
             writer
                 .append(&[
                     sample_summary_entry(4),
-                    Entry::Summary {
+                    Entry::Summary(ExitInfo {
                         message_count: 2,
                         updated_at: datetime!(2026-04-16 12:00:00 UTC),
-                    },
+                    }),
                 ])
                 .unwrap();
 
@@ -617,19 +599,19 @@ mod tests {
             let (_dir, store) = isolated_store();
             let mut writer = store.create(&sample_header("buried"), &[]).unwrap();
             writer
-                .append(&[Entry::Title {
+                .append(&[Entry::Title(TitleInfo {
                     title: "first prompt".to_owned(),
                     updated_at: datetime!(2026-04-16 12:00:00 UTC),
-                }])
+                })])
                 .unwrap();
             writer
                 .append(&[sample_message_entry(Uuid::new_v4(), "short user text")])
                 .unwrap();
             writer
-                .append(&[Entry::Title {
+                .append(&[Entry::Title(TitleInfo {
                     title: "AI picked".to_owned(),
                     updated_at: datetime!(2026-04-16 12:00:05 UTC),
-                }])
+                })])
                 .unwrap();
             let bulky_body = "x".repeat(16_000);
             writer

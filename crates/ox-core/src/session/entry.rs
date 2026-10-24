@@ -63,15 +63,14 @@ pub(crate) enum Entry {
     Rewind {
         #[serde(skip_serializing_if = "Option::is_none")]
         tip: Option<Uuid>,
+        /// Whether an earlier prompt or manual title consumed the first-prompt title opportunity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_user_prompt_seen: Option<bool>,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
     /// The session's display title. The newest `updated_at` wins.
-    Title {
-        title: String,
-        #[serde(with = "time::serde::rfc3339")]
-        updated_at: OffsetDateTime,
-    },
+    Title(TitleInfo),
     /// Sets whether default listings and `--continue` skip the session. The last one in the file
     /// wins.
     Archive {
@@ -81,11 +80,7 @@ pub(crate) enum Entry {
     },
     /// The message count listings show, written when a session that gained messages finishes. The
     /// newest `updated_at` wins.
-    Summary {
-        message_count: u32,
-        #[serde(with = "time::serde::rfc3339")]
-        updated_at: OffsetDateTime,
-    },
+    Summary(ExitInfo),
     /// Display-only sidecar for tool results, indexed by `tool_use_id` on replay.
     ToolResultMetadata {
         tool_use_id: String,
@@ -122,15 +117,17 @@ pub(crate) enum Entry {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleInfo {
     pub title: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExitInfo {
     pub message_count: u32,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
@@ -302,9 +299,7 @@ mod tests {
             parent_uuid: Some(parent),
             message: Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: "hello".to_owned(),
-                }],
+                content: vec![ContentBlock::text("hello")],
             },
             timestamp: datetime!(2026-04-16 12:00:01 UTC),
         };
@@ -326,7 +321,7 @@ mod tests {
         assert_eq!(parsed_uuid, uuid);
         assert_eq!(parsed_parent, Some(parent));
         assert_eq!(message.role, Role::User);
-        assert!(matches!(&message.content[0], ContentBlock::Text { text } if text == "hello"));
+        assert!(matches!(&message.content[0], ContentBlock::Text { text, .. } if text == "hello"));
         assert_eq!(timestamp, datetime!(2026-04-16 12:00:01 UTC));
     }
 
@@ -360,15 +355,15 @@ mod tests {
 
     #[test]
     fn title_round_trips() {
-        let entry = Entry::Title {
+        let entry = Entry::Title(TitleInfo {
             title: "Fix auth bug".to_owned(),
             updated_at: datetime!(2026-04-16 12:05:00 UTC),
-        };
+        });
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["type"], "title");
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
-        let Entry::Title { title, updated_at } = parsed else {
+        let Entry::Title(TitleInfo { title, updated_at }) = parsed else {
             panic!("expected Title");
         };
         assert_eq!(title, "Fix auth bug");
@@ -377,19 +372,19 @@ mod tests {
 
     #[test]
     fn summary_round_trips_without_title_field() {
-        let entry = Entry::Summary {
+        let entry = Entry::Summary(ExitInfo {
             message_count: 8,
             updated_at: datetime!(2026-04-16 12:05:00 UTC),
-        };
+        });
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["type"], "summary");
         assert!(json.get("title").is_none(), "a summary carries no title");
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
-        let Entry::Summary {
+        let Entry::Summary(ExitInfo {
             message_count,
             updated_at,
-        } = parsed
+        }) = parsed
         else {
             panic!("expected Summary");
         };
@@ -642,13 +637,13 @@ mod tests {
         assert_eq!(uuid.to_string(), "a1b2c3d4-e5f6-7890-abcd-1234567890ef");
         assert_eq!(*parent_uuid, None);
         assert_eq!(message.role, crate::message::Role::User);
-        assert!(matches!(&entries[2], Entry::Title { title, .. } if title == "hi"));
+        assert!(matches!(&entries[2], Entry::Title(TitleInfo { title, .. }) if title == "hi"));
         assert!(matches!(
             &entries[3],
-            Entry::Summary {
+            Entry::Summary(ExitInfo {
                 message_count: 1,
                 ..
-            }
+            })
         ));
     }
 }

@@ -284,7 +284,7 @@ impl BlockAccumulator {
             payload,
         };
         match self {
-            Self::Text(text) => (Some(ContentBlock::Text { text }), None),
+            Self::Text(text) => (Some(ContentBlock::text(text)), None),
             Self::ToolUse {
                 id,
                 name,
@@ -588,12 +588,8 @@ mod tests {
                                 thinking: "Let me think".to_owned(),
                                 replay: Replay::with_model(MODEL, "sig"),
                             },
-                            ContentBlock::Text {
-                                text: "Hello there".to_owned(),
-                            },
-                            ContentBlock::Text {
-                                text: "!".to_owned(),
-                            },
+                            ContentBlock::text("Hello there"),
+                            ContentBlock::text("!"),
                             ContentBlock::Thinking {
                                 thinking: "Done".to_owned(),
                                 replay: Replay::with_model(MODEL, "sig2"),
@@ -674,9 +670,7 @@ mod tests {
                 thinking: text.to_owned(),
                 replay: Replay::with_model(MODEL, "sig"),
             };
-            let text_block = |text: &str| ContentBlock::Text {
-                text: text.to_owned(),
-            };
+            let text_block = |text: &str| ContentBlock::text(text);
             let tool_block = |id: &str| ContentBlock::ToolUse {
                 id: id.to_owned(),
                 name: "echo".to_owned(),
@@ -798,9 +792,7 @@ mod tests {
                                     results
                                 )]),
                             },
-                            ContentBlock::Text {
-                                text: "Found it.".to_owned(),
-                            },
+                            ContentBlock::text("Found it."),
                         ],
                         ..Response::default()
                     }),
@@ -838,9 +830,7 @@ mod tests {
                     ResponseEvent::Text("Writing it now.".to_owned()),
                     ResponseEvent::Completed(Response {
                         content: vec![
-                            ContentBlock::Text {
-                                text: "Writing it now.".to_owned(),
-                            },
+                            ContentBlock::text("Writing it now."),
                             ContentBlock::ToolUse {
                                 id: "t1".to_owned(),
                                 name: "write".to_owned(),
@@ -885,9 +875,7 @@ mod tests {
                 [
                     ResponseEvent::Text("Hi".to_owned()),
                     ResponseEvent::Completed(Response {
-                        content: vec![ContentBlock::Text {
-                            text: "Hi".to_owned(),
-                        }],
+                        content: vec![ContentBlock::text("Hi")],
                         ..Response::default()
                     }),
                 ],
@@ -1027,12 +1015,7 @@ mod tests {
             fn yields_text_verbatim_and_reasoning_for_its_model() {
                 assert_eq!(
                     BlockAccumulator::Text("hi".to_owned()).into_content_block(MODEL),
-                    (
-                        Some(ContentBlock::Text {
-                            text: "hi".to_owned()
-                        }),
-                        None
-                    ),
+                    (Some(ContentBlock::text("hi")), None),
                 );
                 assert_eq!(
                     BlockAccumulator::Thinking {

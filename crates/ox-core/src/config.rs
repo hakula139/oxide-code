@@ -50,7 +50,7 @@ pub(crate) const DEFAULT_THEME: &str = "mocha";
 
 // ── ConfigSnapshot ──
 
-/// Resolved-config view minus the secret. Survives [`Config`] being consumed by the client.
+/// Resolved-config view without the auth secret.
 #[derive(Debug, Clone)]
 pub struct ConfigSnapshot {
     pub model: ModelSpec,
@@ -664,6 +664,10 @@ fn validate_base_url(base_url: &Sourced<String>) -> Result<()> {
     let raw = &base_url.value;
     let reason = match reqwest::Url::parse(raw) {
         Err(e) => e.to_string(),
+        Ok(url) if url.query().is_some() || url.fragment().is_some() => {
+            "query strings and fragments are not supported. Remove them from the base URL."
+                .to_owned()
+        }
         Ok(url) => match url.scheme() {
             "https" => return Ok(()),
             "http" if is_loopback_url(&url) => return Ok(()),
@@ -1263,25 +1267,18 @@ mod tests {
 
         #[tokio::test]
         async fn rejects_a_base_url_naming_its_variable_value_and_reason() {
-            for (raw, expected) in [
-                (
-                    "http://gw:8080",
-                    "invalid ANTHROPIC_BASE_URL \"http://gw:8080\": \
-                     http is allowed only for localhost",
-                ),
-                (
-                    "ftp://example.com",
-                    "invalid ANTHROPIC_BASE_URL \"ftp://example.com\": \
-                     expected http or https, got \"ftp\"",
-                ),
-                (
-                    "gw:8080/v1",
-                    r#"invalid ANTHROPIC_BASE_URL "gw:8080/v1": expected http or https, got "gw""#,
-                ),
-                (
-                    "not a url",
-                    r#"invalid ANTHROPIC_BASE_URL "not a url": relative URL without a base"#,
-                ),
+            let components =
+                "query strings and fragments are not supported. Remove them from the base URL.";
+            for (raw, reason) in [
+                ("http://gw:8080", "http is allowed only for localhost"),
+                ("ftp://example.com", "expected http or https, got \"ftp\""),
+                ("gw:8080/v1", "expected http or https, got \"gw\""),
+                ("not a url", "relative URL without a base"),
+                ("https://example.com/prefix?tenant=x", components),
+                ("https://example.com/prefix#anchor", components),
+                ("https://example.com/prefix?", components),
+                ("https://example.com/prefix#", components),
+                ("https://example.com/prefix?tenant=x#anchor", components),
             ] {
                 let dir = tempfile::tempdir().unwrap();
 
@@ -1289,40 +1286,49 @@ mod tests {
                     .await
                     .expect_err("the base URL must be rejected");
 
-                assert_eq!(format!("{err:#}"), expected);
+                assert_eq!(
+                    format!("{err:#}"),
+                    format!("invalid ANTHROPIC_BASE_URL {raw:?}: {reason}"),
+                );
             }
         }
 
         #[tokio::test]
         async fn rejects_a_base_url_naming_the_file_that_sets_it() {
-            let dir = tempfile::tempdir().unwrap();
-            write_user_config(
-                dir.path(),
-                indoc! {r#"
-                    [client]
-                    base_url = "http://gw:8080"
-                "#},
-            );
-            let home = [(HOME_VAR, Some(dir.path()))];
+            let components =
+                "query strings and fragments are not supported. Remove them from the base URL.";
+            for (raw, reason) in [
+                ("http://gw:8080", "http is allowed only for localhost"),
+                ("https://example.com/prefix?tenant=x", components),
+                ("https://example.com/prefix#anchor", components),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                write_user_config(dir.path(), &format!("client.base_url = {raw:?}"));
+                let home = [(HOME_VAR, Some(dir.path()))];
 
-            let err = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &[])))
-                .await
-                .expect_err("http must be rejected");
+                let err = Box::pin(temp_env::async_with_vars(home, load_with(&dir, &[])))
+                    .await
+                    .expect_err("the base URL must be rejected");
 
-            assert_eq!(
-                format!("{err:#}"),
-                "invalid client.base_url \"http://gw:8080\" in ~/ox/config.toml: \
-                 http is allowed only for localhost",
-            );
+                assert_eq!(
+                    format!("{err:#}"),
+                    format!("invalid client.base_url {raw:?} in ~/ox/config.toml: {reason}"),
+                );
+            }
         }
 
         #[tokio::test]
-        async fn accepts_loopback_http_base_url_for_local_proxy() {
+        async fn accepts_base_urls_with_optional_path_prefix_and_trailing_slash() {
             for raw in [
+                "https://example.com",
+                "https://example.com/",
+                "https://example.com/anthropic",
+                "https://example.com/anthropic/",
                 "http://127.0.0.1:8080",
                 "http://127.0.0.2:8080",
                 "http://localhost:8080",
                 "http://[::1]:8080",
+                "http://localhost:8080/anthropic/",
             ] {
                 let dir = tempfile::tempdir().unwrap();
 

@@ -4,7 +4,7 @@
 
 use indoc::formatdoc;
 
-use crate::message::{ContentBlock, Message, Role};
+use crate::message::{ContentBlock, Message, Role, TextOrigin};
 use crate::prompt::system_reminder;
 use crate::protocol::CompactTrigger;
 use crate::tool::bash::background::BackgroundShell;
@@ -25,11 +25,17 @@ pub(crate) fn synthesize_post_compact_message(
     trigger: CompactTrigger,
 ) -> Message {
     let summary = summary.trim();
-    let mut message = Message::user(formatdoc! {"
-        {SUMMARY_PREFIX}
+    let mut message = Message {
+        role: Role::User,
+        content: vec![ContentBlock::generated_text(
+            formatdoc! {"
+                {SUMMARY_PREFIX}
 
-        {summary}
-    "});
+                {summary}
+            "},
+            TextOrigin::CompactionSummary,
+        )],
+    };
     let continuation = (trigger == CompactTrigger::MidTurn).then(|| {
         system_reminder(
             "You were partway through your turn when the conversation was compacted. \
@@ -41,7 +47,7 @@ pub(crate) fn synthesize_post_compact_message(
         [task_reminder(tasks), shell_reminder(shells), continuation]
             .into_iter()
             .flatten()
-            .map(|text| ContentBlock::Text { text }),
+            .map(|text| ContentBlock::generated_text(text, TextOrigin::SystemReminder)),
     );
     message
 }
@@ -89,24 +95,36 @@ fn shell_reminder(shells: &[BackgroundShell]) -> Option<String> {
     }))
 }
 
-/// Removes the synthetic summary block from a resumed post-compact root message, returning whether
-/// it was there.
-pub(super) fn strip_synthetic_post_compact_prefix(message: &mut Message) -> bool {
+/// Restores provenance for the synthetic root an older compact boundary identifies. Explicit
+/// origins survive unchanged, and the model-facing text is never rewritten.
+pub(super) fn restore_post_compact_origin(message: &mut Message) {
     if message.role != Role::User {
-        return false;
+        return;
     }
-    let Some(ContentBlock::Text { text }) = message.content.first() else {
-        return false;
+    let [ContentBlock::Text { origin, .. }, reminders @ ..] = &mut message.content[..] else {
+        return;
     };
-    // Releases up to 0.1.0-alpha.5 broke the prefix across two lines, so match it word by word.
-    let mut words = text.split_whitespace();
-    if !SUMMARY_PREFIX
-        .split_whitespace()
-        .all(|word| words.next() == Some(word))
+    origin.get_or_insert(TextOrigin::CompactionSummary);
+    for block in reminders {
+        if let ContentBlock::Text { origin, .. } = block {
+            origin.get_or_insert(TextOrigin::SystemReminder);
+        }
+    }
+}
+
+/// Removes the generated summary block that the compaction boundary already displays.
+pub(super) fn strip_post_compact_summary(message: &mut Message) -> bool {
+    if message.role != Role::User
+        || !matches!(
+            message.content.first(),
+            Some(ContentBlock::Text {
+                origin: Some(TextOrigin::CompactionSummary),
+                ..
+            })
+        )
     {
         return false;
     }
-
     message.content.remove(0);
     true
 }
@@ -128,7 +146,7 @@ mod tests {
                 synthesize_post_compact_message(" did X, Y, Z\n", &[], &[], CompactTrigger::Manual);
 
             assert_eq!(m.role, Role::User);
-            let [ContentBlock::Text { text }] = &m.content[..] else {
+            let [ContentBlock::Text { text, .. }] = &m.content[..] else {
                 panic!("expected one text block: {m:?}");
             };
             assert_eq!(
@@ -146,8 +164,8 @@ mod tests {
             let m = synthesize_post_compact_message("did X", &plan(), &[], CompactTrigger::Manual);
 
             let [
-                ContentBlock::Text { text: summary },
-                ContentBlock::Text { text: reminder },
+                ContentBlock::Text { text: summary, .. },
+                ContentBlock::Text { text: reminder, .. },
             ] = &m.content[..]
             else {
                 panic!("expected the summary and a reminder: {m:?}");
@@ -178,8 +196,8 @@ mod tests {
 
             let [
                 _,
-                ContentBlock::Text { text: tasks },
-                ContentBlock::Text { text: shells },
+                ContentBlock::Text { text: tasks, .. },
+                ContentBlock::Text { text: shells, .. },
             ] = &m.content[..]
             else {
                 panic!("expected the summary and two reminders: {m:?}");
@@ -213,7 +231,7 @@ mod tests {
                     "{m:?}"
                 );
             }
-            let [_, ContentBlock::Text { text }] = &mid_turn.content[..] else {
+            let [_, ContentBlock::Text { text, .. }] = &mid_turn.content[..] else {
                 panic!("expected the summary and the continuation: {mid_turn:?}");
             };
             assert_eq!(
@@ -227,8 +245,66 @@ mod tests {
         }
     }
 
-    mod strip_synthetic_post_compact_prefix {
+    mod restore_post_compact_origin {
         use super::*;
+
+        #[test]
+        fn preserves_explicit_origins_and_leaves_other_root_shapes_unchanged() {
+            let mut mixed = Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::generated_text("explicit", TextOrigin::Interruption),
+                    ContentBlock::generated_text("kept", TextOrigin::CompactionTruncation),
+                    ContentBlock::tool_result("t1", "tool", false),
+                    ContentBlock::text("legacy reminder"),
+                ],
+            };
+
+            restore_post_compact_origin(&mut mixed);
+
+            assert_eq!(
+                mixed.content,
+                [
+                    ContentBlock::generated_text("explicit", TextOrigin::Interruption),
+                    ContentBlock::generated_text("kept", TextOrigin::CompactionTruncation),
+                    ContentBlock::tool_result("t1", "tool", false),
+                    ContentBlock::generated_text("legacy reminder", TextOrigin::SystemReminder),
+                ]
+            );
+
+            for mut message in [
+                Message::assistant("assistant text"),
+                Message {
+                    role: Role::User,
+                    content: Vec::new(),
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::tool_result("t1", "tool", false)],
+                },
+            ] {
+                let expected = message.clone();
+
+                restore_post_compact_origin(&mut message);
+
+                assert_eq!(message, expected);
+            }
+        }
+    }
+
+    mod strip_post_compact_summary {
+        use super::*;
+
+        #[test]
+        fn preserves_a_literal_summary_prefix() {
+            let mut message = Message::user(SUMMARY_PREFIX);
+            let expected = message.clone();
+
+            let stripped = strip_post_compact_summary(&mut message);
+
+            assert!(!stripped);
+            assert_eq!(message, expected);
+        }
 
         #[test]
         fn removes_only_the_prefix_block() {
@@ -238,11 +314,10 @@ mod tests {
                 &[],
                 CompactTrigger::Manual,
             );
-            m.content.push(ContentBlock::Text {
-                text: "real prompt".to_owned(),
-            });
+            restore_post_compact_origin(&mut m);
+            m.content.push(ContentBlock::text("real prompt"));
 
-            assert!(strip_synthetic_post_compact_prefix(&mut m));
+            assert!(strip_post_compact_summary(&mut m));
             assert_eq!(m, Message::user("real prompt"));
         }
 
@@ -254,11 +329,10 @@ mod tests {
 
                 internal summary"
             });
-            m.content.push(ContentBlock::Text {
-                text: "real prompt".to_owned(),
-            });
+            restore_post_compact_origin(&mut m);
+            m.content.push(ContentBlock::text("real prompt"));
 
-            assert!(strip_synthetic_post_compact_prefix(&mut m));
+            assert!(strip_post_compact_summary(&mut m));
             assert_eq!(m, Message::user("real prompt"));
         }
 
@@ -266,7 +340,7 @@ mod tests {
         fn leaves_regular_user_text() {
             let mut m = Message::user("This conversation should stay visible");
 
-            assert!(!strip_synthetic_post_compact_prefix(&mut m));
+            assert!(!strip_post_compact_summary(&mut m));
             assert_eq!(m.content.len(), 1);
         }
 
@@ -278,7 +352,7 @@ mod tests {
                 not a synthetic user root"
             });
 
-            assert!(!strip_synthetic_post_compact_prefix(&mut m));
+            assert!(!strip_post_compact_summary(&mut m));
             assert_eq!(m.role, Role::Assistant);
             assert_eq!(m.content.len(), 1);
         }
@@ -290,7 +364,7 @@ mod tests {
                 content: vec![ContentBlock::tool_result("toolu_1", SUMMARY_PREFIX, false)],
             };
 
-            assert!(!strip_synthetic_post_compact_prefix(&mut m));
+            assert!(!strip_post_compact_summary(&mut m));
             assert!(matches!(m.content[0], ContentBlock::ToolResult { .. }));
         }
     }

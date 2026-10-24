@@ -23,6 +23,8 @@ pub(crate) enum Role {
 pub(crate) enum ContentBlock {
     Text {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<TextOrigin>,
     },
     ToolUse {
         id: String,
@@ -63,10 +65,24 @@ pub(crate) enum ContentBlock {
 }
 
 impl ContentBlock {
+    pub(crate) fn text(text: impl Into<String>) -> Self {
+        Self::Text {
+            text: text.into(),
+            origin: None,
+        }
+    }
+
+    pub(crate) fn generated_text(text: impl Into<String>, origin: TextOrigin) -> Self {
+        Self::Text {
+            text: text.into(),
+            origin: Some(origin),
+        }
+    }
+
     /// The text of a [`ContentBlock::Text`] block, `None` for any other block.
     pub(crate) fn as_text(&self) -> Option<&str> {
         match self {
-            Self::Text { text } => Some(text),
+            Self::Text { text, .. } => Some(text),
             _ => None,
         }
     }
@@ -89,6 +105,19 @@ impl ContentBlock {
             is_error,
         }
     }
+}
+
+// ── Text Origin ──
+
+/// Generated text whose transcript meaning does not depend on its wording. Absent on ordinary
+/// user and assistant text, and omitted from provider requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TextOrigin {
+    SystemReminder,
+    Interruption,
+    CompactionSummary,
+    CompactionTruncation,
 }
 
 // ── Replay ──
@@ -134,26 +163,31 @@ impl Message {
     pub(crate) fn user(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::text(text)],
         }
     }
 
     pub(crate) fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::text(text)],
         }
     }
 
     /// The user message that ends a turn the user interrupted, so the model reads the prompts
     /// before it as abandoned.
     pub(crate) fn interruption() -> Self {
-        Self::user(INTERRUPTION_MARKER)
+        Self {
+            role: Role::User,
+            content: vec![ContentBlock::generated_text(
+                INTERRUPTION_MARKER,
+                TextOrigin::Interruption,
+            )],
+        }
     }
 }
 
-/// Text of [`Message::interruption`], the one Claude Code records for a cancel mid-stream. Session
-/// files store it and resume matches it verbatim, so new text would show older markers as prompts.
+/// Text of [`Message::interruption`], matching Claude Code's marker for a cancel mid-stream.
 pub(crate) const INTERRUPTION_MARKER: &str = "[Request interrupted by user]";
 
 // ── Progress Updates ──
@@ -190,6 +224,39 @@ mod tests {
 
     mod content_block {
         use super::*;
+
+        #[test]
+        fn text_origin_round_trips_without_changing_ordinary_text() {
+            for (origin, encoded) in [
+                (None, None),
+                (Some(TextOrigin::SystemReminder), Some("system_reminder")),
+                (Some(TextOrigin::Interruption), Some("interruption")),
+                (
+                    Some(TextOrigin::CompactionSummary),
+                    Some("compaction_summary"),
+                ),
+                (
+                    Some(TextOrigin::CompactionTruncation),
+                    Some("compaction_truncation"),
+                ),
+            ] {
+                let mut expected = serde_json::json!({"type": "text", "text": "same text"});
+                if let Some(encoded) = encoded {
+                    expected["origin"] = encoded.into();
+                }
+                let block = ContentBlock::Text {
+                    text: "same text".to_owned(),
+                    origin,
+                };
+
+                let stored = serde_json::to_value(&block).unwrap();
+                let loaded: ContentBlock = serde_json::from_value(expected.clone()).unwrap();
+
+                assert_eq!(stored, expected, "{origin:?}");
+                assert_eq!(loaded, block, "{origin:?}");
+                assert_eq!(loaded.as_text(), Some("same text"), "{origin:?}");
+            }
+        }
 
         #[test]
         fn server_tool_use_round_trips_through_json() {
@@ -357,9 +424,7 @@ mod tests {
             #[test]
             fn yields_a_text_blocks_text_and_skips_every_other_block() {
                 let blocks = [
-                    ContentBlock::Text {
-                        text: "hello".to_owned(),
-                    },
+                    ContentBlock::text("hello"),
                     ContentBlock::Thinking {
                         thinking: "reasoning".to_owned(),
                         replay: Replay::with_model(MODEL, "sig"),
@@ -387,9 +452,7 @@ mod tests {
                 Message::user("hello"),
                 Message {
                     role: Role::User,
-                    content: vec![ContentBlock::Text {
-                        text: "hello".to_owned(),
-                    }],
+                    content: vec![ContentBlock::text("hello")],
                 },
             );
         }
@@ -404,9 +467,7 @@ mod tests {
                 Message::assistant("hi"),
                 Message {
                     role: Role::Assistant,
-                    content: vec![ContentBlock::Text {
-                        text: "hi".to_owned(),
-                    }],
+                    content: vec![ContentBlock::text("hi")],
                 },
             );
         }
@@ -441,9 +502,7 @@ mod tests {
 
         #[test]
         fn stops_at_non_thinking_blocks() {
-            let text = ContentBlock::Text {
-                text: "Checking.".to_owned(),
-            };
+            let text = ContentBlock::text("Checking.");
             for (blocks, index) in [
                 (vec![thinking(""), tool_use()], 1),
                 (vec![thinking("Found it."), text, tool_use()], 2),
