@@ -148,18 +148,46 @@ impl LineEditor {
         !is_blocked_key(event)
     }
 
-    /// Inserts pasted `text` at the cursor as one line, with each run of control characters such as
-    /// a line break collapsed to a space. Keeps what fits under the cap and returns whether the
-    /// text changed.
+    /// Inserts pasted `text` as one line, with each run of control characters collapsed to a space.
+    /// Keeps a prefix within the available width, dropping the paste if its joined text exceeds the
+    /// cap. Returns whether the text changed.
     pub(crate) fn paste(&mut self, text: &str) -> bool {
-        let room = self.max_width.saturating_sub(self.text().width());
         let flat = text
             .split(char::is_control)
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
 
-        let changed = self.textarea.insert_str(take_head(&flat, room));
+        if flat.is_empty() {
+            return false;
+        }
+        let cursor = self.textarea.cursor().1;
+        let ((_, start), (_, end)) = self
+            .textarea
+            .selection_range()
+            .unwrap_or(((0, cursor), (0, cursor)));
+
+        let current = self.text();
+        let byte_at = |column| {
+            current
+                .char_indices()
+                .nth(column)
+                .map_or(current.len(), |(byte, _)| byte)
+        };
+        let start = byte_at(start);
+        let mut candidate = current.to_owned();
+        candidate.replace_range(start..byte_at(end), "");
+
+        let room = self.max_width.saturating_sub(candidate.width());
+        let prefix = take_head(&flat, room);
+        if prefix.is_empty() {
+            return false;
+        }
+        candidate.insert_str(start, &prefix);
+        if candidate.width() > self.max_width {
+            return false;
+        }
+        let changed = self.textarea.insert_str(prefix);
         self.advance_cursor_to_boundary();
         changed
     }
@@ -645,23 +673,40 @@ mod tests {
 
         #[test]
         fn keeps_only_what_fits_under_the_cap() {
-            let mut editor = LineEditor::new("ab").with_max_width(6);
+            for (text, expected) in [("cdefg", "abcdef"), ("c界d界", "abc界d")] {
+                let mut editor = LineEditor::new("ab").with_max_width(6);
 
-            let pasted = editor.paste("c界d界");
+                let pasted = editor.paste(text);
+                assert!(pasted, "{text:?}");
 
-            assert!(pasted);
-            assert_eq!(
-                editor.text(),
-                "abc界d",
-                "a wide char past the cap is dropped"
-            );
+                assert_eq!(editor.text(), expected, "{text:?}");
 
-            let past_the_cap = editor.paste("x");
-            let line_breaks = editor.paste("\n\n");
+                let past_the_cap = editor.paste("x");
+                let line_breaks = editor.paste("\n\n");
 
-            assert!(!past_the_cap, "a full field takes nothing");
-            assert!(!line_breaks, "line breaks alone insert nothing");
-            assert_eq!(editor.text(), "abc界d");
+                assert!(!past_the_cap, "{text:?}: a full field takes nothing");
+                assert!(!line_breaks, "{text:?}: line breaks alone insert nothing");
+                assert_eq!(editor.text(), expected, "{text:?}");
+            }
+        }
+
+        #[test]
+        fn clips_replacement_text_to_the_space_freed_by_the_selection() {
+            for (start, end) in [(1, 3), (3, 1)] {
+                let mut editor = LineEditor::new("abcd").with_max_width(4);
+                editor.textarea.move_cursor(CursorMove::Jump(0, start));
+                editor.textarea.start_selection();
+                editor.textarea.move_cursor(CursorMove::Jump(0, end));
+                editor.textarea.set_yank_text("saved");
+
+                let pasted = editor.paste("界界");
+                assert!(pasted, "{start} → {end}");
+
+                assert_eq!(editor.text(), "a界d", "{start} → {end}");
+                assert_eq!(editor.textarea.cursor(), (0, 2), "{start} → {end}");
+                assert_eq!(editor.textarea.selection_range(), None, "{start} → {end}");
+                assert_eq!(editor.textarea.yank_text(), "saved", "{start} → {end}");
+            }
         }
 
         #[test]
@@ -676,6 +721,76 @@ mod tests {
             assert_eq!(family.text(), "👨‍👩‍👧👨‍👩‍👧", "a ZWJ sequence is never split");
             assert!(!heart_changed);
             assert_eq!(heart.text(), "abcde", "a VS16 emoji takes two columns");
+        }
+
+        #[test]
+        fn validates_joined_graphemes_against_the_cap() {
+            for (cap, text, expected, changed) in [
+                (1, "\u{fe0f}", "❤", false),
+                (2, "\u{fe0f}", "❤️", true),
+                (2, "\u{fe0f}x", "❤", false),
+                (3, "\u{fe0f}x界", "❤️x", true),
+            ] {
+                let mut editor = LineEditor::new("❤").with_max_width(cap);
+                editor.textarea.set_yank_text("saved");
+
+                let pasted = editor.paste(text);
+
+                assert_eq!(pasted, changed, "cap {cap}: {text:?}");
+                assert_eq!(editor.text(), expected, "cap {cap}: {text:?}");
+                assert_eq!(
+                    editor.textarea.cursor(),
+                    (0, expected.chars().count()),
+                    "cap {cap}: {text:?}",
+                );
+                assert_eq!(editor.textarea.yank_text(), "saved", "cap {cap}: {text:?}");
+
+                let undone =
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+                assert_eq!(undone, changed, "cap {cap}: {text:?}");
+                assert_eq!(editor.text(), "❤", "cap {cap}: {text:?}");
+
+                let redone =
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+                assert_eq!(redone, changed, "cap {cap}: {text:?}");
+                assert_eq!(editor.text(), expected, "cap {cap}: {text:?}");
+            }
+        }
+
+        #[test]
+        fn ignores_inadmissible_content_without_changing_selection_or_history() {
+            for (initial, cap, start, end, text) in [
+                ("a", 1, 1, 0, ""),
+                ("a", 1, 1, 0, "\n"),
+                ("a", 1, 1, 0, "\r\n\t"),
+                ("a", 1, 1, 0, "界"),
+                ("❤a", 2, 2, 1, "\u{fe0f}x"),
+            ] {
+                let mut editor = LineEditor::new(initial).with_max_width(cap);
+                type_str(&mut editor, "\u{301}");
+                editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                editor.textarea.move_cursor(CursorMove::Jump(0, start));
+                editor.textarea.start_selection();
+                editor.textarea.move_cursor(CursorMove::Jump(0, end));
+                let selection = editor.textarea.selection_range();
+                editor.textarea.set_yank_text("saved");
+
+                let pasted = editor.paste(text);
+
+                assert!(!pasted, "{text:?}");
+                assert_eq!(editor.text(), initial, "{text:?}");
+                assert_eq!(editor.textarea.cursor(), (0, usize::from(end)), "{text:?}");
+                assert_eq!(editor.textarea.selection_range(), selection, "{text:?}");
+                assert_eq!(editor.textarea.yank_text(), "saved", "{text:?}");
+
+                let redone =
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+                assert!(redone, "{text:?}");
+
+                assert_eq!(editor.text(), format!("{initial}\u{301}"), "{text:?}");
+            }
         }
     }
 
