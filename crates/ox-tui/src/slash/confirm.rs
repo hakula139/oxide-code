@@ -14,6 +14,7 @@ use ox_core::util::text::truncate_to_width;
 
 use super::sessions::{CLEAR_THEN_DELETE_HINT, saved_error_message};
 use crate::glyphs::MODAL_ERROR_PREFIX;
+use crate::modal::acceptance::Acceptance;
 use crate::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
@@ -25,8 +26,6 @@ const FOOTER_HINTS: [&str; 2] = ["Y to delete", "N to cancel"];
 
 /// The title and metadata rows.
 const BODY_HEIGHT: u16 = 2;
-/// Width floor so narrow terminals still paint the full body without panicking.
-const MIN_BUDGET: usize = 8;
 
 // ── ConfirmDeleteSessionModal ──
 
@@ -42,6 +41,7 @@ pub(super) struct ConfirmDeleteSessionModal {
     live_session_id: String,
     /// Error from the last failed delete, shown until a retry replaces it or the modal closes.
     error: Option<String>,
+    acceptance: Acceptance,
 }
 
 impl ConfirmDeleteSessionModal {
@@ -60,6 +60,7 @@ impl ConfirmDeleteSessionModal {
             metadata,
             live_session_id,
             error: None,
+            acceptance: Acceptance::default(),
         }
     }
 
@@ -86,7 +87,13 @@ impl Modal for ConfirmDeleteSessionModal {
     }
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let budget = usize::from(area.width).max(MIN_BUDGET);
+        let budget = usize::from(area.width);
+        let metadata = truncate_to_width(&self.metadata, budget);
+        self.acceptance.update(
+            area.width > 0
+                && metadata.starts_with(id_prefix(&self.session_id))
+                && area.height >= self.height(area.width, u16::MAX),
+        );
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(usize::from(area.height));
         self.header.push_lines(&mut lines, area.width, theme);
 
@@ -94,10 +101,7 @@ impl Modal for ConfirmDeleteSessionModal {
             truncate_to_width(&self.display_title, budget),
             theme.text(),
         )));
-        lines.push(Line::from(Span::styled(
-            truncate_to_width(&self.metadata, budget),
-            theme.dim(),
-        )));
+        lines.push(Line::from(Span::styled(metadata, theme.dim())));
         if let Some(err) = &self.error {
             lines.push(Line::from(Span::styled(
                 truncate_to_width(&format!("{MODAL_ERROR_PREFIX}{err}"), budget),
@@ -111,17 +115,23 @@ impl Modal for ConfirmDeleteSessionModal {
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         // The modal stack handles Esc and Ctrl+C.
         match event.code {
-            KeyCode::Char('y' | 'Y') => self.confirm(),
-            KeyCode::Enter if event.modifiers.is_empty() => self.confirm(),
+            KeyCode::Char('y' | 'Y') if self.acceptance.accepts(event) => self.confirm(),
             KeyCode::Char('n' | 'N') => ModalKey::Cancelled,
-            _ => ModalKey::Consumed,
+            _ => {
+                self.acceptance.guard();
+                ModalKey::Consumed
+            }
         }
+    }
+
+    fn binds_modified_key(&self, _event: &KeyEvent) -> bool {
+        self.acceptance.is_guarded()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::KeyModifiers;
+    use crossterm::event::{KeyEventKind, KeyModifiers};
     use time::OffsetDateTime;
     use time::macros::datetime;
 
@@ -130,7 +140,8 @@ mod tests {
 
     use super::*;
     use crate::modal::ModalStack;
-    use crate::modal::testing::render_rows;
+    use crate::modal::acceptance::TYPE_AHEAD_GUARD;
+    use crate::modal::testing::{render_rows, render_rows_with};
     use crate::slash::sessions::format_metadata_line;
 
     const LAST_ACTIVE: OffsetDateTime = datetime!(2026-04-18 09:00:00 UTC);
@@ -218,6 +229,11 @@ mod tests {
     mod handle_key {
         use super::*;
 
+        fn show_and_arm(modal: &ConfirmDeleteSessionModal) {
+            render_rows(modal, 60, modal.height(60, u16::MAX));
+            modal.acceptance.expire();
+        }
+
         fn is_listed(store: &SessionStore, session_id: &str) -> bool {
             store
                 .list()
@@ -232,35 +248,100 @@ mod tests {
 
         #[test]
         fn y_deletes_and_submits_a_chat_confirmation() {
-            let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
-
-            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
-
-            assert!(
-                matches!(&outcome, ModalKey::Submitted(ModalAction::SystemMessage(msg))
-                    if msg == "Deleted session abababab: Fix auth flow"),
-                "{outcome:?}",
-            );
-            assert!(!is_listed(&store, &stamped_id(0xab)), "row gone from list");
-        }
-
-        #[test]
-        fn shifted_y_and_plain_enter_also_delete() {
             for event in [
+                KeyEvent::from(KeyCode::Char('y')),
                 KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
-                KeyEvent::from(KeyCode::Enter),
             ] {
                 let (_dir, store) = isolated_store();
                 let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
+                show_and_arm(&modal);
 
                 let outcome = modal.handle_key(&event);
 
                 assert!(
-                    matches!(outcome, ModalKey::Submitted(ModalAction::SystemMessage(_))),
+                    matches!(&outcome, ModalKey::Submitted(ModalAction::SystemMessage(msg))
+                        if msg == "Deleted session abababab: Fix auth flow"),
                     "{event:?}: {outcome:?}",
                 );
                 assert!(!is_listed(&store, &stamped_id(0xab)), "{event:?}");
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_visible_target_waits_for_quiet_and_rejects_enter_and_repeated_y() {
+            let (_dir, store) = isolated_store();
+            let modal = seed_modal(&store, 0xab, "Fix auth flow");
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(modal));
+            render_rows_with(60, 7, |frame, area, theme| stack.render(frame, area, theme));
+
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
+            assert!(outcome.is_none());
+            assert!(is_listed(&store, &stamped_id(0xab)));
+
+            tokio::time::advance(TYPE_AHEAD_GUARD).await;
+            for event in [
+                KeyEvent::from(KeyCode::Enter),
+                KeyEvent::new_with_kind(
+                    KeyCode::Char('y'),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Repeat,
+                ),
+            ] {
+                let outcome = stack.handle_key(&event);
+
+                assert!(outcome.is_none(), "{event:?}");
+                assert!(is_listed(&store, &stamped_id(0xab)), "{event:?}");
+            }
+
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
+            assert!(outcome.is_none(), "a repeat restarts the quiet period");
+
+            tokio::time::advance(TYPE_AHEAD_GUARD).await;
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
+            assert!(
+                matches!(outcome, Some(ModalAction::SystemMessage(ref text))
+                if text == "Deleted session abababab: Fix auth flow"),
+                "{outcome:?}"
+            );
+            assert!(!is_listed(&store, &stamped_id(0xab)));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn clipped_targets_rearm_when_they_reappear() {
+            for (width, height) in [(60, 0), (60, 1), (60, 6), (0, 7), (7, 7), (8, 7), (10, 7)] {
+                let (_dir, store) = isolated_store();
+                let modal = seed_modal(&store, 0xab, "Fix auth flow");
+                show_and_arm(&modal);
+                let mut stack = ModalStack::default();
+                stack.push(Box::new(modal));
+                render_rows_with(width, height, |frame, area, theme| {
+                    stack.render(frame, area, theme);
+                });
+
+                let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
+                assert!(outcome.is_none(), "{width}x{height}: {outcome:?}");
+                assert!(is_listed(&store, &stamped_id(0xab)));
+
+                tokio::time::advance(TYPE_AHEAD_GUARD).await;
+                render_rows_with(60, 7, |frame, area, theme| stack.render(frame, area, theme));
+                let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
+                assert!(outcome.is_none(), "restoring {width}x{height} must rearm");
+
+                tokio::time::advance(TYPE_AHEAD_GUARD).await;
+                let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
+                assert!(
+                    matches!(outcome, Some(ModalAction::SystemMessage(ref text))
+                    if text == "Deleted session abababab: Fix auth flow"),
+                    "{outcome:?}"
+                );
+                assert!(!is_listed(&store, &stamped_id(0xab)));
             }
         }
 
@@ -268,6 +349,7 @@ mod tests {
         fn modified_confirmation_keys_do_not_delete() {
             let (_dir, store) = isolated_store();
             let modal = seed_modal(&store, 0xab, "Fix auth");
+            show_and_arm(&modal);
 
             let mut stack = ModalStack::default();
             stack.push(Box::new(modal));
@@ -287,20 +369,26 @@ mod tests {
         }
 
         #[test]
-        fn n_cancels_without_deleting() {
-            let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
+        fn cancel_keys_leave_the_session_untouched_before_rendering() {
+            for event in [
+                KeyEvent::from(KeyCode::Char('n')),
+                KeyEvent::from(KeyCode::Esc),
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            ] {
+                let (_dir, store) = isolated_store();
+                let modal = seed_modal(&store, 0xab, "Fix auth flow");
+                let mut stack = ModalStack::default();
+                stack.push(Box::new(modal));
 
-            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('n')));
+                let outcome = stack.handle_key(&event);
 
-            assert!(
-                matches!(outcome, ModalKey::Cancelled),
-                "N must Cancel, got {outcome:?}"
-            );
-            assert!(
-                is_listed(&store, &stamped_id(0xab)),
-                "session must still exist after cancel",
-            );
+                assert!(
+                    matches!(outcome, Some(ModalAction::Cancelled)),
+                    "{event:?}: {outcome:?}"
+                );
+                assert!(!stack.is_active());
+                assert!(is_listed(&store, &stamped_id(0xab)), "{event:?}");
+            }
         }
 
         #[test]
@@ -309,6 +397,7 @@ mod tests {
             let (_dir, store) = isolated_store();
             let live_id = stamped_id(0xab);
             let mut modal = seed_modal_with_live(&store, 0xab, "Fix auth flow", &live_id);
+            show_and_arm(&modal);
 
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
             assert!(matches!(outcome, ModalKey::Consumed));
@@ -328,6 +417,7 @@ mod tests {
             let live_id = stamped_id(0xab);
             let mut modal = seed_modal_with_live(&store, 0xab, "Fix auth flow", &live_id);
             modal.error = Some("permission denied".to_owned());
+            show_and_arm(&modal);
 
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
 

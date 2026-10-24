@@ -14,10 +14,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use globset::{Glob, GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
+use regex_syntax::hir::literal::Extractor;
 use serde::{Deserialize, Serialize};
 
 use super::shell::{PatternWord, Segment, ShellWord, bare_program, pattern_words};
-use super::{PermissionClass, Target, fold_name, resolve};
+use super::{
+    DirectoryAliases, PermissionClass, Target, fold_name, folded_components, relative_to_folded,
+    resolve, walk_spelling,
+};
 use crate::util::path::{lexical_normalize, slash_separated};
 use crate::util::text::is_hidden;
 
@@ -46,8 +50,7 @@ enum Pattern {
     /// `*`, which matches every call of the class.
     Any,
     Exec(Vec<PatternWord>),
-    /// The glob as written, then a copy rooted where each of its literal prefixes resolves.
-    Path(Vec<PathGlob>),
+    Path(PathGlob),
     Host(GlobMatcher),
     Tool(GlobMatcher),
 }
@@ -57,10 +60,12 @@ enum Pattern {
 /// a case or normalization variant cannot slip past.
 #[derive(Debug, Clone)]
 struct PathGlob {
-    /// The glob, `/`-separated, without the copy that matches below it.
-    glob: String,
     /// Whether the glob matches absolute paths, or paths below each anchor directory.
     absolute: bool,
+    literal: PathBuf,
+    bases: Vec<PathBuf>,
+    /// Equivalent bases expressed in one walk's spelling, with each component folded.
+    walk_bases: Option<Vec<Vec<String>>>,
     exact: GlobSet,
     folded: GlobSet,
 }
@@ -92,7 +97,7 @@ impl Rule {
             match class {
                 PermissionClass::Exec => Pattern::Exec(pattern_words(source)?),
                 PermissionClass::Read | PermissionClass::Edit => {
-                    Pattern::Path(vec![PathGlob::parse(source)?])
+                    Pattern::Path(PathGlob::parse(source)?)
                 }
                 PermissionClass::Net => Pattern::Host(host_glob(source)?),
                 PermissionClass::Mcp => Pattern::Tool(tool_glob(source)?),
@@ -170,7 +175,7 @@ impl Rule {
                 .iter()
                 .any(|segment| segment_held(words, segment)),
             (
-                Pattern::Path(globs),
+                Pattern::Path(glob),
                 Target::Path {
                     canonical,
                     rooted,
@@ -178,9 +183,7 @@ impl Rule {
                     deny_rooted,
                     ..
                 },
-            ) => globs
-                .iter()
-                .any(|glob| glob.is_match(canonical, rooted, requested, deny_rooted, discipline)),
+            ) => glob.is_match(canonical, rooted, requested, deny_rooted, discipline),
             (Pattern::Host(glob) | Pattern::Tool(glob), Target::Name(name)) => glob.is_match(name),
             _ => false,
         }
@@ -196,41 +199,47 @@ impl Rule {
         }
     }
 
-    /// This rule plus a copy of its path glob rooted where the glob's literal prefix (the
-    /// components before the first glob character) resolves, wherever that differs from the prefix
-    /// as written. An anchored glob resolves from each of `anchors`, the anchor directories as
-    /// spelled, and only absolute anchors count.
-    pub(super) fn with_resolved_prefixes(mut self, anchors: &[PathBuf]) -> Result<Self> {
-        let Pattern::Path(globs) = &mut self.pattern else {
-            return Ok(self);
+    /// This rule with its literal path prefix rooted at each absolute anchor and where those roots
+    /// resolve when the policy loads.
+    pub(super) fn with_resolved_prefixes(mut self, anchors: &[PathBuf]) -> Self {
+        let Pattern::Path(glob) = &mut self.pattern else {
+            return self;
         };
-        let written = globs[0].clone();
-        let (prefix, rest) = literal_prefix(&written.glob);
-        let literals: Vec<PathBuf> = if written.absolute {
-            vec![PathBuf::from(prefix)]
+        let mut bases: Vec<PathBuf> = if glob.absolute {
+            vec![glob.literal.clone()]
+        } else if glob.literal.has_root() {
+            Vec::new()
         } else {
             anchors
                 .iter()
                 .filter(|anchor| anchor.is_absolute())
-                .map(|anchor| anchor.join(prefix))
+                .map(|anchor| anchor.join(&glob.literal))
                 .collect()
         };
-        for literal in literals {
-            let Some(target) = resolve(&literal)
-                .ok()
-                .filter(|t| *t != lexical_normalize(&literal))
-            else {
-                continue;
-            };
-            let target = escaped(&target);
-            let glob = if rest.is_empty() {
-                target
-            } else {
-                format!("{}/{rest}", target.trim_end_matches('/'))
-            };
-            globs.push(PathGlob::new(glob, true)?);
-        }
-        Ok(self)
+        let resolved: Vec<PathBuf> = bases.iter().filter_map(|base| resolve(base).ok()).collect();
+        bases.extend(resolved);
+        bases.sort();
+        bases.dedup();
+        glob.bases = bases;
+        self
+    }
+
+    /// This rule in a walk's directory spelling, with alias resolution completed before matching
+    /// its entries. Walks do not follow symlinks, so each entry shares that spelling.
+    pub(super) fn for_walk(mut self, base: &Path) -> Self {
+        let Pattern::Path(glob) = &mut self.pattern else {
+            return self;
+        };
+        glob.walk_bases = Some(
+            glob.bases
+                .iter()
+                .map(|prefix| {
+                    let resolved = resolve(prefix).unwrap_or_else(|_| prefix.clone());
+                    folded_components(&walk_spelling(&resolved, base))
+                })
+                .collect(),
+        );
+        self
     }
 }
 
@@ -267,7 +276,7 @@ fn paints_as_itself(c: char) -> bool {
 
 /// `path` with its separators as `/` and every glob character escaped, so it matches only itself.
 pub(super) fn escaped(path: &Path) -> String {
-    globset::escape(&slash_separated(path))
+    globset::escape(&slash_separated(path)).replace('\\', "\\\\")
 }
 
 // ── Exec Patterns ──
@@ -397,7 +406,7 @@ impl PathGlob {
             if Path::new(trimmed).is_absolute() {
                 pattern.truncate(trimmed.len());
             }
-            return Self::new(pattern, true);
+            return Self::new(&pattern, true);
         }
 
         let anchored = pattern.starts_with("./");
@@ -407,26 +416,34 @@ impl PathGlob {
             .to_owned();
         ensure!(!body.is_empty(), "the pattern names no path");
         if anchored || body.contains('/') {
-            Self::new(body, false)
+            Self::new(&body, false)
         } else {
-            Self::new(format!("**/{body}"), false)
+            Self::new(&format!("**/{body}"), false)
         }
     }
 
-    fn new(glob: String, absolute: bool) -> Result<Self> {
+    fn new(glob: &str, absolute: bool) -> Result<Self> {
         let below = format!("{}/**", glob.trim_end_matches('/'));
-        let set = |globs: [&str; 2]| -> Result<GlobSet> {
+        let set = |globs: [Glob; 2]| -> Result<GlobSet> {
             let mut builder = GlobSetBuilder::new();
             for glob in globs {
-                builder.add(path_glob(glob)?);
+                builder.add(glob);
             }
             Ok(builder.build()?)
         };
+        let parsed = path_glob(glob)?;
+        let literal = literal_prefix(&parsed);
         Ok(Self {
-            exact: set([&glob, &below])?,
-            folded: set([&fold_path(&glob), &fold_path(&below)])?,
-            glob,
+            exact: set([parsed, path_glob(&below)?])?,
+            folded: set([path_glob(&fold_path(glob))?, path_glob(&fold_path(&below))?])?,
             absolute,
+            bases: if absolute {
+                vec![literal.clone()]
+            } else {
+                Vec::new()
+            },
+            literal,
+            walk_bases: None,
         })
     }
 
@@ -444,12 +461,49 @@ impl PathGlob {
         let hit = |path: &str| {
             self.exact.is_match(path) || (deny && self.folded.is_match(fold_path(path)))
         };
-        if self.absolute {
+        let written = if self.absolute {
             hit(canonical) || (deny && requested != canonical && hit(requested))
         } else {
             rooted.iter().any(|path| hit(path))
                 || (deny && deny_rooted.iter().any(|path| hit(path)))
+        };
+        written || (deny && self.prefix_matches([canonical, requested], hit))
+    }
+
+    fn prefix_matches(&self, paths: [&str; 2], hit: impl Fn(&str) -> bool) -> bool {
+        let projected_match = |relative: &str| {
+            let mut projected = self.literal.clone();
+            if !relative.is_empty() {
+                projected.push(relative);
+            }
+            !paths.iter().any(|path| projected == Path::new(path))
+                && hit(&slash_separated(&projected))
+        };
+        if let Some(bases) = &self.walk_bases {
+            return bases.iter().any(|base| {
+                paths.iter().any(|path| {
+                    relative_to_folded(Path::new(path), base)
+                        .is_some_and(|relative| projected_match(&relative))
+                })
+            });
         }
+        let mut aliases = DirectoryAliases::default();
+        self.bases.iter().any(|base| {
+            let resolved = resolve(base).ok();
+            [
+                Some(base.as_path()),
+                resolved.as_deref().filter(|resolved| *resolved != base),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|base| {
+                paths.iter().any(|path| {
+                    aliases
+                        .relative_to(Path::new(path), base)
+                        .is_some_and(|relative| projected_match(&relative))
+                })
+            })
+        })
     }
 }
 
@@ -458,22 +512,34 @@ fn path_glob(glob: &str) -> Result<Glob> {
     Ok(GlobBuilder::new(glob).literal_separator(true).build()?)
 }
 
-/// `glob` split into its literal prefix, the components before the first glob character, and the
-/// rest after the separating `/`. A prefix that is a root, such as `/` or `C:/`, keeps its slash.
-fn literal_prefix(glob: &str) -> (&str, &str) {
-    match glob.find(['*', '?', '[', ']', '{', '}', '\\']) {
-        None => (glob, ""),
-        Some(meta) => match glob[..meta].rfind('/') {
-            Some(slash) => {
-                let root = slash == 0 || glob[..slash].ends_with(':');
-                (
-                    &glob[..if root { slash + 1 } else { slash }],
-                    &glob[slash + 1..],
-                )
-            }
-            None => ("", glob),
-        },
+/// The complete fixed path components at the start of `glob`, decoded by its parsed grammar.
+fn literal_prefix(glob: &Glob) -> PathBuf {
+    let hir = regex_syntax::ParserBuilder::new()
+        .utf8(false)
+        .build()
+        .parse(glob.regex())
+        .expect("globset emits valid regular expressions");
+    let literals = Extractor::new().limit_literal_len(usize::MAX).extract(&hir);
+    let Some(mut prefix) = literals.longest_common_prefix() else {
+        return PathBuf::new();
+    };
+    let complete = literals
+        .literals()
+        .is_some_and(|literals| matches!(literals, [literal] if literal.is_exact()));
+    if !complete {
+        let end = prefix
+            .iter()
+            .rposition(|byte| *byte == b'/')
+            .map_or(0, |slash| {
+                if slash == 0 || prefix[slash - 1] == b':' {
+                    slash + 1
+                } else {
+                    slash
+                }
+            });
+        prefix = &prefix[..end];
     }
+    PathBuf::from(std::str::from_utf8(prefix).expect("a fixed path prefix is UTF-8"))
 }
 
 /// `path` with each name folded by [`fold_name`], rejoined on `/`.
@@ -521,6 +587,10 @@ mod tests {
 
     fn rule(class: PermissionClass, pattern: &str) -> Rule {
         Rule::parse(class, pattern).unwrap()
+    }
+
+    fn edit(pattern: &str) -> Rule {
+        rule(PermissionClass::Edit, pattern)
     }
 
     fn exec(pattern: &str) -> Rule {
@@ -823,10 +893,6 @@ mod tests {
 
     mod matches {
         use super::*;
-
-        fn edit(pattern: &str) -> Rule {
-            rule(PermissionClass::Edit, pattern)
-        }
 
         fn holds(rule: &Rule, command: &str) -> bool {
             rule.matches(
@@ -1242,8 +1308,7 @@ mod tests {
             ] {
                 let rule = Rule::parse(PermissionClass::Read, &raw)
                     .unwrap()
-                    .with_resolved_prefixes(std::slice::from_ref(anchor))
-                    .unwrap();
+                    .with_resolved_prefixes(std::slice::from_ref(anchor));
                 assert_eq!(rule.pattern(), raw, "the copy keeps the pattern as written");
                 let matches = |relative: &str| {
                     let canonical = format!("{root_glob}/{relative}");
@@ -1255,12 +1320,52 @@ mod tests {
 
             let unchanged = Rule::parse(PermissionClass::Read, &format!("{root_glob}/real/**"))
                 .unwrap()
-                .with_resolved_prefixes(std::slice::from_ref(&root))
-                .unwrap();
-            let Pattern::Path(globs) = &unchanged.pattern else {
-                panic!("a read rule has a path pattern");
-            };
-            assert_eq!(globs.len(), 1);
+                .with_resolved_prefixes(std::slice::from_ref(&root));
+            assert!(matches_path(
+                &unchanged,
+                &path(&format!("{root_glob}/real/key"), &[]),
+                MatchDiscipline::Deny
+            ));
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn absolute_prefixes_keep_drive_and_share_roots_distinct() {
+            for (pattern, base, same, different) in [
+                (
+                    "C:/secrets/key",
+                    "C:/real/key",
+                    "c:/REAL/key",
+                    "D:/real/key",
+                ),
+                (
+                    "//server/one/secrets/key",
+                    r"\\server\one\real\key",
+                    "//SERVER/one/real/key",
+                    "//server/two/real/key",
+                ),
+                (
+                    "//server/one/secrets/key",
+                    "//server/one/real/key",
+                    r"\\SERVER\one\real\key",
+                    r"\\server\two\real\key",
+                ),
+            ] {
+                let mut rule = edit(pattern);
+                let Pattern::Path(glob) = &mut rule.pattern else {
+                    unreachable!()
+                };
+                glob.walk_bases = Some(vec![folded_components(Path::new(base))]);
+
+                assert!(
+                    matches_path(&rule, &path(same, &[]), MatchDiscipline::Deny),
+                    "{same}"
+                );
+                assert!(
+                    !matches_path(&rule, &path(different, &[]), MatchDiscipline::Deny),
+                    "{different}"
+                );
+            }
         }
     }
 
@@ -1268,16 +1373,34 @@ mod tests {
         use super::*;
 
         #[test]
-        fn splits_at_the_last_slash_before_a_glob_and_keeps_a_root_slash() {
+        fn decodes_complete_fixed_components_and_keeps_a_root_slash() {
             for (glob, expected) in [
-                ("/a/b*/c", ("/a", "b*/c")),
-                ("/secrets*", ("/", "secrets*")),
-                ("C:/secrets*", ("C:/", "secrets*")),
-                ("src/a", ("src/a", "")),
-                ("*.rs", ("", "*.rs")),
+                ("/a/b*/c", "/a"),
+                ("/secrets*", "/"),
+                ("C:/secrets*", "C:/"),
+                ("src/a", "src/a"),
+                ("*.rs", ""),
+                ("/a[[]1[]]/[*]/?.rs", "/a[1]/*"),
+                ("/a[b]/[x-x]/{one}/file", "/ab/x/one/file"),
+                ("/a/{one,two}/file", "/a"),
+                ("/a/[!x]/file", "/a"),
+                ("/a/{one/two,three}/file", "/a"),
+                ("/a/{one/two}/file", "/a/one/two/file"),
+                ("/a[/]b/file", "/a/b/file"),
+                ("/caf\u{e9}/[[]/file", "/caf\u{e9}/[/file"),
+                ("/{caf\u{e9},caf\u{e8}}/file", "/"),
             ] {
-                assert_eq!(literal_prefix(glob), expected, "{glob}");
+                assert_eq!(
+                    literal_prefix(&path_glob(glob).unwrap()),
+                    PathBuf::from(expected),
+                    "{glob}"
+                );
             }
+            #[cfg(unix)]
+            assert_eq!(
+                literal_prefix(&path_glob(r"/a\/b/file").unwrap()),
+                Path::new("/a/b/file")
+            );
         }
     }
 }

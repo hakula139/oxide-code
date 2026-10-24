@@ -292,7 +292,7 @@ struct CollectedFiles {
 fn collect_files(
     base: &Path,
     include_matcher: Option<&globset::GlobMatcher>,
-    read_filter: &WalkFilter<'_>,
+    read_filter: &WalkFilter,
     cancel: &CancellationToken,
 ) -> CollectedFiles {
     if base.is_file() {
