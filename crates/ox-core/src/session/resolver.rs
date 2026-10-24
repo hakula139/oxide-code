@@ -36,7 +36,7 @@ enum ResumeMode<'a> {
 /// prefix matches in the current project first and then in every project, as `/resume <prefix>`
 /// does, while [`ProjectScope::Every`] searches every project at once for both a prefix and the
 /// latest session.
-pub fn resolve_session(
+pub async fn resolve_session(
     store: &SessionStore,
     model: &str,
     git_branch: Option<String>,
@@ -75,9 +75,11 @@ pub fn resolve_session(
         }
     };
 
-    let resumed = handle::resume_from_path(store, &path)?;
     debug!("resuming session from {}", path.display());
-    Ok(resumed)
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || handle::resume_from_path(&store, &path))
+        .await
+        .context("session resume task failed")?
 }
 
 /// Trims and classifies `target` into a [`ResumeMode`], rejecting a blank name, which names no
@@ -226,7 +228,9 @@ mod tests {
         async fn starts_fresh_when_no_continue_flag() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let resumed = resolve_session(&store, "m", None, None, ProjectScope::Current).unwrap();
+            let resumed = resolve_session(&store, "m", None, None, ProjectScope::Current)
+                .await
+                .unwrap();
             assert_eq!(resumed.transcript.messages, []);
             assert!(resumed.title.is_none());
             assert!(resumed.transcript.tool_metadata.is_empty());
@@ -264,6 +268,7 @@ mod tests {
                 Some(SessionTarget::Named(&arg)),
                 ProjectScope::Current,
             )
+            .await
             .unwrap();
             assert_eq!(resumed.handle.session_id(), full_id);
             assert_eq!(resumed.transcript.messages.len(), 1);
@@ -287,6 +292,7 @@ mod tests {
                 Some(SessionTarget::Named(prefix)),
                 ProjectScope::Current,
             )
+            .await
             .unwrap();
             assert_eq!(resumed.handle.session_id(), full_id);
             assert_eq!(resumed.transcript.messages.len(), 1);
@@ -301,7 +307,7 @@ mod tests {
             let at = time::macros::datetime!(2026-04-18 09:00:00 UTC);
             seed_test_session(&store, "abcd-local", Some("Local"), Some(1), at);
             seed_test_session(&other, "abcd-other", Some("Other"), Some(1), at);
-            let resume = |prefix: &str, projects: ProjectScope| {
+            let resume = async |prefix: &str, projects: ProjectScope| {
                 resolve_session(
                     &store,
                     "m",
@@ -309,19 +315,27 @@ mod tests {
                     Some(SessionTarget::Named(prefix)),
                     projects,
                 )
+                .await
                 .map(|resumed| resumed.title)
             };
 
             assert_eq!(
-                resume("abcd", ProjectScope::Current).unwrap().as_deref(),
+                resume("abcd", ProjectScope::Current)
+                    .await
+                    .unwrap()
+                    .as_deref(),
                 Some("Local")
             );
             assert_eq!(
-                resume("abcd-o", ProjectScope::Current).unwrap().as_deref(),
+                resume("abcd-o", ProjectScope::Current)
+                    .await
+                    .unwrap()
+                    .as_deref(),
                 Some("Other")
             );
             assert_eq!(
                 resume("abcd", ProjectScope::Every)
+                    .await
                     .err()
                     .unwrap()
                     .to_string(),
@@ -365,6 +379,7 @@ mod tests {
                 Some(SessionTarget::Latest),
                 ProjectScope::Current,
             )
+            .await
             .unwrap();
             assert_eq!(resumed.handle.session_id(), "newer");
             assert_eq!(resumed.title.as_deref(), Some("Newer"));
@@ -392,6 +407,7 @@ mod tests {
                 Some(SessionTarget::Named("arch")),
                 ProjectScope::Current,
             )
+            .await
             .unwrap();
             assert_eq!(resumed.handle.session_id(), "archived");
             assert_eq!(resumed.prior, ArchiveState::Archived);
@@ -406,21 +422,22 @@ mod tests {
             );
         }
 
-        #[test]
-        fn continue_errors_without_sessions() {
+        #[tokio::test]
+        async fn continue_errors_without_sessions() {
             let (_dir, store) = isolated_store();
-            let latest = |projects: ProjectScope| {
+            let latest = async |projects: ProjectScope| {
                 resolve_session(&store, "m", None, Some(SessionTarget::Latest), projects)
+                    .await
                     .err()
                     .unwrap()
                     .to_string()
             };
 
             assert_eq!(
-                latest(ProjectScope::Current),
+                latest(ProjectScope::Current).await,
                 "no sessions to resume in this project (use --all to search every project)",
             );
-            assert_eq!(latest(ProjectScope::Every), "no sessions to resume");
+            assert_eq!(latest(ProjectScope::Every).await, "no sessions to resume");
         }
 
         #[tokio::test]
@@ -438,14 +455,15 @@ mod tests {
                 Some(SessionTarget::Named("zzzz")),
                 ProjectScope::Current,
             )
+            .await
             .err()
             .unwrap()
             .to_string();
             assert_eq!(err, "no session matching `zzzz`");
         }
 
-        #[test]
-        fn prefix_reports_ambiguous_matches_newest_first() {
+        #[tokio::test]
+        async fn prefix_reports_ambiguous_matches_newest_first() {
             let (_dir, store) = isolated_store();
             for i in 0..7 {
                 seed_test_session(
@@ -464,6 +482,7 @@ mod tests {
                 Some(SessionTarget::Named("ab")),
                 ProjectScope::Current,
             )
+            .await
             .err()
             .unwrap()
             .to_string();
@@ -474,8 +493,8 @@ mod tests {
             );
         }
 
-        #[test]
-        fn prefix_reports_a_listing_failure() {
+        #[tokio::test]
+        async fn prefix_reports_a_listing_failure() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             std::fs::remove_dir_all(dir.path()).unwrap();
@@ -492,6 +511,7 @@ mod tests {
                     Some(SessionTarget::Named("ab")),
                     projects,
                 )
+                .await
                 .err()
                 .unwrap();
 
@@ -502,8 +522,8 @@ mod tests {
             }
         }
 
-        #[test]
-        fn path_errors_on_missing_file() {
+        #[tokio::test]
+        async fn path_errors_on_missing_file() {
             let (_dir, store) = isolated_store();
             let err = resolve_session(
                 &store,
@@ -512,6 +532,7 @@ mod tests {
                 Some(SessionTarget::Named("/does/not/exist.jsonl")),
                 ProjectScope::Current,
             )
+            .await
             .err()
             .unwrap();
             let cause = std::fs::metadata("/does/not/exist.jsonl").unwrap_err();

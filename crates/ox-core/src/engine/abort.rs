@@ -55,6 +55,7 @@ impl Inbox {
                 op @ (Op::Prompt { .. }
                 | Op::Clear
                 | Op::Archive
+                | Op::SetArchive { .. }
                 | Op::Resume { .. }
                 | Op::Compact { .. }
                 | Op::Rename { .. }

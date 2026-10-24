@@ -1,6 +1,6 @@
 //! Session fixtures and ID-keyed lookups that only this crate's tests use.
 
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -18,18 +18,6 @@ use crate::session::entry::{CURRENT_VERSION, Entry, Header};
 impl SessionStore {
     pub(crate) fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
         open_append_at(&self.find_session_path(session_id)?)
-    }
-}
-
-// ── SessionWriter ──
-
-impl SessionWriter {
-    /// Writer whose first append fails on a read-only handle and whose next one reopens `path`.
-    pub(crate) fn failing_once(path: &Path) -> Self {
-        Self {
-            path: path.to_owned(),
-            file: Some(File::open(path).unwrap()),
-        }
     }
 }
 

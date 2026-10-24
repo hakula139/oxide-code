@@ -16,7 +16,6 @@ use crate::file_tracker::{CACHE_HIT_STUB, LastView, RecordRead};
 use crate::permission::PermissionClass;
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
-const MAX_LINE_CHARS: usize = 2000;
 
 /// Excerpt bytes one Read emits, leaving room under the dispatcher cap for the footer.
 const OUTPUT_BUDGET: usize = super::spill::MAX_OUTPUT_BYTES - 128;
@@ -122,10 +121,7 @@ async fn read_file(
     ctx: &ToolCtx,
 ) -> Result<String, String> {
     let file_path = ctx.cwd().join(path);
-    let (_, bytes) = super::file::read_validated(&file_path, path, |metadata| {
-        super::file::validate_file_target(path, metadata, FileVerb::Read)
-    })
-    .await?;
+    let (_, bytes) = super::file::read_validated(&file_path, path, FileVerb::Read).await?;
 
     if super::file::is_binary(&bytes) {
         return Err(
@@ -159,21 +155,23 @@ async fn read_file(
     let mut output = String::new();
     let mut num_shown: usize = 0;
     for (i, line) in lines[start_idx..].iter().enumerate().take(limit_n) {
-        let line_num = start_idx + i + 1;
-        let row_start = output.len();
+        let line_num = (start_idx + i + 1).to_string();
+        let row_bytes = line_num.len() + 1 + line.len() + usize::from(!output.is_empty());
+        if row_bytes > OUTPUT_BUDGET - output.len() {
+            break;
+        }
         if !output.is_empty() {
             output.push('\n');
         }
-        _ = write!(
-            output,
-            "{line_num}\t{}",
-            super::truncate_line(line, MAX_LINE_CHARS)
-        );
-        if output.len() > OUTPUT_BUDGET {
-            output.truncate(row_start);
-            break;
-        }
+        _ = write!(output, "{line_num}\t{line}");
         num_shown += 1;
+    }
+
+    if num_shown == 0 {
+        return Err(format!(
+            "Line {offset_n} exceeds the Read output budget ({OUTPUT_BUDGET} bytes). \
+             Use the bash tool to inspect this line. Whole-file Write needs every line read."
+        ));
     }
 
     let last_shown = offset_n + num_shown - 1;
@@ -666,23 +664,116 @@ mod tests {
                 matches!(write, Err(GateError::PartialRead { .. })),
                 "lines past the budget keep Write closed: {write:?}",
             );
+
+            let repeated = read_file(path.to_str().unwrap(), None, None, &ctx)
+                .await
+                .unwrap();
+            assert_eq!(repeated, output);
+            let remaining = read_file(path.to_str().unwrap(), Some(shown + 1), None, &ctx)
+                .await
+                .unwrap();
+            let rows = (shown + 1..=1000)
+                .map(|line| format!("{line}\t{}", "x".repeat(199)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                remaining,
+                format!("{rows}\n\n(Showing lines {}–1000 of 1000 total)", shown + 1)
+            );
+            assert_eq!(
+                ctx.tracker
+                    .verify_current_content(&path, content.as_bytes(), GatePurpose::Write),
+                Ok(())
+            );
         }
 
         #[tokio::test]
-        async fn truncates_lines_past_2000_chars() {
+        async fn emits_complete_long_lines_before_granting_full_coverage() {
             let dir = canonical_tempdir();
             let path = dir.path().join("long_line.txt");
             let fits = "a".repeat(2000);
-            let over = "b".repeat(2001);
-            fs::write(&path, format!("{fits}\n{over}\n")).unwrap();
+            let over = format!("{}suffix", "b".repeat(2001));
+            let content = format!("{fits}\n{over}\n");
+            fs::write(&path, &content).unwrap();
+            let ctx = temp_ctx();
 
-            let output = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
+            let output = read_file(path.to_str().unwrap(), None, None, &ctx)
                 .await
                 .unwrap();
+
+            assert_eq!(output, format!("1\t{fits}\n2\t{over}"));
             assert_eq!(
-                output,
-                format!("1\t{fits}\n2\t{}... [2001 chars]", &over[..2000]),
+                ctx.tracker
+                    .verify_current_content(&path, content.as_bytes(), GatePurpose::Write),
+                Ok(())
             );
+            let repeated = read_file(path.to_str().unwrap(), None, None, &ctx)
+                .await
+                .unwrap();
+            assert_eq!(repeated, CACHE_HIT_STUB);
+        }
+
+        #[tokio::test]
+        async fn oversized_rows_never_grant_full_or_cache_hit_eligibility() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("oversized_line.txt");
+            for (name, prefix) in [("only oversized row", ""), ("complete prefix", "first\n")] {
+                let content = format!("{prefix}{}suffix\n", "x".repeat(OUTPUT_BUDGET));
+                fs::write(&path, &content).unwrap();
+                let ctx = temp_ctx();
+                let offset = if prefix.is_empty() { 1 } else { 2 };
+
+                if !prefix.is_empty() {
+                    let first = read_file(path.to_str().unwrap(), None, None, &ctx)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        first, "1\tfirst\n\n(Showing lines 1–1 of 2 total)",
+                        "{name}"
+                    );
+                    let repeated = read_file(path.to_str().unwrap(), None, None, &ctx)
+                        .await
+                        .unwrap();
+                    assert_eq!(repeated, first, "{name}");
+                    assert_eq!(
+                        ctx.tracker.verify_current_content(
+                            &path,
+                            content.as_bytes(),
+                            GatePurpose::Edit
+                        ),
+                        Ok(()),
+                        "{name}"
+                    );
+                }
+                let err = read_file(path.to_str().unwrap(), Some(offset), None, &ctx)
+                    .await
+                    .unwrap_err();
+
+                assert_eq!(
+                    err,
+                    format!(
+                        "Line {offset} exceeds the Read output budget ({OUTPUT_BUDGET} bytes). Use the bash tool to inspect this line. Whole-file Write needs every line read."
+                    ),
+                    "{name}"
+                );
+                let write = ctx.tracker.verify_current_content(
+                    &path,
+                    content.as_bytes(),
+                    GatePurpose::Write,
+                );
+                let expected = if prefix.is_empty() {
+                    GateError::NeverRead {
+                        path: path.clone(),
+                        purpose: GatePurpose::Write,
+                    }
+                } else {
+                    GateError::PartialRead {
+                        path: path.clone(),
+                        purpose: GatePurpose::Write,
+                    }
+                };
+                assert_eq!(write, Err(expected), "{name}");
+            }
         }
 
         #[tokio::test]

@@ -4,7 +4,7 @@ Read-before-Edit gate, xxh64 staleness detection, persistence across session res
 
 ## Implementation
 
-The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool calls. Read populates the tracker, keyed by the canonical path so every spelling of one file, symlinks included, shares an entry. Edit and Write enforce the Read-before-Edit gate and verify the current bytes against the stored hash before mutation. Each write and its tracker record run in one spawned task, so the tracker matches the disk even when a cancel drops the call mid-write. Tracker state persists to JSONL on session finish and verifies by content hash on resume.
+The `FileTracker` is shared across a session's tool calls. Read populates its mutex-protected map, keyed by the canonical path so every spelling of one file, symlinks included, shares an entry. Edit and Write enforce the Read-before-Edit gate and verify the current bytes against the stored hash before mutation. Each write, including parent-directory creation, and its tracker record run in one tracked task. The engine stops tool admission and waits for those tasks before reporting cancellation, clearing or restoring tracker state, changing sessions, or capturing final snapshots. Tracker state persists to JSONL on session finish and verifies by content hash on resume.
 
 ## Design Decisions
 
@@ -14,13 +14,13 @@ The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool call
 
 3. **Persist the tracker on session finish, verify on resume.** `Entry::FileSnapshot` stores the tracker state in JSONL, and each snapshot names the tool call that recorded it. On resume, a snapshot is discarded when its call has no result left in the repaired transcript, since the model cannot see that content. Of the rest, the newest snapshot per path is selected, regular files at or below the tracked-file size cap are rehashed, and the survivors seed the session's new tracker. The engine restores them for every resume, at startup and on `/resume`, and reports the paths that fail the rehash in a notice when it starts on the session, so every frontend tells the user to re-Read them before mutating.
 
-4. **Per-session scope.** The tracker starts and ends with its session, and no other process shares it. The engine builds a new tracker whenever it starts on a session, at startup, on `/clear`, and on `/resume`, so a write that a cancel left running records into the session that made it.
+4. **Per-session scope.** The tracker starts and ends with its session, and no other process shares it. The engine builds a new tracker whenever it starts on a session, at startup, on `/clear`, and on `/resume`. Pending writes finish before that session's snapshots are captured and before the next session starts.
 
 5. **Edit needs any Read, and Write needs every line.** The gate reflects how each tool uses the file:
 
    - Edit anchors on an exact `old_string`, and the content hash already rules out staleness, so any Read of the current content clears it, as in Claude Code.
    - Write replaces the whole file, so it needs every line of the current content read. Coverage is the union of the line windows shown under one content hash, so paging through a long file in several Reads counts, and changed content starts over.
-   - Read stops before the dispatcher's byte cap and reports the lines it showed, so a truncated view never counts as full.
+   - Read emits complete rows within its output budget and reports the lines it showed, so omitted content never counts as full. A line larger than the entire budget returns an explicit error when requested and cannot earn full coverage through line pagination.
 
 6. **`Arc<Mutex<HashMap>>` for tracker state.** The tracker mutates on every Read / Write / Edit. Routing each update through an actor message would force ten-plus round-trips per turn, while lock contention on a small struct with no I/O costs microseconds. The resume rehash reads files, so it runs while the new tracker is built, before any tool can take its lock.
 
@@ -36,6 +36,7 @@ The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool call
 - `crates/ox-core/src/session/entry.rs`: `Entry::FileSnapshot`.
 - `crates/ox-core/src/session/sanitize.rs`: `retain_visible_file_snapshots`, the resume-time provenance filter.
 - `crates/ox-core/src/tool/edit.rs`: Read-before-Edit gate, current-content verification.
-- `crates/ox-core/src/tool/file.rs`: `tracker_key`, `write_tracked`.
+- `crates/ox-core/src/tool/file.rs`: `tracker_key`, `write_file`.
 - `crates/ox-core/src/tool/read.rs`: `FileTracker::record_read`, cache-hit stub.
 - `crates/ox-core/src/tool/write.rs`: Read-before-Write gate.
+- `crates/ox-core/src/util/fs.rs`: bounded regular-file reads through no-follow handles, shared by tools and resume verification.

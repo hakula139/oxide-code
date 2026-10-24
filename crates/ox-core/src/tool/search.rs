@@ -157,7 +157,7 @@ fn innermost_error(e: &std::io::Error) -> String {
 /// returns how many it dropped.
 pub(super) fn withhold_unreadable(
     unreadable: &mut Vec<Unreadable>,
-    read_filter: &WalkFilter<'_>,
+    read_filter: &WalkFilter,
 ) -> usize {
     let found = unreadable.len();
     unreadable.retain(|u| {

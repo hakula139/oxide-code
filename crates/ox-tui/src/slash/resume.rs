@@ -22,7 +22,6 @@ use ox_core::command;
 use ox_core::protocol::{Op, ResumeTarget};
 use ox_core::session::display::{ID_PREFIX_WIDTH, display_title, id_prefix};
 use ox_core::session::entry::{ArchiveState, SessionInfo};
-use ox_core::session::saved;
 use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{ListScope, ProjectScope, SessionWalk};
 use ox_core::util::path::tildify;
@@ -36,8 +35,7 @@ use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{
-    BARE_ARCHIVE_HINT, SHORT_RELATIVE_TIME_WIDTH, format_metadata_line, format_short_relative_time,
-    open_store, saved_error_message,
+    SHORT_RELATIVE_TIME_WIDTH, format_metadata_line, format_short_relative_time, open_store,
 };
 use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
@@ -480,6 +478,12 @@ struct Notice {
     until: Instant,
 }
 
+struct PendingArchive {
+    session_id: String,
+    title: String,
+    listed_at: OffsetDateTime,
+}
+
 pub struct ResumePicker {
     store: SessionStore,
     list: SearchableList<SessionRow>,
@@ -494,6 +498,7 @@ pub struct ResumePicker {
     /// found". Cleared on the next successful reload.
     load_error: Option<String>,
     notice: Option<Notice>,
+    archive: Option<PendingArchive>,
 }
 
 impl ResumePicker {
@@ -536,6 +541,7 @@ impl ResumePicker {
             listed_at: now_local(),
             load_error: None,
             notice: None,
+            archive: None,
         };
         picker.reload();
         picker
@@ -588,11 +594,19 @@ impl ResumePicker {
     }
 
     fn run(&mut self, action: PickerAction) -> ModalKey {
+        if self.archive.is_some()
+            && matches!(
+                action,
+                PickerAction::Resume | PickerAction::Archive | PickerAction::Delete
+            )
+        {
+            return ModalKey::Consumed;
+        }
         match action {
             PickerAction::Resume => return self.submit(),
             PickerAction::Dismiss => return ModalKey::Cancelled,
             PickerAction::Delete => return self.start_delete_confirm(),
-            PickerAction::Archive => self.archive_selected(),
+            PickerAction::Archive => return self.archive_selected(),
             PickerAction::ToggleScope => self.toggle_scope(),
             PickerAction::ToggleArchivedView => self.toggle_archived(),
             PickerAction::ClearFilter => self.list.set_query(""),
@@ -616,41 +630,15 @@ impl ResumePicker {
         self.reload();
     }
 
-    /// Moves the cursor row to the other archive view, landing the cursor on the row that followed.
-    fn archive_selected(&mut self) {
+    fn archive_selected(&self) -> ModalKey {
         let Some(row) = self.list.selected() else {
-            return;
+            return ModalKey::Consumed;
         };
-        let target = self.scope.archive.toggled();
-        let result = saved::set_archived(&row.path, &row.session_id, target, &self.live_session_id);
-        let (text, failed) = match result {
-            Ok(()) => {
-                let verb = match target {
-                    ArchiveState::Active => "Unarchived",
-                    ArchiveState::Archived => "Archived",
-                };
-                let text = format!(
-                    "{verb} session {}: {}",
-                    id_prefix(&row.session_id),
-                    row.title
-                );
-                let id = row.session_id.clone();
-                self.list.retain_items(|row| row.session_id != id);
-                (text, false)
-            }
-            Err(err) => (
-                saved_error_message(
-                    err,
-                    (target == ArchiveState::Archived).then_some(BARE_ARCHIVE_HINT),
-                ),
-                true,
-            ),
-        };
-        self.notice = Some(Notice {
-            text,
-            failed,
-            until: now() + NOTICE_DURATION,
-        });
+        ModalKey::Preview(ModalAction::Dispatch(Action::Op(Op::SetArchive {
+            path: row.path.clone(),
+            session_id: row.session_id.clone(),
+            state: self.scope.archive.toggled(),
+        })))
     }
 
     fn submit(&self) -> ModalKey {
@@ -697,7 +685,7 @@ impl ResumePicker {
     }
 
     fn has_selection(&self) -> bool {
-        self.list.selected().is_some()
+        self.archive.is_none() && self.list.selected().is_some()
     }
 
     /// Loads every page the picker asks for, waiting on each worker.
@@ -758,6 +746,45 @@ impl Modal for ResumePicker {
         self.load_ahead();
     }
 
+    fn archive_started(&mut self, id: &str) {
+        if let Some(row) = self.list.selected().filter(|row| row.session_id == id) {
+            self.archive = Some(PendingArchive {
+                session_id: id.to_owned(),
+                title: row.title.clone(),
+                listed_at: self.listed_at,
+            });
+        }
+    }
+
+    fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, String>) {
+        let Some(pending) = self.archive.take_if(|pending| pending.session_id == id) else {
+            return;
+        };
+        let (text, failed) = match result {
+            Ok(state) => {
+                if self.listed_at == pending.listed_at {
+                    self.list.retain_items(|row| row.session_id != id);
+                } else {
+                    self.reload();
+                }
+                let verb = match state {
+                    ArchiveState::Active => "Unarchived",
+                    ArchiveState::Archived => "Archived",
+                };
+                (
+                    format!("{verb} session {}: {}", id_prefix(id), pending.title),
+                    false,
+                )
+            }
+            Err(error) => (error.clone(), true),
+        };
+        self.notice = Some(Notice {
+            text,
+            failed,
+            until: now() + NOTICE_DURATION,
+        });
+    }
+
     fn on_focus_regained(&mut self) {
         // A session deleted from the nested modal leaves its row behind. Re-seek the cursor after
         // the prune so a row dropped above it doesn't shift the cursor onto another session.
@@ -810,6 +837,21 @@ impl Modal for ResumePicker {
     }
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+mod testing {
+    use super::{ResumePicker, SessionStore};
+
+    impl ResumePicker {
+        pub(crate) fn loaded(store: SessionStore, live_session_id: String) -> Self {
+            let mut picker = Self::new(store, live_session_id);
+            picker.settle();
+            picker
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -821,18 +863,42 @@ mod tests {
 
     use ox_core::session::display::UNTITLED_MARKER;
     use ox_core::session::entry::{ExitInfo, TitleInfo};
+    use ox_core::session::saved::{self, BARE_ARCHIVE_HINT, saved_error_message};
     use ox_core::session::store::testing::{
-        archive_test_session, isolated_store, listed_ids, listed_session, seed_test_session,
-        stamped_id, test_project_dir, test_store, with_isolated_xdg,
+        WriterBarrier, archive_test_session, isolated_store, listed_ids, listed_session,
+        seed_test_session, stamped_id, test_project_dir, test_store, with_isolated_xdg,
     };
 
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
     use super::*;
     use crate::modal::ModalStack;
+    use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::modal::chrome::HINT_SEPARATOR;
-    use crate::modal::testing::{render_rows, rendered_text};
+    use crate::modal::testing::{render_rows, render_rows_with, rendered_text};
     use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::make_read_only;
+
+    fn archive(picker: &mut ResumePicker) -> ModalKey {
+        let outcome = picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        if let ModalKey::Preview(ModalAction::Dispatch(Action::Op(Op::SetArchive {
+            path,
+            session_id,
+            state,
+        }))) = &outcome
+        {
+            picker.archive_started(session_id);
+            let result = saved::set_archived(path, session_id, *state, &picker.live_session_id)
+                .map(|()| *state)
+                .map_err(|error| {
+                    saved_error_message(
+                        error,
+                        (*state == ArchiveState::Archived).then_some(BARE_ARCHIVE_HINT),
+                    )
+                });
+            picker.archive_updated(session_id, &result);
+        }
+        outcome
+    }
 
     /// Seeds one titled session per `(byte, title)` under [`stamped_id`], each last active `byte`
     /// seconds after a fixed time, so a higher byte sorts newer.
@@ -1906,8 +1972,8 @@ mod tests {
             assert!(matches!(outcome, ModalKey::Consumed));
         }
 
-        #[test]
-        fn ctrl_d_then_y_deletes_the_cursor_session_through_the_modal_stack() {
+        #[tokio::test(start_paused = true)]
+        async fn ctrl_d_then_y_deletes_the_cursor_session_through_the_modal_stack() {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
             let picker = opened(ResumePicker::new(
@@ -1919,9 +1985,12 @@ mod tests {
             let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
 
             let pushed = stack.handle_key(&ctrl_d);
+            assert!(pushed.is_none(), "{pushed:?}");
+            render_rows_with(60, 7, |frame, area, theme| stack.render(frame, area, theme));
+            tokio::time::advance(TYPE_AHEAD_GUARD).await;
+
             let deleted = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
 
-            assert!(pushed.is_none(), "{pushed:?}");
             assert!(
                 matches!(
                     &deleted,
@@ -1966,10 +2035,9 @@ mod tests {
             }
             picker.handle_key(&KeyEvent::from(KeyCode::Down));
 
-            let outcome =
-                picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            let outcome = archive(&mut picker);
 
-            assert!(matches!(outcome, ModalKey::Consumed), "{outcome:?}");
+            assert!(matches!(outcome, ModalKey::Preview(_)), "{outcome:?}");
             assert_eq!(
                 listed_ids(&store, ArchiveState::Archived),
                 [stamped_id(0x22)]
@@ -2024,7 +2092,7 @@ mod tests {
             picker.handle_key(&KeyEvent::from(KeyCode::Up));
             assert_eq!(first_shown(&picker), "row-15");
 
-            picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            archive(&mut picker);
 
             assert_eq!(
                 first_shown(&picker),
@@ -2049,7 +2117,7 @@ mod tests {
             picker.settle();
             picker.handle_key(&KeyEvent::from(KeyCode::Down));
 
-            picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            archive(&mut picker);
 
             assert_eq!(listed_ids(&store, ArchiveState::Active), [stamped_id(0x11)]);
             assert_eq!(
@@ -2078,7 +2146,7 @@ mod tests {
             ));
             picker.live_session_id.clone_from(&id);
 
-            picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            archive(&mut picker);
 
             assert_eq!(
                 footer_row(&picker, 120),
@@ -2099,8 +2167,7 @@ mod tests {
             }
             picker.handle_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
 
-            let outcome =
-                picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            let outcome = archive(&mut picker);
 
             assert!(matches!(outcome, ModalKey::Consumed), "{outcome:?}");
             assert_eq!(picker.list.query(), "ab");
@@ -2127,7 +2194,7 @@ mod tests {
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
 
-            picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            archive(&mut picker);
 
             assert_eq!(footer_row(&picker, 400), format!("! {failure}"));
             assert_eq!(picker.list.selected().unwrap().session_id, id);
@@ -2156,7 +2223,7 @@ mod tests {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            archive(&mut picker);
             assert_eq!(footer_row(&picker, 80), "Archived session 22222222: second");
 
             picker.handle_paste("fir");
@@ -2166,6 +2233,55 @@ mod tests {
                 picker.footer_hints().join(HINT_SEPARATOR),
                 "the paste brings the hints back",
             );
+        }
+    }
+
+    mod archive_updated {
+        use super::*;
+
+        #[test]
+        fn keeps_input_available_until_completion_and_refreshes_a_changed_view() {
+            let (_dir, store) = isolated_store();
+            seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
+            let target = stamped_id(0x22);
+            let path = store.find_session_path(&target).unwrap();
+            let mut picker = opened(ResumePicker::new(store.clone(), "live".to_owned()));
+            let barrier = WriterBarrier::hold(&path);
+
+            let action =
+                picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            assert!(matches!(action, ModalKey::Preview(_)));
+            assert!(
+                picker.archive.is_none(),
+                "only accepted operations become pending"
+            );
+            picker.archive_started(&target);
+            picker.archive_updated("unrelated", &Ok(ArchiveState::Archived));
+            assert!(matches!(
+                picker.handle_key(&KeyEvent::from(KeyCode::Enter)),
+                ModalKey::Consumed
+            ));
+            assert!(matches!(
+                picker.handle_key(&KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+                ModalKey::Consumed
+            ));
+            picker.handle_paste("first");
+
+            assert_eq!(picker.list.selected().unwrap().session_id, stamped_id(0x11));
+            assert_eq!(
+                listed_ids(&store, ArchiveState::Archived),
+                [] as [String; 0]
+            );
+            picker.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+            picker.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+            barrier.release();
+            saved::set_archived(&path, &target, ArchiveState::Archived, "live").unwrap();
+
+            picker.archive_updated(&target, &Ok(ArchiveState::Archived));
+            picker.settle();
+
+            assert_eq!(row_ids(&picker), [target]);
+            assert_eq!(footer_row(&picker, 80), "Archived session 22222222: second");
         }
     }
 
@@ -2258,7 +2374,7 @@ mod tests {
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            archive(&mut picker);
             let notice = "Archived session 11111111: only";
             assert_eq!(footer_row(&picker, 120), notice);
 
@@ -2335,7 +2451,7 @@ mod tests {
             picker.settle();
             assert_eq!(picker.next_tick(start), None);
 
-            picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            archive(&mut picker);
 
             assert_eq!(picker.next_tick(start), Some(start + NOTICE_DURATION));
         }

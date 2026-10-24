@@ -68,7 +68,7 @@ On Unix, session files are created with mode `0600`.
 
 ### Actor and Batched Writes
 
-The on-disk file is owned by a single `tokio::spawn`-ed actor task. The rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, drains any queued commands with `try_recv()`, then appends the batch in one write.
+Each process uses a single `tokio::spawn`-ed actor task for its session. The rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, drains any queued commands with `try_recv()`, then moves its state and entries into a `spawn_blocking` operation. That operation flushes the batch and returns the state before the actor sends its acknowledgments, so waiting for another process's file lock leaves the async runtime available.
 
 `agent_turn` queues a tool round's three writes through one `tokio::join!`, while the text-only branch records its single assistant message via the sequential path. The joined writes usually land in one append, and resume sanitization drops a tool call whose result was torn off.
 
@@ -76,11 +76,11 @@ The on-disk file is owned by a single `tokio::spawn`-ed actor task. The rest of 
 
 - `WriterStatus` is either `Pending` (file not yet on disk, staged header plus an optional deferred title) or `Active(SessionWriter)`.
 - Entries stay queued in `SessionState` until a write succeeds, and each batch retries the queue ahead of its own entries, so a message never reaches disk before its parent.
-- The flush that creates the file writes the header and its batch in one write and unlinks the file if that write fails, so the session stays `Pending` with nothing on disk.
-- A failed append drops the writer's file handle, and the next append reopens the same path, including for sessions resumed from an explicit path.
+- The flush that creates the file writes the header and its batch into a private temporary file in the session directory, then publishes the complete file without replacing an existing session. A failed write removes only that private file, so the session stays `Pending` and a concurrent creator's session survives.
+- Each append holds the session directory's exclusive writer lock from opening the transcript through length inspection, torn-tail repair, every short write and retry, and rollback. The lock lives in a private `.writer.lock` file beside the sessions, so Windows readers can keep reading the transcript. The file stays in place across session deletion and recreation. Closing its handle releases the lock before the batch is acknowledged, including after a failure and for sessions resumed from an explicit path.
 - A failed flush with more than 8 MiB to write drops the queue and stops persistence for the rest of the session.
 
-Every append first terminates a torn last line, so a crash mid-write loses only the batch it interrupted, none of which was acknowledged. A failed append truncates the bytes it wrote unless another process has appended since. When it cannot truncate, the retry repeats the lines that landed, and the loader keeps one copy of each message and `usage` entry by its `uuid`. Until persistence stops, a compact whose write fails is unqueued and never committed, matching the agent, which keeps its pre-compact transcript. The loader applies a compact boundary only once its post-compact root follows, so a boundary whose root never landed leaves the old chain in place.
+Every append first terminates a torn last line. A process crash can leave complete entries from its unacknowledged batch, while prior acknowledged batches survive. A failed append truncates its bytes while still holding the lock, so another process can append only after rollback finishes. When truncation fails, the retry repeats the lines that landed, and the loader keeps one copy of each message and `usage` entry by its `uuid`. Until persistence stops, a compact whose write fails is unqueued and never committed, matching the agent, which keeps its pre-compact transcript. The loader applies a compact boundary only once its post-compact root follows, so a boundary whose root never landed leaves the old chain in place.
 
 ### Lazy Materialization
 
@@ -109,11 +109,11 @@ The session's [task list](../tools/tasks.md) needs no entry of its own. On resum
 
 ### Archiving
 
-An `archive` entry sets whether default listings and `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker append an entry to another session's file and restore its mtime, so toggling its archive status does not change its position in listings. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
+An `archive` entry sets whether default listings and `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker append an entry to another session's file and preserve its mtime within the same writer-lock transaction, so toggling its archive status does not erase concurrent activity. The engine owns each saved-session archive through completion and offloads its file I/O to a blocking worker, keeping input and rendering available while another process holds the lock. Later session operations wait for that completion, and the result reaches chat even after the picker closes. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
 
 ### Fork-on-Conflict Concurrency
 
-There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. A rewind abandons every leaf it moves away from, including one another process wrote, so that branch ends the chain again only once a newer message extends it. Each batch lands in one append write (`O_APPEND` on Unix, an end-of-file-offset write on Windows), so concurrent appends interleave only between batches. A compaction starts a new chain, so once one process compacts, resume drops the messages another process appends to the old chain after the boundary, whatever their timestamps.
+Two processes may resume the same session and append separate branches. The newest-leaf rule resolves forks deterministically, while the directory's writer lock serializes each complete append batch across processes. A rewind abandons every leaf it moves away from, including one another process wrote, so that branch ends the chain again only once a newer message extends it. A batch may require several writes (`O_APPEND` on Unix, end-of-file-offset writes on Windows), and concurrent appends interleave only between batches. A compaction starts a new chain, so once one process compacts, resume drops the messages another process appends to the old chain after the boundary, whatever their timestamps.
 
 ### AI-Generated Titles
 
@@ -167,7 +167,7 @@ Listings sort rows and render them as follows:
 
 - `crates/ox-core/src/engine/sessions.rs`: `adopt_session`, which sums the session cost from the resumed `usage` entries.
 - `crates/ox-core/src/engine/turn.rs`: the joined writes that put a tool round's records in one batch.
-- `crates/ox-core/src/session/actor.rs`: the actor that owns the writer and appends each wakeup's commands in one write.
+- `crates/ox-core/src/session/actor.rs`: the actor that owns the session state and flushes each wakeup's commands through a blocking operation.
 - `crates/ox-core/src/session/chain.rs`: message chain reconstruction from the `parent_uuid` DAG.
 - `crates/ox-core/src/session/display.rs`: the session ID and title formatting that listings use.
 - `crates/ox-core/src/session/entry.rs`: the JSONL entry schema and its header `version`.

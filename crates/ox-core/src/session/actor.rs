@@ -1,5 +1,5 @@
 //! Session actor that owns [`SessionState`] and its writer. Each `recv()` wakeup drains the queued
-//! [`SessionCmd`]s into one batch and appends it in one write, so an isolated write flushes at once
+//! [`SessionCmd`]s into one batch and flushes it under the writer lock, so an isolated write runs
 //! with no interval timer. A compaction and `/archive` end their batch so a failed one can be
 //! unqueued, and cmds after a compaction see its committed synthetic root.
 
@@ -120,7 +120,14 @@ pub(super) async fn run(
         {
             flow = batch.absorb(next, &mut state, &shared);
         }
-        let failure = match state.flush_entries(batch.entries) {
+        let (flushed, result) = tokio::task::spawn_blocking(move || {
+            let result = state.flush_entries(batch.entries);
+            (state, result)
+        })
+        .await
+        .expect("session flush task panicked");
+        state = flushed;
+        let failure = match result {
             Err(e) => {
                 let msg = format!("{e:#}");
                 warn!("session write batch failed: {msg}");
@@ -379,8 +386,8 @@ mod tests {
     use super::*;
     use crate::session::handle::testing::boundary;
     use crate::session::state::MAX_UNWRITTEN_BYTES;
-    use crate::session::store::SessionWriter;
     use crate::session::store::local_testing::{saved_entries, saved_titles, test_session_file};
+    use crate::session::store::open_append_at;
     use crate::session::store::testing::{test_project_dir, test_store};
 
     mod run {
@@ -436,6 +443,28 @@ mod tests {
         fn shutdown_cmd() -> (SessionCmd, oneshot::Receiver<()>) {
             let (ack, rx) = oneshot::channel();
             (SessionCmd::Shutdown { ack }, rx)
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn idle_actor_allows_the_clock_to_advance_before_the_next_record() {
+            let dir = tempdir().unwrap();
+            let store = test_store(dir.path());
+            let state = SessionState::fresh(store.clone(), "m", None);
+            let session_id = state.session_id.to_string();
+            let (tx, rx) = mpsc::channel(1);
+            let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
+
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let (record, ack) = record_cmd("after idle");
+            tx.send(record).await.unwrap();
+            assert!(ack.await.unwrap().failure.is_none());
+            drop(tx);
+            actor.await.unwrap();
+
+            assert_eq!(
+                store.load_session_data(&session_id).unwrap().messages,
+                [Message::user("after idle")],
+            );
         }
 
         #[tokio::test]
@@ -943,10 +972,14 @@ mod tests {
             drive(original, vec![rec]).await;
             let path = test_session_file(dir.path(), &session_id);
             let last_uuid = store.load_session_data(&session_id).unwrap().last_uuid;
+            let writer = open_append_at(&path).unwrap();
+            let saved = dir.path().join("saved.jsonl");
+            std::fs::rename(&path, &saved).unwrap();
+            std::fs::create_dir(&path).unwrap();
             let state = SessionState::resumed(
                 store.clone(),
                 session_id.clone(),
-                SessionWriter::failing_once(&path),
+                writer,
                 last_uuid,
                 1,
                 true,
@@ -959,6 +992,8 @@ mod tests {
                 .await
                 .unwrap();
             assert!(archive_rx.await.unwrap().failure.is_some());
+            std::fs::remove_dir(&path).unwrap();
+            std::fs::rename(&saved, &path).unwrap();
             let (rec, rec_rx) = record_cmd("after archive");
             tx.send(rec).await.unwrap();
             assert!(rec_rx.await.unwrap().failure.is_none());

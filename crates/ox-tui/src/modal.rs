@@ -1,5 +1,6 @@
 //! Modal stack that routes keys to the top overlay and renders it between chat and input.
 
+pub(crate) mod acceptance;
 pub(crate) mod approval;
 pub(crate) mod chrome;
 pub(crate) mod kv_overview;
@@ -15,6 +16,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+
+use ox_core::session::entry::ArchiveState;
 
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
@@ -32,6 +35,7 @@ pub(crate) trait Modal: Send {
     /// `max_height`, and the stack clips anything taller.
     fn height(&self, width: u16, max_height: u16) -> u16;
 
+    /// Updates the current view even when `area` has no cells, invalidating hidden acceptance.
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme);
 
     /// Routes one key event. Returns whether the modal consumed it, was cancelled, or submitted a
@@ -40,6 +44,12 @@ pub(crate) trait Modal: Send {
 
     /// Receives bracketed-paste text. Default no-op, so a paste never answers a prompt.
     fn handle_paste(&mut self, _text: &str) {}
+
+    /// Marks a saved-session archive accepted by the engine.
+    fn archive_started(&mut self, _id: &str) {}
+
+    /// Receives a saved-session archive result while this modal remains on the stack.
+    fn archive_updated(&mut self, _id: &str, _result: &Result<ArchiveState, String>) {}
 
     /// Fires when this modal returns to the top of the stack after a nested modal pops. Default
     /// no-op. Pickers override it to refresh state the nested modal changed.
@@ -137,6 +147,18 @@ impl ModalStack {
         self.stack.push(modal);
     }
 
+    pub(crate) fn archive_started(&mut self, id: &str) {
+        for modal in &mut self.stack {
+            modal.archive_started(id);
+        }
+    }
+
+    pub(crate) fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, String>) {
+        for modal in &mut self.stack {
+            modal.archive_updated(id, result);
+        }
+    }
+
     /// Drops every modal on the stack, firing each modal's [`Modal::on_cancel`] hook first, and
     /// returns the hooks' actions for the caller to dispatch. Session swaps call this so pickers
     /// and nested overlays stay with their session and a pending approval still reaches its agent.
@@ -165,9 +187,6 @@ impl ModalStack {
         let Some(top) = self.stack.last() else {
             return;
         };
-        if area.height == 0 {
-            return;
-        }
         let border_area = Rect {
             height: TOP_BORDER_HEIGHT.min(area.height),
             ..area
@@ -179,9 +198,6 @@ impl ModalStack {
         frame.render_widget(Paragraph::new(border).style(theme.surface()), border_area);
 
         let body_height = area.height.saturating_sub(TOP_BORDER_HEIGHT);
-        if body_height == 0 {
-            return;
-        }
         let body_area = Rect {
             x: area.x,
             y: area.y.saturating_add(TOP_BORDER_HEIGHT),
@@ -293,7 +309,7 @@ pub(crate) mod testing {
     }
 
     /// [`render_rows`] for any render closure, such as a picker that is not a [`Modal`].
-    pub(super) fn render_rows_with(
+    pub(crate) fn render_rows_with(
         width: u16,
         height: u16,
         render: impl FnOnce(&mut Frame<'_>, Rect, &Theme),
@@ -329,6 +345,7 @@ pub(crate) mod testing {
         pub(crate) tick_count: Arc<AtomicU32>,
         /// Deadline returned from [`Modal::next_tick`].
         pub(crate) next_tick: Option<Instant>,
+        pub(crate) archive_events: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl ScriptedModal {
@@ -348,11 +365,26 @@ pub(crate) mod testing {
                 focus_regained_count: Arc::new(AtomicU32::new(0)),
                 tick_count: Arc::new(AtomicU32::new(0)),
                 next_tick: None,
+                archive_events: Arc::default(),
             }
         }
     }
 
     impl Modal for ScriptedModal {
+        fn archive_started(&mut self, id: &str) {
+            self.archive_events
+                .lock()
+                .unwrap()
+                .push(format!("started:{id}"));
+        }
+
+        fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, String>) {
+            self.archive_events
+                .lock()
+                .unwrap()
+                .push(format!("completed:{id}:{result:?}"));
+        }
+
         fn height(&self, _width: u16, _max_height: u16) -> u16 {
             self.declared_height
         }
@@ -510,6 +542,41 @@ mod tests {
 
             assert!(stack.is_active());
             assert_eq!(stack.height(80, 40), 3 + TOP_BORDER_HEIGHT);
+        }
+    }
+
+    mod archive_updated {
+        use super::*;
+
+        #[test]
+        fn completes_a_covered_picker_without_dismissing_the_overlay() {
+            let mut stack = ModalStack::default();
+            let picker = ScriptedModal::new(ModalAction::Dispatch(Action::Op(Op::Clear)));
+            let observed = Arc::clone(&picker.archive_events);
+            stack.push(Box::new(picker));
+            stack.push(Box::new(BareModal));
+
+            stack.archive_started("saved");
+            stack.archive_updated("saved", &Ok(ArchiveState::Archived));
+
+            assert_eq!(
+                *observed.lock().unwrap(),
+                ["started:saved", "completed:saved:Ok(Archived)"]
+            );
+            assert!(
+                stack
+                    .handle_key(&KeyEvent::from(KeyCode::Char('s')))
+                    .is_none()
+            );
+            assert!(matches!(
+                stack.handle_key(&KeyEvent::from(KeyCode::Esc)),
+                Some(ModalAction::Cancelled)
+            ));
+            assert!(matches!(
+                stack.handle_key(&KeyEvent::from(KeyCode::Char('s'))),
+                Some(ModalAction::Dispatch(Action::Op(Op::Clear)))
+            ));
+            assert!(!stack.is_active());
         }
     }
 

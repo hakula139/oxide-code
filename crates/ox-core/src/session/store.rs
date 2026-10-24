@@ -12,6 +12,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
+use tempfile::NamedTempFile;
 use time::OffsetDateTime;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -108,19 +109,16 @@ impl SessionStore {
             .join(session_filename(session_id, created_at))
     }
 
-    /// Creates the file (`0600`, `O_EXCL`) and writes the header, then the JSONL `lines`, in one
-    /// write that unlinks the file on failure.
+    /// Publishes the header and JSONL `lines` as a new file (`0600` on Unix), without replacing
+    /// an existing session.
     pub(crate) fn create(&self, header: &Header, lines: &[u8]) -> Result<SessionWriter> {
         validate_session_id(&header.session_id)?;
 
         let mut buf = encode_lines([&Entry::Header(header.clone())])?;
         buf.extend_from_slice(lines);
         let path = self.session_file(&header.session_id, header.created_at);
-        let file = create_written(&path, |file| Appender(file).write_all(&buf))?;
-        Ok(SessionWriter {
-            path,
-            file: Some(file),
-        })
+        create_written(&path, |mut file| file.write_all(&buf))?;
+        Ok(SessionWriter { path })
     }
 }
 
@@ -128,9 +126,9 @@ impl SessionStore {
 
 /// Opens an existing session file in append mode by explicit path.
 pub(super) fn open_append_at(path: &Path) -> Result<SessionWriter> {
+    open_append_file(path)?;
     Ok(SessionWriter {
         path: path.to_owned(),
-        file: Some(open_append_file(path)?),
     })
 }
 
@@ -194,20 +192,22 @@ pub(crate) fn delete_at(path: &Path) -> Result<()> {
 /// Sets the archive state of the session file at `path`. The file keeps its mtime, since listings
 /// order sessions by activity and toggling the state is not activity.
 pub(super) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
-    let mut writer = open_append_at(path)?;
-    let modified = fs::metadata(path)
+    let _lock = lock_writer(path)?;
+    let file = open_append_file(path)?;
+    let modified = file
+        .metadata()
         .and_then(|meta| meta.modified())
         .with_context(|| format!("failed to stat {}", path.display()))?;
-    writer.set_archived(archived)?;
-    if let Some(file) = &writer.file
-        && let Err(e) = file.set_modified(modified)
-    {
+    let lines = archive_lines(archived)?;
+    let result = append_whole(&file, &mut Appender(&file), &lines)
+        .with_context(|| format!("failed to write {}", path.display()));
+    if let Err(e) = file.set_modified(modified) {
         warn!(
             "archive toggle moved {} up the listing: {e}",
             path.display()
         );
     }
-    Ok(())
+    result
 }
 
 const MAX_SESSION_ID_LEN: usize = 64;
@@ -236,11 +236,10 @@ fn file_session_id(path: &Path) -> Option<&str> {
 
 // ── SessionWriter ──
 
-/// Append handle for one session file that reopens its path after a failed write.
+/// The path reopened for each append to one session file.
 #[derive(Debug)]
 pub(crate) struct SessionWriter {
     path: PathBuf,
-    file: Option<File>,
 }
 
 impl SessionWriter {
@@ -248,26 +247,25 @@ impl SessionWriter {
         &self.path
     }
 
-    /// Appends JSONL `lines` in one write, so concurrent appenders interleave only between batches.
+    /// Appends JSONL `lines` while owning the session directory's writer lock.
     pub(super) fn append_lines(&mut self, lines: &[u8]) -> Result<()> {
-        let file = match self.file.take() {
-            Some(file) => file,
-            None => open_append_file(&self.path)?,
-        };
+        let _lock = lock_writer(&self.path)?;
+        let file = open_append_file(&self.path)?;
         append_whole(&file, &mut Appender(&file), lines)
-            .with_context(|| format!("failed to write {}", self.path.display()))?;
-        self.file = Some(file);
-        Ok(())
+            .with_context(|| format!("failed to write {}", self.path.display()))
     }
 
     /// Appends an [`Entry::Archive`] setting the session's archive state.
     pub(super) fn set_archived(&mut self, archived: bool) -> Result<()> {
-        let entry = Entry::Archive {
-            archived,
-            at: OffsetDateTime::now_utc(),
-        };
-        self.append_lines(&encode_lines([&entry])?)
+        self.append_lines(&archive_lines(archived)?)
     }
+}
+
+fn archive_lines(archived: bool) -> Result<Vec<u8>> {
+    encode_lines([&Entry::Archive {
+        archived,
+        at: OffsetDateTime::now_utc(),
+    }])
 }
 
 /// Encodes `entries` as JSONL, one line each.
@@ -483,26 +481,15 @@ fn append_options() -> OpenOptions {
     options
 }
 
-fn open_create_exclusive(path: &Path) -> io::Result<File> {
-    let mut options = append_options();
-    options.create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    options.open(path)
-}
-
-/// Creates `path` and runs `write` on it, unlinking the file when `write` fails.
-fn create_written(path: &Path, write: impl FnOnce(&File) -> io::Result<()>) -> Result<File> {
-    let file = open_create_exclusive(path)
+/// Writes privately beside `path`, then publishes without replacing an existing file.
+fn create_written(path: &Path, write: impl FnOnce(&File) -> io::Result<()>) -> Result<()> {
+    let file = NamedTempFile::new_in(path.parent().context("session file has no parent")?)
         .with_context(|| format!("failed to create {}", path.display()))?;
-    if let Err(e) = write(&file) {
-        _ = fs::remove_file(path);
-        return Err(e).with_context(|| format!("failed to write {}", path.display()));
-    }
-    Ok(file)
+    write(file.as_file()).with_context(|| format!("failed to write {}", path.display()))?;
+    file.persist_noclobber(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    Ok(())
 }
 
 fn open_append_file(path: &Path) -> Result<File> {
@@ -511,7 +498,36 @@ fn open_append_file(path: &Path) -> Result<File> {
         .with_context(|| format!("failed to open {}", path.display()))
 }
 
-/// Writes at the end of a file opened by [`append_options`], atomically with other appenders.
+/// The directory's lock file stays in place across session deletion and recreation. Keeping the
+/// lock off the transcript lets Windows readers open it during a batch.
+fn open_writer_lock(path: &Path) -> Result<File> {
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let path = path
+        .parent()
+        .context("session file has no parent")?
+        .join(".writer.lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))
+}
+
+fn lock_writer(path: &Path) -> Result<File> {
+    let lock = open_writer_lock(path)?;
+    lock.lock()
+        .with_context(|| format!("failed to lock writer for {}", path.display()))?;
+    Ok(lock)
+}
+
+/// Writes at the end of a file opened by [`append_options`].
 struct Appender<'a>(&'a File);
 
 impl Write for Appender<'_> {
@@ -533,8 +549,8 @@ impl Write for Appender<'_> {
     }
 }
 
-/// Writes `lines` through `out`, a handle on `file`, after terminating a torn last line. A failed
-/// write is truncated back off unless another appender has written since.
+/// Terminates a torn last line and writes `lines` through `out`, a handle on `file`. The caller
+/// holds the directory's writer lock through this operation, including failed-write rollback.
 fn append_whole(file: &File, out: &mut impl Write, lines: &[u8]) -> io::Result<()> {
     let mut start = file.metadata()?.len();
     if start > 0 && !ends_with_newline(file, start)? {
@@ -552,10 +568,7 @@ fn append_whole(file: &File, out: &mut impl Write, lines: &[u8]) -> io::Result<(
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => e,
         };
-        let end = start + written as u64;
-        if file.metadata().is_ok_and(|meta| meta.len() == end)
-            && let Err(e) = file.set_len(start)
-        {
+        if let Err(e) = file.set_len(start) {
             warn!("failed to truncate a partial session write: {e}");
         }
         return Err(err);
@@ -648,6 +661,10 @@ fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<Hea
 
 #[cfg(test)]
 mod tests {
+    use std::process::{Child, ChildStdin, Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use indoc::indoc;
     use time::macros::datetime;
 
@@ -655,7 +672,7 @@ mod tests {
         sample_header, sample_message_at, sample_message_entry, sample_summary_entry,
         sample_title_entry, test_session_file,
     };
-    use super::testing::{TEST_PROJECT, isolated_store, test_store};
+    use super::testing::{TEST_PROJECT, WriterBarrier, isolated_store, test_store};
     use super::*;
     use crate::file_tracker::{FileState, LastView};
     use crate::message::ContentBlock;
@@ -1868,6 +1885,43 @@ mod tests {
         use super::*;
 
         #[test]
+        fn preserves_activity_committed_before_its_waiting_write() {
+            let (_dir, store) = isolated_store();
+            let mut writer = store.create(&sample_header("active"), &[]).unwrap();
+            let path = writer.path().to_owned();
+            let barrier = WriterBarrier::hold(&path);
+            let (started, waiting) = mpsc::channel();
+            let target = path.clone();
+            let archive = std::thread::spawn(move || {
+                started.send(()).unwrap();
+                set_archived_at(&target, true).unwrap();
+            });
+            waiting.recv().unwrap();
+            let active = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+            let file = open_append_file(&path).unwrap();
+
+            append_whole(
+                &file,
+                &mut Appender(&file),
+                &encode_lines([&sample_message_entry(Uuid::new_v4(), "activity")]).unwrap(),
+            )
+            .unwrap();
+            file.set_modified(active).unwrap();
+            barrier.release();
+            archive.join().unwrap();
+
+            let data = load_session_data_from_path(&path).unwrap();
+            assert!(data.archived);
+            assert_eq!(data.messages, [Message::user("activity")]);
+            assert_eq!(file.metadata().unwrap().modified().unwrap(), active);
+
+            writer
+                .append(&[sample_message_entry(Uuid::new_v4(), "later activity")])
+                .unwrap();
+            assert_ne!(file.metadata().unwrap().modified().unwrap(), active);
+        }
+
+        #[test]
         fn latest_entry_wins_keeping_the_transcript_and_mtime() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
@@ -1987,7 +2041,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn unlinks_the_file_when_the_write_fails() {
+        fn leaves_no_public_file_when_the_write_fails() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("doomed.jsonl");
 
@@ -2001,6 +2055,109 @@ mod tests {
             assert!(!path.exists(), "a failed create must leave no file behind");
             create_written(&path, |_| Ok(())).unwrap();
         }
+
+        #[test]
+        fn publishes_only_complete_content_and_preserves_a_competing_session() {
+            for fail in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let header = sample_header("publication");
+                let path = store.session_file(&header.session_id, header.created_at);
+                let preparing = std::sync::Barrier::new(2);
+                let release = std::sync::Barrier::new(2);
+
+                std::thread::scope(|scope| {
+                    let creator = scope.spawn(|| {
+                        create_written(&path, |mut file| {
+                            file.write_all(b"partial")?;
+                            preparing.wait();
+                            release.wait();
+                            if fail {
+                                Err(io::ErrorKind::StorageFull.into())
+                            } else {
+                                file.write_all(b" complete\n")
+                            }
+                        })
+                    });
+                    preparing.wait();
+                    let visible = path.exists();
+                    let listed = store.list().unwrap();
+                    let lines =
+                        encode_lines([&sample_message_entry(Uuid::new_v4(), "winner")]).unwrap();
+                    let competing = store.create(&header, &lines);
+                    release.wait();
+
+                    assert!(!visible, "unpublished content must stay private");
+                    assert_eq!(
+                        listed
+                            .into_iter()
+                            .map(|info| info.session_id)
+                            .collect::<Vec<_>>(),
+                        [] as [String; 0],
+                        "private content appeared in listings"
+                    );
+                    competing.unwrap();
+                    let error = creator.join().unwrap().unwrap_err();
+                    assert!(
+                        error.to_string().contains(if fail {
+                            "failed to write"
+                        } else {
+                            "failed to create"
+                        }),
+                        "{error:#}",
+                    );
+                    assert_eq!(
+                        load_session_data_from_path(&path).unwrap().messages,
+                        [Message::user("winner")],
+                    );
+                });
+                assert_eq!(fs::read_dir(&store.project_dir).unwrap().count(), 1);
+            }
+        }
+    }
+
+    mod open_writer_lock {
+        use super::*;
+
+        #[test]
+        fn keeps_the_same_lock_after_deletion_and_recreation() {
+            let (_dir, store) = isolated_store();
+            let header = sample_header("recreated");
+            let writer = store.create(&header, &[]).unwrap();
+            let path = writer.path().to_owned();
+            let lock = lock_writer(&path).unwrap();
+
+            delete_at(&path).unwrap();
+            store.create(&header, &[]).unwrap();
+            let competing = open_writer_lock(&path).unwrap();
+
+            assert!(matches!(
+                competing.try_lock(),
+                Err(fs::TryLockError::WouldBlock)
+            ));
+            drop(lock);
+            competing.try_lock().unwrap();
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn creates_a_private_lock_shared_by_symlink_paths() {
+            use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+            let (dir, store) = isolated_store();
+            let writer = store.create(&sample_header("linked"), &[]).unwrap();
+            let alias = dir.path().join("alias.jsonl");
+            symlink(writer.path(), &alias).unwrap();
+            let lock = lock_writer(writer.path()).unwrap();
+
+            let competing = open_writer_lock(&alias).unwrap();
+
+            assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+            assert!(matches!(
+                competing.try_lock(),
+                Err(fs::TryLockError::WouldBlock)
+            ));
+        }
     }
 
     mod appender {
@@ -2013,7 +2170,8 @@ mod tests {
             fn lands_after_lines_another_handle_appended() {
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("shared.jsonl");
-                let first = create_written(&path, |file| Appender(file).write_all(b"1\n")).unwrap();
+                create_written(&path, |mut file| file.write_all(b"1\n")).unwrap();
+                let first = open_append_file(&path).unwrap();
                 let second = open_append_file(&path).unwrap();
 
                 Appender(&second).write_all(b"2\n").unwrap();
@@ -2029,17 +2187,121 @@ mod tests {
     mod append_whole {
         use super::*;
 
-        /// Writes to `file` until `budget` bytes are spent, then returns what `exhausted` does.
-        struct ShortWriter<'a> {
-            file: &'a File,
-            budget: usize,
-            exhausted: fn(&File) -> io::Result<usize>,
+        const CHILD_PATH: &str = "OX_TEST_SESSION_APPEND_PATH";
+
+        struct CompetingWriter {
+            child: Child,
+            commands: ChildStdin,
+            output: mpsc::Receiver<String>,
         }
 
-        impl Write for ShortWriter<'_> {
+        impl CompetingWriter {
+            fn spawn(path: &Path) -> Self {
+                let mut child = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "session::store::tests::append_whole::serializes_short_writes_and_recovery_across_processes",
+                        "--nocapture",
+                    ])
+                    .env(CHILD_PATH, path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let stdout = child.stdout.take().unwrap();
+                let (tx, output) = mpsc::channel();
+                std::thread::spawn(move || {
+                    for line in BufReader::new(stdout).lines() {
+                        if tx.send(line.unwrap()).is_err() {
+                            break;
+                        }
+                    }
+                });
+                Self {
+                    commands: child.stdin.take().unwrap(),
+                    output,
+                    child,
+                }
+            }
+
+            fn check_lock(&mut self) {
+                self.commands.write_all(b"check\n").unwrap();
+                self.wait_for("OX_LOCK_HELD");
+            }
+
+            fn wait_for(&self, marker: &str) {
+                loop {
+                    let line = self.output.recv_timeout(Duration::from_secs(10)).unwrap();
+                    if line.trim().ends_with(marker) {
+                        break;
+                    }
+                }
+            }
+
+            fn append_and_wait(mut self) {
+                self.commands.write_all(b"append\n").unwrap();
+                self.wait_for("OX_APPEND_DONE");
+                assert!(self.child.wait().unwrap().success());
+            }
+        }
+
+        impl Drop for CompetingWriter {
+            fn drop(&mut self) {
+                _ = self.child.kill();
+                _ = self.child.wait();
+            }
+        }
+
+        fn append_in_child(path: &Path) {
+            let mut command = String::new();
+            io::stdin().read_line(&mut command).unwrap();
+            let file = open_writer_lock(path).unwrap();
+            assert!(matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock)));
+            drop(file);
+            assert_eq!(read_session_id_from_path(path).unwrap(), "partial");
+            assert_eq!(
+                load_session_data_from_path(path).unwrap().messages,
+                [Message::user("root")]
+            );
+            let store = test_store(path.parent().unwrap().parent().unwrap());
+            assert_eq!(
+                store
+                    .list()
+                    .unwrap()
+                    .into_iter()
+                    .map(|info| info.session_id)
+                    .collect::<Vec<_>>(),
+                ["partial"]
+            );
+            println!("OX_LOCK_HELD");
+            io::stdout().flush().unwrap();
+            command.clear();
+            io::stdin().read_line(&mut command).unwrap();
+            let parent = load_session_data_from_path(path).unwrap().last_uuid;
+            open_append_at(path)
+                .unwrap()
+                .append(&[sample_message_at(
+                    Uuid::new_v4(),
+                    parent,
+                    datetime!(2026-04-16 12:00:04 UTC),
+                    "other writer",
+                )])
+                .unwrap();
+            println!("OX_APPEND_DONE");
+            io::stdout().flush().unwrap();
+        }
+
+        /// Writes to `file` until `budget` bytes are spent, then returns what `exhausted` does.
+        struct ShortWriter<'a, F> {
+            file: &'a File,
+            budget: usize,
+            exhausted: F,
+        }
+
+        impl<F: FnMut(&File, &[u8]) -> io::Result<usize>> Write for ShortWriter<'_, F> {
             fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
                 if self.budget == 0 {
-                    return (self.exhausted)(self.file);
+                    return (self.exhausted)(self.file, buf);
                 }
                 let n = buf.len().min(self.budget);
                 self.budget -= n;
@@ -2096,11 +2358,12 @@ mod tests {
             let mut out = ShortWriter {
                 file: &file,
                 budget: first_line + 5,
-                exhausted: |_| Err(io::ErrorKind::StorageFull.into()),
+                exhausted: |_: &File, _: &[u8]| Err(io::ErrorKind::StorageFull.into()),
             };
 
             let err = append_whole(&file, &mut out, &batch).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::StorageFull);
+            drop(file);
             writer.append_lines(&batch).unwrap();
 
             let content = fs::read_to_string(&path).unwrap();
@@ -2122,25 +2385,62 @@ mod tests {
         }
 
         #[test]
-        fn keeps_a_line_another_appender_wrote_after_the_partial_write() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let (path, _writer, batch) = session_with_pending_batch(&store, dir.path());
-            let file = open_append_file(&path).unwrap();
-            let mut out = ShortWriter {
-                file: &file,
-                budget: 5,
-                exhausted: |file| {
-                    Appender(file).write_all(b"\nother appender\n").unwrap();
-                    Ok(0)
-                },
-            };
+        fn serializes_short_writes_and_recovery_across_processes() {
+            if let Some(path) = std::env::var_os(CHILD_PATH) {
+                append_in_child(Path::new(&path));
+                return;
+            }
 
-            let err = append_whole(&file, &mut out, &batch).unwrap_err();
+            for failure in [
+                None,
+                Some(io::ErrorKind::StorageFull),
+                Some(io::ErrorKind::WriteZero),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let (path, _writer, batch) = session_with_pending_batch(&store, dir.path());
+                let mut child = CompetingWriter::spawn(&path);
+                let lock = lock_writer(&path).unwrap();
+                let file = open_append_file(&path).unwrap();
+                let mut checked = false;
+                let mut out = ShortWriter {
+                    file: &file,
+                    budget: 5,
+                    exhausted: |file: &File, buf: &[u8]| {
+                        if !checked {
+                            child.check_lock();
+                            checked = true;
+                            return Err(io::ErrorKind::Interrupted.into());
+                        }
+                        match failure {
+                            Some(io::ErrorKind::WriteZero) => Ok(0),
+                            Some(kind) => Err(kind.into()),
+                            None => Appender(file).write(&buf[..buf.len().min(17)]),
+                        }
+                    },
+                };
 
-            assert_eq!(err.kind(), io::ErrorKind::WriteZero);
-            let content = fs::read_to_string(&path).unwrap();
-            assert!(content.ends_with("\nother appender\n"), "got: {content}");
+                let result = append_whole(&file, &mut out, &batch);
+                drop(file);
+                drop(lock);
+                child.append_and_wait();
+
+                assert_eq!(
+                    result.as_ref().err().map(io::Error::kind),
+                    failure,
+                    "{failure:?}"
+                );
+                let mut expected = vec![Message::user("root")];
+                if failure.is_none() {
+                    expected.extend([Message::user("second"), Message::user("third")]);
+                }
+                expected.push(Message::user("other writer"));
+                assert_eq!(
+                    store.load_session_data("partial").unwrap().messages,
+                    expected,
+                    "{failure:?}",
+                );
+            }
         }
     }
 }
