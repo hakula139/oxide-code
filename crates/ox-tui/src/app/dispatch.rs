@@ -106,7 +106,7 @@ impl App {
                         return;
                     }
                     if let Some(text) = self.chat.handle_mouse(*mouse, now()) {
-                        self.clipboard.copy(text);
+                        self.copy_selection(text);
                     }
                 }
             }
@@ -159,8 +159,14 @@ impl App {
         let Some(text) = self.chat.take_selection().filter(|_| ctrl_c) else {
             return false;
         };
-        self.clipboard.copy(text);
+        self.copy_selection(text);
         true
+    }
+
+    fn copy_selection(&mut self, text: String) {
+        self.pending_clipboard = None;
+        self.copy_notice = None;
+        self.clipboard.copy(text);
     }
 
     fn apply_app_action(&mut self, action: AppAction) {
@@ -558,6 +564,7 @@ mod tests {
     use crate::components::status::StatusHyperlink;
     use crate::modal::testing::ScriptedModal;
     use crate::slash::ChatOutput;
+    use crate::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};
     use crate::testing::{key_event, mouse_event, mouse_event_at};
     use crate::theme::{ThemeOverrides, builtin, resolve_theme};
 
@@ -1191,6 +1198,50 @@ mod tests {
 
                 assert!(!app.dirty, "{event:?}");
             }
+        }
+    }
+
+    mod copy_selection {
+        use super::*;
+
+        #[tokio::test]
+        async fn replaces_an_earlier_copy_still_waiting_for_the_next_frame() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let mut terminal = capture_terminal(60, 8);
+            app.copy_selection("old".to_owned());
+            let earlier = app.clipboard.recv().await.unwrap();
+            app.apply_copy_report(earlier);
+
+            app.copy_selection("latest".to_owned());
+
+            assert_eq!(app.pending_clipboard, None);
+            assert!(app.copy_notice.is_none());
+
+            app.render(&mut terminal).unwrap();
+            let latest = app.clipboard.recv().await.unwrap();
+            app.apply_copy_report(latest);
+            app.render(&mut terminal).unwrap();
+
+            assert_eq!(
+                terminal.backend().bytes(),
+                [
+                    BEGIN_SYNC,
+                    FRAME,
+                    END_SYNC,
+                    FLUSH,
+                    BEGIN_SYNC,
+                    FRAME,
+                    b"\x1b]52;c;bGF0ZXN0\x07",
+                    END_SYNC,
+                    FLUSH,
+                ]
+                .concat(),
+            );
+            let notice = app.copy_notice.as_ref().unwrap();
+            assert_eq!(
+                (notice.text.as_str(), notice.failed),
+                ("Copied 6 characters", false)
+            );
         }
     }
 

@@ -12,9 +12,10 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use tokio::io::AsyncWriteExt as _;
-use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::process::{Child, Command};
+use tokio::sync::{mpsc, watch};
+use tokio::time::Instant;
 use tracing::debug;
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -194,11 +195,19 @@ impl CopyReport {
 /// X11 and some Wayland compositors drop the contents once the process that wrote them lets go.
 pub(crate) struct Clipboard {
     environment: Environment,
-    native: Arc<Mutex<Option<arboard::Clipboard>>>,
+    native: Arc<dyn NativeClipboard>,
     /// Runs tmux for the tmux routes. Tests replace it with a fake.
     tmux: Arc<dyn Runner>,
-    tx: mpsc::UnboundedSender<CopyReport>,
-    rx: mpsc::UnboundedReceiver<CopyReport>,
+    pending: Option<watch::Sender<CopyRequest>>,
+    generation: u64,
+    tx: mpsc::UnboundedSender<(u64, CopyReport)>,
+    rx: mpsc::UnboundedReceiver<(u64, CopyReport)>,
+}
+
+#[derive(Debug, Clone)]
+struct CopyRequest {
+    generation: u64,
+    text: Arc<str>,
 }
 
 impl Clipboard {
@@ -206,33 +215,45 @@ impl Clipboard {
         let (tx, rx) = mpsc::unbounded_channel();
         Self {
             environment,
-            native: Arc::default(),
+            native: Arc::new(SystemClipboard::default()),
             tmux: Arc::new(Program("tmux")),
+            pending: None,
+            generation: 0,
             tx,
             rx,
         }
     }
 
-    /// Starts copying `text` and reports through [`Self::recv`]. Must run inside a tokio runtime.
-    pub(crate) fn copy(&self, text: String) {
+    /// Queues `text`, replacing any pending copy. Must run inside a tokio runtime.
+    pub(crate) fn copy(&mut self, text: String) {
+        self.generation += 1;
+        let request = CopyRequest {
+            generation: self.generation,
+            text: text.into(),
+        };
+        if let Some(pending) = &self.pending {
+            _ = pending.send_replace(request);
+            return;
+        }
+
         let route = Route {
             environment: self.environment,
             native: Arc::clone(&self.native),
             tmux: Arc::clone(&self.tmux),
         };
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let chars = text.graphemes(true).count();
-            let outcome = tokio::time::timeout(COPY_TIMEOUT, route.deliver(text))
-                .await
-                .unwrap_or(Err(CopyError::TimedOut));
-            _ = tx.send(CopyReport { chars, outcome });
-        });
+        let (tx, rx) = watch::channel(request);
+        self.pending = Some(tx);
+        tokio::spawn(route.run(rx, self.tx.clone()));
     }
 
-    /// Waits for the next finished copy. Cancel-safe, so it can sit in a `tokio::select!` arm.
+    /// Waits for the latest copy's report. Cancel-safe for a `tokio::select!` arm.
     pub(crate) async fn recv(&mut self) -> Option<CopyReport> {
-        self.rx.recv().await
+        while let Some((generation, report)) = self.rx.recv().await {
+            if generation == self.generation {
+                return Some(report);
+            }
+        }
+        None
     }
 }
 
@@ -241,25 +262,68 @@ impl Clipboard {
 /// The routes one copy may take.
 struct Route {
     environment: Environment,
-    native: Arc<Mutex<Option<arboard::Clipboard>>>,
+    native: Arc<dyn NativeClipboard>,
     tmux: Arc<dyn Runner>,
 }
 
 impl Route {
+    async fn run(
+        self,
+        mut requests: watch::Receiver<CopyRequest>,
+        reports: mpsc::UnboundedSender<(u64, CopyReport)>,
+    ) {
+        loop {
+            let CopyRequest { generation, text } = requests.borrow_and_update().clone();
+            let chars = text.graphemes(true).count();
+            let deadline = Instant::now() + COPY_TIMEOUT;
+            let delivery = self.deliver(text, deadline);
+            tokio::pin!(delivery);
+
+            if let Ok(outcome) = tokio::time::timeout_at(deadline, &mut delivery).await {
+                _ = reports.send((generation, CopyReport { chars, outcome }));
+            } else {
+                _ = reports.send((
+                    generation,
+                    CopyReport {
+                        chars,
+                        outcome: Err(CopyError::TimedOut),
+                    },
+                ));
+                // Native writes cannot be cancelled, and a killed child must be reaped.
+                _ = delivery.await;
+            }
+            if requests.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+
     /// Tries the native clipboard first, since a tmux forward can otherwise race the native write
     /// for X11 selection ownership.
-    async fn deliver(self, text: String) -> Result<Delivery, CopyError> {
-        let text: Arc<str> = text.into();
+    async fn deliver(&self, text: Arc<str>, deadline: Instant) -> Result<Delivery, CopyError> {
         let native = if self.environment.local {
-            Some(write_native(self.native, Arc::clone(&text)).await)
+            let native = Arc::clone(&self.native);
+            let text = Arc::clone(&text);
+            Some(
+                tokio::task::spawn_blocking(move || native.write(&text))
+                    .await
+                    .context("failed to finish the clipboard write")
+                    .flatten(),
+            )
         } else {
             None
         };
+        if Instant::now() >= deadline {
+            return Err(CopyError::TimedOut);
+        }
         let tmux = if self.environment.tmux && text.len() <= MAX_TERMINAL_COPY_BYTES {
-            Some(load_tmux_buffer(&*self.tmux, &text).await)
+            Some(load_tmux_buffer(&*self.tmux, &text, deadline).await)
         } else {
             None
         };
+        if Instant::now() >= deadline {
+            return Err(CopyError::TimedOut);
+        }
         settle(&text, self.environment, native.as_ref(), tmux.as_ref())
     }
 }
@@ -305,13 +369,16 @@ fn settle(
     })
 }
 
-/// Writes the system clipboard, keeping the handle in `native` for later copies.
-async fn write_native(
-    native: Arc<Mutex<Option<arboard::Clipboard>>>,
-    text: Arc<str>,
-) -> Result<()> {
-    tokio::task::spawn_blocking(move || {
-        let mut native = lock_or_recover(&native, "native clipboard");
+trait NativeClipboard: Send + Sync {
+    fn write(&self, text: &str) -> Result<()>;
+}
+
+#[derive(Default)]
+struct SystemClipboard(Mutex<Option<arboard::Clipboard>>);
+
+impl NativeClipboard for SystemClipboard {
+    fn write(&self, text: &str) -> Result<()> {
+        let mut native = lock_or_recover(&self.0, "native clipboard");
         let clipboard = match &mut *native {
             Some(clipboard) => clipboard,
             None => {
@@ -319,24 +386,23 @@ async fn write_native(
             }
         };
         clipboard
-            .set_text(&*text)
+            .set_text(text)
             .context("failed to write the clipboard")
-    })
-    .await
-    .context("failed to finish the clipboard write")?
+    }
 }
 
 trait Runner: Send + Sync {
-    /// Runs the program with `args` and `stdin`, returning its trimmed stderr, or else its exit
-    /// status, when it fails.
+    /// Runs with `args` and `stdin` until `deadline`, awaiting termination on timeout. A failure
+    /// reports trimmed stderr or the exit status.
     fn run<'a>(
         &'a self,
         args: &'a [&'a str],
         stdin: &'a str,
+        deadline: Instant,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 }
 
-/// A program on `PATH`. Dropping a run's future kills the child, and tokio reaps it.
+/// A program on `PATH` whose child exits before its run completes.
 struct Program(&'static str);
 
 impl Runner for Program {
@@ -344,6 +410,7 @@ impl Runner for Program {
         &'a self,
         args: &'a [&'a str],
         stdin: &'a str,
+        deadline: Instant,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let mut child = Command::new(self.0)
@@ -354,37 +421,67 @@ impl Runner for Program {
                 .kill_on_drop(true)
                 .spawn()
                 .with_context(|| format!("failed to run {}", self.0))?;
-            let mut pipe = child.stdin.take().expect("stdin is piped");
-            let written = pipe.write_all(stdin.as_bytes()).await;
-            drop(pipe);
-            let output = child
-                .wait_with_output()
-                .await
-                .with_context(|| format!("failed to wait for {}", self.0))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            self.run_child(&mut child, stdin, deadline).await
+        })
+    }
+}
+
+impl Program {
+    async fn run_child(&self, child: &mut Child, stdin: &str, deadline: Instant) -> Result<()> {
+        let mut pipe = child.stdin.take().expect("stdin is piped");
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let completion = async {
+            let write = async {
+                let result = pipe.write_all(stdin.as_bytes()).await;
+                drop(pipe);
+                result
+            };
+            let read = async {
+                let mut bytes = Vec::new();
+                stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+            };
+            let (written, status, stderr) = tokio::join!(write, child.wait(), read);
+            let status = status.with_context(|| format!("failed to wait for {}", self.0))?;
+            let stderr = stderr.with_context(|| format!("failed to read from {}", self.0))?;
+            if !status.success() {
+                let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
                 bail!(if stderr.is_empty() {
-                    output.status.to_string()
+                    status.to_string()
                 } else {
                     stderr
                 });
             }
             written.with_context(|| format!("failed to write to {}", self.0))
-        })
+        };
+        let output = tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(deadline) => None,
+            output = completion => Some(output),
+        };
+        if let Some(output) = output {
+            return output;
+        }
+
+        child
+            .kill()
+            .await
+            .with_context(|| format!("failed to stop {}", self.0))?;
+        bail!("{} did not answer before the clipboard deadline", self.0)
     }
 }
 
 /// Stores `text` in a tmux paste buffer. `-w` also forwards it to the outer terminal's clipboard
 /// unless `set-clipboard` is off, and tmux before 3.2 rejects the flag, so a failure retries
 /// without it.
-async fn load_tmux_buffer(tmux: &dyn Runner, text: &str) -> Result<TmuxLoad> {
-    match tmux.run(&["load-buffer", "-w", "-"], text).await {
+async fn load_tmux_buffer(tmux: &dyn Runner, text: &str, deadline: Instant) -> Result<TmuxLoad> {
+    match tmux.run(&["load-buffer", "-w", "-"], text, deadline).await {
         Ok(()) => Ok(TmuxLoad::Forwarded),
-        Err(error) => tmux
-            .run(&["load-buffer", "-"], text)
+        Err(error) if Instant::now() < deadline => tmux
+            .run(&["load-buffer", "-"], text, deadline)
             .await
             .map(|()| TmuxLoad::BufferOnly)
             .map_err(|_| error),
+        Err(error) => Err(error),
     }
 }
 
@@ -405,9 +502,12 @@ fn osc52_sequence(text: &str, screen: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
 
     use anyhow::anyhow;
+    use futures::poll;
+    use tokio::sync::mpsc::error::TryRecvError;
+    use tokio::sync::{Semaphore, oneshot};
 
     use super::*;
 
@@ -443,6 +543,7 @@ mod tests {
             &'a self,
             args: &'a [&'a str],
             stdin: &'a str,
+            _deadline: Instant,
         ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             let args = args.iter().map(|&arg| arg.to_owned()).collect();
             self.runs.lock().unwrap().push((args, stdin.to_owned()));
@@ -463,8 +564,12 @@ mod tests {
             &'a self,
             _args: &'a [&'a str],
             _stdin: &'a str,
+            deadline: Instant,
         ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-            Box::pin(std::future::pending())
+            Box::pin(async move {
+                tokio::time::sleep_until(deadline).await;
+                bail!("tmux timed out")
+            })
         }
     }
 
@@ -588,6 +693,93 @@ mod tests {
     mod copy {
         use super::*;
 
+        struct ControlledTmux {
+            started: mpsc::UnboundedSender<String>,
+            written: mpsc::UnboundedSender<String>,
+            releases: HashMap<&'static str, Semaphore>,
+            contents: Mutex<String>,
+        }
+
+        impl Runner for ControlledTmux {
+            fn run<'a>(
+                &'a self,
+                args: &'a [&'a str],
+                stdin: &'a str,
+                _deadline: Instant,
+            ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+                assert_eq!(args, ["load-buffer", "-w", "-"]);
+                Box::pin(async move {
+                    self.started.send(stdin.to_owned()).unwrap();
+                    self.releases[stdin].acquire().await.unwrap().forget();
+                    *self.contents.lock().unwrap() = stdin.to_owned();
+                    self.written.send(stdin.to_owned()).unwrap();
+                    Ok(())
+                })
+            }
+        }
+
+        struct ControlledNative {
+            started: mpsc::UnboundedSender<String>,
+            written: mpsc::UnboundedSender<String>,
+            release: Mutex<Option<oneshot::Receiver<()>>>,
+            contents: Mutex<String>,
+        }
+
+        impl NativeClipboard for ControlledNative {
+            fn write(&self, text: &str) -> Result<()> {
+                self.started.send(text.to_owned()).unwrap();
+                let release = self.release.lock().unwrap().take();
+                if let Some(release) = release {
+                    _ = release.blocking_recv();
+                }
+                *self.contents.lock().unwrap() = text.to_owned();
+                self.written.send(text.to_owned()).unwrap();
+                Ok(())
+            }
+        }
+
+        struct StoppingTmux {
+            stopped: Semaphore,
+            events: Mutex<Vec<&'static str>>,
+            contents: Mutex<String>,
+        }
+
+        impl Runner for StoppingTmux {
+            fn run<'a>(
+                &'a self,
+                _args: &'a [&'a str],
+                stdin: &'a str,
+                deadline: Instant,
+            ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+                Box::pin(async move {
+                    if stdin == "first" {
+                        tokio::time::sleep_until(deadline).await;
+                        self.events.lock().unwrap().push("first stopping");
+                        self.stopped.acquire().await.unwrap().forget();
+                        self.events.lock().unwrap().push("first stopped");
+                        bail!("tmux timed out");
+                    }
+                    *self.contents.lock().unwrap() = stdin.to_owned();
+                    self.events.lock().unwrap().push("latest written");
+                    Ok(())
+                })
+            }
+        }
+
+        fn worker(clipboard: &mut Clipboard) -> impl Future<Output = ()> + use<> {
+            let (tx, rx) = watch::channel(CopyRequest {
+                generation: 0,
+                text: Arc::from(""),
+            });
+            clipboard.pending = Some(tx);
+            Route {
+                environment: clipboard.environment,
+                native: Arc::clone(&clipboard.native),
+                tmux: Arc::clone(&clipboard.tmux),
+            }
+            .run(rx, clipboard.tx.clone())
+        }
+
         async fn copy_with(clipboard: &mut Clipboard, text: &str) -> CopyReport {
             clipboard.copy(text.to_owned());
             clipboard.recv().await.expect("the copy reports back")
@@ -628,6 +820,179 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn completes_the_current_write_before_the_latest_pending_selection() {
+            for pending in [vec!["latest"], vec!["obsolete", "latest"]] {
+                let (started_tx, mut started) = mpsc::unbounded_channel();
+                let (written_tx, mut written) = mpsc::unbounded_channel();
+                let tmux = Arc::new(ControlledTmux {
+                    started: started_tx,
+                    written: written_tx,
+                    releases: ["first", "obsolete", "latest"]
+                        .map(|text| (text, Semaphore::new(0)))
+                        .into(),
+                    contents: Mutex::default(),
+                });
+                let mut clipboard = Clipboard::new(Environment {
+                    tmux: true,
+                    ..REMOTE
+                });
+                clipboard.tmux = tmux.clone();
+                let mut worker = Box::pin(worker(&mut clipboard));
+
+                clipboard.copy("first".to_owned());
+                assert!(poll!(&mut worker).is_pending(), "{pending:?}");
+                assert_eq!(
+                    started.recv().await.as_deref(),
+                    Some("first"),
+                    "{pending:?}"
+                );
+                for &text in &pending {
+                    clipboard.copy(text.to_owned());
+                    tmux.releases[text].add_permits(1);
+                }
+
+                assert!(poll!(&mut worker).is_pending(), "{pending:?}");
+                assert_eq!(written.try_recv(), Err(TryRecvError::Empty), "{pending:?}");
+
+                tmux.releases["first"].add_permits(1);
+                assert!(poll!(&mut worker).is_pending(), "{pending:?}");
+                let report = clipboard.recv().await.unwrap();
+
+                assert_eq!(
+                    written.recv().await.as_deref(),
+                    Some("first"),
+                    "{pending:?}"
+                );
+                assert_eq!(
+                    written.recv().await.as_deref(),
+                    Some("latest"),
+                    "{pending:?}"
+                );
+                assert_eq!(written.try_recv(), Err(TryRecvError::Empty), "{pending:?}");
+                assert_eq!(*tmux.contents.lock().unwrap(), "latest", "{pending:?}");
+                assert_eq!(report.outcome, Ok(Delivery::Copied), "{pending:?}");
+                assert_eq!(
+                    report.notice(),
+                    ("Copied 6 characters".to_owned(), false),
+                    "{pending:?}"
+                );
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn waits_for_a_timed_out_native_write_before_starting_the_next_copy() {
+            let (started_tx, mut started) = mpsc::unbounded_channel();
+            let (written_tx, mut written) = mpsc::unbounded_channel();
+            let (release, wait) = oneshot::channel();
+            let native = Arc::new(ControlledNative {
+                started: started_tx,
+                written: written_tx,
+                release: Mutex::new(Some(wait)),
+                contents: Mutex::default(),
+            });
+            let mut clipboard = Clipboard::new(Environment {
+                local: true,
+                ..REMOTE
+            });
+            clipboard.native = native.clone();
+            let mut worker = Box::pin(worker(&mut clipboard));
+
+            clipboard.copy("first".to_owned());
+            assert!(poll!(&mut worker).is_pending());
+            assert_eq!(started.recv().await.as_deref(), Some("first"));
+            tokio::time::advance(COPY_TIMEOUT).await;
+            assert!(poll!(&mut worker).is_pending());
+            let timed_out = clipboard.recv().await.unwrap();
+
+            assert_eq!(timed_out.outcome, Err(CopyError::TimedOut));
+            assert_eq!(*native.contents.lock().unwrap(), "");
+
+            clipboard.copy("latest".to_owned());
+            assert!(poll!(&mut worker).is_pending());
+
+            assert_eq!(started.try_recv(), Err(TryRecvError::Empty));
+
+            release.send(()).unwrap();
+            tokio::spawn(worker);
+            let report = clipboard.recv().await.unwrap();
+
+            assert_eq!(written.recv().await.as_deref(), Some("first"));
+            assert_eq!(written.recv().await.as_deref(), Some("latest"));
+            assert_eq!(*native.contents.lock().unwrap(), "latest");
+            assert_eq!(report.outcome, Ok(Delivery::Copied));
+            assert_eq!(report.notice(), ("Copied 6 characters".to_owned(), false));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn waits_for_a_timed_out_tmux_child_to_stop_before_the_next_copy() {
+            let tmux = Arc::new(StoppingTmux {
+                stopped: Semaphore::new(0),
+                events: Mutex::default(),
+                contents: Mutex::default(),
+            });
+            let mut clipboard = Clipboard::new(Environment {
+                tmux: true,
+                ..REMOTE
+            });
+            clipboard.tmux = tmux.clone();
+            let mut worker = Box::pin(worker(&mut clipboard));
+
+            clipboard.copy("first".to_owned());
+            assert!(poll!(&mut worker).is_pending());
+            tokio::time::advance(COPY_TIMEOUT).await;
+            assert!(poll!(&mut worker).is_pending());
+            let timed_out = clipboard.recv().await.unwrap();
+
+            assert_eq!(timed_out.outcome, Err(CopyError::TimedOut));
+
+            clipboard.copy("latest".to_owned());
+            assert!(poll!(&mut worker).is_pending());
+
+            assert_eq!(*tmux.events.lock().unwrap(), ["first stopping"]);
+
+            tmux.stopped.add_permits(1);
+            assert!(poll!(&mut worker).is_pending());
+            let report = clipboard.recv().await.unwrap();
+
+            assert_eq!(
+                *tmux.events.lock().unwrap(),
+                ["first stopping", "first stopped", "latest written"],
+            );
+            assert_eq!(*tmux.contents.lock().unwrap(), "latest");
+            assert_eq!(report.outcome, Ok(Delivery::Copied));
+        }
+
+        #[tokio::test]
+        async fn drains_the_latest_pending_selection_when_the_clipboard_drops() {
+            let (started_tx, mut started) = mpsc::unbounded_channel();
+            let (written_tx, mut written) = mpsc::unbounded_channel();
+            let tmux = Arc::new(ControlledTmux {
+                started: started_tx,
+                written: written_tx,
+                releases: ["first", "latest"]
+                    .map(|text| (text, Semaphore::new(0)))
+                    .into(),
+                contents: Mutex::default(),
+            });
+            let mut clipboard = Clipboard::new(Environment {
+                tmux: true,
+                ..REMOTE
+            });
+            clipboard.tmux = tmux.clone();
+
+            clipboard.copy("first".to_owned());
+            assert_eq!(started.recv().await.as_deref(), Some("first"));
+            clipboard.copy("latest".to_owned());
+            drop(clipboard);
+            tmux.releases["latest"].add_permits(1);
+            tmux.releases["first"].add_permits(1);
+
+            assert_eq!(written.recv().await.as_deref(), Some("first"));
+            assert_eq!(written.recv().await.as_deref(), Some("latest"));
+            assert_eq!(*tmux.contents.lock().unwrap(), "latest");
+        }
+
+        #[tokio::test]
         async fn inside_tmux_keeps_a_selection_over_the_limit_from_tmux() {
             let tmux = FakeTmux::new([Ok(())]);
             let mut clipboard = Clipboard::new(Environment {
@@ -660,6 +1025,55 @@ mod tests {
             let report = copy_with(&mut clipboard, "text").await;
 
             assert_eq!(report.outcome, Err(CopyError::TimedOut));
+        }
+    }
+
+    mod recv {
+        use super::*;
+
+        #[tokio::test]
+        async fn discards_superseded_success_fallback_and_failure_reports() {
+            for (name, outcome) in [
+                ("native copy", Ok(Delivery::Copied)),
+                (
+                    "terminal copy",
+                    Ok(Delivery::Osc52 {
+                        sequence: osc52_sequence("old", false),
+                        needs_permission: false,
+                    }),
+                ),
+                ("timeout", Err(CopyError::TimedOut)),
+            ] {
+                let mut clipboard = Clipboard::new(REMOTE);
+                clipboard.generation = 2;
+                clipboard
+                    .tx
+                    .send((1, CopyReport { chars: 3, outcome }))
+                    .unwrap();
+                let latest = CopyReport {
+                    chars: 6,
+                    outcome: Err(CopyError::AppleTerminal),
+                };
+                clipboard
+                    .tx
+                    .send((
+                        2,
+                        CopyReport {
+                            chars: latest.chars,
+                            outcome: Err(CopyError::AppleTerminal),
+                        },
+                    ))
+                    .unwrap();
+
+                let report = clipboard.recv().await.unwrap();
+
+                assert_eq!(report, latest, "{name}");
+                assert_eq!(
+                    report.notice(),
+                    (CopyError::AppleTerminal.to_string(), true),
+                    "{name}",
+                );
+            }
         }
     }
 
@@ -775,9 +1189,13 @@ mod tests {
                     "exit status: 1"
                 };
 
-                git.run(&["config", "--file", "-", "--get", "a.b"], config)
-                    .await
-                    .unwrap();
+                git.run(
+                    &["config", "--file", "-", "--get", "a.b"],
+                    config,
+                    Instant::now() + COPY_TIMEOUT,
+                )
+                .await
+                .unwrap();
                 let stderr = git
                     .run(
                         &[
@@ -786,15 +1204,80 @@ mod tests {
                             "fixture",
                         ],
                         "",
+                        Instant::now() + COPY_TIMEOUT,
                     )
                     .await
                     .unwrap_err();
                 assert_eq!(stderr.to_string(), "fixture error");
                 let status = git
-                    .run(&["config", "--file", "-", "--get", "a.c"], config)
+                    .run(
+                        &["config", "--file", "-", "--get", "a.c"],
+                        config,
+                        Instant::now() + COPY_TIMEOUT,
+                    )
                     .await
                     .unwrap_err();
                 assert_eq!(status.to_string(), exit_1);
+            }
+        }
+
+        mod run_child {
+            use super::*;
+
+            #[tokio::test]
+            async fn kills_and_reaps_the_child_when_its_deadline_expires() {
+                const CHILD: &str = "OX_TEST_CLIPBOARD_CHILD";
+                if std::env::var_os(CHILD).is_some() {
+                    std::io::Write::write_all(&mut std::io::stderr().lock(), b"ready").unwrap();
+                    std::future::pending::<()>().await;
+                    return;
+                }
+
+                let thread = std::thread::current();
+                let test_name = thread.name().unwrap();
+                let mut child = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env(CHILD, "1")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap();
+                let mut ready = [0; 5];
+
+                let result = tokio::time::timeout(Duration::from_secs(10), async {
+                    child
+                        .stderr
+                        .as_mut()
+                        .unwrap()
+                        .read_exact(&mut ready)
+                        .await
+                        .context("the child did not announce readiness")?;
+                    Program("fixture")
+                        .run_child(&mut child, "", Instant::now())
+                        .await
+                })
+                .await;
+                let reaped = child.id().is_none();
+                let status = child.try_wait();
+                child.kill().await.unwrap();
+
+                assert_eq!(&ready, b"ready");
+                let error = result.expect("the child was not stopped").unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "fixture did not answer before the clipboard deadline"
+                );
+                assert!(reaped, "the child was awaited before returning");
+                let status = status.unwrap().expect("the child has exited");
+                assert!(!status.success(), "the child required forced termination");
+                #[cfg(unix)]
+                assert_eq!(
+                    std::os::unix::process::ExitStatusExt::signal(&status),
+                    Some(9),
+                    "the child was killed with SIGKILL"
+                );
             }
         }
     }
@@ -802,13 +1285,43 @@ mod tests {
     mod load_tmux_buffer {
         use super::*;
 
+        struct DelayedTmux {
+            delay: Duration,
+            deadlines: Mutex<Vec<Instant>>,
+        }
+
+        impl Runner for DelayedTmux {
+            fn run<'a>(
+                &'a self,
+                _args: &'a [&'a str],
+                _stdin: &'a str,
+                deadline: Instant,
+            ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+                let first = {
+                    let mut deadlines = self.deadlines.lock().unwrap();
+                    let first = deadlines.is_empty();
+                    deadlines.push(deadline);
+                    first
+                };
+                Box::pin(async move {
+                    if first {
+                        tokio::time::sleep(self.delay).await;
+                        bail!("first attempt failed");
+                    }
+                    Ok(())
+                })
+            }
+        }
+
         #[tokio::test]
         async fn retries_without_w_for_tmux_before_3_2() {
             let old = FakeTmux::new([Err("usage: load-buffer [-b buffer-name] path"), Ok(())]);
             let down = FakeTmux::new([Err("no server running"), Err("usage: load-buffer")]);
 
             assert_eq!(
-                load_tmux_buffer(&*old, "text").await.unwrap(),
+                load_tmux_buffer(&*old, "text", Instant::now() + COPY_TIMEOUT)
+                    .await
+                    .unwrap(),
                 TmuxLoad::BufferOnly
             );
             assert_eq!(
@@ -819,7 +1332,7 @@ mod tests {
                 ]
             );
             assert_eq!(
-                load_tmux_buffer(&*down, "text")
+                load_tmux_buffer(&*down, "text", Instant::now() + COPY_TIMEOUT)
                     .await
                     .unwrap_err()
                     .to_string(),
@@ -833,6 +1346,43 @@ mod tests {
                     load_buffer(&["-"], "text")
                 ]
             );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn shares_the_deadline_with_fallback_and_skips_expired_retries() {
+            for (name, delay, attempts, expected) in [
+                (
+                    "time remains",
+                    COPY_TIMEOUT / 2,
+                    2,
+                    Ok(TmuxLoad::BufferOnly),
+                ),
+                (
+                    "deadline reached",
+                    COPY_TIMEOUT,
+                    1,
+                    Err("first attempt failed"),
+                ),
+            ] {
+                let tmux = DelayedTmux {
+                    delay,
+                    deadlines: Mutex::default(),
+                };
+                let deadline = Instant::now() + COPY_TIMEOUT;
+
+                let result = load_tmux_buffer(&tmux, "text", deadline).await;
+
+                assert_eq!(
+                    result.map_err(|error| error.to_string()),
+                    expected.map_err(str::to_owned),
+                    "{name}",
+                );
+                assert_eq!(
+                    *tmux.deadlines.lock().unwrap(),
+                    vec![deadline; attempts],
+                    "{name}"
+                );
+            }
         }
     }
 
