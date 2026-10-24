@@ -358,9 +358,9 @@ mod tests {
     use super::*;
     use crate::file_tracker::{FileTracker, LastView};
     use crate::session::handle::testing::boundary;
-    use crate::session::store::load_session_data_from_path;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{isolated_store, test_project_dir, test_store};
+    use crate::session::store::{load_session_data_from_path, open_append_at};
     use crate::tool::tasks::testing::plan;
 
     mod try_defer_title {
@@ -802,10 +802,14 @@ mod tests {
             std::fs::copy(test_session_file(source.path(), &session_id), &copied).unwrap();
 
             let empty_store = tempfile::tempdir().unwrap();
+            let writer = open_append_at(&copied).unwrap();
+            let saved = elsewhere.path().join("saved.jsonl");
+            std::fs::rename(&copied, &saved).unwrap();
+            std::fs::create_dir(&copied).unwrap();
             let mut state = SessionState::resumed(
                 test_store(empty_store.path()),
                 session_id,
-                SessionWriter::failing_once(&copied),
+                writer,
                 original.last_message_uuid,
                 1,
                 true,
@@ -815,8 +819,10 @@ mod tests {
             let err = state.flush_entries(entries).unwrap_err();
             assert_eq!(
                 err.to_string(),
-                format!("failed to write {}", copied.display())
+                format!("failed to open {}", copied.display())
             );
+            std::fs::remove_dir(&copied).unwrap();
+            std::fs::rename(&saved, &copied).unwrap();
             let (entries, _) =
                 state.queue_message_entries(&Message::assistant("third"), None, now, false);
             state.flush_entries(entries).unwrap();
@@ -896,10 +902,14 @@ mod tests {
             let path = test_session_file(dir.path(), &session_id);
             let before = std::fs::read(&path).unwrap();
 
+            let writer = open_append_at(&path).unwrap();
+            let saved = dir.path().join("saved.jsonl");
+            std::fs::rename(&path, &saved).unwrap();
+            std::fs::create_dir(&path).unwrap();
             let mut state = SessionState::resumed(
                 test_store(dir.path()),
                 session_id,
-                SessionWriter::failing_once(&path),
+                writer,
                 original.last_message_uuid,
                 1,
                 true,
@@ -911,6 +921,8 @@ mod tests {
                 format!("{err:#}").contains(&persistence_stopped()),
                 "got: {err:#}"
             );
+            std::fs::remove_dir(&path).unwrap();
+            std::fs::rename(&saved, &path).unwrap();
             let (entries, _) =
                 state.queue_message_entries(&Message::assistant("after"), None, now, false);
             let err = state.flush_entries(entries).unwrap_err();
