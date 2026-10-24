@@ -79,7 +79,7 @@ impl ChainBuilder {
         if let Some(uuid) = tip
             && !self.nodes.contains_key(&uuid)
         {
-            warn!("ignoring rewind to unknown message {uuid}");
+            warn!(message_id = %uuid, "ignoring rewind to unknown message");
             return false;
         }
         let leaves = self
@@ -108,7 +108,10 @@ impl ChainBuilder {
         let mut cursor = Some(tip_uuid);
         while let Some(uuid) = cursor {
             let Some(node) = self.nodes.remove(&uuid) else {
-                warn!("session chain walk stopped at missing or revisited message {uuid}");
+                warn!(
+                    message_id = %uuid,
+                    "session chain walk stopped at missing or revisited message"
+                );
                 break;
             };
             messages.push(node.message);

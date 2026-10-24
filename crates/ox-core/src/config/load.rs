@@ -213,7 +213,7 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     for raw in permission.extra_roots.iter().flatten() {
         extra_root(raw).with_context(invalid)?;
     }
-    debug!("loaded config from {}", path.display());
+    debug!(path = %path.display(), "loaded config");
     Ok(Some(table))
 }
 
@@ -304,6 +304,7 @@ mod tests {
     use crate::permission::Mode;
     use crate::permission::defaults::Shipped;
     use crate::util::fs::testing::{symlink_dir, symlink_file};
+    use crate::util::log::testing::LogCapture;
     use crate::util::path::local_testing::abs;
     use crate::util::path::testing::HOME_VAR;
 
@@ -857,10 +858,21 @@ mod tests {
         fn empty_file_sets_nothing() {
             let dir = tempfile::tempdir().unwrap();
             let path = write(&dir.path().join("config.toml"), "");
+            let logs = LogCapture::default();
 
-            let config = read(&Layer::User(path));
+            let config = tracing::dispatcher::with_default(&logs.dispatch(), || {
+                read(&Layer::User(path.clone()))
+            });
+
             assert_eq!(config.client.model, None);
             assert_eq!(config.tui.theme.base, None);
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    ("path".to_owned(), path.display().to_string()),
+                    ("message".to_owned(), "loaded config".to_owned()),
+                ])]
+            );
         }
 
         #[test]

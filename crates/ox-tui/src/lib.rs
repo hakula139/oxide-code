@@ -119,7 +119,7 @@ pub async fn run<S: Debug>(
     let result = tokio::select! {
         result = app.run(&mut tui) => result.map(|()| None),
         signal = shutdown => {
-            debug!("TUI received {signal:?}, tearing down");
+            debug!(?signal, "TUI received shutdown signal, tearing down");
             Ok(Some(signal))
         }
     };
@@ -129,7 +129,7 @@ pub async fn run<S: Debug>(
     // Dropping the app closes the op channel, which the engine reads as `Shutdown`.
     drop(app);
     if let Some(failure) = task.join().await? {
-        warn!("session finish failed: {failure}");
+        warn!(error = %failure, "session finish failed");
     }
 
     result
