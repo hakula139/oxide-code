@@ -114,8 +114,10 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == 'tag' ]]; then
             expected=${GITHUB_REF_NAME#v}
           else
-            expected=$(cargo metadata --no-deps --format-version 1 |
-              jq -r '.packages[] | select(.name == "ox") | .version')
+            expected=$(
+              cargo metadata --no-deps --format-version 1 |
+                jq -r '.packages[] | select(.name == "ox") | .version'
+            )
           fi
           test "$(smoke/ox --version)" = "ox $expected"
 
@@ -125,10 +127,12 @@ jobs:
         run: |
           floor=$(grep -oP 'Linux with glibc \K[0-9.]+(?= or later)' docs/guide/install.md)
           # The loader tolerates a missing weak version, so only `Flags: none` versions are needed.
-          required=$(readelf -V --wide smoke/ox |
-            grep -oP 'Name: GLIBC_\K[0-9.]+(?=\s+Flags: none)' |
-            sort -uV |
-            tail -1)
+          required=$(
+            readelf -V --wide smoke/ox |
+              grep -oP 'Name: GLIBC_\K[0-9.]+(?=\s+Flags: none)' |
+              sort -uV |
+              tail -1
+          )
           test -n "$required"
           echo "ox requires glibc $required, and docs/guide/install.md promises $floor"
           if [[ "$(printf '%s\n' "$required" "$floor" | sort -V | tail -1)" != "$floor" ]]; then
@@ -235,22 +239,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Follow the latest release, or the newest prerelease before the first stable one.
-          latest=$(gh api graphql \
-            -F owner='{owner}' \
-            -F name='{repo}' \
-            -f query="query(\$owner: String!, \$name: String!) {
-              repository(owner: \$owner, name: \$name) {
-                latestRelease { tagName }
-              }
-            }" \
-            --jq '.data.repository.latestRelease.tagName // empty')
+          latest=$(
+            gh api graphql \
+              -F owner='{owner}' \
+              -F name='{repo}' \
+              -f query="query(\$owner: String!, \$name: String!) {
+                repository(owner: \$owner, name: \$name) {
+                  latestRelease { tagName }
+                }
+              }" \
+              --jq '.data.repository.latestRelease.tagName // empty'
+          )
 
           if [[ -z "$latest" ]]; then
-            latest=$(gh release list \
-              --exclude-drafts \
-              --limit 1 \
-              --json tagName \
-              --jq '.[0].tagName // empty')
+            latest=$(
+              gh release list \
+                --exclude-drafts \
+                --limit 1 \
+                --json tagName \
+                --jq '.[0].tagName // empty'
+            )
           fi
 
           if [[ -z "$latest" ]]; then
