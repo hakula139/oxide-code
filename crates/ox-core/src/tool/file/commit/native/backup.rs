@@ -45,7 +45,7 @@ fn transfer(
     external: bool,
     mut emit: impl FnMut(&[u8]) -> io::Result<()>,
 ) -> io::Result<()> {
-    let provider: Vec<_> = ":WofCompressedData:$DATA"
+    let provider: Vec<_> = super::WOF_STREAM
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect();
@@ -220,7 +220,7 @@ impl io::Read for Reader<'_> {
         }
         let capacity = u32::try_from(buffer.len()).map_err(io::Error::other)?;
         let mut count = 0;
-        // BufReader supplies an 8 KiB buffer. The context and output remain live until completion.
+        // BufReader supplies at least 8 KiB. The context and output remain live until completion.
         super::windows_result(unsafe {
             FileSystem::BackupRead(
                 self.0.file.as_raw_handle(),

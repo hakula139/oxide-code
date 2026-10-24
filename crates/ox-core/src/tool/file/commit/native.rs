@@ -817,6 +817,9 @@ fn opened_path(file: &File) -> io::Result<std::path::PathBuf> {
     }
 }
 
+#[cfg(any(windows, test))]
+const WOF_STREAM: &str = ":WofCompressedData:$DATA";
+
 #[cfg(windows)]
 fn streams(file: &File, external: bool) -> io::Result<std::collections::BTreeMap<Vec<u16>, u64>> {
     use std::io::Read as _;
@@ -827,11 +830,7 @@ fn streams(file: &File, external: bool) -> io::Result<std::collections::BTreeMap
     let mut streams = std::collections::BTreeMap::new();
     for name in stream_names(file)? {
         if name == "::$DATA".encode_utf16().collect::<Vec<_>>()
-            || (external
-                && name
-                    == ":WofCompressedData:$DATA"
-                        .encode_utf16()
-                        .collect::<Vec<_>>())
+            || (external && name == WOF_STREAM.encode_utf16().collect::<Vec<_>>())
         {
             continue;
         }
