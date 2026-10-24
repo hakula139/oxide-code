@@ -25,14 +25,14 @@ The per-line caps below go through `truncate_line(line, max_chars)`, which appen
 - **edit / tasks / write**: No output truncation because success messages are tiny.
 - **glob**: `MAX_RESULTS = 100` matches. Footer: `(Showing 100 of N matches. Use a more specific pattern.)`, with the full count in `ToolMetadata::truncated_total` for the view header. A `Could not read:` note lists the paths the walk failed to read, naming at most `MAX_NOTE_PATHS = 10` and counting the rest.
 - **grep**: Per-line cap at `MAX_LINE_CHARS = 500`, per-mode row cap at `DEFAULT_HEAD_LIMIT = 250`, user-overridable. Content mode also stops collecting rows past `MAX_SPILL_BYTES`, the most a spill keeps, so `head_limit: 0` cannot hold every match of a large tree in memory. File-size pre-gate at `MAX_WALK_FILE_SIZE = 1 MiB` for files found by a directory walk, and at `MAX_TRACKED_FILE_SIZE = 10 MiB`, as for `read`, when the search root is one file such as a spill. The notes listing files skipped for size and paths the search failed to read each name at most `MAX_NOTE_PATHS = 10` and count the rest.
-- **read**: Per-line cap at `MAX_LINE_CHARS = 2000`, row cap at `DEFAULT_LINE_LIMIT = 2000`, and a byte budget just under `MAX_OUTPUT_BYTES` so the footer reports the displayed lines. File-size pre-gate at `MAX_TRACKED_FILE_SIZE = 10 MiB`.
+- **read**: Complete rows up to `DEFAULT_LINE_LIMIT = 2000` and a byte budget just under `MAX_OUTPUT_BYTES` so the footer reports the displayed lines. A row larger than the entire budget returns an explicit error when requested. File-size limit at `MAX_TRACKED_FILE_SIZE = 10 MiB`, enforced on the opened regular file and during reading.
 
 ## Design Decisions
 
 1. **Two truncation layers, separated by responsibility.** View-shape stays per-tool because it needs tool-specific knowledge. Byte-budget runs after `Tool::run` as the absolute safety net.
 2. **Head-and-tail strategy.** Keeps the command setup and final outcome, the two slices the model needs most. Tail-only would lose the prompt, and head-only would lose the result.
 3. **Spill the cut output to a session file.** The model gets the head and tail inline, and the marker names a file holding the rest for `read` and `grep` to page through when the middle matters. Keying the directory by session ID beside the session file ties the files to the session, so `/delete` removes them and nothing else needs to clean up. Because `bash` spills as it drains, a command's full output never sits in memory, and a background shell spills each read's window to its own files. Because the cap applies to each file, and so to each call or read, the total is unbounded: a long-running background shell read many times can fill the disk across its files.
-4. **Per-tool line caps.** Read allows 2000 characters per line because Edit needs the exact text of the lines it targets. Grep lists many hits per call and stays at 500.
+4. **Complete Read rows.** Read emits each line in full because Edit needs its exact text and Write needs coverage of every byte. Grep lists many hits per call and caps each line at 500 characters.
 5. **A fixed 1 KiB window for line-boundary cuts.** A cut always moves to the nearest line break, so a wider window drops no more than the partial line, but it lets a partial line of several KiB vanish whole at the cost of up to that much of each end's budget. 1 KiB is under 2% of a 64 KiB end and about 3% of the 32 KiB end left when both `bash` pipes overflow, while longer lines, such as minified code, keep the char cut and stay visible.
 
 ## Sources
@@ -47,6 +47,6 @@ The per-line caps below go through `truncate_line(line, max_chars)`, which appen
 - `crates/ox-core/src/tool/bash/background.rs`: `ShellOutput::take`, the per-read capture of a background shell.
 - `crates/ox-core/src/tool/glob.rs`: `MAX_RESULTS`, `truncated_total` setter.
 - `crates/ox-core/src/tool/grep.rs`: `DEFAULT_HEAD_LIMIT`, `MAX_LINE_CHARS`, `MAX_WALK_FILE_SIZE`, and `Rows`, the content-mode row and byte cap.
-- `crates/ox-core/src/tool/read.rs`: `DEFAULT_LINE_LIMIT`, `MAX_LINE_CHARS`, `OUTPUT_BUDGET`.
+- `crates/ox-core/src/tool/read.rs`: `DEFAULT_LINE_LIMIT`, `OUTPUT_BUDGET`.
 - `crates/ox-core/src/tool/search.rs`: `MAX_NOTE_PATHS`, `push_path_note()`.
 - `crates/ox-core/src/tool/spill.rs`: `run_capped`, `cap_output()`, `MAX_OUTPUT_BYTES`, `LINE_SNAP_BYTES`, `whole_line_head()`, `whole_line_tail()`, `Spill`, `MAX_SPILL_BYTES`, `SPILL_DIR`.

@@ -169,10 +169,7 @@ async fn edit_file(
     }
 
     let file_path = ctx.cwd().join(path);
-    let (_, content_bytes) = super::file::read_validated(&file_path, path, |metadata| {
-        super::file::validate_file_target(path, metadata, FileVerb::Edit)
-    })
-    .await?;
+    let (_, content_bytes) = super::file::read_validated(&file_path, path, FileVerb::Edit).await?;
     let key = super::file::tracker_key(&file_path).await;
     ctx.tracker
         .verify_current_content(&key, &content_bytes, GatePurpose::Edit)

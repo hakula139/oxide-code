@@ -46,6 +46,7 @@ impl Engine {
     }
 
     async fn roll_session(&mut self, sink: &dyn EventSink, old_session: ArchiveState) {
+        super::settle_file_writes(&self.file_tracker).await;
         let git_branch = current_branch(self.cwd()).await;
         let outcome = handle::roll(
             &mut self.session,
@@ -101,6 +102,7 @@ impl Engine {
     /// Finalizes the live session and swaps to the one `target` names. A prefix must match one
     /// saved session other than the live one.
     async fn roll_into(&mut self, target: ResumeTarget) -> Result<RollIntoOutcome> {
+        super::settle_file_writes(&self.file_tracker).await;
         let path = match target {
             ResumeTarget::Path(path) => path,
             ResumeTarget::Prefix(prefix) => {
@@ -112,6 +114,7 @@ impl Engine {
     }
 
     async fn adopt_session(&mut self, sink: &dyn EventSink, transcript: LoadedTranscript) {
+        super::settle_file_writes(&self.file_tracker).await;
         self.shells.stop_all().await;
         let LoadedTranscript {
             messages,
@@ -243,7 +246,8 @@ mod tests {
         MODEL, SESSION_CONTEXT, engine, mount_reply, mount_tool_call_once, request_bodies,
         with_pinned_home,
     };
-    use crate::file_tracker::testing::seed_full_read;
+    use crate::file_tracker::testing::{assert_writes_draining, blocked_write, seed_full_read};
+    use crate::file_tracker::{GateError, GatePurpose};
     use crate::message::Message;
     use crate::model::TokenUsage;
     use crate::permission::rule::Rule;
@@ -293,6 +297,81 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[tokio::test]
+    async fn clear_and_resume_drain_old_writes_before_saving_and_adopting() {
+        with_pinned_home(async {
+            for (name, resume) in [("clear", false), ("resume", true)] {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let old_id = engine.session_id().to_owned();
+                let target_id = finished_session(&store).await;
+                let target = store.find_session_path(&target_id).unwrap();
+                let path = dir.path().join("notes.txt");
+                record_write_call(
+                    &engine.session,
+                    &engine.file_tracker,
+                    "toolu_write",
+                    &path,
+                    true,
+                )
+                .await;
+                let tracker = Arc::clone(&engine.file_tracker);
+                let previous = tracker.snapshot_all();
+                let release = blocked_write(&tracker, &path, b"committed", "toolu_write").await;
+                let sink = CapturingSink::default();
+
+                {
+                    let mut operation: std::pin::Pin<Box<dyn Future<Output = ()>>> = if resume {
+                        Box::pin(engine.resume(&sink, ResumeTarget::Path(target)))
+                    } else {
+                        Box::pin(engine.clear(&sink))
+                    };
+                    assert!(futures::poll!(operation.as_mut()).is_pending(), "{name}");
+                    assert_writes_draining(&tracker);
+                    assert_eq!(std::fs::read(&path).unwrap(), b"alpha", "{name}");
+                    assert_eq!(tracker.snapshot_all(), previous, "{name}");
+                    assert_eq!(sink.events(), [], "{name}");
+                    release.send(()).unwrap();
+                    operation.await;
+                }
+
+                assert_eq!(std::fs::read(&path).unwrap(), b"committed", "{name}");
+                assert_eq!(
+                    store.load_session_data(&old_id).unwrap().file_snapshots,
+                    tracker.snapshot_all(),
+                    "{name}",
+                );
+                assert_eq!(
+                    tracker.verify_current_content(&path, b"committed", GatePurpose::Write),
+                    Ok(()),
+                    "{name}",
+                );
+                assert_eq!(
+                    engine.file_tracker.verify_current_content(
+                        &path,
+                        b"committed",
+                        GatePurpose::Write
+                    ),
+                    Err(GateError::NeverRead {
+                        path,
+                        purpose: GatePurpose::Write
+                    }),
+                    "{name}",
+                );
+                assert!(
+                    sink.events()
+                        .iter()
+                        .any(|event| matches!(event, Event::SessionReady)),
+                    "{name}",
+                );
+                assert_eq!(engine.finalize().await, None, "{name}");
+            }
+        })
+        .await;
     }
 
     #[tokio::test]

@@ -1,14 +1,15 @@
 //! File access for the file tools: target validation, reads checked on the opened file, and writes
 //! that never follow a symlink at the final component.
 
-use std::fs::{File, Metadata, OpenOptions};
+use std::fs::{Metadata, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use strum::Display;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::AsyncWriteExt as _;
 
 use super::ToolCtx;
-use crate::file_tracker::{TrackableFileError, validate_trackable_file};
+use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
+use crate::util::fs::{FileReadError, open_no_follow, read_regular_file, validate_regular_file};
 use crate::util::path::lexical_normalize;
 use crate::util::text::format_size;
 
@@ -42,24 +43,29 @@ pub(super) fn validate_file_target(
     metadata: &Metadata,
     verb: FileVerb,
 ) -> Result<(), String> {
-    match validate_trackable_file(metadata) {
-        Ok(()) => Ok(()),
-        Err(TrackableFileError::Directory) => Err(match verb {
+    validate_regular_file(metadata, MAX_TRACKED_FILE_SIZE)
+        .map_err(|error| file_read_error(path, error, verb))
+}
+
+fn file_read_error(path: &str, error: FileReadError, verb: FileVerb) -> String {
+    match error {
+        FileReadError::Io(error) => format!("Failed to read {path}: {error}"),
+        FileReadError::Directory => match verb {
             FileVerb::Read => {
                 format!("{path} is a directory. Use the glob tool to list directory contents.")
             }
             FileVerb::Edit | FileVerb::Write => {
                 format!("{path} is a directory. Refusing to {verb}.")
             }
-        }),
-        Err(TrackableFileError::NonRegular) => Err(format!(
-            "{path} is not a regular file (fifo, socket, or device). Refusing to {verb}.",
-        )),
-        Err(TrackableFileError::TooLarge { size, max }) => {
+        },
+        FileReadError::NonRegular => {
+            format!("{path} is not a regular file (fifo, socket, or device). Refusing to {verb}.")
+        }
+        FileReadError::TooLarge { size, max } => {
             let (size, max) = (format_size(size), format_size(max));
-            Err(format!(
+            format!(
                 "File is too large ({size}, max {max}). Use the bash tool to {verb} large files.",
-            ))
+            )
         }
     }
 }
@@ -75,30 +81,23 @@ pub(super) fn is_binary(bytes: &[u8]) -> bool {
 
 // ── File Reading ──
 
-/// Reads `path` once `validate` accepts its metadata, checked by path before the open and again on
-/// the opened file, so a file swapped in between cannot skip the check. The open refuses a symlink
-/// at the final component and never blocks on a fifo, as [`open_no_follow`] describes. Errors name
-/// the file as `shown`.
+/// Reads a bounded regular file, checking its metadata before opening and through the opened
+/// no-follow handle. Errors name the file as `shown` and phrase refusals for `verb`.
 pub(super) async fn read_validated(
     path: &Path,
     shown: &str,
-    validate: impl Fn(&Metadata) -> Result<(), String>,
+    verb: FileVerb,
 ) -> Result<(Metadata, Vec<u8>), String> {
     let metadata = tokio::fs::metadata(path)
         .await
         .map_err(|e| format!("Failed to access {shown}: {e}"))?;
-    validate(&metadata)?;
+    validate_file_target(shown, &metadata, verb)?;
 
-    let error = |e: std::io::Error| format!("Failed to read {shown}: {e}");
-    let mut options = OpenOptions::new();
-    options.read(true);
-    let mut file = open_no_follow(path, options).await.map_err(error)?;
-    let metadata = file.metadata().await.map_err(error)?;
-    validate(&metadata)?;
-
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).await.map_err(error)?;
-    Ok((metadata, bytes))
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || read_regular_file(&path, MAX_TRACKED_FILE_SIZE))
+        .await
+        .map_err(|error| format!("Failed to read {shown}: {error}"))?
+        .map_err(|error| file_read_error(shown, error, verb))
 }
 
 // ── File Writing ──
@@ -116,7 +115,9 @@ async fn write_no_follow(path: &Path, bytes: &[u8], mode: WriteMode) -> std::io:
     options
         .write(true)
         .create_new(matches!(mode, WriteMode::CreateNew));
-    let mut file = open_no_follow(path, options).await?;
+    let path = path.to_owned();
+    let file = tokio::task::spawn_blocking(move || open_no_follow(&path, options)).await??;
+    let mut file = tokio::fs::File::from_std(file);
 
     if matches!(mode, WriteMode::Overwrite) {
         file.set_len(0).await?;
@@ -141,76 +142,6 @@ pub(super) async fn write_tracked(
             Ok((tracker_key(&path).await, bytes))
         })
         .await
-}
-
-// ── No-Follow Open ──
-
-/// Opens `path` without following a symlink at the final component, so a link swapped in after the
-/// gate resolved the path cannot redirect the call, and without blocking on a fifo.
-async fn open_no_follow(path: &Path, options: OpenOptions) -> std::io::Result<tokio::fs::File> {
-    let path = path.to_owned();
-    let file =
-        tokio::task::spawn_blocking(move || open_no_follow_blocking(&path, options)).await??;
-    Ok(tokio::fs::File::from_std(file))
-}
-
-#[cfg(unix)]
-pub(super) fn open_no_follow_blocking(
-    path: &Path,
-    mut options: OpenOptions,
-) -> std::io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    use nix::fcntl::OFlag;
-
-    options
-        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
-        .open(path)
-}
-
-/// `FILE_FLAG_OPEN_REPARSE_POINT` opens a reparse point itself, so a symlink or junction there
-/// fails the open as `O_NOFOLLOW` makes it fail on Unix. Any other reparse point, such as a
-/// deduplicated file, reads only through the file system filter the flag bypasses, so it opens
-/// again without the flag and keeps that handle only when it reaches the same file.
-#[cfg(windows)]
-pub(super) fn open_no_follow_blocking(
-    path: &Path,
-    mut options: OpenOptions,
-) -> std::io::Result<File> {
-    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
-
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
-    };
-
-    let file = options
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
-        return Ok(file);
-    }
-    if metadata.file_type().is_symlink() {
-        return Err(std::io::Error::other(
-            "the final path component is a symlink",
-        ));
-    }
-
-    let reopened = options.custom_flags(0).open(path)?;
-    if file_id(&reopened)? == file_id(&file)? {
-        Ok(reopened)
-    } else {
-        Err(std::io::Error::other(
-            "the file changed while it was opened",
-        ))
-    }
-}
-
-/// The volume and file index that identify a file across handles.
-#[cfg(windows)]
-fn file_id(file: &File) -> std::io::Result<(u64, u64)> {
-    let info = winapi_util::file::information(file)?;
-    Ok((info.volume_serial_number(), info.file_index()))
 }
 
 #[cfg(test)]
@@ -273,13 +204,16 @@ mod tests {
             let link = dir.path().join("link.txt");
             symlink_file(&target, &link);
 
-            let accept = |_: &Metadata| Ok(());
-            let (metadata, bytes) = read_validated(&target, "target.txt", accept).await.unwrap();
+            let (metadata, bytes) = read_validated(&target, "target.txt", FileVerb::Read)
+                .await
+                .unwrap();
             assert_eq!(
                 (metadata.len(), bytes.as_slice()),
                 (8, b"original".as_slice())
             );
-            let err = read_validated(&link, "link.txt", accept).await.unwrap_err();
+            let err = read_validated(&link, "link.txt", FileVerb::Read)
+                .await
+                .unwrap_err();
             #[cfg(unix)]
             let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32);
             #[cfg(windows)]
@@ -287,39 +221,24 @@ mod tests {
             assert_eq!(err, format!("Failed to read link.txt: {cause}"));
         }
 
-        #[cfg(unix)]
         #[tokio::test]
-        async fn rechecks_a_file_swapped_after_the_path_check() {
-            // Each swap runs once the path check passes, as a racing writer's would: a larger file
-            // the size limit must catch, then a fifo the open must not block on.
-            fn grow(path: &Path) {
-                let staged = path.with_extension("new");
-                fs::write(&staged, "SECRET=1").unwrap();
-                fs::rename(&staged, path).unwrap();
-            }
-            fn fifo(path: &Path) {
-                fs::remove_file(path).unwrap();
-                nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
-            }
-
+        async fn preserves_each_mutating_tools_size_refusal() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("notes.md");
-            for swap in [grow as fn(&Path), fifo] {
-                fs::write(&path, "ok").unwrap();
-                let swapped = std::cell::Cell::new(false);
-                let validate = |meta: &Metadata| {
-                    if !meta.is_file() || meta.len() > 4 {
-                        return Err("rejected".to_owned());
-                    }
-                    if !swapped.replace(true) {
-                        swap(&path);
-                    }
-                    Ok(())
-                };
-                let err = read_validated(&path, "notes.md", validate)
-                    .await
-                    .unwrap_err();
-                assert_eq!(err, "rejected");
+            fs::File::create(&path)
+                .unwrap()
+                .set_len(MAX_TRACKED_FILE_SIZE + 1)
+                .unwrap();
+
+            for verb in [FileVerb::Read, FileVerb::Edit, FileVerb::Write] {
+                let err = read_validated(&path, "notes.md", verb).await.unwrap_err();
+
+                assert_eq!(
+                    err,
+                    format!(
+                        "File is too large (10.0 MiB, max 10 MiB). Use the bash tool to {verb} large files."
+                    )
+                );
             }
         }
     }
@@ -416,8 +335,9 @@ mod tests {
                 String::from_utf8_lossy(&compact.stdout)
             );
 
-            let accept = |_: &Metadata| Ok(());
-            let (_, bytes) = read_validated(&path, "notes.txt", accept).await.unwrap();
+            let (_, bytes) = read_validated(&path, "notes.txt", FileVerb::Read)
+                .await
+                .unwrap();
             assert_eq!(bytes, content.as_bytes());
             write_no_follow(&path, b"rewritten", WriteMode::Overwrite)
                 .await

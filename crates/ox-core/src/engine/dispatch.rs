@@ -99,6 +99,7 @@ pub(super) async fn run_tool_round(
     inbox: &mut Inbox,
     dispatch_ctx: &mut DispatchContext<'_>,
 ) -> ToolRound {
+    dispatch_ctx.tracker.reopen_writes();
     let mut round = ToolRound {
         results: Vec::with_capacity(tool_uses.len()),
         sidecars: Vec::with_capacity(tool_uses.len()),
@@ -295,6 +296,7 @@ impl<'r> Dispatcher<'r, '_> {
                     for cancel in &cancels {
                         cancel.cancel();
                     }
+                    super::settle_file_writes(&self.dispatch_ctx.tracker).await;
                     for call in started.iter_mut().filter(|call| call.output.is_none()) {
                         call.output = Some(ToolOutput::error(INTERRUPTED));
                     }

@@ -1,11 +1,124 @@
-//! Filesystem helpers for persisting private state (0700 dirs, 0600 files).
+//! Bounded regular-file access and private-state persistence (0700 dirs, 0600 files).
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write as _};
+use std::fs::{self, File, Metadata, OpenOptions};
+use std::io::{self, Read, Write as _};
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use tempfile::Builder;
+
+// ── Regular File Reading ──
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FileReadError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("not a regular file: directory")]
+    Directory,
+    #[error("not a regular file")]
+    NonRegular,
+    #[error("too large to read ({size} bytes, max {max} bytes)")]
+    TooLarge { size: u64, max: u64 },
+}
+
+/// Reads a regular file through a no-follow handle, consuming at most `limit + 1` bytes and
+/// rejecting overflow even if the file grew after its metadata was checked.
+pub(crate) fn read_regular_file(
+    path: &Path,
+    limit: u64,
+) -> Result<(Metadata, Vec<u8>), FileReadError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    let file = open_no_follow(path, options)?;
+    let metadata = file.metadata()?;
+    let bytes = read_regular_contents(file, &metadata, limit)?;
+    Ok((metadata, bytes))
+}
+
+fn read_regular_contents(
+    reader: impl Read,
+    metadata: &Metadata,
+    limit: u64,
+) -> Result<Vec<u8>, FileReadError> {
+    validate_regular_file(metadata, limit)?;
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    let size = bytes.len() as u64;
+    if size > limit {
+        return Err(FileReadError::TooLarge { size, max: limit });
+    }
+    Ok(bytes)
+}
+
+/// Checks that `metadata` names a regular file within `limit` bytes.
+pub(crate) fn validate_regular_file(metadata: &Metadata, limit: u64) -> Result<(), FileReadError> {
+    if metadata.is_dir() {
+        return Err(FileReadError::Directory);
+    }
+    if !metadata.is_file() {
+        return Err(FileReadError::NonRegular);
+    }
+    let size = metadata.len();
+    if size > limit {
+        return Err(FileReadError::TooLarge { size, max: limit });
+    }
+    Ok(())
+}
+
+// ── No-Follow Open ──
+
+/// Opens `path` without following a final symlink or blocking on a FIFO.
+#[cfg(unix)]
+pub(crate) fn open_no_follow(path: &Path, mut options: OpenOptions) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    use nix::fcntl::OFlag;
+
+    options
+        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
+        .open(path)
+}
+
+/// `FILE_FLAG_OPEN_REPARSE_POINT` opens a reparse point itself, so a symlink or junction there
+/// fails the open as `O_NOFOLLOW` makes it fail on Unix. Other reparse points need their file
+/// system filter, so a second open keeps its handle only when it reaches the same file.
+#[cfg(windows)]
+pub(crate) fn open_no_follow(path: &Path, mut options: OpenOptions) -> io::Result<File> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    let file = options
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+        return Ok(file);
+    }
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::other("the final path component is a symlink"));
+    }
+
+    let reopened = options.custom_flags(0).open(path)?;
+    if file_id(&reopened)? == file_id(&file)? {
+        Ok(reopened)
+    } else {
+        Err(io::Error::other("the file changed while it was opened"))
+    }
+}
+
+/// The volume and file index that identify a file across handles.
+#[cfg(windows)]
+fn file_id(file: &File) -> io::Result<(u64, u64)> {
+    let info = winapi_util::file::information(file)?;
+    Ok((info.volume_serial_number(), info.file_index()))
+}
+
+// ── Private State ──
 
 /// Creates `path` and its missing parents with `0700` perms on Unix, also tightening an existing
 /// `path` to `0700` when permitted.
@@ -202,6 +315,261 @@ mod tests {
     #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    mod file_read_error {
+        use super::*;
+
+        #[test]
+        fn describes_io_type_and_size_failures() {
+            let cases = [
+                (
+                    "io",
+                    FileReadError::Io(io::Error::other("fixture failure")),
+                    "fixture failure",
+                ),
+                (
+                    "directory",
+                    FileReadError::Directory,
+                    "not a regular file: directory",
+                ),
+                (
+                    "non-regular",
+                    FileReadError::NonRegular,
+                    "not a regular file",
+                ),
+                (
+                    "size limit",
+                    FileReadError::TooLarge { size: 9, max: 8 },
+                    "too large to read (9 bytes, max 8 bytes)",
+                ),
+            ];
+
+            for (name, error, expected) in cases {
+                assert_eq!(error.to_string(), expected, "{name}");
+            }
+        }
+    }
+
+    mod read_regular_file {
+        use super::*;
+        use crate::util::fs::testing::symlink_file;
+
+        #[test]
+        fn reads_empty_and_exact_limit_files() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("notes.txt");
+            let cases = [
+                ("empty", b"".as_slice(), 0),
+                ("at limit", b"bounded".as_slice(), 7),
+            ];
+
+            for (name, content, limit) in cases {
+                fs::write(&path, content).unwrap();
+
+                let (metadata, bytes) = read_regular_file(&path, limit).unwrap();
+
+                assert_eq!(metadata.len(), content.len() as u64, "{name}");
+                assert_eq!(bytes, content, "{name}");
+            }
+        }
+
+        #[test]
+        fn rejects_a_file_above_the_requested_limit() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("notes.txt");
+            fs::write(&path, b"too large").unwrap();
+
+            let error = read_regular_file(&path, 8).unwrap_err();
+
+            assert!(matches!(error, FileReadError::TooLarge { size: 9, max: 8 }));
+        }
+
+        #[test]
+        fn preserves_a_missing_files_io_error() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("missing.txt");
+
+            let error = read_regular_file(&path, 8).unwrap_err();
+
+            assert!(
+                matches!(error, FileReadError::Io(ref error) if error.kind() == io::ErrorKind::NotFound)
+            );
+        }
+
+        #[test]
+        fn refuses_a_final_symlink() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("target.txt");
+            let link = dir.path().join("link.txt");
+            fs::write(&target, b"original").unwrap();
+            symlink_file(&target, &link);
+
+            let error = read_regular_file(&link, 8).unwrap_err();
+
+            assert!(matches!(error, FileReadError::Io(_)));
+            #[cfg(unix)]
+            let expected =
+                io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32).to_string();
+            #[cfg(windows)]
+            let expected = "the final path component is a symlink";
+            assert_eq!(error.to_string(), expected);
+            assert_eq!(fs::read(&target).unwrap(), b"original");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn refuses_a_fifo_without_waiting_for_a_writer() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("pipe");
+            nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+            std::thread::spawn(move || {
+                done_tx.send(read_regular_file(&path, 8)).unwrap();
+            });
+            let result = done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+
+            assert!(matches!(result, Err(FileReadError::NonRegular)));
+        }
+    }
+
+    mod read_regular_contents {
+        use super::*;
+
+        struct Counted<R> {
+            reader: R,
+            consumed: usize,
+        }
+
+        impl<R: Read> Read for Counted<R> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let count = self.reader.read(buffer)?;
+                self.consumed += count;
+                Ok(count)
+            }
+        }
+
+        #[test]
+        fn stops_after_one_extra_byte_when_a_file_grows_after_metadata() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("growing.txt");
+            fs::write(&path, b"old").unwrap();
+            let file = File::open(&path).unwrap();
+            let metadata = file.metadata().unwrap();
+            let mut counted = Counted {
+                reader: file,
+                consumed: 0,
+            };
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b" plus newly appended bytes")
+                .unwrap();
+
+            let error = read_regular_contents(&mut counted, &metadata, 8).unwrap_err();
+
+            assert_eq!(metadata.len(), 3);
+            assert_eq!(counted.consumed, 9);
+            assert!(matches!(error, FileReadError::TooLarge { size: 9, max: 8 }));
+            assert_eq!(fs::read(&path).unwrap(), b"old plus newly appended bytes");
+        }
+
+        #[test]
+        fn rejects_oversized_metadata_before_consuming_bytes() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("notes.txt");
+            fs::write(&path, b"too large").unwrap();
+            let file = File::open(&path).unwrap();
+            let metadata = file.metadata().unwrap();
+            let mut counted = Counted {
+                reader: file,
+                consumed: 0,
+            };
+
+            let error = read_regular_contents(&mut counted, &metadata, 8).unwrap_err();
+
+            assert_eq!(counted.consumed, 0);
+            assert!(matches!(error, FileReadError::TooLarge { size: 9, max: 8 }));
+        }
+
+        #[test]
+        fn preserves_an_error_during_consumption() {
+            struct FailedReader;
+
+            impl Read for FailedReader {
+                fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "fixture read failure",
+                    ))
+                }
+            }
+
+            let file = tempfile::tempfile().unwrap();
+            let metadata = file.metadata().unwrap();
+
+            let error = read_regular_contents(FailedReader, &metadata, 8).unwrap_err();
+
+            assert!(
+                matches!(error, FileReadError::Io(ref error) if error.kind() == io::ErrorKind::PermissionDenied)
+            );
+            assert_eq!(error.to_string(), "fixture read failure");
+        }
+    }
+
+    mod validate_regular_file {
+        use super::*;
+
+        #[test]
+        fn validates_regular_files_size_and_directories() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("notes.txt");
+            fs::write(&path, b"bounded").unwrap();
+            let cases = [
+                ("at limit", path.as_path(), 7, Ok(())),
+                (
+                    "above limit",
+                    path.as_path(),
+                    6,
+                    Err("too large to read (7 bytes, max 6 bytes)"),
+                ),
+                (
+                    "directory",
+                    dir.path(),
+                    8,
+                    Err("not a regular file: directory"),
+                ),
+            ];
+
+            for (name, path, limit, expected) in cases {
+                let metadata = fs::metadata(path).unwrap();
+
+                let result = validate_regular_file(&metadata, limit);
+
+                assert_eq!(
+                    result.map_err(|error| error.to_string()),
+                    expected.map_err(str::to_owned),
+                    "{name}"
+                );
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn refuses_socket_metadata() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("socket");
+            let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            let metadata = fs::metadata(&path).unwrap();
+
+            let result = validate_regular_file(&metadata, 8);
+
+            assert!(matches!(result, Err(FileReadError::NonRegular)));
+        }
     }
 
     mod create_private_dir_all {
