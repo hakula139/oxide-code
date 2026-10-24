@@ -6,7 +6,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::file::{FileVerb, WriteMode};
+use super::file::FileVerb;
 use super::view::{
     ApprovalBody, ApprovalPreview, DiffChunk, EditDiff, NumberedLine, ToolResultView,
 };
@@ -181,7 +181,11 @@ async fn edit_file(
         new_string: new_string.to_owned(),
         replace_all,
     };
-    let (updated, edited) = super::run_blocking(move || replacement.apply(content_bytes)).await?;
+    let (expected, updated, edited) = super::run_blocking(move || {
+        let (updated, edited) = replacement.apply(&content_bytes)?;
+        Ok((content_bytes, updated, edited))
+    })
+    .await?;
 
     ctx.tracker
         .write_and_record(
@@ -190,7 +194,7 @@ async fn edit_file(
                 file_path,
                 path.to_owned(),
                 updated.into_bytes(),
-                WriteMode::Overwrite,
+                Some(expected),
             ),
         )
         .await
@@ -217,13 +221,13 @@ struct Replacement {
 
 impl Replacement {
     /// The file's updated text and what changed, given its current `content`.
-    fn apply(&self, content: Vec<u8>) -> Result<(String, Edited), String> {
+    fn apply(&self, content: &[u8]) -> Result<(String, Edited), String> {
         let path = &self.path;
         let content =
-            String::from_utf8(content).map_err(|e| format!("Failed to read {path}: {e}"))?;
+            std::str::from_utf8(content).map_err(|e| format!("Failed to read {path}: {e}"))?;
 
-        let eol = dominant_eol(&content);
-        let content = normalize_eol(&content);
+        let eol = dominant_eol(content);
+        let content = normalize_eol(content);
         let old_string = normalize_eol(&self.old_string);
         let new_string = normalize_eol(&self.new_string);
 
@@ -624,6 +628,26 @@ mod tests {
 
     mod edit_file {
         use super::*;
+
+        #[tokio::test]
+        async fn a_hard_link_refusal_keeps_content_and_tracker_unchanged() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("original.txt");
+            let alias = dir.path().join("alias.txt");
+            fs::write(&path, "original").unwrap();
+            fs::hard_link(&path, &alias).unwrap();
+            let ctx = seeded_ctx(&path);
+            let before = ctx.tracker.snapshot_all();
+
+            let error = edit_file(path.to_str().unwrap(), "original", "changed", false, &ctx)
+                .await
+                .unwrap_err();
+
+            assert!(error.contains("hard links"), "{error}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+            assert_eq!(fs::read_to_string(&alias).unwrap(), "original");
+            assert_eq!(ctx.tracker.snapshot_all(), before);
+        }
 
         #[tokio::test]
         async fn replaces_unique_string() {

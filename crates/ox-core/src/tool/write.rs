@@ -146,10 +146,12 @@ where
         Err(e) => return Err(format!("Failed to access {path}: {e}")),
     };
 
-    if let Some(meta) = &pre_meta {
+    let expected = if let Some(meta) = &pre_meta {
         validate_write_target(path, meta)?;
-        check_gate(&file_path, path, &ctx.tracker).await?;
-    }
+        Some(check_gate(&file_path, path, &ctx.tracker).await?)
+    } else {
+        None
+    };
 
     let mode = if pre_meta.is_some() {
         WriteMode::Overwrite
@@ -165,7 +167,7 @@ where
                     .await
                     .with_context(|| format!("Failed to create directory {}", parent.display()))?;
             }
-            super::file::write_file(file_path, shown, bytes, mode).await
+            super::file::write_file(file_path, shown, bytes, expected).await
         })
         .await
         .map_err(|error| format!("{error:#}"))?;
@@ -183,7 +185,7 @@ fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(),
     super::file::validate_file_target(path, metadata, FileVerb::Write)
 }
 
-async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<(), String> {
+async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<Vec<u8>, String> {
     let bytes = read_target(path, shown).await?;
     tracker
         .verify_current_content(
@@ -191,7 +193,8 @@ async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<(
             &bytes,
             GatePurpose::Write,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 
 /// Reads the existing target `path`, spelled `shown`. The no-follow open refuses a symlink, and
@@ -476,6 +479,28 @@ mod tests {
 
             assert_eq!(mode, WriteMode::Overwrite);
             assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
+        }
+
+        #[tokio::test]
+        async fn a_change_after_the_gate_keeps_the_tracker_unchanged() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("existing.txt");
+            fs::write(&path, "original").unwrap();
+            let ctx = temp_ctx();
+            seed_full_read(&ctx.tracker, &path);
+            let before = ctx.tracker.snapshot_all();
+            let changed = path.clone();
+
+            let error =
+                write_file_with_parent(path.to_str().unwrap(), "ours", &ctx, |_| async move {
+                    fs::write(changed, "theirs")
+                })
+                .await
+                .unwrap_err();
+
+            assert!(error.contains("the file changed"), "{error}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
+            assert_eq!(ctx.tracker.snapshot_all(), before);
         }
 
         #[tokio::test]

@@ -1,15 +1,16 @@
 //! File access for the file tools: target validation, reads checked on the opened file, and writes
 //! that never follow a symlink at the final component.
 
-use std::fs::{Metadata, OpenOptions};
+mod commit;
+
+use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use strum::Display;
-use tokio::io::AsyncWriteExt as _;
 
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
-use crate::util::fs::{FileReadError, open_no_follow, read_regular_file, validate_regular_file};
+use crate::util::fs::{FileReadError, read_regular_file, validate_regular_file};
 use crate::util::path::lexical_normalize;
 use crate::util::text::format_size;
 
@@ -108,36 +109,28 @@ pub(super) enum WriteMode {
     Overwrite,
 }
 
-/// Writes `bytes` through [`open_no_follow`], refusing existing entries in `CreateNew` mode and
-/// truncating only after a successful open in `Overwrite` mode.
-async fn write_no_follow(path: &Path, bytes: &[u8], mode: WriteMode) -> std::io::Result<()> {
-    let mut options = OpenOptions::new();
-    options
-        .write(true)
-        .create_new(matches!(mode, WriteMode::CreateNew));
-    let path = path.to_owned();
-    let file = tokio::task::spawn_blocking(move || open_no_follow(&path, options)).await??;
-    let mut file = tokio::fs::File::from_std(file);
-
-    if matches!(mode, WriteMode::Overwrite) {
-        file.set_len(0).await?;
-    }
-    file.write_all(bytes).await?;
-    file.flush().await
-}
-
-/// Writes `bytes` through [`write_no_follow`] and returns them with the path's [`tracker_key`].
-/// The caller must run this inside the tracker's owned write operation.
+/// Atomically publishes `bytes` after checking the original `expected` bytes and metadata.
+/// `None` requires a new path. The caller must use the tracker's owned write operation.
 pub(super) async fn write_file(
     path: PathBuf,
     shown: String,
     bytes: Vec<u8>,
-    mode: WriteMode,
+    expected: Option<Vec<u8>>,
 ) -> anyhow::Result<(PathBuf, Vec<u8>)> {
-    write_no_follow(&path, &bytes, mode)
-        .await
-        .with_context(|| format!("Failed to write {shown}"))?;
-    Ok((tracker_key(&path).await, bytes))
+    let key = if expected.is_none() {
+        let parent = path.parent().context("the file has no parent")?;
+        let name = path.file_name().context("the file has no name")?;
+        let parent = tokio::fs::canonicalize(parent).await?;
+        dunce::simplified(&parent).join(name)
+    } else {
+        tracker_key(&path).await
+    };
+    tokio::task::spawn_blocking(move || {
+        commit::write(&path, &bytes, expected.as_deref())
+            .with_context(|| format!("Failed to write {shown}"))?;
+        Ok((key, bytes))
+    })
+    .await?
 }
 
 #[cfg(test)]
@@ -239,23 +232,21 @@ mod tests {
         }
     }
 
-    mod write_no_follow {
+    mod atomic_write {
         use super::*;
 
-        #[tokio::test]
-        async fn overwrite_truncates_a_regular_file() {
+        #[test]
+        fn overwrite_replaces_a_regular_file() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("file.txt");
             fs::write(&path, "a much longer original").unwrap();
 
-            write_no_follow(&path, b"short", WriteMode::Overwrite)
-                .await
-                .unwrap();
+            commit::write(&path, b"short", Some(b"a much longer original")).unwrap();
             assert_eq!(fs::read_to_string(&path).unwrap(), "short");
         }
 
-        #[tokio::test]
-        async fn create_new_refuses_existing_entries_and_dangling_links() {
+        #[test]
+        fn create_new_refuses_existing_entries_and_dangling_links() {
             let dir = tempfile::tempdir().unwrap();
             let existing = dir.path().join("existing.txt");
             fs::write(&existing, "original").unwrap();
@@ -263,31 +254,21 @@ mod tests {
             let link = dir.path().join("link.txt");
             symlink_file(&target, &link);
 
-            assert!(
-                write_no_follow(&existing, b"x", WriteMode::CreateNew)
-                    .await
-                    .is_err()
-            );
+            assert!(commit::write(&existing, b"x", None).is_err());
             assert_eq!(fs::read_to_string(&existing).unwrap(), "original");
-            assert!(
-                write_no_follow(&link, b"x", WriteMode::CreateNew)
-                    .await
-                    .is_err()
-            );
+            assert!(commit::write(&link, b"x", None).is_err());
             assert!(!target.exists(), "the link target must not be created");
         }
 
-        #[tokio::test]
-        async fn overwrite_refuses_a_symlink() {
+        #[test]
+        fn overwrite_refuses_a_symlink() {
             let dir = tempfile::tempdir().unwrap();
             let target = dir.path().join("target.txt");
             fs::write(&target, "original").unwrap();
             let link = dir.path().join("link.txt");
             symlink_file(&target, &link);
 
-            let err = write_no_follow(&link, b"x", WriteMode::Overwrite)
-                .await
-                .unwrap_err();
+            let err = commit::write(&link, b"x", Some(b"original")).unwrap_err();
             #[cfg(unix)]
             assert_eq!(err.raw_os_error(), Some(nix::errno::Errno::ELOOP as i32));
             #[cfg(windows)]
@@ -302,7 +283,7 @@ mod tests {
             let fifo = dir.path().join("pipe");
             nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
 
-            let write = write_no_follow(&fifo, b"x", WriteMode::Overwrite);
+            let write = write_file(fifo, "pipe".to_owned(), b"x".to_vec(), Some(Vec::new()));
             let result = tokio::time::timeout(std::time::Duration::from_secs(5), write).await;
             assert!(result.expect("the open must not block").is_err());
         }
@@ -335,9 +316,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(bytes, content.as_bytes());
-            write_no_follow(&path, b"rewritten", WriteMode::Overwrite)
-                .await
-                .unwrap();
+            commit::write(&path, b"rewritten", Some(content.as_bytes())).unwrap();
             assert_eq!(fs::read(&path).unwrap(), b"rewritten");
         }
     }
