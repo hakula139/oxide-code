@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::pin::pin;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader, Lines};
 
 use ox_core::command::{self, Parsed};
@@ -16,15 +16,15 @@ use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::text::escape_hidden;
 
-use super::stdio::{Approver, StdioSink, render_op, render_queued};
+use super::stdio::{Approver, Renderer, StdioSink, render_op, render_queued};
 use super::{Exit, Shutdown, shutdown_signal};
 
 /// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session.
-/// EOF after an operation failed or a command was rejected exits with failure. An attended `engine`
-/// asks its approvals on stdin, while an unattended one asks none, so a piped line is never taken
-/// as an answer. In an attended run, SIGINT interrupts the running operation or discards the line
-/// at the prompt, as shells do. Every other signal ends the run. `first`, when given, runs as the
-/// first input line.
+/// EOF after an operation failed, a command was rejected, or output failed exits with failure. An
+/// attended `engine` asks its approvals on stdin, while an unattended one asks none, so a piped line
+/// is never taken as an answer. In an attended run, SIGINT interrupts the running operation or
+/// discards the line at the prompt, as shells do. Every other signal ends the run. `first`, when
+/// given, runs as the first input line.
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,
@@ -58,12 +58,13 @@ where
     R: AsyncBufRead + Unpin,
 {
     let mut lines = input.lines();
+    let mut renderer = Renderer::new(sink);
     let mut stopped = None;
     let mut failed = false;
 
     let result: Result<()> = async {
         'repl: loop {
-            render_queued(&mut handle.events, sink);
+            render_queued(&mut handle.events, &mut renderer);
             let line = if let Some(line) = first.take() {
                 line
             } else {
@@ -93,7 +94,7 @@ where
                 Some(parsed) => match command_op(&parsed, project_root) {
                     Ok(op) => op,
                     Err(message) => {
-                        sink.emit(Event::Error(message), "slash-command-rejected");
+                        renderer.render(Event::Error(message));
                         failed = true;
                         continue;
                     }
@@ -110,22 +111,22 @@ where
                 lines: &mut lines,
                 out: io::stderr(),
             };
-            let mut rendered = pin!(render_op(
+            let mut operation = pin!(render_op(
                 &mut handle.events,
-                sink,
+                &mut renderer,
                 &handle.ops,
                 &op,
                 attended.then_some(&mut prompter)
             ));
             let end = loop {
                 tokio::select! {
-                    end = &mut rendered => break end,
+                    end = &mut operation => break end,
                     caught = signal() => {
                         if !(attended && caught == Shutdown::Interrupt) {
                             stopped = Some(caught);
                             break 'repl;
                         }
-                        // A send fails only once the engine has stopped, which `rendered` reports.
+                        // A send fails only once the engine has stopped, which `operation` reports.
                         _ = handle.ops.send(Op::Interrupt).await;
                     }
                 }
@@ -141,13 +142,13 @@ where
     .await;
 
     let failure = handle.shutdown().await?;
-    sink.session_write_error(failure.as_deref());
+    renderer.session_write_error(failure.as_deref());
     result?;
-    Ok(match stopped {
-        Some(signal) => Exit::Signal(signal),
-        None if failed => Exit::Failure,
-        None => Exit::Success,
-    })
+    if let Some(signal) = stopped {
+        return Ok(Exit::Signal(signal));
+    }
+    renderer.finish().context("failed to print output")?;
+    Ok(if failed { Exit::Failure } else { Exit::Success })
 }
 
 /// The op a slash command runs in the REPL at `project_root`, or the message saying why it cannot
@@ -286,6 +287,7 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use indoc::{formatdoc, indoc};
     use wiremock::matchers::{method, path};
@@ -452,6 +454,87 @@ mod tests {
                     3,
                     "the failed prompt, the literal, and its reply are saved",
                 );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn reports_a_lost_reply_after_later_output_succeeds_and_the_session_is_saved() {
+            #[derive(Default)]
+            struct LostToken {
+                events: CapturingSink,
+                failed: AtomicBool,
+            }
+
+            impl EventSink for LostToken {
+                fn send(&self, event: Event) -> Result<()> {
+                    if matches!(event, Event::StreamToken(_))
+                        && !self.failed.swap(true, Ordering::Relaxed)
+                    {
+                        bail!("lost reply token");
+                    }
+                    self.events.send(event)
+                }
+            }
+
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let session_id = engine.session_id().to_owned();
+                let sink = LostToken::default();
+                let input: &[u8] = b"first\nsecond\n";
+
+                let result = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &sink,
+                    None,
+                    input,
+                    true,
+                    no_signal,
+                ))
+                .await;
+                assert_eq!(
+                    format!("{:#}", result.unwrap_err()),
+                    "failed to print output: lost reply token",
+                );
+
+                let replies: Vec<String> = sink
+                    .events
+                    .events()
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::StreamToken(text) => Some(text),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(replies, ["reply"]);
+                let transcript =
+                    fs::read_to_string(store.find_session_path(&session_id).unwrap()).unwrap();
+                let messages: Vec<serde_json::Value> = transcript
+                    .lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .filter(|entry| entry["type"] == "message")
+                    .map(|entry| entry["message"].clone())
+                    .collect();
+                let expected: Vec<serde_json::Value> = [
+                    ("user", "first"),
+                    ("assistant", "reply"),
+                    ("user", "second"),
+                    ("assistant", "reply"),
+                ]
+                .into_iter()
+                .map(|(role, text)| {
+                    serde_json::json!({
+                        "role": role,
+                        "content": [{"type": "text", "text": text}],
+                    })
+                })
+                .collect();
+                assert_eq!(messages, expected);
             })
             .await;
         }
