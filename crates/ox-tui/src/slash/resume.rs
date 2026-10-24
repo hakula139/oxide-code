@@ -829,8 +829,9 @@ mod tests {
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
     use super::*;
     use crate::modal::ModalStack;
+    use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::modal::chrome::HINT_SEPARATOR;
-    use crate::modal::testing::{render_rows, rendered_text};
+    use crate::modal::testing::{render_rows, render_rows_with, rendered_text};
     use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::make_read_only;
 
@@ -1906,8 +1907,8 @@ mod tests {
             assert!(matches!(outcome, ModalKey::Consumed));
         }
 
-        #[test]
-        fn ctrl_d_then_y_deletes_the_cursor_session_through_the_modal_stack() {
+        #[tokio::test(start_paused = true)]
+        async fn ctrl_d_then_y_deletes_the_cursor_session_through_the_modal_stack() {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
             let picker = opened(ResumePicker::new(
@@ -1919,9 +1920,12 @@ mod tests {
             let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
 
             let pushed = stack.handle_key(&ctrl_d);
+            assert!(pushed.is_none(), "{pushed:?}");
+            render_rows_with(60, 7, |frame, area, theme| stack.render(frame, area, theme));
+            tokio::time::advance(TYPE_AHEAD_GUARD).await;
+
             let deleted = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
 
-            assert!(pushed.is_none(), "{pushed:?}");
             assert!(
                 matches!(
                     &deleted,

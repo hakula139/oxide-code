@@ -3,7 +3,6 @@
 //! `Deny`, `DenyWithFeedback` with typed text, or `Abort`.
 
 use std::cell::{Cell, RefCell};
-use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -17,12 +16,13 @@ use ox_core::protocol::{ApprovalDecision, Op};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview, DiffChunk};
 use ox_core::util::text::{is_hidden, truncate_to_width};
 
+use super::acceptance::Acceptance;
 use super::line_editor::LineEditor;
 use super::{Modal, ModalAction, ModalKey};
 use crate::action::Action;
+use crate::saturating_u16;
 use crate::theme::Theme;
 use crate::wrap::{expand_tabs, wrap_line};
-use crate::{now, saturating_u16};
 
 // ── Constants ──
 
@@ -49,10 +49,6 @@ const CONTINUATION_INDENT: usize = 2;
 /// Stands in for each character of a whitespace run a plain space would misrepresent.
 const WHITESPACE_MARKER: char = '·';
 
-/// Quiet period before the modal answers keys. Keys inside it drop and restart it, since a burst of
-/// them was typed or pasted for the input the modal covers.
-const TYPE_AHEAD_GUARD: Duration = Duration::from_millis(300);
-
 // ── ApprovalModal ──
 
 /// Approve-or-deny overlay for a gated tool call. Holds the tool-use `id` so the emitted decision
@@ -74,8 +70,7 @@ pub(crate) struct ApprovalModal {
     view: Cell<View>,
     /// Reused across frames so a large preview is wrapped once per width and palette.
     wrapped: RefCell<Option<Wrapped>>,
-    /// End of the current [`TYPE_AHEAD_GUARD`] window.
-    guard_until: Instant,
+    acceptance: Acceptance,
 }
 
 /// Viewport geometry from the last render.
@@ -83,12 +78,6 @@ pub(crate) struct ApprovalModal {
 struct View {
     rows: usize,
     max_scroll: usize,
-    /// Whether the first body row fit the area. Approval waits for it, so a cramped layout can't
-    /// approve a call the user never saw.
-    body_shown: bool,
-    /// Whether the whole edit step, through the footer, fit the area. Enter waits for it, so a
-    /// cramped layout can't submit an answer the user never saw.
-    editor_shown: bool,
 }
 
 /// An open one-line editor and what its Enter submits.
@@ -196,13 +185,13 @@ impl ApprovalModal {
             scroll: 0,
             view: Cell::default(),
             wrapped: RefCell::default(),
-            guard_until: now() + TYPE_AHEAD_GUARD,
+            acceptance: Acceptance::default(),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn expire_guard(&mut self) {
-        self.guard_until = now();
+        self.acceptance.expire();
     }
 
     fn decision(&self, decision: ApprovalDecision) -> ModalAction {
@@ -271,15 +260,15 @@ impl ApprovalModal {
             editor: LineEditor::new(text),
             error: None,
         });
-        self.guard_until = now() + TYPE_AHEAD_GUARD;
+        self.acceptance.reset();
         ModalKey::Consumed
     }
 
     /// Routes `event` to the open editor, or returns `None` when none is open.
     fn handle_edit_key(&mut self, event: &KeyEvent) -> Option<ModalKey> {
         let scroll = self.line_scroll(event.code);
-        let ready = now() >= self.guard_until && self.view.get().editor_shown;
         let edit = self.edit.as_mut()?;
+        let ready = event.code == KeyCode::Enter && self.acceptance.accepts(event);
         if let Some(delta) = scroll {
             return Some(self.scroll_by(delta));
         }
@@ -290,6 +279,7 @@ impl ApprovalModal {
                 if let Some(Purpose::Rule(offer)) = purpose {
                     self.grant = Some(offer);
                 }
+                self.acceptance.reset();
                 ModalKey::Consumed
             }
             EditStep::Submit(decision) => ModalKey::Submitted(self.decision(decision)),
@@ -337,7 +327,7 @@ impl ApprovalModal {
             scroll,
             rows,
             total,
-            body_shown: wrapped.heading.len() + 1 < usize::from(area.height),
+            body_shown: area.width > 0 && wrapped.heading.len() + 1 < usize::from(area.height),
         }
     }
 
@@ -347,10 +337,6 @@ impl ApprovalModal {
             (None, Some(_)) => GRANT_FOOTER_HINT,
             (None, None) => FOOTER_HINT,
         }
-    }
-
-    fn body_visible(&self) -> bool {
-        self.body.is_empty() || self.view.get().body_shown
     }
 
     fn page(&self) -> isize {
@@ -407,12 +393,15 @@ impl Modal for ApprovalModal {
             truncate_to_width(self.footer_hint(), budget),
             theme.dim(),
         )));
-        let editor_shown = edit.is_some() && lines.len() <= usize::from(area.height);
-        self.view.set(View {
-            rows,
-            max_scroll,
-            body_shown,
-            editor_shown,
+        let editor_shown =
+            area.width > 0 && edit.is_some() && lines.len() <= usize::from(area.height);
+        self.view.set(View { rows, max_scroll });
+        self.acceptance.update(if edit.is_some() {
+            editor_shown
+        } else if self.body.is_empty() {
+            !area.is_empty()
+        } else {
+            body_shown
         });
 
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
@@ -426,9 +415,7 @@ impl Modal for ApprovalModal {
         if let Some(outcome) = self.handle_edit_key(event) {
             return outcome;
         }
-        let now = now();
-        if now < self.guard_until {
-            self.guard_until = now + TYPE_AHEAD_GUARD;
+        if self.acceptance.guard() {
             return ModalKey::Consumed;
         }
         if let Some(delta) = self.line_scroll(event.code) {
@@ -436,10 +423,10 @@ impl Modal for ApprovalModal {
         }
         // Esc and Ctrl+C are intercepted at the stack level and resolve through `on_cancel`.
         match event.code {
-            KeyCode::Char('y' | 'Y') if self.body_visible() => {
+            KeyCode::Char('y' | 'Y') if self.acceptance.accepts(event) => {
                 ModalKey::Submitted(self.decision(ApprovalDecision::Approve))
             }
-            KeyCode::Char('a' | 'A') if self.body_visible() => match self.grant.take() {
+            KeyCode::Char('a' | 'A') if self.acceptance.accepts(event) => match self.grant.take() {
                 Some(offer) => {
                     let pattern = offer.suggested().pattern().to_owned();
                     self.start_edit(Purpose::Rule(offer), &pattern)
@@ -473,7 +460,7 @@ impl Modal for ApprovalModal {
     /// Takes every key while the type-ahead guard is armed, so a modified key typed into the input
     /// restarts it too.
     fn binds_modified_key(&self, event: &KeyEvent) -> bool {
-        now() < self.guard_until || self.edit.is_some() && LineEditor::binds_modified_key(event)
+        self.acceptance.is_guarded() || self.edit.is_some() && LineEditor::binds_modified_key(event)
     }
 }
 
@@ -619,6 +606,8 @@ fn flush(spans: &mut Vec<Span<'static>>, plain: &mut String, style: Style) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crossterm::event::KeyModifiers;
     use indoc::{formatdoc, indoc};
     use ratatui::Terminal;
@@ -631,6 +620,7 @@ mod tests {
 
     use super::*;
     use crate::modal::ModalStack;
+    use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::modal::testing::render_rows;
 
     fn fresh_command_modal(command: &str) -> ApprovalModal {
@@ -648,6 +638,7 @@ mod tests {
     /// A modal past its [`TYPE_AHEAD_GUARD`], so it answers keys.
     fn command_modal(command: &str) -> ApprovalModal {
         let mut modal = fresh_command_modal(command);
+        render_rows(&modal, 60, modal.height(60, 40));
         modal.expire_guard();
         modal
     }
@@ -917,8 +908,8 @@ mod tests {
                 None,
                 Some(Box::new(exec_grant(command))),
             );
-            modal.expire_guard();
             render_to_string(&modal, 60, modal.height(60, 40));
+            modal.expire_guard();
             modal
         }
 
@@ -932,8 +923,8 @@ mod tests {
         fn enter_keeps_editing_and_says_why_when_the_rule_no_longer_covers_the_call() {
             let mut modal = granted_modal("cargo test");
             modal.handle_key(&KeyEvent::from(KeyCode::Char('a')));
-            modal.expire_guard();
             render_to_string(&modal, 60, modal.height(60, 40));
+            modal.expire_guard();
             for _ in 0.."test".len() {
                 modal.handle_key(&KeyEvent::from(KeyCode::Backspace));
             }
@@ -976,6 +967,7 @@ mod tests {
             assert!(matches!(outcome, ModalKey::Consumed));
 
             let full = render_to_string(&modal, 60, 6);
+            tokio::time::advance(TYPE_AHEAD_GUARD).await;
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
 
             assert!(full.contains("cargo test"), "{full}");
@@ -991,8 +983,8 @@ mod tests {
             let command = format!("echo {}", "x".repeat(1_200));
             let mut modal = granted_modal(&command);
             modal.handle_key(&KeyEvent::from(KeyCode::Char('a')));
-            modal.expire_guard();
             render_to_string(&modal, 60, modal.height(60, 40));
+            modal.expire_guard();
             modal.handle_key(&KeyEvent::from(KeyCode::End));
             type_text(&mut modal, " $X");
 
@@ -1259,10 +1251,11 @@ mod tests {
             );
         }
 
-        #[test]
-        fn y_waits_until_a_body_row_has_shown() {
+        #[tokio::test(start_paused = true)]
+        async fn y_waits_until_a_body_row_has_shown() {
             let y = KeyEvent::from(KeyCode::Char('y'));
-            let mut modal = command_modal("one\ntwo");
+            let mut modal = fresh_command_modal("one\ntwo");
+            modal.expire_guard();
 
             let outcome = modal.handle_key(&y);
 
@@ -1274,15 +1267,18 @@ mod tests {
             assert!(matches!(outcome, ModalKey::Consumed), "body clipped");
 
             let shown = render_to_string(&modal, 40, 3);
+            tokio::time::advance(TYPE_AHEAD_GUARD).await;
             let outcome = modal.handle_key(&y);
 
             assert!(shown.contains("one"), "{shown}");
             assert!(matches!(outcome, ModalKey::Submitted(_)));
 
-            let mut empty = command_modal("");
+            let mut empty = fresh_command_modal("");
+            render_to_string(&empty, 40, 1);
+            tokio::time::advance(TYPE_AHEAD_GUARD).await;
             let outcome = empty.handle_key(&y);
 
-            assert!(matches!(outcome, ModalKey::Submitted(_)), "nothing to hide");
+            assert!(matches!(outcome, ModalKey::Submitted(_)), "heading shown");
         }
 
         #[test]
@@ -1297,8 +1293,8 @@ mod tests {
             assert!(matches!(outcome, ModalKey::Consumed));
             assert!(modal.captures_esc());
 
-            modal.expire_guard();
             let editing = render_to_string(&modal, 60, modal.height(60, 40));
+            modal.expire_guard();
 
             assert!(editing.contains(RULE_LABEL), "{editing}");
             assert!(editing.contains("cargo test"), "{editing}");
@@ -1330,6 +1326,42 @@ mod tests {
                 *rule,
                 Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()
             );
+        }
+
+        #[test]
+        fn modified_editor_keys_edit_the_rule_without_submitting_it() {
+            let mut modal = granted_modal("cargo test");
+            modal.handle_key(&KeyEvent::from(KeyCode::Char('a')));
+            render_to_string(&modal, 60, modal.height(60, 40));
+            modal.expire_guard();
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(modal));
+
+            for code in [KeyCode::Char('a'), KeyCode::Char('k')] {
+                let outcome = stack.handle_key(&KeyEvent::new(code, KeyModifiers::CONTROL));
+                assert!(outcome.is_none(), "{code:?}: {outcome:?}");
+            }
+            stack.handle_paste("cargo test *");
+            let outcome = stack.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+
+            assert!(
+                outcome.is_none(),
+                "Ctrl+Enter must keep editing: {outcome:?}"
+            );
+            assert!(stack.is_active());
+
+            let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Enter));
+
+            let expected = ApprovalDecision::AllowForSession {
+                rule: Box::new(Rule::parse(PermissionClass::Exec, "cargo test *").unwrap()),
+            };
+            assert!(
+                matches!(outcome, Some(ModalAction::Dispatch(Action::Op(Op::Resolve {
+                ref id, ref decision,
+            }))) if id == "call-1" && decision == &expected),
+                "{outcome:?}"
+            );
+            assert!(!stack.is_active());
         }
 
         #[test]
@@ -1370,8 +1402,8 @@ mod tests {
 
             assert!(modal.captures_esc());
 
-            modal.expire_guard();
             let editing = render_to_string(&modal, 60, modal.height(60, 40));
+            modal.expire_guard();
 
             assert!(editing.contains(FEEDBACK_LABEL), "{editing}");
             assert!(editing.contains("[Enter] deny with feedback"), "{editing}");
