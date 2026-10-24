@@ -1212,7 +1212,7 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn malformed_frame_is_skipped_without_poisoning_stream() {
+            async fn malformed_frame_fails_the_stream() {
                 let body = raw_sse_body(&[
                     (
                         "content_block_start",
@@ -1228,19 +1228,14 @@ mod tests {
                 let server = serve(vec![sse_response(body)]).await;
                 let client = test_client(server.uri(), api_key(), TEST_MODEL);
 
-                let events = stream_hi(&client).await.unwrap();
+                let error = stream_hi(&client)
+                    .await
+                    .expect_err("corrupt data fails the stream");
 
                 assert_eq!(
-                    events,
-                    [
-                        ResponseEvent::Text("Hi".to_owned()),
-                        ResponseEvent::Completed(Response {
-                            content: vec![ContentBlock::Text {
-                                text: "Hi".to_owned(),
-                            }],
-                            ..Response::default()
-                        }),
-                    ],
+                    format!("{error:#}"),
+                    "Anthropic API stream failed: failed to parse SSE data: {not valid json: \
+                     key must be a string at line 1 column 2",
                 );
             }
 

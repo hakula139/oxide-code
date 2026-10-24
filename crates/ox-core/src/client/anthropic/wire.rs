@@ -390,10 +390,14 @@ pub(super) enum ContentBlockInfo {
     ToolUse {
         id: String,
         name: String,
+        #[serde(default = "empty_tool_input")]
+        input: serde_json::Value,
     },
     ServerToolUse {
         id: String,
         name: String,
+        #[serde(default = "empty_tool_input")]
+        input: serde_json::Value,
     },
     Thinking {
         thinking: String,
@@ -409,18 +413,34 @@ pub(super) enum ContentBlockInfo {
     /// block type carrying a `tool_use_id` reads as one.
     #[serde(untagged)]
     ServerToolResult {
+        #[serde(deserialize_with = "unknown_block_type")]
         r#type: String,
         tool_use_id: String,
         #[serde(flatten)]
         fields: serde_json::Map<String, serde_json::Value>,
     },
-    /// Serde tries the untagged variants after a tagged one fails, so a malformed known block lands
-    /// here too. `type` is raw JSON because such a block may carry any.
     #[serde(untagged)]
     Unknown {
-        #[serde(default)]
-        r#type: serde_json::Value,
+        #[serde(deserialize_with = "unknown_block_type")]
+        r#type: String,
     },
+}
+
+fn empty_tool_input() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+/// Rejects known tags so an untagged fallback cannot hide a malformed supported block.
+fn unknown_block_type<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let kind = String::deserialize(deserializer)?;
+    match kind.as_str() {
+        "text" | "tool_use" | "server_tool_use" | "thinking" | "redacted_thinking"
+        | "mcp_tool_result" => Err(serde::de::Error::custom("malformed known content block")),
+        _ => Ok(kind),
+    }
 }
 
 #[expect(
@@ -965,6 +985,7 @@ mod tests {
                 ContentBlockInfo::ToolUse {
                     id: "toolu_01".to_owned(),
                     name: "bash".to_owned(),
+                    input: json!({}),
                 }
             );
         }
@@ -981,6 +1002,7 @@ mod tests {
                 ContentBlockInfo::ServerToolUse {
                     id: "stu_01".to_owned(),
                     name: "advisor".to_owned(),
+                    input: json!({}),
                 }
             );
         }
@@ -1044,20 +1066,35 @@ mod tests {
         }
 
         #[test]
-        fn unknown_or_malformed_block_keeps_its_type() {
-            for (json, expected) in [
-                (
-                    r#"{"type":"some_future_block","data":"opaque"}"#,
-                    json!("some_future_block"),
-                ),
-                (r#"{"type":"tool_use","id":"toolu_01"}"#, json!("tool_use")),
-            ] {
-                let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        fn unknown_block_keeps_its_type() {
+            let info: ContentBlockInfo =
+                serde_json::from_str(r#"{"type":"some_future_block","data":"opaque"}"#).unwrap();
 
-                assert_eq!(
-                    info,
-                    ContentBlockInfo::Unknown { r#type: expected },
-                    "{json}"
+            assert_eq!(
+                info,
+                ContentBlockInfo::Unknown {
+                    r#type: "some_future_block".to_owned()
+                }
+            );
+        }
+
+        #[test]
+        fn malformed_known_blocks_fail_deserialization() {
+            for value in [
+                json!({"type": "text", "text": 42}),
+                json!({"type": "tool_use", "id": "t1"}),
+                json!({"type": "server_tool_use", "id": "s1", "tool_use_id": "t1"}),
+                json!({"type": "thinking", "thinking": "reason"}),
+                json!({"type": "redacted_thinking", "data": false}),
+                json!({"type": null}),
+                json!({}),
+            ] {
+                let error = serde_json::from_value::<ContentBlockInfo>(value.clone())
+                    .expect_err("malformed known blocks cannot become unknown blocks");
+
+                assert!(
+                    error.to_string().contains("did not match"),
+                    "{value}: {error}"
                 );
             }
         }
