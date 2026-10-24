@@ -37,42 +37,52 @@ pub(crate) async fn run(
     let handle = engine.spawn();
     let signal = async || {
         let caught = shutdown_signal().await;
-        _ = sink.break_line(&mut io::stdout(), &mut io::stderr());
-        caught
+        let output = sink.break_line(&mut io::stdout(), &mut io::stderr());
+        (caught, output.map_err(Into::into))
     };
-    drive(handle, &project_root, &sink, first, stdin, attended, signal).await
+    let prompter = Prompter::new(stdin, io::stderr());
+    drive(
+        handle,
+        &project_root,
+        &sink,
+        first,
+        prompter,
+        attended,
+        signal,
+    )
+    .await
 }
 
-/// Runs the REPL over `first`, then the lines of `input`, where each `signal` call waits for the
-/// next signal.
-async fn drive<R>(
+/// Runs the REPL over `first`, then `prompter`'s input. Each `signal` call waits for the next signal
+/// and reports whether its line break succeeded.
+async fn drive<R, W>(
     mut handle: EngineHandle,
     project_root: &Path,
     sink: &dyn EventSink,
     mut first: Option<String>,
-    input: R,
+    mut prompter: Prompter<R, W>,
     attended: bool,
-    mut signal: impl AsyncFnMut() -> Shutdown,
+    mut signal: impl AsyncFnMut() -> (Shutdown, Result<()>),
 ) -> Result<Exit>
 where
     R: AsyncBufRead + Unpin,
+    W: Write,
 {
-    let mut lines = input.lines();
-    let mut renderer = Renderer::new(sink);
+    let renderer = Renderer::new(sink);
     let mut stopped = None;
     let mut failed = false;
 
     let result: Result<()> = async {
         'repl: loop {
-            render_queued(&mut handle.events, &mut renderer);
+            render_queued(&mut handle.events, &renderer);
             let line = if let Some(line) = first.take() {
                 line
             } else {
-                _ = write!(io::stderr(), "> ");
-                _ = io::stderr().flush();
+                renderer.output(prompter.prompt("> ").map_err(Into::into));
                 let line = tokio::select! {
-                    line = lines.next_line() => line?,
-                    caught = signal() => {
+                    line = prompter.lines.next_line() => line?,
+                    (caught, output) = signal() => {
+                        renderer.output(output);
                         if attended && caught == Shutdown::Interrupt {
                             continue;
                         }
@@ -107,13 +117,9 @@ where
 
             // A send fails only once the engine has stopped, which `render_op` then reports.
             _ = handle.ops.send(op.clone()).await;
-            let mut prompter = Prompter {
-                lines: &mut lines,
-                out: io::stderr(),
-            };
             let mut operation = pin!(render_op(
                 &mut handle.events,
-                &mut renderer,
+                &renderer,
                 &handle.ops,
                 &op,
                 attended.then_some(&mut prompter)
@@ -121,7 +127,8 @@ where
             let end = loop {
                 tokio::select! {
                     end = &mut operation => break end,
-                    caught = signal() => {
+                    (caught, output) = signal() => {
+                        renderer.output(output);
                         if !(attended && caught == Shutdown::Interrupt) {
                             stopped = Some(caught);
                             break 'repl;
@@ -177,85 +184,100 @@ const GRANT_CHOICES: &str =
 
 /// Answers approvals with lines read from the REPL's input, writing the call and its choices to
 /// `out`. The input ending aborts the turn.
-struct Prompter<'a, R, W> {
-    lines: &'a mut Lines<R>,
+struct Prompter<R, W> {
+    lines: Lines<R>,
     out: W,
 }
 
-impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<'_, R, W> {
+impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<R, W> {
     async fn decide(
         &mut self,
         preview: &ApprovalPreview,
         basis: &Basis,
         grant: Option<&SessionGrant>,
-    ) -> ApprovalDecision {
-        _ = write_preview(&mut self.out, preview, basis);
+    ) -> Result<ApprovalDecision> {
+        write_preview(&mut self.out, preview, basis)?;
         let choices = if grant.is_some() {
             GRANT_CHOICES
         } else {
             CHOICES
         };
         loop {
-            let Some(answer) = self.ask(choices).await else {
-                return ApprovalDecision::Abort;
+            let Some(answer) = self.ask(choices).await? else {
+                return Ok(ApprovalDecision::Abort);
             };
             match (answer.to_ascii_lowercase().as_str(), grant) {
-                ("y" | "yes", _) => return ApprovalDecision::Approve,
-                ("a", Some(grant)) => match self.rule(grant).await {
+                ("y" | "yes", _) => return Ok(ApprovalDecision::Approve),
+                ("a", Some(grant)) => match self.rule(grant).await? {
                     Some(Ok(rule)) => {
-                        return ApprovalDecision::AllowForSession {
+                        return Ok(ApprovalDecision::AllowForSession {
                             rule: Box::new(rule),
-                        };
+                        });
                     }
-                    Some(Err(e)) => _ = writeln!(self.out, "Rule rejected: {e:#}"),
-                    None => return ApprovalDecision::Abort,
+                    Some(Err(e)) => writeln!(self.out, "Rule rejected: {e:#}")?,
+                    None => return Ok(ApprovalDecision::Abort),
                 },
-                ("n" | "no", _) => return ApprovalDecision::Deny,
-                ("f", _) => match self.ask("Feedback for the model: ").await {
+                ("n" | "no", _) => return Ok(ApprovalDecision::Deny),
+                ("f", _) => match self.ask("Feedback for the model: ").await? {
                     Some(feedback) if !feedback.is_empty() => {
-                        return ApprovalDecision::DenyWithFeedback { feedback };
+                        return Ok(ApprovalDecision::DenyWithFeedback { feedback });
                     }
                     Some(_) => {}
-                    None => return ApprovalDecision::Abort,
+                    None => return Ok(ApprovalDecision::Abort),
                 },
-                ("x", _) => return ApprovalDecision::Abort,
-                _ => _ = writeln!(self.out, "Answer with one of the letters in brackets"),
+                ("x", _) => return Ok(ApprovalDecision::Abort),
+                _ => writeln!(self.out, "Answer with one of the letters in brackets")?,
             }
         }
     }
 }
 
-impl<R: AsyncBufRead + Unpin, W: Write> Prompter<'_, R, W> {
-    /// Writes `prompt` and reads the trimmed answer, or `None` once the input ends or fails.
-    async fn ask(&mut self, prompt: &str) -> Option<String> {
-        _ = write!(self.out, "{prompt}");
-        _ = self.out.flush();
+impl<R: AsyncBufRead + Unpin, W: Write> Prompter<R, W> {
+    fn new(input: R, out: W) -> Self {
+        Self {
+            lines: input.lines(),
+            out,
+        }
+    }
+
+    fn prompt(&mut self, prompt: &str) -> io::Result<()> {
+        write!(self.out, "{prompt}")?;
+        self.out.flush()
+    }
+
+    /// Writes `prompt` before reading the trimmed answer, or `None` once the input ends or fails.
+    /// An output error leaves the answer unread.
+    async fn ask(&mut self, prompt: &str) -> Result<Option<String>> {
+        self.prompt(prompt)?;
         match self.lines.next_line().await {
-            Ok(Some(line)) => Some(line.trim().to_owned()),
+            Ok(Some(line)) => Ok(Some(line.trim().to_owned())),
             Ok(None) => {
-                _ = writeln!(self.out);
-                None
+                writeln!(self.out)?;
+                Ok(None)
             }
             Err(e) => {
-                _ = writeln!(self.out, "\nCould not read the answer: {e}");
-                None
+                writeln!(self.out, "\nCould not read the answer: {e}")?;
+                Ok(None)
             }
         }
     }
 
     /// Reads the pattern of the session rule to grant, where an empty answer takes the suggested
     /// one, or `None` once the input ends. An error says why the grant does not admit the rule.
-    async fn rule(&mut self, grant: &SessionGrant) -> Option<Result<Rule>> {
+    async fn rule(&mut self, grant: &SessionGrant) -> Result<Option<Result<Rule>>> {
         let suggested = grant.suggested().pattern().to_owned();
-        let answer = self
+        let Some(answer) = self
             .ask(&format!("Pattern to allow [{suggested}]: "))
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
         let text = if answer.is_empty() {
             &suggested
         } else {
             &answer
         };
-        Some(grant.accept(text))
+        Ok(Some(grant.accept(text)))
     }
 }
 
@@ -307,11 +329,78 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Failure {
+        Write(&'static str),
+        Flush,
+    }
+
+    impl Failure {
+        fn message(self) -> &'static str {
+            match self {
+                Self::Write(_) => "lost prompt write",
+                Self::Flush => "lost prompt flush",
+            }
+        }
+    }
+
+    struct FailingOutput {
+        output: Vec<u8>,
+        failure: Option<Failure>,
+    }
+
+    impl FailingOutput {
+        fn new(failure: Failure) -> Self {
+            Self {
+                output: Vec::new(),
+                failure: Some(failure),
+            }
+        }
+    }
+
+    impl Write for FailingOutput {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if let Some(Failure::Write(text)) = self.failure
+                && buf.windows(text.len()).any(|part| part == text.as_bytes())
+            {
+                self.failure = None;
+                return Err(io::Error::other("lost prompt write"));
+            }
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.failure == Some(Failure::Flush) {
+                self.failure = None;
+                return Err(io::Error::other("lost prompt flush"));
+            }
+            Ok(())
+        }
+    }
+
     mod drive {
         use super::*;
 
-        async fn no_signal() -> Shutdown {
+        async fn no_signal() -> (Shutdown, Result<()>) {
             std::future::pending().await
+        }
+
+        #[derive(Default)]
+        struct LostToken {
+            events: CapturingSink,
+            failed: AtomicBool,
+        }
+
+        impl EventSink for LostToken {
+            fn send(&self, event: Event) -> Result<()> {
+                if matches!(event, Event::StreamToken(_))
+                    && !self.failed.swap(true, Ordering::Relaxed)
+                {
+                    bail!("lost reply token");
+                }
+                self.events.send(event)
+            }
         }
 
         #[tokio::test]
@@ -329,7 +418,7 @@ mod tests {
                     dir.path(),
                     &sink,
                     None,
-                    input,
+                    Prompter::new(input, io::sink()),
                     true,
                     no_signal,
                 ))
@@ -360,7 +449,7 @@ mod tests {
                     dir.path(),
                     &CapturingSink::default(),
                     first,
-                    input,
+                    Prompter::new(input, io::sink()),
                     true,
                     no_signal,
                 ))
@@ -377,6 +466,61 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(prompts, ["Explain\nthis", "second"]);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn retains_prompt_write_and_flush_failures_after_a_reply_is_saved() {
+            with_pinned_home(async {
+                for failure in [Failure::Write("> "), Failure::Flush] {
+                    let server = MockServer::start().await;
+                    mount_reply(&server, "reply").await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = test_store(dir.path());
+                    let engine = engine(server.uri(), &store, dir.path()).await;
+                    let session_id = engine.session_id().to_owned();
+                    let sink = CapturingSink::default();
+                    let mut out = FailingOutput::new(failure);
+                    let input: &[u8] = b"hello\n/exit\n";
+
+                    let result = Box::pin(drive(
+                        engine.spawn(),
+                        dir.path(),
+                        &sink,
+                        None,
+                        Prompter::new(input, &mut out),
+                        true,
+                        no_signal,
+                    ))
+                    .await;
+                    assert_eq!(
+                        format!("{:#}", result.unwrap_err()),
+                        format!("failed to print output: {}", failure.message()),
+                        "{failure:?}",
+                    );
+
+                    assert_eq!(out.failure, None, "{failure:?}");
+                    assert!(out.output.ends_with(b"> "), "{failure:?}: {:?}", out.output);
+                    assert!(
+                        sink.events()
+                            .contains(&Event::StreamToken("reply".to_owned()))
+                    );
+                    let transcript =
+                        fs::read_to_string(store.find_session_path(&session_id).unwrap()).unwrap();
+                    let text: Vec<String> = transcript
+                        .lines()
+                        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                        .filter(|entry| entry["type"] == "message")
+                        .map(|entry| {
+                            entry["message"]["content"][0]["text"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned()
+                        })
+                        .collect();
+                    assert_eq!(text, ["hello", "reply"], "{failure:?}");
+                }
             })
             .await;
         }
@@ -410,7 +554,7 @@ mod tests {
                     dir.path(),
                     &sink,
                     None,
-                    input,
+                    Prompter::new(input, io::sink()),
                     true,
                     no_signal,
                 ))
@@ -460,23 +604,6 @@ mod tests {
 
         #[tokio::test]
         async fn reports_a_lost_reply_after_later_output_succeeds_and_the_session_is_saved() {
-            #[derive(Default)]
-            struct LostToken {
-                events: CapturingSink,
-                failed: AtomicBool,
-            }
-
-            impl EventSink for LostToken {
-                fn send(&self, event: Event) -> Result<()> {
-                    if matches!(event, Event::StreamToken(_))
-                        && !self.failed.swap(true, Ordering::Relaxed)
-                    {
-                        bail!("lost reply token");
-                    }
-                    self.events.send(event)
-                }
-            }
-
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 mount_reply(&server, "reply").await;
@@ -492,7 +619,7 @@ mod tests {
                     dir.path(),
                     &sink,
                     None,
-                    input,
+                    Prompter::new(input, io::sink()),
                     true,
                     no_signal,
                 ))
@@ -569,7 +696,7 @@ mod tests {
                     dir.path(),
                     &sink,
                     None,
-                    input.as_bytes(),
+                    Prompter::new(input.as_bytes(), io::sink()),
                     true,
                     no_signal,
                 ))
@@ -638,7 +765,7 @@ mod tests {
                     dir.path(),
                     &CapturingSink::default(),
                     None,
-                    input,
+                    Prompter::new(input, io::sink()),
                     true,
                     no_signal,
                 ))
@@ -676,7 +803,7 @@ mod tests {
                     dir.path(),
                     &sink,
                     None,
-                    input,
+                    Prompter::new(input, io::sink()),
                     true,
                     no_signal,
                 ))
@@ -732,7 +859,7 @@ mod tests {
                     dir.path(),
                     &CapturingSink::default(),
                     None,
-                    input,
+                    Prompter::new(input, io::sink()),
                     true,
                     no_signal,
                 ))
@@ -763,7 +890,7 @@ mod tests {
                     dir.path(),
                     &sink,
                     None,
-                    input,
+                    Prompter::new(input, io::sink()),
                     true,
                     no_signal,
                 ))
@@ -821,7 +948,7 @@ mod tests {
                     dir.path(),
                     &CapturingSink::default(),
                     None,
-                    input.as_bytes(),
+                    Prompter::new(input.as_bytes(), io::sink()),
                     true,
                     no_signal,
                 ))
@@ -842,7 +969,77 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn sigint_from_a_terminal_interrupts_the_turn_and_keeps_reading() {
+        async fn retains_approval_output_failures_after_aborting_and_saving_the_turn() {
+            with_pinned_home(async {
+                for failure in [
+                    Failure::Write("needs approval"),
+                    Failure::Write("[y]"),
+                    Failure::Flush,
+                ] {
+                    let server = MockServer::start().await;
+                    mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"git push"}"#)
+                        .await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = test_store(dir.path());
+                    let engine = engine(server.uri(), &store, dir.path())
+                        .await
+                        .with_tools(bash_registry(Vec::new()));
+                    let session_id = engine.session_id().to_owned();
+                    let sink = CapturingSink::default();
+                    let mut out = FailingOutput::new(failure);
+                    let input: &[u8] = b"/exit\n";
+
+                    let result = Box::pin(drive(
+                        engine.spawn(),
+                        dir.path(),
+                        &sink,
+                        Some("push it".to_owned()),
+                        Prompter::new(input, &mut out),
+                        true,
+                        no_signal,
+                    ))
+                    .await;
+                    assert_eq!(
+                        format!("{:#}", result.unwrap_err()),
+                        format!("failed to print output: {}", failure.message()),
+                        "{failure:?}",
+                    );
+
+                    assert!(out.output.ends_with(b"> "), "{failure:?}: {:?}", out.output);
+                    assert!(sink.events().contains(&Event::Cancelled), "{failure:?}");
+                    let approved: Vec<Event> = sink
+                        .events()
+                        .into_iter()
+                        .filter(|event| match event {
+                            Event::ToolCallEnd(result) => !result.is_error,
+                            Event::SessionRulesUpdated(rules) => !rules.is_empty(),
+                            _ => false,
+                        })
+                        .collect();
+                    assert_eq!(approved, [], "{failure:?}");
+                    assert_eq!(request_bodies(&server).await.len(), 1, "{failure:?}");
+                    let transcript =
+                        fs::read_to_string(store.find_session_path(&session_id).unwrap()).unwrap();
+                    let messages: Vec<serde_json::Value> = transcript
+                        .lines()
+                        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                        .filter(|entry| entry["type"] == "message")
+                        .map(|entry| entry["message"].clone())
+                        .collect();
+                    assert_eq!(messages[0]["content"][0]["text"], "push it", "{failure:?}");
+                    assert_eq!(messages[1]["content"][0]["id"], "call-1", "{failure:?}");
+                    assert_eq!(
+                        messages.last().unwrap()["content"][0]["text"],
+                        "[Request interrupted by user]",
+                        "{failure:?}",
+                    );
+                }
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn retains_signal_output_failure_while_interrupting_and_reading_later_turns() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 mount_stalled_reply_once(&server).await;
@@ -851,7 +1048,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
-                let sink = CapturingSink::default();
+                let sink = LostToken::default();
                 let input: &[u8] = indoc! {b"
                     first
                     second
@@ -861,25 +1058,30 @@ mod tests {
                     if !interrupted {
                         until_requested(&server, 1).await;
                         interrupted = true;
-                        return Shutdown::Interrupt;
+                        return (
+                            Shutdown::Interrupt,
+                            Err(anyhow::anyhow!("lost signal line break")),
+                        );
                     }
                     std::future::pending().await
                 };
 
-                let exit = Box::pin(drive(
+                let result = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
                     &sink,
                     None,
-                    input,
+                    Prompter::new(input, io::sink()),
                     true,
                     signal,
                 ))
-                .await
-                .unwrap();
-
-                assert_eq!(exit, Exit::Success);
+                .await;
+                assert_eq!(
+                    format!("{:#}", result.unwrap_err()),
+                    "failed to print output: lost signal line break"
+                );
                 let ends: Vec<Event> = sink
+                    .events
                     .events()
                     .into_iter()
                     .filter(|event| matches!(event, Event::Cancelled | Event::TurnComplete))
@@ -910,7 +1112,7 @@ mod tests {
                     tokio::io::AsyncWriteExt::write_all(&mut writer, b"hello\n")
                         .await
                         .unwrap();
-                    Shutdown::Interrupt
+                    (Shutdown::Interrupt, Ok(()))
                 };
 
                 let exit = Box::pin(drive(
@@ -918,7 +1120,7 @@ mod tests {
                     dir.path(),
                     &CapturingSink::default(),
                     None,
-                    BufReader::new(reader),
+                    Prompter::new(BufReader::new(reader), io::sink()),
                     true,
                     signal,
                 ))
@@ -949,7 +1151,10 @@ mod tests {
                     }
                     until_requested(&server, 1).await;
                     interrupted = true;
-                    Shutdown::Interrupt
+                    (
+                        Shutdown::Interrupt,
+                        Err(anyhow::anyhow!("lost signal line break")),
+                    )
                 };
 
                 let exit = Box::pin(drive(
@@ -957,7 +1162,7 @@ mod tests {
                     dir.path(),
                     &CapturingSink::default(),
                     None,
-                    input,
+                    Prompter::new(input, io::sink()),
                     false,
                     signal,
                 ))
@@ -979,7 +1184,7 @@ mod tests {
                 Path::new("/repo"),
                 &CapturingSink::default(),
                 None,
-                input,
+                Prompter::new(input, FailingOutput::new(Failure::Write("> "))),
                 true,
                 no_signal,
             ))
@@ -1001,18 +1206,15 @@ mod tests {
                 input: &str,
                 grant: Option<&SessionGrant>,
             ) -> (ApprovalDecision, String) {
-                let mut lines = input.as_bytes().lines();
-                let mut prompter = Prompter {
-                    lines: &mut lines,
-                    out: Vec::new(),
-                };
+                let mut prompter = Prompter::new(input.as_bytes(), Vec::new());
                 let decision = prompter
                     .decide(
                         &bash_preview("cargo test"),
                         &Basis::Mode(Mode::Manual),
                         grant,
                     )
-                    .await;
+                    .await
+                    .unwrap();
                 (decision, String::from_utf8(prompter.out).unwrap())
             }
 
@@ -1103,19 +1305,103 @@ mod tests {
 
             #[tokio::test]
             async fn aborts_saying_why_when_the_input_cannot_be_read() {
-                let mut lines = (&b"\xff\n"[..]).lines();
-                let mut prompter = Prompter {
-                    lines: &mut lines,
-                    out: Vec::new(),
-                };
+                let mut prompter = Prompter::new(&b"\xff\n"[..], Vec::new());
 
                 let decision = prompter
                     .decide(&bash_preview("ls"), &Basis::Mode(Mode::Manual), None)
-                    .await;
+                    .await
+                    .unwrap();
 
                 assert_eq!(decision, ApprovalDecision::Abort);
                 let out = String::from_utf8(prompter.out).unwrap();
                 assert!(out.contains("Could not read the answer: "), "{out}");
+            }
+
+            #[tokio::test]
+            async fn aborts_before_reading_an_undisplayed_approval() {
+                let grant = exec_grant("cargo test");
+                for failure in [
+                    Failure::Write("needs approval"),
+                    Failure::Write("[y]"),
+                    Failure::Flush,
+                ] {
+                    for input in ["y\n", "a\n\n"] {
+                        let mut prompter =
+                            Prompter::new(input.as_bytes(), FailingOutput::new(failure));
+
+                        let decision = prompter
+                            .decide(
+                                &bash_preview("cargo test"),
+                                &Basis::Mode(Mode::Manual),
+                                Some(&grant),
+                            )
+                            .await;
+
+                        assert_eq!(
+                            decision.unwrap_err().to_string(),
+                            failure.message(),
+                            "{failure:?}, {input:?}"
+                        );
+                        assert_eq!(
+                            prompter.lines.next_line().await.unwrap(),
+                            Some(input.trim().to_owned())
+                        );
+                    }
+                }
+            }
+
+            #[tokio::test]
+            async fn stops_before_reading_again_when_followup_output_fails() {
+                let grant = exec_grant("cargo test");
+                for (failure, input, unread) in [
+                    (Failure::Write("Feedback"), "f\ny\n", "y"),
+                    (Failure::Write("Pattern"), "a\n\n", ""),
+                    (Failure::Write("Rule rejected"), "a\ncargo build\ny\n", "y"),
+                    (Failure::Write("Answer with"), "maybe\ny\n", "y"),
+                ] {
+                    let mut prompter = Prompter::new(input.as_bytes(), FailingOutput::new(failure));
+
+                    let result = prompter
+                        .decide(
+                            &bash_preview("cargo test"),
+                            &Basis::Mode(Mode::Manual),
+                            Some(&grant),
+                        )
+                        .await;
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        failure.message(),
+                        "{failure:?}"
+                    );
+
+                    assert_eq!(
+                        prompter.lines.next_line().await.unwrap().as_deref(),
+                        Some(unread),
+                        "{failure:?}",
+                    );
+                }
+            }
+        }
+
+        mod ask {
+            use super::*;
+
+            #[tokio::test]
+            async fn reports_output_failure_when_an_input_diagnostic_cannot_be_written() {
+                for (input, failure) in [
+                    (&b""[..], Failure::Write("\n")),
+                    (&b"\xff\n"[..], Failure::Write("Could not read")),
+                ] {
+                    let mut prompter = Prompter::new(input, FailingOutput::new(failure));
+
+                    let result = prompter.ask("Answer: ").await;
+
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        failure.message(),
+                        "{failure:?}"
+                    );
+                }
             }
         }
     }

@@ -1,5 +1,6 @@
 //! Stdio rendering of engine events for the `--no-tui` REPL and `--print` headless modes.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, Write};
@@ -27,32 +28,36 @@ use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 /// Renders all events while retaining the first output failure until the engine has shut down.
 pub(super) struct Renderer<'a> {
     sink: &'a dyn EventSink,
-    failure: Option<anyhow::Error>,
+    failure: RefCell<Option<anyhow::Error>>,
 }
 
 impl<'a> Renderer<'a> {
     pub(super) fn new(sink: &'a dyn EventSink) -> Self {
         Self {
             sink,
-            failure: None,
+            failure: RefCell::default(),
         }
     }
 
-    pub(super) fn render(&mut self, event: Event) {
-        if let Err(error) = self.sink.send(event) {
+    pub(super) fn render(&self, event: Event) {
+        self.output(self.sink.send(event));
+    }
+
+    pub(super) fn output(&self, result: Result<()>) {
+        if let Err(error) = result {
             debug!(error = %format_args!("{error:#}"), "stdio render failed");
-            self.failure.get_or_insert(error);
+            self.failure.borrow_mut().get_or_insert(error);
         }
     }
 
-    pub(super) fn session_write_error(&mut self, failure: Option<&str>) {
+    pub(super) fn session_write_error(&self, failure: Option<&str>) {
         if let Some(failure) = failure {
             self.render(Event::Error(notice::session_write_failed(failure)));
         }
     }
 
     pub(super) fn finish(self) -> Result<()> {
-        self.failure.map_or(Ok(()), Err)
+        self.failure.into_inner().map_or(Ok(()), Err)
     }
 }
 
@@ -63,7 +68,7 @@ impl<'a> Renderer<'a> {
 /// attends requests no approval, so such a run passes no `approver`.
 pub(super) async fn render_op<A: Approver>(
     events: &mut mpsc::UnboundedReceiver<Event>,
-    renderer: &mut Renderer<'_>,
+    renderer: &Renderer<'_>,
     ops: &mpsc::Sender<Op>,
     op: &Op,
     mut approver: Option<&mut A>,
@@ -109,6 +114,10 @@ pub(super) async fn render_op<A: Approver>(
             }
         };
         if let Some(decision) = decision {
+            let decision = decision.unwrap_or_else(|error| {
+                renderer.output(Err(error));
+                ApprovalDecision::Abort
+            });
             // A send fails only once the engine has stopped, which the next `recv` reports.
             _ = ops.send(Op::Resolve { id, decision }).await;
         }
@@ -118,20 +127,17 @@ pub(super) async fn render_op<A: Approver>(
 /// How a stdio frontend answers an approval request.
 pub(super) trait Approver {
     /// Decides the call `preview` shows, which `basis` made ask and `grant` may allow for the rest
-    /// of the session.
+    /// of the session. An error aborts the call and is retained until shutdown.
     fn decide(
         &mut self,
         preview: &ApprovalPreview,
         basis: &Basis,
         grant: Option<&SessionGrant>,
-    ) -> impl Future<Output = ApprovalDecision>;
+    ) -> impl Future<Output = Result<ApprovalDecision>>;
 }
 
 /// Renders the events already queued, such as the engine's startup warnings.
-pub(super) fn render_queued(
-    events: &mut mpsc::UnboundedReceiver<Event>,
-    renderer: &mut Renderer<'_>,
-) {
+pub(super) fn render_queued(events: &mut mpsc::UnboundedReceiver<Event>, renderer: &Renderer<'_>) {
     while let Ok(event) = events.try_recv() {
         renderer.render(event);
     }
@@ -150,7 +156,7 @@ impl Approver for Unattended {
         _: &ApprovalPreview,
         _: &Basis,
         _: Option<&SessionGrant>,
-    ) -> ApprovalDecision {
+    ) -> Result<ApprovalDecision> {
         match *self {}
     }
 }
@@ -458,7 +464,7 @@ mod tests {
                 }
             }
 
-            let mut renderer = Renderer::new(&ErrorSink);
+            let renderer = Renderer::new(&ErrorSink);
 
             renderer.render(Event::Error("first failure".to_owned()));
             renderer.render(Event::Error("second failure".to_owned()));
@@ -481,7 +487,7 @@ mod tests {
             #[test]
             fn records_the_full_render_failure_chain() {
                 let logs = LogCapture::default();
-                let mut renderer = Renderer::new(&ChainedFailure);
+                let renderer = Renderer::new(&ChainedFailure);
 
                 tracing::dispatcher::with_default(&logs.dispatch(), || {
                     renderer.render(Event::TurnComplete);
@@ -510,7 +516,7 @@ mod tests {
             #[test]
             fn renders_a_writer_failure_only_when_reported() {
                 let sink = CapturingSink::default();
-                let mut renderer = Renderer::new(&sink);
+                let renderer = Renderer::new(&sink);
 
                 renderer.session_write_error(None);
                 renderer.session_write_error(Some("disk full"));
@@ -539,10 +545,10 @@ mod tests {
                 preview: &ApprovalPreview,
                 _: &Basis,
                 grant: Option<&SessionGrant>,
-            ) -> impl Future<Output = ApprovalDecision> {
+            ) -> impl Future<Output = Result<ApprovalDecision>> {
                 let rule = grant.map(|grant| grant.suggested().pattern().to_owned());
                 self.offered.push((preview.title.clone(), rule));
-                std::future::ready(self.decision.clone())
+                std::future::ready(Ok(self.decision.clone()))
             }
         }
 
@@ -575,7 +581,7 @@ mod tests {
 
             let end = render_op(
                 &mut events,
-                &mut Renderer::new(&sink),
+                &Renderer::new(&sink),
                 &ops_tx,
                 &prompt(),
                 Some(&mut approver),
@@ -608,7 +614,7 @@ mod tests {
                     _: &ApprovalPreview,
                     _: &Basis,
                     _: Option<&SessionGrant>,
-                ) -> impl Future<Output = ApprovalDecision> {
+                ) -> impl Future<Output = Result<ApprovalDecision>> {
                     std::future::pending()
                 }
             }
@@ -631,7 +637,7 @@ mod tests {
 
             let end = render_op(
                 &mut events,
-                &mut Renderer::new(&sink),
+                &Renderer::new(&sink),
                 &ops_tx,
                 &prompt(),
                 Some(&mut Undecided),
@@ -661,10 +667,10 @@ mod tests {
                     _: &ApprovalPreview,
                     _: &Basis,
                     _: Option<&SessionGrant>,
-                ) -> ApprovalDecision {
+                ) -> Result<ApprovalDecision> {
                     tokio::task::yield_now().await;
                     self.rendered = Some(self.sink.events());
-                    ApprovalDecision::Deny
+                    Ok(ApprovalDecision::Deny)
                 }
             }
 
@@ -690,7 +696,7 @@ mod tests {
 
             let end = render_op(
                 &mut events,
-                &mut Renderer::new(&sink),
+                &Renderer::new(&sink),
                 &ops,
                 &prompt(),
                 Some(&mut approver),
@@ -718,19 +724,76 @@ mod tests {
 
             let (ops, _) = mpsc::channel(1);
             let mut approver = fixed(ApprovalDecision::Deny);
-            let mut renderer = Renderer::new(&FailingSink);
-            let end = render_op(
-                &mut events,
-                &mut renderer,
-                &ops,
-                &prompt(),
-                Some(&mut approver),
-            )
-            .await;
+            let renderer = Renderer::new(&FailingSink);
+            let end = render_op(&mut events, &renderer, &ops, &prompt(), Some(&mut approver)).await;
 
             assert_eq!(end, Some(TurnEnd::Cancelled));
             assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
             assert_eq!(renderer.finish().unwrap_err().to_string(), "sink closed");
+        }
+
+        #[tokio::test]
+        async fn aborts_an_approval_with_failed_output_and_drains_its_terminal_event() {
+            struct LostPrompt;
+
+            impl Approver for LostPrompt {
+                fn decide(
+                    &mut self,
+                    _: &ApprovalPreview,
+                    _: &Basis,
+                    _: Option<&SessionGrant>,
+                ) -> impl Future<Output = Result<ApprovalDecision>> {
+                    std::future::ready(Err(anyhow::anyhow!("lost approval prompt")))
+                }
+            }
+
+            let (tx, mut events) = mpsc::unbounded_channel();
+            for event in [
+                Event::ApprovalRequested {
+                    id: "t1".to_owned(),
+                    preview: bash_preview("ls"),
+                    basis: Basis::Mode(Mode::Manual),
+                    grant: Some(Box::new(exec_grant("ls"))),
+                },
+                Event::StreamToken("later output".to_owned()),
+                Event::Cancelled,
+                Event::TurnComplete,
+            ] {
+                tx.send(event).unwrap();
+            }
+            let (ops_tx, mut ops) = mpsc::channel(1);
+            let sink = CapturingSink::default();
+            let renderer = Renderer::new(&sink);
+
+            let end = render_op(
+                &mut events,
+                &renderer,
+                &ops_tx,
+                &prompt(),
+                Some(&mut LostPrompt),
+            )
+            .await;
+
+            assert_eq!(end, Some(TurnEnd::Cancelled));
+            assert_eq!(
+                ops.try_recv().ok(),
+                Some(Op::Resolve {
+                    id: "t1".to_owned(),
+                    decision: ApprovalDecision::Abort,
+                }),
+            );
+            assert_eq!(
+                sink.events(),
+                [
+                    Event::StreamToken("later output".to_owned()),
+                    Event::Cancelled
+                ],
+            );
+            assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
+            assert_eq!(
+                renderer.finish().unwrap_err().to_string(),
+                "lost approval prompt"
+            );
         }
 
         #[tokio::test]
@@ -757,7 +820,7 @@ mod tests {
             let mut approver = fixed(ApprovalDecision::Deny);
             let end = render_op(
                 &mut events,
-                &mut Renderer::new(&sink),
+                &Renderer::new(&sink),
                 &ops,
                 &Op::Clear,
                 Some(&mut approver),
@@ -784,7 +847,7 @@ mod tests {
 
                 let end = render_op(
                     &mut handle.events,
-                    &mut Renderer::new(&sink),
+                    &Renderer::new(&sink),
                     &handle.ops,
                     &Op::Clear,
                     Some(&mut approver),
@@ -824,7 +887,7 @@ mod tests {
             let mut approver = fixed(ApprovalDecision::Deny);
             let end = render_op(
                 &mut events,
-                &mut Renderer::new(&sink),
+                &Renderer::new(&sink),
                 &ops,
                 &prompt(),
                 Some(&mut approver),
