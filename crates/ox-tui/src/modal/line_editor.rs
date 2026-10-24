@@ -73,27 +73,14 @@ impl LineEditor {
         if is_blocked_key(event) {
             return false;
         }
-        let stops = GraphemeStops::new(self.text());
-        let at = stops.at_char(self.textarea.cursor().1);
+        let mut changed = match char_deletion(event) {
+            Some(side) => self.delete_grapheme(side),
+            None => self.textarea.input(*event),
+        };
 
-        let mut changed = self.textarea.input(*event);
-        // ratatui-textarea steps by char, so finish a deletion or move that stopped mid-cluster.
-        match char_deletion(event) {
-            Some(Side::Before) if at > 0 => {
-                for _ in 1..stops.char(at) - stops.char(at - 1) {
-                    self.textarea.delete_char();
-                }
-            }
-            Some(Side::After) if at < stops.len() => {
-                for _ in 1..stops.char(at + 1) - stops.char(at) {
-                    self.textarea.delete_next_char();
-                }
-            }
-            _ => {}
-        }
-        while !self.cursor_on_boundary() {
+        while !changed && !self.cursor_on_boundary() {
             let before = self.textarea.cursor();
-            changed |= self.textarea.input(*event);
+            changed = self.textarea.input(*event);
             if self.textarea.cursor() == before {
                 break;
             }
@@ -106,7 +93,47 @@ impl LineEditor {
             self.textarea.undo();
             return false;
         }
+        self.advance_cursor_to_boundary();
         true
+    }
+
+    fn delete_grapheme(&mut self, side: Side) -> bool {
+        let selected = self
+            .textarea
+            .selection_range()
+            .is_some_and(|(start, end)| start != end);
+
+        if !selected {
+            let stops = GraphemeStops::new(self.text());
+            let at = stops.at_char(self.textarea.cursor().1);
+            let (movement, chars) = match side {
+                Side::Before => (
+                    CursorMove::Back,
+                    stops.char(at) - stops.char(at.saturating_sub(1)),
+                ),
+                Side::After => (
+                    CursorMove::Forward,
+                    stops.char((at + 1).min(stops.len())) - stops.char(at),
+                ),
+            };
+
+            self.textarea.start_selection();
+            for _ in 0..chars {
+                self.textarea.move_cursor(movement);
+            }
+        }
+
+        // A selection is one history entry and leaves the yank buffer intact.
+        self.textarea.delete_str(0)
+    }
+
+    fn advance_cursor_to_boundary(&mut self) {
+        // An edit can join neighboring graphemes around the cursor.
+        let char = self.textarea.cursor().1;
+        let stops = GraphemeStops::new(self.text());
+        for _ in char..stops.char(stops.at_char(char)) {
+            self.textarea.move_cursor(CursorMove::Forward);
+        }
     }
 
     fn cursor_on_boundary(&self) -> bool {
@@ -131,7 +158,10 @@ impl LineEditor {
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
-        self.textarea.insert_str(take_head(&flat, room))
+
+        let changed = self.textarea.insert_str(take_head(&flat, room));
+        self.advance_cursor_to_boundary();
+        changed
     }
 
     /// The prompt plus the slice of the text that fits `width`, or the placeholder while empty.
@@ -222,6 +252,7 @@ impl GraphemeStops {
 }
 
 /// Which side of the cursor a deletion removes from.
+#[derive(Debug, Clone, Copy)]
 enum Side {
     Before,
     After,
@@ -394,28 +425,161 @@ mod tests {
         }
 
         #[test]
-        fn steps_over_and_deletes_the_grapheme_cluster_before_the_cursor() {
+        fn steps_over_grapheme_clusters_in_both_directions() {
             let mut editor = LineEditor::new("a👨‍👩‍👧b");
 
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
             type_str(&mut editor, "<");
             editor.handle_key(&KeyEvent::from(KeyCode::Right));
-            let deleted = editor.handle_key(&KeyEvent::from(KeyCode::Backspace));
+            type_str(&mut editor, ">");
 
-            assert!(deleted);
-            assert_eq!(editor.text(), "a<b");
+            assert_eq!(editor.text(), "a<👨‍👩‍👧>b");
         }
 
         #[test]
-        fn deletes_the_whole_grapheme_cluster_after_the_cursor() {
-            let mut editor = LineEditor::new("❤️x");
-            editor.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        fn deletes_graphemes_in_one_undo_step() {
+            for (name, code, modifiers, backward) in [
+                ("Backspace", KeyCode::Backspace, KeyModifiers::NONE, true),
+                ("Ctrl+H", KeyCode::Char('h'), KeyModifiers::CONTROL, true),
+                ("Delete", KeyCode::Delete, KeyModifiers::NONE, false),
+                ("Ctrl+D", KeyCode::Char('d'), KeyModifiers::CONTROL, false),
+            ] {
+                for grapheme in ["e\u{301}", "❤️", "👨‍👩‍👧"] {
+                    let text = format!("a{grapheme}b");
+                    let mut editor = LineEditor::new(&text);
+                    let column = if backward {
+                        1 + grapheme.chars().count()
+                    } else {
+                        1
+                    };
+                    editor
+                        .textarea
+                        .move_cursor(CursorMove::Jump(0, saturating_u16(column)));
+                    editor.textarea.set_yank_text(" saved ");
 
-            let deleted = editor.handle_key(&KeyEvent::from(KeyCode::Delete));
+                    let deleted = editor.handle_key(&KeyEvent::new(code, modifiers));
+                    assert!(deleted, "{name}: {grapheme:?}");
 
-            assert!(deleted);
-            assert_eq!(editor.text(), "x");
+                    assert_eq!(editor.text(), "ab", "{name}: {grapheme:?}");
+                    assert_eq!(editor.textarea.cursor(), (0, 1), "{name}: {grapheme:?}");
+
+                    let undone = editor
+                        .handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                    assert!(undone, "{name}: {grapheme:?}");
+
+                    assert_eq!(editor.text(), text, "{name}: {grapheme:?}");
+
+                    let redone = editor
+                        .handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+                    assert!(redone, "{name}: {grapheme:?}");
+
+                    assert_eq!(editor.text(), "ab", "{name}: {grapheme:?}");
+
+                    let pasted = editor
+                        .handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+                    assert!(pasted, "{name}: {grapheme:?}");
+
+                    assert_eq!(editor.text(), "a saved b", "{name}: {grapheme:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn deletion_at_the_buffer_edge_keeps_the_text() {
+            for text in ["", "ab"] {
+                for (code, movement) in [
+                    (KeyCode::Backspace, CursorMove::Head),
+                    (KeyCode::Delete, CursorMove::End),
+                ] {
+                    let mut editor = LineEditor::new(text);
+                    editor.textarea.move_cursor(movement);
+
+                    let deleted = editor.handle_key(&KeyEvent::from(code));
+
+                    assert!(!deleted, "{code:?}: {text:?}");
+                    assert_eq!(editor.text(), text, "{code:?}: {text:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn honors_selections_during_grapheme_deletion() {
+            for (code, empty_selection_text) in
+                [(KeyCode::Backspace, "axb"), (KeyCode::Delete, "a❤️b")]
+            {
+                for (start, end, expected) in
+                    [(1, 4, "ab"), (4, 1, "ab"), (3, 3, empty_selection_text)]
+                {
+                    let mut editor = LineEditor::new("a❤️xb");
+                    editor.textarea.move_cursor(CursorMove::Jump(0, start));
+                    editor.textarea.start_selection();
+                    editor.textarea.move_cursor(CursorMove::Jump(0, end));
+
+                    let deleted = editor.handle_key(&KeyEvent::from(code));
+                    assert!(deleted, "{code:?}: {start} → {end}");
+
+                    assert_eq!(editor.text(), expected, "{code:?}: {start} → {end}");
+
+                    let undone = editor
+                        .handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                    assert!(undone, "{code:?}: {start} → {end}");
+
+                    assert_eq!(editor.text(), "a❤️xb", "{code:?}: {start} → {end}");
+                }
+            }
+        }
+
+        #[test]
+        fn keeps_graphemes_joined_by_a_deletion() {
+            for (code, column) in [(KeyCode::Backspace, 2), (KeyCode::Delete, 1)] {
+                let mut editor = LineEditor::new("🇦x🇧");
+                editor.textarea.move_cursor(CursorMove::Jump(0, column));
+
+                let deleted = editor.handle_key(&KeyEvent::from(code));
+                assert!(deleted, "{code:?}");
+
+                assert_eq!(editor.text(), "🇦🇧", "{code:?}");
+                assert_eq!(editor.textarea.cursor(), (0, 2), "{code:?}");
+
+                let undone =
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                assert!(undone, "{code:?}");
+
+                assert_eq!(editor.text(), "🇦x🇧", "{code:?}");
+
+                let redone =
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+                assert!(redone, "{code:?}");
+
+                assert_eq!(editor.text(), "🇦🇧", "{code:?}");
+                assert_eq!(editor.textarea.cursor(), (0, 2), "{code:?}");
+            }
+        }
+
+        #[test]
+        fn inserts_once_when_joining_adjacent_graphemes() {
+            let mut editor = LineEditor::new("👨👩");
+            editor.handle_key(&KeyEvent::from(KeyCode::Left));
+
+            let inserted = editor.handle_key(&KeyEvent::from(KeyCode::Char('\u{200d}')));
+            assert!(inserted);
+
+            assert_eq!(editor.text(), "👨‍👩");
+            assert_eq!(editor.textarea.cursor(), (0, 3));
+
+            let undone =
+                editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+            assert!(undone);
+
+            assert_eq!(editor.text(), "👨👩");
+
+            let redone =
+                editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+            assert!(redone);
+
+            assert_eq!(editor.text(), "👨‍👩");
+            assert_eq!(editor.textarea.cursor(), (0, 3));
         }
 
         #[test]
@@ -443,6 +607,40 @@ mod tests {
 
             assert!(pasted);
             assert_eq!(editor.text(), "[fix auth flow]");
+        }
+
+        #[test]
+        fn parks_the_cursor_after_graphemes_joined_by_a_paste() {
+            for (initial, column, text, expected, end) in
+                [("👨👩", 1, "\u{200d}", "👨‍👩", 3), ("🇧", 0, "🇦", "🇦🇧", 2)]
+            {
+                let mut editor = LineEditor::new(initial);
+                editor.textarea.move_cursor(CursorMove::Jump(0, column));
+
+                let pasted = editor.paste(text);
+                assert!(pasted, "{initial:?}: {text:?}");
+
+                assert_eq!(editor.text(), expected, "{initial:?}: {text:?}");
+                assert_eq!(editor.textarea.cursor(), (0, end), "{initial:?}: {text:?}");
+
+                let undone =
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                assert!(undone, "{initial:?}: {text:?}");
+
+                assert_eq!(editor.text(), initial, "{initial:?}: {text:?}");
+
+                let redone =
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+                assert!(redone, "{initial:?}: {text:?}");
+
+                assert_eq!(editor.text(), expected, "{initial:?}: {text:?}");
+                assert_eq!(editor.textarea.cursor(), (0, end), "{initial:?}: {text:?}");
+
+                let deleted = editor.handle_key(&KeyEvent::from(KeyCode::Backspace));
+                assert!(deleted, "{initial:?}: {text:?}");
+
+                assert_eq!(editor.text(), "", "{initial:?}: {text:?}");
+            }
         }
 
         #[test]
