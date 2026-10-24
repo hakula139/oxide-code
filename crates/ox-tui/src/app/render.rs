@@ -251,7 +251,9 @@ fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static>
 mod tests {
     use std::fmt::Write as _;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    };
     use indoc::indoc;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -259,6 +261,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use ox_core::config::StatusLineSegment;
+    use ox_core::permission::testing::exec_grant;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::testing::{ls_call, text_result};
     use ox_core::protocol::{ApprovalDecision, CompactTrigger, Event, Op};
@@ -277,6 +280,7 @@ mod tests {
     use crate::components::status::testing::status_bar_init;
     use crate::components::status::{Status, StatusBar};
     use crate::git_probes::GitUpdate;
+    use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::now;
     use crate::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};
     use crate::testing::{buffer_rows, key_event};
@@ -390,6 +394,93 @@ mod tests {
 
     mod draw_frame {
         use super::*;
+
+        #[tokio::test(start_paused = true)]
+        async fn clipped_approval_and_editor_views_rearm_when_restored() {
+            for editor in [false, true] {
+                for (width, height) in [(60, 1), (60, 3), (0, 12)] {
+                    let (mut app, mut rx, _event_tx) = test_app(None);
+                    app.push_approval_modal(
+                        "call-1".to_owned(),
+                        ApprovalPreview {
+                            title: "Bash".to_owned(),
+                            body: ApprovalBody::Command("cargo test".to_owned()),
+                        },
+                        &Basis::Mode(Mode::Manual),
+                        Some(Box::new(exec_grant("cargo test"))),
+                    );
+                    render_app(&mut app, 60, 12);
+                    tokio::time::advance(TYPE_AHEAD_GUARD).await;
+                    let key = if editor {
+                        app.handle_crossterm_event(&key_event(
+                            KeyCode::Char('a'),
+                            KeyModifiers::NONE,
+                        ));
+                        render_app(&mut app, 60, 12);
+                        tokio::time::advance(TYPE_AHEAD_GUARD).await;
+                        KeyCode::Enter
+                    } else {
+                        KeyCode::Char('y')
+                    };
+                    render_app(&mut app, width, height);
+                    if editor {
+                        app.handle_crossterm_event(&CrosstermEvent::Paste(" *".to_owned()));
+                    }
+
+                    app.handle_crossterm_event(&key_event(key, KeyModifiers::NONE));
+
+                    assert_eq!(
+                        rx.try_recv(),
+                        Err(mpsc::error::TryRecvError::Empty),
+                        "editor={editor} at {width}x{height}"
+                    );
+                    assert!(app.modals.is_active());
+
+                    render_app(&mut app, 60, 12);
+                    app.handle_crossterm_event(&key_event(key, KeyModifiers::NONE));
+
+                    assert_eq!(
+                        rx.try_recv(),
+                        Err(mpsc::error::TryRecvError::Empty),
+                        "reappearance must rearm editor={editor}"
+                    );
+
+                    tokio::time::advance(TYPE_AHEAD_GUARD).await;
+                    app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::new_with_kind(
+                        key,
+                        KeyModifiers::NONE,
+                        KeyEventKind::Repeat,
+                    )));
+
+                    assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+
+                    tokio::time::advance(TYPE_AHEAD_GUARD).await;
+                    app.handle_crossterm_event(&key_event(key, KeyModifiers::NONE));
+
+                    let expected = if editor {
+                        ApprovalDecision::AllowForSession {
+                            rule: Box::new(
+                                ox_core::permission::rule::Rule::parse(
+                                    ox_core::permission::PermissionClass::Exec,
+                                    "cargo test *",
+                                )
+                                .unwrap(),
+                            ),
+                        }
+                    } else {
+                        ApprovalDecision::Approve
+                    };
+                    assert_eq!(
+                        rx.try_recv(),
+                        Ok(Op::Resolve {
+                            id: "call-1".to_owned(),
+                            decision: expected
+                        })
+                    );
+                    assert!(!app.modals.is_active());
+                }
+            }
+        }
 
         /// Pushes a finished `ls` call listing two files.
         fn push_ls_call(app: &mut App) {
