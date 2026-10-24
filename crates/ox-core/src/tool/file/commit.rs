@@ -14,6 +14,7 @@ use tempfile::{NamedTempFile, TempDir, TempPath};
 use self::metadata::Snapshot;
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::util::fs::{open_no_follow, validate_regular_file};
+use crate::util::path::requires_directory;
 
 pub(super) fn write(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> io::Result<()> {
     write_with(path, bytes, expected, |_, _| Ok(()))
@@ -34,6 +35,12 @@ fn write_with(
     expected: Option<&[u8]>,
     mut checkpoint: impl FnMut(Phase, &File) -> io::Result<()>,
 ) -> io::Result<()> {
+    if expected.is_none() && requires_directory(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a new file path has a directory suffix",
+        ));
+    }
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("the file has no parent"))?;
@@ -396,6 +403,26 @@ mod tests {
                 } else {
                     attempt.assert_native_refusal(&result.unwrap_err());
                 }
+            }
+        }
+
+        #[test]
+        fn refuses_directory_suffixed_new_paths_before_preparation() {
+            for name in ["missing/", "missing/."] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join(name);
+                let mut visited = Vec::new();
+
+                let error = write_with(&path, b"new", None, |phase, _| {
+                    visited.push(phase);
+                    Ok(())
+                })
+                .unwrap_err();
+
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name}");
+                assert_eq!(error.to_string(), "a new file path has a directory suffix");
+                assert_eq!(visited, [], "{name}");
+                assert_eq!(entries(dir.path()), [] as [std::ffi::OsString; 0], "{name}");
             }
         }
 

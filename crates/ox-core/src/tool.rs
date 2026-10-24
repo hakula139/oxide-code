@@ -972,7 +972,18 @@ mod tests {
 
         #[tokio::test]
         async fn keeps_missing_directory_paths_from_becoming_files() {
-            for name in ["missing/", "missing/."] {
+            for name in [
+                "missing/",
+                "missing/.",
+                "missing//",
+                "missing/./",
+                #[cfg(windows)]
+                r"missing\",
+                #[cfg(windows)]
+                r"missing\.",
+                #[cfg(windows)]
+                r"missing/\.",
+            ] {
                 let dir = canonical_tempdir();
                 let ctx = ctx(dir.path());
 
@@ -988,7 +999,12 @@ mod tests {
                 .await;
                 assert!(write.is_error, "{name}: {}", write.content);
 
-                assert!(!dir.path().join("missing").is_file());
+                assert_eq!(ctx.tracker.snapshot_all(), [], "{name}");
+                let entries: Vec<_> = fs::read_dir(dir.path())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                assert_eq!(entries, [] as [std::ffi::OsString; 0], "{name}");
             }
         }
 

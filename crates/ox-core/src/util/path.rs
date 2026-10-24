@@ -124,6 +124,16 @@ pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Whether the final component requires a directory, including a separator or `.` that
+/// [`Path::components`] omits.
+pub(crate) fn requires_directory(path: &Path) -> bool {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .rsplit(|byte| std::path::is_separator(char::from(*byte)))
+        .next()
+        .is_some_and(|last| last.is_empty() || last == b".")
+}
+
 /// `path` as lossy UTF-8 with every platform separator written as `/`. Paths the model reads use
 /// this form, since its shell is bash, where `\` escapes the next character.
 pub(crate) fn slash_separated(path: &Path) -> String {
