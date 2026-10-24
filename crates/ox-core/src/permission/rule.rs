@@ -1331,19 +1331,31 @@ mod tests {
         #[cfg(windows)]
         #[test]
         fn absolute_prefixes_keep_drive_and_share_roots_distinct() {
-            for (pattern, same, different) in [
-                ("C:/secrets/key", "c:/SECRETS/key", "D:/secrets/key"),
+            for (pattern, base, same, different) in [
+                (
+                    "C:/secrets/key",
+                    "C:/real/key",
+                    "c:/REAL/key",
+                    "D:/real/key",
+                ),
                 (
                     "//server/one/secrets/key",
-                    "//SERVER/one/secrets/key",
-                    "//server/two/secrets/key",
+                    r"\\server\one\real\key",
+                    "//SERVER/one/real/key",
+                    "//server/two/real/key",
+                ),
+                (
+                    "//server/one/secrets/key",
+                    "//server/one/real/key",
+                    r"\\SERVER\one\real\key",
+                    r"\\server\two\real\key",
                 ),
             ] {
                 let mut rule = edit(pattern);
                 let Pattern::Path(glob) = &mut rule.pattern else {
                     unreachable!()
                 };
-                glob.walk_bases = Some(vec![folded_components(&glob.literal)]);
+                glob.walk_bases = Some(vec![folded_components(Path::new(base))]);
 
                 assert!(
                     matches_path(&rule, &path(same, &[]), MatchDiscipline::Deny),

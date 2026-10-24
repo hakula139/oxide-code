@@ -26,7 +26,7 @@ use unicode_normalization::UnicodeNormalization as _;
 use self::defaults::{ProtectedRoots, Shipped, ShippedTier, protected_roots};
 use self::rule::{MatchDiscipline, Rule};
 use self::shell::{CommandTarget, Segment};
-use crate::util::path::{expand_user, lexical_normalize};
+use crate::util::path::{expand_user, lexical_normalize, slash_separated};
 use crate::util::variant;
 
 // ── Mode ──
@@ -512,14 +512,16 @@ fn walk_spelling(path: &Path, base: &Path) -> PathBuf {
 
 /// `path` beneath a base already split into [`fold_name`]-folded components, including its root.
 fn relative_to_folded(path: &Path, base: &[String]) -> Option<String> {
-    let names: Vec<&OsStr> = path.components().map(Component::as_os_str).collect();
-    let rest = names.get(base.len()..)?;
-    names
+    let components: Vec<Component<'_>> = path.components().collect();
+    let rest = components.get(base.len()..)?;
+    components
         .iter()
         .zip(base)
-        .all(|(name, folded)| fold_name(&name.to_string_lossy()) == *folded)
+        .all(|(component, folded)| folded_component(*component) == *folded)
         .then(|| {
             rest.iter()
+                .copied()
+                .map(Component::as_os_str)
                 .collect::<PathBuf>()
                 .to_string_lossy()
                 .into_owned()
@@ -696,9 +698,11 @@ fn folded_names(path: &Path) -> Vec<String> {
 }
 
 fn folded_components(path: &Path) -> Vec<String> {
-    path.components()
-        .map(|component| fold_name(&component.as_os_str().to_string_lossy()))
-        .collect()
+    path.components().map(folded_component).collect()
+}
+
+fn folded_component(component: Component<'_>) -> String {
+    fold_name(&slash_separated(Path::new(component.as_os_str())))
 }
 
 fn names(path: &Path) -> impl Iterator<Item = &OsStr> {
@@ -2911,6 +2915,28 @@ mod tests {
                         );
                     }
                 }
+            }
+
+            #[test]
+            fn a_decoded_absolute_prefix_stays_within_an_anchored_patterns_scope() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                for name in ["work", "vault"] {
+                    std::fs::create_dir(root.join(name)).unwrap();
+                }
+                symlink_dir(Path::new("vault"), &root.join("alias"));
+                let workspace = Workspace::new(&root.join("work"));
+                let pattern = format!("./{{{}}}/**", escaped(&root.join("alias")));
+                let p = resolved_policy(Mode::Yolo, &[(READ, &pattern)], &[], &[], &[], &workspace);
+
+                let target = Access::for_path(root.join("vault/key"), &workspace);
+
+                assert_eq!(decide(&p, READ, &target), Decision::Allow);
+                assert!(
+                    !p.read_filter()
+                        .walk(&root.join("vault"), &root.join("vault"), &workspace)
+                        .withholds(&root.join("vault/key"))
+                );
             }
 
             #[test]
