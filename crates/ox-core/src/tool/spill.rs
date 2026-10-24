@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
+use super::view::ToolResultView;
 use super::{Prepared, Tool, ToolCtx, ToolOutput, run_blocking};
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::util::fs::create_private_dir_all;
@@ -31,7 +32,12 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
     let content = std::mem::take(&mut output.content);
     let spill = ctx.spills().file(".txt");
     match run_blocking(move || Ok(cap_output(&content, spill))).await {
-        Ok(capped) => output.content = capped,
+        Ok(capped) => {
+            output.metadata.result_view = Some(ToolResultView::Text {
+                content: capped.clone(),
+            });
+            output.content = capped;
+        }
         Err(e) => return ToolOutput::error(e),
     }
     output
@@ -257,8 +263,7 @@ mod tests {
     use crate::tool::grep::GrepTool;
     use crate::tool::local_testing::{ctx, spill_path};
     use crate::tool::testing::bash_registry;
-    use crate::tool::view::ToolResultView;
-    use crate::tool::{ToolRegistry, ToolSpec};
+    use crate::tool::{ToolMetadata, ToolRegistry, ToolSpec};
 
     /// Splits output capped by [`cap_output`] into its head, the text inside its omission marker,
     /// and its tail.
@@ -368,7 +373,20 @@ mod tests {
                 output.is_error,
                 Path::new("/repo"),
             );
-            assert!(matches!(view, ToolResultView::Text { .. }));
+            assert_eq!(
+                view,
+                ToolResultView::Text {
+                    content: output.content.clone()
+                },
+            );
+            let metadata: ToolMetadata =
+                serde_json::from_value(serde_json::to_value(&output.metadata).unwrap()).unwrap();
+            assert_eq!(metadata.result_view, Some(view));
+            assert!(
+                output
+                    .content
+                    .contains("bytes omitted, full output saved to")
+            );
         }
 
         #[tokio::test]
