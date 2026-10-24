@@ -24,7 +24,7 @@ These rules apply to comments, docs, commit messages, PR and issue text, `#[expe
 
 - State conclusions directly and match each claim's strength to its evidence. Describe what you checked, and avoid absolute claims such as "bug-free" or "guaranteed".
 - Say each thing once, using the fewest words that preserve its meaning. Give messages of the same kind a consistent shape.
-- Include units with numbers, as in `Retrying in 1 s`. Write 1024-based sizes in KiB and MiB, as in `64 KiB`, and keep KB and MB for 1000-based ones.
+- Include units with numbers, as in `Retrying in 1 s`. Label sizes by their base: `KiB`, `MiB`, and `GiB` for powers of 1024, and `kB` and `MB` for powers of 1000. `util::text::format_size` picks the binary unit for a byte count. An exact count stays in bytes.
 - Connect related thoughts with a period or a linking word such as `since`, `because`, `while`, `so`, or `but`. Use an em-dash only as a paired parenthetical or to separate a list label from its gloss.
 - Avoid semicolons in prose. They are fine in code and literal syntax, and between list items that contain commas.
 - Define things by what they are. Add a contrast with what they are not only when omitting it could lead to a materially wrong reading.
@@ -33,7 +33,6 @@ These rules apply to comments, docs, commit messages, PR and issue text, `#[expe
 - Place commas and periods outside closing quotation marks.
 - Use straight quotes. Arrows and comparison operators (`→`, `≤`, `≠`) are welcome.
 - Put spaces around `/` and arrows when they separate words or phrases, as in `Read / Write` and `low → high`. Keep compound terms such as `I/O` tight.
-- Label a size shown in units by the base it counts in: `KiB`, `MiB`, and `GiB` for powers of 1024, and `kB` and `MB` for powers of 1000. `util::text::format_size` picks the binary unit for a byte count. An exact count stays in bytes.
 - Close a delimited block the same way it opens. If an opening tag or fence, such as `<system-reminder>`, appears on its own line, put its closing counterpart on its own line too.
 
 ## Messages

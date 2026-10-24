@@ -32,7 +32,7 @@ Dispatched actions flow through the same channel as keyboard input, so the modal
 
 Bracketed pastes reach `Modal::handle_paste`, which defaults to a no-op. Text fields such as `/rename`, the picker search, and the approval prompt's editors accept them, and a paste never answers a confirm or approval prompt.
 
-`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear` on resume or compaction. A modal whose `Modal::captures_esc` returns true takes Esc itself, while Ctrl+C still cancels. The approval prompt's rule and feedback editors take Esc to step back to the choice, and the `/resume` picker takes it so dismissal runs through its keymap.
+`Modal::on_cancel` fires whenever a modal leaves the stack without submitting: the stack-level Esc / Ctrl+C cancel, a `Cancelled` outcome, or `ModalStack::clear`. A modal whose `Modal::captures_esc` returns true takes Esc itself, while Ctrl+C still cancels. The approval prompt's rule and feedback editors take Esc to step back to the choice, and the `/resume` picker takes it so dismissal runs through its keymap.
 
 Only a plain Esc cancels. The stack drops every other key held with Ctrl, Alt, or another modifier but Shift unless `Modal::binds_modified_key` claims it, so a picker's `j` or Enter never fires as Alt+J or Ctrl+Enter. A modal with a text field claims every modified key but a line break or an indent through `LineEditor::binds_modified_key`, which covers the `/resume` picker's Ctrl keymap, and that picker moves its cursor only on unmodified arrows. The approval prompt claims every key while its type-ahead guard is armed, so any key restarts the guard.
 
@@ -68,7 +68,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **Confirm-delete modal**: `ConfirmDeleteSessionModal` shows the session's title above its `format_metadata_line` row, which leads with the ID prefix. Y runs `session::saved::delete` on the session's file synchronously once the target is visible and the shared type-ahead guard expires. Enter does nothing, and repeated Y events restart the guard. Success submits `ModalAction::SystemMessage("Deleted session {id}: {title}")`, so the chat records the deletion. A failure shows an inline error that stays until a retry replaces it or the modal closes, so a stray key can't wipe the diagnostic. N cancels. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D.
 
-- **Approval modal**: `ApprovalModal` is the approve-or-deny gate the App pushes when the agent asks to run a gated tool call. It holds the tool-use ID and renders the call summary as its title above the body: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. The body shows at most 16 rows and scrolls when the call runs longer or the band is shorter. Y submits `Op::Resolve` with `Approve` while the first body row is visible and the type-ahead guard has expired, while Enter does nothing. [permissions.md](../tools/permissions.md) covers the guard. When the call offers a session grant, A opens a rule editor prefilled with the suggested rule, and Enter submits `AllowForSession` with the edited rule while the whole editor is visible and armed. N submits `Deny`. F opens a feedback editor whose Enter submits `DenyWithFeedback` with the typed text. Esc from the choice, Ctrl+C, and a `clear` on resume or compaction all resolve through `on_cancel` to `Abort`, which ends the turn.
+- **Approval modal**: `ApprovalModal` is the approve-or-deny gate the App pushes when the agent asks to run a gated tool call. It holds the tool-use ID and renders the call summary as its title above the body: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. The body shows at most 16 rows and scrolls when the call runs longer or the band is shorter. Y submits `Op::Resolve` with `Approve` while the first body row is visible and the type-ahead guard has expired, while Enter does nothing. [permissions.md](../tools/permissions.md) covers the guard. When the call offers a session grant, A opens a rule editor prefilled with the suggested rule, and Enter submits `AllowForSession` with the edited rule while the whole editor is visible and armed. N submits `Deny`. F opens a feedback editor whose Enter submits `DenyWithFeedback` with the typed text. Esc from the choice, Ctrl+C, and clearing the stack all resolve through `on_cancel` to `Abort`, which ends the turn.
 
 - **`/status` overview**: `KvOverview` of session descriptors (model, effort, permission mode, cwd, session ID, auth, version, cache TTL, auto compaction, show-thinking, show-welcome), plus a Session Rules section listing the session allow rules once any is granted and a Background Shells section listing each open shell with its state and the first line of its command. Constructed in `slash/status`.
 
@@ -84,7 +84,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 3. **Typed result delivery via `ModalAction`, no callbacks.** Modal emits `ModalKey::Submitted(ModalAction)` and the manager dispatches. Boxed `FnOnce` callbacks were rejected for the lifetime / `Send` complexity and because they hide the dispatch graph.
 
-4. **Modals receive a `&LiveSessionInfo` snapshot at open.** Modals do not subscribe to updates, so a modal shows the values from when it opened. The App clears every modal on a resume or a compaction, since both replace the transcript the modal opened over.
+4. **Commands build modals from read-only App state.** `SlashContext` supplies the current `&LiveSessionInfo` and title when a command runs. The App clears every modal on resume and after manual or pre-turn compaction. Mid-turn compaction preserves open modals and their live previews, since the user may open one at any point during a long turn.
 
 5. **Layout band sized by `ModalStack::height(width, max_height)`.** When the stack is empty, the band takes no rows. When active, it shifts the chat upward, just like the slash popup. The App caps the band so the status bar and one chat row stay visible, and sizes it before the queued-prompt preview, which takes the rows left over. Pickers and `KvOverview` fit the cap by scrolling their bodies between a pinned header and footer, and the stack clips any fixed-size modal that still runs taller.
 
@@ -113,7 +113,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 ## Sources
 
 - `crates/ox-tui/src/app/dispatch.rs`: `App::handle_crossterm_event` modal gate, `run_slash`, `apply_slash_outcome`, `apply_modal_action`, `dispatch_action`, `clear_modals`.
-- `crates/ox-tui/src/app/events.rs`: `push_approval_modal`.
+- `crates/ox-tui/src/app/events.rs`: `push_approval_modal`, `apply_session_resumed`, and `apply_session_compacted`.
 - `crates/ox-tui/src/app/render.rs`: `draw_frame` modal layout band.
 - `crates/ox-tui/src/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`.
 - `crates/ox-tui/src/modal.rs`: `Modal` (including the `on_cancel`, `captures_esc`, `binds_modified_key`, `tick`, and `next_tick` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
