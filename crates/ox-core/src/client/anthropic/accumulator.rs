@@ -163,7 +163,8 @@ enum BlockAccumulator {
     ToolUse {
         id: String,
         name: String,
-        json_buf: String,
+        input: serde_json::Value,
+        json_buf: Option<String>,
         /// Whether this is a `server_tool_use` call, which the API runs itself.
         server: bool,
     },
@@ -187,8 +188,10 @@ impl BlockAccumulator {
     fn start(info: ContentBlockInfo, index: usize) -> Self {
         match info {
             ContentBlockInfo::Text { text } => Self::Text(text),
-            ContentBlockInfo::ToolUse { id, name } => Self::tool_use(id, name, false),
-            ContentBlockInfo::ServerToolUse { id, name } => Self::tool_use(id, name, true),
+            ContentBlockInfo::ToolUse { id, name, input } => Self::tool_use(id, name, input, false),
+            ContentBlockInfo::ServerToolUse { id, name, input } => {
+                Self::tool_use(id, name, input, true)
+            }
             ContentBlockInfo::ServerToolResult {
                 r#type,
                 tool_use_id,
@@ -211,17 +214,18 @@ impl BlockAccumulator {
                 Self::Skipped
             }
             ContentBlockInfo::Unknown { r#type: kind } => {
-                warn!(index, %kind, "skipping unknown or malformed content block");
+                warn!(index, %kind, "skipping unknown content block");
                 Self::Skipped
             }
         }
     }
 
-    fn tool_use(id: String, name: String, server: bool) -> Self {
+    fn tool_use(id: String, name: String, input: serde_json::Value, server: bool) -> Self {
         Self::ToolUse {
             id,
             name,
-            json_buf: String::new(),
+            input,
+            json_buf: None,
             server,
         }
     }
@@ -234,7 +238,7 @@ impl BlockAccumulator {
                 Some(ResponseEvent::Text(text))
             }
             (Self::ToolUse { json_buf, .. }, Delta::InputJsonDelta { partial_json }) => {
-                json_buf.push_str(&partial_json);
+                json_buf.get_or_insert_default().push_str(&partial_json);
                 None
             }
             (
@@ -280,14 +284,15 @@ impl BlockAccumulator {
             payload,
         };
         match self {
-            Self::Text(text) => (Some(ContentBlock::Text { text }), None),
+            Self::Text(text) => (Some(ContentBlock::text(text)), None),
             Self::ToolUse {
                 id,
                 name,
+                input,
                 json_buf,
                 server,
             } => {
-                let (input, err) = parse_tool_json(&json_buf);
+                let (input, err) = json_buf.map_or((input, None), |json| parse_tool_json(&json));
                 let parse_error = err.map(|e| (id.clone(), e));
                 let block = if server {
                     ContentBlock::ServerToolUse { id, name, input }
@@ -329,8 +334,7 @@ impl BlockAccumulator {
     }
 }
 
-/// Returns an empty object and the parse error on failure. An empty buffer is a call that streamed
-/// no input, which reads as `{}`.
+/// Treats an empty delta buffer as `{}`. Malformed JSON returns `{}` with its parse error.
 fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
     let error = match serde_json::from_str(json_buf) {
         Ok(value) => return (value, None),
@@ -410,6 +414,92 @@ mod tests {
 
     mod apply {
         use super::*;
+
+        #[test]
+        fn keeps_initial_tool_input_until_a_delta_replaces_it() {
+            for kind in ["tool_use", "server_tool_use"] {
+                for (case, initial, deltas, expected, malformed) in [
+                    ("empty_input", json!({}), vec![], json!({}), false),
+                    (
+                        "start_only",
+                        json!({"file_path": "notes.txt"}),
+                        vec![],
+                        json!({"file_path": "notes.txt"}),
+                        false,
+                    ),
+                    (
+                        "fragmented",
+                        json!({}),
+                        vec![r#"{"file_path":"#, r#""notes.txt"}"#],
+                        json!({"file_path": "notes.txt"}),
+                        false,
+                    ),
+                    (
+                        "replacement",
+                        json!({"old": true}),
+                        vec![r#"{"new":true}"#],
+                        json!({"new": true}),
+                        false,
+                    ),
+                    ("empty_deltas", json!({}), vec!["", ""], json!({}), false),
+                    (
+                        "empty_replacement",
+                        json!({"old": true}),
+                        vec![""],
+                        json!({}),
+                        false,
+                    ),
+                    (
+                        "malformed",
+                        json!({"old": true}),
+                        vec!["{"],
+                        json!({}),
+                        true,
+                    ),
+                ] {
+                    let mut reply = accumulator(true);
+                    let mut events = vec![block_start(
+                        0,
+                        &json!({"type": kind, "id": "t1", "name": "read", "input": initial}),
+                    )];
+                    events.extend(deltas.into_iter().map(|partial_json| {
+                        block_delta(
+                            0,
+                            &json!({"type": "input_json_delta", "partial_json": partial_json}),
+                        )
+                    }));
+                    events.extend([
+                        json!({"type": "content_block_stop", "index": 0}),
+                        json!({"type": "message_stop"}),
+                    ]);
+
+                    let forwarded = fold(&mut reply, events);
+
+                    let block = if kind == "tool_use" {
+                        ContentBlock::ToolUse {
+                            id: "t1".to_owned(),
+                            name: "read".to_owned(),
+                            input: expected,
+                        }
+                    } else {
+                        ContentBlock::ServerToolUse {
+                            id: "t1".to_owned(),
+                            name: "read".to_owned(),
+                            input: expected,
+                        }
+                    };
+                    assert!(
+                        matches!(
+                            forwarded.as_slice(),
+                            [ResponseEvent::Completed(response)]
+                                if response.content == [block]
+                                    && response.parse_errors.contains_key("t1") == malformed
+                        ),
+                        "{kind}: {case}: {forwarded:?}"
+                    );
+                }
+            }
+        }
 
         #[test]
         fn layers_usage_from_message_start_and_message_delta() {
@@ -498,12 +588,8 @@ mod tests {
                                 thinking: "Let me think".to_owned(),
                                 replay: Replay::with_model(MODEL, "sig"),
                             },
-                            ContentBlock::Text {
-                                text: "Hello there".to_owned(),
-                            },
-                            ContentBlock::Text {
-                                text: "!".to_owned(),
-                            },
+                            ContentBlock::text("Hello there"),
+                            ContentBlock::text("!"),
                             ContentBlock::Thinking {
                                 thinking: "Done".to_owned(),
                                 replay: Replay::with_model(MODEL, "sig2"),
@@ -584,9 +670,7 @@ mod tests {
                 thinking: text.to_owned(),
                 replay: Replay::with_model(MODEL, "sig"),
             };
-            let text_block = |text: &str| ContentBlock::Text {
-                text: text.to_owned(),
-            };
+            let text_block = |text: &str| ContentBlock::text(text);
             let tool_block = |id: &str| ContentBlock::ToolUse {
                 id: id.to_owned(),
                 name: "echo".to_owned(),
@@ -708,9 +792,7 @@ mod tests {
                                     results
                                 )]),
                             },
-                            ContentBlock::Text {
-                                text: "Found it.".to_owned(),
-                            },
+                            ContentBlock::text("Found it."),
                         ],
                         ..Response::default()
                     }),
@@ -748,9 +830,7 @@ mod tests {
                     ResponseEvent::Text("Writing it now.".to_owned()),
                     ResponseEvent::Completed(Response {
                         content: vec![
-                            ContentBlock::Text {
-                                text: "Writing it now.".to_owned(),
-                            },
+                            ContentBlock::text("Writing it now."),
                             ContentBlock::ToolUse {
                                 id: "t1".to_owned(),
                                 name: "write".to_owned(),
@@ -795,9 +875,7 @@ mod tests {
                 [
                     ResponseEvent::Text("Hi".to_owned()),
                     ResponseEvent::Completed(Response {
-                        content: vec![ContentBlock::Text {
-                            text: "Hi".to_owned(),
-                        }],
+                        content: vec![ContentBlock::text("Hi")],
                         ..Response::default()
                     }),
                 ],
@@ -872,49 +950,10 @@ mod tests {
             }
 
             #[test]
-            fn opens_tool_uses_with_an_empty_input_buffer() {
-                let tool = BlockAccumulator::start(
-                    ContentBlockInfo::ToolUse {
-                        id: "tool_1".to_owned(),
-                        name: "bash".to_owned(),
-                    },
-                    0,
-                );
-
-                assert_eq!(
-                    tool,
-                    BlockAccumulator::ToolUse {
-                        id: "tool_1".to_owned(),
-                        name: "bash".to_owned(),
-                        json_buf: String::new(),
-                        server: false,
-                    },
-                );
-
-                let server = BlockAccumulator::start(
-                    ContentBlockInfo::ServerToolUse {
-                        id: "srv_1".to_owned(),
-                        name: "web_search".to_owned(),
-                    },
-                    0,
-                );
-
-                assert_eq!(
-                    server,
-                    BlockAccumulator::ToolUse {
-                        id: "srv_1".to_owned(),
-                        name: "web_search".to_owned(),
-                        json_buf: String::new(),
-                        server: true,
-                    },
-                );
-            }
-
-            #[test]
             fn skips_unknown_blocks_and_mcp_connector_results() {
                 for info in [
                     ContentBlockInfo::Unknown {
-                        r#type: json!("some_future_block"),
+                        r#type: "some_future_block".to_owned(),
                     },
                     ContentBlockInfo::McpToolResult {},
                 ] {
@@ -927,31 +966,6 @@ mod tests {
 
         mod apply {
             use super::*;
-
-            #[test]
-            fn appends_tool_input_without_streaming_it() {
-                let mut block = BlockAccumulator::ToolUse {
-                    id: "tool_1".to_owned(),
-                    name: "bash".to_owned(),
-                    json_buf: r#"{"x"#.to_owned(),
-                    server: false,
-                };
-
-                let forwarded = block.apply(Delta::InputJsonDelta {
-                    partial_json: ":1}".to_owned(),
-                });
-
-                assert_eq!(forwarded, None);
-                assert_eq!(
-                    block,
-                    BlockAccumulator::ToolUse {
-                        id: "tool_1".to_owned(),
-                        name: "bash".to_owned(),
-                        json_buf: r#"{"x:1}"#.to_owned(),
-                        server: false,
-                    },
-                );
-            }
 
             #[test]
             fn appends_thinking_and_replaces_the_signature() {
@@ -1001,12 +1015,7 @@ mod tests {
             fn yields_text_verbatim_and_reasoning_for_its_model() {
                 assert_eq!(
                     BlockAccumulator::Text("hi".to_owned()).into_content_block(MODEL),
-                    (
-                        Some(ContentBlock::Text {
-                            text: "hi".to_owned()
-                        }),
-                        None
-                    ),
+                    (Some(ContentBlock::text("hi")), None),
                 );
                 assert_eq!(
                     BlockAccumulator::Thinking {
@@ -1039,76 +1048,6 @@ mod tests {
                     (None, None)
                 );
             }
-
-            #[test]
-            fn parses_tool_input() {
-                let (tool, err) = BlockAccumulator::ToolUse {
-                    id: "tool_1".to_owned(),
-                    name: "bash".to_owned(),
-                    json_buf: r#"{"command": "ls"}"#.to_owned(),
-                    server: false,
-                }
-                .into_content_block(MODEL);
-                assert_eq!(
-                    tool,
-                    Some(ContentBlock::ToolUse {
-                        id: "tool_1".to_owned(),
-                        name: "bash".to_owned(),
-                        input: json!({"command": "ls"}),
-                    }),
-                );
-                assert_eq!(err, None);
-
-                let (server, err) = BlockAccumulator::ToolUse {
-                    id: "srv_1".to_owned(),
-                    name: "web_search".to_owned(),
-                    json_buf: r#"{"query": "rust"}"#.to_owned(),
-                    server: true,
-                }
-                .into_content_block(MODEL);
-                assert_eq!(
-                    server,
-                    Some(ContentBlock::ServerToolUse {
-                        id: "srv_1".to_owned(),
-                        name: "web_search".to_owned(),
-                        input: json!({"query": "rust"}),
-                    }),
-                );
-                assert_eq!(err, None);
-            }
-
-            #[test]
-            fn malformed_tool_input_surfaces_a_parse_error() {
-                let block = BlockAccumulator::ToolUse {
-                    id: "srv_1".to_owned(),
-                    name: "web_search".to_owned(),
-                    json_buf: "{unclosed".to_owned(),
-                    server: true,
-                };
-
-                let (block, err) = block.into_content_block(MODEL);
-
-                assert_eq!(
-                    block,
-                    Some(ContentBlock::ServerToolUse {
-                        id: "srv_1".to_owned(),
-                        name: "web_search".to_owned(),
-                        input: json!({}),
-                    }),
-                );
-                let serde_error =
-                    serde_json::from_str::<serde_json::Value>("{unclosed").unwrap_err();
-                assert_eq!(err, Some(("srv_1".to_owned(), serde_error.to_string())));
-            }
-        }
-    }
-
-    mod parse_tool_json {
-        use super::*;
-
-        #[test]
-        fn empty_buffer_is_an_empty_object() {
-            assert_eq!(parse_tool_json(""), (json!({}), None));
         }
     }
 }

@@ -18,11 +18,11 @@ The trigger estimates the size of the next request from the latest request of th
 input_tokens + cache_creation_input_tokens + cache_read_input_tokens + estimate(messages since that request)
 ```
 
-`message_start` reports the input and cache counts, and the stream keeps the latest non-zero value for each field. The status-line context segment shows the same input total. The messages appended since that request, its reply, tool results, queued prompts, and any interruption marker, have no reported usage yet, so the trigger estimates them at four bytes of JSON per token, as Claude Code's `tokenCountWithEstimation` does. A turn with no reported usage leaves no estimate, which means "do not auto-compact".
+`message_start` reports the input and cache counts, and the stream keeps the latest non-zero value for each field. The status-line context segment shows the same input total. The messages appended since that request, its reply, tool results, queued prompts, and any interruption marker, have no reported usage yet, so the trigger estimates them at four bytes of JSON per token, as Claude Code's `tokenCountWithEstimation` does.
 
-A transcript that no turn has reported usage on, because the session just started, was resumed, or was compacted, has no request to measure from. Until its first turn reports usage, the trigger estimates the whole next request at the same four bytes per token: the system prompt, the user context, the tool definitions, and the transcript. A resumed session over the threshold therefore compacts before its first prompt.
+A fresh, resumed, or compacted transcript has no request to measure from. The trigger estimates the whole next request at the same four bytes per token: the system prompt, the user context, the tool definitions, and the transcript. It also uses this estimate when a turn reports no usage, including a context-limit rejection, so retained prompts still count toward compaction before the next submission. The status-line context segment keeps the latest reported input total. A resumed session over the threshold therefore compacts before its first prompt.
 
-The check inside a turn and the check before the next prompt read the same estimate, so a turn that stops near the threshold, whether it completed, failed, or was cancelled, compacts before the next prompt goes out.
+When a turn reports usage, the checks inside the turn and before the next prompt use the same estimate.
 
 ## Threshold
 

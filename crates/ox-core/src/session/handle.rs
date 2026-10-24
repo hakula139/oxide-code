@@ -19,7 +19,7 @@ use super::actor::{self, Record, SessionCmd};
 use super::entry::{ArchiveState, CompactBoundary, CompactInfo, UsageRecord};
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
-use super::state::{SessionState, extract_user_text};
+use super::state::SessionState;
 use super::store::{SessionData, SessionStore, load_session_data_from_path, open_append_at};
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
@@ -111,7 +111,7 @@ pub(crate) struct Checkpoint {
 pub(crate) struct RecordOutcome {
     /// The branch point the message chained from, `None` when the actor is gone.
     pub(crate) checkpoint: Option<Checkpoint>,
-    /// `Some` only on the first user-text message of a fresh session.
+    /// `Some` when this ordinary user message may seed the session's automatic title.
     pub(crate) ai_title_seed: Option<String>,
     /// A write failure, reported only the first time each kind of failure occurs.
     pub(crate) failure: Option<String>,
@@ -495,8 +495,6 @@ fn resume_loaded(
         writer.set_archived(false)?;
     }
 
-    let first_user_prompt_seen =
-        data.messages.iter().any(|m| extract_user_text(m).is_some()) || data.title.is_some();
     let tasks = tasks::latest(&data.messages)
         .or_else(|| data.compact.as_ref().map(|compact| compact.tasks.clone()))
         .unwrap_or_default();
@@ -509,7 +507,7 @@ fn resume_loaded(
         writer,
         data.last_uuid,
         message_count,
-        first_user_prompt_seen,
+        data.first_user_prompt_seen,
     );
     let handle = spawn_actor(state);
     Ok(ResumedSession {
@@ -558,10 +556,11 @@ mod tests {
         FileState, FileTracker, GateError, GatePurpose, LastView,
         testing::{record_tracked_file, seed_full_read},
     };
-    use crate::message::{ContentBlock, Replay, Role};
+    use crate::message::{ContentBlock, Replay, Role, TextOrigin};
     use crate::prompt::PromptParts;
-    use crate::session::entry::{Entry, SessionInfo};
+    use crate::session::entry::{Entry, ExitInfo, SessionInfo};
     use crate::session::handle::testing::record_write_call;
+    use crate::session::store::encode_lines;
     use crate::session::store::listing::ProjectScope;
     use crate::session::store::local_testing::{
         saved_entries, saved_snapshot_paths, saved_titles, test_session_file,
@@ -571,7 +570,7 @@ mod tests {
         test_project_dir, test_store,
     };
     use crate::tool::tasks::testing::plan;
-    use crate::tool::view::{DiffChunk, EditDiff, NumberedLine};
+    use crate::tool::view::{DiffChunk, EditDiff, NumberedLine, ToolResultView};
 
     /// The failure the first write after the actor stops reports.
     const STOPPED: &str =
@@ -1227,7 +1226,7 @@ mod tests {
             let entries = saved_entries(dir.path(), &session_id);
             let summary_count = entries
                 .iter()
-                .filter(|entry| matches!(entry, Entry::Summary { .. }))
+                .filter(|entry| matches!(entry, Entry::Summary(_)))
                 .count();
             assert_eq!(summary_count, 1);
         }
@@ -1299,10 +1298,10 @@ mod tests {
             assert!(
                 matches!(
                     entries.last(),
-                    Some(Entry::Summary {
+                    Some(Entry::Summary(ExitInfo {
                         message_count: 1,
                         ..
-                    })
+                    }))
                 ),
                 "summary lands on disk: {entries:?}",
             );
@@ -1357,10 +1356,10 @@ mod tests {
             assert!(
                 matches!(
                     entries.last(),
-                    Some(Entry::Summary {
+                    Some(Entry::Summary(ExitInfo {
                         message_count: 1,
                         ..
-                    })
+                    }))
                 ),
                 "summary lands on disk: {entries:?}",
             );
@@ -1486,7 +1485,7 @@ mod tests {
 
             let old = saved_entries(dir.path(), &original_id);
             assert!(
-                matches!(&old[..], [Entry::Header(header), .., Entry::Summary { .. }]
+                matches!(&old[..], [Entry::Header(header), .., Entry::Summary(_)]
                     if header.session_id == original_id),
                 "old JSONL keeps its header and gets a summary entry: {old:?}",
             );
@@ -1609,10 +1608,10 @@ mod tests {
             assert!(
                 matches!(
                     entries.last(),
-                    Some(Entry::Summary {
+                    Some(Entry::Summary(ExitInfo {
                         message_count: 1,
                         ..
-                    })
+                    }))
                 ),
                 "old JSONL gets a summary: {entries:?}",
             );
@@ -1708,6 +1707,320 @@ mod tests {
         use super::*;
 
         #[tokio::test]
+        async fn generated_reminders_and_interruptions_keep_their_saved_presentation() {
+            let (dir, store) = isolated_store();
+            let original = start(&store, "m", None);
+            let session_id = original.session_id().to_owned();
+            let literal = "<system-reminder>Explain this tag.</system-reminder>";
+            let messages = [
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::text(literal),
+                        ContentBlock::generated_text(literal, TextOrigin::SystemReminder),
+                    ],
+                },
+                Message::interruption(),
+            ];
+            for message in &messages {
+                let outcome = original.record_message(message.clone()).await;
+                assert_eq!(outcome.failure, None);
+            }
+            assert_eq!(original.finalize(Vec::new()).await, None);
+
+            let resumed = resume_id(&store, &session_id).unwrap();
+            let history = crate::session::history::interactions(
+                &resumed.transcript.messages,
+                resumed.transcript.compact.as_ref(),
+                &resumed.transcript.tool_metadata,
+                &crate::tool::ToolRegistry::new(Vec::new()),
+                dir.path(),
+            );
+            resumed.handle.shutdown().await;
+
+            assert_eq!(resumed.transcript.messages, messages);
+            assert_eq!(
+                history,
+                [
+                    crate::protocol::Interaction::UserText(literal.to_owned()),
+                    crate::protocol::Interaction::Interrupted,
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_concurrent_assistant_append_restores_the_existing_prompt_title_state() {
+            let (_dir, store) = isolated_store();
+            let root = Uuid::new_v4();
+            let now = datetime!(2026-01-01 00:00:00 UTC);
+            let messages = [
+                Message::user("original prompt"),
+                Message::assistant("continued reply"),
+            ];
+            let records = [
+                Entry::Message {
+                    uuid: root,
+                    parent_uuid: None,
+                    message: messages[0].clone(),
+                    timestamp: now,
+                },
+                Entry::Rewind {
+                    tip: None,
+                    first_user_prompt_seen: Some(false),
+                    timestamp: now,
+                },
+                Entry::Message {
+                    uuid: Uuid::new_v4(),
+                    parent_uuid: Some(root),
+                    message: messages[1].clone(),
+                    timestamp: now,
+                },
+            ];
+            seed_test_session(&store, "revived", None, None, now);
+            store
+                .open_append("revived")
+                .unwrap()
+                .append_lines(&encode_lines(&records).unwrap())
+                .unwrap();
+
+            let resumed = resume_id(&store, "revived").unwrap();
+            let next = resumed
+                .handle
+                .record_message(Message::user("next prompt"))
+                .await;
+            assert_eq!(next.failure, None);
+            resumed.handle.shutdown().await;
+
+            assert_eq!(resumed.transcript.messages, messages);
+            assert_eq!(next.ai_title_seed, None);
+            assert_eq!(
+                store
+                    .load_session_data("revived")
+                    .unwrap()
+                    .title
+                    .map(|title| title.title),
+                None
+            );
+        }
+
+        #[tokio::test]
+        async fn retained_legacy_compact_roots_consume_the_title_opportunity() {
+            for (name, retain_root, recorded_state, expected_seed) in [
+                ("legacy rewind", true, None, None),
+                ("explicit rewind", true, Some(false), None),
+                ("empty rewind", false, Some(false), Some("next prompt")),
+            ] {
+                let (_dir, store) = isolated_store();
+                let root = Uuid::new_v4();
+                let now = datetime!(2026-01-01 00:00:00 UTC);
+                let records = [
+                    Entry::Compact {
+                        summary: "legacy summary".to_owned(),
+                        pre_message_count: 4,
+                        instructions: None,
+                        tasks: Vec::new(),
+                        timestamp: now,
+                    },
+                    Entry::Message {
+                        uuid: root,
+                        parent_uuid: None,
+                        message: Message::user("legacy summary"),
+                        timestamp: now,
+                    },
+                    Entry::Rewind {
+                        tip: retain_root.then_some(root),
+                        first_user_prompt_seen: recorded_state,
+                        timestamp: now,
+                    },
+                ];
+                seed_test_session(&store, "legacy", None, None, now);
+                store
+                    .open_append("legacy")
+                    .unwrap()
+                    .append_lines(&encode_lines(&records).unwrap())
+                    .unwrap();
+
+                let resumed = resume_id(&store, "legacy").unwrap();
+                let next = resumed
+                    .handle
+                    .record_message(Message::user("next prompt"))
+                    .await;
+                assert_eq!(next.failure, None, "{name}");
+                resumed.handle.shutdown().await;
+
+                let expected = if retain_root {
+                    vec![Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::generated_text(
+                            "legacy summary",
+                            TextOrigin::CompactionSummary,
+                        )],
+                    }]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(resumed.transcript.messages, expected, "{name}");
+                assert_eq!(next.ai_title_seed.as_deref(), expected_seed, "{name}");
+                assert_eq!(
+                    store
+                        .load_session_data("legacy")
+                        .unwrap()
+                        .title
+                        .map(|title| title.title),
+                    expected_seed.map(str::to_owned),
+                    "{name}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn an_unknown_rewind_keeps_the_empty_rewind_title_opportunity() {
+            let (_dir, store) = isolated_store();
+            let now = datetime!(2026-01-01 00:00:00 UTC);
+            let records = [
+                Entry::Rewind {
+                    tip: None,
+                    first_user_prompt_seen: Some(false),
+                    timestamp: now,
+                },
+                Entry::Rewind {
+                    tip: Some(Uuid::new_v4()),
+                    first_user_prompt_seen: Some(true),
+                    timestamp: now,
+                },
+            ];
+            seed_test_session(&store, "unknown", None, None, now);
+            store
+                .open_append("unknown")
+                .unwrap()
+                .append_lines(&encode_lines(&records).unwrap())
+                .unwrap();
+
+            let resumed = resume_id(&store, "unknown").unwrap();
+            let next = resumed
+                .handle
+                .record_message(Message::user("accepted"))
+                .await;
+            assert_eq!(next.failure, None);
+            resumed.handle.shutdown().await;
+
+            assert_eq!(resumed.transcript.messages, []);
+            assert_eq!(next.ai_title_seed.as_deref(), Some("accepted"));
+            assert_eq!(
+                store
+                    .load_session_data("unknown")
+                    .unwrap()
+                    .title
+                    .unwrap()
+                    .title,
+                "accepted"
+            );
+        }
+
+        #[tokio::test]
+        async fn keeps_literal_control_text_visible_after_save_and_resume() {
+            for (name, text) in [
+                (
+                    "literal reminder",
+                    "<system-reminder>Explain this tag.</system-reminder>",
+                ),
+                ("literal interruption", crate::message::INTERRUPTION_MARKER),
+            ] {
+                let (dir, store) = isolated_store();
+                let original = start(&store, "m", None);
+                let session_id = original.session_id().to_owned();
+                let recorded = original.record_message(Message::user(text)).await;
+                assert_eq!(recorded.failure, None, "{name}");
+                assert_eq!(original.finalize(Vec::new()).await, None, "{name}");
+
+                let resumed = resume_id(&store, &session_id).unwrap();
+                let history = crate::session::history::interactions(
+                    &resumed.transcript.messages,
+                    resumed.transcript.compact.as_ref(),
+                    &resumed.transcript.tool_metadata,
+                    &crate::tool::ToolRegistry::new(Vec::new()),
+                    dir.path(),
+                );
+                resumed.handle.shutdown().await;
+
+                assert_eq!(
+                    history,
+                    [crate::protocol::Interaction::UserText(text.to_owned())],
+                    "{name}",
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn restores_first_prompt_title_eligibility_across_rewind_and_resume() {
+            #[derive(Clone, Copy, PartialEq, Eq)]
+            enum RenameAt {
+                BeforePrompt,
+                BeforeRewind,
+                AfterRewind,
+            }
+
+            for (name, rename_at) in [
+                ("automatic title", None),
+                ("manual before prompt", Some(RenameAt::BeforePrompt)),
+                ("manual before rewind", Some(RenameAt::BeforeRewind)),
+                ("manual after rewind", Some(RenameAt::AfterRewind)),
+            ] {
+                let (dir, store) = isolated_store();
+                let original = start(&store, "m", None);
+                let session_id = original.session_id().to_owned();
+                if rename_at == Some(RenameAt::BeforePrompt) {
+                    let renamed = original.set_manual_title("Manual title".to_owned()).await;
+                    assert_eq!(renamed.failure, None, "{name}");
+                }
+                let refused = original.record_message(Message::user("refused")).await;
+                assert_eq!(refused.failure, None, "{name}");
+                if rename_at == Some(RenameAt::BeforeRewind) {
+                    let renamed = original.set_manual_title("Manual title".to_owned()).await;
+                    assert_eq!(renamed.failure, None, "{name}");
+                }
+
+                let rewound = original
+                    .rewind(refused.checkpoint.expect("the actor is running"))
+                    .await;
+                assert_eq!(rewound.failure, None, "{name}");
+                if rename_at == Some(RenameAt::AfterRewind) {
+                    let renamed = original.set_manual_title("Manual title".to_owned()).await;
+                    assert_eq!(renamed.failure, None, "{name}");
+                }
+                assert_eq!(original.finalize(Vec::new()).await, None, "{name}");
+                let resumed = resume_id(&store, &session_id).unwrap();
+                let accepted = resumed
+                    .handle
+                    .record_message(Message::user("accepted"))
+                    .await;
+                assert_eq!(accepted.failure, None, "{name}");
+                assert_eq!(resumed.handle.finalize(Vec::new()).await, None, "{name}");
+
+                let expected_seed = rename_at.is_none().then_some("accepted");
+                assert_eq!(accepted.ai_title_seed.as_deref(), expected_seed, "{name}");
+                let expected_titles = match rename_at {
+                    None => vec!["refused", "accepted"],
+                    Some(RenameAt::BeforePrompt) => vec!["Manual title"],
+                    Some(RenameAt::BeforeRewind | RenameAt::AfterRewind) => {
+                        vec!["refused", "Manual title"]
+                    }
+                };
+                assert_eq!(
+                    saved_titles(&saved_entries(dir.path(), &session_id)),
+                    expected_titles,
+                    "{name}",
+                );
+                let listed = store.list_matching("", ProjectScope::Current).unwrap();
+                assert_eq!(
+                    listed[0].title.as_ref().map(|title| title.title.as_str()),
+                    expected_titles.last().copied(),
+                    "{name}",
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn loads_messages_and_keeps_session_id() {
             let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
@@ -1779,7 +2092,8 @@ mod tests {
             );
             assert_eq!(resumed.title.as_deref(), Some("User-named"));
 
-            resumed.handle.record_message(Message::user("hi")).await;
+            let recorded = resumed.handle.record_message(Message::user("hi")).await;
+            assert_eq!(recorded.ai_title_seed, None);
             resumed.handle.finish(Vec::new()).await;
             resumed.handle.shutdown().await;
 
@@ -2038,7 +2352,12 @@ mod tests {
                         tasks: plan(),
                         context: prompt.session_context(),
                     },
-                    Message::user("Summary: asked to edit f.rs."),
+                    crate::session::post_compact::synthesize_post_compact_message(
+                        "Asked to edit f.rs.",
+                        &plan(),
+                        &[],
+                        crate::protocol::CompactTrigger::Manual,
+                    ),
                 )
                 .await;
 
@@ -2173,6 +2492,11 @@ mod tests {
                         ToolMetadata {
                             title: Some("Found 100 files".to_owned()),
                             truncated_total: Some(250),
+                            result_view: Some(ToolResultView::GlobFiles {
+                                pattern: "*.rs".to_owned(),
+                                files: vec!["g.rs".to_owned()],
+                                total: 250,
+                            }),
                             ..ToolMetadata::default()
                         },
                     ),
@@ -2228,9 +2552,7 @@ mod tests {
                             }),
                         )]),
                     },
-                    ContentBlock::Text {
-                        text: "Renaming main.".to_owned(),
-                    },
+                    ContentBlock::text("Renaming main."),
                     ContentBlock::tool_use(
                         "t1",
                         "edit",

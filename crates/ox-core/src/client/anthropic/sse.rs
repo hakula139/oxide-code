@@ -5,7 +5,6 @@ use std::borrow::Cow;
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::StreamExt as _;
 use tokio::sync::mpsc;
-use tracing::debug;
 
 use super::accumulator::{ReplySpec, ResponseAccumulator};
 use super::transport::{
@@ -57,8 +56,7 @@ async fn forward_sse(
 ///
 /// Returns `Ok(())` once the completed reply is forwarded or the receiver drops. Returns `Err` for
 /// transport / HTTP failures, an in-band `error` event, a stream that ends before `message_stop`,
-/// and the frame-size guard. Single malformed frames are logged and skipped so they do not poison
-/// the rest of the turn.
+/// invalid stream data, and the frame-size guard.
 async fn stream_sse(
     http: &reqwest::Client,
     request: &MessagesRequest,
@@ -111,20 +109,11 @@ async fn pump_events(
         frames.push(&chunk);
 
         while let Some(frame) = frames.next_frame().context("Anthropic API stream failed")? {
-            let frame = match std::str::from_utf8(&frame) {
-                Ok(s) => s,
-                Err(e) => {
-                    debug!(error = %e, "skipping invalid UTF-8 SSE frame");
-                    continue;
-                }
-            };
-            let event = match parse_sse_frame(frame) {
-                Ok(Some(event)) => event,
-                Ok(None) => continue,
-                Err(e) => {
-                    debug!(error = %format_args!("{e:#}"), "skipping malformed SSE frame");
-                    continue;
-                }
+            let Some(event) = parse_sse_frame(&frame)
+                .context("Anthropic API stream failed")
+                .map_err(|e| fail("Anthropic API stream failed", e, !reply.content_started()))?
+            else {
+                continue;
             };
 
             let event = match reply.apply(event) {
@@ -213,23 +202,26 @@ impl FrameDecoder {
     }
 }
 
-/// Parses one SSE frame (lines up to a blank-line separator). Returns `Ok(None)` for frames with no
-/// `data:` line (comments, heartbeats). Per the SSE spec, multiple `data:` lines concatenate with
-/// `\n`. Both `data: payload` and `data:payload` (no leading space) are accepted because some
-/// gateways drop the space.
-fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
+/// Parses one UTF-8 SSE frame (lines up to a blank-line separator). Frames without a `data:` line
+/// are ignored unless named `error`. Multiple `data:` lines concatenate with `\n` per the SSE spec.
+/// Both `data: payload` and `data:payload` are accepted because some gateways drop the space.
+fn parse_sse_frame(frame: &[u8]) -> Result<Option<StreamEvent>> {
+    let frame = std::str::from_utf8(frame).context("invalid UTF-8 SSE frame")?;
+    let mut event_name = None;
     let mut data_lines: Vec<&str> = Vec::new();
 
     for line in frame.lines() {
-        if let Some(value) = line
-            .strip_prefix("data: ")
-            .or_else(|| line.strip_prefix("data:"))
-        {
-            data_lines.push(value);
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        match field {
+            "event" => event_name = Some(value),
+            "data" => data_lines.push(value),
+            _ => {}
         }
     }
 
     let data: Cow<'_, str> = match data_lines.as_slice() {
+        [] if event_name == Some("error") => bail!("SSE error event has no data"),
         [] => return Ok(None),
         [one] => Cow::Borrowed(*one),
         _ => Cow::Owned(data_lines.join("\n")),
@@ -237,6 +229,16 @@ fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
 
     let event: StreamEvent =
         serde_json::from_str(&data).with_context(|| format!("failed to parse SSE data: {data}"))?;
+
+    if let Some(name) = event_name.filter(|name| !matches!(*name, "" | "message")) {
+        let payload: serde_json::Value = serde_json::from_str(&data)?;
+        if payload["type"] != name {
+            bail!(
+                "SSE event {name:?} does not match data type {}",
+                payload["type"]
+            );
+        }
+    }
 
     Ok(Some(event))
 }
@@ -254,7 +256,7 @@ mod tests {
     use crate::client::anthropic::local_testing::{
         messages_request, plain_http, request_count, retry_counts, serve,
     };
-    use crate::client::anthropic::testing::sse_response;
+    use crate::client::anthropic::testing::{sse_body, sse_response};
     use crate::client::anthropic::wire::{Delta, MessageResponse};
     use crate::client::{RateLimitWindow, RateLimits, Response};
     use crate::message::ContentBlock;
@@ -406,9 +408,7 @@ mod tests {
 
         fn hi_reply() -> ResponseEvent {
             ResponseEvent::Completed(Response {
-                content: vec![ContentBlock::Text {
-                    text: "Hi".to_owned(),
-                }],
+                content: vec![ContentBlock::text("Hi")],
                 ..Response::default()
             })
         }
@@ -567,19 +567,18 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn skips_unusable_frames_then_keeps_streaming() {
-            // An invalid UTF-8 frame (0xC3 0x28 is a lone start byte) and a comment heartbeat with
-            // no `data:` line are both skipped without poisoning the rest of the stream.
-            let mut body = indoc! {b"
+        async fn skips_comments_heartbeats_and_unknown_event_types() {
+            let ignored = indoc! {r#"
                 event: ping
-                data: \xc3\x28
+                data: {"type":"ping"}
 
                 : heartbeat
 
-            "}
-            .to_vec();
-            body.extend_from_slice(MESSAGE_START.as_bytes());
-            body.extend_from_slice(MESSAGE_STOP.as_bytes());
+                event: future_event
+                data: {"type":"future_event","payload":"opaque"}
+
+            "#};
+            let body = [MESSAGE_START, TEXT_DELTA, ignored, MESSAGE_STOP].concat();
             let server = serve(vec![sse_response(body)]).await;
 
             let (result, events) = run_stream(&server.uri()).await;
@@ -587,9 +586,102 @@ mod tests {
             result.unwrap();
             assert_eq!(
                 events,
-                [START_USAGE, ResponseEvent::Completed(Response::default())],
-                "only the valid frames surfaced",
+                [
+                    START_USAGE,
+                    ResponseEvent::Text("Hi".to_owned()),
+                    hi_reply()
+                ],
             );
+        }
+
+        #[tokio::test]
+        async fn corrupt_frames_fail_without_retry_or_completion() {
+            for (frame, expected) in [
+                (b"data: \xc3\x28\n\n".to_vec(), "invalid UTF-8 SSE frame"),
+                (b"data: {broken}\n\n".to_vec(), "failed to parse SSE data"),
+                (
+                    sse_body(&[serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": 42}})]).into_bytes(),
+                    "failed to parse SSE data",
+                ),
+                (
+                    sse_body(&[serde_json::json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "t1"}})]).into_bytes(),
+                    "failed to parse SSE data",
+                ),
+                (
+                    indoc! {r#"
+                        event: error
+                        data: {"type":"overloaded_error","message":"Overloaded"}
+
+                    "#}.as_bytes().to_vec(),
+                    "SSE event \"error\" does not match data type",
+                ),
+                (
+                    indoc! {r#"
+                        event: error
+                        data: {"type":"message_stop"}
+
+                    "#}.as_bytes().to_vec(),
+                    "SSE event \"error\" does not match data type",
+                ),
+                (
+                    indoc! {r#"
+                        event: content_block_delta
+                        data: {"type":"future_event","index":0,"delta":{"type":"input_json_delta","partial_json":42}}
+
+                    "#}.as_bytes().to_vec(),
+                    "SSE event \"content_block_delta\" does not match data type",
+                ),
+                (b"event: error\n\n".to_vec(), "SSE error event has no data"),
+            ] {
+                let body = [MESSAGE_START.as_bytes(), TEXT_DELTA.as_bytes(), &frame, MESSAGE_STOP.as_bytes()].concat();
+                let server = serve(vec![sse_response(body)]).await;
+
+                let (result, events) = run_stream(&server.uri()).await;
+
+                let error = result.expect_err("corrupt data fails the attempt");
+                assert!(format!("{error:#}").contains(expected), "{error:#}");
+                assert_eq!(events, [START_USAGE, ResponseEvent::Text("Hi".to_owned())]);
+                assert_eq!(request_count(&server).await, 1, "content prevents retry");
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn retries_corrupt_data_before_content() {
+            for frame in [
+                &b"data: \xc3\x28\n\n"[..],
+                &b"data: {broken}\n\n"[..],
+                indoc! {r#"
+                    event: content_block_delta
+                    data: {"type":"future_event"}
+
+                "#}
+                .as_bytes(),
+            ] {
+                let body = [MESSAGE_START.as_bytes(), frame, MESSAGE_STOP.as_bytes()].concat();
+                let server = serve(vec![
+                    sse_response(body),
+                    sse_response([MESSAGE_START, TEXT_DELTA, MESSAGE_STOP].concat()),
+                ])
+                .await;
+
+                let (result, events) = run_stream(&server.uri()).await;
+                result.expect("the fresh attempt succeeds");
+
+                assert_eq!(
+                    events,
+                    [
+                        START_USAGE,
+                        ResponseEvent::Retrying(
+                            "Anthropic API stream failed. Retrying in 2 s (retry 1 of 5)."
+                                .to_owned()
+                        ),
+                        START_USAGE,
+                        ResponseEvent::Text("Hi".to_owned()),
+                        hi_reply(),
+                    ],
+                );
+                assert_eq!(retry_counts(&server).await, ["0", "1"]);
+            }
         }
 
         #[tokio::test]
@@ -695,7 +787,7 @@ mod tests {
                 data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
             "#};
 
-            let event = parse_sse_frame(frame).unwrap().unwrap();
+            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
 
             assert_eq!(
                 event,
@@ -715,7 +807,7 @@ mod tests {
                 data: {"type":"ping"}
             "#};
 
-            let event = parse_sse_frame(frame).unwrap().unwrap();
+            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
 
             assert_eq!(event, StreamEvent::Ping);
         }
@@ -727,7 +819,7 @@ mod tests {
                 data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
             "#};
 
-            let event = parse_sse_frame(frame).unwrap().unwrap();
+            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
 
             assert_eq!(
                 event,
@@ -746,7 +838,7 @@ mod tests {
                 data: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}
             "#};
 
-            let event = parse_sse_frame(frame).unwrap().unwrap();
+            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
 
             assert_eq!(
                 event,
@@ -766,7 +858,7 @@ mod tests {
                 data: {"type":"some_future_event","payload":"data"}
             "#};
 
-            let event = parse_sse_frame(frame).unwrap().unwrap();
+            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
 
             assert_eq!(event, StreamEvent::Unknown);
         }
@@ -780,7 +872,7 @@ mod tests {
                 data: "ping"}
             "#};
 
-            let event = parse_sse_frame(frame).unwrap().unwrap();
+            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
 
             assert_eq!(event, StreamEvent::Ping);
         }
@@ -792,20 +884,37 @@ mod tests {
                 data:{"type":"ping"}
             "#};
 
-            let event = parse_sse_frame(frame).unwrap().unwrap();
+            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
 
             assert_eq!(event, StreamEvent::Ping);
         }
 
         #[test]
+        fn accepts_default_event_envelopes() {
+            for prefix in [
+                "",
+                "event:\n",
+                "event\n",
+                "event: message\n",
+                "event: stale\nevent:\n",
+            ] {
+                let frame = format!("{prefix}data: {{\"type\":\"ping\"}}");
+
+                let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
+
+                assert_eq!(event, StreamEvent::Ping, "{prefix:?}");
+            }
+        }
+
+        #[test]
         fn skips_a_frame_without_a_data_line() {
-            assert!(parse_sse_frame("").unwrap().is_none());
-            assert!(parse_sse_frame(": comment line").unwrap().is_none());
+            assert!(parse_sse_frame(b"").unwrap().is_none());
+            assert!(parse_sse_frame(b": comment line").unwrap().is_none());
         }
 
         #[test]
         fn invalid_json_errors() {
-            let err = parse_sse_frame("data: {not valid json}").unwrap_err();
+            let err = parse_sse_frame(b"data: {not valid json}").unwrap_err();
 
             assert_eq!(
                 err.to_string(),

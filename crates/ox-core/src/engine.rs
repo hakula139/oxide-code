@@ -31,7 +31,7 @@ use crate::config::Config;
 use crate::config::compaction::CompactionConfig;
 use crate::config::oauth::{self, ClaudeCodeKeychain};
 use crate::file_tracker::{FileSnapshot, FileTracker};
-use crate::message::{ContentBlock, Message};
+use crate::message::{ContentBlock, Message, TextOrigin};
 use crate::model::{ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
@@ -153,9 +153,8 @@ pub struct Engine {
     /// Whether fresh sessions get an AI title in the background, which only the TUI shows.
     generates_titles: bool,
     auto_compaction_failures: AutoCompactFailures,
-    /// [`TurnReport::context_estimate`] of the latest turn the transcript keeps. Before any such
-    /// turn, an estimate from the parts of the next request. `None` when the latest turn reported
-    /// no usage.
+    /// [`TurnReport::context_estimate`] of the latest turn the transcript keeps, or an estimate
+    /// from the parts of the next request when that turn reported no usage.
     context_estimate: Option<u32>,
     /// The latest usage any turn the transcript keeps reported, which the status line shows.
     displayed_usage: Option<TokenUsage>,
@@ -293,7 +292,22 @@ impl Engine {
         sink: mpsc::UnboundedSender<Event>,
         mut ops: mpsc::Receiver<Op>,
     ) -> Option<String> {
-        while let Some(op) = ops.recv().await {
+        loop {
+            let op = tokio::select! {
+                biased;
+                usage = async { self.title_usage.as_mut()?.await.ok() },
+                    if self.title_usage.is_some() =>
+                {
+                    if self.account_title_usage(usage) {
+                        self.emit_usage_update(&sink);
+                    }
+                    continue;
+                }
+                op = ops.recv() => match op {
+                    Some(op) => op,
+                    None => break,
+                },
+            };
             let mut end = None;
             match op {
                 Op::Prompt { text, title } => {
@@ -360,7 +374,10 @@ impl Engine {
         let mut user_msg = Message::user(text);
         let fresh = self.load_user_context(sink).await;
         if let Some(reminder) = self.prompt.catch_up(fresh) {
-            user_msg.content.push(ContentBlock::Text { text: reminder });
+            user_msg.content.push(ContentBlock::generated_text(
+                reminder,
+                TextOrigin::SystemReminder,
+            ));
             self.prompt_unrecorded = true;
         }
         let context =
@@ -1107,16 +1124,24 @@ mod tests {
     mod run {
         use super::*;
 
-        /// Events of the prompt in flight until both its terminal event and its session's AI title
-        /// have arrived, in either order.
+        /// Events until the turn ends and its title and combined usage arrive, in any order.
         async fn titled_turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
             let prompt = Op::prompt("");
-            let (mut ended, mut titled) = (false, false);
+            let expected =
+                request_cost(MODEL, REPLY_USAGE) + request_cost(TITLE_MODEL, COMPLETION_USAGE);
+            let (mut ended, mut titled, mut billed) = (false, false, false);
             let mut seen = Vec::new();
-            while !(ended && titled) {
+            while !(ended && titled && billed) {
                 let event = events.recv().await.expect("the engine stopped early");
                 ended |= TurnEnd::of(&prompt, &event).is_some();
                 titled |= matches!(event, Event::SessionTitleUpdated { .. });
+                billed |= matches!(
+                    &event,
+                    Event::UsageUpdated(UsageSnapshot {
+                        estimated_cost_usd: Some(cost),
+                        ..
+                    }) if (cost - expected).abs() < 1e-12
+                );
                 seen.push(event);
             }
             seen
@@ -1203,6 +1228,100 @@ mod tests {
                         ] if (cost - expected).abs() < 1e-12
                     ),
                     "two turns and the title: {second:?}"
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn counts_a_late_title_request_while_idle() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_title(&server, greeting_title()).await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let client = engine.client.clone();
+                let session = engine.session.clone();
+                let session_id = engine.session_id().to_owned();
+                let (billed, usage) = oneshot::channel();
+                engine.title_usage = Some(usage);
+                let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
+                let (sink, events) = mpsc::unbounded_channel();
+                let task = EngineTask(tokio::spawn(engine.run(sink.clone(), op_rx)));
+                let mut handle = EngineHandle { ops, events, task };
+
+                let first = submit(&mut handle, "hello").await;
+                assert!(matches!(first.last(), Some(Event::TurnComplete)));
+                let title = title_generator::spawn(client, session, sink, "hello".to_owned());
+                billed.send(title.await.unwrap()).unwrap();
+                let late = tokio::time::timeout(Duration::from_secs(5), async {
+                    let (mut title, mut usage) = (None, None);
+                    while title.is_none() || usage.is_none() {
+                        match handle.events.recv().await.unwrap() {
+                            Event::SessionTitleUpdated { id, title: value } => {
+                                title = Some((id, value));
+                            }
+                            Event::UsageUpdated(value) => usage = Some(value),
+                            event => panic!("unexpected idle event: {event:?}"),
+                        }
+                    }
+                    (title.unwrap(), usage.unwrap())
+                })
+                .await;
+                let persisted = store.load_session_data(&session_id).unwrap();
+                let second = submit(&mut handle, "again").await;
+                handle.shutdown().await.unwrap();
+
+                let (title, usage) = late.expect("idle title usage must arrive without another op");
+                assert_eq!(title, (session_id, "Greeting".to_owned()));
+                assert_eq!(usage.context_tokens, Some(REPLY_USAGE.context_tokens()));
+                assert_eq!(usage.context_window, Some(1_000_000));
+                let expected =
+                    request_cost(MODEL, REPLY_USAGE) + request_cost(TITLE_MODEL, COMPLETION_USAGE);
+                assert!((usage.estimated_cost_usd.unwrap() - expected).abs() < 1e-12);
+                assert_eq!(persisted.title.unwrap().title, "Greeting");
+                assert!((usage::estimate_cost_usd(&persisted.usage) - expected).abs() < 1e-12);
+                let costs: Vec<_> = second
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::UsageUpdated(usage) => usage.estimated_cost_usd,
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(costs.len(), 1, "{second:?}");
+                assert!((costs[0] - expected - request_cost(MODEL, REPLY_USAGE)).abs() < 1e-12);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn serves_prompts_after_a_title_request_ends_without_usage() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let (billed, usage) = oneshot::channel();
+                engine.title_usage = Some(usage);
+                drop(billed);
+                let mut handle = engine.spawn();
+
+                let events = submit(&mut handle, "hello").await;
+                handle.shutdown().await.unwrap();
+
+                assert_eq!(
+                    events,
+                    [
+                        Event::StreamToken("reply".to_owned()),
+                        Event::UsageUpdated(UsageSnapshot {
+                            context_tokens: Some(REPLY_USAGE.context_tokens()),
+                            context_window: Some(1_000_000),
+                            estimated_cost_usd: Some(request_cost(MODEL, REPLY_USAGE)),
+                        }),
+                        Event::TurnComplete,
+                    ]
                 );
             })
             .await;
@@ -2230,7 +2349,7 @@ mod tests {
                 assert_eq!(data.context, Some(expected));
                 assert!(matches!(
                     &data.messages[2].content[..],
-                    [_, ContentBlock::Text { text }] if text == reminder
+                    [_, ContentBlock::Text { text, .. }] if text == reminder
                 ));
             })
             .await;
@@ -2421,6 +2540,90 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn resumed_first_prompt_refusal_requests_a_new_title_unless_manually_named() {
+            with_pinned_home(async {
+                for manual in [false, true] {
+                    let refused_server = MockServer::start().await;
+                    mount_refusal_once(&refused_server, 1_000).await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = test_store(dir.path());
+                    let mut original = engine(refused_server.uri(), &store, dir.path()).await;
+                    let session_id = original.session_id().to_owned();
+                    assert_eq!(
+                        original
+                            .submit_prompt(
+                                "refused",
+                                None,
+                                &CapturingSink::default(),
+                                &mut inert_ops()
+                            )
+                            .await,
+                        TurnEnd::Failed
+                    );
+                    if manual {
+                        let renamed = original
+                            .session
+                            .set_manual_title("Manual title".to_owned())
+                            .await;
+                        assert_eq!(renamed.failure, None);
+                    }
+                    assert_eq!(original.finalize().await, None);
+                    let server = MockServer::start().await;
+                    mount_title(&server, greeting_title()).await;
+                    mount_reply(&server, "accepted reply").await;
+                    let mut resumed = engine(server.uri(), &store, dir.path()).await;
+                    resumed
+                        .resume(
+                            &CapturingSink::default(),
+                            ResumeTarget::Path(store.find_session_path(&session_id).unwrap()),
+                        )
+                        .await;
+                    resumed.generates_titles = true;
+                    let (sink, mut events) = mpsc::unbounded_channel();
+
+                    let end = resumed
+                        .submit_prompt("accepted", None, &sink, &mut inert_ops())
+                        .await;
+                    assert_eq!(end, TurnEnd::Completed);
+                    if manual {
+                        assert!(resumed.title_usage.is_none());
+                    } else {
+                        let title = tokio::time::timeout(Duration::from_secs(5), async {
+                            loop {
+                                if let Some(Event::SessionTitleUpdated { title, .. }) =
+                                    events.recv().await
+                                {
+                                    break title;
+                                }
+                            }
+                        })
+                        .await
+                        .expect("the title request completes");
+                        assert_eq!(title, "Greeting");
+                    }
+                    assert_eq!(resumed.finalize().await, None);
+
+                    let requests = request_bodies(&server).await;
+                    let title_requests: Vec<_> = requests
+                        .iter()
+                        .filter(|request| request["model"] == TITLE_MODEL)
+                        .collect();
+                    assert_eq!(title_requests.len(), usize::from(!manual));
+                    assert_eq!(
+                        store
+                            .load_session_data(&session_id)
+                            .unwrap()
+                            .title
+                            .unwrap()
+                            .title,
+                        if manual { "Manual title" } else { "Greeting" }
+                    );
+                }
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn adopts_the_list_of_a_turn_that_fails_after_the_call() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -2541,7 +2744,7 @@ mod tests {
                 assert_eq!(*done, Message::assistant("done"));
                 assert!(matches!(
                     &prompt.content[..],
-                    [ContentBlock::Text { text }, _] if text == "rephrased"
+                    [ContentBlock::Text { text, .. }, _] if text == "rephrased"
                 ));
                 assert_eq!(*reply, Message::assistant("reply"));
                 assert_eq!(data.context, Some(expected));
@@ -2615,7 +2818,7 @@ mod tests {
                 assert_eq!(turn.last().unwrap()["content"][0]["text"], "five");
                 assert!(matches!(
                     &engine.messages[0].content[0],
-                    ContentBlock::Text { text } if text.contains("auto summary")
+                    ContentBlock::Text { text, .. } if text.contains("auto summary")
                 ));
                 assert_eq!(engine.messages.len(), 3);
                 assert_eq!(
@@ -2650,6 +2853,87 @@ mod tests {
                     .iter()
                     .position(|event| matches!(event, Event::TurnComplete));
                 assert!(compacted < completed.unwrap());
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn compacts_a_rejected_oversized_prompt_before_the_next_prompt() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply_once(&server, "first reply").await;
+                Mock::given(method("POST"))
+                    .and(path("/v1/messages"))
+                    .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "prompt is too long: 60000 tokens > 50000 maximum",
+                        },
+                    })))
+                    .up_to_n_times(1)
+                    .mount(&server)
+                    .await;
+                mount_reply_once(&server, "Preserve the pasted service log investigation.").await;
+                mount_reply(&server, "continued").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                engine.compaction = CompactionConfig::with_threshold(50_000);
+                let sink = CapturingSink::default();
+                let mut ops = inert_ops();
+                let oversized = "service log entry\n".repeat(15_000);
+
+                let first = engine.submit_prompt("hello", None, &sink, &mut ops).await;
+                assert_eq!(first, TurnEnd::Completed);
+                assert_eq!(
+                    engine.context_estimate,
+                    Some(1_000 + compaction::transcript_tokens(&engine.messages[1..]))
+                );
+                let rejected = engine
+                    .submit_prompt(&oversized, None, &sink, &mut ops)
+                    .await;
+                assert_eq!(rejected, TurnEnd::Failed);
+                let continued = engine
+                    .submit_prompt("continue the investigation", None, &sink, &mut ops)
+                    .await;
+                assert_eq!(continued, TurnEnd::Completed);
+
+                let events = sink.events();
+                assert!(
+                    events.iter().any(|event| matches!(
+                        event,
+                        Event::SessionCompacted {
+                            trigger: CompactTrigger::Auto,
+                            ..
+                        }
+                    )),
+                    "the rejected prompt must be compacted before continuing: {events:?}"
+                );
+                let requests = request_bodies(&server).await;
+                let summarized = texts(&requests[2]);
+                assert_eq!(summarized[summarized.len() - 2], oversized);
+                let resumed = texts(&requests[3]);
+                assert!(resumed[1].contains("Preserve the pasted service log investigation."));
+                assert_eq!(resumed.last(), Some(&"continue the investigation"));
+                assert!(!resumed.contains(&oversized.as_str()));
+                let saved = store.load_session_data(engine.session_id()).unwrap();
+                assert_eq!(saved.messages, engine.messages);
+                assert_eq!(
+                    saved.messages.last(),
+                    Some(&Message::assistant("continued"))
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter_map(|event| match event {
+                            Event::TurnFailed(message) => Some(message.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    ["Anthropic API error (HTTP 400 Bad Request): \
+                      prompt is too long: 60000 tokens > 50000 maximum"]
+                );
             })
             .await;
         }
@@ -2780,8 +3064,9 @@ mod tests {
                     "call-1",
                     "the summary covers the finished round"
                 );
-                let Some(ContentBlock::Text { text: continuation }) =
-                    mid_turn_summary().content.pop()
+                let Some(ContentBlock::Text {
+                    text: continuation, ..
+                }) = mid_turn_summary().content.pop()
                 else {
                     panic!("the summary message ends on its continuation");
                 };

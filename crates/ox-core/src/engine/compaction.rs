@@ -15,7 +15,7 @@ use super::turn::{collect_response, record_interruption};
 use super::{Engine, TurnEnd, report_abort};
 use crate::client::{PromptTooLong, Response, ResponseEvent, StopReason, Wire};
 use crate::config::compaction::AutoCompactionConfig;
-use crate::message::{ContentBlock, Message, Role};
+use crate::message::{ContentBlock, Message, Role, TextOrigin};
 use crate::model::TokenUsage;
 use crate::prompt::{PromptParts, UserContext};
 use crate::protocol::{CompactTrigger, Event, EventSink, Op};
@@ -581,11 +581,7 @@ fn drop_oldest_rounds(transcript: &[Message], target: u32) -> Option<Vec<Message
         freed = freed.saturating_add(rough_tokens(message));
     }
     let kept = messages.split_off(cut?);
-    Some(
-        iter::once(Message::user(RETRY_TRUNCATION_MARKER))
-            .chain(kept)
-            .collect(),
-    )
+    Some(iter::once(truncation_marker()).chain(kept).collect())
 }
 
 /// Returns whether `message` holds a server tool result whose call an earlier reply made. A
@@ -605,10 +601,25 @@ fn answers_an_earlier_call(message: &Message) -> bool {
     })
 }
 
+fn truncation_marker() -> Message {
+    Message {
+        role: Role::User,
+        content: vec![ContentBlock::generated_text(
+            RETRY_TRUNCATION_MARKER,
+            TextOrigin::CompactionTruncation,
+        )],
+    }
+}
+
 fn is_truncation_marker(message: &Message) -> bool {
-    let marker = RETRY_TRUNCATION_MARKER;
     message.role == Role::User
-        && matches!(&message.content[..], [ContentBlock::Text { text }] if text == marker)
+        && matches!(
+            &message.content[..],
+            [ContentBlock::Text {
+                origin: Some(TextOrigin::CompactionTruncation),
+                ..
+            }]
+        )
 }
 
 /// Drops thinking blocks, which a new turn may omit, and the message if nothing else remains.
@@ -1721,9 +1732,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     content: vec![
-                        ContentBlock::Text {
-                            text: "reading".to_owned(),
-                        },
+                        ContentBlock::text("reading"),
                         ContentBlock::ToolUse {
                             id: "t1".to_owned(),
                             name: "read".to_owned(),
@@ -1746,9 +1755,7 @@ mod tests {
                             thinking: "the bug is in auth".to_owned(),
                             replay: Replay::with_model(MODEL, "sig"),
                         },
-                        ContentBlock::Text {
-                            text: "found it".to_owned(),
-                        },
+                        ContentBlock::text("found it"),
                     ],
                 },
                 Message::user("any progress?"),
@@ -2042,9 +2049,7 @@ mod tests {
                                 thinking: "read it first".to_owned(),
                                 replay: Replay::with_model(MODEL, "sig"),
                             },
-                            ContentBlock::Text {
-                                text: "reading".to_owned(),
-                            },
+                            ContentBlock::text("reading"),
                             tool_call.clone(),
                         ],
                     },
@@ -2061,16 +2066,13 @@ mod tests {
                     Message::user("check the file"),
                     Message {
                         role: Role::Assistant,
-                        content: vec![
-                            ContentBlock::Text {
-                                text: "reading".to_owned(),
-                            },
-                            tool_call.clone(),
-                        ],
+                        content: vec![ContentBlock::text("reading"), tool_call.clone()],
                     },
                     tool_result.clone(),
                 ];
-                expected.extend(interrupted.then(Message::interruption));
+                expected.extend(
+                    interrupted.then(|| Message::user(crate::message::INTERRUPTION_MARKER)),
+                );
                 expected.extend([
                     Message::assistant(RETRY_TURN_CLOSE_MARKER),
                     Message::user(build_user_message(None)),
@@ -2289,9 +2291,7 @@ mod tests {
                 ResponseEvent::RateLimits(limits),
                 ResponseEvent::Text("Recap".to_owned()),
                 ResponseEvent::Completed(Response {
-                    content: vec![ContentBlock::Text {
-                        text: "Recap".to_owned(),
-                    }],
+                    content: vec![ContentBlock::text("Recap")],
                     ..Response::default()
                 }),
             ] {
@@ -2328,15 +2328,10 @@ mod tests {
             let server = MockServer::start().await;
             mount_summary(
                 &server,
-                indoc! {r#"
-                    event: ping
-                    data: {"type":"message_start","message":{"id":"m","model":"claude-haiku-5-5"}}
-
-                    event: ping
-                    data: {"type":"error","error":{"type":"invalid_request_error","message":"summary request rejected"}}
-
-                "#}
-                .to_owned(),
+                sse_body(&[
+                    json!({"type": "message_start", "message": {"id": "m", "model": "claude-haiku-5-5"}}),
+                    json!({"type": "error", "error": {"type": "invalid_request_error", "message": "summary request rejected"}}),
+                ]),
             )
             .await;
 
@@ -2405,7 +2400,7 @@ mod tests {
             assert_eq!(
                 kept,
                 [
-                    Message::user(RETRY_TRUNCATION_MARKER),
+                    truncation_marker(),
                     Message::assistant("alpha-end, beta-end"),
                 ],
             );
@@ -2414,7 +2409,7 @@ mod tests {
         #[test]
         fn replaces_an_earlier_truncation_marker() {
             let transcript = [
-                Message::user(RETRY_TRUNCATION_MARKER),
+                truncation_marker(),
                 Message::assistant("older"),
                 Message::user("next"),
                 Message::assistant("newer"),
@@ -2424,10 +2419,7 @@ mod tests {
 
             assert_eq!(
                 to_json(&kept),
-                to_json(&[
-                    Message::user(RETRY_TRUNCATION_MARKER),
-                    Message::assistant("newer")
-                ]),
+                to_json(&[truncation_marker(), Message::assistant("newer")]),
             );
         }
 
@@ -2451,17 +2443,12 @@ mod tests {
                         is_error: false,
                     }],
                 },
-                reply(vec![
-                    server_result("s1"),
-                    ContentBlock::Text {
-                        text: "Found it.".to_owned(),
-                    },
-                ]),
+                reply(vec![server_result("s1"), ContentBlock::text("Found it.")]),
             ];
 
             let kept = drop_oldest_rounds(&transcript, u32::MAX).unwrap();
 
-            assert_eq!(kept[0], Message::user(RETRY_TRUNCATION_MARKER));
+            assert_eq!(kept[0], truncation_marker());
             assert_eq!(kept[1..], transcript[1..]);
         }
 
@@ -2469,23 +2456,13 @@ mod tests {
         fn keeps_a_paused_server_call_with_its_continuation() {
             let transcript = [
                 Message::user("research X"),
-                reply(vec![
-                    ContentBlock::Text {
-                        text: "Searching.".to_owned(),
-                    },
-                    server_call("s1"),
-                ]),
-                reply(vec![
-                    server_result("s1"),
-                    ContentBlock::Text {
-                        text: "Found X.".to_owned(),
-                    },
-                ]),
+                reply(vec![ContentBlock::text("Searching."), server_call("s1")]),
+                reply(vec![server_result("s1"), ContentBlock::text("Found X.")]),
             ];
 
             let kept = drop_oldest_rounds(&transcript, u32::MAX).unwrap();
 
-            assert_eq!(kept[0], Message::user(RETRY_TRUNCATION_MARKER));
+            assert_eq!(kept[0], truncation_marker());
             assert_eq!(kept[1..], transcript[1..]);
         }
 
@@ -2500,6 +2477,21 @@ mod tests {
             };
 
             assert!(drop_oldest_rounds(&[Message::user("one"), thinking_only], 0).is_none());
+        }
+    }
+
+    mod is_truncation_marker {
+        use super::*;
+
+        #[test]
+        fn identifies_generated_markers_without_claiming_literal_user_text() {
+            assert!(is_truncation_marker(&truncation_marker()));
+            assert!(!is_truncation_marker(&Message::user(
+                RETRY_TRUNCATION_MARKER
+            )));
+            assert!(!is_truncation_marker(&Message::assistant(
+                RETRY_TRUNCATION_MARKER
+            )));
         }
     }
 
