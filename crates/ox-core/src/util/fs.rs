@@ -118,6 +118,25 @@ fn file_id(file: &File) -> io::Result<(u64, u64)> {
     Ok((info.volume_serial_number(), info.file_index()))
 }
 
+// ── File Locking ──
+
+/// An exclusive file lock whose release does not wait for inherited handles to close.
+pub(crate) struct FileLock(File);
+
+impl FileLock {
+    pub(crate) fn lock(file: File) -> io::Result<Self> {
+        file.lock()?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Logging cleanup failures here would recurse through the file appender.
+        let _: io::Result<()> = self.0.unlock();
+    }
+}
+
 // ── Private State ──
 
 /// Creates `path` and its missing parents with `0700` perms on Unix, also tightening an existing
@@ -569,6 +588,33 @@ mod tests {
             let result = validate_regular_file(&metadata, 8);
 
             assert!(matches!(result, Err(FileReadError::NonRegular)));
+        }
+    }
+
+    mod file_lock {
+        use super::*;
+
+        mod drop {
+            use super::*;
+
+            #[test]
+            fn releases_while_a_duplicate_handle_remains_open() {
+                let dir = tempdir().unwrap();
+                let path = dir.path().join("writer.lock");
+                let file = File::create_new(&path).unwrap();
+                let duplicate = file.try_clone().unwrap();
+                let competing = File::options().read(true).write(true).open(&path).unwrap();
+                let lock = FileLock::lock(file).unwrap();
+                assert!(matches!(
+                    competing.try_lock(),
+                    Err(fs::TryLockError::WouldBlock)
+                ));
+
+                drop(lock);
+
+                competing.try_lock().unwrap();
+                drop(duplicate);
+            }
         }
     }
 
