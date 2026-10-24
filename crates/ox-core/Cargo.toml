@@ -29,6 +29,7 @@ indoc.workspace = true
 platform-info.workspace = true
 process-wrap.workspace = true
 regex.workspace = true
+regex-syntax.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 rustls-webpki.workspace = true
