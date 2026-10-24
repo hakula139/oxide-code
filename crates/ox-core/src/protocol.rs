@@ -31,9 +31,10 @@ use crate::tool::view::{ApprovalPreview, ToolResultView};
 /// race them against its in-flight stream and tool futures with one biased `select!`.
 ///
 /// [`Self::Prompt`], [`Self::SetModel`], [`Self::Compact`], [`Self::Clear`], [`Self::Archive`],
-/// [`Self::Resume`], [`Self::Rename`], [`Self::Login`], and [`Self::Logout`] require an idle engine.
-/// Frontends wait for the preceding operation's terminal event before submitting them. An
-/// idle-only op received during another operation is dropped without a terminal event.
+/// [`Self::SetArchive`], [`Self::Resume`], [`Self::Rename`], [`Self::Login`], and [`Self::Logout`]
+/// require an idle engine. Frontends wait for the preceding operation's terminal event before
+/// submitting them. An idle-only op received during another operation is dropped without a
+/// terminal event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Op {
@@ -64,6 +65,13 @@ pub enum Op {
     Clear,
     /// Archives the live session, then continues in a fresh one like [`Self::Clear`].
     Archive,
+    /// Sets the archive state of the saved session at `path`. `session_id` identifies that file.
+    /// Completion arrives through [`Event::ArchiveUpdated`] before the next idle operation runs.
+    SetArchive {
+        path: PathBuf,
+        session_id: String,
+        state: ArchiveState,
+    },
     /// Finalizes the live session and continues `target`'s saved session in place, which
     /// [`Event::SessionResumed`] reports.
     Resume { target: ResumeTarget },
@@ -186,6 +194,7 @@ pub struct UsageSnapshot {
 /// - [`Op::Prompt`] ends with [`Self::TurnComplete`], [`Self::TurnFailed`], or [`Self::Cancelled`].
 /// - [`Op::Compact`] ends with [`Self::SessionReady`], `TurnFailed`, or `Cancelled`.
 /// - [`Op::Resume`] and [`Op::Archive`] end with `SessionReady` or `TurnFailed`.
+/// - [`Op::SetArchive`] ends with [`Self::ArchiveUpdated`].
 /// - [`Op::Clear`] ends with `SessionReady`.
 /// - [`Op::Login`] ends with [`Self::SignedIn`], `TurnFailed`, or `Cancelled`.
 /// - [`Op::Logout`] ends with [`Self::SignedOut`] or `TurnFailed`.
@@ -257,6 +266,11 @@ pub enum Event {
     /// An [`Op::Rename`] could not record its title, so the title stays. Ends the rename as
     /// [`Self::SessionTitleUpdated`] does.
     RenameFailed(String),
+    /// The saved session's archive operation completed. The error is a display-ready sentence.
+    ArchiveUpdated {
+        id: String,
+        result: Result<ArchiveState, String>,
+    },
     /// [`Op::Clear`] or [`Op::Archive`] started session `id`. `old_session` reports the prior
     /// session's archive state for the frontend's notice.
     SessionRolled {
@@ -540,6 +554,7 @@ mod tests {
                 Op::Compact { .. } => "compact",
                 Op::Clear => "clear",
                 Op::Archive => "archive",
+                Op::SetArchive { .. } => "set_archive",
                 Op::Resume { .. } => "resume",
                 Op::Rename { .. } => "rename",
                 Op::Login => "login",
@@ -593,6 +608,11 @@ mod tests {
                 },
                 Op::Clear,
                 Op::Archive,
+                Op::SetArchive {
+                    path: PathBuf::from("/repo/session.jsonl"),
+                    session_id: "s1".to_owned(),
+                    state: ArchiveState::Archived,
+                },
                 Op::Resume {
                     target: ResumeTarget::Path(PathBuf::from("/repo/session.jsonl")),
                 },
@@ -791,6 +811,7 @@ mod tests {
                 Event::SummaryDiscarded => "summary_discarded",
                 Event::SessionTitleUpdated { .. } => "session_title_updated",
                 Event::RenameFailed(_) => "rename_failed",
+                Event::ArchiveUpdated { .. } => "archive_updated",
                 Event::SessionRolled { .. } => "session_rolled",
                 Event::SessionResumed { .. } => "session_resumed",
                 Event::SessionCompacted { .. } => "session_compacted",
@@ -865,6 +886,14 @@ mod tests {
                     title: "Title".to_owned(),
                 },
                 Event::RenameFailed("Session write failed: disk full".to_owned()),
+                Event::ArchiveUpdated {
+                    id: "s1".to_owned(),
+                    result: Ok(ArchiveState::Archived),
+                },
+                Event::ArchiveUpdated {
+                    id: "s1".to_owned(),
+                    result: Err("Archive failed".to_owned()),
+                },
                 Event::SessionRolled {
                     id: "s2".to_owned(),
                     old_session: ArchiveState::Archived,

@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, warn};
@@ -440,16 +440,23 @@ pub(crate) async fn roll_into(
     snapshots: Vec<FileSnapshot>,
     target: &Path,
 ) -> Result<RollIntoOutcome> {
-    let data = load_session_data_from_path(target)?;
-    if data.session_id == session.session_id() {
-        return Err(SavedError::live(session.session_id()).into());
-    }
+    let store = store.clone();
+    let target = target.to_owned();
+    let live_id = session.session_id().to_owned();
     let ResumedSession {
         handle: target_handle,
         transcript,
         title,
         prior,
-    } = resume_loaded(store, target, data)?;
+    } = tokio::task::spawn_blocking(move || {
+        let data = load_session_data_from_path(&target)?;
+        if data.session_id == live_id {
+            return Err(SavedError::live(&live_id).into());
+        }
+        resume_loaded(&store, &target, data)
+    })
+    .await
+    .context("session resume task failed")??;
 
     let old_session = std::mem::replace(session, target_handle);
     let finalize_failure = old_session.finalize(snapshots).await;
@@ -560,7 +567,8 @@ mod tests {
         saved_entries, saved_snapshot_paths, saved_titles, test_session_file,
     };
     use crate::session::store::testing::{
-        TEST_PROJECT, isolated_store, seed_test_session, test_project_dir, test_store,
+        TEST_PROJECT, WriterBarrier, archive_test_session, isolated_store, seed_test_session,
+        test_project_dir, test_store,
     };
     use crate::tool::tasks::testing::plan;
     use crate::tool::view::{DiffChunk, EditDiff, NumberedLine};
@@ -1525,6 +1533,36 @@ mod tests {
 
     mod roll_into {
         use super::*;
+
+        #[tokio::test]
+        async fn serves_runtime_work_while_an_archived_resume_waits_for_the_writer() {
+            let (_dir, store) = isolated_store();
+            seed_test_session(
+                &store,
+                "target",
+                Some("Saved"),
+                Some(1),
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+            archive_test_session(&store, "target");
+            let target = store.find_session_path("target").unwrap();
+            let barrier = WriterBarrier::hold(&target);
+            let mut session = start(&store, "m", None);
+
+            let resume = tokio::spawn(async move {
+                let outcome = roll_into(&mut session, &store, Vec::new(), &target)
+                    .await
+                    .unwrap();
+                session.shutdown().await;
+                outcome
+            });
+            let independent = tokio::spawn(async { "runtime event" });
+
+            assert_eq!(independent.await.unwrap(), "runtime event");
+            assert!(!resume.is_finished());
+            barrier.release();
+            assert_eq!(resume.await.unwrap().prior, ArchiveState::Archived);
+        }
 
         #[tokio::test]
         async fn swaps_to_target_and_finalizes_old() {

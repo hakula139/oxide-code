@@ -17,6 +17,8 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use ox_core::session::entry::ArchiveState;
+
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
 use crate::keymap::{CTRL_C, KeyChord, is_unmodified};
@@ -42,6 +44,12 @@ pub(crate) trait Modal: Send {
 
     /// Receives bracketed-paste text. Default no-op, so a paste never answers a prompt.
     fn handle_paste(&mut self, _text: &str) {}
+
+    /// Marks a saved-session archive accepted by the engine.
+    fn archive_started(&mut self, _id: &str) {}
+
+    /// Receives a saved-session archive result while this modal remains on the stack.
+    fn archive_updated(&mut self, _id: &str, _result: &Result<ArchiveState, String>) {}
 
     /// Fires when this modal returns to the top of the stack after a nested modal pops. Default
     /// no-op. Pickers override it to refresh state the nested modal changed.
@@ -137,6 +145,18 @@ impl ModalStack {
 
     pub(crate) fn push(&mut self, modal: Box<dyn Modal>) {
         self.stack.push(modal);
+    }
+
+    pub(crate) fn archive_started(&mut self, id: &str) {
+        for modal in &mut self.stack {
+            modal.archive_started(id);
+        }
+    }
+
+    pub(crate) fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, String>) {
+        for modal in &mut self.stack {
+            modal.archive_updated(id, result);
+        }
     }
 
     /// Drops every modal on the stack, firing each modal's [`Modal::on_cancel`] hook first, and
@@ -325,6 +345,7 @@ pub(crate) mod testing {
         pub(crate) tick_count: Arc<AtomicU32>,
         /// Deadline returned from [`Modal::next_tick`].
         pub(crate) next_tick: Option<Instant>,
+        pub(crate) archive_events: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl ScriptedModal {
@@ -344,11 +365,26 @@ pub(crate) mod testing {
                 focus_regained_count: Arc::new(AtomicU32::new(0)),
                 tick_count: Arc::new(AtomicU32::new(0)),
                 next_tick: None,
+                archive_events: Arc::default(),
             }
         }
     }
 
     impl Modal for ScriptedModal {
+        fn archive_started(&mut self, id: &str) {
+            self.archive_events
+                .lock()
+                .unwrap()
+                .push(format!("started:{id}"));
+        }
+
+        fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, String>) {
+            self.archive_events
+                .lock()
+                .unwrap()
+                .push(format!("completed:{id}:{result:?}"));
+        }
+
         fn height(&self, _width: u16, _max_height: u16) -> u16 {
             self.declared_height
         }

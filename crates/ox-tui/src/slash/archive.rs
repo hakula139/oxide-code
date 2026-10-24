@@ -1,17 +1,16 @@
 //! `/archive` and `/unarchive` set whether a session shows in default listings and bare
 //! `--continue`. Bare `/archive` forwards [`Op::Archive`], which archives the live session and
-//! rolls to a fresh one. The typed-arg forms update a saved session's file directly.
+//! rolls to a fresh one. The typed-arg forms send saved-session operations to the engine.
 
 use ox_core::command;
 use ox_core::protocol::Op;
-use ox_core::session::display::{archive_notice, id_prefix};
+use ox_core::session::display::id_prefix;
 use ox_core::session::entry::{ArchiveState, SessionInfo};
 use ox_core::session::resolver::{ResolveError, resolve_saved_prefix};
-use ox_core::session::saved;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use super::sessions::{BARE_ARCHIVE_HINT, open_store, resolve_error_message, saved_error_message};
+use super::sessions::{BARE_ARCHIVE_HINT, open_store, resolve_error_message};
 use crate::action::Action;
 
 // ── ArchiveCmd ──
@@ -42,7 +41,7 @@ impl SlashCommand for ArchiveCmd {
         let store = open_store(ctx.info)?;
         let info = resolve_saved_prefix(&store, prefix, &ctx.info.session_id)
             .map_err(|e| resolve_error_message(e, Some(BARE_ARCHIVE_HINT)))?;
-        apply_archived(&info, ArchiveState::Archived, &ctx.info.session_id)
+        Ok(apply_archived(&info, ArchiveState::Archived))
     }
 }
 
@@ -84,7 +83,7 @@ impl SlashCommand for UnarchiveCmd {
         }
         let store = open_store(ctx.info)?;
         match resolve_saved_prefix(&store, prefix, &ctx.info.session_id) {
-            Ok(info) => apply_archived(&info, ArchiveState::Active, &ctx.info.session_id),
+            Ok(info) => Ok(apply_archived(&info, ArchiveState::Active)),
             Err(ResolveError::Live { .. }) => Ok(SlashOutcome::SystemMessage(
                 "The live session is not archived".to_owned(),
             )),
@@ -95,43 +94,57 @@ impl SlashCommand for UnarchiveCmd {
 
 // ── Helpers ──
 
-fn apply_archived(
-    info: &SessionInfo,
-    target: ArchiveState,
-    live_id: &str,
-) -> Result<SlashOutcome, String> {
+fn apply_archived(info: &SessionInfo, target: ArchiveState) -> SlashOutcome {
     if info.archive_state() == target {
         let state = match target {
             ArchiveState::Active => "not archived",
             ArchiveState::Archived => "already archived",
         };
-        return Ok(SlashOutcome::SystemMessage(format!(
+        return SlashOutcome::SystemMessage(format!(
             "Session {} is {state}",
             id_prefix(&info.session_id),
-        )));
+        ));
     }
-    let live_recovery = (target == ArchiveState::Archived).then_some(BARE_ARCHIVE_HINT);
-    saved::set_archived(&info.path, &info.session_id, target, live_id)
-        .map_err(|e| saved_error_message(e, live_recovery))?;
-    Ok(SlashOutcome::SystemMessage(archive_notice(
-        &info.session_id,
-        target,
-    )))
+    SlashOutcome::Forward(Action::Op(Op::SetArchive {
+        path: info.path.clone(),
+        session_id: info.session_id.clone(),
+        state: target,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use time::macros::datetime;
 
+    use ox_core::session::display::archive_notice;
+    use ox_core::session::saved::{self, saved_error_message};
     use ox_core::session::store::SessionStore;
     use ox_core::session::store::testing::{
-        archive_test_session, listed_ids, seed_test_session, stamped_id, with_isolated_xdg,
+        WriterBarrier, archive_test_session, isolated_store, listed_ids, seed_test_session,
+        stamped_id, with_isolated_xdg,
     };
 
     use super::*;
     use crate::session_info::testing::test_session_info;
-    use crate::slash::registry::testing::run_execute;
     use crate::slash::testing::make_read_only;
+
+    fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
+        let outcome = crate::slash::registry::testing::run_execute(cmd, args)?;
+        let SlashOutcome::Forward(Action::Op(Op::SetArchive {
+            path,
+            session_id,
+            state,
+        })) = outcome
+        else {
+            return Ok(outcome);
+        };
+        saved::set_archived(&path, &session_id, state, &test_session_info().session_id)
+            .map_err(|error| saved_error_message(error, Some(BARE_ARCHIVE_HINT)))?;
+        Ok(SlashOutcome::SystemMessage(archive_notice(
+            &session_id,
+            state,
+        )))
+    }
 
     fn seed_saved(store: &SessionStore, session_id: &str) {
         seed_test_session(
@@ -314,6 +327,30 @@ mod tests {
                     assert_eq!(err, "No session matching `zzzz`");
                 });
             }
+        }
+    }
+    mod apply_archived {
+        use super::*;
+
+        #[test]
+        fn forwards_the_saved_archive_without_waiting_for_the_writer() {
+            let (_dir, store) = isolated_store();
+            seed_saved(&store, "saved");
+            let info = store.list().unwrap().into_iter().next().unwrap();
+            let barrier = WriterBarrier::hold(&info.path);
+
+            let outcome = apply_archived(&info, ArchiveState::Archived);
+
+            assert_eq!(
+                outcome.into_forward(),
+                Action::Op(Op::SetArchive {
+                    path: info.path,
+                    session_id: "saved".to_owned(),
+                    state: ArchiveState::Archived,
+                })
+            );
+            assert_eq!(listed_ids(&store, ArchiveState::Active), ["saved"]);
+            barrier.release();
         }
     }
 }

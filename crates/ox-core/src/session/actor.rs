@@ -1,5 +1,5 @@
 //! Session actor that owns [`SessionState`] and its writer. Each `recv()` wakeup drains the queued
-//! [`SessionCmd`]s into one batch and appends it in one write, so an isolated write flushes at once
+//! [`SessionCmd`]s into one batch and flushes it under the writer lock, so an isolated write runs
 //! with no interval timer. A compaction and `/archive` end their batch so a failed one can be
 //! unqueued, and cmds after a compaction see its committed synthetic root.
 

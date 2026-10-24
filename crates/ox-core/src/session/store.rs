@@ -192,18 +192,22 @@ pub(crate) fn delete_at(path: &Path) -> Result<()> {
 /// Sets the archive state of the session file at `path`. The file keeps its mtime, since listings
 /// order sessions by activity and toggling the state is not activity.
 pub(super) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
-    let mut writer = open_append_at(path)?;
-    let modified = fs::metadata(path)
+    let _lock = lock_writer(path)?;
+    let file = open_append_file(path)?;
+    let modified = file
+        .metadata()
         .and_then(|meta| meta.modified())
         .with_context(|| format!("failed to stat {}", path.display()))?;
-    writer.set_archived(archived)?;
-    if let Err(e) = open_append_file(path).and_then(|file| Ok(file.set_modified(modified)?)) {
+    let lines = archive_lines(archived)?;
+    let result = append_whole(&file, &mut Appender(&file), &lines)
+        .with_context(|| format!("failed to write {}", path.display()));
+    if let Err(e) = file.set_modified(modified) {
         warn!(
             "archive toggle moved {} up the listing: {e}",
             path.display()
         );
     }
-    Ok(())
+    result
 }
 
 const MAX_SESSION_ID_LEN: usize = 64;
@@ -243,8 +247,9 @@ impl SessionWriter {
         &self.path
     }
 
-    /// Appends JSONL `lines` under an exclusive file lock, released by closing the batch's handle.
+    /// Appends JSONL `lines` while owning the session directory's writer lock.
     pub(super) fn append_lines(&mut self, lines: &[u8]) -> Result<()> {
+        let _lock = lock_writer(&self.path)?;
         let file = open_append_file(&self.path)?;
         append_whole(&file, &mut Appender(&file), lines)
             .with_context(|| format!("failed to write {}", self.path.display()))
@@ -252,12 +257,15 @@ impl SessionWriter {
 
     /// Appends an [`Entry::Archive`] setting the session's archive state.
     pub(super) fn set_archived(&mut self, archived: bool) -> Result<()> {
-        let entry = Entry::Archive {
-            archived,
-            at: OffsetDateTime::now_utc(),
-        };
-        self.append_lines(&encode_lines([&entry])?)
+        self.append_lines(&archive_lines(archived)?)
     }
+}
+
+fn archive_lines(archived: bool) -> Result<Vec<u8>> {
+    encode_lines([&Entry::Archive {
+        archived,
+        at: OffsetDateTime::now_utc(),
+    }])
 }
 
 /// Encodes `entries` as JSONL, one line each.
@@ -490,6 +498,35 @@ fn open_append_file(path: &Path) -> Result<File> {
         .with_context(|| format!("failed to open {}", path.display()))
 }
 
+/// The directory's lock file stays in place across session deletion and recreation. Keeping the
+/// lock off the transcript lets Windows readers open it during a batch.
+fn open_writer_lock(path: &Path) -> Result<File> {
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let path = path
+        .parent()
+        .context("session file has no parent")?
+        .join(".writer.lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))
+}
+
+fn lock_writer(path: &Path) -> Result<File> {
+    let lock = open_writer_lock(path)?;
+    lock.lock()
+        .with_context(|| format!("failed to lock writer for {}", path.display()))?;
+    Ok(lock)
+}
+
 /// Writes at the end of a file opened by [`append_options`].
 struct Appender<'a>(&'a File);
 
@@ -512,10 +549,9 @@ impl Write for Appender<'_> {
     }
 }
 
-/// Locks `file` until the caller closes it, terminates a torn last line, and writes `lines`
-/// through `out`, a handle on `file`. A failed write is truncated back off under the same lock.
+/// Terminates a torn last line and writes `lines` through `out`, a handle on `file`. The caller
+/// holds the directory's writer lock through this operation, including failed-write rollback.
 fn append_whole(file: &File, out: &mut impl Write, lines: &[u8]) -> io::Result<()> {
-    file.lock()?;
     let mut start = file.metadata()?.len();
     if start > 0 && !ends_with_newline(file, start)? {
         out.write_all(b"\n")?;
@@ -625,6 +661,10 @@ fn read_header<R: BufRead>(lines: &mut JsonlLines<R>, path: &Path) -> Result<Hea
 
 #[cfg(test)]
 mod tests {
+    use std::process::{Child, ChildStdin, Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use indoc::indoc;
     use time::macros::datetime;
 
@@ -632,7 +672,7 @@ mod tests {
         sample_header, sample_message_at, sample_message_entry, sample_summary_entry,
         sample_title_entry, test_session_file,
     };
-    use super::testing::{TEST_PROJECT, isolated_store, test_store};
+    use super::testing::{TEST_PROJECT, WriterBarrier, isolated_store, test_store};
     use super::*;
     use crate::file_tracker::{FileState, LastView};
     use crate::message::ContentBlock;
@@ -1845,6 +1885,43 @@ mod tests {
         use super::*;
 
         #[test]
+        fn preserves_activity_committed_before_its_waiting_write() {
+            let (_dir, store) = isolated_store();
+            let mut writer = store.create(&sample_header("active"), &[]).unwrap();
+            let path = writer.path().to_owned();
+            let barrier = WriterBarrier::hold(&path);
+            let (started, waiting) = mpsc::channel();
+            let target = path.clone();
+            let archive = std::thread::spawn(move || {
+                started.send(()).unwrap();
+                set_archived_at(&target, true).unwrap();
+            });
+            waiting.recv().unwrap();
+            let active = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+            let file = open_append_file(&path).unwrap();
+
+            append_whole(
+                &file,
+                &mut Appender(&file),
+                &encode_lines([&sample_message_entry(Uuid::new_v4(), "activity")]).unwrap(),
+            )
+            .unwrap();
+            file.set_modified(active).unwrap();
+            barrier.release();
+            archive.join().unwrap();
+
+            let data = load_session_data_from_path(&path).unwrap();
+            assert!(data.archived);
+            assert_eq!(data.messages, [Message::user("activity")]);
+            assert_eq!(file.metadata().unwrap().modified().unwrap(), active);
+
+            writer
+                .append(&[sample_message_entry(Uuid::new_v4(), "later activity")])
+                .unwrap();
+            assert_ne!(file.metadata().unwrap().modified().unwrap(), active);
+        }
+
+        #[test]
         fn latest_entry_wins_keeping_the_transcript_and_mtime() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
@@ -2011,7 +2088,14 @@ mod tests {
                     release.wait();
 
                     assert!(!visible, "unpublished content must stay private");
-                    assert!(listed.is_empty(), "private content appeared in listings");
+                    assert_eq!(
+                        listed
+                            .into_iter()
+                            .map(|info| info.session_id)
+                            .collect::<Vec<_>>(),
+                        [] as [String; 0],
+                        "private content appeared in listings"
+                    );
                     competing.unwrap();
                     let error = creator.join().unwrap().unwrap_err();
                     assert!(
@@ -2029,6 +2113,50 @@ mod tests {
                 });
                 assert_eq!(fs::read_dir(&store.project_dir).unwrap().count(), 1);
             }
+        }
+    }
+
+    mod open_writer_lock {
+        use super::*;
+
+        #[test]
+        fn keeps_the_same_lock_after_deletion_and_recreation() {
+            let (_dir, store) = isolated_store();
+            let header = sample_header("recreated");
+            let writer = store.create(&header, &[]).unwrap();
+            let path = writer.path().to_owned();
+            let lock = lock_writer(&path).unwrap();
+
+            delete_at(&path).unwrap();
+            store.create(&header, &[]).unwrap();
+            let competing = open_writer_lock(&path).unwrap();
+
+            assert!(matches!(
+                competing.try_lock(),
+                Err(fs::TryLockError::WouldBlock)
+            ));
+            drop(lock);
+            competing.try_lock().unwrap();
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn creates_a_private_lock_shared_by_symlink_paths() {
+            use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+            let (dir, store) = isolated_store();
+            let writer = store.create(&sample_header("linked"), &[]).unwrap();
+            let alias = dir.path().join("alias.jsonl");
+            symlink(writer.path(), &alias).unwrap();
+            let lock = lock_writer(writer.path()).unwrap();
+
+            let competing = open_writer_lock(&alias).unwrap();
+
+            assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+            assert!(matches!(
+                competing.try_lock(),
+                Err(fs::TryLockError::WouldBlock)
+            ));
         }
     }
 
@@ -2057,10 +2185,6 @@ mod tests {
     }
 
     mod append_whole {
-        use std::process::{Child, ChildStdin, Command, Stdio};
-        use std::sync::mpsc;
-        use std::time::Duration;
-
         use super::*;
 
         const CHILD_PATH: &str = "OX_TEST_SESSION_APPEND_PATH";
@@ -2131,9 +2255,24 @@ mod tests {
         fn append_in_child(path: &Path) {
             let mut command = String::new();
             io::stdin().read_line(&mut command).unwrap();
-            let file = open_append_file(path).unwrap();
+            let file = open_writer_lock(path).unwrap();
             assert!(matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock)));
             drop(file);
+            assert_eq!(read_session_id_from_path(path).unwrap(), "partial");
+            assert_eq!(
+                load_session_data_from_path(path).unwrap().messages,
+                [Message::user("root")]
+            );
+            let store = test_store(path.parent().unwrap().parent().unwrap());
+            assert_eq!(
+                store
+                    .list()
+                    .unwrap()
+                    .into_iter()
+                    .map(|info| info.session_id)
+                    .collect::<Vec<_>>(),
+                ["partial"]
+            );
             println!("OX_LOCK_HELD");
             io::stdout().flush().unwrap();
             command.clear();
@@ -2261,6 +2400,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let (path, _writer, batch) = session_with_pending_batch(&store, dir.path());
                 let mut child = CompetingWriter::spawn(&path);
+                let lock = lock_writer(&path).unwrap();
                 let file = open_append_file(&path).unwrap();
                 let mut checked = false;
                 let mut out = ShortWriter {
@@ -2282,6 +2422,7 @@ mod tests {
 
                 let result = append_whole(&file, &mut out, &batch);
                 drop(file);
+                drop(lock);
                 child.append_and_wait();
 
                 assert_eq!(

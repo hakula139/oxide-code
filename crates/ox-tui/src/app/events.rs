@@ -71,6 +71,9 @@ impl App {
                     self.status_bar.set_title(Some(title));
                 }
             }
+            Event::ArchiveUpdated { id, result } => {
+                self.apply_archive_updated(&id, &result);
+            }
             Event::SessionRolled { id, old_session } => {
                 self.apply_session_rolled(id, old_session);
             }
@@ -147,6 +150,19 @@ impl App {
             basis.reason(),
             grant,
         )));
+    }
+
+    fn apply_archive_updated(&mut self, id: &str, result: &Result<ArchiveState, String>) {
+        self.modals.archive_updated(id, result);
+        match result {
+            Ok(state) => self.chat.push_system_message(archive_notice(id, *state)),
+            Err(message) => self.chat.push_error(message),
+        }
+        if result.is_err() || self.status == Status::Cancelling {
+            self.enter_idle();
+        } else {
+            self.finalize_idle();
+        }
     }
 
     fn finish_turn(&mut self) {
@@ -2118,6 +2134,31 @@ mod tests {
 
             assert_eq!(app.session_info.background_shells, shells_in_each_state());
             assert!(app.dirty);
+        }
+    }
+
+    mod apply_archive_updated {
+        use super::*;
+
+        #[test]
+        fn failed_or_interrupted_completion_keeps_queued_input_for_the_user() {
+            for (status, result) in [
+                (Status::Cancelling, Ok(ArchiveState::Archived)),
+                (Status::Archiving, Err("Archive failed".to_owned())),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.queue.push("next prompt".to_owned());
+                app.set_status(status);
+
+                app.apply_archive_updated("saved", &result);
+
+                assert_eq!(app.status, Status::Idle);
+                assert_eq!(*app.queue.pending(), ["next prompt"]);
+                assert_eq!(
+                    rx.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                );
+            }
         }
     }
 
