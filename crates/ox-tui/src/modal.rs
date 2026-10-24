@@ -545,6 +545,41 @@ mod tests {
         }
     }
 
+    mod archive_updated {
+        use super::*;
+
+        #[test]
+        fn completes_a_covered_picker_without_dismissing_the_overlay() {
+            let mut stack = ModalStack::default();
+            let picker = ScriptedModal::new(ModalAction::Dispatch(Action::Op(Op::Clear)));
+            let observed = Arc::clone(&picker.archive_events);
+            stack.push(Box::new(picker));
+            stack.push(Box::new(BareModal));
+
+            stack.archive_started("saved");
+            stack.archive_updated("saved", &Ok(ArchiveState::Archived));
+
+            assert_eq!(
+                *observed.lock().unwrap(),
+                ["started:saved", "completed:saved:Ok(Archived)"]
+            );
+            assert!(
+                stack
+                    .handle_key(&KeyEvent::from(KeyCode::Char('s')))
+                    .is_none()
+            );
+            assert!(matches!(
+                stack.handle_key(&KeyEvent::from(KeyCode::Esc)),
+                Some(ModalAction::Cancelled)
+            ));
+            assert!(matches!(
+                stack.handle_key(&KeyEvent::from(KeyCode::Char('s'))),
+                Some(ModalAction::Dispatch(Action::Op(Op::Clear)))
+            ));
+            assert!(!stack.is_active());
+        }
+    }
+
     mod clear {
         use super::*;
 
