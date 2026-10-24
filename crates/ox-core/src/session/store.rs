@@ -28,7 +28,7 @@ use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, TextOrigin};
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
-use crate::util::fs::create_private_dir_all;
+use crate::util::fs::{FileLock, create_private_dir_all};
 use crate::util::path::{XdgBase, app_dir};
 
 const SESSIONS_DIR: &str = "sessions";
@@ -553,11 +553,9 @@ fn open_writer_lock(path: &Path) -> Result<File> {
         .with_context(|| format!("failed to open {}", path.display()))
 }
 
-fn lock_writer(path: &Path) -> Result<File> {
-    let lock = open_writer_lock(path)?;
-    lock.lock()
-        .with_context(|| format!("failed to lock writer for {}", path.display()))?;
-    Ok(lock)
+fn lock_writer(path: &Path) -> Result<FileLock> {
+    FileLock::lock(open_writer_lock(path)?)
+        .with_context(|| format!("failed to lock writer for {}", path.display()))
 }
 
 /// Writes at the end of a file opened by [`append_options`].
@@ -2283,11 +2281,14 @@ mod tests {
             let writer = store.create(&sample_header("linked"), &[]).unwrap();
             let alias = dir.path().join("alias.jsonl");
             symlink(writer.path(), &alias).unwrap();
-            let lock = lock_writer(writer.path()).unwrap();
+            let _lock = lock_writer(writer.path()).unwrap();
 
             let competing = open_writer_lock(&alias).unwrap();
 
-            assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                competing.metadata().unwrap().permissions().mode() & 0o777,
+                0o600
+            );
             assert!(matches!(
                 competing.try_lock(),
                 Err(fs::TryLockError::WouldBlock)
