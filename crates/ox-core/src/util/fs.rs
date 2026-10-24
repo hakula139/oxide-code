@@ -118,6 +118,25 @@ fn file_id(file: &File) -> io::Result<(u64, u64)> {
     Ok((info.volume_serial_number(), info.file_index()))
 }
 
+// ── File Locking ──
+
+/// An exclusive file lock whose release does not wait for inherited handles to close.
+pub(crate) struct FileLock(File);
+
+impl FileLock {
+    pub(crate) fn lock(file: File) -> io::Result<Self> {
+        file.lock()?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Logging cleanup failures here would recurse through the file appender.
+        let _: io::Result<()> = self.0.unlock();
+    }
+}
+
 // ── Private State ──
 
 /// Creates `path` and its missing parents with `0700` perms on Unix, also tightening an existing
@@ -141,7 +160,7 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
         use tracing::debug;
 
         if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
-            debug!("failed to tighten {} to 0o700: {e}", path.display());
+            debug!(path = %path.display(), error = %e, "failed to tighten directory to 0o700");
         }
     }
     Ok(())
@@ -168,9 +187,20 @@ pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Opens `path` for appending with `0600` perms on Unix, also tightening an existing file's mode.
-pub(crate) fn open_private_append(path: &Path) -> io::Result<File> {
+pub(super) fn open_private_append(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.append(true).create(true);
+    open_private(path, &mut options)
+}
+
+/// Opens a lockable coordination file without truncating it, enforcing `0600` perms on Unix.
+pub(super) fn open_private_lock(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    open_private(path, &mut options)
+}
+
+fn open_private(path: &Path, options: &mut OpenOptions) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -572,6 +602,33 @@ mod tests {
         }
     }
 
+    mod file_lock {
+        use super::*;
+
+        mod drop {
+            use super::*;
+
+            #[test]
+            fn releases_while_a_duplicate_handle_remains_open() {
+                let dir = tempdir().unwrap();
+                let path = dir.path().join("writer.lock");
+                let file = File::create_new(&path).unwrap();
+                let duplicate = file.try_clone().unwrap();
+                let competing = File::options().read(true).write(true).open(&path).unwrap();
+                let lock = FileLock::lock(file).unwrap();
+                assert!(matches!(
+                    competing.try_lock(),
+                    Err(fs::TryLockError::WouldBlock)
+                ));
+
+                drop(lock);
+
+                competing.try_lock().unwrap();
+                drop(duplicate);
+            }
+        }
+    }
+
     mod create_private_dir_all {
         use super::*;
 
@@ -764,6 +821,23 @@ mod tests {
             open_private_append(&path).unwrap();
 
             assert_eq!(mode(&path), 0o600);
+        }
+    }
+
+    mod open_private_lock {
+        use super::*;
+
+        #[test]
+        fn preserves_existing_content_while_locking() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("writer.lock");
+            fs::write(&path, b"existing").unwrap();
+
+            let file = open_private_lock(&path).unwrap();
+            let lock = FileLock::lock(file).unwrap();
+            drop(lock);
+
+            assert_eq!(fs::read(&path).unwrap(), b"existing");
         }
     }
 }

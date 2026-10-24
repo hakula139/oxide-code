@@ -24,14 +24,46 @@ use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 
 // ── Turn Rendering ──
 
-/// Renders `events` on `sink` until `op`, already sent, ends, returning how it ended, or `None`
-/// once the engine has stopped. Approval requests go to `approver` in place of `sink`, and its
-/// answer goes back on `ops`. Events that arrive while `approver` decides wait until it answers,
-/// unless one ends `op`, such as the cancellation an interrupt causes, which drops the question. An
-/// engine for a run nobody attends requests no approval, so such a run passes no `approver`.
+/// Renders all events while retaining the first output failure until the engine has shut down.
+pub(super) struct Renderer<'a> {
+    sink: &'a dyn EventSink,
+    failure: Option<anyhow::Error>,
+}
+
+impl<'a> Renderer<'a> {
+    pub(super) fn new(sink: &'a dyn EventSink) -> Self {
+        Self {
+            sink,
+            failure: None,
+        }
+    }
+
+    pub(super) fn render(&mut self, event: Event) {
+        if let Err(error) = self.sink.send(event) {
+            debug!(error = %format_args!("{error:#}"), "stdio render failed");
+            self.failure.get_or_insert(error);
+        }
+    }
+
+    pub(super) fn session_write_error(&mut self, failure: Option<&str>) {
+        if let Some(failure) = failure {
+            self.render(Event::Error(notice::session_write_failed(failure)));
+        }
+    }
+
+    pub(super) fn finish(self) -> Result<()> {
+        self.failure.map_or(Ok(()), Err)
+    }
+}
+
+/// Renders `events` until `op`, already sent, ends, returning how it ended, or `None` once the
+/// engine has stopped. Approval requests go to `approver`, and its answer goes back on `ops`.
+/// Events that arrive while `approver` decides wait until it answers, unless one ends `op`, such as
+/// the cancellation an interrupt causes, which drops the question. An engine for a run nobody
+/// attends requests no approval, so such a run passes no `approver`.
 pub(super) async fn render_op<A: Approver>(
     events: &mut mpsc::UnboundedReceiver<Event>,
-    sink: &dyn EventSink,
+    renderer: &mut Renderer<'_>,
     ops: &mpsc::Sender<Op>,
     op: &Op,
     mut approver: Option<&mut A>,
@@ -50,7 +82,7 @@ pub(super) async fn render_op<A: Approver>(
         } = event
         else {
             let end = TurnEnd::of(op, &event);
-            render(sink, event);
+            renderer.render(event);
             if end.is_some() {
                 return end;
             }
@@ -96,15 +128,12 @@ pub(super) trait Approver {
 }
 
 /// Renders the events already queued, such as the engine's startup warnings.
-pub(super) fn render_queued(events: &mut mpsc::UnboundedReceiver<Event>, sink: &dyn EventSink) {
+pub(super) fn render_queued(
+    events: &mut mpsc::UnboundedReceiver<Event>,
+    renderer: &mut Renderer<'_>,
+) {
     while let Ok(event) = events.try_recv() {
-        render(sink, event);
-    }
-}
-
-fn render(sink: &dyn EventSink, event: Event) {
-    if let Err(e) = sink.send(event) {
-        debug!("stdio render failed: {e}");
+        renderer.render(event);
     }
 }
 
@@ -390,6 +419,8 @@ fn resumed_notice(id: &str, title: Option<&str>, prior: ArchiveState) -> String 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use indoc::indoc;
     use wiremock::MockServer;
 
@@ -406,9 +437,92 @@ mod tests {
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::{plan, task};
     use ox_core::tool::testing::bash_preview;
+    use ox_core::util::log::testing::LogCapture;
 
     use super::*;
     use crate::driver::testing::{ClosedPipe, Screen};
+
+    mod renderer {
+        use super::*;
+
+        #[test]
+        fn retains_the_first_error_after_later_failures_and_successes() {
+            struct ErrorSink;
+
+            impl EventSink for ErrorSink {
+                fn send(&self, event: Event) -> Result<()> {
+                    if let Event::Error(message) = event {
+                        anyhow::bail!(message);
+                    }
+                    Ok(())
+                }
+            }
+
+            let mut renderer = Renderer::new(&ErrorSink);
+
+            renderer.render(Event::Error("first failure".to_owned()));
+            renderer.render(Event::Error("second failure".to_owned()));
+            renderer.render(Event::TurnComplete);
+
+            assert_eq!(renderer.finish().unwrap_err().to_string(), "first failure");
+        }
+
+        mod render {
+            use super::*;
+
+            struct ChainedFailure;
+
+            impl EventSink for ChainedFailure {
+                fn send(&self, _event: Event) -> Result<()> {
+                    Err(anyhow::anyhow!("pipe closed").context("failed to render event"))
+                }
+            }
+
+            #[test]
+            fn records_the_full_render_failure_chain() {
+                let logs = LogCapture::default();
+                let mut renderer = Renderer::new(&ChainedFailure);
+
+                tracing::dispatcher::with_default(&logs.dispatch(), || {
+                    renderer.render(Event::TurnComplete);
+                });
+
+                assert_eq!(
+                    logs.events(),
+                    [BTreeMap::from([
+                        (
+                            "error".to_owned(),
+                            "failed to render event: pipe closed".to_owned()
+                        ),
+                        ("message".to_owned(), "stdio render failed".to_owned()),
+                    ])]
+                );
+                assert_eq!(
+                    format!("{:#}", renderer.finish().unwrap_err()),
+                    "failed to render event: pipe closed"
+                );
+            }
+        }
+
+        mod session_write_error {
+            use super::*;
+
+            #[test]
+            fn renders_a_writer_failure_only_when_reported() {
+                let sink = CapturingSink::default();
+                let mut renderer = Renderer::new(&sink);
+
+                renderer.session_write_error(None);
+                renderer.session_write_error(Some("disk full"));
+                renderer.finish().unwrap();
+
+                assert_eq!(
+                    sink.events(),
+                    [Event::Error("Session write failed: disk full".to_owned())],
+                );
+            }
+        }
+    }
 
     mod render_op {
         use super::*;
@@ -459,7 +573,14 @@ mod tests {
             let sink = CapturingSink::default();
             let mut approver = fixed(ApprovalDecision::Deny);
 
-            let end = render_op(&mut events, &sink, &ops_tx, &prompt(), Some(&mut approver)).await;
+            let end = render_op(
+                &mut events,
+                &mut Renderer::new(&sink),
+                &ops_tx,
+                &prompt(),
+                Some(&mut approver),
+            )
+            .await;
 
             assert_eq!(end, Some(TurnEnd::Completed));
             assert_eq!(
@@ -508,7 +629,14 @@ mod tests {
             let (ops_tx, mut ops) = mpsc::channel(1);
             let sink = CapturingSink::default();
 
-            let end = render_op(&mut events, &sink, &ops_tx, &prompt(), Some(&mut Undecided)).await;
+            let end = render_op(
+                &mut events,
+                &mut Renderer::new(&sink),
+                &ops_tx,
+                &prompt(),
+                Some(&mut Undecided),
+            )
+            .await;
 
             assert_eq!(end, Some(TurnEnd::Cancelled));
             assert_eq!(
@@ -560,7 +688,14 @@ mod tests {
                 rendered: None,
             };
 
-            let end = render_op(&mut events, &sink, &ops, &prompt(), Some(&mut approver)).await;
+            let end = render_op(
+                &mut events,
+                &mut Renderer::new(&sink),
+                &ops,
+                &prompt(),
+                Some(&mut approver),
+            )
+            .await;
 
             assert_eq!(end, Some(TurnEnd::Completed));
             assert_eq!(approver.rendered, Some(Vec::new()));
@@ -583,9 +718,10 @@ mod tests {
 
             let (ops, _) = mpsc::channel(1);
             let mut approver = fixed(ApprovalDecision::Deny);
+            let mut renderer = Renderer::new(&FailingSink);
             let end = render_op(
                 &mut events,
-                &FailingSink,
+                &mut renderer,
                 &ops,
                 &prompt(),
                 Some(&mut approver),
@@ -594,6 +730,7 @@ mod tests {
 
             assert_eq!(end, Some(TurnEnd::Cancelled));
             assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
+            assert_eq!(renderer.finish().unwrap_err().to_string(), "sink closed");
         }
 
         #[tokio::test]
@@ -618,7 +755,14 @@ mod tests {
 
             let (ops, _) = mpsc::channel(1);
             let mut approver = fixed(ApprovalDecision::Deny);
-            let end = render_op(&mut events, &sink, &ops, &Op::Clear, Some(&mut approver)).await;
+            let end = render_op(
+                &mut events,
+                &mut Renderer::new(&sink),
+                &ops,
+                &Op::Clear,
+                Some(&mut approver),
+            )
+            .await;
 
             assert_eq!(end, Some(TurnEnd::Completed));
             assert_eq!(sink.events(), cleared);
@@ -640,7 +784,7 @@ mod tests {
 
                 let end = render_op(
                     &mut handle.events,
-                    &sink,
+                    &mut Renderer::new(&sink),
                     &handle.ops,
                     &Op::Clear,
                     Some(&mut approver),
@@ -678,7 +822,14 @@ mod tests {
 
             let (ops, _) = mpsc::channel(1);
             let mut approver = fixed(ApprovalDecision::Deny);
-            let end = render_op(&mut events, &sink, &ops, &prompt(), Some(&mut approver)).await;
+            let end = render_op(
+                &mut events,
+                &mut Renderer::new(&sink),
+                &ops,
+                &prompt(),
+                Some(&mut approver),
+            )
+            .await;
 
             assert_eq!(end, None);
             assert_eq!(sink.events(), [Event::StreamToken("partial".to_owned())]);

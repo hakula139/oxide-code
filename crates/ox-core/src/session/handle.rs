@@ -292,7 +292,7 @@ impl SessionHandle {
             if let Err(e) = task.await
                 && e.is_panic()
             {
-                error!("title generation panicked: {e}");
+                error!(error = %e, "title generation panicked");
             }
         }
     }
@@ -313,9 +313,9 @@ impl SessionHandle {
             && let Err(e) = j.await
         {
             if e.is_panic() {
-                error!("session actor panicked: {e}");
+                error!(error = %e, "session actor panicked");
             } else {
-                warn!("session actor task cancelled: {e}");
+                warn!(error = %e, "session actor task cancelled");
             }
         }
     }

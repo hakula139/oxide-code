@@ -192,7 +192,13 @@ impl SessionStore {
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 match collect_session_paths(&entry.path()) {
                     Ok(mut paths) => out.append(&mut paths),
-                    Err(e) => warn!("skipping project dir {}: {e}", entry.path().display()),
+                    Err(e) => {
+                        warn!(
+                            path = %entry.path().display(),
+                            error = %format_args!("{e:#}"),
+                            "skipping project directory"
+                        );
+                    }
                 }
             }
         }
@@ -210,7 +216,11 @@ fn collect_session_paths(dir: &Path) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
             e.metadata()
                 .and_then(|m| m.modified())
                 .inspect_err(|err| {
-                    warn!("skipping session {} (stat failed): {err}", path.display());
+                    warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "skipping session whose metadata is unreadable"
+                    );
                 })
                 .ok()
                 .map(|t| (path, OffsetDateTime::from(t)))
@@ -223,7 +233,7 @@ fn read_dir_entries(dir: &Path) -> Result<impl Iterator<Item = fs::DirEntry>> {
     let entries = fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
     Ok(entries.filter_map(|entry| {
         entry
-            .inspect_err(|e| warn!("skipping directory entry: {e}"))
+            .inspect_err(|e| warn!(error = %e, "skipping directory entry"))
             .ok()
     }))
 }
@@ -240,7 +250,13 @@ fn read_readable(
     project: Option<&Project>,
 ) -> Option<SessionInfo> {
     read_session_info(path, modified, project)
-        .inspect_err(|e| warn!("skipping unreadable session file {}: {e:#}", path.display()))
+        .inspect_err(|e| {
+            warn!(
+                path = %path.display(),
+                error = %format_args!("{e:#}"),
+                "skipping unreadable session file"
+            );
+        })
         .ok()
         .flatten()
 }
@@ -309,6 +325,8 @@ fn read_session_info(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use time::macros::datetime;
     use uuid::Uuid;
 
@@ -323,6 +341,7 @@ mod tests {
         test_store,
     };
     use crate::util::fs::testing::deny_read_access;
+    use crate::util::log::testing::LogCapture;
     use crate::util::path::testing::HOME_VAR;
 
     /// Builds `count` sessions whose mtimes and file names both ascend in seed order.
@@ -822,8 +841,14 @@ mod tests {
             let store = test_store(dir.path());
             seed_n_sessions(&store, 3);
             write_newest_corrupt_session(dir.path());
+            let path = test_session_file(dir.path(), "corrupt");
+            let logs = LogCapture::default();
 
-            let page = store.list_paged(Some(2), ListScope::default()).unwrap();
+            let page = tracing::dispatcher::with_default(&logs.dispatch(), || {
+                store.list_paged(Some(2), ListScope::default())
+            })
+            .unwrap();
+
             let ids: Vec<_> = page
                 .sessions()
                 .iter()
@@ -831,6 +856,24 @@ mod tests {
                 .collect();
             assert_eq!(ids, ["session-0002", "session-0001"]);
             assert!(page.has_more());
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    (
+                        "error".to_owned(),
+                        format!(
+                            "{} is not an oxide-code session file: \
+                             its first line is not a session header: expected ident at line 1 column 2",
+                            path.display()
+                        ),
+                    ),
+                    (
+                        "message".to_owned(),
+                        "skipping unreadable session file".to_owned(),
+                    ),
+                    ("path".to_owned(), path.display().to_string()),
+                ])]
+            );
 
             let full = store.list_paged(Some(3), ListScope::default()).unwrap();
             assert_eq!(full.sessions().len(), 3);
@@ -860,14 +903,18 @@ mod tests {
             let locked = dir.path().join("locked-project");
             fs::create_dir(&locked).unwrap();
             let _denied = deny_read_access(&locked);
+            let cause = fs::read_dir(&locked).unwrap_err();
+            let logs = LogCapture::default();
 
-            let page = store.list_paged(
-                None,
-                ListScope {
-                    projects: ProjectScope::Every,
-                    ..ListScope::default()
-                },
-            );
+            let page = tracing::dispatcher::with_default(&logs.dispatch(), || {
+                store.list_paged(
+                    None,
+                    ListScope {
+                        projects: ProjectScope::Every,
+                        ..ListScope::default()
+                    },
+                )
+            });
 
             let ids: Vec<_> = page
                 .unwrap()
@@ -876,6 +923,20 @@ mod tests {
                 .map(|s| s.session_id)
                 .collect();
             assert_eq!(ids, ["own"]);
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    ("path".to_owned(), locked.display().to_string()),
+                    (
+                        "error".to_owned(),
+                        format!("failed to read {}: {cause}", locked.display()),
+                    ),
+                    (
+                        "message".to_owned(),
+                        "skipping project directory".to_owned()
+                    ),
+                ])]
+            );
         }
     }
 
