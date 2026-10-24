@@ -4,10 +4,10 @@
 use std::fs::{Metadata, OpenOptions};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use strum::Display;
 use tokio::io::AsyncWriteExt as _;
 
-use super::ToolCtx;
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::util::fs::{FileReadError, open_no_follow, read_regular_file, validate_regular_file};
 use crate::util::path::lexical_normalize;
@@ -126,22 +126,18 @@ async fn write_no_follow(path: &Path, bytes: &[u8], mode: WriteMode) -> std::io:
     file.flush().await
 }
 
-/// Writes `bytes` to the absolute `path` like [`write_no_follow`] and records them in the context's
-/// tracker under the path's [`tracker_key`] as one unit, so a caller dropped mid-write cannot leave
-/// the file written but unrecorded.
-pub(super) async fn write_tracked(
-    ctx: &ToolCtx,
-    path: &Path,
+/// Writes `bytes` through [`write_no_follow`] and returns them with the path's [`tracker_key`].
+/// The caller must run this inside the tracker's owned write operation.
+pub(super) async fn write_file(
+    path: PathBuf,
+    shown: String,
     bytes: Vec<u8>,
     mode: WriteMode,
-) -> std::io::Result<()> {
-    let path = path.to_owned();
-    ctx.tracker
-        .write_and_record(&ctx.tool_use_id, async move {
-            write_no_follow(&path, &bytes, mode).await?;
-            Ok((tracker_key(&path).await, bytes))
-        })
+) -> anyhow::Result<(PathBuf, Vec<u8>)> {
+    write_no_follow(&path, &bytes, mode)
         .await
+        .with_context(|| format!("Failed to write {shown}"))?;
+    Ok((tracker_key(&path).await, bytes))
 }
 
 #[cfg(test)]

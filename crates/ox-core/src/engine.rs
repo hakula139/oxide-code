@@ -1891,20 +1891,15 @@ mod tests {
                 ctx: &'a ToolCtx,
             ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
                 Box::pin(async move {
-                    let path = self.path.clone();
-                    let bytes = prepared.input["text"].as_str().unwrap().as_bytes().to_vec();
-                    let started = self.started.clone();
-                    let release = Arc::clone(&self.release);
-                    let cancel = ctx.cancel.clone();
-                    ctx.tracker
-                        .write_and_record(&ctx.tool_use_id, async move {
-                            started.send(cancel).unwrap();
-                            release.notified().await;
-                            tokio::fs::write(&path, &bytes).await?;
-                            Ok((path, bytes))
-                        })
-                        .await
-                        .unwrap();
+                    crate::tool::write::testing::write_with_blocked_parent(
+                        &self.path,
+                        prepared.input["text"].as_str().unwrap(),
+                        ctx,
+                        self.started.clone(),
+                        Arc::clone(&self.release),
+                    )
+                    .await
+                    .unwrap();
                     ToolOutput::success("wrote")
                 })
             }
@@ -1928,8 +1923,8 @@ mod tests {
                     let store = test_store(dir.path());
                     let mut engine = engine(server.uri(), &store, dir.path()).await;
                     let session_id = engine.session_id().to_owned();
-                    let path = dir.path().join("notes.txt");
-                    std::fs::write(&path, b"original").unwrap();
+                    let parent = dir.path().join("nested");
+                    let path = parent.join("notes.txt");
                     let tracker = Arc::clone(&engine.file_tracker);
                     let (started, mut started_rx) = mpsc::unbounded_channel();
                     let release = Arc::new(Notify::new());
@@ -1955,7 +1950,7 @@ mod tests {
                         assert!(futures::poll!(turn.as_mut()).is_pending(), "{name}");
                         assert_writes_draining(&tracker);
                         assert!(cancel.is_cancelled(), "{name}");
-                        assert_eq!(std::fs::read(&path).unwrap(), b"original", "{name}");
+                        assert!(!parent.exists(), "{name}");
                         assert_eq!(tracker.snapshot_all(), [], "{name}");
                         assert!(!sink.events().iter().any(|event| {
                             matches!(event, Event::ToolCallEnd(_) | Event::Cancelled)

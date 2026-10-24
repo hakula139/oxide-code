@@ -165,9 +165,9 @@ impl FileTracker {
         self: &Arc<Self>,
         tool_use_id: &str,
         write: W,
-    ) -> std::io::Result<()>
+    ) -> anyhow::Result<()>
     where
-        W: Future<Output = std::io::Result<(PathBuf, Vec<u8>)>> + Send + 'static,
+        W: Future<Output = anyhow::Result<(PathBuf, Vec<u8>)>> + Send + 'static,
     {
         let tracker = Arc::clone(self);
         let tool_use_id = tool_use_id.to_owned();
@@ -179,13 +179,13 @@ impl FileTracker {
                         Ok(())
                     }
                     Err(error) => {
-                        warn!(tool_use_id, %error, "workspace write failed");
+                        warn!(tool_use_id, error = %format_args!("{error:#}"), "workspace write failed");
                         Err(error)
                     }
                 }
             })
             .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+            .unwrap_or_else(|e| Err(e.into()))
     }
 
     /// Waits for admitted writes and their records. The owner must stop tool admission first.
@@ -449,7 +449,7 @@ mod tests {
     use crate::util::fs::testing::deny_read_access;
 
     /// Writes `bytes` to `path` and returns them under `path` as the tracker key.
-    async fn write_file(path: PathBuf, bytes: &[u8]) -> std::io::Result<(PathBuf, Vec<u8>)> {
+    async fn write_file(path: PathBuf, bytes: &[u8]) -> anyhow::Result<(PathBuf, Vec<u8>)> {
         tokio::fs::write(&path, bytes).await?;
         Ok((path, bytes.to_vec()))
     }
@@ -728,7 +728,11 @@ mod tests {
                 .await;
 
             assert_eq!(
-                result.unwrap_err().kind(),
+                result
+                    .unwrap_err()
+                    .downcast::<std::io::Error>()
+                    .unwrap()
+                    .kind(),
                 std::io::ErrorKind::NotFound,
                 "the parent directory is missing",
             );
