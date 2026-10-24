@@ -165,3 +165,45 @@ fn supported_attribute(file: &File, name: &str) -> io::Result<Option<Vec<u8>>> {
         result => result,
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    mod apply {
+        use super::*;
+
+        #[test]
+        fn restores_changed_values_and_removes_extra_attributes() {
+            let dir = tempfile::tempdir().unwrap();
+            let source = File::create(dir.path().join("source")).unwrap();
+            source.set_xattr("user.ox.value", b"\x00\xff").unwrap();
+            source.set_xattr("user.ox.empty", b"").unwrap();
+            let snapshot = Snapshot::capture(&source).unwrap();
+            let staged = File::create(dir.path().join("staged")).unwrap();
+            staged.set_xattr("user.ox.value", b"incorrect").unwrap();
+            staged.set_xattr("user.ox.extra", b"extra").unwrap();
+
+            snapshot.apply(&staged).unwrap();
+
+            snapshot.verify(&staged).unwrap();
+        }
+
+        #[test]
+        fn refuses_an_owner_assignment_the_process_cannot_make() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("source");
+            std::fs::write(&path, b"original").unwrap();
+            let file = File::open(&path).unwrap();
+            let original = Snapshot::capture(&file).unwrap();
+            let mut desired = original.clone();
+            desired.owner.0 += 1;
+
+            let error = desired.apply(&file).unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            original.verify(&file).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        }
+    }
+}

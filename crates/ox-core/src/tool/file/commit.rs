@@ -60,7 +60,6 @@ fn write_with(
 
     snapshot.apply(file)?;
     checkpoint(Phase::Metadata, file)?;
-    snapshot.verify(file)?;
     file.sync_all()?;
     checkpoint(Phase::Synced, file)?;
 
@@ -68,6 +67,12 @@ fn write_with(
         original.verify(path, expected.expect("overwrites have expected bytes"))?;
     }
     checkpoint(Phase::Validated, file)?;
+    if !bytes_match(file, bytes)? {
+        return Err(io::Error::other(
+            "the prepared file changed before publication",
+        ));
+    }
+    snapshot.verify(file)?;
 
     #[cfg(unix)]
     {
@@ -120,15 +125,20 @@ fn check_file(file: &mut File, expected: &[u8]) -> io::Result<()> {
             "refusing to replace a file with multiple hard links",
         ));
     }
-    let mut bytes = Vec::new();
-    file.take(MAX_TRACKED_FILE_SIZE + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes != expected {
+    if !bytes_match(file, expected)? {
         return Err(io::Error::other(
             "the file changed while preparing the write. Read it again.",
         ));
     }
     Ok(())
+}
+
+fn bytes_match(file: &mut File, expected: &[u8]) -> io::Result<bool> {
+    file.rewind()?;
+    let mut bytes = Vec::new();
+    file.take(expected.len() as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes == expected)
 }
 
 struct Staged {
@@ -289,6 +299,62 @@ mod tests {
         }
 
         #[test]
+        fn output_can_exceed_the_input_read_limit() {
+            let bytes = vec![b'x'; usize::try_from(MAX_TRACKED_FILE_SIZE).unwrap() + 1];
+            for existing in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                if existing {
+                    fs::write(&path, b"original").unwrap();
+                }
+
+                write(&path, &bytes, existing.then_some(b"original".as_slice())).unwrap();
+
+                assert_eq!(fs::read(&path).unwrap(), bytes, "existing={existing}");
+            }
+        }
+
+        #[test]
+        fn refuses_stage_content_changes_after_original_validation() {
+            for existing in [false, true] {
+                for changed in [b"".as_slice(), b"OURS", b"ours-extra"] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("target");
+                    if existing {
+                        fs::write(&path, b"original").unwrap();
+                    }
+                    let before = entries(dir.path());
+
+                    let error = write_with(
+                        &path,
+                        b"ours",
+                        existing.then_some(b"original".as_slice()),
+                        |phase, mut staged| {
+                            if phase == Phase::Validated {
+                                staged.set_len(0)?;
+                                staged.rewind()?;
+                                staged.write_all(changed)?;
+                            }
+                            Ok(())
+                        },
+                    )
+                    .unwrap_err();
+
+                    assert!(
+                        error.to_string().contains("prepared file changed"),
+                        "{error}"
+                    );
+                    assert_eq!(entries(dir.path()), before);
+                    if existing {
+                        assert_eq!(fs::read(&path).unwrap(), b"original");
+                    } else {
+                        assert!(!path.exists());
+                    }
+                }
+            }
+        }
+
+        #[test]
         fn refuses_stale_bytes_and_multiple_links() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("target");
@@ -404,7 +470,7 @@ mod tests {
                 let result = write_with(&path, b"ours", Some(b"original"), |phase, staged| {
                     if source && phase == Phase::Synced {
                         fs::set_permissions(&path, fs::Permissions::from_mode(0o640))?;
-                    } else if !source && phase == Phase::Metadata {
+                    } else if !source && phase == Phase::Validated {
                         staged.set_permissions(fs::Permissions::from_mode(0o640))?;
                     }
                     Ok(())

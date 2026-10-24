@@ -490,7 +490,7 @@ struct CopyIdentity {
 )]
 unsafe extern "system" fn check_copy_identity(
     _: i64,
-    _transferred: i64,
+    transferred: i64,
     _: i64,
     _: i64,
     _: u32,
@@ -503,11 +503,13 @@ unsafe extern "system" fn check_copy_identity(
 
     // The synchronous caller owns this context until CopyFileExW returns.
     let context = unsafe { &*context.cast::<CopyIdentity>() };
+    #[cfg(not(test))]
+    _ = transferred;
     #[cfg(test)]
     if context.fail_after_chunk && reason == FileSystem::CALLBACK_CHUNK_FINISHED {
         context
             .copied_data
-            .store(_transferred > 0, Ordering::Relaxed);
+            .store(transferred > 0, Ordering::Relaxed);
         context.failed.store(true, Ordering::Relaxed);
         return FileSystem::PROGRESS_CANCEL;
     }
@@ -1169,6 +1171,46 @@ mod tests {
 
     mod write {
         use super::*;
+
+        #[test]
+        fn staged_ea_and_stream_changes_refuse_publication() {
+            for change_ea in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("source");
+                fs::write(&path, b"original").unwrap();
+                fs::write(stream_path(&path, "application"), b"old").unwrap();
+                let file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .unwrap();
+                extended::set(&file, b"OX.TEST", b"old").unwrap();
+                let before = Security::capture(&file).unwrap();
+                let id = identity(&file).unwrap();
+
+                let error = write_with(&path, b"ours", Some(b"original"), |phase, staged| {
+                    if phase == Phase::Validated {
+                        if change_ea {
+                            extended::set(staged, b"OX.TEST", b"new")?;
+                        } else {
+                            fs::write(stream_path(&opened_path(staged)?, "application"), b"new")?;
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap_err();
+
+                assert!(error.to_string().contains("metadata"), "{error}");
+                assert_eq!(identity(&File::open(&path).unwrap()).unwrap(), id);
+                assert_eq!(Security::capture(&file).unwrap(), before);
+                assert_eq!(fs::read(&path).unwrap(), b"original");
+                let names: Vec<_> = fs::read_dir(dir.path())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                assert_eq!(names, [std::ffi::OsString::from("source")]);
+            }
+        }
 
         #[test]
         fn ea_and_stream_only_changes_refuse_publication() {
