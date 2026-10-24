@@ -14,19 +14,25 @@ pub(super) struct QueuedPrompt {
     line: String,
     /// The prompt a slash command built from `line`, which the engine receives in its place.
     built: Option<String>,
+    needs_echo: bool,
 }
 
 impl QueuedPrompt {
     /// A prompt typed into the input, sent with its `//` escape removed.
     fn typed(line: String) -> Self {
-        Self { line, built: None }
+        Self {
+            line,
+            built: None,
+            needs_echo: true,
+        }
     }
 
-    /// A prompt a slash command built from the command `line`.
+    /// A prompt built from `line`, whose slash command has already echoed in chat.
     pub(super) fn slash(line: String, prompt: String) -> Self {
         Self {
             line,
             built: Some(prompt),
+            needs_echo: false,
         }
     }
 
@@ -52,6 +58,11 @@ impl QueuedPrompt {
     /// The text the chat shows for the prompt.
     pub(super) fn display(&self) -> &str {
         command::unescape_literal(&self.line)
+    }
+
+    /// Takes the chat echo for an accepted delivery, once per attempt.
+    pub(super) fn take_echo(&mut self) -> Option<String> {
+        std::mem::take(&mut self.needs_echo).then(|| self.display().to_owned())
     }
 }
 
@@ -136,9 +147,13 @@ impl PromptQueue {
         self.hand_back = HandBack::UnsentPrompt;
     }
 
-    /// Notes that a compaction finished, so a later failure is the turn's own.
+    /// Notes that compaction cleared chat, so pending prompts need an echo and a later failure is
+    /// the turn's own.
     pub(super) fn mark_compacted(&mut self) {
         self.hand_back = HandBack::Nothing;
+        for prompt in &mut self.pending {
+            prompt.needs_echo = true;
+        }
     }
 
     /// Forgets the active prompt and the prompts the turn took in, once a mid-turn compaction
@@ -156,6 +171,11 @@ impl PromptQueue {
     /// Queues a line typed into the input.
     pub(super) fn push(&mut self, line: String) {
         self.pending.push_back(QueuedPrompt::typed(line));
+    }
+
+    /// Returns a prompt whose turn could not start to the head of the queue.
+    pub(super) fn push_front(&mut self, prompt: QueuedPrompt) {
+        self.pending.push_front(prompt);
     }
 
     /// Takes the most recently queued line back, for editing.
@@ -186,17 +206,17 @@ impl PromptQueue {
     }
 
     /// Moves the queue head into the in-flight turn once the engine confirms it drained `text`,
-    /// returning what the chat shows for it. Only a forwarded head matches, since the engine drains
+    /// returning any pending chat echo. Only a forwarded head matches, since the engine drains
     /// prompts in the order it took them.
-    pub(super) fn confirm_drained(&mut self, text: String) -> String {
+    pub(super) fn confirm_drained(&mut self, text: String) -> Option<String> {
         if self.forwarded > 0
             && self
                 .pending
                 .front()
                 .is_some_and(|queued| queued.prompt() == text)
-            && let Some(queued) = self.pending.pop_front()
+            && let Some(mut queued) = self.pending.pop_front()
         {
-            let display = queued.display().to_owned();
+            let display = queued.take_echo();
             self.drained.push(queued);
             self.forwarded -= 1;
             display
@@ -205,7 +225,7 @@ impl PromptQueue {
                 prompt_len = text.len(),
                 "drained prompt does not lead the forwarded queue"
             );
-            text
+            Some(text)
         }
     }
 
@@ -223,7 +243,8 @@ impl PromptQueue {
                 FailedTurn::HandedBack(self.restore_active(into_input))
             }
             HandBack::RolledBackTurn => {
-                for drained in self.drained.drain(..).rev() {
+                for mut drained in self.drained.drain(..).rev() {
+                    drained.needs_echo = true;
                     self.pending.push_front(drained);
                 }
                 FailedTurn::HandedBack(self.restore_active(input_empty))
@@ -232,7 +253,8 @@ impl PromptQueue {
     }
 
     fn restore_active(&mut self, into_input: bool) -> Option<QueuedPrompt> {
-        let prompt = self.active.take()?;
+        let mut prompt = self.active.take()?;
+        prompt.needs_echo = true;
         if into_input {
             return Some(prompt);
         }
@@ -285,18 +307,23 @@ mod tests {
         use super::*;
 
         #[test]
-        fn shows_a_slash_prompt_by_its_line() {
-            let mut queue = PromptQueue::default();
-            queue.pending.push_back(QueuedPrompt::slash(
-                "/init".to_owned(),
-                "Create AGENTS.md.".to_owned(),
-            ));
-            queue.mark_forwarded();
+        fn echoes_a_slash_prompt_only_after_compaction_clears_chat() {
+            for compacted in [false, true] {
+                let mut queue = PromptQueue::default();
+                queue.pending.push_back(QueuedPrompt::slash(
+                    "/init".to_owned(),
+                    "Create AGENTS.md.".to_owned(),
+                ));
+                if compacted {
+                    queue.mark_compacted();
+                }
+                queue.mark_forwarded();
 
-            let display = queue.confirm_drained("Create AGENTS.md.".to_owned());
+                let display = queue.confirm_drained("Create AGENTS.md.".to_owned());
 
-            assert_eq!(display, "/init");
-            assert_eq!(*queue.pending(), [] as [&str; 0]);
+                assert_eq!(display.as_deref(), compacted.then_some("/init"));
+                assert_eq!(*queue.pending(), [] as [&str; 0]);
+            }
         }
     }
 
@@ -328,9 +355,18 @@ mod tests {
 
             assert_eq!(failed, FailedTurn::HandedBack(None));
             assert_eq!(
-                *queue.pending(),
-                [init("Create AGENTS.md."), init("Update AGENTS.md.")]
+                queue
+                    .pending()
+                    .iter()
+                    .map(QueuedPrompt::prompt)
+                    .collect::<Vec<_>>(),
+                ["Create AGENTS.md.", "Update AGENTS.md."]
             );
+            for mut prompt in queue.pending {
+                assert_eq!(prompt.title(), Some("/init"));
+                assert_eq!(prompt.take_echo().as_deref(), Some("/init"));
+                assert_eq!(prompt.take_echo(), None);
+            }
         }
 
         #[test]

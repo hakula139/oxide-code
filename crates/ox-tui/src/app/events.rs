@@ -127,8 +127,9 @@ impl App {
     }
 
     fn apply_prompt_drained(&mut self, text: String) {
-        let display = self.queue.confirm_drained(text);
-        self.chat.push_user_message(display);
+        if let Some(display) = self.queue.confirm_drained(text) {
+            self.chat.push_user_message(display);
+        }
     }
 
     /// Opens the approve-or-deny overlay for a gated tool call. Pushing onto the stack lets it nest
@@ -399,7 +400,6 @@ impl App {
     /// Starts a turn with the oldest queued prompt.
     pub(super) fn drain_pending_prompt(&mut self) {
         if let Some(next) = self.queue.pop_next() {
-            self.chat.push_user_message(next.display().to_owned());
             self.start_turn(next);
         }
     }
@@ -914,35 +914,24 @@ mod tests {
 
         #[tokio::test]
         async fn prompt_unsent_reruns_a_slash_prompt_as_built() {
+            let root = tempfile::tempdir().unwrap();
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.dispatch_action(Action::SlashPrompt {
-                line: "/init".to_owned(),
-                prompt: "Create AGENTS.md for this repository.".to_owned(),
-            });
-            rx.try_recv().expect("prompt forwarded");
+            app.session_info.project_root = root.path().to_owned();
+            app.dispatch_action(Action::Submit("/init AGENTS.md".to_owned()));
+            let original = rx.try_recv().expect("prompt forwarded");
             app.handle_engine_event(Event::AutoCompactionStarted);
             app.dispatch_action(Action::Submit("queued".to_owned()));
             app.handle_engine_event(Event::PromptUnsent);
             app.handle_engine_event(Event::TurnFailed(
                 "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
             ));
-            assert_eq!(*app.queue.pending(), ["/init", "queued"]);
+            assert_eq!(*app.queue.pending(), ["/init AGENTS.md", "queued"]);
 
             app.dispatch_action(Action::Submit("go".to_owned()));
 
-            assert_eq!(
-                rx.try_recv().ok(),
-                Some(Op::Prompt {
-                    text: "Create AGENTS.md for this repository.".to_owned(),
-                    title: Some("/init".to_owned()),
-                }),
-                "the command's prompt runs, not its line",
-            );
+            assert_eq!(rx.try_recv(), Ok(original));
             let text = rendered_text(&mut app, 80, 20);
-            assert!(
-                text.contains("/init") && !text.contains("Create AGENTS.md"),
-                "the chat shows the line: {text}"
-            );
+            assert_eq!(text.matches("/init AGENTS.md").count(), 2, "{text}");
         }
 
         #[test]
