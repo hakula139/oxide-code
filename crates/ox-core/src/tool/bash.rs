@@ -711,7 +711,10 @@ impl ShellTree {
             return true;
         }
         let limit = Self::KILL_LIMIT.as_secs();
-        warn!("stopped killing a bash process tree still alive after {limit} s of SIGKILL");
+        warn!(
+            limit_seconds = limit,
+            "stopped killing a bash process tree still alive after SIGKILL"
+        );
         false
     }
 }

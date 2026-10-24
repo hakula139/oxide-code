@@ -81,10 +81,7 @@ impl SessionStore {
         let cwd_dir =
             Some(sessions_dir.join(project_dir_name(cwd))).filter(|dir| *dir != project_dir);
 
-        debug!(
-            "session store at {} (project: {project_name})",
-            sessions_dir.display()
-        );
+        debug!(path = %sessions_dir.display(), project_name, "opened session store");
         Ok(Self {
             sessions_dir,
             project_dir,
@@ -152,7 +149,7 @@ pub(super) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     while let Some((line_no, line)) = lines.next_line()? {
         match serde_json::from_str(line) {
             Ok(entry) => builder.apply_entry(entry, line_no),
-            Err(e) => warn!("skipping malformed entry at line {line_no}: {e}"),
+            Err(e) => warn!(line_no, error = %e, "skipping malformed entry"),
         }
     }
     Ok(builder.finish(header.session_id))
@@ -204,10 +201,7 @@ pub(super) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
     let result = append_whole(&file, &mut Appender(&file), &lines)
         .with_context(|| format!("failed to write {}", path.display()));
     if let Err(e) = file.set_modified(modified) {
-        warn!(
-            "archive toggle moved {} up the listing: {e}",
-            path.display()
-        );
+        warn!(path = %path.display(), error = %e, "archive toggle moved session up the listing");
     }
     result
 }
@@ -406,7 +400,10 @@ impl SessionDataBuilder {
                 self.reset_at_compact(compact);
                 restore_post_compact_origin(&mut message);
             } else {
-                warn!("skipping compact boundary without its post-compact root at line {line_no}");
+                warn!(
+                    line_no,
+                    "skipping compact boundary without its post-compact root"
+                );
             }
         }
         let accepted = self.accepts_compact_tail_message(uuid, parent_uuid);
@@ -414,7 +411,7 @@ impl SessionDataBuilder {
             tail.accepts_sidecars = accepted;
         }
         if !accepted {
-            warn!("skipping pre-compact branch append at line {line_no}");
+            warn!(line_no, "skipping pre-compact branch append");
             return;
         }
         if parent_uuid.is_none() {
@@ -600,7 +597,7 @@ fn append_whole(file: &File, out: &mut impl Write, lines: &[u8]) -> io::Result<(
             Err(e) => e,
         };
         if let Err(e) = file.set_len(start) {
-            warn!("failed to truncate a partial session write: {e}");
+            warn!(error = %e, "failed to truncate a partial session write");
         }
         return Err(err);
     }
@@ -663,7 +660,7 @@ impl<R: BufRead> JsonlLines<R> {
                     return Ok(Some((self.line_no, &self.line)));
                 }
                 Err(e) => {
-                    warn!("skipping non-utf8 entry at line {}: {e}", self.line_no);
+                    warn!(line_no = self.line_no, error = %e, "skipping non-utf8 entry");
                     buf = e.into_bytes();
                 }
             }

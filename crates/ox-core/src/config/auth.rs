@@ -230,7 +230,10 @@ impl Auth {
             Ok(secret) => Credential::new(self.source, secret).map(Some),
             Err(e) if e.is_transient() => Err(e.into()),
             Err(e) => {
-                warn!(error = %format_args!("{e:#}"), "failed to reload the stored login after HTTP 401");
+                warn!(
+                    error = %format_args!("{e:#}"),
+                    "failed to reload the stored login after HTTP 401"
+                );
                 Ok(None)
             }
         }
@@ -462,12 +465,15 @@ async fn load_login(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     use strum::VariantArray as _;
+    use tracing::instrument::WithSubscriber as _;
 
     use super::*;
     use crate::config::oauth::testing::{ox_login_in, write_creds};
+    use crate::util::log::testing::LogCapture;
     use crate::util::path::local_testing::abs;
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::local_testing::no_roots;
@@ -625,10 +631,27 @@ mod tests {
             ] {
                 let (trust, reloads) = (no_roots(), TaskTracker::new());
                 let rejected = auth.credential(&trust, &reloads).await.unwrap();
+                let logs = LogCapture::default();
 
-                let reloaded = auth.reload(&rejected, &trust, &reloads).await.unwrap();
+                let reloaded = auth
+                    .reload(&rejected, &trust, &reloads)
+                    .with_subscriber(logs.dispatch())
+                    .await
+                    .unwrap();
 
                 assert!(reloaded.is_none(), "{auth:?}");
+                let expected = if auth.source == AuthSource::OxLogin {
+                    vec![BTreeMap::from([
+                        ("error".to_owned(), "no stored login found".to_owned()),
+                        (
+                            "message".to_owned(),
+                            "failed to reload the stored login after HTTP 401".to_owned(),
+                        ),
+                    ])]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(logs.events(), expected, "{auth:?}");
             }
         }
 

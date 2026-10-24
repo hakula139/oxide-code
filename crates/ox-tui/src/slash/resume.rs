@@ -557,7 +557,10 @@ impl ResumePicker {
                 Pages::rest(walk)
             }
             Err(err) => {
-                tracing::warn!("resume picker: listing sessions failed: {err:#}");
+                tracing::warn!(
+                    error = %format_args!("{err:#}"),
+                    "resume picker failed to list sessions"
+                );
                 self.load_error = Some(format!("Failed to load sessions: {err:#}"));
                 Pages::Done
             }
@@ -854,6 +857,7 @@ mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use crossterm::event::KeyModifiers;
@@ -868,6 +872,7 @@ mod tests {
         WriterBarrier, archive_test_session, isolated_store, listed_ids, listed_session,
         seed_test_session, stamped_id, test_project_dir, test_store, with_isolated_xdg,
     };
+    use ox_core::util::log::testing::LogCapture;
 
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
     use super::*;
@@ -1433,13 +1438,27 @@ mod tests {
             let Err(cause) = store.walk(ListScope::default()) else {
                 panic!("the walk must fail without the project directory");
             };
+            let logs = LogCapture::default();
 
-            let picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let picker = tracing::dispatcher::with_default(&logs.dispatch(), || {
+                opened(ResumePicker::new(store, "live-session-id".to_owned()))
+            });
+
             assert_eq!(
                 picker.load_error,
                 Some(format!("Failed to load sessions: {cause:#}")),
             );
             assert_eq!(row_ids(&picker), Vec::<String>::new());
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    ("error".to_owned(), format!("{cause:#}")),
+                    (
+                        "message".to_owned(),
+                        "resume picker failed to list sessions".to_owned(),
+                    ),
+                ])]
+            );
         }
     }
 

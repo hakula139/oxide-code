@@ -130,7 +130,7 @@ pub(super) async fn run(
         let failure = match result {
             Err(e) => {
                 let msg = format!("{e:#}");
-                warn!("session write batch failed: {msg}");
+                warn!(error = %msg, "session write batch failed");
                 shared.record_flush_failure(&msg);
                 Some(msg)
             }

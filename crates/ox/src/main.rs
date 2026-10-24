@@ -365,7 +365,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let tui_mode = cli.tui_mode()?;
     let _log_guard = util::log::init_tracing(tui_mode)?;
     if let Some(e) = offset_error {
-        warn!("failed to read the local timezone offset, so times show in UTC: {e}");
+        warn!(error = %e, "failed to read the local timezone offset, so times show in UTC");
     }
     let cwd = env::current_dir().context("failed to read the current working directory")?;
     let project_root = util::git::project_root(&cwd);

@@ -72,7 +72,7 @@ where
     let owner = session.clone();
     let task = tokio::spawn(async move {
         if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt, billed).await {
-            warn!("AI title generation failed: {e:#}");
+            warn!(error = %format_args!("{e:#}"), "AI title generation failed");
         }
     });
     owner.set_title_task(task);

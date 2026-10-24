@@ -506,7 +506,10 @@ async fn load_token_from(
                         warn!("skipping OAuth token refresh: another process holds the lock");
                     }
                     Unlocked::Failed(e) => {
-                        warn!("skipping OAuth token refresh, using existing: {e:#}");
+                        warn!(
+                            error = %format_args!("{e:#}"),
+                            "skipping OAuth token refresh, using existing"
+                        );
                     }
                 }
                 return Ok(creds.into_token());
@@ -540,7 +543,10 @@ async fn load_token_from(
         Ok(response) => {
             let mut token = response.token();
             if let Err(e) = write_refreshed_credentials(&creds, &response, token.expires_at_ms) {
-                warn!("failed to save refreshed OAuth credentials, keeping them in memory: {e:#}");
+                warn!(
+                    error = %format_args!("{e:#}"),
+                    "failed to save refreshed OAuth credentials, keeping them in memory"
+                );
                 token.unsaved = Some(UnsavedRefresh {
                     refresh_token: response.refresh_token,
                     // A refresh sending an unsaved token leaves the store with the one it replaced.
@@ -559,7 +565,10 @@ async fn load_token_from(
             })
         }
         Err(TokenRequestError { error, .. }) => {
-            warn!("failed to refresh OAuth token, using existing: {error:#}");
+            warn!(
+                error = %format_args!("{error:#}"),
+                "failed to refresh OAuth token, using existing"
+            );
             Ok(creds.into_token())
         }
     }
@@ -613,7 +622,7 @@ fn enforce_private_mode(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
 
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-        debug!("failed to reassert 0o600 on {}: {e}", path.display());
+        debug!(path = %path.display(), error = %e, "failed to reassert 0o600 on credentials");
     }
 }
 
@@ -675,7 +684,7 @@ impl Keychain for SystemKeychain {
         let account = match keychain_account() {
             Ok(account) => account,
             Err(e) => {
-                debug!("skipping the Keychain: {e:#}");
+                debug!(error = %format_args!("{e:#}"), "skipping the Keychain");
                 return Ok(None);
             }
         };
@@ -691,7 +700,7 @@ impl Keychain for SystemKeychain {
                 | os_status::AUTH_FAILED
                 | os_status::INTERACTION_NOT_ALLOWED => Err(LoginError::KeychainDenied),
                 _ => {
-                    debug!("failed to read the Claude Code login from the Keychain: {e}");
+                    debug!(error = %e, "failed to read the Claude Code login from the Keychain");
                     Ok(None)
                 }
             },
@@ -963,13 +972,15 @@ impl LockGuard {
                     tokio::time::sleep(LOCK_UPDATE_INTERVAL).await;
                     let mut held = lock_or_recover(&mtime, "credentials lock");
                     if !held.is_some_and(|set| owns_lock(&path, set)) {
-                        warn!("another process took over the lock at {}", path.display());
+                        warn!(path = %path.display(), "another process took over the lock");
                         *held = None;
                         return;
                     }
                     match touch_dir(&path).and_then(|()| lock_mtime(&path)) {
                         Ok(set) => *held = Some(set),
-                        Err(e) => debug!("failed to refresh lock {}: {e}", path.display()),
+                        Err(e) => {
+                            debug!(path = %path.display(), error = %e, "failed to refresh lock");
+                        }
                     }
                 }
             }
@@ -990,7 +1001,7 @@ impl Drop for LockGuard {
             return;
         }
         if let Err(e) = std::fs::remove_dir_all(&self.path) {
-            debug!("failed to release lock {}: {e}", self.path.display());
+            debug!(path = %self.path.display(), error = %e, "failed to release lock");
         }
     }
 }
@@ -1034,7 +1045,7 @@ async fn wait_for_lock(path: &Path) -> Result<LockGuard, Unlocked> {
                 if is_stale_lock(path)
                     && let Err(e) = std::fs::remove_dir_all(path)
                 {
-                    debug!("failed to clear stale lock {}: {e}", path.display());
+                    debug!(path = %path.display(), error = %e, "failed to clear stale lock");
                 }
             }
             Err(e) => {
@@ -1221,15 +1232,18 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use tracing::instrument::WithSubscriber as _;
     use wiremock::matchers::{body_partial_json, method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::testing::{HeldRefresh, creds_json, ok_refresh_body, write_creds};
     use super::*;
     use crate::util::fs::testing::symlink_dir;
+    use crate::util::log::testing::LogCapture;
     use crate::util::path::local_testing::{abs, canonical_tempdir};
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::PlatformTrust;
@@ -2017,8 +2031,10 @@ mod tests {
             let keychain = FakeKeychain::unwritable(
                 creds_json("old", Some("old-refresh"), now_millis().unwrap() + 1_000).to_string(),
             );
+            let logs = LogCapture::default();
 
             let token = load(&store(Some(&keychain), &creds, &lock), &server.uri())
+                .with_subscriber(logs.dispatch())
                 .await
                 .unwrap();
 
@@ -2026,6 +2042,17 @@ mod tests {
             let unsaved = token.unsaved.expect("the rotated refresh token is held");
             assert_eq!(unsaved.refresh_token, "fresh-refresh");
             assert_eq!(unsaved.replaced, "old-refresh");
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    ("error".to_owned(), "Keychain write denied".to_owned()),
+                    (
+                        "message".to_owned(),
+                        "failed to save refreshed OAuth credentials, keeping them in memory"
+                            .to_owned(),
+                    ),
+                ])]
+            );
         }
 
         #[tokio::test]
@@ -2090,6 +2117,7 @@ mod tests {
                     replaced: "old-refresh".to_owned(),
                 }),
             };
+            let logs = LogCapture::default();
 
             let token = load_token_from(
                 &store(None, &creds, &lock),
@@ -2098,6 +2126,7 @@ mod tests {
                 Some(&held),
                 None,
             )
+            .with_subscriber(logs.dispatch())
             .await
             .unwrap();
 
@@ -2106,6 +2135,29 @@ mod tests {
             assert_eq!(unsaved.refresh_token, "held-refresh");
             assert_eq!(unsaved.replaced, "old-refresh");
             server.verify().await;
+            assert_eq!(
+                logs.events(),
+                [
+                    BTreeMap::from([
+                        ("status".to_owned(), "503".to_owned()),
+                        ("body".to_owned(), String::new()),
+                        (
+                            "message".to_owned(),
+                            "OAuth token endpoint error".to_owned()
+                        ),
+                    ]),
+                    BTreeMap::from([
+                        (
+                            "error".to_owned(),
+                            "token refresh failed with HTTP 503 Service Unavailable".to_owned(),
+                        ),
+                        (
+                            "message".to_owned(),
+                            "failed to refresh OAuth token, using existing".to_owned(),
+                        ),
+                    ]),
+                ]
+            );
         }
 
         #[tokio::test(start_paused = true)]
@@ -2212,7 +2264,12 @@ mod tests {
                 .await
                 .expect_err("expired + lock failure must bail");
             write_creds(&creds, "tok", Some("ref"), now_millis().unwrap() + 60_000);
-            let token = load(&store, "http://should-not-be-called").await.unwrap();
+            let logs = LogCapture::default();
+
+            let token = load(&store, "http://should-not-be-called")
+                .with_subscriber(logs.dispatch())
+                .await
+                .unwrap();
 
             assert!(!err.is_transient(), "{err:?}");
             let message = format!("{err:#}");
@@ -2226,6 +2283,20 @@ mod tests {
                 "{message}"
             );
             assert_eq!(token.access_token, "tok");
+            let cause = std::fs::create_dir(&lock).unwrap_err();
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    (
+                        "error".to_owned(),
+                        format!("failed to create lock at {}: {cause}", lock.display()),
+                    ),
+                    (
+                        "message".to_owned(),
+                        "skipping OAuth token refresh, using existing".to_owned(),
+                    ),
+                ])]
+            );
         }
 
         #[tokio::test(start_paused = true)]
@@ -2506,6 +2577,37 @@ mod tests {
         #[test]
         fn counts_an_expiry_in_the_past_as_expired() {
             assert!(is_expired(0));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    mod system_keychain {
+        use super::*;
+
+        mod read {
+            use super::*;
+
+            #[test]
+            fn skips_without_an_os_username() {
+                let logs = LogCapture::default();
+
+                let result = temp_env::with_var("USER", None::<&str>, || {
+                    tracing::dispatcher::with_default(&logs.dispatch(), || SystemKeychain.read())
+                })
+                .unwrap();
+
+                assert!(result.is_none());
+                assert_eq!(
+                    logs.events(),
+                    [BTreeMap::from([
+                        (
+                            "error".to_owned(),
+                            "failed to determine the OS username".to_owned(),
+                        ),
+                        ("message".to_owned(), "skipping the Keychain".to_owned()),
+                    ])]
+                );
+            }
         }
     }
 

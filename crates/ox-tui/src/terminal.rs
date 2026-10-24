@@ -302,7 +302,7 @@ fn route_panic(
     );
     deferred.reports.push(report.clone());
     drop(deferred);
-    error!("{report}");
+    error!(report, "deferred panic while terminal is active");
     PanicRoute::Deferred
 }
 
@@ -426,10 +426,14 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use anyhow::anyhow;
     use indoc::indoc;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier, Style};
+
+    use ox_core::util::log::testing::LogCapture;
 
     use super::testing::{BEGIN_SYNC, END_SYNC, FLUSH, capture_terminal};
     use super::*;
@@ -739,11 +743,29 @@ mod tests {
         #[test]
         fn defers_a_background_panic_and_names_its_thread() {
             let deferred = Mutex::new(DeferredPanics::default());
-            let route = route_panic(&deferred, false, None, &"panicked at x.rs:1:1:\nboom");
+            let logs = LogCapture::default();
+
+            let route = tracing::dispatcher::with_default(&logs.dispatch(), || {
+                route_panic(&deferred, false, None, &"panicked at x.rs:1:1:\nboom")
+            });
+
             assert_eq!(route, PanicRoute::Deferred);
             assert_eq!(
                 deferred.lock().unwrap().reports,
                 ["thread '<unnamed>' panicked at x.rs:1:1:\nboom"],
+            );
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    (
+                        "report".to_owned(),
+                        "thread '<unnamed>' panicked at x.rs:1:1:\nboom".to_owned(),
+                    ),
+                    (
+                        "message".to_owned(),
+                        "deferred panic while terminal is active".to_owned(),
+                    ),
+                ])]
             );
         }
 
