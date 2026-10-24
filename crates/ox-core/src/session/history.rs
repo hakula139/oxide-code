@@ -7,9 +7,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::entry::CompactInfo;
-use super::post_compact::strip_synthetic_post_compact_prefix;
-use crate::message::{ContentBlock, INTERRUPTION_MARKER, Message, Role, progress_update_before};
-use crate::prompt::is_system_reminder;
+use super::post_compact::strip_post_compact_summary;
+use crate::message::{ContentBlock, Message, Role, TextOrigin, progress_update_before};
 use crate::protocol::{Interaction, ToolCall, ToolResult};
 use crate::tool::view::ToolResultView;
 use crate::tool::{ToolMetadata, ToolRegistry};
@@ -45,7 +44,7 @@ pub(crate) fn interactions(
 fn post_compact_messages(messages: &[Message]) -> Vec<Message> {
     let mut messages = messages.to_vec();
     if let Some(first) = messages.first_mut()
-        && strip_synthetic_post_compact_prefix(first)
+        && strip_post_compact_summary(first)
         && first.content.is_empty()
     {
         messages.remove(0);
@@ -54,8 +53,8 @@ fn post_compact_messages(messages: &[Message]) -> Vec<Message> {
 }
 
 /// Walks a transcript in display order. Tool calls are paired inline with their `tool_use_id`
-/// results, and an interruption marker becomes [`Interaction::Interrupted`]. Whitespace-only text
-/// and the `<system-reminder>` blocks in user messages are dropped.
+/// results, and generated interruptions become [`Interaction::Interrupted`]. Whitespace-only text
+/// and generated reminders in user messages are dropped.
 fn walk_transcript(
     messages: &[Message],
     tool_metadata: &HashMap<String, ToolMetadata>,
@@ -101,15 +100,18 @@ impl TranscriptWalker<'_> {
         let mut text_buf = String::new();
         for (index, block) in msg.content.iter().enumerate() {
             match block {
-                ContentBlock::Text { text }
-                    if msg.role == Role::User && is_system_reminder(text) => {}
-                ContentBlock::Text { text }
-                    if msg.role == Role::User && text == INTERRUPTION_MARKER =>
-                {
+                ContentBlock::Text {
+                    origin: Some(TextOrigin::SystemReminder),
+                    ..
+                } if msg.role == Role::User => {}
+                ContentBlock::Text {
+                    origin: Some(TextOrigin::Interruption),
+                    ..
+                } if msg.role == Role::User => {
                     self.flush_text(&mut text_buf, msg.role);
                     self.out.push(Interaction::Interrupted);
                 }
-                ContentBlock::Text { text } if !text.trim().is_empty() => {
+                ContentBlock::Text { text, .. } if !text.trim().is_empty() => {
                     if !text_buf.is_empty() {
                         text_buf.push('\n');
                     }
@@ -199,7 +201,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::message::Replay;
+    use crate::message::{INTERRUPTION_MARKER, Replay};
     use crate::protocol::{CompactTrigger, testing};
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::DEFAULT_TOOL_ICON;
@@ -262,15 +264,15 @@ mod tests {
         }
 
         #[test]
-        fn keeps_a_real_prompt_merged_into_the_compaction_root() {
-            let mut merged =
-                synthesize_post_compact_message("internal", &[], &[], CompactTrigger::Auto);
-            merged.content.push(ContentBlock::Text {
-                text: "real follow-up".to_owned(),
-            });
+        fn preserves_a_prompt_after_the_compaction_root() {
+            let root = synthesize_post_compact_message("internal", &[], &[], CompactTrigger::Auto);
 
             let out = interactions(
-                &[merged, Message::assistant("post-compact reply")],
+                &[
+                    root,
+                    Message::user("real follow-up"),
+                    Message::assistant("post-compact reply"),
+                ],
                 Some(&compact_info()),
                 &HashMap::new(),
                 &tools(),
@@ -359,14 +361,7 @@ mod tests {
         fn joins_adjacent_text_blocks_with_newline() {
             let messages = [Message {
                 role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "first".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "second".to_owned(),
-                    },
-                ],
+                content: vec![ContentBlock::text("first"), ContentBlock::text("second")],
             }];
             assert_eq!(
                 walk(&messages),
@@ -378,9 +373,7 @@ mod tests {
         fn drops_whitespace_only_text() {
             let messages = [Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: "  \n  ".to_owned(),
-                }],
+                content: vec![ContentBlock::text("  \n  ")],
             }];
             assert_eq!(walk(&messages), Vec::<Interaction>::new());
         }
@@ -396,12 +389,8 @@ mod tests {
                 Message {
                     role: Role::User,
                     content: vec![
-                        ContentBlock::Text {
-                            text: "fix it".to_owned(),
-                        },
-                        ContentBlock::Text {
-                            text: reminder.to_owned(),
-                        },
+                        ContentBlock::text("fix it"),
+                        ContentBlock::generated_text(reminder, TextOrigin::SystemReminder),
                     ],
                 },
                 Message::assistant(reminder),
@@ -416,16 +405,14 @@ mod tests {
         }
 
         #[test]
-        fn marks_each_interruption_in_prompts_merged_on_resume() {
-            let text = |text: &str| ContentBlock::Text {
-                text: text.to_owned(),
-            };
+        fn marks_generated_interruptions_between_prompts_and_tools() {
+            let text = |text: &str| ContentBlock::text(text);
             let messages = [
                 Message {
                     role: Role::User,
                     content: vec![
                         text("write a story"),
-                        text(INTERRUPTION_MARKER),
+                        ContentBlock::generated_text(INTERRUPTION_MARKER, TextOrigin::Interruption),
                         text("run ls"),
                     ],
                 },
@@ -441,7 +428,7 @@ mod tests {
                     role: Role::User,
                     content: vec![
                         ContentBlock::tool_result("t1", "interrupted", true),
-                        text(INTERRUPTION_MARKER),
+                        ContentBlock::generated_text(INTERRUPTION_MARKER, TextOrigin::Interruption),
                         text("what is 7 times 6?"),
                     ],
                 },
@@ -694,9 +681,7 @@ mod tests {
                             serde_json::json!([{"type": "web_search_result"}]),
                         )]),
                     },
-                    ContentBlock::Text {
-                        text: "Found it".to_owned(),
-                    },
+                    ContentBlock::text("Found it"),
                 ],
             }];
             assert_eq!(
@@ -719,13 +704,9 @@ mod tests {
             let messages = [Message {
                 role: Role::Assistant,
                 content: vec![
-                    ContentBlock::Text {
-                        text: "Let me check".to_owned(),
-                    },
+                    ContentBlock::text("Let me check"),
                     ContentBlock::tool_use("t1", "bash", serde_json::json!({"command": "ls"})),
-                    ContentBlock::Text {
-                        text: "Done".to_owned(),
-                    },
+                    ContentBlock::text("Done"),
                 ],
             }];
             assert_eq!(
@@ -750,9 +731,7 @@ mod tests {
                     ContentBlock::RedactedThinking {
                         replay: Replay::with_model(MODEL, "opaque"),
                     },
-                    ContentBlock::Text {
-                        text: "answer".to_owned(),
-                    },
+                    ContentBlock::text("answer"),
                 ],
             }];
             assert_eq!(
@@ -773,9 +752,7 @@ mod tests {
                         thinking: "  \n  ".to_owned(),
                         replay: Replay::with_model(MODEL, "sig"),
                     },
-                    ContentBlock::Text {
-                        text: "reply".to_owned(),
-                    },
+                    ContentBlock::text("reply"),
                 ],
             }];
             assert_eq!(

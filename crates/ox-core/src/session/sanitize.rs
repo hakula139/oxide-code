@@ -1,5 +1,5 @@
-//! Resume-time transcript repair. Drops unresolved tool calls and orphan tool results, collapses
-//! same-role neighbors, and patches head / tail edges the API would reject. File-tracker snapshots
+//! Resume-time transcript repair. Drops unresolved tool calls and orphan tool results, preserving
+//! message boundaries, and patches head / tail edges the API would reject. File-tracker snapshots
 //! follow the repaired transcript.
 
 use std::collections::HashSet;
@@ -20,12 +20,11 @@ const RESUME_HEAD_SENTINEL: &str = "[Previous session prefix lost in recovery.]"
 // ── Entry Point ──
 
 /// Repairs a loaded transcript for the next API request. Removes unresolved calls before orphaned
-/// results, then merges adjacent roles and repairs the head and tail. This order prevents dropped
-/// calls from leaving orphaned results or empty messages from breaking alternation.
+/// results, then repairs the head and tail. This order prevents dropped calls from leaving
+/// orphaned results.
 pub(super) fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
     drop_unresolved_tool_uses(messages);
     drop_orphan_tool_results(messages);
-    collapse_consecutive_roles(messages);
     insert_resume_sentinels(messages);
 }
 
@@ -59,8 +58,7 @@ fn drop_unresolved_tool_uses(messages: &mut [Message]) {
     }
 }
 
-/// Drops tool results with no surviving call, then strips messages that prior passes emptied so
-/// role-collapse sees no stubs.
+/// Drops tool results with no surviving call, then strips messages that the repair emptied.
 fn drop_orphan_tool_results(messages: &mut Vec<Message>) {
     let surviving = tool_use_ids(messages);
 
@@ -75,18 +73,6 @@ fn drop_orphan_tool_results(messages: &mut Vec<Message>) {
     }
 
     messages.retain(|m| !m.content.is_empty());
-}
-
-/// Merges adjacent same-role runs so role alternation holds after the filter passes.
-fn collapse_consecutive_roles(messages: &mut Vec<Message>) {
-    messages.dedup_by(|next, prev| {
-        if prev.role == next.role {
-            prev.content.append(&mut next.content);
-            true
-        } else {
-            false
-        }
-    });
 }
 
 /// Patches head / tail edges the API rejects. Prepends a user stub before a leading assistant and
@@ -175,9 +161,7 @@ mod tests {
     }
 
     fn text(text: &str) -> ContentBlock {
-        ContentBlock::Text {
-            text: text.to_owned(),
-        }
+        ContentBlock::text(text)
     }
 
     fn assistant(content: Vec<ContentBlock>) -> Message {
@@ -196,6 +180,22 @@ mod tests {
 
     mod sanitize_resumed_messages {
         use super::*;
+
+        #[test]
+        fn keeps_queued_prompt_and_paused_reply_boundaries() {
+            let mut messages = vec![
+                Message::user("first prompt"),
+                Message::user("queued prompt"),
+                Message::assistant("partial reply"),
+                Message::assistant("completed reply"),
+                Message::user("follow-up"),
+            ];
+            let expected = messages.clone();
+
+            sanitize_resumed_messages(&mut messages);
+
+            assert_eq!(messages, expected);
+        }
 
         #[test]
         fn noop_for_clean_transcript() {
@@ -280,7 +280,7 @@ mod tests {
         }
 
         #[test]
-        fn collapses_adjacent_users_after_empty_assistant_drop() {
+        fn preserves_user_boundaries_after_dropping_an_unresolved_assistant() {
             let mut messages = vec![
                 Message::user("do X"),
                 assistant(vec![unresolved_tool_use("unresolved")]),
@@ -289,11 +289,14 @@ mod tests {
 
             sanitize_resumed_messages(&mut messages);
 
-            assert_eq!(messages, [user(vec![text("do X"), text("and now Y")])]);
+            assert_eq!(
+                messages,
+                [Message::user("do X"), Message::user("and now Y")]
+            );
         }
 
         #[test]
-        fn collapses_adjacent_assistants_after_orphan_user_drop() {
+        fn preserves_assistant_boundaries_after_dropping_an_orphan_result() {
             let mut messages = vec![
                 Message::user("do X"),
                 Message::assistant("first answer"),
@@ -307,7 +310,8 @@ mod tests {
                 messages,
                 [
                     Message::user("do X"),
-                    assistant(vec![text("first answer"), text("second answer")]),
+                    Message::assistant("first answer"),
+                    Message::assistant("second answer"),
                 ],
             );
         }
@@ -347,12 +351,8 @@ mod tests {
                 messages,
                 [
                     Message::user("research X"),
-                    assistant(vec![
-                        text("Searching."),
-                        server_tool_use("s1"),
-                        server_tool_result("s1"),
-                        text("Found X."),
-                    ]),
+                    assistant(vec![text("Searching."), server_tool_use("s1")]),
+                    assistant(vec![server_tool_result("s1"), text("Found X.")]),
                 ],
             );
         }
@@ -553,45 +553,6 @@ mod tests {
             drop_orphan_tool_results(&mut messages);
 
             assert_eq!(messages, [Message::user("first")]);
-        }
-    }
-
-    mod collapse_consecutive_roles {
-        use super::*;
-
-        #[test]
-        fn merges_runs_and_preserves_alternation() {
-            let mut messages = vec![
-                Message::assistant("a1"),
-                Message::assistant("a2"),
-                Message::assistant("a3"),
-                Message::user("u1"),
-                Message::user("u2"),
-            ];
-
-            collapse_consecutive_roles(&mut messages);
-
-            assert_eq!(
-                messages,
-                [
-                    assistant(vec![text("a1"), text("a2"), text("a3")]),
-                    user(vec![text("u1"), text("u2")]),
-                ],
-            );
-        }
-
-        #[test]
-        fn noop_on_alternating_transcript() {
-            let mut messages = vec![
-                Message::user("u"),
-                Message::assistant("a"),
-                Message::user("u2"),
-            ];
-            let before = messages.clone();
-
-            collapse_consecutive_roles(&mut messages);
-
-            assert_eq!(messages, before);
         }
     }
 

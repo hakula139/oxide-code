@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::display::fit_title;
-use super::entry::{CURRENT_VERSION, CompactBoundary, Entry, Header};
+use super::entry::{CURRENT_VERSION, CompactBoundary, Entry, ExitInfo, Header, TitleInfo};
 use super::handle::Checkpoint;
 use super::store::{SessionStore, SessionWriter, artifact_dir, encode_lines};
 use crate::file_tracker::FileSnapshot;
@@ -42,8 +42,7 @@ pub(super) struct SessionState {
     /// Loaded count on resume (`0` for fresh). `finish_entries` skips the summary when unchanged.
     initial_message_count: u32,
     message_count: u32,
-    /// Whether the session has seen its first user text, after which no message emits another title
-    /// entry.
+    /// Whether an earlier prompt or manual title consumed the first-prompt title opportunity.
     first_user_prompt_seen: bool,
     finished: bool,
     persistence_stopped: bool,
@@ -81,8 +80,8 @@ impl SessionState {
         }
     }
 
-    /// A resumed session, writing through `writer` at once. `first_user_prompt_seen` says whether
-    /// disk already holds a title or user message.
+    /// A resumed session, writing through `writer` at once, with title eligibility restored from
+    /// the saved records and resolved message chain.
     pub(super) fn resumed(
         store: SessionStore,
         session_id: String,
@@ -135,10 +134,10 @@ impl SessionState {
             self.first_user_prompt_seen = true;
             if !manual_title_set {
                 ai_title_seed = Some(text.to_owned());
-                entries.push(Entry::Title {
+                entries.push(Entry::Title(TitleInfo {
                     title: fit_title(title.unwrap_or(text)),
                     updated_at: now,
-                });
+                }));
             }
         }
 
@@ -166,12 +165,18 @@ impl SessionState {
 
     /// Moves the chain anchor back to `checkpoint`, returning the entry that records the move. A
     /// rewind to before the first user prompt lets the next one title the session again.
-    pub(super) fn rewind_entry(&mut self, checkpoint: Checkpoint, now: OffsetDateTime) -> Entry {
+    pub(super) fn rewind_entry(
+        &mut self,
+        checkpoint: Checkpoint,
+        manual_title_set: bool,
+        now: OffsetDateTime,
+    ) -> Entry {
         self.last_message_uuid = checkpoint.tip;
         self.message_count = checkpoint.message_count;
-        self.first_user_prompt_seen = checkpoint.first_user_prompt_seen;
+        self.first_user_prompt_seen = checkpoint.first_user_prompt_seen || manual_title_set;
         Entry::Rewind {
             tip: checkpoint.tip,
+            first_user_prompt_seen: Some(self.first_user_prompt_seen),
             timestamp: now,
         }
     }
@@ -270,10 +275,10 @@ impl SessionState {
             .into_iter()
             .map(|snapshot| Entry::FileSnapshot { snapshot })
             .collect();
-        entries.push(Entry::Summary {
+        entries.push(Entry::Summary(ExitInfo {
             message_count: self.message_count,
             updated_at: now,
-        });
+        }));
         entries
     }
 
@@ -293,10 +298,10 @@ impl SessionState {
             WriterStatus::Pending {
                 deferred_title: Some(title),
                 ..
-            } => Some(Entry::Title {
+            } => Some(Entry::Title(TitleInfo {
                 title: title.clone(),
                 updated_at: OffsetDateTime::now_utc(),
-            }),
+            })),
             _ => None,
         };
         let lines = encode_lines(deferred_title.iter().chain(&self.unwritten))?;
@@ -341,7 +346,7 @@ fn new_header(
     }
 }
 
-/// Extracts the first non-empty text content from a user message.
+/// Extracts the first nonempty ordinary text from a user message.
 pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
     if message.role != Role::User {
         return None;
@@ -349,7 +354,10 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
     message
         .content
         .iter()
-        .filter_map(ContentBlock::as_text)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, origin: None } => Some(text.as_str()),
+            _ => None,
+        })
         .find(|text| !text.trim().is_empty())
 }
 
@@ -414,7 +422,7 @@ mod tests {
             assert_eq!(entries.len(), 2, "title + message");
             assert!(matches!(
                 &entries[0],
-                Entry::Title { title, .. } if title == "Fix the auth bug",
+                Entry::Title(TitleInfo { title, .. }) if title == "Fix the auth bug",
             ));
             assert!(matches!(&entries[1], Entry::Message { .. }));
             assert_eq!(seed.as_deref(), Some("Fix the auth bug"));
@@ -438,7 +446,7 @@ mod tests {
 
             assert!(matches!(
                 &entries[0],
-                Entry::Title { title, .. } if title == "/init AGENTS.md",
+                Entry::Title(TitleInfo { title, .. }) if title == "/init AGENTS.md",
             ));
             assert_eq!(seed.as_deref(), Some("Create AGENTS.md for this project."));
         }
@@ -515,7 +523,7 @@ mod tests {
             let checkpoint = state.checkpoint();
             _ = state.queue_message_entries(&Message::user("refused"), None, now, false);
 
-            let entry = state.rewind_entry(checkpoint, now);
+            let entry = state.rewind_entry(checkpoint, false, now);
             let (entries, _) =
                 state.queue_message_entries(&Message::user("next"), None, now, false);
 
@@ -536,11 +544,13 @@ mod tests {
             let checkpoint = state.checkpoint();
             _ = state.queue_message_entries(&Message::user("refused"), None, now, false);
 
-            _ = state.rewind_entry(checkpoint, now);
+            _ = state.rewind_entry(checkpoint, false, now);
             let (entries, seed) =
                 state.queue_message_entries(&Message::user("next"), None, now, false);
 
-            assert!(matches!(&entries[0], Entry::Title { title, .. } if title == "next"));
+            assert!(
+                matches!(&entries[0], Entry::Title(TitleInfo { title, .. }) if title == "next")
+            );
             assert_eq!(seed.as_deref(), Some("next"));
         }
     }
@@ -702,7 +712,7 @@ mod tests {
             state.flush_entries(entries).unwrap();
 
             let entries = state.finish_entries(Vec::new(), now);
-            let Some(Entry::Summary { message_count, .. }) = entries.last() else {
+            let Some(Entry::Summary(ExitInfo { message_count, .. })) = entries.last() else {
                 panic!("expected trailing Summary, got {entries:?}");
             };
             assert_eq!(*message_count, 1);
@@ -744,7 +754,7 @@ mod tests {
                 .count();
             assert_eq!(snapshot_count, 3);
             assert!(
-                matches!(entries.last(), Some(Entry::Summary { .. })),
+                matches!(entries.last(), Some(Entry::Summary(_))),
                 "summary must come after every snapshot",
             );
         }
@@ -941,13 +951,33 @@ mod tests {
         use super::*;
 
         #[test]
+        fn generated_text_cannot_seed_a_title() {
+            use crate::message::TextOrigin;
+
+            for origin in [
+                TextOrigin::SystemReminder,
+                TextOrigin::Interruption,
+                TextOrigin::CompactionSummary,
+                TextOrigin::CompactionTruncation,
+            ] {
+                let mut message = Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::generated_text("generated", origin)],
+                };
+                assert_eq!(extract_user_text(&message), None, "{origin:?}");
+
+                message.content.push(ContentBlock::text("literal"));
+
+                assert_eq!(extract_user_text(&message), Some("literal"), "{origin:?}");
+            }
+        }
+
+        #[test]
         fn selects_first_nonempty_user_text() {
             let tool_result = ContentBlock::tool_result("t1", "output", false);
             let user_with_only_blank = Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: "  ".to_owned(),
-                }],
+                content: vec![ContentBlock::text("  ")],
             };
             let user_with_only_tool_result = Message {
                 role: Role::User,
@@ -955,12 +985,7 @@ mod tests {
             };
             let user_with_text_after_tool_result = Message {
                 role: Role::User,
-                content: vec![
-                    tool_result,
-                    ContentBlock::Text {
-                        text: "follow-up".to_owned(),
-                    },
-                ],
+                content: vec![tool_result, ContentBlock::text("follow-up")],
             };
 
             assert_eq!(extract_user_text(&Message::user("hello")), Some("hello"));

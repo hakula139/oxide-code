@@ -240,18 +240,13 @@ fn render_model(model: &str) -> String {
     }
 }
 
-/// `body` wrapped in the `<system-reminder>` block that [`is_system_reminder`] detects.
+/// `body` wrapped in the model-facing `<system-reminder>` envelope.
 pub(crate) fn system_reminder(body: &str) -> String {
     formatdoc! {"
         <system-reminder>
         {body}
         </system-reminder>"
     }
-}
-
-/// Returns whether `text` is a `<system-reminder>` block, which transcript displays leave out.
-pub(crate) fn is_system_reminder(text: &str) -> bool {
-    text.starts_with("<system-reminder>")
 }
 
 #[cfg(test)]
