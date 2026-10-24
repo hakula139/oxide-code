@@ -12,7 +12,10 @@ use crate::session::entry::UsageRecord;
 
 impl Engine {
     pub(super) async fn account_usage(&mut self, sink: &dyn EventSink, report: &TurnReport) {
-        self.context_estimate = report.context_estimate(&self.messages);
+        self.context_estimate =
+            Some(report.context_estimate(&self.messages).unwrap_or_else(|| {
+                request_tokens(&self.prompt, &self.tools.definitions(), &self.messages)
+            }));
         let Some(usage) = report.usage() else {
             return;
         };
@@ -76,12 +79,22 @@ impl Engine {
         let Some(pending) = &mut self.title_usage else {
             return;
         };
-        match pending.try_recv() {
-            Ok(record) => self.total_estimated_cost_usd += estimate_cost_usd(&[record]),
+        let record = match pending.try_recv() {
+            Ok(record) => Some(record),
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Closed) => {}
-        }
+            Err(TryRecvError::Closed) => None,
+        };
+        self.account_title_usage(record);
+    }
+
+    /// Consumes the title result and returns whether it reported usage.
+    pub(super) fn account_title_usage(&mut self, record: Option<UsageRecord>) -> bool {
         self.title_usage = None;
+        let Some(record) = record else {
+            return false;
+        };
+        self.total_estimated_cost_usd += estimate_cost_usd(&[record]);
+        true
     }
 }
 

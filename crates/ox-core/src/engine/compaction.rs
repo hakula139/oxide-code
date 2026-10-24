@@ -2328,15 +2328,10 @@ mod tests {
             let server = MockServer::start().await;
             mount_summary(
                 &server,
-                indoc! {r#"
-                    event: ping
-                    data: {"type":"message_start","message":{"id":"m","model":"claude-haiku-5-5"}}
-
-                    event: ping
-                    data: {"type":"error","error":{"type":"invalid_request_error","message":"summary request rejected"}}
-
-                "#}
-                .to_owned(),
+                sse_body(&[
+                    json!({"type": "message_start", "message": {"id": "m", "model": "claude-haiku-5-5"}}),
+                    json!({"type": "error", "error": {"type": "invalid_request_error", "message": "summary request rejected"}}),
+                ]),
             )
             .await;
 

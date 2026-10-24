@@ -393,6 +393,7 @@ mod tests {
             let blocks = vec![ContentBlockInfo::ToolUse {
                 id: "t1".to_owned(),
                 name: "noop".to_owned(),
+                input: serde_json::json!({}),
             }];
 
             assert_eq!(join_text_blocks(blocks), "");
