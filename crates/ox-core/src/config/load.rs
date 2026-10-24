@@ -607,7 +607,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 write(&dir.path().join(".ox/config.toml"), "");
                 let child = dir.path().join("sub");
-                let path = child.join(".ox/config.toml");
+                let path = child.join(".ox").join("config.toml");
                 if linked {
                     std::fs::create_dir_all(child.join(".ox")).unwrap();
                     symlink_dir(dir.path(), &path);
@@ -640,7 +640,7 @@ mod tests {
                 if ancestor_config {
                     write(&dir.path().join(".ox/config.toml"), "");
                 }
-                let path = child.join(".ox/config.toml");
+                let path = child.join(".ox").join("config.toml");
                 if directory_link {
                     let first = child.join(".ox");
                     let second = child.join("loop");
@@ -675,7 +675,7 @@ mod tests {
                 if ancestor_config {
                     write(&dir.path().join(".ox/config.toml"), "");
                 }
-                let path = child.join(".ox/config.toml");
+                let path = child.join(".ox").join("config.toml");
                 if directory_link {
                     symlink_dir(&child.join("missing"), &child.join(".ox"));
                 } else {
