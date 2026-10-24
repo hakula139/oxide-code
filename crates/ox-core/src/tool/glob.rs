@@ -635,14 +635,6 @@ mod tests {
             assert_filename_round_trip("No files found").await;
         }
 
-        #[cfg(unix)]
-        #[tokio::test]
-        async fn preserves_newlines_in_native_filenames_after_metadata_round_trip() {
-            for name in ["line\nname.rs", "blank\n\nname.rs", "trailing.rs\n"] {
-                assert_filename_round_trip(name).await;
-            }
-        }
-
         #[tokio::test]
         async fn matching_pattern_reports_files() {
             let dir = canonical_tempdir();
@@ -696,6 +688,14 @@ mod tests {
 
             assert!(!output.is_error);
             assert_eq!(output.metadata.truncated_total, Some(total));
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn preserves_newlines_in_native_filenames_after_metadata_round_trip() {
+            for name in ["line\nname.rs", "blank\n\nname.rs", "trailing.rs\n"] {
+                assert_filename_round_trip(name).await;
+            }
         }
     }
 
