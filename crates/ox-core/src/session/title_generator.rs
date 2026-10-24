@@ -722,15 +722,36 @@ mod tests {
         use super::*;
 
         #[test]
-        fn extracts_json_title_field() {
-            let out = parse_title(r#"{"title": "Fix auth bug"}"#).unwrap();
-            assert_eq!(out, "Fix auth bug");
-        }
+        fn extracts_titles_from_supported_envelopes() {
+            for (case, input, expected) in [
+                ("plain JSON", r#"{"title": "Fix auth bug"}"#, "Fix auth bug"),
+                ("padded title", r#"{"title": "  padded  "}"#, "padded"),
+                // Haiku on some gateways wraps the JSON envelope in a fenced block.
+                (
+                    "JSON code fence",
+                    indoc! {r#"
+                        ```json
+                        {
+                          "title": "Fix the login flow"
+                        }
+                        ```
+                    "#},
+                    "Fix the login flow",
+                ),
+                (
+                    "bare code fence",
+                    indoc! {r#"
+                        ```
+                        {"title":"Add OAuth auth"}
+                        ```
+                    "#},
+                    "Add OAuth auth",
+                ),
+            ] {
+                let title = parse_title(input).unwrap_or_else(|error| panic!("{case}: {error:#}"));
 
-        #[test]
-        fn trims_whitespace_inside_json_envelope() {
-            let out = parse_title(r#"{"title": "  padded  "}"#).unwrap();
-            assert_eq!(out, "padded");
+                assert_eq!(title, expected, "{case}");
+            }
         }
 
         #[test]
@@ -763,29 +784,6 @@ mod tests {
             let err = parse_title("   ").unwrap_err();
 
             assert_eq!(err.to_string(), "empty response");
-        }
-
-        #[test]
-        fn unwraps_json_code_fence() {
-            // Haiku on some gateways wraps the JSON envelope in a fenced block.
-            let raw = indoc! {r#"
-                ```json
-                {
-                  "title": "Fix the login flow"
-                }
-                ```
-            "#};
-            assert_eq!(parse_title(raw).unwrap(), "Fix the login flow");
-        }
-
-        #[test]
-        fn unwraps_bare_code_fence() {
-            let raw = indoc! {r#"
-                ```
-                {"title":"Add OAuth auth"}
-                ```
-            "#};
-            assert_eq!(parse_title(raw).unwrap(), "Add OAuth auth");
         }
     }
 

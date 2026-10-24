@@ -548,26 +548,15 @@ mod tests {
         use super::*;
 
         #[test]
-        fn under_limit_preserves_input() {
-            assert_eq!(truncate_to_bytes("hello", 10), "hello");
-        }
-
-        #[test]
-        fn over_limit_appends_ellipsis() {
-            assert_eq!(truncate_to_bytes("hello world", 5), "hello...");
-        }
-
-        #[test]
-        fn respects_char_boundary() {
-            // Each `中` is 3 bytes, so a 5-byte limit must round down to a character boundary.
-            let input = "中中中中";
-            let result = truncate_to_bytes(input, 5);
-            assert_eq!(result, "中...");
-        }
-
-        #[test]
-        fn exact_boundary_no_split() {
-            assert_eq!(truncate_to_bytes("中中", 6), "中中");
+        fn preserves_character_boundaries_at_the_byte_limit() {
+            for (case, input, max_bytes, expected) in [
+                ("fits", "hello", 10, "hello"),
+                ("overflow", "hello world", 5, "hello..."),
+                ("inside a multibyte character", "中中中中", 5, "中..."),
+                ("exact multibyte boundary", "中中", 6, "中中"),
+            ] {
+                assert_eq!(truncate_to_bytes(input, max_bytes), expected, "{case}");
+            }
         }
     }
 }

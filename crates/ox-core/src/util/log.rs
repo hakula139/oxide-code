@@ -158,33 +158,23 @@ mod tests {
         use super::*;
 
         #[test]
-        fn honors_rust_log_level() {
-            temp_env::with_var("RUST_LOG", Some("debug"), || {
-                assert_eq!(make_filter().to_string(), "debug");
-            });
-        }
-
-        #[test]
-        fn honors_rust_log_directive_language() {
-            temp_env::with_var("RUST_LOG", Some("info,reqwest=warn"), || {
-                assert_eq!(make_filter().to_string(), "reqwest=warn,info");
-            });
-        }
-
-        #[test]
-        fn defaults_to_warn_when_rust_log_is_unset_empty_or_invalid() {
-            for value in [None, Some(""), Some("ox=loud")] {
+        fn honors_valid_directives_and_defaults_to_warn() {
+            for (case, value, expected) in [
+                ("level", Some("debug"), "debug"),
+                (
+                    "directive language",
+                    Some("info,reqwest=warn"),
+                    "reqwest=warn,info",
+                ),
+                ("unset", None, "warn"),
+                ("empty", Some(""), "warn"),
+                ("invalid", Some("ox=loud"), "warn"),
+                ("mixed validity", Some("info,ox=loud"), "info"),
+            ] {
                 let filter = temp_env::with_var("RUST_LOG", value, make_filter);
 
-                assert_eq!(filter.to_string(), "warn", "{value:?}");
+                assert_eq!(filter.to_string(), expected, "{case}");
             }
-        }
-
-        #[test]
-        fn keeps_the_valid_directives_beside_invalid_ones() {
-            temp_env::with_var("RUST_LOG", Some("info,ox=loud"), || {
-                assert_eq!(make_filter().to_string(), "info");
-            });
         }
     }
 

@@ -337,13 +337,8 @@ pub mod testing {
         command
     }
 
-    /// Runs `f` under [`ISOLATED_GIT_ENV`], so production probes under test see only the fixture.
+    /// Runs `future` under [`ISOLATED_GIT_ENV`] so probes see only their fixture.
     /// `git rebase --exec` exports `GIT_DIR`, which would otherwise aim them at the caller's repo.
-    pub fn with_isolated_git_env<R>(f: impl FnOnce() -> R) -> R {
-        temp_env::with_vars(ISOLATED_GIT_ENV, f)
-    }
-
-    /// [`with_isolated_git_env`] for async probes.
     pub async fn with_isolated_git_env_async<F: Future>(future: F) -> F::Output {
         temp_env::async_with_vars(ISOLATED_GIT_ENV, future).await
     }

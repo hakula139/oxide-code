@@ -77,21 +77,22 @@ mod tests {
         use super::*;
 
         #[test]
-        fn keeps_the_trimmed_first_line() {
-            assert_eq!(
-                fit_title("  Fix auth flow  \nDetails below"),
-                "Fix auth flow"
-            );
-        }
-
-        #[test]
-        fn skips_leading_blank_lines() {
-            assert_eq!(fit_title("\n  \n Fix auth flow\nDetails"), "Fix auth flow");
-        }
-
-        #[test]
-        fn blank_text_gives_an_empty_title() {
-            assert_eq!(fit_title(" \n\t\n "), "");
+        fn keeps_the_trimmed_first_nonblank_line() {
+            for (case, input, expected) in [
+                (
+                    "trim first line",
+                    "  Fix auth flow  \nDetails below",
+                    "Fix auth flow",
+                ),
+                (
+                    "leading blank lines",
+                    "\n  \n Fix auth flow\nDetails",
+                    "Fix auth flow",
+                ),
+                ("blank input", " \n\t\n ", ""),
+            ] {
+                assert_eq!(fit_title(input), expected, "{case}");
+            }
         }
 
         #[test]

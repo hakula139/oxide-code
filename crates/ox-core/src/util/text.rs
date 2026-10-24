@@ -292,37 +292,20 @@ mod tests {
         use super::*;
 
         #[test]
-        fn passes_through_strings_that_fit() {
-            assert_eq!(truncate_to_width("short", 10), "short");
-            assert_eq!(truncate_to_width("exact", 5), "exact");
-            assert_eq!(truncate_to_width("", 5), "");
-        }
-
-        #[test]
-        fn appends_ellipsis_on_ascii_overflow() {
-            assert_eq!(truncate_to_width("abcdefghij", 5), "ab...");
-        }
-
-        #[test]
-        fn accounts_for_cjk_double_width() {
-            // Width 5 leaves 2 columns beside the ellipsis, room for one 2-column char.
-            assert_eq!(truncate_to_width("测试文本", 5), "测...");
-        }
-
-        #[test]
-        fn zero_produces_empty() {
-            assert_eq!(truncate_to_width("anything", 0), "");
-        }
-
-        #[test]
-        fn drops_ellipsis_when_budget_below_ellipsis_width() {
-            assert_eq!(truncate_to_width("abc", 1), "a");
-            assert_eq!(truncate_to_width("abc", 2), "ab");
-        }
-
-        #[test]
-        fn keeps_zwj_emoji_whole() {
-            assert_eq!(truncate_to_width("👨‍👩‍👧 family photo", 5), "👨‍👩‍👧...");
+        fn respects_display_width_and_grapheme_boundaries() {
+            for (case, input, width, expected) in [
+                ("fits", "short", 10, "short"),
+                ("exact fit", "exact", 5, "exact"),
+                ("empty", "", 5, ""),
+                ("ASCII overflow", "abcdefghij", 5, "ab..."),
+                ("CJK width", "测试文本", 5, "测..."),
+                ("zero budget", "anything", 0, ""),
+                ("one column", "abc", 1, "a"),
+                ("two columns", "abc", 2, "ab"),
+                ("whole ZWJ emoji", "👨‍👩‍👧 family photo", 5, "👨‍👩‍👧..."),
+            ] {
+                assert_eq!(truncate_to_width(input, width), expected, "{case}");
+            }
         }
     }
 
@@ -330,41 +313,30 @@ mod tests {
         use super::*;
 
         #[test]
-        fn passes_through_strings_that_fit() {
-            assert_eq!(center_truncate_to_width("short", 10), "short");
-            assert_eq!(center_truncate_to_width("exact", 5), "exact");
-            assert_eq!(center_truncate_to_width("", 5), "");
-        }
-
-        #[test]
-        fn keeps_head_and_tail_around_ellipsis() {
-            assert_eq!(
-                center_truncate_to_width("~/work/project/src/x.rs", 13),
-                "~/wor.../x.rs",
-            );
-        }
-
-        #[test]
-        fn falls_back_to_right_truncation_when_budget_too_small() {
-            assert_eq!(center_truncate_to_width("abcdef", 2), "ab");
-            assert_eq!(center_truncate_to_width("abcdef", 1), "a");
-        }
-
-        #[test]
-        fn accounts_for_cjk_double_width() {
-            // Width 9 leaves 3 columns per side, room for one 2-column char each.
-            assert_eq!(center_truncate_to_width("测试文本编辑", 9), "测...辑");
-        }
-
-        #[test]
-        fn falls_back_to_right_truncate_when_cjk_overflows_both_halves() {
-            // Width 5 leaves 1 column per side, too narrow for a 2-column char.
-            assert_eq!(center_truncate_to_width("中文测试", 5), "中...");
-        }
-
-        #[test]
-        fn keeps_zwj_emoji_whole_on_both_sides() {
-            assert_eq!(center_truncate_to_width("👨‍👩‍👧 photos/2026 👨‍👩‍👧", 7), "👨‍👩‍👧...👨‍👩‍👧",);
+        fn respects_display_width_and_grapheme_boundaries() {
+            for (case, input, width, expected) in [
+                ("fits", "short", 10, "short"),
+                ("exact fit", "exact", 5, "exact"),
+                ("empty", "", 5, ""),
+                (
+                    "ASCII head and tail",
+                    "~/work/project/src/x.rs",
+                    13,
+                    "~/wor.../x.rs",
+                ),
+                ("two-column fallback", "abcdef", 2, "ab"),
+                ("one-column fallback", "abcdef", 1, "a"),
+                ("CJK sides", "测试文本编辑", 9, "测...辑"),
+                ("narrow CJK halves", "中文测试", 5, "中..."),
+                (
+                    "whole ZWJ emoji on both sides",
+                    "👨‍👩‍👧 photos/2026 👨‍👩‍👧",
+                    7,
+                    "👨‍👩‍👧...👨‍👩‍👧",
+                ),
+            ] {
+                assert_eq!(center_truncate_to_width(input, width), expected, "{case}");
+            }
         }
     }
 

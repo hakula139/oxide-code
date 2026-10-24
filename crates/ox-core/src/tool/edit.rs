@@ -1279,29 +1279,17 @@ mod tests {
         use super::*;
 
         #[test]
-        fn lf_only_selects_lf() {
-            assert_eq!(dominant_eol("a\nb\n"), "\n");
-        }
-
-        #[test]
-        fn crlf_only_selects_crlf() {
-            assert_eq!(dominant_eol("a\r\nb\r\n"), "\r\n");
-        }
-
-        #[test]
-        fn mixed_favors_majority() {
-            assert_eq!(dominant_eol("a\nb\r\nc\r\n"), "\r\n");
-            assert_eq!(dominant_eol("a\nb\nc\r\n"), "\n");
-        }
-
-        #[test]
-        fn tie_defaults_to_lf() {
-            assert_eq!(dominant_eol("a\nb\r\n"), "\n");
-        }
-
-        #[test]
-        fn no_newlines_defaults_to_lf() {
-            assert_eq!(dominant_eol("no newlines"), "\n");
+        fn selects_the_majority_and_defaults_to_lf() {
+            for (case, input, expected) in [
+                ("LF only", "a\nb\n", "\n"),
+                ("CRLF only", "a\r\nb\r\n", "\r\n"),
+                ("CRLF majority", "a\nb\r\nc\r\n", "\r\n"),
+                ("LF majority", "a\nb\nc\r\n", "\n"),
+                ("tie", "a\nb\r\n", "\n"),
+                ("no newline", "no newlines", "\n"),
+            ] {
+                assert_eq!(dominant_eol(input), expected, "{case}");
+            }
         }
     }
 
@@ -1327,13 +1315,10 @@ mod tests {
         use super::*;
 
         #[test]
-        fn inserts_cr_for_crlf() {
-            assert_eq!(apply_eol("a\nb\n".to_owned(), "\r\n"), "a\r\nb\r\n");
-        }
-
-        #[test]
-        fn lf_preserves_content() {
-            assert_eq!(apply_eol("a\nb\n".to_owned(), "\n"), "a\nb\n");
+        fn restores_requested_line_endings() {
+            for (case, eol, expected) in [("CRLF", "\r\n", "a\r\nb\r\n"), ("LF", "\n", "a\nb\n")] {
+                assert_eq!(apply_eol("a\nb\n".to_owned(), eol), expected, "{case}");
+            }
         }
     }
 

@@ -1492,25 +1492,33 @@ mod tests {
         use super::*;
 
         #[test]
-        fn relative_inside_base() {
-            let base = Path::new("/home/user/project");
-            let path = Path::new("/home/user/project/src/main.rs");
-            assert_eq!(display_path(path, base), "src/main.rs");
-        }
-
-        #[test]
-        fn outside_base_stays_absolute() {
-            let base = Path::new("/home/user/project");
-            let path = Path::new("/etc/config.toml");
-            assert_eq!(display_path(path, base), "/etc/config.toml");
-        }
-
-        #[test]
-        fn names_the_base_itself_by_its_file_name() {
-            let base = Path::new("/home/user/project/src/main.rs");
-            let path = Path::new("/home/user/project/src/main.rs");
-
-            assert_eq!(display_path(path, base), "main.rs");
+        fn chooses_the_name_from_the_path_relation_to_base() {
+            for (case, path, base, expected) in [
+                (
+                    "inside base",
+                    "/home/user/project/src/main.rs",
+                    "/home/user/project",
+                    "src/main.rs",
+                ),
+                (
+                    "outside base",
+                    "/etc/config.toml",
+                    "/home/user/project",
+                    "/etc/config.toml",
+                ),
+                (
+                    "base itself",
+                    "/home/user/project/src/main.rs",
+                    "/home/user/project/src/main.rs",
+                    "main.rs",
+                ),
+            ] {
+                assert_eq!(
+                    display_path(Path::new(path), Path::new(base)),
+                    expected,
+                    "{case}"
+                );
+            }
         }
     }
 
@@ -1518,13 +1526,13 @@ mod tests {
         use super::*;
 
         #[test]
-        fn extracts_basename() {
-            assert_eq!(file_name("/home/user/project/src/main.rs"), "main.rs");
-        }
-
-        #[test]
-        fn returns_a_bare_name_as_is() {
-            assert_eq!(file_name("README.md"), "README.md");
+        fn keeps_only_the_trailing_name() {
+            for (case, path, expected) in [
+                ("full path", "/home/user/project/src/main.rs", "main.rs"),
+                ("bare name", "README.md", "README.md"),
+            ] {
+                assert_eq!(file_name(path), expected, "{case}");
+            }
         }
     }
 

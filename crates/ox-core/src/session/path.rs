@@ -50,34 +50,34 @@ mod tests {
         use super::*;
 
         #[test]
-        fn replaces_slashes_and_trims_leading() {
-            let out = project_dir_name(Path::new("/Users/alice/project"));
-            assert_eq!(out, "Users-alice-project");
-        }
-
-        #[test]
-        fn replaces_backslash_and_drive_letter() {
-            let out = project_dir_name(Path::new(r"C:\Users\alice\project"));
-            assert_eq!(out, "C--Users-alice-project");
-        }
-
-        #[test]
-        fn preserves_dots_underscores_and_dashes() {
-            let out = project_dir_name(Path::new("/home/user/my-proj_v1.0"));
-            assert_eq!(out, "home-user-my-proj_v1.0");
-        }
-
-        #[test]
-        fn replaces_other_reserved_chars_with_dash() {
-            let out = project_dir_name(Path::new("/sub dir/with spaces&symbols!"));
-            assert_eq!(out, "sub-dir-with-spaces-symbols");
-        }
-
-        #[test]
-        fn is_unknown_for_empty_result() {
-            assert_eq!(project_dir_name(Path::new("/")), UNKNOWN_PROJECT_DIR);
-            assert_eq!(project_dir_name(Path::new("")), UNKNOWN_PROJECT_DIR);
-            assert_eq!(project_dir_name(Path::new("///")), UNKNOWN_PROJECT_DIR);
+        fn replaces_reserved_characters_and_preserves_safe_names() {
+            for (case, input, expected) in [
+                (
+                    "Unix separators",
+                    "/Users/alice/project",
+                    "Users-alice-project",
+                ),
+                (
+                    "Windows spelling",
+                    r"C:\Users\alice\project",
+                    "C--Users-alice-project",
+                ),
+                (
+                    "safe punctuation",
+                    "/home/user/my-proj_v1.0",
+                    "home-user-my-proj_v1.0",
+                ),
+                (
+                    "reserved characters",
+                    "/sub dir/with spaces&symbols!",
+                    "sub-dir-with-spaces-symbols",
+                ),
+                ("root", "/", UNKNOWN_PROJECT_DIR),
+                ("empty", "", UNKNOWN_PROJECT_DIR),
+                ("repeated separators", "///", UNKNOWN_PROJECT_DIR),
+            ] {
+                assert_eq!(project_dir_name(Path::new(input)), expected, "{case}");
+            }
         }
 
         #[test]
