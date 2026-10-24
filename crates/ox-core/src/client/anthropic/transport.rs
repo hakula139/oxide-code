@@ -495,6 +495,34 @@ mod tests {
     };
     use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
 
+    mod messages_url {
+        use super::*;
+
+        #[test]
+        fn appends_the_messages_path_after_an_optional_prefix() {
+            for (base, expected) in [
+                (
+                    "https://example.com",
+                    "https://example.com/v1/messages?beta=true",
+                ),
+                (
+                    "https://example.com/",
+                    "https://example.com/v1/messages?beta=true",
+                ),
+                (
+                    "https://example.com/anthropic",
+                    "https://example.com/anthropic/v1/messages?beta=true",
+                ),
+                (
+                    "https://example.com/anthropic/",
+                    "https://example.com/anthropic/v1/messages?beta=true",
+                ),
+            ] {
+                assert_eq!(messages_url(base), expected, "{base}");
+            }
+        }
+    }
+
     mod post_messages {
         use super::*;
 
