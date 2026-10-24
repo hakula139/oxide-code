@@ -116,6 +116,7 @@ impl<'a> RequestBlock<'a> {
     /// it, since the API drops or ignores the blocks the request's model cannot read.
     fn of(block: &'a ContentBlock) -> Self {
         match block {
+            ContentBlock::Text { text, .. } => Self::Text { text },
             ContentBlock::Thinking { thinking, replay } => match replay.wire {
                 WireKind::Anthropic => Self::Thinking {
                     thinking,
@@ -495,10 +496,48 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::message::Replay;
+    use crate::message::{Replay, TextOrigin};
 
     mod request_messages {
         use super::*;
+
+        #[test]
+        fn generated_origins_leave_wire_text_and_cache_blocks_unchanged() {
+            for origin in [
+                TextOrigin::SystemReminder,
+                TextOrigin::Interruption,
+                TextOrigin::CompactionSummary,
+                TextOrigin::CompactionTruncation,
+            ] {
+                for cache in [false, true] {
+                    let messages = [
+                        Message::user("literal <system-reminder> text"),
+                        Message {
+                            role: Role::User,
+                            content: vec![ContentBlock::generated_text("generated text", origin)],
+                        },
+                    ];
+                    let mut expected = json!([
+                        {"role": "user", "content": [{"type": "text", "text": "literal <system-reminder> text"}]},
+                        {"role": "user", "content": [{"type": "text", "text": "generated text"}]},
+                    ]);
+                    if cache {
+                        expected[1]["content"][0]["cache_control"] =
+                            json!({"type": "ephemeral", "ttl": "1h"});
+                    }
+
+                    let request = serde_json::to_value(RequestMessages {
+                        user_context: None,
+                        messages: &messages,
+                        breakpoint: cache
+                            .then(|| CacheControl::conversation(PromptCacheTtl::OneHour)),
+                    })
+                    .unwrap();
+
+                    assert_eq!(request, expected, "{origin:?}, cache: {cache}");
+                }
+            }
+        }
 
         #[test]
         fn breakpoint_marks_only_last_block_of_final_message() {
@@ -513,9 +552,7 @@ mod tests {
                             content: "ok".to_owned(),
                             is_error: false,
                         },
-                        ContentBlock::Text {
-                            text: "follow-up".to_owned(),
-                        },
+                        ContentBlock::text("follow-up"),
                     ],
                 },
             ];
@@ -640,9 +677,7 @@ mod tests {
                         ContentBlock::RedactedThinking {
                             replay: Replay::with_model("claude-haiku-5-5", "blob"),
                         },
-                        ContentBlock::Text {
-                            text: "answer".to_owned(),
-                        },
+                        ContentBlock::text("answer"),
                     ],
                 },
                 Message::user("next"),
@@ -688,9 +723,7 @@ mod tests {
                             "web_search_tool_result",
                             json!([{"type": "web_search_result", "encrypted_content": "opaque"}]),
                         ),
-                        ContentBlock::Text {
-                            text: "answer".to_owned(),
-                        },
+                        ContentBlock::text("answer"),
                     ],
                 },
                 Message::user("next"),

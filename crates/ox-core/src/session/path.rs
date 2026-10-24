@@ -33,16 +33,11 @@ pub(super) fn project_dir_name(path: &Path) -> String {
         return UNKNOWN_PROJECT_DIR.to_owned();
     }
 
-    let char_count = trimmed.chars().count();
-    if char_count <= MAX_PROJECT_DIR_LEN {
+    if trimmed.len() <= MAX_PROJECT_DIR_LEN {
         return trimmed.to_owned();
     }
 
-    let keep_chars = MAX_PROJECT_DIR_LEN - HASH_SUFFIX_HEX_LEN - 1;
-    let cut = trimmed
-        .char_indices()
-        .nth(keep_chars)
-        .map_or(trimmed.len(), |(i, _)| i);
+    let cut = MAX_PROJECT_DIR_LEN - HASH_SUFFIX_HEX_LEN - 1;
     let hash = xxh64(path.as_os_str().as_encoded_bytes(), 0);
     format!("{}-{hash:016x}", &trimmed[..cut])
 }

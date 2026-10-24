@@ -31,7 +31,7 @@ use crate::config::Config;
 use crate::config::compaction::CompactionConfig;
 use crate::config::oauth::{self, ClaudeCodeKeychain};
 use crate::file_tracker::{FileSnapshot, FileTracker};
-use crate::message::{ContentBlock, Message};
+use crate::message::{ContentBlock, Message, TextOrigin};
 use crate::model::{ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
@@ -374,7 +374,10 @@ impl Engine {
         let mut user_msg = Message::user(text);
         let fresh = self.load_user_context(sink).await;
         if let Some(reminder) = self.prompt.catch_up(fresh) {
-            user_msg.content.push(ContentBlock::Text { text: reminder });
+            user_msg.content.push(ContentBlock::generated_text(
+                reminder,
+                TextOrigin::SystemReminder,
+            ));
             self.prompt_unrecorded = true;
         }
         let context =
@@ -2346,7 +2349,7 @@ mod tests {
                 assert_eq!(data.context, Some(expected));
                 assert!(matches!(
                     &data.messages[2].content[..],
-                    [_, ContentBlock::Text { text }] if text == reminder
+                    [_, ContentBlock::Text { text, .. }] if text == reminder
                 ));
             })
             .await;
@@ -2537,6 +2540,90 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn resumed_first_prompt_refusal_requests_a_new_title_unless_manually_named() {
+            with_pinned_home(async {
+                for manual in [false, true] {
+                    let refused_server = MockServer::start().await;
+                    mount_refusal_once(&refused_server, 1_000).await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = test_store(dir.path());
+                    let mut original = engine(refused_server.uri(), &store, dir.path()).await;
+                    let session_id = original.session_id().to_owned();
+                    assert_eq!(
+                        original
+                            .submit_prompt(
+                                "refused",
+                                None,
+                                &CapturingSink::default(),
+                                &mut inert_ops()
+                            )
+                            .await,
+                        TurnEnd::Failed
+                    );
+                    if manual {
+                        let renamed = original
+                            .session
+                            .set_manual_title("Manual title".to_owned())
+                            .await;
+                        assert_eq!(renamed.failure, None);
+                    }
+                    assert_eq!(original.finalize().await, None);
+                    let server = MockServer::start().await;
+                    mount_title(&server, greeting_title()).await;
+                    mount_reply(&server, "accepted reply").await;
+                    let mut resumed = engine(server.uri(), &store, dir.path()).await;
+                    resumed
+                        .resume(
+                            &CapturingSink::default(),
+                            ResumeTarget::Path(store.find_session_path(&session_id).unwrap()),
+                        )
+                        .await;
+                    resumed.generates_titles = true;
+                    let (sink, mut events) = mpsc::unbounded_channel();
+
+                    let end = resumed
+                        .submit_prompt("accepted", None, &sink, &mut inert_ops())
+                        .await;
+                    assert_eq!(end, TurnEnd::Completed);
+                    if manual {
+                        assert!(resumed.title_usage.is_none());
+                    } else {
+                        let title = tokio::time::timeout(Duration::from_secs(5), async {
+                            loop {
+                                if let Some(Event::SessionTitleUpdated { title, .. }) =
+                                    events.recv().await
+                                {
+                                    break title;
+                                }
+                            }
+                        })
+                        .await
+                        .expect("the title request completes");
+                        assert_eq!(title, "Greeting");
+                    }
+                    assert_eq!(resumed.finalize().await, None);
+
+                    let requests = request_bodies(&server).await;
+                    let title_requests: Vec<_> = requests
+                        .iter()
+                        .filter(|request| request["model"] == TITLE_MODEL)
+                        .collect();
+                    assert_eq!(title_requests.len(), usize::from(!manual));
+                    assert_eq!(
+                        store
+                            .load_session_data(&session_id)
+                            .unwrap()
+                            .title
+                            .unwrap()
+                            .title,
+                        if manual { "Manual title" } else { "Greeting" }
+                    );
+                }
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn adopts_the_list_of_a_turn_that_fails_after_the_call() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -2657,7 +2744,7 @@ mod tests {
                 assert_eq!(*done, Message::assistant("done"));
                 assert!(matches!(
                     &prompt.content[..],
-                    [ContentBlock::Text { text }, _] if text == "rephrased"
+                    [ContentBlock::Text { text, .. }, _] if text == "rephrased"
                 ));
                 assert_eq!(*reply, Message::assistant("reply"));
                 assert_eq!(data.context, Some(expected));
@@ -2731,7 +2818,7 @@ mod tests {
                 assert_eq!(turn.last().unwrap()["content"][0]["text"], "five");
                 assert!(matches!(
                     &engine.messages[0].content[0],
-                    ContentBlock::Text { text } if text.contains("auto summary")
+                    ContentBlock::Text { text, .. } if text.contains("auto summary")
                 ));
                 assert_eq!(engine.messages.len(), 3);
                 assert_eq!(
@@ -2977,8 +3064,9 @@ mod tests {
                     "call-1",
                     "the summary covers the finished round"
                 );
-                let Some(ContentBlock::Text { text: continuation }) =
-                    mid_turn_summary().content.pop()
+                let Some(ContentBlock::Text {
+                    text: continuation, ..
+                }) = mid_turn_summary().content.pop()
                 else {
                     panic!("the summary message ends on its continuation");
                 };

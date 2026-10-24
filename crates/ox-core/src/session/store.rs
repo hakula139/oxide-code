@@ -22,8 +22,10 @@ use super::entry::{
     CURRENT_VERSION, CompactInfo, Entry, Header, TitleInfo, UsageRecord, keep_newer,
 };
 use super::path::project_dir_name;
+use super::post_compact::restore_post_compact_origin;
+use super::state::extract_user_text;
 use crate::file_tracker::FileSnapshot;
-use crate::message::Message;
+use crate::message::{ContentBlock, Message, TextOrigin};
 use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 use crate::util::fs::create_private_dir_all;
@@ -292,6 +294,7 @@ pub(crate) struct SessionData {
     pub(crate) context: Option<SessionContext>,
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<TitleInfo>,
+    pub(crate) first_user_prompt_seen: bool,
     pub(crate) archived: bool,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     /// Every billed request in the file, on any branch and across compactions.
@@ -317,6 +320,7 @@ struct SessionDataBuilder {
     /// A compact boundary that takes effect only once its post-compact root follows it.
     pending_compact: Option<CompactInfo>,
     latest_title: Option<TitleInfo>,
+    first_user_prompt_seen: Option<bool>,
     archived: bool,
     /// Set once a compaction takes effect.
     compact_tail: Option<CompactTail>,
@@ -338,9 +342,18 @@ impl SessionDataBuilder {
                 message,
                 timestamp,
             } => self.insert_message(uuid, parent_uuid, message, timestamp, line_no),
-            Entry::Rewind { tip, .. } => self.chain.rewind(tip),
-            Entry::Title { title, updated_at } => {
-                keep_newer(&mut self.latest_title, TitleInfo { title, updated_at });
+            Entry::Rewind {
+                tip,
+                first_user_prompt_seen,
+                ..
+            } => {
+                if self.chain.rewind(tip) {
+                    self.first_user_prompt_seen = first_user_prompt_seen;
+                }
+            }
+            Entry::Title(title) => {
+                keep_newer(&mut self.latest_title, title);
+                self.first_user_prompt_seen = Some(true);
             }
             Entry::Archive { archived, .. } => self.archived = archived,
             Entry::ToolResultMetadata {
@@ -378,7 +391,7 @@ impl SessionDataBuilder {
         &mut self,
         uuid: Uuid,
         parent_uuid: Option<Uuid>,
-        message: Message,
+        mut message: Message,
         timestamp: OffsetDateTime,
         line_no: u32,
     ) {
@@ -391,6 +404,7 @@ impl SessionDataBuilder {
         if let Some(compact) = self.pending_compact.take() {
             if parent_uuid.is_none() {
                 self.reset_at_compact(compact);
+                restore_post_compact_origin(&mut message);
             } else {
                 warn!("skipping compact boundary without its post-compact root at line {line_no}");
             }
@@ -405,6 +419,9 @@ impl SessionDataBuilder {
         }
         if parent_uuid.is_none() {
             self.clear_sidecars();
+        }
+        if extract_user_text(&message).is_some() {
+            self.first_user_prompt_seen = Some(true);
         }
         self.chain
             .insert(uuid, parent_uuid, message, timestamp, context);
@@ -433,6 +450,7 @@ impl SessionDataBuilder {
     fn reset_at_compact(&mut self, compact: CompactInfo) {
         self.chain = ChainBuilder::default();
         self.compact = Some(compact);
+        self.first_user_prompt_seen = Some(true);
         self.compact_tail = Some(CompactTail {
             uuids: HashSet::new(),
             accepts_sidecars: false,
@@ -451,6 +469,20 @@ impl SessionDataBuilder {
             tip,
             context,
         } = self.chain.resolve();
+        // A later writer can extend a user branch that an empty rewind abandoned.
+        let first_user_prompt_seen = messages.iter().any(|m| extract_user_text(m).is_some())
+            || messages.first().is_some_and(|message| {
+                matches!(
+                    message.content.first(),
+                    Some(ContentBlock::Text {
+                        origin: Some(TextOrigin::CompactionSummary),
+                        ..
+                    })
+                )
+            })
+            || self
+                .first_user_prompt_seen
+                .unwrap_or(self.latest_title.is_some());
         SessionData {
             session_id,
             messages,
@@ -458,6 +490,7 @@ impl SessionDataBuilder {
             context: context.map(|context| *context),
             compact: self.compact,
             title: self.latest_title,
+            first_user_prompt_seen,
             archived: self.archived,
             tool_result_metadata: self.tool_result_metadata,
             usage: self.usage,
@@ -675,7 +708,7 @@ mod tests {
     use super::testing::{TEST_PROJECT, WriterBarrier, isolated_store, test_store};
     use super::*;
     use crate::file_tracker::{FileState, LastView};
-    use crate::message::ContentBlock;
+    use crate::message::{ContentBlock, Role};
     use crate::model::PromptCacheTtl;
     use crate::prompt::PromptParts;
     use crate::tool::tasks::testing::plan;
@@ -877,11 +910,11 @@ mod tests {
             assert_eq!(data.messages.len(), 2);
             assert!(matches!(
                 &data.messages[0].content[0],
-                ContentBlock::Text { text } if text == "first"
+                ContentBlock::Text { text, .. } if text == "first"
             ));
             assert!(matches!(
                 &data.messages[1].content[0],
-                ContentBlock::Text { text } if text == "second"
+                ContentBlock::Text { text, .. } if text == "second"
             ));
         }
 
@@ -948,6 +981,99 @@ mod tests {
 
     mod load_session_data_from_path {
         use super::*;
+
+        #[test]
+        fn only_the_committed_compact_root_gains_legacy_provenance() {
+            let (_dir, store) = isolated_store();
+            let now = datetime!(2026-01-01 00:00:00 UTC);
+            let root = Uuid::new_v4();
+            let prompt = Uuid::new_v4();
+            let literal = "<system-reminder>Explain this tag.</system-reminder>";
+            let legacy = Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::text("legacy summary wrapped\nacross lines"),
+                    ContentBlock::text("<system-reminder>saved tasks</system-reminder>"),
+                ],
+            };
+            let records = [
+                Entry::Compact {
+                    summary: "historical summary".to_owned(),
+                    pre_message_count: 2,
+                    instructions: None,
+                    tasks: Vec::new(),
+                    timestamp: now,
+                },
+                Entry::Message {
+                    uuid: root,
+                    parent_uuid: None,
+                    message: legacy.clone(),
+                    timestamp: now,
+                },
+                Entry::Message {
+                    uuid: prompt,
+                    parent_uuid: Some(root),
+                    message: Message::user(literal),
+                    timestamp: now,
+                },
+                Entry::Message {
+                    uuid: Uuid::new_v4(),
+                    parent_uuid: Some(prompt),
+                    message: Message::user(crate::message::INTERRUPTION_MARKER),
+                    timestamp: now,
+                },
+            ];
+            store
+                .create(
+                    &sample_header("legacy-origins"),
+                    &encode_lines(&records).unwrap(),
+                )
+                .unwrap();
+
+            let loaded = store.load_session_data("legacy-origins").unwrap();
+            let history = crate::session::history::interactions(
+                &loaded.messages,
+                loaded.compact.as_ref(),
+                &loaded.tool_result_metadata,
+                &crate::tool::ToolRegistry::new(Vec::new()),
+                Path::new("/repo"),
+            );
+
+            assert_eq!(
+                loaded.messages,
+                [
+                    Message {
+                        role: Role::User,
+                        content: vec![
+                            ContentBlock::generated_text(
+                                legacy.content[0].as_text().unwrap(),
+                                TextOrigin::CompactionSummary
+                            ),
+                            ContentBlock::generated_text(
+                                legacy.content[1].as_text().unwrap(),
+                                TextOrigin::SystemReminder
+                            ),
+                        ]
+                    },
+                    Message::user(literal),
+                    Message::user(crate::message::INTERRUPTION_MARKER),
+                ]
+            );
+            assert_eq!(
+                history,
+                [
+                    crate::protocol::Interaction::Compacted {
+                        summary: "historical summary".to_owned(),
+                        pre_count: 2,
+                        instructions: None
+                    },
+                    crate::protocol::Interaction::UserText(literal.to_owned()),
+                    crate::protocol::Interaction::UserText(
+                        crate::message::INTERRUPTION_MARKER.to_owned()
+                    ),
+                ]
+            );
+        }
 
         fn session_context(date: &str) -> SessionContext {
             let mut prompt = PromptParts::default();
@@ -1049,12 +1175,12 @@ mod tests {
             assert_eq!(data.messages[0].role, crate::message::Role::User);
             assert!(matches!(
                 &data.messages[0].content[0],
-                ContentBlock::Text { text } if text == "hello"
+                ContentBlock::Text { text, .. } if text == "hello"
             ));
             assert_eq!(data.messages[1].role, crate::message::Role::Assistant);
             assert!(matches!(
                 &data.messages[1].content[0],
-                ContentBlock::Text { text } if text == "hi there"
+                ContentBlock::Text { text, .. } if text == "hi there"
             ));
         }
 
@@ -1368,7 +1494,7 @@ mod tests {
             assert_eq!(data.messages.len(), 1);
             assert!(matches!(
                 &data.messages[0].content[0],
-                ContentBlock::Text { text } if text == "synthetic summary"
+                ContentBlock::Text { text, .. } if text == "synthetic summary"
             ));
             assert_eq!(
                 data.compact,
@@ -1515,7 +1641,16 @@ mod tests {
             .unwrap();
 
             let data = store.load_session_data("billed").unwrap();
-            assert_eq!(data.messages, [Message::user("summary")]);
+            assert_eq!(
+                data.messages,
+                [Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::generated_text(
+                        "summary",
+                        TextOrigin::CompactionSummary
+                    )],
+                }]
+            );
             let usage: Vec<_> = data
                 .usage
                 .iter()
@@ -1618,11 +1753,11 @@ mod tests {
             );
             assert_eq!(data.messages.len(), 2);
             assert!(
-                matches!(&data.messages[0].content[0], ContentBlock::Text { text } if text == "shared root"),
+                matches!(&data.messages[0].content[0], ContentBlock::Text { text, .. } if text == "shared root"),
                 "chain should start at the shared ancestor"
             );
             assert!(
-                matches!(&data.messages[1].content[0], ContentBlock::Text { text } if text == "branch B (newer leaf)"),
+                matches!(&data.messages[1].content[0], ContentBlock::Text { text, .. } if text == "branch B (newer leaf)"),
                 "chain should end at the newest leaf"
             );
         }
