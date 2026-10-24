@@ -599,24 +599,17 @@ mod tests {
         }
 
         #[test]
-        fn shift_enter_inserts_newline() {
-            let mut input = test_input();
-            type_text(&mut input, "a");
+        fn modified_enter_inserts_newline() {
+            for modifiers in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+                let mut input = test_input();
+                type_text(&mut input, "a");
 
-            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
-            assert_eq!(outcome, InputOutcome::Consumed);
-            assert_eq!(input.textarea.lines().len(), 2);
-        }
+                let outcome = input.handle_event(&key(KeyCode::Enter, modifiers));
+                assert_eq!(outcome, InputOutcome::Consumed, "{modifiers:?}");
 
-        #[test]
-        fn alt_enter_inserts_newline() {
-            // VS Code and Cursor send Shift+Enter as `\x1b\r`, which crossterm parses as Alt+Enter.
-            let mut input = test_input();
-            type_text(&mut input, "a");
-
-            let outcome = input.handle_event(&key(KeyCode::Enter, KeyModifiers::ALT));
-            assert_eq!(outcome, InputOutcome::Consumed);
-            assert_eq!(input.textarea.lines().len(), 2);
+                assert_eq!(input.textarea.lines(), ["a", ""], "{modifiers:?}");
+                assert_eq!(input.textarea.cursor(), (1, 0), "{modifiers:?}");
+            }
         }
 
         #[test]
