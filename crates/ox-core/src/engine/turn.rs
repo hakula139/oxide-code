@@ -1427,6 +1427,11 @@ mod tests {
                 Op::Compact { instructions: None },
                 Op::Clear,
                 Op::Archive,
+                Op::SetArchive {
+                    path: "/repo/other.jsonl".into(),
+                    session_id: "other".to_owned(),
+                    state: crate::session::entry::ArchiveState::Archived,
+                },
                 Op::Resume {
                     target: ResumeTarget::Path("/repo/other.jsonl".into()),
                 },

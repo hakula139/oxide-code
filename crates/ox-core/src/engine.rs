@@ -54,6 +54,8 @@ const OP_CHANNEL_CAP: usize = 32;
 
 /// A running [`Engine`]. Closing `ops` asks it to quit.
 pub struct EngineHandle {
+    /// Frontend submissions, subject to [`Op`]'s idle-state requirements. Enqueueing an op does
+    /// not acknowledge its execution.
     pub ops: mpsc::Sender<Op>,
     pub events: mpsc::UnboundedReceiver<Event>,
     pub task: EngineTask,
@@ -302,6 +304,13 @@ impl Engine {
                 }
                 Op::Clear => self.clear(&sink).await,
                 Op::Archive => self.archive(&sink).await,
+                Op::SetArchive {
+                    path,
+                    session_id,
+                    state,
+                } => {
+                    self.set_archive(&sink, path, session_id, state).await;
+                }
                 Op::Resume { target } => self.resume(&sink, target).await,
                 Op::Rename { title } => self.rename(&sink, title).await,
                 Op::SetModel(pick) => self.set_model(&sink, pick),
@@ -629,6 +638,11 @@ impl TurnEnd {
     /// How `op` ended, if `event` is one of the terminal events [`Event`] lists for it.
     pub fn of(op: &Op, event: &Event) -> Option<Self> {
         match (op, event) {
+            (Op::SetArchive { .. }, Event::ArchiveUpdated { result, .. }) => Some(if result.is_ok() {
+                Self::Completed
+            } else {
+                Self::Failed
+            }),
             (
                 Op::Prompt { .. }
                 | Op::Compact { .. }
@@ -724,7 +738,7 @@ mod tests {
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;
     use crate::session::post_compact::synthesize_post_compact_message;
-    use crate::session::store::testing::test_store;
+    use crate::session::store::testing::{WriterBarrier, seed_test_session, test_store};
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
     use crate::tool::bash::background::testing::shell;
@@ -1544,6 +1558,73 @@ mod tests {
 
                 assert_eq!(resumed, (archived_id.clone(), ArchiveState::Archived));
                 assert!(!store.load_session_data(&archived_id).unwrap().archived);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn finishes_a_saved_archive_before_the_queued_resume() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                seed_test_session(
+                    &store,
+                    "saved",
+                    Some("Saved"),
+                    Some(1),
+                    time::macros::datetime!(2026-04-18 09:00:00 UTC),
+                );
+                let path = store.find_session_path("saved").unwrap();
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let barrier = WriterBarrier::hold(&path);
+                let mut handle = engine.spawn();
+
+                handle
+                    .ops
+                    .send(Op::SetArchive {
+                        path: path.clone(),
+                        session_id: "saved".to_owned(),
+                        state: ArchiveState::Archived,
+                    })
+                    .await
+                    .unwrap();
+                handle
+                    .ops
+                    .send(Op::Resume {
+                        target: ResumeTarget::Path(path),
+                    })
+                    .await
+                    .unwrap();
+                let independent = tokio::spawn(async { "runtime event" });
+
+                assert_eq!(independent.await.unwrap(), "runtime event");
+                assert!(!store.load_session_data("saved").unwrap().archived);
+                barrier.release();
+                let archived = next_matching(&mut handle.events, |event| {
+                    matches!(
+                        event,
+                        Event::ArchiveUpdated { .. } | Event::SessionResumed { .. }
+                    )
+                    .then_some(event)
+                })
+                .await;
+                assert_eq!(
+                    archived,
+                    Event::ArchiveUpdated {
+                        id: "saved".to_owned(),
+                        result: Ok(ArchiveState::Archived)
+                    }
+                );
+                let resumed = next_matching(&mut handle.events, |event| match event {
+                    Event::SessionResumed { id, prior, .. } => Some((id, prior)),
+                    _ => None,
+                })
+                .await;
+                handle.shutdown().await.unwrap();
+
+                assert_eq!(resumed, ("saved".to_owned(), ArchiveState::Archived));
+                assert!(!store.load_session_data("saved").unwrap().archived);
             })
             .await;
         }
@@ -3340,6 +3421,31 @@ mod tests {
 
         mod of {
             use super::*;
+
+            #[test]
+            fn saved_archive_ends_on_its_completion_result() {
+                let op = Op::SetArchive {
+                    path: "/repo/saved.jsonl".into(),
+                    session_id: "saved".to_owned(),
+                    state: ArchiveState::Archived,
+                };
+
+                for (result, expected) in [
+                    (Ok(ArchiveState::Archived), TurnEnd::Completed),
+                    (Err("Archive failed".to_owned()), TurnEnd::Failed),
+                ] {
+                    assert_eq!(
+                        TurnEnd::of(
+                            &op,
+                            &Event::ArchiveUpdated {
+                                id: "saved".to_owned(),
+                                result
+                            }
+                        ),
+                        Some(expected)
+                    );
+                }
+            }
 
             #[test]
             fn reads_only_the_terminal_events_of_the_op_in_flight() {

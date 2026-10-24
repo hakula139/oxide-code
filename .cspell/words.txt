@@ -84,6 +84,7 @@ nixos
 nixpkgs
 nlink
 nocapture
+noclobber
 nohup
 nonewline
 noprefix
