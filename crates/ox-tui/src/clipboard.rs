@@ -1226,26 +1226,58 @@ mod tests {
 
             #[tokio::test]
             async fn kills_and_reaps_the_child_when_its_deadline_expires() {
-                let mut child = Command::new("git")
-                    .args(["hash-object", "--stdin"])
+                const CHILD: &str = "OX_TEST_CLIPBOARD_CHILD";
+                if std::env::var_os(CHILD).is_some() {
+                    std::io::Write::write_all(&mut std::io::stderr().lock(), b"ready").unwrap();
+                    std::future::pending::<()>().await;
+                    return;
+                }
+
+                let thread = std::thread::current();
+                let test_name = thread.name().unwrap();
+                let mut child = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env(CHILD, "1")
                     .stdin(Stdio::piped())
                     .stdout(Stdio::null())
                     .stderr(Stdio::piped())
                     .kill_on_drop(true)
                     .spawn()
                     .unwrap();
+                let mut ready = [0; 5];
 
-                let error = Program("git")
-                    .run_child(&mut child, "", Instant::now())
-                    .await
-                    .unwrap_err();
+                let result = tokio::time::timeout(Duration::from_secs(10), async {
+                    child
+                        .stderr
+                        .as_mut()
+                        .unwrap()
+                        .read_exact(&mut ready)
+                        .await
+                        .context("the child did not announce readiness")?;
+                    Program("fixture")
+                        .run_child(&mut child, "", Instant::now())
+                        .await
+                })
+                .await;
+                let reaped = child.id().is_none();
+                let status = child.try_wait();
+                child.kill().await.unwrap();
 
+                assert_eq!(&ready, b"ready");
+                let error = result.expect("the child was not stopped").unwrap_err();
                 assert_eq!(
                     error.to_string(),
-                    "git did not answer before the clipboard deadline"
+                    "fixture did not answer before the clipboard deadline"
                 );
-                assert_eq!(child.id(), None, "the child was awaited before returning");
-                assert!(child.try_wait().unwrap().is_some(), "the child has exited");
+                assert!(reaped, "the child was awaited before returning");
+                let status = status.unwrap().expect("the child has exited");
+                assert!(!status.success(), "the child required forced termination");
+                #[cfg(unix)]
+                assert_eq!(
+                    std::os::unix::process::ExitStatusExt::signal(&status),
+                    Some(9),
+                    "the child was killed with SIGKILL"
+                );
             }
         }
     }
