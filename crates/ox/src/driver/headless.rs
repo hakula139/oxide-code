@@ -17,14 +17,14 @@ use ox_core::protocol::notice::ENGINE_STOPPED;
 use ox_core::protocol::{Event, EventSink, Op, UsageSnapshot};
 use ox_core::util::sync::lock_or_recover;
 
-use super::stdio::{StdioSink, Unattended, render_op};
+use super::stdio::{Renderer, StdioSink, Unattended, render_op};
 use super::{Exit, shutdown_signal};
 
 /// How long [`read_prompt`] waits on an open stdin before saying what it waits for.
 const STDIN_NOTICE_DELAY: Duration = Duration::from_secs(3);
 
-/// Runs `prompt` as a single turn, printed in `format`. A turn that does not complete exits with
-/// failure, and a signal exits with its own status. If the engine panics, the panic is returned
+/// Runs `prompt` as a single turn, printed in `format`. An incomplete turn or failed output exits
+/// with failure, and a signal exits with its own status. If the engine panics, the panic is returned
 /// after the failed result is printed.
 pub(crate) async fn run(
     engine: Engine,
@@ -109,24 +109,22 @@ where
     E: Write + Send,
 {
     let prompt = Op::prompt(command::unescape_literal(prompt));
+    let mut renderer = Renderer::new(printer);
     // A send fails only once the engine has stopped, which `render_op` then reports.
     _ = handle.ops.send(prompt.clone()).await;
-    let rendered = render_op(
+    let operation = render_op(
         &mut handle.events,
-        printer,
+        &mut renderer,
         &handle.ops,
         &prompt,
         None::<&mut Unattended>,
     );
     let (end, mut exit) = tokio::select! {
-        end = rendered => match end {
+        end = operation => match end {
             Some(TurnEnd::Completed) => (TurnEnd::Completed, Exit::Success),
             Some(end) => (end, Exit::Failure),
             None => {
-                printer.emit(
-                    Event::TurnFailed(ENGINE_STOPPED.to_owned()),
-                    "engine-stopped",
-                );
+                renderer.render(Event::TurnFailed(ENGINE_STOPPED.to_owned()));
                 (TurnEnd::Failed, Exit::Failure)
             }
         },
@@ -138,10 +136,10 @@ where
 
     let finished = handle.shutdown().await;
     if let Ok(failure) = &finished {
-        printer.session_write_error(failure.as_deref());
+        renderer.session_write_error(failure.as_deref());
     }
-    if let Err(e) = printer.finish(end) {
-        _ = writeln!(io::stderr(), "Error: failed to print the result: {e:#}");
+    if let Err(e) = renderer.finish().and(printer.finish(end)) {
+        _ = writeln!(io::stderr(), "Error: failed to print output: {e:#}");
         if !matches!(exit, Exit::Signal(_)) {
             exit = Exit::Failure;
         }
@@ -560,25 +558,103 @@ mod tests {
         #[tokio::test]
         async fn fails_a_completed_turn_whose_result_cannot_be_printed() {
             with_pinned_home(async {
-                let server = MockServer::start().await;
-                mount_reply(&server, "reply").await;
-                let dir = tempfile::tempdir().unwrap();
-                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let printer = Printer::new(
-                    OutputFormat::Json,
-                    false,
-                    SESSION_ID.to_owned(),
-                    ClosedPipe,
-                    Vec::new(),
-                );
+                for &format in OutputFormat::value_variants() {
+                    let server = MockServer::start().await;
+                    mount_reply(&server, "reply").await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    let printer =
+                        Printer::new(format, false, SESSION_ID.to_owned(), ClosedPipe, Vec::new());
 
-                let exit = Box::pin(drive(engine.spawn(), &printer, "hello"))
-                    .await
-                    .unwrap();
+                    let exit = Box::pin(drive(engine.spawn(), &printer, "hello"))
+                        .await
+                        .unwrap();
 
-                assert_eq!(exit, Exit::Failure);
+                    assert_eq!(exit, Exit::Failure, "{format:?}");
+                }
             })
             .await;
+        }
+    }
+
+    mod rendering {
+        use super::*;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Failure {
+            Write,
+            Flush,
+        }
+
+        struct FailOnce {
+            output: Vec<u8>,
+            failure: Option<Failure>,
+        }
+
+        impl Write for FailOnce {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if self.failure == Some(Failure::Write) {
+                    self.failure = None;
+                    return Err(io::Error::other("first write failed"));
+                }
+                self.output.write(buf)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                if self.failure == Some(Failure::Flush) {
+                    self.failure = None;
+                    return Err(io::Error::other("first flush failed"));
+                }
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn retains_early_write_and_flush_failures_after_later_output_succeeds() {
+            for format in [OutputFormat::Text, OutputFormat::StreamJson] {
+                for failure in [Failure::Write, Failure::Flush] {
+                    let stdout = FailOnce {
+                        output: Vec::new(),
+                        failure: Some(failure),
+                    };
+                    let printer =
+                        Printer::new(format, false, SESSION_ID.to_owned(), stdout, Vec::new());
+                    let mut renderer = Renderer::new(&printer);
+
+                    for event in [
+                        Event::StreamToken("lost".to_owned()),
+                        Event::StreamToken("reply".to_owned()),
+                        Event::Error("boom".to_owned()),
+                        Event::TurnComplete,
+                    ] {
+                        renderer.render(event);
+                    }
+                    let finished = renderer.finish().and(printer.finish(TurnEnd::Completed));
+                    let expected = match failure {
+                        Failure::Write => "first write failed",
+                        Failure::Flush => "first flush failed",
+                    };
+                    assert_eq!(
+                        finished.unwrap_err().to_string(),
+                        expected,
+                        "{format:?}, {failure:?}",
+                    );
+
+                    let (stdout, stderr) = printed(printer);
+                    if format == OutputFormat::Text {
+                        let expected = match failure {
+                            Failure::Write => "reply\n",
+                            Failure::Flush => "lostreply\n",
+                        };
+                        assert_eq!(stdout.output, expected.as_bytes(), "{failure:?}");
+                    } else {
+                        let result = result_data(&stdout.output);
+                        assert_eq!(result["stop_reason"], "completed", "{failure:?}");
+                        assert_eq!(result["message"], "lostreply", "{failure:?}");
+                    }
+                    assert_eq!(stderr, "Error: boom\n", "{format:?}, {failure:?}");
+                }
+            }
         }
     }
 
