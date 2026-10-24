@@ -239,6 +239,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::process::Command;
     use std::sync::Arc;
 
     use tokio::sync::{Notify, mpsc};
@@ -705,6 +706,24 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn logs_parent_creation_failure_after_the_caller_is_dropped() {
+            // Tracing caches callsite interest process-wide, including other test threads.
+            const CHILD: &str = "PARENT_CREATION_LOG_TEST_CHILD";
+            if std::env::var_os(CHILD).is_none() {
+                let thread = std::thread::current();
+                let name = thread.name().unwrap();
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", name])
+                    .env(CHILD, "1")
+                    .output()
+                    .unwrap();
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(output.status.success(), "{stdout}{stderr}");
+                assert!(stdout.contains(&format!("test {name} ... ok")), "{stdout}");
+                return;
+            }
+
             let dir = canonical_tempdir();
             let parent = dir.path().join("nested");
             let path = parent.join("file.txt");
