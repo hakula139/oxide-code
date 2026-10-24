@@ -310,13 +310,15 @@ mod tests {
                     )
                     .unwrap_err();
 
-                    if attempt.acl_available {
+                    let outcome = if attempt.acl_available {
                         assert!(error.to_string().contains("injected"), "{phase:?}");
                         assert_eq!(visited.last(), Some(&phase));
+                        "injected-error"
                     } else {
                         attempt.assert_native_refusal(&error);
                         assert_eq!(visited, []);
-                    }
+                        "refused"
+                    };
                     assert_eq!(entries(dir.path()), before, "{phase:?}");
                     if let Some(original) = original {
                         assert_eq!(fs::read(&path).unwrap(), b"original", "{phase:?}");
@@ -328,6 +330,10 @@ mod tests {
                     } else {
                         assert!(!path.exists(), "{phase:?}");
                     }
+                    println!(
+                        "workspace-write-checkpoint existing={existing} requested={phase:?} visited={visited:?} outcome={outcome} errno={:?}",
+                        error.raw_os_error()
+                    );
                 }
             }
         }
@@ -694,7 +700,8 @@ mod tests {
 
             let result = write(&path, b"new", Some(b"original"));
 
-            if attempt.acl_available {
+            let errno = result.as_ref().err().and_then(io::Error::raw_os_error);
+            let (outcome, xattrs) = if attempt.acl_available {
                 result.unwrap();
                 let current = File::open(&path).unwrap();
                 snapshot.unwrap().verify(&current).unwrap();
@@ -708,17 +715,21 @@ mod tests {
                         current.get_xattr("user.ox.empty").unwrap(),
                         Some(Vec::new())
                     );
+                    ("preserved", "verified")
                 } else {
                     assert_eq!(
                         current.list_xattr().unwrap_err().raw_os_error(),
                         Some(nix::libc::EOPNOTSUPP)
                     );
+                    ("preserved", "unsupported")
                 }
             } else {
                 attempt.assert_native_refusal(&snapshot.unwrap_err());
                 attempt.assert_native_refusal(&result.unwrap_err());
-            }
+                ("refused", "not-reached")
+            };
             assert_eq!(entries(dir.path()), [path.file_name().unwrap()]);
+            println!("workspace-write-metadata outcome={outcome} xattrs={xattrs} errno={errno:?}");
         }
 
         #[cfg(unix)]
@@ -915,7 +926,8 @@ mod tests {
 
             let result = write(&path, b"new", Some(b"original"));
 
-            if attempt.acl_available {
+            let errno = result.as_ref().err().and_then(io::Error::raw_os_error);
+            let (outcome, named_acl) = if attempt.acl_available {
                 result.unwrap();
                 snapshot
                     .unwrap()
@@ -937,14 +949,18 @@ mod tests {
                     without_acl.verify(&current).unwrap();
                     assert_eq!(current.get_xattr("system.posix_acl_access").unwrap(), None);
                     assert_eq!(fs::read(&path).unwrap(), b"again");
+                    ("preserved", "verified")
                 } else {
                     assert_eq!(current.get_xattr("system.posix_acl_access").unwrap(), None);
+                    ("preserved", "unsupported")
                 }
             } else {
                 attempt.assert_native_refusal(&snapshot.unwrap_err());
                 attempt.assert_native_refusal(&result.unwrap_err());
-            }
+                ("refused", "not-reached")
+            };
             assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+            println!("workspace-write-acl outcome={outcome} named_acl={named_acl} errno={errno:?}");
         }
     }
 }
