@@ -982,6 +982,73 @@ mod tests {
     mod load_session_data_from_path {
         use super::*;
 
+        fn session_context(date: &str) -> SessionContext {
+            let mut prompt = PromptParts::default();
+            date.clone_into(&mut prompt.seen.date);
+            prompt.session_context()
+        }
+
+        fn sample_context(date: &str, timestamp: OffsetDateTime) -> Entry {
+            Entry::Context {
+                context: Box::new(session_context(date)),
+                timestamp,
+            }
+        }
+
+        /// A user message recorded with the context dated `date`, as the actor writes one.
+        fn message_with_context(
+            date: &str,
+            uuid: Uuid,
+            parent_uuid: Option<Uuid>,
+            timestamp: OffsetDateTime,
+            text: &str,
+        ) -> [Entry; 2] {
+            [
+                sample_context(date, timestamp),
+                sample_message_at(uuid, parent_uuid, timestamp, text),
+            ]
+        }
+
+        fn sample_snapshot(path: &str) -> Entry {
+            Entry::FileSnapshot {
+                snapshot: FileSnapshot {
+                    path: PathBuf::from(path),
+                    state: FileState {
+                        content_hash: 42,
+                        last_view: LastView::Full,
+                        recorded_at: datetime!(2026-04-16 12:00:01 UTC),
+                        tool_use_id: "toolu_1".to_owned(),
+                    },
+                },
+            }
+        }
+
+        /// A boundary compacting one message, with no focus instructions or tasks.
+        fn sample_compact(timestamp: OffsetDateTime) -> Entry {
+            Entry::Compact {
+                summary: "summary".to_owned(),
+                pre_message_count: 1,
+                instructions: None,
+                tasks: Vec::new(),
+                timestamp,
+            }
+        }
+
+        fn sample_tool_metadata(
+            tool_use_id: &str,
+            title: &str,
+            timestamp: OffsetDateTime,
+        ) -> Entry {
+            Entry::ToolResultMetadata {
+                tool_use_id: tool_use_id.to_owned(),
+                metadata: ToolMetadata {
+                    title: Some(title.to_owned()),
+                    ..ToolMetadata::default()
+                },
+                timestamp,
+            }
+        }
+
         #[test]
         fn only_the_committed_compact_root_gains_legacy_provenance() {
             let (_dir, store) = isolated_store();
@@ -1073,73 +1140,6 @@ mod tests {
                     ),
                 ]
             );
-        }
-
-        fn session_context(date: &str) -> SessionContext {
-            let mut prompt = PromptParts::default();
-            date.clone_into(&mut prompt.seen.date);
-            prompt.session_context()
-        }
-
-        fn sample_context(date: &str, timestamp: OffsetDateTime) -> Entry {
-            Entry::Context {
-                context: Box::new(session_context(date)),
-                timestamp,
-            }
-        }
-
-        /// A user message recorded with the context dated `date`, as the actor writes one.
-        fn message_with_context(
-            date: &str,
-            uuid: Uuid,
-            parent_uuid: Option<Uuid>,
-            timestamp: OffsetDateTime,
-            text: &str,
-        ) -> [Entry; 2] {
-            [
-                sample_context(date, timestamp),
-                sample_message_at(uuid, parent_uuid, timestamp, text),
-            ]
-        }
-
-        fn sample_snapshot(path: &str) -> Entry {
-            Entry::FileSnapshot {
-                snapshot: FileSnapshot {
-                    path: PathBuf::from(path),
-                    state: FileState {
-                        content_hash: 42,
-                        last_view: LastView::Full,
-                        recorded_at: datetime!(2026-04-16 12:00:01 UTC),
-                        tool_use_id: "toolu_1".to_owned(),
-                    },
-                },
-            }
-        }
-
-        /// A boundary compacting one message, with no focus instructions or tasks.
-        fn sample_compact(timestamp: OffsetDateTime) -> Entry {
-            Entry::Compact {
-                summary: "summary".to_owned(),
-                pre_message_count: 1,
-                instructions: None,
-                tasks: Vec::new(),
-                timestamp,
-            }
-        }
-
-        fn sample_tool_metadata(
-            tool_use_id: &str,
-            title: &str,
-            timestamp: OffsetDateTime,
-        ) -> Entry {
-            Entry::ToolResultMetadata {
-                tool_use_id: tool_use_id.to_owned(),
-                metadata: ToolMetadata {
-                    title: Some(title.to_owned()),
-                    ..ToolMetadata::default()
-                },
-                timestamp,
-            }
         }
 
         #[test]

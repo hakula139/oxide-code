@@ -560,6 +560,7 @@ mod tests {
     use crate::prompt::PromptParts;
     use crate::session::entry::{Entry, ExitInfo, SessionInfo};
     use crate::session::handle::testing::record_write_call;
+    use crate::session::store::encode_lines;
     use crate::session::store::listing::ProjectScope;
     use crate::session::store::local_testing::{
         saved_entries, saved_snapshot_paths, saved_titles, test_session_file,
@@ -1779,7 +1780,7 @@ mod tests {
             store
                 .open_append("revived")
                 .unwrap()
-                .append(&records)
+                .append_lines(&encode_lines(&records).unwrap())
                 .unwrap();
 
             let resumed = resume_id(&store, "revived").unwrap();
@@ -1836,7 +1837,7 @@ mod tests {
                 store
                     .open_append("legacy")
                     .unwrap()
-                    .append(&records)
+                    .append_lines(&encode_lines(&records).unwrap())
                     .unwrap();
 
                 let resumed = resume_id(&store, "legacy").unwrap();
@@ -1892,7 +1893,7 @@ mod tests {
             store
                 .open_append("unknown")
                 .unwrap()
-                .append(&records)
+                .append_lines(&encode_lines(&records).unwrap())
                 .unwrap();
 
             let resumed = resume_id(&store, "unknown").unwrap();

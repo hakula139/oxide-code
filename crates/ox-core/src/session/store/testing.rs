@@ -78,7 +78,7 @@ pub(super) fn find_session_in(dir: &Path, session_id: &str) -> Option<PathBuf> {
 // ── SessionWriter ──
 
 impl SessionWriter {
-    pub(in crate::session) fn append(&mut self, entries: &[Entry]) -> Result<()> {
+    pub(super) fn append(&mut self, entries: &[Entry]) -> Result<()> {
         self.append_lines(&encode_lines(entries)?)
     }
 }
