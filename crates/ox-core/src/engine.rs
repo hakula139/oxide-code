@@ -2427,49 +2427,71 @@ mod tests {
         #[tokio::test]
         async fn bills_nothing_for_a_title_request_that_fails() {
             with_pinned_home(async {
-                let server = MockServer::start().await;
-                let failure = ResponseTemplate::new(500).insert_header("retry-after", "0");
-                mount_title(&server, failure).await;
-                mount_reply(&server, "reply").await;
-                let dir = tempfile::tempdir().unwrap();
-                let store = test_store(dir.path());
-                let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.generates_titles = true;
-                let session_id = engine.session_id().to_owned();
-                let cache_ttl = engine.client.prompt_cache_ttl();
-                let sink = CapturingSink::default();
+                for (case, title_finishes_first) in [("title first", true), ("turn first", false)] {
+                    let server = MockServer::start().await;
+                    let failure = ResponseTemplate::new(500).insert_header("retry-after", "0");
+                    mount_title(&server, failure).await;
+                    mount_reply(&server, "reply").await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = test_store(dir.path());
+                    let mut engine = engine(server.uri(), &store, dir.path()).await;
+                    let session_id = engine.session_id().to_owned();
+                    let cache_ttl = engine.client.prompt_cache_ttl();
+                    let sink = CapturingSink::default();
+                    let title = title_generator::spawn(
+                        engine.client.clone(),
+                        engine.session.clone(),
+                        sink.clone(),
+                        "hello".to_owned(),
+                    );
+                    let (billed, usage) = oneshot::channel();
+                    engine.title_usage = Some(usage);
+                    let failure = async {
+                        assert!(
+                            title.await.is_err(),
+                            "{case}: failed title reports no usage"
+                        );
+                        drop(billed);
+                    };
+                    let mut ops = inert_ops();
+                    let turn = engine.submit_prompt("hello", None, &sink, &mut ops);
 
-                engine
-                    .submit_prompt("hello", None, &sink, &mut inert_ops())
-                    .await;
-                let title = engine.title_usage.as_mut().expect("a fresh session titles");
-                let delivered = title.await;
-                engine.emit_usage_update(&sink);
-                engine.finalize().await;
+                    let end = if title_finishes_first {
+                        failure.await;
+                        turn.await
+                    } else {
+                        let end = turn.await;
+                        failure.await;
+                        end
+                    };
+                    assert_eq!(end, TurnEnd::Completed, "{case}");
+                    engine.emit_usage_update(&sink);
+                    engine.finalize().await;
 
-                assert!(delivered.is_err(), "the failed request delivers no usage");
-                let shown = sink
-                    .events()
-                    .into_iter()
-                    .rev()
-                    .find_map(|event| match event {
-                        Event::UsageUpdated(usage) => usage.estimated_cost_usd,
-                        _ => None,
-                    });
-                let expected = request_cost(MODEL, REPLY_USAGE);
-                assert!(
-                    shown.is_some_and(|cost| (cost - expected).abs() < 1e-12),
-                    "only the turn counts: {shown:?}"
-                );
-                let data = store.load_session_data(&session_id).unwrap();
-                assert_eq!(
-                    data.usage,
-                    [UsageRecord {
-                        model: MODEL.to_owned(),
-                        cache_ttl,
-                        tokens: REPLY_USAGE,
-                    }]
-                );
+                    let shown = sink
+                        .events()
+                        .into_iter()
+                        .rev()
+                        .find_map(|event| match event {
+                            Event::UsageUpdated(usage) => usage.estimated_cost_usd,
+                            _ => None,
+                        });
+                    let expected = request_cost(MODEL, REPLY_USAGE);
+                    assert!(
+                        shown.is_some_and(|cost| (cost - expected).abs() < 1e-12),
+                        "{case}: only the turn counts: {shown:?}"
+                    );
+                    let data = store.load_session_data(&session_id).unwrap();
+                    assert_eq!(
+                        data.usage,
+                        [UsageRecord {
+                            model: MODEL.to_owned(),
+                            cache_ttl,
+                            tokens: REPLY_USAGE,
+                        }],
+                        "{case}"
+                    );
+                }
             })
             .await;
         }
