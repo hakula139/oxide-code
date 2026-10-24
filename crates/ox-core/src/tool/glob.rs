@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use super::search::{NO_FILES_FOUND, SearchRoot};
+use super::search::{NO_FILES_FOUND, SearchRoot, SearchRow, SearchRows};
 use super::view::ToolResultView;
 use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
 use crate::permission::{PermissionClass, ReadFilter};
@@ -124,8 +124,11 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
             content,
             title,
             truncated_total,
+            view,
         }) => {
-            let output = ToolOutput::success(content).with_title(title);
+            let output = ToolOutput::success(content)
+                .with_title(title)
+                .with_result_view(view);
             match truncated_total {
                 Some(total) => output.with_truncated_total(total),
                 None => output,
@@ -141,6 +144,7 @@ struct GlobOutput {
     /// A one-line summary of the call, which the UI shows on its result.
     title: String,
     truncated_total: Option<usize>,
+    view: ToolResultView,
 }
 
 /// Lists up to [`MAX_RESULTS`] files under `root` that match `pattern`, newest first and relative
@@ -181,22 +185,21 @@ fn glob_files(
             withheld += usize::from(held);
             !held
         });
-    let mut matches: Vec<String> = super::search::newest_first(entries)
-        .iter()
-        .map(|entry| super::display_path(entry.path(), cwd))
-        .collect();
+    let (entries, total) = super::search::newest_first(entries, MAX_RESULTS);
+    let mut rows = SearchRows::new(MAX_RESULTS);
+    for entry in entries {
+        rows.push(SearchRow::Path(super::display_path(entry.path(), cwd)));
+    }
     withheld += super::search::withhold_unreadable(&mut unreadable, &read_filter);
 
-    let total = matches.len();
     let truncated = total > MAX_RESULTS;
-    matches.truncate(MAX_RESULTS);
 
-    let (mut content, title) = if matches.is_empty() {
+    let (mut content, title) = if rows.kept.is_empty() {
         (NO_FILES_FOUND.to_owned(), NO_FILES_FOUND.to_owned())
     } else {
-        let count = matches.len();
+        let count = rows.kept.len();
         let word = plural(count, "file", "files");
-        (matches.join("\n"), format!("Found {count} {word}"))
+        (rows.render(), format!("Found {count} {word}"))
     };
     if truncated {
         _ = write!(
@@ -206,11 +209,23 @@ fn glob_files(
     }
     super::search::push_unreadable_note(&mut content, &unreadable, cwd);
     super::search::push_withheld_note(&mut content, withheld);
+    let view = if unreadable.is_empty() && withheld == 0 {
+        ToolResultView::GlobFiles {
+            pattern: pattern.to_owned(),
+            files: rows.kept.iter().map(ToString::to_string).collect(),
+            total,
+        }
+    } else {
+        ToolResultView::Text {
+            content: content.clone(),
+        }
+    };
 
     Ok(GlobOutput {
         content,
         title,
         truncated_total: truncated.then_some(total),
+        view,
     })
 }
 
@@ -239,6 +254,7 @@ fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, String> {
 
 // ── Result View ──
 
+/// Reconstructs a legacy result without stored paths, retaining unrecognized output as text.
 fn parse_files_view(
     input: &serde_json::Value,
     content: &str,
@@ -293,6 +309,7 @@ mod tests {
 
     use super::*;
     use crate::permission::Access;
+    use crate::tool::ToolRegistry;
     use crate::tool::local_testing::{self, ctx, deny_reads, search_root, temp_ctx};
     use crate::util::fs::testing::deny_read_access;
     use crate::util::path::local_testing::canonical_tempdir;
@@ -542,6 +559,89 @@ mod tests {
 
     mod run {
         use super::*;
+
+        async fn assert_filename_round_trip(name: &str) {
+            let dir = canonical_tempdir();
+            fs::write(dir.path().join(name), "").unwrap();
+            let input = serde_json::json!({"pattern": "*"});
+            let registry = ToolRegistry::new(vec![Box::new(glob_tool())]);
+
+            let output = registry
+                .run_input("glob", input.clone(), &ctx(dir.path()))
+                .await;
+            assert!(!output.is_error, "{name:?}: {}", output.content);
+            let metadata: ToolMetadata =
+                serde_json::from_value(serde_json::to_value(&output.metadata).unwrap()).unwrap();
+
+            assert_eq!(output.content, name);
+            assert_eq!(output.metadata.title.as_deref(), Some("Found 1 file"));
+            for cwd in [dir.path(), Path::new("/another/workspace")] {
+                assert_eq!(
+                    registry.result_view(
+                        "glob",
+                        &input,
+                        &output.content,
+                        &metadata,
+                        output.is_error,
+                        cwd
+                    ),
+                    ToolResultView::GlobFiles {
+                        pattern: "*".to_owned(),
+                        files: vec![name.to_owned()],
+                        total: 1,
+                    },
+                    "{name:?} at {cwd:?}",
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn persists_the_text_view_when_search_notes_are_present() {
+            let dir = canonical_tempdir();
+            fs::write(dir.path().join("public.rs"), "").unwrap();
+            fs::write(dir.path().join("secret.rs"), "").unwrap();
+            let registry =
+                ToolRegistry::new(vec![Box::new(GlobTool::new(deny_reads(&["secret.rs"])))]);
+            let input = serde_json::json!({"pattern": "*.rs"});
+
+            let output = registry
+                .run_input("glob", input.clone(), &ctx(dir.path()))
+                .await;
+            assert!(!output.is_error, "{}", output.content);
+
+            assert_eq!(
+                output.content,
+                "public.rs\n\n(1 file withheld by read deny or ask rules)"
+            );
+            let expected = ToolResultView::Text {
+                content: output.content.clone(),
+            };
+            assert_eq!(output.metadata.result_view, Some(expected.clone()));
+            assert_eq!(
+                registry.result_view(
+                    "glob",
+                    &input,
+                    &output.content,
+                    &output.metadata,
+                    output.is_error,
+                    dir.path()
+                ),
+                expected
+            );
+        }
+
+        #[tokio::test]
+        async fn preserves_a_filename_that_equals_the_empty_result_message() {
+            assert_filename_round_trip("No files found").await;
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn preserves_newlines_in_native_filenames_after_metadata_round_trip() {
+            for name in ["line\nname.rs", "blank\n\nname.rs", "trailing.rs\n"] {
+                assert_filename_round_trip(name).await;
+            }
+        }
 
         #[tokio::test]
         async fn matching_pattern_reports_files() {
