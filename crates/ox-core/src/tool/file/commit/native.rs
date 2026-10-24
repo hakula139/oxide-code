@@ -540,7 +540,9 @@ unsafe extern "system" fn check_copy_identity(
     // The synchronous caller owns this context until CopyFileExW returns.
     let context = unsafe { &*context.cast::<CopyIdentity>() };
     #[cfg(not(test))]
-    _ = transferred;
+    {
+        _ = transferred;
+    }
     #[cfg(test)]
     if context.fail_after_chunk && reason == FileSystem::CALLBACK_CHUNK_FINISHED {
         context
@@ -1300,8 +1302,8 @@ mod tests {
         fn a_partial_native_copy_failure_keeps_the_original_and_cleans_up() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("file");
-            let content = vec![b'x'; 1024 * 1024];
-            fs::write(&path, &content).unwrap();
+            let bytes = vec![b'x'; 1024 * 1024];
+            fs::write(&path, &bytes).unwrap();
             let source = File::open(&path).unwrap();
             let staged = TemporaryFile::staged(dir.path()).unwrap();
             let stage_name = staged.path.to_path_buf();
@@ -1319,7 +1321,7 @@ mod tests {
 
             assert!(context.checked.load(Ordering::Relaxed));
             assert!(context.copied_data.load(Ordering::Relaxed));
-            assert_eq!(fs::read(&path).unwrap(), content);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
             assert_eq!(
                 identity(&File::open(&path).unwrap()).unwrap(),
                 identity(&source).unwrap()
@@ -1548,7 +1550,7 @@ mod tests {
                 if fail {
                     let error = result.unwrap_err();
                     assert!(error.to_string().contains("injected new-file"), "{error}");
-                    assert_eq!(names, []);
+                    assert_eq!(names, [] as [std::ffi::OsString; 0]);
                     assert!(actual.is_none());
                 } else {
                     result.unwrap();

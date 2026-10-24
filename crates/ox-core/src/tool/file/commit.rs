@@ -3,7 +3,9 @@
 mod metadata;
 mod native;
 
-use std::fs::{self, File, OpenOptions};
+#[cfg(any(unix, test))]
+use std::fs;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::Path;
 
