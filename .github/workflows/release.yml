@@ -36,8 +36,7 @@ env:
 jobs:
   ci:
     name: CI
-    # ci.yml already runs on pull requests, where a called run would also share this workflow's
-    # concurrency group and wait on it forever.
+    # ci.yml already checks pull requests, so calling it here would duplicate those checks.
     if: github.event_name != 'pull_request' && !inputs.notes
     uses: ./.github/workflows/ci.yml
     secrets: inherit
@@ -115,8 +114,10 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == 'tag' ]]; then
             expected=${GITHUB_REF_NAME#v}
           else
-            expected=$(cargo metadata --no-deps --format-version 1 |
-              jq -r '.packages[] | select(.name == "ox") | .version')
+            expected=$(
+              cargo metadata --no-deps --format-version 1 |
+                jq -r '.packages[] | select(.name == "ox") | .version'
+            )
           fi
           test "$(smoke/ox --version)" = "ox $expected"
 
@@ -126,10 +127,12 @@ jobs:
         run: |
           floor=$(grep -oP 'Linux with glibc \K[0-9.]+(?= or later)' docs/guide/install.md)
           # The loader tolerates a missing weak version, so only `Flags: none` versions are needed.
-          required=$(readelf -V --wide smoke/ox |
-            grep -oP 'Name: GLIBC_\K[0-9.]+(?=\s+Flags: none)' |
-            sort -uV |
-            tail -1)
+          required=$(
+            readelf -V --wide smoke/ox |
+              grep -oP 'Name: GLIBC_\K[0-9.]+(?=\s+Flags: none)' |
+              sort -uV |
+              tail -1
+          )
           test -n "$required"
           echo "ox requires glibc $required, and docs/guide/install.md promises $floor"
           if [[ "$(printf '%s\n' "$required" "$floor" | sort -V | tail -1)" != "$floor" ]]; then
@@ -236,11 +239,33 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Follow the latest release, or the newest prerelease before the first stable one.
-          latest=$(gh release list \
-            --exclude-drafts \
-            --json tagName,isLatest \
-            --jq '.[] | select(.isLatest) | .tagName')
-          if [[ -n "$latest" && "$latest" != "$GITHUB_REF_NAME" ]]; then
+          latest=$(
+            gh api graphql \
+              -F owner='{owner}' \
+              -F name='{repo}' \
+              -f query="query(\$owner: String!, \$name: String!) {
+                repository(owner: \$owner, name: \$name) {
+                  latestRelease { tagName }
+                }
+              }" \
+              --jq '.data.repository.latestRelease.tagName // empty'
+          )
+
+          if [[ -z "$latest" ]]; then
+            latest=$(
+              gh release list \
+                --exclude-drafts \
+                --limit 1 \
+                --json tagName \
+                --jq '.[0].tagName // empty'
+            )
+          fi
+
+          if [[ -z "$latest" ]]; then
+            echo '::error::No published release found for the Homebrew formula'
+            exit 1
+          fi
+          if [[ "$latest" != "$GITHUB_REF_NAME" ]]; then
             echo "Skipping $GITHUB_REF_NAME, since the formula follows $latest."
             exit 0
           fi
@@ -268,15 +293,7 @@ jobs:
               --title "$title" \
               --assignee hakula139 \
               --label chore \
-              --body-file - <<EOF
-          ## Summary
-
-          Points the Homebrew formula at the $GITHUB_REF_NAME release archives.
-
-          ## Test plan
-
-          - [x] The Release workflow rendered the formula from the checksums its build jobs produced.
-          EOF
+              --body-file .github/templates/homebrew-formula-pr.md
           then
             echo "::error::Could not open the formula PR." \
               'Enable "Allow GitHub Actions to create and approve pull requests"' \
