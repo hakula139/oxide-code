@@ -19,7 +19,7 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 
 - The [module map](../design/architecture.md) lists top-level modules by layer. New code imports only from its own layer or lower layers.
 - Put functions and types in the modules that reflect their conceptual domains, creating modules as needed. A type or trait shared across modules belongs in the module that owns its contract.
-- The TUI, bare REPL (`--no-tui`), and headless mode (`-p`) all drive the same `Engine` through an `EngineHandle`. Implement new agent behavior in the engine or a lower layer and report it through `Event`s, so every frontend receives it and each frontend handles only input and output. [#149](https://github.com/hakula139/oxide-code/issues/149) tracks the behavior that still lives in frontends.
+- The TUI, bare REPL (`--no-tui`), and headless mode (`-p`) all drive the same `Engine` through an `EngineHandle`. Implement new agent behavior in the engine or a lower layer and report it through `Event`s, so every frontend receives it and each frontend handles only input and output.
 
 ## Traits
 
