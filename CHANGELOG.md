@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.8] - 2026-10-25
+
+### Highlights
+
+- File permission checks recognize equivalent directory spellings, and approval prompts require the current target to be visible before accepting confirmation.
+- Session writes preserve concurrent updates, and interruption or session changes wait for workspace writes to settle.
+- Resuming sessions preserves literal transcript text, message boundaries, and title eligibility.
+
+### Fixed
+
+- _(permission)_ Close a gap in `v0.1.0-alpha.3` through `v0.1.0-alpha.7` where equivalent directory spellings, including macOS volume aliases, could bypass file-tool deny rules or protected-path approval. Held path rules also retain symlink protection when their literal directory prefix contains escaped glob characters. ([#629](https://github.com/hakula139/oxide-code/pull/629))
+- _(tui)_ Require a fresh confirmation after the current approval target is visible and buffered input has ended. In `v0.1.0-alpha.3` through `v0.1.0-alpha.7`, clipping an approval prompt could leave it ready to accept input while hidden. Saved-session deletion now requires **Y** after the target is visible, preventing buffered **Enter** from deleting a session before its confirmation appeared in `v0.1.0-alpha.2` through `v0.1.0-alpha.7`. ([#628](https://github.com/hakula139/oxide-code/pull/628))
+- _(config)_ Stop with a diagnostic when the nearest project config is broken, unreadable, or not a regular file. Silently ignoring such a config could drop permission rules in `v0.1.0-alpha.3` through `v0.1.0-alpha.7`. Reject API base URLs containing a query or fragment while preserving valid path prefixes. ([#638](https://github.com/hakula139/oxide-code/pull/638))
+- _(driver)_ Return a failure when headless or text REPL output cannot be written or flushed, even if a later write succeeds. In `v0.1.0-alpha.3` through `v0.1.0-alpha.7`, a failed REPL approval preview or prompt could still accept an answer. Abort these approvals before reading an answer when their preview or choices cannot be displayed. Continue orderly session shutdown while preserving signal exit statuses. ([#642](https://github.com/hakula139/oxide-code/pull/642), [#652](https://github.com/hakula139/oxide-code/pull/652))
+- _(tool)_ Publish Edit and Write replacements atomically while preserving supported file access and application metadata. Failed preparation leaves the original file intact. Refuse files with multiple hard links and detected unsupported access metadata. ([#636](https://github.com/hakula139/oxide-code/pull/636))
+- _(session)_ Preserve completed session records when another process encounters a partial write, expose new sessions only after their initial content is complete, and release writer locks when transactions finish. Archive operations finish even after the picker closes, and resume waits for them without blocking the interface. ([#633](https://github.com/hakula139/oxide-code/pull/633), [#641](https://github.com/hakula139/oxide-code/pull/641))
+- _(ox-core)_ Finish pending workspace writes before interruption, compaction, session changes, and final snapshots. Enforce file-size limits while reading, preserve long-line suffixes that fit the output budget, and count only fully returned rows as read. ([#630](https://github.com/hakula139/oxide-code/pull/630))
+- _(client)_ Preserve tool arguments supplied at the start of a response block. Stop corrupt response streams before a partial or malformed tool call can run. ([#631](https://github.com/hakula139/oxide-code/pull/631))
+- _(session)_ Preserve literal text resembling internal reminders or interruption markers, and keep separate prompts and replies distinct when resuming. Restore title eligibility after a refused first prompt while preserving manual titles through rewinds and compaction. ([#639](https://github.com/hakula139/oxide-code/pull/639))
+- _(tui)_ Preserve prompts and operation state when the engine cannot accept a request. Retried ordinary and slash-command prompts keep their original text and appear once in the chat. ([#632](https://github.com/hakula139/oxide-code/pull/632))
+- _(tui)_ Delete and undo complete Unicode graphemes, and keep the cursor on a grapheme boundary after editing. Preserve selected text when pasted input contains only controls, and reject a paste whose joined result still exceeds the field's display-width limit. ([#645](https://github.com/hakula139/oxide-code/pull/645))
+- _(tui)_ Keep rapid clipboard copies in selection order, retain the latest pending selection, and discard stale copy feedback. Bound fallback attempts by one shared deadline. ([#649](https://github.com/hakula139/oxide-code/pull/649))
+- _(search)_ Keep filenames and result metadata intact through Grep, Glob, and session resume, including filenames containing line breaks, trailing spaces, or colon-and-line-number sequences. Bound retained search results while preserving exact count results and the newest Glob matches. ([#635](https://github.com/hakula139/oxide-code/pull/635))
+- _(engine)_ Keep automatic compaction available after a failed turn reports no usage, and update session cost when a title request finishes between turns. ([#637](https://github.com/hakula139/oxide-code/pull/637))
+- _(log)_ Preserve log events when concurrent sessions rotate the log, and retain error chains and operation context in structured fields. ([#643](https://github.com/hakula139/oxide-code/pull/643))
+- _(release)_ Prevent reruns of older prereleases from downgrading the Homebrew formula. The formula follows GitHub's latest stable release, or the newest published prerelease before the first stable release. ([#640](https://github.com/hakula139/oxide-code/pull/640))
+- _(nix)_ Include the project license and third-party notices in Nix installations under `share/doc/oxide-code`. ([#646](https://github.com/hakula139/oxide-code/pull/646))
+
 ## [0.1.0-alpha.7] - 2026-10-23
 
 ### Highlights
@@ -350,6 +378,7 @@ The project fixes security issues publicly before 1.0, and the first two entries
 - _(deps)_ Bump rustls-webpki and rand for Dependabot alerts (#17)
 - _(deps)_ Bump rustls-webpki from 0.103.12 to 0.103.13 (#34)
 
+[0.1.0-alpha.8]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.7..v0.1.0-alpha.8
 [0.1.0-alpha.7]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.6..v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.5..v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.4..v0.1.0-alpha.5
