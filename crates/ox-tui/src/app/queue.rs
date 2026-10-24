@@ -158,6 +158,11 @@ impl PromptQueue {
         self.pending.push_back(QueuedPrompt::typed(line));
     }
 
+    /// Returns a prompt whose turn could not start to the head of the queue.
+    pub(super) fn push_front(&mut self, prompt: QueuedPrompt) {
+        self.pending.push_front(prompt);
+    }
+
     /// Takes the most recently queued line back, for editing.
     pub(super) fn pop_last(&mut self) -> Option<String> {
         self.pending.pop_back().map(|queued| queued.line)

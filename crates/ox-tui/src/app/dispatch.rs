@@ -7,6 +7,7 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::Position;
+use tokio::sync::mpsc::OwnedPermit;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::debug;
 
@@ -241,12 +242,17 @@ impl App {
         }
     }
 
-    /// Applies the op's local state change, then sends it to the engine. Prompts reach the engine
+    /// Reserves delivery before applying the op's local state change. Prompts reach the engine
     /// only through the prompt queue, by [`Self::start_turn`] and [`Self::forward_queued_prompts`].
     pub(super) fn dispatch_op(&mut self, op: Op) {
+        if op == Op::Shutdown {
+            self.should_quit = true;
+        }
+        let Some((permit, op)) = self.reserve_op(op) else {
+            return;
+        };
         match &op {
             Op::Interrupt => self.set_status(Status::Cancelling),
-            Op::Shutdown => self.should_quit = true,
             Op::Clear => {
                 self.queue.mark_switch();
                 self.set_status(Status::Clearing);
@@ -268,17 +274,22 @@ impl App {
             | Op::Resolve { .. }
             | Op::SetModel(_)
             | Op::Rename { .. }
-            | Op::LoginCode(_) => {}
+            | Op::LoginCode(_)
+            | Op::Shutdown => {}
         }
-        self.send_op(op);
+        permit.send(op);
     }
 
-    /// Sends `op` to the engine. A full channel surfaces as a chat error block, and a closed
-    /// channel quits.
-    fn send_op(&mut self, op: Op) {
-        if let Err(e) = self.ops.try_send(op) {
-            self.surface_send_error(&e);
-        }
+    /// Reserves capacity for `op`. A full channel surfaces as a chat error block, and a closed
+    /// channel quits. The permit keeps that capacity while local state changes.
+    fn reserve_op(&mut self, op: Op) -> Option<(OwnedPermit<Op>, Op)> {
+        let error = match self.ops.clone().try_reserve_owned() {
+            Ok(permit) => return Some((permit, op)),
+            Err(TrySendError::Full(_)) => TrySendError::Full(op),
+            Err(TrySendError::Closed(_)) => TrySendError::Closed(op),
+        };
+        self.surface_send_error(&error);
+        None
     }
 
     fn surface_send_error(&mut self, e: &TrySendError<Op>) {
@@ -293,6 +304,12 @@ impl App {
             TrySendError::Full(Op::Resolve { .. }) => {
                 self.chat.push_error(
                     "Approval could not be delivered. Press Esc to cancel the blocked turn.",
+                );
+            }
+            TrySendError::Full(Op::Prompt { .. }) => {
+                self.chat.push_error(
+                    "ox is busy, so the prompt stays queued. Press Esc to edit it, \
+                     or submit another prompt to retry.",
                 );
             }
             TrySendError::Full(_) => {
@@ -415,17 +432,22 @@ impl App {
         }
     }
 
-    /// Starts a turn running `prompt` as the active prompt, then hands it the queued prompts so
-    /// they splice in at its round boundaries.
-    pub(super) fn start_turn(&mut self, prompt: QueuedPrompt) {
+    /// Starts a turn running `prompt` and forwards queued prompts to its round boundaries. Returns
+    /// whether delivery succeeded, keeping a rejected prompt at the queue head.
+    pub(super) fn start_turn(&mut self, prompt: QueuedPrompt) -> bool {
         let op = Op::Prompt {
             text: prompt.prompt().to_owned(),
             title: prompt.title().map(str::to_owned),
         };
+        let Some((permit, op)) = self.reserve_op(op) else {
+            self.queue.push_front(prompt);
+            return false;
+        };
         self.queue.set_active(prompt);
         self.set_status(Status::Streaming);
-        self.send_op(op);
+        permit.send(op);
         self.forward_queued_prompts();
+        true
     }
 
     /// Forwards the queued prompts the in-flight turn lacks, in order. A prompt that a full channel
@@ -534,6 +556,18 @@ mod tests {
     use crate::theme::{ThemeOverrides, builtin, resolve_theme};
 
     const RED: Color = Color::Rgb(0xff, 0x00, 0x00);
+
+    fn fill_channel(app: &App) -> Vec<Op> {
+        (0..OP_CHANNEL_CAPACITY)
+            .map(|index| {
+                let op = Op::Rename {
+                    title: format!("queued-{index}"),
+                };
+                app.ops.try_send(op.clone()).unwrap();
+                op
+            })
+            .collect()
+    }
 
     fn built_in_theme(name: &str) -> &'static BuiltinTheme {
         builtin::find(name).expect("a built-in theme")
@@ -1397,29 +1431,86 @@ mod tests {
 
             assert!(app.should_quit, "closed channel must trigger teardown");
             assert_eq!(app.chat.last_error_text(), None);
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(app.queue.active(), None);
+            assert_eq!(*app.queue.pending(), ["hi"]);
         }
 
         #[test]
-        fn full_channel_surfaces_error_but_keeps_app_alive() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            app.dispatch_action(Action::Submit("active".to_owned()));
-            for _ in 1..OP_CHANNEL_CAPACITY {
-                app.dispatch_action(Action::Op(Op::Interrupt));
+        fn full_channel_keeps_prompts_for_one_ordered_retry() {
+            for (action, line, prompt, title) in [
+                (
+                    Action::Submit("//literal-command".to_owned()),
+                    "//literal-command",
+                    "/literal-command",
+                    None,
+                ),
+                (
+                    Action::SlashPrompt {
+                        line: "/init AGENTS.md".to_owned(),
+                        prompt: "Create project instructions.".to_owned(),
+                    },
+                    "/init AGENTS.md",
+                    "Create project instructions.",
+                    Some("/init AGENTS.md"),
+                ),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                let buffered = fill_channel(&app);
+
+                app.dispatch_action(action);
+                app.dispatch_action(Action::Submit("next prompt".to_owned()));
+
+                assert!(!app.should_quit, "{line}");
+                assert_eq!(app.status, Status::Idle, "{line}");
+                assert_eq!(app.queue.active(), None, "{line}");
+                assert_eq!(*app.queue.pending(), [line, "next prompt"], "{line}");
+                assert_eq!(app.queue.pending()[0].prompt(), prompt, "{line}");
+                assert_eq!(app.queue.pending()[0].title(), title, "{line}");
+                assert_eq!(app.queue.forwarded(), 0, "{line}");
+                assert_eq!(app.chat.entry_count(), 2, "only rejection notices: {line}");
+                assert_eq!(
+                    app.chat.last_error_text(),
+                    Some(
+                        "ox is busy, so the prompt stays queued. Press Esc to edit it, \
+                         or submit another prompt to retry."
+                    ),
+                    "{line}",
+                );
+                for op in buffered {
+                    assert_eq!(rx.try_recv(), Ok(op), "{line}");
+                }
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{line}");
+
+                app.drain_pending_prompt();
+
+                assert_eq!(app.status, Status::Streaming, "{line}");
+                assert_eq!(app.queue.active().map(QueuedPrompt::line), Some(line));
+                assert_eq!(
+                    rx.try_recv(),
+                    Ok(Op::Prompt {
+                        text: prompt.to_owned(),
+                        title: title.map(str::to_owned),
+                    }),
+                    "{line}",
+                );
+                assert_eq!(rx.try_recv(), Ok(Op::Queue("next prompt".to_owned())));
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{line}");
+                let text = rendered_text(&mut app, 100, 20);
+                assert_eq!(
+                    text.matches(line.trim_start_matches('/')).count(),
+                    1,
+                    "{text}"
+                );
+
+                app.handle_engine_event(Event::PromptDrained("next prompt".to_owned()));
+                app.handle_engine_event(Event::TurnComplete);
+
+                assert_eq!(app.status, Status::Idle, "{line}");
+                assert_eq!(app.queue.active(), None, "{line}");
+                assert_eq!(*app.queue.pending(), [] as [&str; 0], "{line}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{line}");
             }
-            let before_overflow = app.chat.entry_count();
-
-            app.dispatch_action(Action::Op(Op::Interrupt));
-
-            assert!(!app.should_quit, "Full is not fatal");
-            assert_eq!(
-                app.chat.entry_count(),
-                before_overflow + 1,
-                "exactly one error block on overflow",
-            );
-            assert_eq!(
-                app.chat.last_error_text(),
-                Some("ox is busy, so the request was dropped. Try again."),
-            );
         }
 
         #[test]
@@ -1740,6 +1831,69 @@ mod tests {
     mod dispatch_op {
         use super::*;
 
+        #[test]
+        fn full_channel_preserves_state_until_delivery_can_be_reserved() {
+            for (op, before, after) in [
+                (Op::Interrupt, Status::Streaming, Status::Cancelling),
+                (Op::Clear, Status::Idle, Status::Clearing),
+                (
+                    Op::Resume {
+                        target: ResumeTarget::Prefix("saved-session".to_owned()),
+                    },
+                    Status::Idle,
+                    Status::Resuming,
+                ),
+                (
+                    Op::Compact {
+                        instructions: Some("focus on the API".to_owned()),
+                    },
+                    Status::Idle,
+                    Status::Compacting,
+                ),
+                (Op::Login, Status::Idle, Status::SigningIn),
+                (Op::Logout, Status::Idle, Status::SigningOut),
+                (Op::Archive, Status::Idle, Status::Archiving),
+                (Op::SetMode(Mode::Plan), Status::Idle, Status::Idle),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.set_status(before.clone());
+                app.requested_mode = Mode::Manual;
+                app.queue.push("old session".to_owned());
+                app.queue.mark_switch();
+                app.queue.push("current session".to_owned());
+                let buffered = fill_channel(&app);
+
+                app.dispatch_op(op.clone());
+
+                assert!(!app.should_quit, "{op:?}");
+                assert_eq!(app.status, before, "{op:?}");
+                assert_eq!(app.requested_mode, Mode::Manual, "{op:?}");
+                assert_eq!(
+                    app.chat.last_error_text(),
+                    Some("ox is busy, so the request was dropped. Try again."),
+                    "{op:?}",
+                );
+                app.queue.discard_left_behind();
+                assert_eq!(*app.queue.pending(), ["current session"], "{op:?}");
+                for buffered_op in buffered {
+                    assert_eq!(rx.try_recv(), Ok(buffered_op), "{op:?}");
+                }
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{op:?}");
+
+                app.dispatch_op(op.clone());
+
+                assert_eq!(app.status, after, "{op:?}");
+                let mode = if let Op::SetMode(mode) = &op {
+                    *mode
+                } else {
+                    Mode::Manual
+                };
+                assert_eq!(app.requested_mode, mode, "{op:?}");
+                assert_eq!(rx.try_recv(), Ok(op.clone()), "{op:?}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{op:?}");
+            }
+        }
+
         #[tokio::test]
         async fn interrupt_flips_status_to_cancelling_and_forwards() {
             let (mut app, mut rx, _event_tx) = test_app(None);
@@ -1765,6 +1919,34 @@ mod tests {
             assert!(app.should_quit);
             assert_eq!(app.chat.entry_count(), 0);
             assert_eq!(app.status, Status::Idle);
+        }
+
+        #[test]
+        fn shutdown_quits_when_delivery_is_full_or_closed() {
+            for closed in [false, true] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                let buffered = fill_channel(&app);
+                if closed {
+                    rx.close();
+                }
+
+                app.dispatch_op(Op::Shutdown);
+
+                assert!(app.should_quit, "closed={closed}");
+                assert_eq!(app.status, Status::Idle, "closed={closed}");
+                for op in buffered {
+                    assert_eq!(rx.try_recv(), Ok(op), "closed={closed}");
+                }
+                assert_eq!(
+                    rx.try_recv(),
+                    Err(if closed {
+                        TryRecvError::Disconnected
+                    } else {
+                        TryRecvError::Empty
+                    }),
+                    "closed={closed}",
+                );
+            }
         }
 
         #[tokio::test]

@@ -399,8 +399,10 @@ impl App {
     /// Starts a turn with the oldest queued prompt.
     pub(super) fn drain_pending_prompt(&mut self) {
         if let Some(next) = self.queue.pop_next() {
-            self.chat.push_user_message(next.display().to_owned());
-            self.start_turn(next);
+            let display = next.display().to_owned();
+            if self.start_turn(next) {
+                self.chat.push_user_message(display);
+            }
         }
     }
 

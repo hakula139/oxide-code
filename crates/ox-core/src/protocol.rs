@@ -29,6 +29,11 @@ use crate::tool::view::{ApprovalPreview, ToolResultView};
 
 /// Commands from a frontend to the engine. Multiplexed onto a single `mpsc`, so a running turn can
 /// race them against its in-flight stream and tool futures with one biased `select!`.
+///
+/// [`Self::Prompt`], [`Self::SetModel`], [`Self::Compact`], [`Self::Clear`], [`Self::Archive`],
+/// [`Self::Resume`], [`Self::Rename`], [`Self::Login`], and [`Self::Logout`] require an idle engine.
+/// Frontends wait for the preceding operation's terminal event before submitting them. An
+/// idle-only op received during another operation is dropped without a terminal event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Op {
@@ -175,8 +180,8 @@ pub struct UsageSnapshot {
 /// Notifications from the engine to a frontend, which receives them on the `events` channel of the
 /// [`EngineHandle`](crate::engine::EngineHandle) it drives.
 ///
-/// Unless [`Op::Shutdown`] stops it first, the engine ends each op below with one terminal event,
-/// sent last:
+/// For each op submitted in the state [`Op`] requires, the engine sends one terminal event last,
+/// unless [`Op::Shutdown`] stops it first:
 ///
 /// - [`Op::Prompt`] ends with [`Self::TurnComplete`], [`Self::TurnFailed`], or [`Self::Cancelled`].
 /// - [`Op::Compact`] ends with [`Self::SessionReady`], `TurnFailed`, or `Cancelled`.

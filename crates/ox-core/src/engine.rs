@@ -54,6 +54,8 @@ const OP_CHANNEL_CAP: usize = 32;
 
 /// A running [`Engine`]. Closing `ops` asks it to quit.
 pub struct EngineHandle {
+    /// Frontend submissions, subject to [`Op`]'s idle-state requirements. Enqueueing an op does
+    /// not acknowledge its execution.
     pub ops: mpsc::Sender<Op>,
     pub events: mpsc::UnboundedReceiver<Event>,
     pub task: EngineTask,
