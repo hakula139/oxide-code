@@ -152,6 +152,7 @@
             enable = true;
             name = "prettier";
             entry = nodeHook "prettier-write" "prettier --write --ignore-unknown";
+            require_serial = true;
             types = [ "text" ];
           };
 
@@ -159,6 +160,7 @@
             enable = true;
             package = null;
             entry = nodeHook "cspell" "cspell --no-must-find-files --no-progress";
+            require_serial = true;
             types = [ "text" ];
           };
 
@@ -167,6 +169,7 @@
             name = "markdownlint-cli2";
             package = null;
             entry = nodeHook "markdownlint" "markdownlint-cli2 --fix";
+            require_serial = true;
             files = "\\.md$";
           };
         };
