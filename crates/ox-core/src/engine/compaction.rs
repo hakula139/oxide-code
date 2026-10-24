@@ -338,6 +338,7 @@ impl Engine {
         boundary: CompactBoundary,
         trigger: CompactTrigger,
     ) -> Option<Checkpoint> {
+        super::settle_file_writes(&self.file_tracker).await;
         let synthetic = synthesize_post_compact_message(
             &boundary.summary,
             &boundary.tasks,
@@ -713,7 +714,7 @@ mod tests {
     use crate::engine::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, request_bodies, with_pinned_home,
     };
-    use crate::file_tracker::testing::seed_full_read;
+    use crate::file_tracker::testing::{assert_writes_draining, blocked_write, seed_full_read};
     use crate::message::Replay;
     use crate::permission::Mode;
     use crate::prompt::{SessionContext, SystemPrompt};
@@ -1485,46 +1486,63 @@ mod tests {
         #[tokio::test]
         async fn clears_the_tracker_and_carries_the_task_list_over() {
             with_pinned_home(async {
-                let server = MockServer::start().await;
-                let dir = tempfile::tempdir().unwrap();
-                let store = test_store(dir.path());
-                let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let session_id = engine.session_id().to_owned();
-                engine.messages = tool_heavy_transcript();
-                let read = dir.path().join("read.txt");
-                std::fs::write(&read, "read").unwrap();
-                seed_full_read(&engine.file_tracker, &read);
-                let sink = CapturingSink::default();
+                for trigger in [CompactTrigger::Manual, CompactTrigger::Auto] {
+                    let server = MockServer::start().await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = test_store(dir.path());
+                    let mut engine = engine(server.uri(), &store, dir.path()).await;
+                    let session_id = engine.session_id().to_owned();
+                    engine.messages = tool_heavy_transcript();
+                    let read = dir.path().join("read.txt");
+                    std::fs::write(&read, "read").unwrap();
+                    seed_full_read(&engine.file_tracker, &read);
+                    let sink = CapturingSink::default();
+                    let tracker = std::sync::Arc::clone(&engine.file_tracker);
+                    let previous = tracker.snapshot_all();
+                    let release = blocked_write(&tracker, &read, b"committed", "toolu_write").await;
 
-                let compacted = engine
-                    .replace_with_summary(&sink, boundary(plan()), CompactTrigger::Auto)
-                    .await;
+                    let compacted = {
+                        let mut compact = std::pin::pin!(engine.replace_with_summary(
+                            &sink,
+                            boundary(plan()),
+                            trigger
+                        ));
+                        assert!(futures::poll!(compact.as_mut()).is_pending(), "{trigger:?}");
+                        assert_writes_draining(&tracker);
+                        assert_eq!(std::fs::read(&read).unwrap(), b"read", "{trigger:?}");
+                        assert_eq!(tracker.snapshot_all(), previous, "{trigger:?}");
+                        assert_eq!(sink.events(), [], "{trigger:?}");
+                        release.send(()).unwrap();
+                        compact.await
+                    };
 
-                assert!(compacted.is_some());
-                assert_eq!(engine.file_tracker.snapshot_all(), []);
-                let summary = synthesize_post_compact_message(
-                    "fixed login bug",
-                    &plan(),
-                    &[],
-                    CompactTrigger::Auto,
-                );
-                assert_eq!(engine.messages, [summary]);
-                assert!(
-                    matches!(
-                        sink.events().as_slice(),
-                        [Event::SessionCompacted {
-                            summary,
-                            trigger: CompactTrigger::Auto,
-                            ..
-                        }] if summary == "fixed login bug"
-                    ),
-                    "{:?}",
-                    sink.events(),
-                );
-                engine.session.shutdown().await;
-                let saved = store.load_session_data(&session_id).unwrap();
-                assert_eq!(saved.compact.map(|compact| compact.tasks), Some(plan()));
-                assert_eq!(saved.messages, engine.messages);
+                    assert!(compacted.is_some(), "{trigger:?}");
+                    assert_eq!(std::fs::read(&read).unwrap(), b"committed", "{trigger:?}");
+                    assert_eq!(engine.file_tracker.snapshot_all(), [], "{trigger:?}");
+                    let summary =
+                        synthesize_post_compact_message("fixed login bug", &plan(), &[], trigger);
+                    assert_eq!(engine.messages, [summary], "{trigger:?}");
+                    assert!(
+                        matches!(
+                            sink.events().as_slice(),
+                            [Event::SessionCompacted {
+                                summary,
+                                trigger: actual_trigger,
+                                ..
+                            }] if summary == "fixed login bug" && *actual_trigger == trigger
+                        ),
+                        "{trigger:?}: {:?}",
+                        sink.events(),
+                    );
+                    engine.session.shutdown().await;
+                    let saved = store.load_session_data(&session_id).unwrap();
+                    assert_eq!(
+                        saved.compact.map(|compact| compact.tasks),
+                        Some(plan()),
+                        "{trigger:?}"
+                    );
+                    assert_eq!(saved.messages, engine.messages, "{trigger:?}");
+                }
             })
             .await;
         }

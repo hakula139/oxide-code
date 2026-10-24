@@ -1,16 +1,18 @@
 //! Per-session Read-before-Edit gate with xxh64 staleness detection.
 
 use std::collections::HashMap;
-use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context as _, ensure};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use tracing::debug;
+use tokio_util::task::TaskTracker;
+use tracing::instrument::WithSubscriber as _;
+use tracing::{debug, warn};
 use xxhash_rust::xxh64::xxh64;
 
+use crate::util::fs::read_regular_file;
 use crate::util::sync::lock_or_recover;
 
 const HASH_SEED: u64 = 0;
@@ -33,6 +35,7 @@ pub(crate) const MAX_TRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024;
 #[derive(Default)]
 pub(crate) struct FileTracker {
     by_path: Mutex<HashMap<PathBuf, FileState>>,
+    writes: TaskTracker,
 }
 
 /// What the tracker knows about one file's content.
@@ -79,6 +82,7 @@ impl FileTracker {
         dropped.sort();
         let tracker = Self {
             by_path: Mutex::new(latest),
+            ..Self::default()
         };
         (tracker, dropped)
     }
@@ -156,24 +160,46 @@ impl FileTracker {
 
     /// Drives `write` in a task of its own, then records the bytes it wrote under the tracker key
     /// it returns, attributed to the tool call `tool_use_id`, so the record lands with the write
-    /// even when the caller is dropped mid-write.
+    /// even when the caller is dropped mid-write. The owner must drain writes before resetting
+    /// state or capturing final snapshots.
     pub(crate) async fn write_and_record<W>(
         self: &Arc<Self>,
         tool_use_id: &str,
         write: W,
-    ) -> std::io::Result<()>
+    ) -> anyhow::Result<()>
     where
-        W: Future<Output = std::io::Result<(PathBuf, Vec<u8>)>> + Send + 'static,
+        W: Future<Output = anyhow::Result<(PathBuf, Vec<u8>)>> + Send + 'static,
     {
         let tracker = Arc::clone(self);
         let tool_use_id = tool_use_id.to_owned();
-        tokio::spawn(async move {
-            let (key, bytes) = write.await?;
-            tracker.record_modify(key, &bytes, tool_use_id);
-            Ok(())
-        })
-        .await
-        .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+        self.writes
+            .spawn(
+                async move {
+                    match write.await {
+                        Ok((key, bytes)) => {
+                            tracker.record_modify(key, &bytes, tool_use_id);
+                            Ok(())
+                        }
+                        Err(error) => {
+                            warn!(tool_use_id, error = %format_args!("{error:#}"), "workspace write failed");
+                            Err(error)
+                        }
+                    }
+                }
+                .with_current_subscriber(),
+            )
+            .await
+            .unwrap_or_else(|e| Err(e.into()))
+    }
+
+    /// Waits for admitted writes and their records. The owner must stop tool admission first.
+    pub(crate) async fn drain_writes(&self) {
+        self.writes.close();
+        self.writes.wait().await;
+    }
+
+    pub(crate) fn reopen_writes(&self) {
+        self.writes.reopen();
     }
 
     /// Records bytes the agent just wrote. Always lands as [`LastView::Full`] so a subsequent Edit
@@ -222,9 +248,7 @@ impl FileTracker {
 
 /// Checks that the file at `path` is still trackable and holds the content `content_hash` names.
 fn verify_on_disk(path: &Path, content_hash: u64) -> anyhow::Result<()> {
-    let metadata = std::fs::metadata(path).context("stat failed")?;
-    validate_trackable_file(&metadata)?;
-    let bytes = std::fs::read(path).context("read failed")?;
+    let (_, bytes) = read_regular_file(path, MAX_TRACKED_FILE_SIZE).context("read failed")?;
     ensure!(xxh64(&bytes, HASH_SEED) == content_hash, "content changed");
     Ok(())
 }
@@ -304,36 +328,6 @@ impl GatePurpose {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum TrackableFileError {
-    #[error("not a regular file: directory")]
-    Directory,
-    #[error("not a regular file")]
-    NonRegular,
-    #[error("too large to verify ({size} bytes, max {max} bytes)")]
-    TooLarge { size: u64, max: u64 },
-}
-
-/// Checks that `metadata` names a regular file within [`MAX_TRACKED_FILE_SIZE`]. A FIFO, socket, or
-/// device can report `len() == 0`, so the size check alone would let it through.
-pub(crate) fn validate_trackable_file(metadata: &Metadata) -> Result<(), TrackableFileError> {
-    let file_type = metadata.file_type();
-    if file_type.is_dir() {
-        return Err(TrackableFileError::Directory);
-    }
-    if !file_type.is_file() {
-        return Err(TrackableFileError::NonRegular);
-    }
-    let size = metadata.len();
-    if size > MAX_TRACKED_FILE_SIZE {
-        return Err(TrackableFileError::TooLarge {
-            size,
-            max: MAX_TRACKED_FILE_SIZE,
-        });
-    }
-    Ok(())
-}
-
 // ── FileSnapshot ──
 
 /// Tracked file state persisted at session finish and revalidated against disk on resume.
@@ -392,10 +386,38 @@ pub(crate) mod testing {
     use std::path::Path;
     use std::sync::Arc;
 
+    use tokio::sync::oneshot;
+
     use super::{FileTracker, LastView};
 
     pub(crate) fn tracker() -> Arc<FileTracker> {
         Arc::new(FileTracker::default())
+    }
+
+    pub(crate) async fn blocked_write(
+        tracker: &Arc<FileTracker>,
+        path: &Path,
+        bytes: &[u8],
+        tool_use_id: &str,
+    ) -> oneshot::Sender<()> {
+        let path = path.to_owned();
+        let bytes = bytes.to_vec();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let mut caller = std::pin::pin!(tracker.write_and_record(tool_use_id, async move {
+            started_tx.send(()).unwrap();
+            release_rx.await.map_err(std::io::Error::other)?;
+            tokio::fs::write(&path, &bytes).await?;
+            Ok((path, bytes))
+        }));
+        assert!(futures::poll!(caller.as_mut()).is_pending());
+        started_rx.await.unwrap();
+        release_tx
+    }
+
+    pub(crate) fn assert_writes_draining(tracker: &FileTracker) {
+        assert!(tracker.writes.is_closed());
+        assert!(!tracker.writes.is_empty());
     }
 
     pub(crate) fn seed_full_read(tracker: &FileTracker, path: &Path) {
@@ -431,7 +453,7 @@ mod tests {
     use crate::util::fs::testing::deny_read_access;
 
     /// Writes `bytes` to `path` and returns them under `path` as the tracker key.
-    async fn write_file(path: PathBuf, bytes: &[u8]) -> std::io::Result<(PathBuf, Vec<u8>)> {
+    async fn write_file(path: PathBuf, bytes: &[u8]) -> anyhow::Result<(PathBuf, Vec<u8>)> {
         tokio::fs::write(&path, bytes).await?;
         Ok((path, bytes.to_vec()))
     }
@@ -681,20 +703,16 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("a.rs");
             let tracker = tracker();
-            let (written_tx, written_rx) = tokio::sync::oneshot::channel();
-            let write = {
-                let path = path.clone();
-                async move {
-                    let written = write_file(path, b"w").await;
-                    _ = written_tx.send(());
-                    written
-                }
-            };
+            let release =
+                super::super::testing::blocked_write(&tracker, &path, b"w", "toolu_write").await;
+            let mut drain = std::pin::pin!(tracker.drain_writes());
 
-            let caller = tracker.write_and_record("toolu_write", write);
-            _ = tokio::time::timeout(Duration::ZERO, caller).await;
-            // Needs the current-thread runtime, which records the write in the poll that sends.
-            written_rx.await.unwrap();
+            assert!(futures::poll!(drain.as_mut()).is_pending());
+            super::super::testing::assert_writes_draining(&tracker);
+            assert!(!path.exists());
+            assert_eq!(tracker.snapshot_all(), []);
+            release.send(()).unwrap();
+            drain.await;
 
             assert_eq!(std::fs::read(&path).unwrap(), b"w");
             let stored = tracker.lock().get(&path).cloned().unwrap();
@@ -714,7 +732,11 @@ mod tests {
                 .await;
 
             assert_eq!(
-                result.unwrap_err().kind(),
+                result
+                    .unwrap_err()
+                    .downcast::<std::io::Error>()
+                    .unwrap()
+                    .kind(),
                 std::io::ErrorKind::NotFound,
                 "the parent directory is missing",
             );
@@ -876,6 +898,21 @@ mod tests {
         }
 
         #[test]
+        fn final_symlink_drops_snapshot_even_when_content_matches() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("a.rs");
+            let target = dir.path().join("target.rs");
+            std::fs::write(&target, b"content").unwrap();
+            crate::util::fs::testing::symlink_file(&target, &path);
+            let snap = snapshot(&path, b"content", OffsetDateTime::now_utc());
+
+            let (tracker, dropped) = FileTracker::restored(vec![snap]);
+
+            assert_eq!(dropped, [path]);
+            assert_eq!(tracker.snapshot_all(), []);
+        }
+
+        #[test]
         fn reports_dropped_paths_in_sorted_order() {
             let dir = tempfile::tempdir().unwrap();
             let kept_path = dir.path().join("kept.rs");
@@ -1004,91 +1041,6 @@ mod tests {
                     LastView::Full
                 );
             }
-        }
-    }
-
-    mod trackable_file_error {
-        use super::*;
-
-        #[test]
-        fn directory_displays_its_kind() {
-            let err = TrackableFileError::Directory;
-
-            assert_eq!(err.to_string(), "not a regular file: directory");
-        }
-
-        #[test]
-        fn non_regular_displays_as_not_a_regular_file() {
-            let err = TrackableFileError::NonRegular;
-
-            assert_eq!(err.to_string(), "not a regular file");
-        }
-
-        #[test]
-        fn too_large_displays_the_size_and_limit() {
-            let err = TrackableFileError::TooLarge { size: 12, max: 10 };
-
-            assert_eq!(
-                err.to_string(),
-                "too large to verify (12 bytes, max 10 bytes)"
-            );
-        }
-    }
-
-    mod validate_trackable_file {
-        use super::*;
-
-        #[test]
-        fn accepts_regular_file_at_limit() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("tracked.rs");
-            let f = std::fs::File::create(&path).unwrap();
-            f.set_len(MAX_TRACKED_FILE_SIZE).unwrap();
-            let metadata = std::fs::metadata(&path).unwrap();
-
-            assert_eq!(validate_trackable_file(&metadata), Ok(()));
-        }
-
-        #[test]
-        fn rejects_directory() {
-            let dir = tempfile::tempdir().unwrap();
-            let metadata = std::fs::metadata(dir.path()).unwrap();
-
-            assert_eq!(
-                validate_trackable_file(&metadata),
-                Err(TrackableFileError::Directory)
-            );
-        }
-
-        #[test]
-        fn rejects_oversized_file() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("huge.rs");
-            let f = std::fs::File::create(&path).unwrap();
-            f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
-            let metadata = std::fs::metadata(&path).unwrap();
-
-            assert_eq!(
-                validate_trackable_file(&metadata),
-                Err(TrackableFileError::TooLarge {
-                    size: MAX_TRACKED_FILE_SIZE + 1,
-                    max: MAX_TRACKED_FILE_SIZE,
-                }),
-            );
-        }
-
-        #[cfg(unix)]
-        #[test]
-        fn rejects_non_regular_file() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("socket");
-            let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-            let metadata = std::fs::metadata(&path).unwrap();
-
-            assert_eq!(
-                validate_trackable_file(&metadata),
-                Err(TrackableFileError::NonRegular)
-            );
         }
     }
 

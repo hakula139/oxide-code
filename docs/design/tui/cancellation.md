@@ -48,7 +48,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-core/src/session/history.rs`: `walk_transcript`, which shows a resumed interruption marker as `Interaction::Interrupted`.
 - `crates/ox-core/src/tool.rs`: `Tool::run` drop contract, `ToolCtx::cancel`.
 - `crates/ox-core/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
-- `crates/ox-core/src/tool/file.rs`: `write_tracked`.
+- `crates/ox-core/src/tool/file.rs`: `write_file`.
 - `crates/ox-core/src/tool/search.rs`: `walk_files`.
 - `crates/ox-tui/src/app.rs`: `App::status` and `App::set_status`.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `handle_ctrl_c`, the Ctrl+D POSIX gate in `handle_ctrl_d`, and `expire_armed_exit`.

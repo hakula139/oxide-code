@@ -1,8 +1,9 @@
 //! File writing tool with directory creation.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use anyhow::Context as _;
 use serde::Deserialize;
 
 use super::file::{FileVerb, WriteMode};
@@ -123,6 +124,21 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
 /// Writes `content` to `path`, resolved against the context's cwd, and returns the [`WriteMode`]
 /// the write took.
 async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<WriteMode, String> {
+    write_file_with_parent(path, content, ctx, |parent| async move {
+        tokio::fs::create_dir_all(parent).await
+    })
+    .await
+}
+
+async fn write_file_with_parent<F>(
+    path: &str,
+    content: &str,
+    ctx: &ToolCtx,
+    create_parent: impl FnOnce(PathBuf) -> F + Send + 'static,
+) -> Result<WriteMode, String>
+where
+    F: Future<Output = std::io::Result<()>> + Send,
+{
     let file_path = ctx.cwd().join(path);
     let pre_meta = match tokio::fs::symlink_metadata(&file_path).await {
         Ok(meta) => Some(meta),
@@ -135,20 +151,24 @@ async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<WriteMod
         check_gate(&file_path, path, &ctx.tracker).await?;
     }
 
-    if let Some(parent) = file_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
-    }
-
     let mode = if pre_meta.is_some() {
         WriteMode::Overwrite
     } else {
         WriteMode::CreateNew
     };
-    super::file::write_tracked(ctx, &file_path, content.as_bytes().to_vec(), mode)
+    let shown = path.to_owned();
+    let bytes = content.as_bytes().to_vec();
+    ctx.tracker
+        .write_and_record(&ctx.tool_use_id, async move {
+            if let Some(parent) = file_path.parent() {
+                create_parent(parent.to_owned())
+                    .await
+                    .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+            }
+            super::file::write_file(file_path, shown, bytes, mode).await
+        })
         .await
-        .map_err(|e| format!("Failed to write {path}: {e}"))?;
+        .map_err(|error| format!("{error:#}"))?;
     Ok(mode)
 }
 
@@ -177,20 +197,57 @@ async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<(
 /// Reads the existing target `path`, spelled `shown`. The no-follow open refuses a symlink, and
 /// [`validate_write_target`] refuses a non-regular or oversized file.
 async fn read_target(path: &Path, shown: &str) -> Result<Vec<u8>, String> {
-    let (_, bytes) = super::file::read_validated(path, shown, |metadata| {
-        validate_write_target(shown, metadata)
-    })
-    .await?;
+    let (_, bytes) = super::file::read_validated(path, shown, FileVerb::Write).await?;
     Ok(bytes)
+}
+
+// ── Testing ──
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use tokio::sync::{Notify, mpsc};
+    use tokio_util::sync::CancellationToken;
+
+    use super::ToolCtx;
+
+    pub(crate) async fn write_with_blocked_parent(
+        path: &Path,
+        content: &str,
+        ctx: &ToolCtx,
+        started: mpsc::UnboundedSender<CancellationToken>,
+        release: Arc<Notify>,
+    ) -> Result<(), String> {
+        let cancel = ctx.cancel.clone();
+        super::write_file_with_parent(
+            path.to_str().unwrap(),
+            content,
+            ctx,
+            move |parent| async move {
+                started.send(cancel).unwrap();
+                release.notified().await;
+                tokio::fs::create_dir_all(parent).await
+            },
+        )
+        .await
+        .map(|_| ())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::process::Command;
+    use std::sync::Arc;
+
+    use tokio::sync::{Notify, mpsc};
+    use tracing::instrument::WithSubscriber as _;
 
     use super::*;
     use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
-    use crate::file_tracker::testing::seed_full_read;
+    use crate::file_tracker::testing::{assert_writes_draining, seed_full_read};
     use crate::tool::local_testing::{self, ctx, temp_ctx};
     use crate::tool::read::ReadTool;
     use crate::tool::view::{DiffChunk, NumberedLine};
@@ -645,6 +702,80 @@ mod tests {
                 err,
                 format!("Failed to create directory {}: {cause}", nested.display()),
             );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn logs_parent_creation_failure_after_the_caller_is_dropped() {
+            // Tracing caches callsite interest process-wide, including other test threads.
+            const CHILD: &str = "PARENT_CREATION_LOG_TEST_CHILD";
+            if std::env::var_os(CHILD).is_none() {
+                let thread = std::thread::current();
+                let name = thread.name().unwrap();
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", name])
+                    .env(CHILD, "1")
+                    .output()
+                    .unwrap();
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(output.status.success(), "{stdout}{stderr}");
+                assert!(stdout.contains(&format!("test {name} ... ok")), "{stdout}");
+                return;
+            }
+
+            let dir = canonical_tempdir();
+            let parent = dir.path().join("nested");
+            let path = parent.join("file.txt");
+            let ctx = ctx(dir.path());
+            let log_path = dir.path().join("events.log");
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(fs::File::create(&log_path).unwrap())
+                .finish();
+            let (started, mut started_rx) = mpsc::unbounded_channel();
+            let release = Arc::new(Notify::new());
+            let mut caller = Box::pin(
+                testing::write_with_blocked_parent(
+                    &path,
+                    "content",
+                    &ctx,
+                    started,
+                    Arc::clone(&release),
+                )
+                .with_subscriber(subscriber),
+            );
+            tokio::select! {
+                token = started_rx.recv() => assert!(token.is_some()),
+                result = caller.as_mut() => panic!("write ended before parent creation: {result:?}"),
+            }
+
+            drop(caller);
+            let mut drain = std::pin::pin!(ctx.tracker.drain_writes());
+            assert!(futures::poll!(drain.as_mut()).is_pending());
+            assert_writes_draining(&ctx.tracker);
+            assert!(!parent.exists());
+            assert_eq!(ctx.tracker.snapshot_all(), []);
+            assert_eq!(fs::read_to_string(&log_path).unwrap(), "");
+            fs::write(&parent, "blocker").unwrap();
+            release.notify_one();
+            drain.await;
+
+            let cause = fs::create_dir_all(&parent).unwrap_err();
+            let log = fs::read_to_string(&log_path).unwrap();
+            assert!(log.contains("workspace write failed"), "{log}");
+            assert!(log.contains("tool_use_id=\"toolu_test\""), "{log}");
+            assert!(
+                log.contains(&format!(
+                    "Failed to create directory {}: {cause}",
+                    parent.display()
+                )),
+                "{log}",
+            );
+            assert!(!path.exists());
+            assert_eq!(fs::read_to_string(&parent).unwrap(), "blocker");
+            assert_eq!(ctx.tracker.snapshot_all(), []);
         }
 
         #[cfg(unix)]

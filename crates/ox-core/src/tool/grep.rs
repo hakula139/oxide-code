@@ -1,8 +1,7 @@
 //! Regex content search tool.
 
 use std::fmt::Write as _;
-use std::fs::OpenOptions;
-use std::io::{self, Read as _};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,6 +17,7 @@ use super::view::{GrepFileGroup, GrepMatchLine, ToolResultView};
 use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
+use crate::util::fs::{FileReadError, read_regular_file};
 use crate::util::text::{format_size, plural};
 
 const NO_MATCHES_FOUND: &str = "No matches found";
@@ -380,22 +380,16 @@ fn texts<'a>(
 /// never blocks on a fifo, and the opened file must be a regular file within `size_limit` bytes, so
 /// an entry swapped after the walk checked it is not read through.
 fn read_text(path: &Path, size_limit: u64) -> io::Result<Option<String>> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    let mut file = super::file::open_no_follow_blocking(path, options)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::other("not a regular file"));
-    }
-    if metadata.len() > size_limit {
-        let limit = format_size(size_limit);
-        return Err(io::Error::other(format!(
-            "grew past the {limit} size limit"
-        )));
-    }
-
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    let (_, bytes) = read_regular_file(path, size_limit).map_err(|error| match error {
+        FileReadError::Io(error) => error,
+        FileReadError::Directory | FileReadError::NonRegular => {
+            io::Error::other("not a regular file")
+        }
+        FileReadError::TooLarge { .. } => {
+            let limit = format_size(size_limit);
+            io::Error::other(format!("grew past the {limit} size limit"))
+        }
+    })?;
     if super::file::is_binary(&bytes) {
         return Ok(None);
     }
