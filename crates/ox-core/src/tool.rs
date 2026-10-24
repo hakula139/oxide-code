@@ -458,6 +458,7 @@ fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
 #[cfg(test)]
 pub(crate) mod local_testing {
     use std::fs::{self, File};
+    use std::io;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
@@ -470,6 +471,141 @@ pub(crate) mod local_testing {
     use crate::file_tracker::FileTracker;
     use crate::permission::rule::Rule;
     use crate::permission::{Access, Mode, PermissionClass, Policy, ReadFilter, Workspace};
+
+    /// Native ACL availability and original-file evidence for one workspace write attempt.
+    pub(crate) struct WorkspaceWrite {
+        pub(crate) acl_available: bool,
+        path: PathBuf,
+        original: Option<(File, fs::Metadata, Vec<u8>)>,
+    }
+
+    impl WorkspaceWrite {
+        pub(crate) fn new(path: &Path) -> Self {
+            #[cfg(target_os = "linux")]
+            let acl_available = {
+                use xattr::FileExt as _;
+
+                let existing = path.ancestors().find(|path| path.exists()).unwrap();
+                match File::open(existing)
+                    .unwrap()
+                    .get_xattr("system.posix_acl_access")
+                {
+                    Ok(_) => true,
+                    Err(error) => {
+                        assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
+                        false
+                    }
+                }
+            };
+            #[cfg(not(target_os = "linux"))]
+            let acl_available = true;
+            let original = match File::open(path) {
+                Ok(file) => {
+                    let metadata = file.metadata().unwrap();
+                    let bytes = fs::read(path).unwrap();
+                    Some((file, metadata, bytes))
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => panic!("cannot inspect {}: {error}", path.display()),
+            };
+            Self {
+                acl_available,
+                path: path.to_owned(),
+                original,
+            }
+        }
+
+        pub(crate) fn assert_native_refusal(&self, error: &io::Error) {
+            assert!(!self.acl_available);
+            assert_eq!(error.raw_os_error(), acl_unavailable_error().raw_os_error());
+            self.assert_unchanged();
+        }
+
+        pub(crate) fn assert_refusal(&self, error: &str, shown: &str) {
+            assert!(!self.acl_available);
+            assert_eq!(
+                error,
+                format!("Failed to write {shown}: {}", acl_unavailable_error())
+            );
+            self.assert_unchanged();
+        }
+
+        pub(crate) fn assert_logged_refusal(&self, log: &str, tool_use_id: &str) {
+            assert!(!self.acl_available);
+            let error = format!(
+                "error=Failed to write {}: {}",
+                self.path.display(),
+                acl_unavailable_error()
+            );
+            let call = format!("tool_use_id=\"{tool_use_id}\"");
+            assert!(
+                log.lines().any(|line| {
+                    line.contains("workspace write failed")
+                        && line.contains(&call)
+                        && line.contains(&error)
+                }),
+                "{log}"
+            );
+            self.assert_unchanged();
+        }
+
+        pub(crate) fn assert_unchanged(&self) {
+            if let Some((original, metadata, bytes)) = &self.original {
+                let current = File::open(&self.path).unwrap();
+                assert_eq!(fs::read(&self.path).unwrap(), *bytes);
+                assert_eq!(
+                    current.metadata().unwrap().permissions(),
+                    metadata.permissions()
+                );
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+
+                    let current = current.metadata().unwrap();
+                    assert_eq!(
+                        (current.dev(), current.ino(), current.uid(), current.gid()),
+                        (
+                            metadata.dev(),
+                            metadata.ino(),
+                            metadata.uid(),
+                            metadata.gid()
+                        )
+                    );
+                    let _: &File = original;
+                }
+                #[cfg(windows)]
+                assert_eq!(
+                    crate::util::fs::file_id(&current).unwrap(),
+                    crate::util::fs::file_id(original).unwrap()
+                );
+            } else {
+                assert!(!self.path.exists());
+            }
+            let parent = self.path.parent().unwrap();
+            if parent.exists() {
+                let temporary: Vec<_> = fs::read_dir(parent)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .filter(|name| {
+                        let name = name.to_string_lossy();
+                        name.starts_with(".ox-write.") || name.starts_with(".ox-mode.")
+                    })
+                    .collect();
+                assert_eq!(temporary, [] as [std::ffi::OsString; 0]);
+            }
+        }
+    }
+
+    fn acl_unavailable_error() -> io::Error {
+        #[cfg(target_os = "linux")]
+        {
+            io::Error::from_raw_os_error(nix::libc::EOPNOTSUPP)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            panic!("the required POSIX ACL query exists only on Linux")
+        }
+    }
 
     /// A fresh tracker's context in `cwd`, for call `toolu_test` of session `test-session`, whose
     /// artifact directory is `cwd/session`.
@@ -836,7 +972,18 @@ mod tests {
 
         #[tokio::test]
         async fn keeps_missing_directory_paths_from_becoming_files() {
-            for name in ["missing/", "missing/."] {
+            for name in [
+                "missing/",
+                "missing/.",
+                "missing//",
+                "missing/./",
+                #[cfg(windows)]
+                r"missing\",
+                #[cfg(windows)]
+                r"missing\.",
+                #[cfg(windows)]
+                r"missing/\.",
+            ] {
                 let dir = canonical_tempdir();
                 let ctx = ctx(dir.path());
 
@@ -852,7 +999,12 @@ mod tests {
                 .await;
                 assert!(write.is_error, "{name}: {}", write.content);
 
-                assert!(!dir.path().join("missing").is_file());
+                assert_eq!(ctx.tracker.snapshot_all(), [], "{name}");
+                let entries: Vec<_> = fs::read_dir(dir.path())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                assert_eq!(entries, [] as [std::ffi::OsString; 0], "{name}");
             }
         }
 
