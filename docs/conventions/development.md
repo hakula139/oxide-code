@@ -74,7 +74,7 @@ CI runs on pushes to `main`, pull requests, and manual dispatch, and the release
 | Lint                         | `nix flake check`, which runs the pre-commit hooks without the Node ones and the Home Manager module tests, then `pnpm format`, `pnpm lint`, `pnpm spellcheck`, and `cargo deny check` |
 | Rust (Linux, macOS, Windows) | `cargo clippy --all-targets`, `cargo clippy`, `cargo doc --no-deps`, and the test suite under `cargo llvm-cov`, uploaded to Codecov                                                    |
 | MSRV                         | `cargo hack check --rust-version` against `rust-version`                                                                                                                               |
-| Nix (Linux, macOS)           | The package build, which runs the tests and `ox --version`                                                                                                                             |
+| Nix (Linux, macOS)           | The package build, which runs the tests, `ox --version`, and installed license notice checks                                                                                           |
 
 Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result fails when any job in its `needs` fails or is cancelled, so list each new job there.
 
