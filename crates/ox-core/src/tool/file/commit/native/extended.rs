@@ -71,7 +71,7 @@ pub(super) fn capture(file: &File) -> io::Result<Snapshot> {
                 return Ok(Snapshot::new());
             }
             Foundation::STATUS_BUFFER_OVERFLOW | Foundation::STATUS_BUFFER_TOO_SMALL => {
-                buffer.resize(buffer.len() * 2, 0)
+                buffer.resize(buffer.len() * 2, 0);
             }
             _ => {
                 let error = unsafe { Foundation::RtlNtStatusToDosError(result) };

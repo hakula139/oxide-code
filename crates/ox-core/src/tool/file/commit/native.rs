@@ -1,5 +1,7 @@
 //! Native operations whose handle and buffer contracts are contained here.
 
+#[cfg(any(windows, test))]
+mod backup;
 #[cfg(windows)]
 mod extended;
 
@@ -9,8 +11,6 @@ use std::path::Path;
 
 #[cfg(windows)]
 use std::os::windows::{ffi::OsStrExt as _, io::AsRawHandle as _};
-#[cfg(windows)]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(windows)]
 use windows_sys::Win32::{
@@ -263,8 +263,8 @@ impl NativeBytes {
         Self(words)
     }
 
-    fn pointer(value: &Option<Self>) -> *mut std::ffi::c_void {
-        value.as_ref().map_or(std::ptr::null_mut(), |bytes| {
+    fn pointer(value: Option<&Self>) -> *mut std::ffi::c_void {
+        value.map_or(std::ptr::null_mut(), |bytes| {
             bytes.0.as_ptr().cast_mut().cast()
         })
     }
@@ -326,10 +326,10 @@ fn access(file: &File) -> io::Result<Access> {
         group: sid(group),
         dacl: acl(dacl),
         label: acl(label),
+        // SetSecurityInfo can mark inheritance conversion without changing a regular file's ACL.
         control: control
             & (WinSecurity::SE_DACL_PRESENT
                 | WinSecurity::SE_DACL_PROTECTED
-                | WinSecurity::SE_DACL_AUTO_INHERITED
                 | WinSecurity::SE_DACL_AUTO_INHERIT_REQ),
     })
 }
@@ -393,10 +393,10 @@ fn set_access(file: &File, access: &Access) -> io::Result<()> {
             file.as_raw_handle(),
             WinSecurity::Authorization::SE_FILE_OBJECT,
             information,
-            NativeBytes::pointer(&access.owner),
-            NativeBytes::pointer(&access.group),
-            NativeBytes::pointer(&access.dacl).cast(),
-            NativeBytes::pointer(&access.label).cast(),
+            NativeBytes::pointer(access.owner.as_ref()),
+            NativeBytes::pointer(access.group.as_ref()),
+            NativeBytes::pointer(access.dacl.as_ref()).cast(),
+            NativeBytes::pointer(access.label.as_ref()).cast(),
         )
     };
     if error == 0 {
@@ -507,75 +507,12 @@ pub(super) fn discard(file: &File) -> io::Result<()> {
     })
 }
 
-#[cfg(windows)]
-struct CopyIdentity {
-    source: (u64, [u8; 16]),
-    destination: (u64, [u8; 16]),
-    checked: AtomicBool,
-    failed: AtomicBool,
-    #[cfg(test)]
-    fail_after_chunk: bool,
-    #[cfg(test)]
-    copied_data: AtomicBool,
-}
-
-#[cfg(windows)]
-#[expect(
-    unsafe_code,
-    reason = "CopyFileExW lends its actual source and destination handles to this callback"
-)]
-unsafe extern "system" fn check_copy_identity(
-    _: i64,
-    transferred: i64,
-    _: i64,
-    _: i64,
-    _: u32,
-    reason: u32,
-    source: Foundation::HANDLE,
-    destination: Foundation::HANDLE,
-    context: *const std::ffi::c_void,
-) -> u32 {
-    use std::os::windows::io::BorrowedHandle;
-
-    // The synchronous caller owns this context until CopyFileExW returns.
-    let context = unsafe { &*context.cast::<CopyIdentity>() };
-    #[cfg(not(test))]
-    {
-        _ = transferred;
-    }
-    #[cfg(test)]
-    if context.fail_after_chunk && reason == FileSystem::CALLBACK_CHUNK_FINISHED {
-        context
-            .copied_data
-            .store(transferred > 0, Ordering::Relaxed);
-        context.failed.store(true, Ordering::Relaxed);
-        return FileSystem::PROGRESS_CANCEL;
-    }
-    if reason != FileSystem::CALLBACK_STREAM_SWITCH {
-        return FileSystem::PROGRESS_CONTINUE;
-    }
-    let matches = |handle, expected| {
-        // The copy API lends these live handles only for the callback. They are never closed here.
-        let handle = unsafe { BorrowedHandle::borrow_raw(handle) };
-        crate::util::fs::file_id(handle).is_ok_and(|id| id == expected)
-    };
-    context.checked.store(true, Ordering::Relaxed);
-    if !matches(source, context.source) || !matches(destination, context.destination) {
-        context.failed.store(true, Ordering::Relaxed);
-    }
-    if context.failed.load(Ordering::Relaxed) {
-        FileSystem::PROGRESS_CANCEL
-    } else {
-        FileSystem::PROGRESS_CONTINUE
-    }
-}
-
 #[cfg(target_os = "macos")]
 #[expect(
     unsafe_code,
     reason = "fcopyfile has no safe descriptor-bound standard library API"
 )]
-pub(super) fn copy(source: &File, _: &Path, destination: &File, _: &Path) -> io::Result<()> {
+pub(super) fn copy(source: &File, destination: &File) -> io::Result<()> {
     use std::io::Seek as _;
     use std::os::fd::AsRawFd as _;
 
@@ -594,60 +531,8 @@ pub(super) fn copy(source: &File, _: &Path, destination: &File, _: &Path) -> io:
 }
 
 #[cfg(windows)]
-pub(super) fn copy(
-    source: &File,
-    source_path: &Path,
-    destination: &File,
-    destination_path: &Path,
-) -> io::Result<()> {
-    let context = CopyIdentity {
-        source: identity(source)?,
-        destination: identity(destination)?,
-        checked: AtomicBool::new(false),
-        failed: AtomicBool::new(false),
-        #[cfg(test)]
-        fail_after_chunk: false,
-        #[cfg(test)]
-        copied_data: AtomicBool::new(false),
-    };
-    copy_with(source_path, destination_path, &context)
-}
-
-#[cfg(windows)]
-#[expect(
-    unsafe_code,
-    reason = "native copying preserves application streams and EAs, with opened-handle identity checks"
-)]
-fn copy_with(
-    source_path: &Path,
-    destination_path: &Path,
-    context: &CopyIdentity,
-) -> io::Result<()> {
-    let source_path = wide(source_path)?;
-    let destination_path = wide(destination_path)?;
-    // The callback only borrows this live context. Both native paths remain terminated and alive.
-    let result = unsafe {
-        FileSystem::CopyFileExW(
-            source_path.as_ptr(),
-            destination_path.as_ptr(),
-            Some(check_copy_identity),
-            std::ptr::from_ref(context).cast(),
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if context.failed.load(Ordering::Relaxed) {
-        return Err(io::Error::other(
-            "the native copy could not validate its opened files",
-        ));
-    }
-    windows_result(result)?;
-    if !context.checked.load(Ordering::Relaxed) {
-        return Err(io::Error::other(
-            "the native copy did not expose its opened files",
-        ));
-    }
-    Ok(())
+pub(super) fn copy(source: &File, destination: &File) -> io::Result<()> {
+    backup::copy(source, destination)
 }
 
 #[cfg(windows)]
@@ -1031,8 +916,11 @@ fn parse_stream_names(bytes: &[u8]) -> io::Result<Vec<Vec<u16>>> {
             return Err(invalid());
         }
         names.push(
-            name.chunks_exact(2)
-                .map(|unit| u16::from_ne_bytes([unit[0], unit[1]]))
+            name.as_chunks::<2>()
+                .0
+                .iter()
+                .copied()
+                .map(u16::from_ne_bytes)
                 .collect(),
         );
         if next == 0 {
@@ -1049,7 +937,7 @@ fn parse_stream_names(bytes: &[u8]) -> io::Result<Vec<Vec<u16>>> {
 #[cfg(all(test, windows))]
 mod tests {
     use std::fs;
-    use std::io::Write as _;
+    use std::io::{Seek as _, Write as _};
     use std::os::windows::ffi::OsStringExt as _;
     use std::os::windows::fs::OpenOptionsExt as _;
 
@@ -1067,7 +955,8 @@ mod tests {
         reason = "copy a test ACL from a live native descriptor into its owned aligned representation"
     )]
     fn descriptor_acl(sddl: &str, system: bool) -> Option<NativeBytes> {
-        let descriptor = descriptor(&sddl.encode_utf16().chain([0]).collect::<Vec<_>>()).unwrap();
+        let descriptor = descriptor(&sddl.encode_utf16().chain([0]).collect::<Vec<_>>())
+            .expect("the fixture has a valid security descriptor");
         let mut present = 0;
         let mut defaulted = 0;
         let mut acl = std::ptr::null_mut();
@@ -1084,7 +973,7 @@ mod tests {
                 &raw mut acl,
                 &raw mut defaulted,
             ))
-            .unwrap();
+            .expect("the fixture's ACL can be queried");
             assert_ne!(present, 0);
             (!acl.is_null()).then(|| NativeBytes::copy(acl.cast(), usize::from((*acl).AclSize)))
         }
@@ -1105,7 +994,7 @@ mod tests {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                NativeBytes::pointer(&acl).cast(),
+                NativeBytes::pointer(acl.as_ref()).cast(),
             )
         };
         if error == 0 {
@@ -1203,49 +1092,6 @@ mod tests {
         }
     }
 
-    mod check_copy_identity {
-        use super::*;
-
-        #[test]
-        #[expect(
-            unsafe_code,
-            reason = "invoke the native callback with live borrowed file handles and its exact context"
-        )]
-        fn callback_compares_the_upper_half_of_the_file_id() {
-            let dir = tempfile::tempdir().unwrap();
-            let source = File::create(dir.path().join("source")).unwrap();
-            let destination = File::create(dir.path().join("destination")).unwrap();
-            let mut context = CopyIdentity {
-                source: identity(&source).unwrap(),
-                destination: identity(&destination).unwrap(),
-                checked: AtomicBool::new(false),
-                failed: AtomicBool::new(false),
-                fail_after_chunk: false,
-                copied_data: AtomicBool::new(false),
-            };
-            context.source.1[15] ^= 1;
-
-            let result = unsafe {
-                check_copy_identity(
-                    0,
-                    0,
-                    0,
-                    0,
-                    1,
-                    FileSystem::CALLBACK_STREAM_SWITCH,
-                    source.as_raw_handle(),
-                    destination.as_raw_handle(),
-                    (&raw mut context).cast(),
-                )
-            };
-
-            assert_eq!(result, FileSystem::PROGRESS_CANCEL);
-            assert!(
-                context.checked.load(Ordering::Relaxed) && context.failed.load(Ordering::Relaxed)
-            );
-        }
-    }
-
     mod copy {
         use super::*;
 
@@ -1257,6 +1103,7 @@ mod tests {
                 fs::write(&path, content).unwrap();
                 fs::write(stream_path(&path, "application"), b"\x00\xff\x01").unwrap();
                 fs::write(stream_path(&path, "empty"), b"").unwrap();
+                fs::write(stream_path(&path, "single"), b"x").unwrap();
                 let source = fs::OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -1275,7 +1122,7 @@ mod tests {
 
                 assert!(fs::rename(&staged.path, dir.path().join("moved")).is_err());
                 assert!(fs::rename(&victim, &staged.path).is_err());
-                copy(&source, &path, &staged.file, &staged.path).unwrap();
+                copy(&source, &staged.file).unwrap();
                 snapshot.apply(&staged.file).unwrap();
 
                 assert_eq!(Security::capture(&staged.file).unwrap(), snapshot);
@@ -1299,29 +1146,84 @@ mod tests {
         }
 
         #[test]
+        #[expect(
+            unsafe_code,
+            reason = "mark test application streams sparse through their synchronous handles"
+        )]
+        fn sparse_streams_keep_nonzero_data_and_trailing_or_complete_holes() {
+            use windows_sys::Win32::System::{IO::DeviceIoControl, Ioctl::FSCTL_SET_SPARSE};
+
+            for (name, data) in [("trailing", b"content".as_slice()), ("all-hole", b"")] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("source");
+                fs::write(&path, b"original").unwrap();
+                let alternate = stream_path(&path, "sparse");
+                let mut stream = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(&alternate)
+                    .unwrap();
+                let mut returned = 0;
+                // A null input sets the sparse flag. This synchronous call has no output buffer.
+                windows_result(unsafe {
+                    DeviceIoControl(
+                        stream.as_raw_handle(),
+                        FSCTL_SET_SPARSE,
+                        std::ptr::null(),
+                        0,
+                        std::ptr::null_mut(),
+                        0,
+                        &raw mut returned,
+                        std::ptr::null_mut(),
+                    )
+                })
+                .unwrap();
+                stream.seek(io::SeekFrom::Start(65_536)).unwrap();
+                stream.write_all(data).unwrap();
+                stream.set_len(196_608).unwrap();
+                drop(stream);
+                let mut expected = vec![0; 196_608];
+                expected[65_536..65_536 + data.len()].copy_from_slice(data);
+                let source = File::open(&path).unwrap();
+                let snapshot = Security::capture(&source).unwrap();
+                let staged = TemporaryFile::staged(dir.path()).unwrap();
+                let copied = stream_path(&staged.path, "sparse");
+
+                copy(&source, &staged.file).unwrap();
+                snapshot.apply(&staged.file).unwrap();
+
+                assert_eq!(fs::metadata(&copied).unwrap().len(), 196_608, "{name}");
+                assert_eq!(fs::read(&copied).unwrap(), expected, "{name}");
+                assert_eq!(Security::capture(&staged.file).unwrap(), snapshot, "{name}");
+            }
+        }
+
+        #[test]
         fn a_partial_native_copy_failure_keeps_the_original_and_cleans_up() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("file");
             let bytes = vec![b'x'; 1024 * 1024];
-            fs::write(&path, &bytes).unwrap();
+            fs::write(&path, b"original").unwrap();
+            fs::write(stream_path(&path, "application"), &bytes).unwrap();
             let source = File::open(&path).unwrap();
             let staged = TemporaryFile::staged(dir.path()).unwrap();
             let stage_name = staged.path.to_path_buf();
-            let context = CopyIdentity {
-                source: identity(&source).unwrap(),
-                destination: identity(&staged.file).unwrap(),
-                checked: AtomicBool::new(false),
-                failed: AtomicBool::new(false),
-                fail_after_chunk: true,
-                copied_data: AtomicBool::new(false),
-            };
+            let mut writes = 0;
 
-            assert!(copy_with(&path, &staged.path, &context).is_err());
+            let error = backup::copy_with(&source, &staged.file, || {
+                writes += 1;
+                if writes == 3 {
+                    return Err(io::Error::other("injected partial metadata copy"));
+                }
+                Ok(())
+            })
+            .unwrap_err();
             drop(staged);
 
-            assert!(context.checked.load(Ordering::Relaxed));
-            assert!(context.copied_data.load(Ordering::Relaxed));
-            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert_eq!(error.to_string(), "injected partial metadata copy");
+            assert_eq!(fs::read(&path).unwrap(), b"original");
+            assert_eq!(fs::read(stream_path(&path, "application")).unwrap(), bytes);
             assert_eq!(
                 identity(&File::open(&path).unwrap()).unwrap(),
                 identity(&source).unwrap()
@@ -1330,23 +1232,25 @@ mod tests {
         }
 
         #[test]
-        fn copying_from_a_replaced_name_refuses_before_publication() {
+        fn copying_uses_the_open_original_after_its_path_is_replaced() {
             let dir = tempfile::tempdir().unwrap();
             let original = dir.path().join("original");
             let substituted = dir.path().join("substituted");
             fs::write(&original, b"original").unwrap();
+            fs::write(stream_path(&original, "application"), b"original stream").unwrap();
             fs::write(&substituted, b"substituted").unwrap();
             let source = File::open(&original).unwrap();
             let staged = TemporaryFile::staged(dir.path()).unwrap();
-            let stage_name = staged.path.to_path_buf();
+            fs::rename(&original, dir.path().join("moved")).unwrap();
+            fs::rename(&substituted, &original).unwrap();
 
-            let error = copy(&source, &substituted, &staged.file, &staged.path).unwrap_err();
-            drop(staged);
+            copy(&source, &staged.file).unwrap();
 
-            assert!(error.to_string().contains("validate"), "{error}");
-            assert!(!stage_name.exists());
-            assert_eq!(fs::read(&original).unwrap(), b"original");
-            assert_eq!(fs::read(&substituted).unwrap(), b"substituted");
+            assert_eq!(fs::read(&original).unwrap(), b"substituted");
+            assert_eq!(
+                fs::read(stream_path(&staged.path, "application")).unwrap(),
+                b"original stream"
+            );
         }
     }
 
@@ -1444,8 +1348,9 @@ mod tests {
             let content = b"compressible\n".repeat(4096);
             fs::write(&path, &content).unwrap();
             let source = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
+                .access_mode(
+                    Foundation::GENERIC_READ | Foundation::GENERIC_WRITE | FileSystem::WRITE_DAC,
+                )
                 .open(&path)
                 .unwrap();
             set_compression(&source, FileSystem::COMPRESSION_FORMAT_LZNT1).unwrap();
@@ -1475,6 +1380,66 @@ mod tests {
             write(&atomic, b"content", None).unwrap();
 
             assert_eq!(access(&File::open(&atomic).unwrap()).unwrap(), expected);
+        }
+
+        #[test]
+        fn replacements_follow_future_parent_acl_changes_like_ordinary_files() {
+            for protected in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let parent = fs::OpenOptions::new()
+                    .access_mode(Foundation::GENERIC_READ | FileSystem::WRITE_DAC)
+                    .custom_flags(FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+                    .open(dir.path())
+                    .unwrap();
+                let original = access(&parent).unwrap();
+                let mut policy = original.clone();
+                policy.dacl = descriptor_acl("D:P(A;OICI;FA;;;OW)", false);
+                policy.control |= WinSecurity::SE_DACL_PROTECTED;
+                set_access(&parent, &policy).unwrap();
+                let ordinary = dir.path().join("ordinary");
+                let atomic = dir.path().join("atomic");
+                for path in [&ordinary, &atomic] {
+                    fs::write(path, b"original").unwrap();
+                    if protected {
+                        let file = fs::OpenOptions::new()
+                            .access_mode(Foundation::GENERIC_READ | FileSystem::WRITE_DAC)
+                            .open(path)
+                            .unwrap();
+                        let mut leaf = access(&file).unwrap();
+                        leaf.control |= WinSecurity::SE_DACL_PROTECTED;
+                        set_access(&file, &leaf).unwrap();
+                    }
+                }
+                write(&atomic, b"changed", Some(b"original")).unwrap();
+
+                for deny in [true, false] {
+                    policy.dacl = descriptor_acl(
+                        if deny {
+                            "D:P(D;OIIO;0x00000002;;;WD)(A;OICI;FA;;;OW)"
+                        } else {
+                            "D:P(A;OICI;FA;;;OW)"
+                        },
+                        false,
+                    );
+
+                    set_access(&parent, &policy).unwrap();
+
+                    assert_eq!(
+                        access(&File::open(&atomic).unwrap()).unwrap(),
+                        access(&File::open(&ordinary).unwrap()).unwrap(),
+                        "protected={protected}, deny={deny}"
+                    );
+                    for path in [&ordinary, &atomic] {
+                        assert_eq!(
+                            fs::OpenOptions::new().write(true).open(path).is_ok(),
+                            protected || !deny,
+                            "{}: protected={protected}, deny={deny}",
+                            path.display()
+                        );
+                    }
+                }
+                set_access(&parent, &original).unwrap();
+            }
         }
 
         #[test]

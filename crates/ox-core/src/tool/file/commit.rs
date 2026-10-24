@@ -51,7 +51,7 @@ fn write_with(
     let mut staged = TemporaryFile::staged(parent)?;
     #[cfg(any(target_os = "macos", windows))]
     if let Some(original) = &original {
-        native::copy(&original.file, path, &staged.file, &staged.path)?;
+        native::copy(&original.file, &staged.file)?;
     }
     let file = &mut staged.file;
     checkpoint(Phase::Prepared, file)?;

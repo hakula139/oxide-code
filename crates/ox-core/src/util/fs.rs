@@ -111,7 +111,7 @@ pub(crate) fn open_no_follow(path: &Path, mut options: OpenOptions) -> io::Resul
     }
 }
 
-/// The volume and full file ID, including the upper 64 bits required by ReFS.
+/// The volume and full file ID, including the upper 64 bits required by `ReFS`.
 #[cfg(windows)]
 #[expect(
     unsafe_code,
