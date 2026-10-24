@@ -102,40 +102,51 @@ fn drop_ins(dir: &Path) -> Result<Vec<PathBuf>> {
 /// The `.ox/config.toml` in the nearest directory from `cwd` up to `root` that has one. It must be
 /// a file [`resolve_project_file`] lets the checkout supply.
 fn project_layer(cwd: &Path, root: &Path) -> Result<Option<Layer>> {
-    let Some(path) = cwd
+    for path in cwd
         .ancestors()
         .take_while(|dir| dir.starts_with(root))
         .map(|dir| dir.join(PROJECT_DIR).join(CONFIG_FILE))
-        .find(|path| path.is_file())
-    else {
-        return Ok(None);
-    };
-
-    let fix = || {
-        format!(
-            "Replace the link with a regular file, or move personal settings to {}.",
-            user_config_hint()
-        )
-    };
-    match resolve_project_file(&path, root) {
-        Ok(_) => Ok(Some(Layer::Project(path))),
-        Err(ProjectFileError::Io(e)) => {
-            Err(e).with_context(|| format!("failed to resolve config at {}", path.display()))
+    {
+        let failed = || format!("failed to resolve config at {}", path.display());
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(failed),
         }
-        Err(ProjectFileError::Outside) => bail!(
-            "{} links outside the project root {}. {}",
-            path.display(),
-            root.display(),
-            fix(),
-        ),
-        Err(ProjectFileError::Linked) => bail!(
-            "{} is reached through a symlink, \
-             which is not followed when the project root {} contains the home directory. {}",
-            path.display(),
-            root.display(),
-            fix(),
-        ),
+
+        let fix = || {
+            format!(
+                "Replace the link with a regular file, or move personal settings to {}.",
+                user_config_hint()
+            )
+        };
+        let resolved = match resolve_project_file(&path, root) {
+            Ok(resolved) => resolved,
+            Err(ProjectFileError::Io(e)) => return Err(e).with_context(failed),
+            Err(ProjectFileError::Outside) => bail!(
+                "{} links outside the project root {}. {}",
+                path.display(),
+                root.display(),
+                fix(),
+            ),
+            Err(ProjectFileError::Linked) => bail!(
+                "{} is reached through a symlink, \
+                 which is not followed when the project root {} contains the home directory. {}",
+                path.display(),
+                root.display(),
+                fix(),
+            ),
+        };
+        if !std::fs::metadata(resolved).with_context(failed)?.is_file() {
+            bail!(
+                "invalid config at {}: expected a regular file. \
+                 Replace it with a regular file or remove it.",
+                path.display(),
+            );
+        }
+        return Ok(Some(Layer::Project(path)));
     }
+    Ok(None)
 }
 
 pub fn user_config_path() -> Option<PathBuf> {
@@ -565,6 +576,87 @@ mod tests {
             assert_eq!(
                 project_layer(&app, dir.path()).unwrap(),
                 Some(Layer::Project(path))
+            );
+        }
+
+        #[test]
+        fn rejects_a_directory_at_the_config_path() {
+            for linked in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                write(&dir.path().join(".ox/config.toml"), "");
+                let child = dir.path().join("sub");
+                let path = child.join(".ox/config.toml");
+                if linked {
+                    std::fs::create_dir_all(child.join(".ox")).unwrap();
+                    symlink_dir(dir.path(), &path);
+                } else {
+                    std::fs::create_dir_all(&path).unwrap();
+                }
+
+                let err = project_layer(&child, dir.path()).expect_err("a directory must fail");
+
+                assert_eq!(
+                    format!("{err:#}"),
+                    format!(
+                        "invalid config at {}: expected a regular file. \
+                         Replace it with a regular file or remove it.",
+                        path.display(),
+                    ),
+                    "linked={linked}",
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_looped_links_with_or_without_an_ancestor_config() {
+            for (directory_link, ancestor_config) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let dir = tempfile::tempdir().unwrap();
+                let child = dir.path().join("sub");
+                std::fs::create_dir(&child).unwrap();
+                if ancestor_config {
+                    write(&dir.path().join(".ox/config.toml"), "");
+                }
+                let path = child.join(".ox/config.toml");
+                if directory_link {
+                    let first = child.join(".ox");
+                    let second = child.join("loop");
+                    symlink_dir(&first, &second);
+                    symlink_dir(&second, &first);
+                } else {
+                    std::fs::create_dir(child.join(".ox")).unwrap();
+                    let second = child.join(".ox/loop.toml");
+                    symlink_file(&path, &second);
+                    symlink_file(&second, &path);
+                }
+                let cause = std::fs::canonicalize(&path).unwrap_err();
+
+                let err = project_layer(&child, dir.path()).expect_err("a looped link must fail");
+
+                assert_eq!(
+                    format!("{err:#}"),
+                    format!("failed to resolve config at {}: {cause}", path.display()),
+                    "directory_link={directory_link}, ancestor_config={ancestor_config}",
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_a_dangling_link_before_using_an_ancestor_config() {
+            let dir = tempfile::tempdir().unwrap();
+            write(&dir.path().join(".ox/config.toml"), "");
+            let child = dir.path().join("sub");
+            std::fs::create_dir_all(child.join(".ox")).unwrap();
+            let path = child.join(".ox/config.toml");
+            symlink_file(&child.join("missing.toml"), &path);
+            let cause = std::fs::canonicalize(&path).unwrap_err();
+
+            let err = project_layer(&child, dir.path()).expect_err("a dangling link must fail");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!("failed to resolve config at {}: {cause}", path.display()),
             );
         }
 
