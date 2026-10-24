@@ -253,6 +253,10 @@ impl StdioSink {
                 let line = format!("Error: {}", escape_controls(&msg));
                 self.end_reply_then(stdout, stderr, &line)?;
             }
+            Event::ArchiveUpdated { id, result } => match result {
+                Ok(state) => writeln!(stderr, "{}", archive_notice(&id, state))?,
+                Err(message) => writeln!(stderr, "Error: {}", escape_controls(&message))?,
+            },
             Event::Error(msg) | Event::RenameFailed(msg) => {
                 writeln!(stderr, "Error: {}", escape_controls(&msg))?;
             }
@@ -989,6 +993,28 @@ mod tests {
 
                 assert_eq!(stdout, "");
                 assert_eq!(stderr, "Switched to plan mode\n");
+            }
+
+            #[test]
+            fn saved_archive_reports_its_result_without_replacing_the_transcript() {
+                for (result, expected) in [
+                    (Ok(ArchiveState::Active), "Unarchived session saved\n"),
+                    (
+                        Err("Disk unavailable".to_owned()),
+                        "Error: Disk unavailable\n",
+                    ),
+                ] {
+                    let (stdout, stderr) = render_one(
+                        &test_sink(false),
+                        Event::ArchiveUpdated {
+                            id: "saved".to_owned(),
+                            result,
+                        },
+                    );
+
+                    assert_eq!(stdout, "");
+                    assert_eq!(stderr, expected);
+                }
             }
 
             #[test]

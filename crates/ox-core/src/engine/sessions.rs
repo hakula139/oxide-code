@@ -1,4 +1,4 @@
-//! The engine's session swaps (`/clear`, `/archive`, and `/resume`), `/rename`, and what the
+//! The engine's session swaps, saved-session archive operations, `/rename`, and what the
 //! engine shows as it starts on a session.
 
 use std::path::PathBuf;
@@ -15,6 +15,7 @@ use crate::session::display::id_prefix;
 use crate::session::entry::ArchiveState;
 use crate::session::handle::{self, LoadedTranscript, RollIntoOutcome};
 use crate::session::resolver::resolve_saved_prefix;
+use crate::session::saved::{self, BARE_ARCHIVE_HINT, saved_error_message};
 use crate::util::git::current_branch;
 use crate::util::text::plural;
 
@@ -43,6 +44,30 @@ impl Engine {
             return;
         }
         self.roll_session(sink, ArchiveState::Archived).await;
+    }
+
+    pub(super) async fn set_archive(
+        &self,
+        sink: &dyn EventSink,
+        path: PathBuf,
+        session_id: String,
+        state: ArchiveState,
+    ) {
+        let id = session_id.clone();
+        let live_id = self.session.session_id().to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            saved::set_archived(&path, &session_id, state, &live_id)
+                .map_err(|error| {
+                    saved_error_message(
+                        error,
+                        (state == ArchiveState::Archived).then_some(BARE_ARCHIVE_HINT),
+                    )
+                })
+                .map(|()| state)
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("Session archive task failed: {error}")));
+        sink.emit(Event::ArchiveUpdated { id, result }, "archive-updated");
     }
 
     async fn roll_session(&mut self, sink: &dyn EventSink, old_session: ArchiveState) {
@@ -747,6 +772,42 @@ mod tests {
                     ),
                     "{events:?}",
                 );
+            })
+            .await;
+        }
+    }
+
+    mod set_archive {
+        use super::*;
+
+        #[tokio::test]
+        async fn reports_a_failed_write_without_switching_the_live_session() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let live_id = engine.session.session_id().to_owned();
+                let path = dir.path().join("missing.jsonl");
+                let sink = CapturingSink::default();
+                let expected = saved_error_message(
+                    saved::set_archived(&path, "saved", ArchiveState::Archived, &live_id)
+                        .unwrap_err(),
+                    Some(BARE_ARCHIVE_HINT),
+                );
+
+                engine
+                    .set_archive(&sink, path, "saved".to_owned(), ArchiveState::Archived)
+                    .await;
+
+                assert_eq!(
+                    sink.events(),
+                    [Event::ArchiveUpdated {
+                        id: "saved".to_owned(),
+                        result: Err(expected)
+                    }]
+                );
+                assert_eq!(engine.session.session_id(), live_id);
             })
             .await;
         }
