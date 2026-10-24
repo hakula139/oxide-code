@@ -124,7 +124,7 @@ pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// Whether the final component requires a directory, including a separator or `.` that
+/// Returns whether the final component requires a directory, including a separator or `.` that
 /// [`Path::components`] omits.
 pub(crate) fn requires_directory(path: &Path) -> bool {
     path.as_os_str()
