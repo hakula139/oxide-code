@@ -40,13 +40,13 @@ fn write_with(
         .transpose()?;
     let probe = original
         .is_none()
-        .then(|| create_probe(parent))
+        .then(|| TemporaryFile::probe(parent))
         .transpose()?;
     let snapshot = match &original {
         Some(original) => original.snapshot.clone(),
-        None => Snapshot::capture(probe.as_ref().expect("new files have a probe").as_file())?,
+        None => Snapshot::capture(&probe.as_ref().expect("new files have a probe").file)?,
     };
-    let mut staged = Staged::new(parent)?;
+    let mut staged = TemporaryFile::staged(parent)?;
     #[cfg(any(target_os = "macos", windows))]
     if let Some(original) = &original {
         native::copy(&original.file, path, &staged.file, &staged.path)?;
@@ -144,7 +144,7 @@ fn bytes_match(file: &mut File, expected: &[u8]) -> io::Result<bool> {
     Ok(bytes == expected)
 }
 
-struct Staged {
+struct TemporaryFile {
     file: File,
     path: TempPath,
     _directory: Option<TempDir>,
@@ -152,8 +152,8 @@ struct Staged {
     published: bool,
 }
 
-impl Staged {
-    fn new(parent: &Path) -> io::Result<Self> {
+impl TemporaryFile {
+    fn staged(parent: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -165,25 +165,56 @@ impl Staged {
             #[cfg(target_os = "macos")]
             native::make_private(&File::open(directory.path())?)?;
             let file = NamedTempFile::new_in(directory.path())?;
-            let (file, path) = file.into_parts();
-            Ok(Self {
-                file,
-                path,
-                _directory: Some(directory),
-            })
+            Ok(Self::from_named(file, Some(directory)))
         }
         #[cfg(windows)]
         {
             let file = tempfile::Builder::new()
                 .prefix(".ox-write.")
                 .make_in(parent, native::create_private)?;
-            let (file, path) = file.into_parts();
-            Ok(Self {
-                file,
-                path,
-                _directory: None,
-                published: false,
-            })
+            Ok(Self::from_named(file, None))
+        }
+    }
+
+    fn probe(parent: &Path) -> io::Result<Self> {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(".ox-mode.");
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            builder
+                .permissions(fs::Permissions::from_mode(0o666))
+                .tempfile_in(parent)?
+        };
+        #[cfg(windows)]
+        let file = builder.make_in(parent, |path| {
+            use std::os::windows::fs::OpenOptionsExt as _;
+
+            use windows_sys::Win32::Storage::FileSystem;
+
+            // Creation grants the requested DELETE access even when the inherited DACL denies it.
+            OpenOptions::new()
+                .create_new(true)
+                .access_mode(
+                    FileSystem::FILE_GENERIC_READ
+                        | FileSystem::FILE_GENERIC_WRITE
+                        | FileSystem::DELETE,
+                )
+                .share_mode(FileSystem::FILE_SHARE_READ | FileSystem::FILE_SHARE_WRITE)
+                .open(path)
+        })?;
+        Ok(Self::from_named(file, None))
+    }
+
+    fn from_named(file: NamedTempFile, directory: Option<TempDir>) -> Self {
+        let (file, path) = file.into_parts();
+        Self {
+            file,
+            path,
+            _directory: directory,
+            #[cfg(windows)]
+            published: false,
         }
     }
 
@@ -203,24 +234,13 @@ impl Staged {
 }
 
 #[cfg(windows)]
-impl Drop for Staged {
+impl Drop for TemporaryFile {
     fn drop(&mut self) {
         if !self.published {
             _ = native::discard(&self.file);
         }
         self.path.disable_cleanup(true);
     }
-}
-
-fn create_probe(parent: &Path) -> io::Result<NamedTempFile> {
-    let mut builder = tempfile::Builder::new();
-    builder.prefix(".ox-mode.");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        builder.permissions(fs::Permissions::from_mode(0o666));
-    }
-    builder.tempfile_in(parent)
 }
 
 #[cfg(test)]

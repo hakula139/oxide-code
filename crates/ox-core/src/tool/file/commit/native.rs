@@ -491,7 +491,7 @@ pub(super) fn publish(file: &File, destination: &Path, replace: bool) -> io::Res
 #[cfg(windows)]
 #[expect(
     unsafe_code,
-    reason = "dispose an unpublished stage using the DELETE authority retained by its handle"
+    reason = "dispose an unpublished temporary file using the DELETE authority retained by its handle"
 )]
 pub(super) fn discard(file: &File) -> io::Result<()> {
     let disposition = FileSystem::FILE_DISPOSITION_INFO { DeleteFile: true };
@@ -1052,7 +1052,7 @@ mod tests {
     use std::os::windows::fs::OpenOptionsExt as _;
 
     use super::*;
-    use crate::tool::file::commit::{Phase, Staged, write, write_with};
+    use crate::tool::file::commit::{Phase, TemporaryFile, write, write_with};
 
     fn stream_path(path: &Path, name: &str) -> std::path::PathBuf {
         let mut path = path.as_os_str().to_owned();
@@ -1184,8 +1184,8 @@ mod tests {
         #[test]
         fn extended_replacement_cannot_replace_a_delete_pinned_target() {
             let dir = tempfile::tempdir().unwrap();
-            let target = Staged::new(dir.path()).unwrap();
-            let source = Staged::new(dir.path()).unwrap();
+            let target = TemporaryFile::staged(dir.path()).unwrap();
+            let source = TemporaryFile::staged(dir.path()).unwrap();
             (&target.file).write_all(b"target").unwrap();
             (&source.file).write_all(b"source").unwrap();
             let identity_before = identity(&target.file).unwrap();
@@ -1267,7 +1267,7 @@ mod tests {
                 )
                 .unwrap();
                 let snapshot = Security::capture(&source).unwrap();
-                let staged = Staged::new(dir.path()).unwrap();
+                let staged = TemporaryFile::staged(dir.path()).unwrap();
                 let victim = dir.path().join("victim");
                 fs::write(&victim, b"victim").unwrap();
 
@@ -1303,7 +1303,7 @@ mod tests {
             let content = vec![b'x'; 1024 * 1024];
             fs::write(&path, &content).unwrap();
             let source = File::open(&path).unwrap();
-            let staged = Staged::new(dir.path()).unwrap();
+            let staged = TemporaryFile::staged(dir.path()).unwrap();
             let stage_name = staged.path.to_path_buf();
             let context = CopyIdentity {
                 source: identity(&source).unwrap(),
@@ -1335,7 +1335,7 @@ mod tests {
             fs::write(&original, b"original").unwrap();
             fs::write(&substituted, b"substituted").unwrap();
             let source = File::open(&original).unwrap();
-            let staged = Staged::new(dir.path()).unwrap();
+            let staged = TemporaryFile::staged(dir.path()).unwrap();
             let stage_name = staged.path.to_path_buf();
 
             let error = copy(&source, &substituted, &staged.file, &staged.path).unwrap_err();
@@ -1473,6 +1473,88 @@ mod tests {
             write(&atomic, b"content", None).unwrap();
 
             assert_eq!(access(&File::open(&atomic).unwrap()).unwrap(), expected);
+        }
+
+        #[test]
+        fn new_file_probes_are_removed_under_inherited_delete_denial() {
+            for fail in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                let ordinary = dir.path().join("ordinary");
+                let parent = fs::OpenOptions::new()
+                    .access_mode(Foundation::GENERIC_READ | FileSystem::WRITE_DAC)
+                    .custom_flags(FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+                    .open(dir.path())
+                    .unwrap();
+                let original_parent = access(&parent).unwrap();
+                let mut policy = original_parent.clone();
+                // cspell:ignore OICI OIIO
+                policy.dacl = descriptor_acl(
+                    "D:P(D;;0x00000040;;;WD)(D;OIIO;0x00010000;;;WD)(A;OICI;FA;;;OW)",
+                    false,
+                );
+                policy.control |= WinSecurity::SE_DACL_PROTECTED;
+                set_access(&parent, &policy).unwrap();
+                let reference = fs::OpenOptions::new()
+                    .create_new(true)
+                    .access_mode(
+                        Foundation::GENERIC_READ
+                            | Foundation::GENERIC_WRITE
+                            | FileSystem::WRITE_DAC,
+                    )
+                    .open(&ordinary)
+                    .unwrap();
+                let expected = access(&reference).unwrap();
+                assert!(fs::remove_file(&ordinary).is_err());
+                let mut removable = expected.clone();
+                removable.dacl = None;
+                removable.control |= WinSecurity::SE_DACL_PROTECTED;
+                set_access(&reference, &removable).unwrap();
+                drop(reference);
+                fs::remove_file(&ordinary).unwrap();
+
+                let result = write_with(&path, b"content", None, |phase, _| {
+                    if phase == Phase::Prepared {
+                        let probe = fs::read_dir(dir.path())?
+                            .map(|entry| entry.unwrap().path())
+                            .find(|path| {
+                                path.file_name()
+                                    .unwrap()
+                                    .to_string_lossy()
+                                    .starts_with(".ox-mode.")
+                            })
+                            .unwrap();
+                        assert_eq!(fs::read(&probe).unwrap(), b"");
+                        assert_eq!(access(&File::open(probe).unwrap()).unwrap(), expected);
+                    }
+                    if fail && phase == Phase::Metadata {
+                        return Err(io::Error::other("injected new-file preparation failure"));
+                    }
+                    Ok(())
+                });
+                let names: Vec<_> = fs::read_dir(dir.path())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                let actual = path.exists().then(|| {
+                    (
+                        fs::read(&path).unwrap(),
+                        access(&File::open(&path).unwrap()).unwrap(),
+                    )
+                });
+                set_access(&parent, &original_parent).unwrap();
+
+                if fail {
+                    let error = result.unwrap_err();
+                    assert!(error.to_string().contains("injected new-file"), "{error}");
+                    assert!(names.is_empty(), "{names:?}");
+                    assert!(actual.is_none());
+                } else {
+                    result.unwrap();
+                    assert_eq!(names, [std::ffi::OsString::from("target")]);
+                    assert_eq!(actual.unwrap(), (b"content".to_vec(), expected));
+                }
+            }
         }
 
         #[test]
