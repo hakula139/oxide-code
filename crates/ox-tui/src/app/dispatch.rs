@@ -432,22 +432,24 @@ impl App {
         }
     }
 
-    /// Starts a turn running `prompt` and forwards queued prompts to its round boundaries. Returns
-    /// whether delivery succeeded, keeping a rejected prompt at the queue head.
-    pub(super) fn start_turn(&mut self, prompt: QueuedPrompt) -> bool {
+    /// Starts a turn running `prompt` and forwards queued prompts to its round boundaries. A
+    /// rejected prompt stays at the queue head with its pending chat echo.
+    pub(super) fn start_turn(&mut self, mut prompt: QueuedPrompt) {
         let op = Op::Prompt {
             text: prompt.prompt().to_owned(),
             title: prompt.title().map(str::to_owned),
         };
         let Some((permit, op)) = self.reserve_op(op) else {
             self.queue.push_front(prompt);
-            return false;
+            return;
         };
+        if let Some(display) = prompt.take_echo() {
+            self.chat.push_user_message(display);
+        }
         self.queue.set_active(prompt);
         self.set_status(Status::Streaming);
         permit.send(op);
         self.forward_queued_prompts();
-        true
     }
 
     /// Forwards the queued prompts the in-flight turn lacks, in order. A prompt that a full channel
@@ -538,7 +540,7 @@ mod tests {
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::testing::text_result;
-    use ox_core::protocol::{ApprovalDecision, ConfigPick, Event, ResumeTarget};
+    use ox_core::protocol::{ApprovalDecision, CompactTrigger, ConfigPick, Event, ResumeTarget};
     use ox_core::session::entry::ArchiveState;
     use ox_core::session::store::testing::{seed_test_session, stamped_id, with_isolated_xdg};
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
@@ -1438,78 +1440,126 @@ mod tests {
 
         #[test]
         fn full_channel_keeps_prompts_for_one_ordered_retry() {
-            for (action, line, prompt, title) in [
+            for (command, line, title) in [
+                ("//literal-command", "//literal-command", None),
                 (
-                    Action::Submit("//literal-command".to_owned()),
-                    "//literal-command",
-                    "/literal-command",
-                    None,
-                ),
-                (
-                    Action::SlashPrompt {
-                        line: "/init AGENTS.md".to_owned(),
-                        prompt: "Create project instructions.".to_owned(),
-                    },
                     "/init AGENTS.md",
-                    "Create project instructions.",
+                    "/init AGENTS.md",
                     Some("/init AGENTS.md"),
                 ),
+                ("/init", "/init AGENTS.md", Some("/init AGENTS.md")),
             ] {
+                let root = tempfile::tempdir().unwrap();
                 let (mut app, mut rx, _event_tx) = test_app(None);
+                app.session_info.project_root = root.path().to_owned();
+                let prompt = title.map_or_else(
+                    || "/literal-command".to_owned(),
+                    |_| command::init::create_prompt(root.path(), "AGENTS.md"),
+                );
                 let buffered = fill_channel(&app);
 
-                app.dispatch_action(action);
+                app.dispatch_action(Action::Submit(command.to_owned()));
+                if command == "/init" {
+                    assert!(app.modals.is_active());
+                    app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+                }
                 app.dispatch_action(Action::Submit("next prompt".to_owned()));
 
-                assert!(!app.should_quit, "{line}");
-                assert_eq!(app.status, Status::Idle, "{line}");
-                assert_eq!(app.queue.active(), None, "{line}");
-                assert_eq!(*app.queue.pending(), [line, "next prompt"], "{line}");
-                assert_eq!(app.queue.pending()[0].prompt(), prompt, "{line}");
-                assert_eq!(app.queue.pending()[0].title(), title, "{line}");
-                assert_eq!(app.queue.forwarded(), 0, "{line}");
-                assert_eq!(app.chat.entry_count(), 2, "only rejection notices: {line}");
+                assert!(!app.should_quit, "{command}");
+                assert_eq!(app.status, Status::Idle, "{command}");
+                assert_eq!(app.queue.active(), None, "{command}");
+                assert_eq!(*app.queue.pending(), [line, "next prompt"], "{command}");
+                assert_eq!(app.queue.pending()[0].prompt(), prompt, "{command}");
+                assert_eq!(app.queue.pending()[0].title(), title, "{command}");
+                assert_eq!(app.queue.forwarded(), 0, "{command}");
+                assert_eq!(app.chat.entry_count(), 2 + usize::from(title.is_some()));
                 assert_eq!(
                     app.chat.last_error_text(),
                     Some(
                         "ox is busy, so the prompt stays queued. Press Esc to edit it, \
                          or submit another prompt to retry."
                     ),
-                    "{line}",
+                    "{command}",
                 );
                 for op in buffered {
-                    assert_eq!(rx.try_recv(), Ok(op), "{line}");
+                    assert_eq!(rx.try_recv(), Ok(op), "{command}");
                 }
-                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{line}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{command}");
 
-                app.drain_pending_prompt();
+                std::fs::write(root.path().join("AGENTS.md"), "# Instructions\n").unwrap();
 
-                assert_eq!(app.status, Status::Streaming, "{line}");
+                app.dispatch_action(Action::Submit("retry prompt".to_owned()));
+
+                assert_eq!(app.status, Status::Streaming, "{command}");
                 assert_eq!(app.queue.active().map(QueuedPrompt::line), Some(line));
                 assert_eq!(
                     rx.try_recv(),
                     Ok(Op::Prompt {
-                        text: prompt.to_owned(),
+                        text: prompt,
                         title: title.map(str::to_owned),
                     }),
-                    "{line}",
+                    "{command}",
                 );
                 assert_eq!(rx.try_recv(), Ok(Op::Queue("next prompt".to_owned())));
-                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{line}");
+                assert_eq!(rx.try_recv(), Ok(Op::Queue("retry prompt".to_owned())));
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{command}");
                 let text = rendered_text(&mut app, 100, 20);
                 assert_eq!(
-                    text.matches(line.trim_start_matches('/')).count(),
+                    text.matches(command.trim_start_matches('/')).count(),
                     1,
                     "{text}"
                 );
 
                 app.handle_engine_event(Event::PromptDrained("next prompt".to_owned()));
+                app.handle_engine_event(Event::PromptDrained("retry prompt".to_owned()));
                 app.handle_engine_event(Event::TurnComplete);
 
-                assert_eq!(app.status, Status::Idle, "{line}");
-                assert_eq!(app.queue.active(), None, "{line}");
-                assert_eq!(*app.queue.pending(), [] as [&str; 0], "{line}");
-                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{line}");
+                assert_eq!(app.status, Status::Idle, "{command}");
+                assert_eq!(app.queue.active(), None, "{command}");
+                assert_eq!(*app.queue.pending(), [] as [&str; 0], "{command}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{command}");
+            }
+        }
+
+        #[test]
+        fn rejected_slash_prompt_echo_survives_forwarding_and_compaction() {
+            for compacted in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.session_info.project_root = root.path().to_owned();
+                let buffered = fill_channel(&app);
+                let queued = command::init::create_prompt(root.path(), "AGENTS.md");
+                app.dispatch_action(Action::Submit("/init AGENTS.md".to_owned()));
+                for op in buffered {
+                    assert_eq!(rx.try_recv(), Ok(op));
+                }
+
+                app.dispatch_action(Action::Submit("/init CLAUDE.md".to_owned()));
+
+                assert_eq!(
+                    rx.try_recv(),
+                    Ok(Op::Prompt {
+                        text: command::init::create_prompt(root.path(), "CLAUDE.md"),
+                        title: Some("/init CLAUDE.md".to_owned()),
+                    }),
+                );
+                assert_eq!(rx.try_recv(), Ok(Op::Queue(queued.clone())));
+
+                if compacted {
+                    app.handle_engine_event(Event::SessionCompacted {
+                        summary: "Earlier work".to_owned(),
+                        pre_count: 2,
+                        instructions: None,
+                        trigger: CompactTrigger::Auto,
+                    });
+                }
+                app.handle_engine_event(Event::PromptDrained(queued));
+
+                assert_eq!(*app.queue.pending(), [] as [&str; 0]);
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+                let text = rendered_text(&mut app, 100, 20);
+                assert_eq!(text.matches("/init AGENTS.md").count(), 1, "{text}");
+                assert_eq!(text.matches("/init CLAUDE.md").count(), 1, "{text}");
             }
         }
 
@@ -1700,6 +1750,23 @@ mod tests {
             );
         }
 
+        #[test]
+        fn init_picker_cancel_keeps_the_typed_command_in_chat() {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.session_info.project_root = root.path().to_owned();
+            app.dispatch_action(Action::Submit("/init".to_owned()));
+            assert!(app.modals.is_active());
+
+            app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
+            assert!(!app.modals.is_active());
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+            let text = rendered_text(&mut app, 80, 10);
+            assert_eq!(text.matches("/init").count(), 1, "{text}");
+        }
+
         #[tokio::test]
         async fn init_during_busy_refuses_with_system_message_no_forward() {
             // Mutating: refuse. The typed `/init` row lands, but its synthesized body doesn't.
@@ -1830,69 +1897,6 @@ mod tests {
 
     mod dispatch_op {
         use super::*;
-
-        #[test]
-        fn full_channel_preserves_state_until_delivery_can_be_reserved() {
-            for (op, before, after) in [
-                (Op::Interrupt, Status::Streaming, Status::Cancelling),
-                (Op::Clear, Status::Idle, Status::Clearing),
-                (
-                    Op::Resume {
-                        target: ResumeTarget::Prefix("saved-session".to_owned()),
-                    },
-                    Status::Idle,
-                    Status::Resuming,
-                ),
-                (
-                    Op::Compact {
-                        instructions: Some("focus on the API".to_owned()),
-                    },
-                    Status::Idle,
-                    Status::Compacting,
-                ),
-                (Op::Login, Status::Idle, Status::SigningIn),
-                (Op::Logout, Status::Idle, Status::SigningOut),
-                (Op::Archive, Status::Idle, Status::Archiving),
-                (Op::SetMode(Mode::Plan), Status::Idle, Status::Idle),
-            ] {
-                let (mut app, mut rx, _event_tx) = test_app(None);
-                app.set_status(before.clone());
-                app.requested_mode = Mode::Manual;
-                app.queue.push("old session".to_owned());
-                app.queue.mark_switch();
-                app.queue.push("current session".to_owned());
-                let buffered = fill_channel(&app);
-
-                app.dispatch_op(op.clone());
-
-                assert!(!app.should_quit, "{op:?}");
-                assert_eq!(app.status, before, "{op:?}");
-                assert_eq!(app.requested_mode, Mode::Manual, "{op:?}");
-                assert_eq!(
-                    app.chat.last_error_text(),
-                    Some("ox is busy, so the request was dropped. Try again."),
-                    "{op:?}",
-                );
-                app.queue.discard_left_behind();
-                assert_eq!(*app.queue.pending(), ["current session"], "{op:?}");
-                for buffered_op in buffered {
-                    assert_eq!(rx.try_recv(), Ok(buffered_op), "{op:?}");
-                }
-                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{op:?}");
-
-                app.dispatch_op(op.clone());
-
-                assert_eq!(app.status, after, "{op:?}");
-                let mode = if let Op::SetMode(mode) = &op {
-                    *mode
-                } else {
-                    Mode::Manual
-                };
-                assert_eq!(app.requested_mode, mode, "{op:?}");
-                assert_eq!(rx.try_recv(), Ok(op.clone()), "{op:?}");
-                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{op:?}");
-            }
-        }
 
         #[tokio::test]
         async fn interrupt_flips_status_to_cancelling_and_forwards() {
@@ -2061,6 +2065,69 @@ mod tests {
                 assert_eq!(forwarded, op);
                 assert!(!app.should_quit);
                 assert_eq!(app.chat.entry_count(), 0);
+            }
+        }
+
+        #[test]
+        fn full_channel_preserves_state_until_delivery_can_be_reserved() {
+            for (op, before, after) in [
+                (Op::Interrupt, Status::Streaming, Status::Cancelling),
+                (Op::Clear, Status::Idle, Status::Clearing),
+                (
+                    Op::Resume {
+                        target: ResumeTarget::Prefix("saved-session".to_owned()),
+                    },
+                    Status::Idle,
+                    Status::Resuming,
+                ),
+                (
+                    Op::Compact {
+                        instructions: Some("focus on the API".to_owned()),
+                    },
+                    Status::Idle,
+                    Status::Compacting,
+                ),
+                (Op::Login, Status::Idle, Status::SigningIn),
+                (Op::Logout, Status::Idle, Status::SigningOut),
+                (Op::Archive, Status::Idle, Status::Archiving),
+                (Op::SetMode(Mode::Plan), Status::Idle, Status::Idle),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.set_status(before.clone());
+                app.requested_mode = Mode::Manual;
+                app.queue.push("old session".to_owned());
+                app.queue.mark_switch();
+                app.queue.push("current session".to_owned());
+                let buffered = fill_channel(&app);
+
+                app.dispatch_op(op.clone());
+
+                assert!(!app.should_quit, "{op:?}");
+                assert_eq!(app.status, before, "{op:?}");
+                assert_eq!(app.requested_mode, Mode::Manual, "{op:?}");
+                assert_eq!(
+                    app.chat.last_error_text(),
+                    Some("ox is busy, so the request was dropped. Try again."),
+                    "{op:?}",
+                );
+                app.queue.discard_left_behind();
+                assert_eq!(*app.queue.pending(), ["current session"], "{op:?}");
+                for buffered_op in buffered {
+                    assert_eq!(rx.try_recv(), Ok(buffered_op), "{op:?}");
+                }
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{op:?}");
+
+                app.dispatch_op(op.clone());
+
+                assert_eq!(app.status, after, "{op:?}");
+                let mode = if let Op::SetMode(mode) = &op {
+                    *mode
+                } else {
+                    Mode::Manual
+                };
+                assert_eq!(app.requested_mode, mode, "{op:?}");
+                assert_eq!(rx.try_recv(), Ok(op.clone()), "{op:?}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{op:?}");
             }
         }
     }
