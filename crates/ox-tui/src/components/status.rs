@@ -740,7 +740,7 @@ mod tests {
 
         #[test]
         fn is_the_next_spinner_frame_while_busy() {
-            let mut bar = bar_with(vec![StatusLineSegment::CurrentTime]);
+            let mut bar = bar_with(vec![StatusLineSegment::RunState]);
             bar.set_status(Status::Streaming);
 
             assert_eq!(bar.next_tick(crate::now()), Some(bar.next_spinner_frame));
@@ -779,6 +779,28 @@ mod tests {
                 (Duration::from_secs(119)..=Duration::from_secs(120)).contains(&wait),
                 "{wait:?}"
             );
+        }
+
+        #[test]
+        fn an_expired_usage_limit_precedes_the_spinner_and_minute() {
+            let mut bar = bar_with(vec![
+                StatusLineSegment::RunState,
+                StatusLineSegment::CurrentTime,
+            ]);
+            bar.set_status(Status::Streaming);
+            bar.set_rate_limits(Some(RateLimits {
+                five_hour: Some(RateLimitWindow {
+                    utilization: 0.5,
+                    resets_at: 0,
+                }),
+                seven_day: None,
+            }));
+            let now = bar
+                .next_spinner_frame
+                .checked_sub(SPINNER_FRAME_INTERVAL)
+                .unwrap();
+
+            assert_eq!(bar.next_tick(now), Some(now));
         }
 
         #[test]
