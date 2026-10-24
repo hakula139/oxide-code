@@ -30,7 +30,7 @@ Drop-ins share the `config.toml` schema and count as user config. An invalid dro
 
 A project file comes from the checkout, so it can set only the `[client]`, `[permission]`, and `[tui]` tables. Within `[client]` it can set only `model`, `effort`, `max_tokens`, `max_tool_rounds`, `prompt_cache_ttl`, and the [`[client.compaction]`](#clientcompaction-context-compression) table, and within `[permission]` only `deny` and `ask`. Setting any other key fails the config load. This keeps a repository from redirecting your credentials, changing the endpoint or TLS trust, or widening what runs without asking. A project file may set `tui.theme.base` only to a built-in theme name, and the TUI refuses to start when it names a file. A TOML error in a project file gives only its line, column, and key, since the parser's message can quote a value.
 
-The project file must also resolve inside the project root. A `.ox/config.toml` that resolves outside it, through a symlinked file or `.ox` directory, fails the config load with an error that names only the link. A link to a file inside the repository, such as a config shared across a monorepo, still works, unless the project root is your home directory or one of its ancestors, as with a dotfiles repository at `~`. There, a project file reached through any symlink fails the load.
+The project file must also resolve inside the project root. A `.ox/config.toml` that resolves outside it, through a symlinked file or `.ox` directory, fails the config load with an error that names only the link. An unreadable candidate, an entry that is not a regular file, or a link whose target cannot resolve also fails the load. A link to a file inside the repository, such as a config shared across a monorepo, still works, unless the project root is your home directory or one of its ancestors, as with a dotfiles repository at `~`. There, a project file reached through any symlink fails the load.
 
 ## Checking the Config
 
@@ -110,7 +110,7 @@ When unset, the agent loop has no per-turn round cap. Setting `max_tool_rounds =
 
 #### `base_url`: Endpoint
 
-Set `base_url` in user config or `ANTHROPIC_BASE_URL`. The URL must use HTTPS unless it points at localhost for a local proxy. Requests go to `/v1/messages` under it, so leave `/v1` off the URL. A trailing slash makes no difference.
+Set `base_url` in user config or `ANTHROPIC_BASE_URL`. The URL must use HTTPS unless it points at localhost for a local proxy, and it must omit query strings and fragments. Requests go to `/v1/messages` under it, so leave `/v1` off the URL. A path prefix is supported, and a trailing slash makes no difference.
 
 #### `extra_ca_certs`: Corporate Trust Anchors
 
