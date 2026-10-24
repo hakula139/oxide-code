@@ -837,6 +837,21 @@ impl Modal for ResumePicker {
     }
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+mod testing {
+    use super::{ResumePicker, SessionStore};
+
+    impl ResumePicker {
+        pub(crate) fn loaded(store: SessionStore, live_session_id: String) -> Self {
+            let mut picker = Self::new(store, live_session_id);
+            picker.settle();
+            picker
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

@@ -329,6 +329,7 @@ mod tests {
             }
         }
     }
+
     mod apply_archived {
         use super::*;
 
