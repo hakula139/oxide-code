@@ -262,8 +262,9 @@ impl<R: AsyncBufRead + Unpin, W: Write> Prompter<R, W> {
         }
     }
 
-    /// Reads the pattern of the session rule to grant, where an empty answer takes the suggested
-    /// one, or `None` once the input ends. An error says why the grant does not admit the rule.
+    /// Reads and validates a session-rule pattern, using the suggestion for empty input.
+    /// Ended or unreadable input returns `None`. The outer error reports output failure, and the
+    /// inner error explains why the grant rejects the rule.
     async fn rule(&mut self, grant: &SessionGrant) -> Result<Option<Result<Rule>>> {
         let suggested = grant.suggested().pattern().to_owned();
         let Some(answer) = self
