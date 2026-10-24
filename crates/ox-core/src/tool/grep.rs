@@ -1,8 +1,7 @@
 //! Regex content search tool.
 
 use std::fmt::Write as _;
-use std::fs::OpenOptions;
-use std::io::{self, Read as _};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,12 +11,12 @@ use serde::{Deserialize, Serialize};
 use strum::VariantArray;
 use tokio_util::sync::CancellationToken;
 
-use super::search::{NO_FILES_FOUND, SearchRoot, Unreadable};
-use super::spill::MAX_SPILL_BYTES;
+use super::search::{NO_FILES_FOUND, SearchRoot, SearchRow, SearchRows, Unreadable};
 use super::view::{GrepFileGroup, GrepMatchLine, ToolResultView};
 use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
+use crate::util::fs::{FileReadError, read_regular_file};
 use crate::util::text::{format_size, plural};
 
 const NO_MATCHES_FOUND: &str = "No matches found";
@@ -194,7 +193,13 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
     })
     .await
     {
-        Ok(GrepOutput { content, title }) => ToolOutput::success(content).with_title(title),
+        Ok(GrepOutput {
+            content,
+            title,
+            view,
+        }) => ToolOutput::success(content)
+            .with_title(title)
+            .with_result_view(view),
         Err(msg) => ToolOutput::error(msg),
     }
 }
@@ -215,11 +220,23 @@ struct GrepParams<'a> {
     cancel: CancellationToken,
 }
 
-/// What a search found: the text the model reads and the title the UI shows for it.
 #[derive(Debug)]
 struct GrepOutput {
     content: String,
     title: String,
+    view: ToolResultView,
+}
+
+impl GrepOutput {
+    fn text(content: String, title: String) -> Self {
+        Self {
+            view: ToolResultView::Text {
+                content: content.clone(),
+            },
+            content,
+            title,
+        }
+    }
 }
 
 fn grep_files(params: &GrepParams<'_>) -> Result<GrepOutput, String> {
@@ -263,17 +280,22 @@ fn grep_files(params: &GrepParams<'_>) -> Result<GrepOutput, String> {
 
     let cwd = &root.cwd;
     let texts = texts(&files, size_limit, &params.cancel, &mut unreadable);
-    let GrepOutput { mut content, title } = match params.output_mode {
+    let mut output = match params.output_mode {
         OutputMode::FilesWithMatches => format_files_with_matches(texts, cwd, &re, head_limit),
         OutputMode::Count => format_count(texts, cwd, &re, head_limit),
         OutputMode::Content => format_content(texts, cwd, &re, params.context, head_limit),
     };
 
-    push_skipped_note(&mut content, &skipped_large, size_limit, cwd);
-    super::search::push_unreadable_note(&mut content, &unreadable, cwd);
-    super::search::push_withheld_note(&mut content, withheld);
+    push_skipped_note(&mut output.content, &skipped_large, size_limit, cwd);
+    super::search::push_unreadable_note(&mut output.content, &unreadable, cwd);
+    super::search::push_withheld_note(&mut output.content, withheld);
+    if !skipped_large.is_empty() || !unreadable.is_empty() || withheld > 0 {
+        output.view = ToolResultView::Text {
+            content: output.content.clone(),
+        };
+    }
 
-    Ok(GrepOutput { content, title })
+    Ok(output)
 }
 
 struct CollectedFiles {
@@ -292,7 +314,7 @@ struct CollectedFiles {
 fn collect_files(
     base: &Path,
     include_matcher: Option<&globset::GlobMatcher>,
-    read_filter: &WalkFilter<'_>,
+    read_filter: &WalkFilter,
     cancel: &CancellationToken,
 ) -> CollectedFiles {
     if base.is_file() {
@@ -338,7 +360,8 @@ fn collect_files(
             }
             true
         });
-    let files = super::search::newest_first(entries)
+    let files = super::search::newest_first(entries, usize::MAX)
+        .0
         .into_iter()
         .map(ignore::DirEntry::into_path)
         .collect();
@@ -380,22 +403,16 @@ fn texts<'a>(
 /// never blocks on a fifo, and the opened file must be a regular file within `size_limit` bytes, so
 /// an entry swapped after the walk checked it is not read through.
 fn read_text(path: &Path, size_limit: u64) -> io::Result<Option<String>> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    let mut file = super::file::open_no_follow_blocking(path, options)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::other("not a regular file"));
-    }
-    if metadata.len() > size_limit {
-        let limit = format_size(size_limit);
-        return Err(io::Error::other(format!(
-            "grew past the {limit} size limit"
-        )));
-    }
-
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    let (_, bytes) = read_regular_file(path, size_limit).map_err(|error| match error {
+        FileReadError::Io(error) => error,
+        FileReadError::Directory | FileReadError::NonRegular => {
+            io::Error::other("not a regular file")
+        }
+        FileReadError::TooLarge { .. } => {
+            let limit = format_size(size_limit);
+            io::Error::other(format!("grew past the {limit} size limit"))
+        }
+    })?;
     if super::file::is_binary(&bytes) {
         return Ok(None);
     }
@@ -418,19 +435,17 @@ fn push_skipped_note(output: &mut String, skipped: &[(PathBuf, u64)], limit: u64
 // ── Content Mode ──
 
 fn format_content<'a>(
-    texts: impl Iterator<Item = (&'a Path, String)>,
+    mut texts: impl Iterator<Item = (&'a Path, String)>,
     cwd: &Path,
     re: &regex::Regex,
     context: usize,
     head_limit: usize,
 ) -> GrepOutput {
-    let mut rows = Rows::new(head_limit);
+    let mut rows = SearchRows::new(head_limit);
 
-    for (path, text) in texts {
-        if rows.full() {
-            break;
-        }
-
+    while !rows.full()
+        && let Some((path, text)) = texts.next()
+    {
         let display_path = super::display_path(path, cwd);
 
         if context == 0 {
@@ -440,85 +455,49 @@ fn format_content<'a>(
         }
     }
 
-    rows.render()
+    format_matches(rows)
 }
 
-/// The content rows a search keeps: one past `head_limit`, which proves more output exists, so the
-/// footer appears only when a row was dropped, and at most about [`MAX_SPILL_BYTES`], the most the
-/// dispatcher keeps of a result, so `head_limit: 0` cannot buffer every match of a large tree.
-struct Rows {
-    kept: Vec<String>,
-    bytes: u64,
-    head_limit: usize,
-    /// How many of the rows `render` keeps matched the pattern.
-    matches: usize,
-}
-
-impl Rows {
-    fn new(head_limit: usize) -> Self {
-        Self {
-            kept: Vec::new(),
-            bytes: 0,
-            head_limit,
-            matches: 0,
-        }
+fn format_matches(rows: SearchRows) -> GrepOutput {
+    let truncated = rows.full();
+    let mut content = rows.render();
+    if let Some(footer) = rows.limit_description("lines") {
+        _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{footer})");
     }
-
-    /// Returns whether the search can stop, since another row would be dropped.
-    fn full(&self) -> bool {
-        self.kept.len() > self.head_limit || self.bytes >= MAX_SPILL_BYTES
-    }
-
-    /// Keeps `row`, a line that matched the pattern when `is_match` and a context line or range
-    /// separator otherwise.
-    fn push(&mut self, row: String, is_match: bool) {
-        if is_match && self.kept.len() < self.head_limit {
-            self.matches += 1;
-        }
-        self.bytes += row.len() as u64 + 1;
-        self.kept.push(row);
-    }
-
-    /// The kept rows, cut to `head_limit`, with a footer naming the limit that dropped any, titled
-    /// with the match count they show.
-    fn render(mut self) -> GrepOutput {
-        if self.kept.is_empty() {
-            return GrepOutput {
-                content: NO_MATCHES_FOUND.into(),
-                title: NO_MATCHES_FOUND.into(),
-            };
-        }
-
-        let footer = if self.kept.len() > self.head_limit {
-            self.kept.truncate(self.head_limit);
-            Some(format!("{} lines", self.head_limit))
-        } else if self.bytes >= MAX_SPILL_BYTES {
-            let size = format_size(MAX_SPILL_BYTES);
-            Some(format!("{size} of output"))
-        } else {
-            None
-        };
-
-        let mut content = self.kept.join("\n");
-        if let Some(footer) = footer {
-            _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{footer})");
-        }
-        let word = plural(self.matches, "match", "matches");
-        GrepOutput {
-            content,
-            title: format!("{} {word}", self.matches),
-        }
+    let groups = rows.into_groups();
+    let matches = groups
+        .iter()
+        .flat_map(|group| &group.lines)
+        .filter(|line| line.is_match)
+        .count();
+    let title = if content.is_empty() {
+        NO_MATCHES_FOUND.clone_into(&mut content);
+        content.clone()
+    } else {
+        format!("{matches} {}", plural(matches, "match", "matches"))
+    };
+    GrepOutput {
+        content,
+        title,
+        view: ToolResultView::GrepMatches { groups, truncated },
     }
 }
 
-fn search_no_context(text: &str, re: &regex::Regex, display_path: &str, rows: &mut Rows) {
+fn search_no_context(text: &str, re: &regex::Regex, display_path: &str, rows: &mut SearchRows) {
     for (line_num, line) in text.lines().enumerate() {
         if rows.full() {
             return;
         }
         if re.is_match(line) {
             let truncated = super::truncate_line(line, MAX_LINE_CHARS);
-            rows.push(format!("{display_path}:{}:{truncated}", line_num + 1), true);
+            rows.push(SearchRow::Match {
+                path: display_path.to_owned(),
+                line: GrepMatchLine {
+                    number: line_num + 1,
+                    text: truncated.into_owned(),
+                    is_match: true,
+                },
+            });
         }
     }
 }
@@ -528,7 +507,7 @@ fn search_with_context(
     re: &regex::Regex,
     display_path: &str,
     context: usize,
-    rows: &mut Rows,
+    rows: &mut SearchRows,
 ) {
     let lines: Vec<&str> = text.lines().collect();
     let match_indices: Vec<usize> = lines
@@ -560,19 +539,22 @@ fn search_with_context(
             return;
         }
         if range_idx > 0 {
-            rows.push("--".to_owned(), false);
+            rows.push(SearchRow::Separator);
         }
         for (i, line) in lines.iter().enumerate().take(end + 1).skip(start) {
             if rows.full() {
                 return;
             }
             let is_match = match_indices.binary_search(&i).is_ok();
-            let sep = if is_match { ':' } else { '-' };
             let truncated = super::truncate_line(line, MAX_LINE_CHARS);
-            rows.push(
-                format!("{display_path}:{}{sep}{truncated}", i + 1),
-                is_match,
-            );
+            rows.push(SearchRow::Match {
+                path: display_path.to_owned(),
+                line: GrepMatchLine {
+                    number: i + 1,
+                    text: truncated.into_owned(),
+                    is_match,
+                },
+            });
         }
     }
 }
@@ -580,47 +562,39 @@ fn search_with_context(
 // ── Files-with-Matches Mode ──
 
 fn format_files_with_matches<'a>(
-    texts: impl Iterator<Item = (&'a Path, String)>,
+    mut texts: impl Iterator<Item = (&'a Path, String)>,
     cwd: &Path,
     re: &regex::Regex,
     head_limit: usize,
 ) -> GrepOutput {
-    let mut matching_files: Vec<String> = Vec::new();
-
-    for (path, text) in texts {
-        if matching_files.len() > head_limit {
-            break;
-        }
-
+    let mut rows = SearchRows::new(head_limit);
+    while !rows.full()
+        && let Some((path, text)) = texts.next()
+    {
         if text.lines().any(|line| re.is_match(line)) {
-            matching_files.push(super::display_path(path, cwd));
+            rows.push(SearchRow::Path(super::display_path(path, cwd)));
         }
     }
 
-    if matching_files.is_empty() {
-        return GrepOutput {
-            content: NO_FILES_FOUND.into(),
-            title: NO_MATCHES_FOUND.into(),
-        };
+    if rows.kept.is_empty() {
+        return GrepOutput::text(NO_FILES_FOUND.into(), NO_MATCHES_FOUND.into());
     }
 
-    let truncated = matching_files.len() > head_limit;
-    matching_files.truncate(head_limit);
-    let num_files = matching_files.len();
+    let num_files = rows.kept.len();
     let file_word = plural(num_files, "file", "files");
 
     let title = format!("Found {num_files} {file_word}");
-    let files = matching_files.join("\n");
+    let files = rows.render();
     let mut content = formatdoc! {"
         {title}
         {files}"
     };
 
-    if truncated {
-        _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{head_limit} files)");
+    if let Some(footer) = rows.limit_description("files") {
+        _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{footer})");
     }
 
-    GrepOutput { content, title }
+    GrepOutput::text(content, title)
 }
 
 // ── Count Mode ──
@@ -631,47 +605,44 @@ fn format_count<'a>(
     re: &regex::Regex,
     head_limit: usize,
 ) -> GrepOutput {
-    let mut counts: Vec<(String, usize)> = Vec::new();
+    let mut rows = SearchRows::new(head_limit);
     let mut total_matches: usize = 0;
+    let mut total_files: usize = 0;
 
     for (path, text) in texts {
         let count = text.lines().filter(|line| re.is_match(line)).count();
         if count > 0 {
             total_matches += count;
-            counts.push((super::display_path(path, cwd), count));
+            total_files += 1;
+            if !rows.full() {
+                rows.push(SearchRow::Count {
+                    path: super::display_path(path, cwd),
+                    count,
+                });
+            }
         }
     }
 
-    if counts.is_empty() {
-        return GrepOutput {
-            content: NO_MATCHES_FOUND.into(),
-            title: NO_MATCHES_FOUND.into(),
-        };
+    if total_files == 0 {
+        return GrepOutput::text(NO_MATCHES_FOUND.into(), NO_MATCHES_FOUND.into());
     }
-
-    let total_files = counts.len();
-    let truncated = total_files > head_limit;
-    counts.truncate(head_limit);
 
     let title = format!(
         "Found {total_matches} total {} across {total_files} {}",
         plural(total_matches, "occurrence", "occurrences"),
         plural(total_files, "file", "files"),
     );
-    let mut content = title.clone();
-    for (p, c) in &counts {
-        _ = write!(content, "\n{p}:{c}");
-    }
-    if truncated {
-        _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{head_limit} files)");
+    let mut content = format!("{title}\n{}", rows.render());
+    if let Some(footer) = rows.limit_description("files") {
+        _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{footer})");
     }
 
-    GrepOutput { content, title }
+    GrepOutput::text(content, title)
 }
 
 // ── Result View ──
 
-/// Returns `None` for any unrecognized line so the block falls through to text.
+/// Reconstructs a legacy result without stored rows, falling back to text for unrecognized lines.
 fn parse_content_view(content: &str) -> Option<ToolResultView> {
     let trimmed = content.trim_end();
     if trimmed == NO_MATCHES_FOUND {
@@ -707,8 +678,7 @@ fn parse_content_view(content: &str) -> Option<ToolResultView> {
 
 /// Parses one row: `path:NUM:text` (match) or `path:NUM-text` (context).
 ///
-/// Paths can contain `:` (Windows drive letters, URL-shaped names), so the row commits on the first
-/// colon followed by digits and a `:` / `-` separator, which marks the line-number column.
+/// Legacy output has no path boundary, so the first digit column retains its historical meaning.
 fn parse_match_line(line: &str) -> Option<(&str, GrepMatchLine)> {
     let mut search_start = 0;
     while let Some(off) = line[search_start..].find(':') {
@@ -753,6 +723,7 @@ mod tests {
 
     use super::*;
     use crate::permission::Access;
+    use crate::tool::ToolRegistry;
     use crate::tool::local_testing::{self, ctx, deny_reads, search_root, temp_ctx};
     use crate::util::fs::testing::{deny_read_access, symlink_file};
     use crate::util::path::local_testing::canonical_tempdir;
@@ -853,6 +824,56 @@ mod tests {
         use super::*;
 
         #[tokio::test]
+        async fn persists_the_text_view_when_search_notes_are_present() {
+            let dir = canonical_tempdir();
+            fs::write(dir.path().join("public.rs"), "hit\n").unwrap();
+            fs::write(dir.path().join("secret.rs"), "hit\n").unwrap();
+            let registry =
+                ToolRegistry::new(vec![Box::new(GrepTool::new(deny_reads(&["secret.rs"])))]);
+
+            for (mode, body) in [
+                ("content", "public.rs:1:hit"),
+                ("files_with_matches", "Found 1 file\npublic.rs"),
+                (
+                    "count",
+                    "Found 1 total occurrence across 1 file\npublic.rs:1",
+                ),
+            ] {
+                let input = serde_json::json!({"pattern": "hit", "output_mode": mode});
+
+                let output = registry
+                    .run_input("grep", input.clone(), &ctx(dir.path()))
+                    .await;
+                assert!(!output.is_error, "{mode}: {}", output.content);
+
+                assert_eq!(
+                    output.content,
+                    format!("{body}\n\n(1 file withheld by read deny or ask rules)")
+                );
+                let expected = ToolResultView::Text {
+                    content: output.content.clone(),
+                };
+                assert_eq!(
+                    output.metadata.result_view,
+                    Some(expected.clone()),
+                    "{mode}"
+                );
+                assert_eq!(
+                    registry.result_view(
+                        "grep",
+                        &input,
+                        &output.content,
+                        &output.metadata,
+                        output.is_error,
+                        dir.path()
+                    ),
+                    expected,
+                    "{mode}"
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn matching_pattern_reports_matches() {
             let dir = canonical_tempdir();
             fs::write(
@@ -891,6 +912,68 @@ mod tests {
             assert!(output.is_error);
             assert_eq!(output.content, format!("Invalid regex: {cause}"));
             assert_eq!(output.metadata.title, None, "errors are not a match count");
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn preserves_native_paths_and_context_after_metadata_round_trip() {
+            for name in ["name:12:part.rs", "name:12-part.rs", "line\nname.rs"] {
+                let dir = canonical_tempdir();
+                fs::write(dir.path().join(name), "before\nhit\nafter\n").unwrap();
+                let input = serde_json::json!({"pattern": "hit", "context": 1});
+                let registry = ToolRegistry::new(vec![Box::new(grep_tool())]);
+
+                let output = registry
+                    .run_input("grep", input.clone(), &ctx(dir.path()))
+                    .await;
+                assert!(!output.is_error, "{name:?}: {}", output.content);
+                let metadata: ToolMetadata =
+                    serde_json::from_value(serde_json::to_value(&output.metadata).unwrap())
+                        .unwrap();
+
+                assert_eq!(
+                    output.content,
+                    format!("{name}:1-before\n{name}:2:hit\n{name}:3-after"),
+                    "{name:?}",
+                );
+                let expected = ToolResultView::GrepMatches {
+                    groups: vec![GrepFileGroup {
+                        path: name.to_owned(),
+                        lines: vec![
+                            GrepMatchLine {
+                                number: 1,
+                                text: "before".to_owned(),
+                                is_match: false,
+                            },
+                            GrepMatchLine {
+                                number: 2,
+                                text: "hit".to_owned(),
+                                is_match: true,
+                            },
+                            GrepMatchLine {
+                                number: 3,
+                                text: "after".to_owned(),
+                                is_match: false,
+                            },
+                        ],
+                    }],
+                    truncated: false,
+                };
+                for cwd in [dir.path(), Path::new("/another/workspace")] {
+                    assert_eq!(
+                        registry.result_view(
+                            "grep",
+                            &input,
+                            &output.content,
+                            &metadata,
+                            output.is_error,
+                            cwd
+                        ),
+                        expected,
+                        "{name:?} at {cwd:?}",
+                    );
+                }
+            }
         }
     }
 
@@ -1051,6 +1134,7 @@ mod tests {
             let GrepOutput {
                 content: result,
                 title,
+                ..
             } = grep_files(&p).unwrap();
 
             // MATCH1 ctx → 1-2 and MATCH2 ctx → 7-8, so the gap forces a "--" separator.
@@ -1269,6 +1353,7 @@ mod tests {
             let GrepOutput {
                 content: result,
                 title,
+                ..
             } = grep_files(&params("hit", dir.path())).unwrap();
 
             let dir_cause = fs::read_dir(&locked).unwrap_err();
@@ -1357,6 +1442,7 @@ mod tests {
             let GrepOutput {
                 content: result,
                 title,
+                ..
             } = grep_files(&p).unwrap();
             assert_eq!(
                 result,
@@ -1561,6 +1647,7 @@ mod tests {
             let GrepOutput {
                 content: result,
                 title,
+                ..
             } = grep_files(&p).unwrap();
             let (header, files) = result.split_once('\n').unwrap();
             let mut files: Vec<_> = files.lines().collect();
@@ -1697,6 +1784,7 @@ mod tests {
             let GrepOutput {
                 content: result,
                 title,
+                ..
             } = grep_files(&p).unwrap();
 
             let (header, counts) = result.split_once('\n').unwrap();
@@ -1813,13 +1901,18 @@ mod tests {
         #[test]
         fn stops_reading_files_once_the_rows_are_full() {
             let re = regex::Regex::new("m").unwrap();
+            let visited = std::cell::Cell::new(0);
             let texts = [
                 (Path::new("/repo/a.rs"), "m\nm\n".to_owned()),
                 (Path::new("/repo/b.rs"), "m\n".to_owned()),
             ];
+            let texts = texts
+                .into_iter()
+                .inspect(|_| visited.set(visited.get() + 1));
 
-            let output = format_content(texts.into_iter(), Path::new("/repo"), &re, 0, 1).content;
+            let output = format_content(texts, Path::new("/repo"), &re, 0, 1).content;
 
+            assert_eq!(visited.get(), 1);
             assert_eq!(
                 output,
                 indoc! {"
@@ -1831,67 +1924,75 @@ mod tests {
         }
     }
 
-    mod rows {
+    mod format_matches {
         use super::*;
 
-        mod render {
-            use super::*;
-
-            #[test]
-            fn keeps_every_row_under_both_limits() {
-                let mut rows = Rows::new(2);
-                rows.push("a".to_owned(), true);
-                rows.push("b".to_owned(), true);
-
-                assert!(!rows.full());
-                assert_eq!(rows.render().content, "a\nb");
+        fn match_row(number: usize, text: &str) -> SearchRow {
+            SearchRow::Match {
+                path: "a.rs".to_owned(),
+                line: GrepMatchLine {
+                    number,
+                    text: text.to_owned(),
+                    is_match: true,
+                },
             }
+        }
 
-            #[test]
-            fn cuts_to_the_head_limit_and_names_it() {
-                let mut rows = Rows::new(2);
-                for row in ["a", "b", "c"] {
-                    rows.push(row.to_owned(), true);
+        #[test]
+        fn names_only_the_limit_that_omitted_a_row() {
+            for (limit, expected, truncated) in [
+                (3, "a.rs:1:a\na.rs:2:b\na.rs:3:c", false),
+                (
+                    2,
+                    "a.rs:1:a\na.rs:2:b\n\n(Results limited to 2 lines)",
+                    true,
+                ),
+            ] {
+                let mut rows = SearchRows::new(limit);
+                for (index, text) in ["a", "b", "c"].into_iter().enumerate() {
+                    rows.push(match_row(index + 1, text));
                 }
 
-                assert!(rows.full());
-                let rendered = rows.render();
+                let output = format_matches(rows);
+
+                assert_eq!(output.content, expected, "limit {limit}");
+                assert_eq!(output.title, format!("{limit} matches"), "limit {limit}");
+                let expected_lines = ["a", "b", "c"]
+                    .into_iter()
+                    .take(limit)
+                    .enumerate()
+                    .map(|(index, text)| GrepMatchLine {
+                        number: index + 1,
+                        text: text.to_owned(),
+                        is_match: true,
+                    })
+                    .collect();
                 assert_eq!(
-                    rendered.content,
-                    indoc! {"
-                        a
-                        b
-
-                        (Results limited to 2 lines)"
-                    },
+                    output.view,
+                    ToolResultView::GrepMatches {
+                        groups: vec![GrepFileGroup {
+                            path: "a.rs".to_owned(),
+                            lines: expected_lines
+                        }],
+                        truncated,
+                    }
                 );
-                assert_eq!(rendered.title, "2 matches");
             }
+        }
 
-            #[test]
-            fn stops_at_the_spill_limit_without_a_head_limit() {
-                let row = "x".repeat(1 << 20);
-                let mut rows = Rows::new(usize::MAX);
-                let mut pushed = 0;
-                while !rows.full() {
-                    rows.push(row.clone(), true);
-                    pushed += 1;
+        #[test]
+        fn without_rows_reports_no_matches() {
+            let output = format_matches(SearchRows::new(2));
+
+            assert_eq!(output.content, "No matches found");
+            assert_eq!(output.title, "No matches found");
+            assert_eq!(
+                output.view,
+                ToolResultView::GrepMatches {
+                    groups: vec![],
+                    truncated: false
                 }
-
-                let rendered = rows.render().content;
-
-                assert_eq!(pushed, 10);
-                let kept = vec![row; 10].join("\n");
-                assert!(
-                    rendered == format!("{kept}\n\n(Results limited to 10 MiB of output)"),
-                    "the rows and the footer naming the byte limit",
-                );
-            }
-
-            #[test]
-            fn without_rows_reports_no_matches() {
-                assert_eq!(Rows::new(2).render().content, "No matches found");
-            }
+            );
         }
     }
 
@@ -1901,21 +2002,90 @@ mod tests {
         #[test]
         fn context_past_the_file_shows_every_line_around_the_match() {
             let re = regex::Regex::new("b").unwrap();
-            let mut rows = Rows::new(usize::MAX);
+            let mut rows = SearchRows::new(usize::MAX);
 
             search_with_context("a\nb\nc\n", &re, "f.txt", usize::MAX, &mut rows);
 
-            assert_eq!(rows.kept, ["f.txt:1-a", "f.txt:2:b", "f.txt:3-c"]);
+            assert_eq!(rows.render(), "f.txt:1-a\nf.txt:2:b\nf.txt:3-c");
         }
 
         #[test]
         fn stops_between_ranges_once_the_rows_are_full() {
             let re = regex::Regex::new("a").unwrap();
-            let mut rows = Rows::new(1);
+            let mut rows = SearchRows::new(1);
 
             search_with_context("a\nx\nx\nx\na\n", &re, "f.txt", 1, &mut rows);
 
-            assert_eq!(rows.kept, ["f.txt:1:a", "f.txt:2-x"]);
+            assert_eq!(rows.render(), "f.txt:1:a");
+            assert!(rows.full());
+        }
+    }
+
+    mod format_files_with_matches {
+        use super::*;
+
+        #[test]
+        fn stops_reading_after_the_first_omitted_match() {
+            let re = regex::Regex::new("hit").unwrap();
+            let visited = std::cell::Cell::new(0);
+            let sources = [
+                (Path::new("/repo/first.rs"), "hit\n"),
+                (Path::new("/repo/miss.rs"), "absent\n"),
+                (Path::new("/repo/omitted.rs"), "hit\n"),
+                (Path::new("/repo/unvisited.rs"), "hit\n"),
+            ];
+            let texts = sources.into_iter().map(|(path, text)| {
+                visited.set(visited.get() + 1);
+                (path, text.to_owned())
+            });
+
+            let output = format_files_with_matches(texts, Path::new("/repo"), &re, 1);
+
+            assert_eq!(visited.get(), 3);
+            assert_eq!(output.title, "Found 1 file");
+            assert_eq!(
+                output.content,
+                indoc! {"
+                    Found 1 file
+                    first.rs
+
+                    (Results limited to 1 files)"
+                },
+            );
+        }
+    }
+
+    mod format_count {
+        use super::*;
+
+        #[test]
+        fn counts_every_file_while_retaining_only_the_requested_prefix() {
+            let re = regex::Regex::new("hit").unwrap();
+            let visited = std::cell::Cell::new(0);
+            let sources = [
+                (Path::new("/repo/first.rs"), "hit\nhit\n"),
+                (Path::new("/repo/miss.rs"), "absent\n"),
+                (Path::new("/repo/second.rs"), "hit\n"),
+                (Path::new("/repo/last.rs"), "hit\nhit\nhit\n"),
+            ];
+            let texts = sources.into_iter().map(|(path, text)| {
+                visited.set(visited.get() + 1);
+                (path, text.to_owned())
+            });
+
+            let output = format_count(texts, Path::new("/repo"), &re, 1);
+
+            assert_eq!(visited.get(), sources.len());
+            assert_eq!(output.title, "Found 6 total occurrences across 3 files");
+            assert_eq!(
+                output.content,
+                indoc! {"
+                    Found 6 total occurrences across 3 files
+                    first.rs:2
+
+                    (Results limited to 1 files)"
+                },
+            );
         }
     }
 

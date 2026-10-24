@@ -1,7 +1,8 @@
-//! What the search tools share: the resolved root, the file walk, and the notes on what a search
-//! could not read or withheld.
+//! Shared search roots, ordered file walking, bounded result rows, and visibility notes.
 
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
+use std::fmt;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,9 +10,11 @@ use std::time::SystemTime;
 
 use tokio_util::sync::CancellationToken;
 
+use super::spill::MAX_SPILL_BYTES;
+use super::view::{GrepFileGroup, GrepMatchLine};
 use super::{Prepared, ToolCtx, display_path, extract_input_field, tool_path};
 use crate::permission::{Access, WalkFilter, Workspace};
-use crate::util::text::{ELLIPSIS, plural};
+use crate::util::text::{ELLIPSIS, format_size, plural};
 
 // ── Search Root ──
 
@@ -157,7 +160,7 @@ fn innermost_error(e: &std::io::Error) -> String {
 /// returns how many it dropped.
 pub(super) fn withhold_unreadable(
     unreadable: &mut Vec<Unreadable>,
-    read_filter: &WalkFilter<'_>,
+    read_filter: &WalkFilter,
 ) -> usize {
     let found = unreadable.len();
     unreadable.retain(|u| {
@@ -168,13 +171,22 @@ pub(super) fn withhold_unreadable(
     found - unreadable.len()
 }
 
-/// `entries` sorted newest first by modification time, keeping walk order among equal times.
+/// The newest `limit` entries and the full count, keeping walk order among equal modification times.
 pub(super) fn newest_first(
     entries: impl Iterator<Item = ignore::DirEntry>,
-) -> Vec<ignore::DirEntry> {
-    let mut entries: Vec<_> = entries.collect();
-    entries.sort_by_cached_key(|entry| Reverse(entry_mtime(entry)));
-    entries
+    limit: usize,
+) -> (Vec<ignore::DirEntry>, usize) {
+    let mut newest = BTreeMap::new();
+    let mut total = 0;
+    for entry in entries {
+        let key = (Reverse(entry_mtime(&entry)), total);
+        total += 1;
+        newest.insert(key, entry);
+        if newest.len() > limit {
+            newest.pop_last();
+        }
+    }
+    (newest.into_values().collect(), total)
 }
 
 /// The entry's modification time, or [`SystemTime::UNIX_EPOCH`] when stat fails (entry vanished,
@@ -185,6 +197,97 @@ fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
         .ok()
         .and_then(|m| m.modified().ok())
         .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+// ── Search Rows ──
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SearchRow {
+    Path(String),
+    Count { path: String, count: usize },
+    Match { path: String, line: GrepMatchLine },
+    Separator,
+}
+
+impl fmt::Display for SearchRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Path(path) => f.write_str(path),
+            Self::Count { path, count } => write!(f, "{path}:{count}"),
+            Self::Match { path, line } => {
+                let separator = if line.is_match { ':' } else { '-' };
+                write!(f, "{path}:{}{separator}{}", line.number, line.text)
+            }
+            Self::Separator => f.write_str("--"),
+        }
+    }
+}
+
+/// Retains an output prefix under a row cap and the spill budget. The first omitted row records
+/// truncation, while callers that need full totals can continue counting without retaining rows.
+pub(super) struct SearchRows {
+    pub(super) kept: Vec<SearchRow>,
+    bytes: u64,
+    head_limit: usize,
+    row_limit_reached: bool,
+}
+
+impl SearchRows {
+    pub(super) fn new(head_limit: usize) -> Self {
+        Self {
+            kept: Vec::new(),
+            bytes: 0,
+            head_limit,
+            row_limit_reached: false,
+        }
+    }
+
+    pub(super) fn full(&self) -> bool {
+        self.row_limit_reached || self.bytes >= MAX_SPILL_BYTES
+    }
+
+    pub(super) fn push(&mut self, row: SearchRow) {
+        if self.kept.len() == self.head_limit {
+            self.row_limit_reached = true;
+        } else if !self.full() {
+            self.bytes += row.to_string().len() as u64 + 1;
+            self.kept.push(row);
+        }
+    }
+
+    pub(super) fn limit_description(&self, noun: &str) -> Option<String> {
+        if self.row_limit_reached {
+            Some(format!("{} {noun}", self.head_limit))
+        } else if self.bytes >= MAX_SPILL_BYTES {
+            Some(format!("{} of output", format_size(MAX_SPILL_BYTES)))
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn render(&self) -> String {
+        self.kept
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub(super) fn into_groups(self) -> Vec<GrepFileGroup> {
+        let mut groups: Vec<GrepFileGroup> = Vec::new();
+        for row in self.kept {
+            if let SearchRow::Match { path, line } = row {
+                match groups.last_mut() {
+                    Some(group) if group.path == path => group.lines.push(line),
+                    _ => groups.push(GrepFileGroup {
+                        path,
+                        lines: vec![line],
+                    }),
+                }
+            }
+        }
+        groups
+    }
 }
 
 // ── Search Notes ──
@@ -243,110 +346,120 @@ mod tests {
     use indoc::{formatdoc, indoc};
 
     use super::*;
-    use crate::tool::local_testing::{create_modified_at, deny_reads, search_root};
+    use crate::tool::local_testing::{self, create_modified_at, deny_reads};
     use crate::util::fs::testing::deny_read_access;
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::testing::HOME_VAR;
 
-    mod new {
+    mod search_root {
         use super::*;
 
-        #[test]
-        fn resolves_relative_and_absolute_paths_and_keeps_their_spelling() {
-            let dir = canonical_tempdir();
-            fs::create_dir(dir.path().join("src")).unwrap();
-            fs::create_dir(dir.path().join("lib")).unwrap();
-            let lib = dir.path().join("lib");
+        mod new {
+            use super::*;
 
-            let relative = search_root(dir.path(), Some("./src/../lib")).unwrap();
-            let absolute = search_root(Path::new("/"), Some(lib.to_str().unwrap())).unwrap();
+            #[test]
+            fn resolves_relative_and_absolute_paths_and_keeps_their_spelling() {
+                let dir = canonical_tempdir();
+                fs::create_dir(dir.path().join("src")).unwrap();
+                fs::create_dir(dir.path().join("lib")).unwrap();
+                let lib = dir.path().join("lib");
 
-            assert_eq!(
-                (relative.base, relative.spelled, relative.cwd),
-                (
-                    lib.clone(),
-                    PathBuf::from("./src/../lib"),
-                    dir.path().to_owned()
-                ),
-            );
-            assert_eq!(absolute.base, lib);
-        }
+                let relative =
+                    local_testing::search_root(dir.path(), Some("./src/../lib")).unwrap();
+                let absolute =
+                    local_testing::search_root(Path::new("/"), Some(lib.to_str().unwrap()))
+                        .unwrap();
 
-        #[test]
-        fn reads_a_leading_tilde_as_the_home_directory() {
-            let dir = canonical_tempdir();
-            let home = dir.path().join("home");
-            fs::create_dir_all(home.join("notes")).unwrap();
+                assert_eq!(
+                    (relative.base, relative.spelled, relative.cwd),
+                    (
+                        lib.clone(),
+                        PathBuf::from("./src/../lib"),
+                        dir.path().to_owned()
+                    ),
+                );
+                assert_eq!(absolute.base, lib);
+            }
 
-            let root = temp_env::with_var(HOME_VAR, Some(&home), || {
-                search_root(dir.path(), Some("~/notes")).unwrap()
-            });
+            #[test]
+            fn reads_a_leading_tilde_as_the_home_directory() {
+                let dir = canonical_tempdir();
+                let home = dir.path().join("home");
+                fs::create_dir_all(home.join("notes")).unwrap();
 
-            assert_eq!(
-                (root.base, root.spelled),
-                (home.join("notes"), home.join("notes"))
-            );
-        }
+                let root = temp_env::with_var(HOME_VAR, Some(&home), || {
+                    local_testing::search_root(dir.path(), Some("~/notes")).unwrap()
+                });
 
-        #[test]
-        fn defaults_to_the_cwd_without_a_path() {
-            let dir = canonical_tempdir();
+                assert_eq!(
+                    (root.base, root.spelled),
+                    (home.join("notes"), home.join("notes"))
+                );
+            }
 
-            let root = search_root(dir.path(), None).unwrap();
+            #[test]
+            fn defaults_to_the_cwd_without_a_path() {
+                let dir = canonical_tempdir();
 
-            assert_eq!(
-                (root.base, root.spelled),
-                (dir.path().to_owned(), PathBuf::from(".")),
-            );
-        }
+                let root = local_testing::search_root(dir.path(), None).unwrap();
 
-        #[test]
-        fn missing_path_is_named_relative_to_cwd() {
-            let dir = canonical_tempdir();
+                assert_eq!(
+                    (root.base, root.spelled),
+                    (dir.path().to_owned(), PathBuf::from(".")),
+                );
+            }
 
-            let err = search_root(dir.path(), Some("missing")).err().unwrap();
+            #[test]
+            fn missing_path_is_named_relative_to_cwd() {
+                let dir = canonical_tempdir();
 
-            let cause = fs::metadata(dir.path().join("missing")).unwrap_err();
-            assert_eq!(err, format!("Failed to access missing: {cause}"));
-        }
+                let err = local_testing::search_root(dir.path(), Some("missing"))
+                    .err()
+                    .unwrap();
 
-        #[test]
-        fn refuses_an_access_that_is_not_a_path() {
-            let workspace = Arc::new(Workspace::new(Path::new("/repo")));
-            let err = SearchRoot::new(&Access::None, Some("src"), workspace)
-                .err()
-                .unwrap();
-            assert_eq!(
-                err,
-                "Failed to access src: the search root was not resolved."
-            );
-        }
+                let cause = fs::metadata(dir.path().join("missing")).unwrap_err();
+                assert_eq!(err, format!("Failed to access missing: {cause}"));
+            }
 
-        #[cfg(unix)]
-        #[test]
-        fn resolves_dot_dot_after_a_symlink_physically() {
-            let dir = canonical_tempdir();
-            fs::create_dir_all(dir.path().join("real/target")).unwrap();
-            let cwd = dir.path().join("cwd");
-            fs::create_dir(&cwd).unwrap();
-            std::os::unix::fs::symlink(dir.path().join("real/target"), cwd.join("link")).unwrap();
+            #[test]
+            fn refuses_an_access_that_is_not_a_path() {
+                let workspace = Arc::new(Workspace::new(Path::new("/repo")));
+                let err = SearchRoot::new(&Access::None, Some("src"), workspace)
+                    .err()
+                    .unwrap();
+                assert_eq!(
+                    err,
+                    "Failed to access src: the search root was not resolved."
+                );
+            }
 
-            let root = search_root(&cwd, Some("link/..")).unwrap();
+            #[cfg(unix)]
+            #[test]
+            fn resolves_dot_dot_after_a_symlink_physically() {
+                let dir = canonical_tempdir();
+                fs::create_dir_all(dir.path().join("real/target")).unwrap();
+                let cwd = dir.path().join("cwd");
+                fs::create_dir(&cwd).unwrap();
+                std::os::unix::fs::symlink(dir.path().join("real/target"), cwd.join("link"))
+                    .unwrap();
 
-            assert_eq!(root.base, dir.path().join("real"));
-        }
+                let root = local_testing::search_root(&cwd, Some("link/..")).unwrap();
 
-        #[cfg(target_os = "linux")]
-        #[test]
-        fn walks_from_a_root_whose_name_is_not_utf8() {
-            use std::os::unix::ffi::OsStrExt as _;
-            let dir = canonical_tempdir();
-            let cwd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
-            fs::create_dir(&cwd).unwrap();
+                assert_eq!(root.base, dir.path().join("real"));
+            }
 
-            let root = search_root(&cwd, None).unwrap();
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn walks_from_a_root_whose_name_is_not_utf8() {
+                use std::os::unix::ffi::OsStrExt as _;
+                let dir = canonical_tempdir();
+                let cwd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+                fs::create_dir(&cwd).unwrap();
 
-            assert_eq!(root.base, cwd);
+                let root = local_testing::search_root(&cwd, None).unwrap();
+
+                assert_eq!(root.base, cwd);
+            }
         }
     }
 
@@ -455,7 +568,7 @@ mod tests {
         #[test]
         fn drops_and_counts_only_the_paths_the_filter_withholds() {
             let dir = canonical_tempdir();
-            let root = search_root(dir.path(), None).unwrap();
+            let root = local_testing::search_root(dir.path(), None).unwrap();
             let read_filter = deny_reads(&["secrets"]);
             let read_filter = read_filter.walk(&root.base, &root.spelled, &root.workspace);
             let at = |path: Option<&str>| Unreadable {
@@ -475,6 +588,36 @@ mod tests {
         use super::*;
 
         #[test]
+        fn keeps_later_newest_entries_while_counting_the_whole_walk() {
+            let dir = canonical_tempdir();
+            for index in 0..300 {
+                create_modified_at(
+                    &dir.path().join(format!("{index:03}.rs")),
+                    1_000_000 + index,
+                );
+            }
+            let mut unreadable = Vec::new();
+            let mut entries: Vec<_> =
+                walk_files(dir.path(), &CancellationToken::new(), &mut unreadable).collect();
+            entries.sort_by_key(|entry| entry.file_name().to_owned());
+            let visited = std::cell::Cell::new(0);
+            let entries = entries
+                .into_iter()
+                .inspect(|_| visited.set(visited.get() + 1));
+
+            let (kept, total) = newest_first(entries, 3);
+
+            let names: Vec<_> = kept
+                .iter()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, ["299.rs", "298.rs", "297.rs"]);
+            assert_eq!(total, 300);
+            assert_eq!(visited.get(), 300);
+            assert_eq!(unreadable, []);
+        }
+
+        #[test]
         fn orders_by_mtime_and_keeps_input_order_among_ties() {
             let dir = canonical_tempdir();
             for (name, secs) in [
@@ -489,13 +632,122 @@ mod tests {
                 walk_files(dir.path(), &CancellationToken::new(), &mut unreadable).collect();
             entries.sort_by_key(|entry| Reverse(entry.file_name().to_owned()));
 
-            let sorted = newest_first(entries.into_iter());
+            for (limit, expected) in [
+                (usize::MAX, vec!["b.txt", "c.txt", "a.txt"]),
+                (2, vec!["b.txt", "c.txt"]),
+                (1, vec!["b.txt"]),
+                (0, vec![]),
+            ] {
+                let (sorted, total) = newest_first(entries.clone().into_iter(), limit);
 
-            let names: Vec<_> = sorted
-                .iter()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect();
-            assert_eq!(names, ["b.txt", "c.txt", "a.txt"]);
+                let names: Vec<_> = sorted
+                    .iter()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect();
+                assert_eq!(names, expected, "limit {limit}");
+                assert_eq!(total, 3, "limit {limit}");
+            }
+        }
+    }
+
+    mod push {
+        use super::*;
+
+        #[test]
+        fn retains_only_the_requested_prefix_when_later_matches_are_counted() {
+            let mut rows = SearchRows::new(2);
+
+            for index in 0..10_000 {
+                rows.push(SearchRow::Count {
+                    path: format!("file-{index}"),
+                    count: index + 1,
+                });
+            }
+
+            assert_eq!(
+                rows.kept,
+                [
+                    SearchRow::Count {
+                        path: "file-0".to_owned(),
+                        count: 1
+                    },
+                    SearchRow::Count {
+                        path: "file-1".to_owned(),
+                        count: 2
+                    },
+                ]
+            );
+            assert_eq!(rows.render(), "file-0:1\nfile-1:2");
+            assert_eq!(rows.limit_description("files").as_deref(), Some("2 files"));
+            assert!(rows.full());
+        }
+
+        #[test]
+        fn stops_at_the_spill_limit_without_a_row_limit() {
+            let row = "x".repeat(1 << 20);
+            let mut rows = SearchRows::new(usize::MAX);
+            let mut pushed = 0;
+
+            while !rows.full() {
+                rows.push(SearchRow::Path(row.clone()));
+                pushed += 1;
+            }
+            rows.push(SearchRow::Path("omitted".to_owned()));
+
+            assert_eq!(pushed, 10);
+            assert_eq!(rows.render(), vec![row; 10].join("\n"));
+            assert_eq!(
+                rows.limit_description("files").as_deref(),
+                Some("10 MiB of output")
+            );
+        }
+    }
+
+    mod into_groups {
+        use super::*;
+
+        #[test]
+        fn keeps_native_paths_and_context_across_separators() {
+            let first = GrepMatchLine {
+                number: 5,
+                text: "hit".to_owned(),
+                is_match: true,
+            };
+            let context = GrepMatchLine {
+                number: 10,
+                text: "context".to_owned(),
+                is_match: false,
+            };
+            let mut rows = SearchRows::new(10);
+            rows.push(SearchRow::Match {
+                path: "name:12:part.rs".to_owned(),
+                line: first.clone(),
+            });
+            rows.push(SearchRow::Separator);
+            rows.push(SearchRow::Match {
+                path: "name:12:part.rs".to_owned(),
+                line: context.clone(),
+            });
+            rows.push(SearchRow::Match {
+                path: "line\nname.rs".to_owned(),
+                line: first.clone(),
+            });
+
+            let groups = rows.into_groups();
+
+            assert_eq!(
+                groups,
+                [
+                    GrepFileGroup {
+                        path: "name:12:part.rs".to_owned(),
+                        lines: vec![first.clone(), context]
+                    },
+                    GrepFileGroup {
+                        path: "line\nname.rs".to_owned(),
+                        lines: vec![first]
+                    },
+                ]
+            );
         }
     }
 

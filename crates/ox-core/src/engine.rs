@@ -54,6 +54,8 @@ const OP_CHANNEL_CAP: usize = 32;
 
 /// A running [`Engine`]. Closing `ops` asks it to quit.
 pub struct EngineHandle {
+    /// Frontend submissions, subject to [`Op`]'s idle-state requirements. Enqueueing an op does
+    /// not acknowledge its execution.
     pub ops: mpsc::Sender<Op>,
     pub events: mpsc::UnboundedReceiver<Event>,
     pub task: EngineTask,
@@ -302,6 +304,13 @@ impl Engine {
                 }
                 Op::Clear => self.clear(&sink).await,
                 Op::Archive => self.archive(&sink).await,
+                Op::SetArchive {
+                    path,
+                    session_id,
+                    state,
+                } => {
+                    self.set_archive(&sink, path, session_id, state).await;
+                }
                 Op::Resume { target } => self.resume(&sink, target).await,
                 Op::Rename { title } => self.rename(&sink, title).await,
                 Op::SetModel(pick) => self.set_model(&sink, pick),
@@ -481,6 +490,7 @@ impl Engine {
         checkpoint: Option<Checkpoint>,
         report: &TurnReport,
     ) {
+        settle_file_writes(&self.file_tracker).await;
         self.bill(sink, &report.billable_rounds).await;
         self.messages.truncate(start.transcript_len);
         self.prompt.seen = start.seen;
@@ -570,10 +580,11 @@ impl Engine {
         }
     }
 
-    /// Ends the background shells, flushes and closes the live session, then waits for the
-    /// stored-login reloads still in flight, such as one the aborted title request started, so
-    /// exiting does not cancel their write-back. Returns the session's write failure, if any.
+    /// Settles workspace writes, ends background shells, and closes the live session, then waits
+    /// for stored-login reloads still in flight so exiting cannot cancel their write-back.
+    /// Returns the session's write failure, if any.
     async fn finalize(self) -> Option<String> {
+        settle_file_writes(&self.file_tracker).await;
         self.shells.stop_all().await;
         let failure = self
             .session
@@ -582,6 +593,10 @@ impl Engine {
         self.client.finish_reloads().await;
         failure
     }
+}
+
+async fn settle_file_writes(tracker: &FileTracker) {
+    tracker.drain_writes().await;
 }
 
 /// The engine state before a turn's prompt: the transcript length, what the model had seen of the
@@ -623,6 +638,11 @@ impl TurnEnd {
     /// How `op` ended, if `event` is one of the terminal events [`Event`] lists for it.
     pub fn of(op: &Op, event: &Event) -> Option<Self> {
         match (op, event) {
+            (Op::SetArchive { .. }, Event::ArchiveUpdated { result, .. }) => Some(if result.is_ok() {
+                Self::Completed
+            } else {
+                Self::Failed
+            }),
             (
                 Op::Prompt { .. }
                 | Op::Compact { .. }
@@ -703,7 +723,10 @@ mod tests {
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
     use crate::config::testing::test_config;
-    use crate::file_tracker::testing::{record_tracked_file, seed_full_read};
+    use crate::file_tracker::testing::{
+        assert_writes_draining, blocked_write, record_tracked_file, seed_full_read,
+    };
+    use crate::file_tracker::{GateError, GatePurpose};
     use crate::message::{Replay, Role};
     use crate::model;
     use crate::model::{Effort, PromptCacheTtl, ResolvedModelId};
@@ -713,8 +736,9 @@ mod tests {
     use crate::protocol::{CompactTrigger, ResumeTarget, UsageSnapshot};
     use crate::session::entry::ArchiveState;
     use crate::session::handle;
+    use crate::session::handle::testing::record_write_call;
     use crate::session::post_compact::synthesize_post_compact_message;
-    use crate::session::store::testing::test_store;
+    use crate::session::store::testing::{WriterBarrier, seed_test_session, test_store};
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
     use crate::tool::bash::background::testing::shell;
@@ -1539,6 +1563,73 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn finishes_a_saved_archive_before_the_queued_resume() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                seed_test_session(
+                    &store,
+                    "saved",
+                    Some("Saved"),
+                    Some(1),
+                    time::macros::datetime!(2026-04-18 09:00:00 UTC),
+                );
+                let path = store.find_session_path("saved").unwrap();
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let barrier = WriterBarrier::hold(&path);
+                let mut handle = engine.spawn();
+
+                handle
+                    .ops
+                    .send(Op::SetArchive {
+                        path: path.clone(),
+                        session_id: "saved".to_owned(),
+                        state: ArchiveState::Archived,
+                    })
+                    .await
+                    .unwrap();
+                handle
+                    .ops
+                    .send(Op::Resume {
+                        target: ResumeTarget::Path(path),
+                    })
+                    .await
+                    .unwrap();
+                let independent = tokio::spawn(async { "runtime event" });
+
+                assert_eq!(independent.await.unwrap(), "runtime event");
+                assert!(!store.load_session_data("saved").unwrap().archived);
+                barrier.release();
+                let archived = next_matching(&mut handle.events, |event| {
+                    matches!(
+                        event,
+                        Event::ArchiveUpdated { .. } | Event::SessionResumed { .. }
+                    )
+                    .then_some(event)
+                })
+                .await;
+                assert_eq!(
+                    archived,
+                    Event::ArchiveUpdated {
+                        id: "saved".to_owned(),
+                        result: Ok(ArchiveState::Archived)
+                    }
+                );
+                let resumed = next_matching(&mut handle.events, |event| match event {
+                    Event::SessionResumed { id, prior, .. } => Some((id, prior)),
+                    _ => None,
+                })
+                .await;
+                handle.shutdown().await.unwrap();
+
+                assert_eq!(resumed, ("saved".to_owned(), ArchiveState::Archived));
+                assert!(!store.load_session_data("saved").unwrap().archived);
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn applies_rename_and_config_ops_until_shutdown() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -1846,7 +1937,158 @@ mod tests {
     }
 
     mod submit_prompt {
+        use std::pin::Pin;
+
+        use tokio::sync::Notify;
+        use tokio_util::sync::CancellationToken;
+
         use super::*;
+        use crate::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec};
+
+        struct BlockedWriteTool {
+            path: PathBuf,
+            started: mpsc::UnboundedSender<CancellationToken>,
+            release: Arc<Notify>,
+        }
+
+        impl Tool for BlockedWriteTool {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "blocked-write".to_owned(),
+                    description: "Controlled workspace write.".to_owned(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                    }),
+                    class: PermissionClass::Read,
+                    parallel_safe: false,
+                }
+            }
+
+            fn run<'a>(
+                &'a self,
+                prepared: Prepared,
+                ctx: &'a ToolCtx,
+            ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+                Box::pin(async move {
+                    crate::tool::write::testing::write_with_blocked_parent(
+                        &self.path,
+                        prepared.input["text"].as_str().unwrap(),
+                        ctx,
+                        self.started.clone(),
+                        Arc::clone(&self.release),
+                    )
+                    .await
+                    .unwrap();
+                    ToolOutput::success("wrote")
+                })
+            }
+        }
+
+        #[tokio::test]
+        async fn interrupt_and_shutdown_wait_for_workspace_writes_before_ending() {
+            with_pinned_home(async {
+                for (name, op, expected) in [
+                    ("interrupt", Op::Interrupt, TurnEnd::Cancelled),
+                    ("shutdown", Op::Shutdown, TurnEnd::Shutdown),
+                ] {
+                    let server = MockServer::start().await;
+                    mount_tool_call_once(
+                        &server,
+                        "toolu_write",
+                        "blocked-write",
+                        r#"{"text":"committed"}"#,
+                    ).await;
+                    let dir = canonical_tempdir();
+                    let store = test_store(dir.path());
+                    let mut engine = engine(server.uri(), &store, dir.path()).await;
+                    let session_id = engine.session_id().to_owned();
+                    let parent = dir.path().join("nested");
+                    let path = parent.join("notes.txt");
+                    let tracker = Arc::clone(&engine.file_tracker);
+                    let (started, mut started_rx) = mpsc::unbounded_channel();
+                    let release = Arc::new(Notify::new());
+                    engine.tools = Arc::new(ToolRegistry::new(vec![Box::new(
+                        BlockedWriteTool {
+                            path: path.clone(),
+                            started,
+                            release: Arc::clone(&release),
+                        },
+                    )]));
+                    let sink = CapturingSink::default();
+                    let (tx, mut ops) = mpsc::channel(1);
+                    let ended = {
+                        let mut turn = std::pin::pin!(
+                            engine.submit_prompt("write", None, &sink, &mut ops)
+                        );
+                        let cancel = tokio::select! {
+                            token = started_rx.recv() => token.unwrap(),
+                            end = turn.as_mut() => panic!("turn ended before its write started: {end:?}"),
+                        };
+
+                        tx.try_send(op).unwrap();
+                        assert!(futures::poll!(turn.as_mut()).is_pending(), "{name}");
+                        assert_writes_draining(&tracker);
+                        assert!(cancel.is_cancelled(), "{name}");
+                        assert!(!parent.exists(), "{name}");
+                        assert_eq!(tracker.snapshot_all(), [], "{name}");
+                        assert!(!sink.events().iter().any(|event| {
+                            matches!(event, Event::ToolCallEnd(_) | Event::Cancelled)
+                        }), "{name}");
+                        release.notify_one();
+                        turn.await
+                    };
+                    assert_eq!(ended, expected, "{name}");
+
+                    assert_eq!(std::fs::read(&path).unwrap(), b"committed", "{name}");
+                    assert_eq!(
+                        tracker.verify_current_content(&path, b"committed", GatePurpose::Write),
+                        Ok(()),
+                        "{name}",
+                    );
+                    assert_eq!(
+                        sink.events().iter().filter(|event| matches!(event, Event::Cancelled)).count(),
+                        usize::from(expected == TurnEnd::Cancelled),
+                        "{name}",
+                    );
+                    if expected == TurnEnd::Cancelled {
+                        server.reset().await;
+                        mount_tool_call_once(
+                            &server,
+                            "toolu_next",
+                            "blocked-write",
+                            r#"{"text":"later"}"#,
+                        ).await;
+                        mount_reply(&server, "done").await;
+                        let mut next = std::pin::pin!(
+                            engine.submit_prompt("write again", None, &sink, &mut ops)
+                        );
+                        let token = tokio::select! {
+                            token = started_rx.recv() => token.unwrap(),
+                            end = next.as_mut() => panic!("next turn ended before its write started: {end:?}"),
+                        };
+                        assert!(!token.is_cancelled(), "{name}");
+                        assert_eq!(std::fs::read(&path).unwrap(), b"committed", "{name}");
+                        release.notify_one();
+                        assert_eq!(next.await, TurnEnd::Completed, "{name}");
+                        assert_eq!(std::fs::read(&path).unwrap(), b"later", "{name}");
+                        assert_eq!(
+                            tracker.verify_current_content(&path, b"later", GatePurpose::Write),
+                            Ok(()),
+                            "{name}",
+                        );
+                    }
+                    assert_eq!(engine.finalize().await, None, "{name}");
+                    assert_eq!(
+                        store.load_session_data(&session_id).unwrap().file_snapshots,
+                        tracker.snapshot_all(),
+                        "{name}",
+                    );
+                }
+            })
+            .await;
+        }
 
         /// Answers the next Messages request with `text`.
         async fn mount_reply_once(server: &MockServer, text: &str) {
@@ -2802,6 +3044,53 @@ mod tests {
         }
     }
 
+    mod roll_back {
+        use super::*;
+
+        #[tokio::test]
+        async fn settles_the_write_before_restoring_the_checkpoint() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = canonical_tempdir();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let path = dir.path().join("notes.txt");
+                std::fs::write(&path, b"original").unwrap();
+                seed_full_read(&engine.file_tracker, &path);
+                let start = engine.turn_start();
+                let snapshots = start.files.clone();
+                let tracker = Arc::clone(&engine.file_tracker);
+                let release = blocked_write(&tracker, &path, b"committed", "toolu_write").await;
+                let sink = CapturingSink::default();
+                let report = TurnReport::default();
+                let mut rollback = std::pin::pin!(engine.roll_back(&sink, start, None, &report));
+
+                assert!(futures::poll!(rollback.as_mut()).is_pending());
+                assert_writes_draining(&tracker);
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                assert_eq!(tracker.snapshot_all(), snapshots);
+                assert_eq!(sink.events(), []);
+                release.send(()).unwrap();
+                rollback.await;
+
+                assert_eq!(std::fs::read(&path).unwrap(), b"committed");
+                assert_eq!(tracker.snapshot_all(), snapshots);
+                assert_eq!(
+                    tracker.verify_current_content(&path, b"committed", GatePurpose::Write),
+                    Err(GateError::ContentDrifted {
+                        path,
+                        purpose: GatePurpose::Write
+                    })
+                );
+                assert!(
+                    sink.events()
+                        .iter()
+                        .any(|event| matches!(event, Event::TurnRolledBack))
+                );
+            })
+            .await;
+        }
+    }
+
     mod set_model {
         use super::*;
 
@@ -3081,11 +3370,82 @@ mod tests {
         }
     }
 
+    mod finalize {
+        use super::*;
+
+        #[tokio::test]
+        async fn snapshots_the_committed_bytes_after_draining_writes() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = canonical_tempdir();
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let session_id = engine.session_id().to_owned();
+                let path = dir.path().join("notes.txt");
+                record_write_call(
+                    &engine.session,
+                    &engine.file_tracker,
+                    "toolu_write",
+                    &path,
+                    true,
+                )
+                .await;
+                let tracker = Arc::clone(&engine.file_tracker);
+                let previous = tracker.snapshot_all();
+                let release = blocked_write(&tracker, &path, b"committed", "toolu_write").await;
+                let mut finalization = std::pin::pin!(engine.finalize());
+
+                assert!(futures::poll!(finalization.as_mut()).is_pending());
+                assert_writes_draining(&tracker);
+                assert_eq!(std::fs::read(&path).unwrap(), b"alpha");
+                assert_eq!(tracker.snapshot_all(), previous);
+                release.send(()).unwrap();
+                assert_eq!(finalization.await, None);
+
+                assert_eq!(std::fs::read(&path).unwrap(), b"committed");
+                let saved = store.load_session_data(&session_id).unwrap().file_snapshots;
+                assert_eq!(saved, tracker.snapshot_all());
+                let (restored, dropped) = FileTracker::restored(saved);
+                assert_eq!(dropped, [] as [PathBuf; 0]);
+                assert_eq!(
+                    restored.verify_current_content(&path, b"committed", GatePurpose::Write),
+                    Ok(())
+                );
+            })
+            .await;
+        }
+    }
+
     mod turn_end {
         use super::*;
 
         mod of {
             use super::*;
+
+            #[test]
+            fn saved_archive_ends_on_its_completion_result() {
+                let op = Op::SetArchive {
+                    path: "/repo/saved.jsonl".into(),
+                    session_id: "saved".to_owned(),
+                    state: ArchiveState::Archived,
+                };
+
+                for (result, expected) in [
+                    (Ok(ArchiveState::Archived), TurnEnd::Completed),
+                    (Err("Archive failed".to_owned()), TurnEnd::Failed),
+                ] {
+                    assert_eq!(
+                        TurnEnd::of(
+                            &op,
+                            &Event::ArchiveUpdated {
+                                id: "saved".to_owned(),
+                                result
+                            }
+                        ),
+                        Some(expected)
+                    );
+                }
+            }
 
             #[test]
             fn reads_only_the_terminal_events_of_the_op_in_flight() {

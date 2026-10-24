@@ -559,10 +559,11 @@ async fn headless_rejected_request_preserves_branch_and_user_message() {
         .map(|entry| entry.unwrap().path())
         .collect();
     assert_eq!(projects.len(), 1, "session projects: {projects:?}");
-    let sessions: Vec<_> = std::fs::read_dir(&projects[0])
+    let (sessions, sidecars): (Vec<_>, Vec<_>) = std::fs::read_dir(&projects[0])
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .collect();
+        .partition(|path| path.extension().is_some_and(|ext| ext == "jsonl"));
+    assert_eq!(sidecars, [projects[0].join(".writer.lock")]);
     assert_eq!(sessions.len(), 1, "session files: {sessions:?}");
     let transcript = std::fs::read_to_string(&sessions[0]).unwrap();
     let entries: Vec<serde_json::Value> = transcript

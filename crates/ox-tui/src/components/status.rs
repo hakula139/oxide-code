@@ -278,7 +278,7 @@ impl StatusBar {
     /// Returns `true` when the time, the usage limits, or the spinner changed and the caller should
     /// repaint.
     pub(crate) fn tick(&mut self, now: Instant) -> bool {
-        let mut dirty = self.refresh_current_time();
+        let mut dirty = self.refresh_current_time(local_minute());
         dirty |= self.expire_rate_limits();
         if self.status.is_busy() && now >= self.next_spinner_frame {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
@@ -291,11 +291,15 @@ impl StatusBar {
     /// When [`Self::tick`] next changes the bar, on the event loop's clock: the next spinner frame
     /// while busy, the next minute the current-time segment shows, or the next usage-limit reset.
     pub(crate) fn next_tick(&self, now: Instant) -> Option<Instant> {
+        self.next_tick_at(now, now_local())
+    }
+
+    fn next_tick_at(&self, now: Instant, wall_now: OffsetDateTime) -> Option<Instant> {
         let spinner = self.status.is_busy().then_some(self.next_spinner_frame);
         let minute = self
             .current_minute
-            .map(|_| now + until_next_minute(now_local().time()));
-        let unix_now = OffsetDateTime::now_utc().unix_timestamp();
+            .map(|_| now + until_next_minute(wall_now.time()));
+        let unix_now = wall_now.unix_timestamp();
         let reset = self.rate_limits.iter().flat_map(|limits| {
             [limits.five_hour, limits.seven_day]
                 .into_iter()
@@ -308,11 +312,10 @@ impl StatusBar {
         spinner.into_iter().chain(minute).chain(reset).min()
     }
 
-    fn refresh_current_time(&mut self) -> bool {
+    fn refresh_current_time(&mut self, current: u16) -> bool {
         let Some(shown) = self.current_minute else {
             return false;
         };
-        let current = local_minute();
         if current == shown {
             return false;
         }
@@ -445,7 +448,7 @@ pub(crate) mod testing {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use time::macros::time;
+    use time::macros::{datetime, time};
 
     use ox_core::client::RateLimitWindow;
 
@@ -661,18 +664,6 @@ mod tests {
         }
 
         #[test]
-        fn idle_current_time_marks_dirty_on_minute_change() {
-            let mut bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::CurrentTime]));
-            let current = local_minute();
-            bar.current_minute = Some((current + 1) % 1440);
-
-            assert!(bar.tick(crate::now()));
-            assert_eq!(bar.current_minute, Some(current));
-            assert!(!bar.tick(crate::now()));
-            assert_eq!(bar.spinner_frame, 0);
-        }
-
-        #[test]
         fn drops_a_usage_limit_window_once_it_resets() {
             let mut bar = test_bar();
             let window = |resets_at| {
@@ -734,58 +725,115 @@ mod tests {
     mod next_tick {
         use super::*;
 
-        fn bar_with(segments: Vec<StatusLineSegment>) -> StatusBar {
-            StatusBar::new(status_bar_init(segments))
-        }
-
         #[test]
         fn is_the_next_spinner_frame_while_busy() {
-            let mut bar = bar_with(vec![StatusLineSegment::CurrentTime]);
+            let mut bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::RunState]));
             bar.set_status(Status::Streaming);
 
             assert_eq!(bar.next_tick(crate::now()), Some(bar.next_spinner_frame));
         }
 
         #[test]
+        fn never_changes_an_idle_bar_without_a_clock_or_usage_limits() {
+            let bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::Model]));
+
+            assert_eq!(bar.next_tick(Instant::now()), None);
+        }
+    }
+
+    mod next_tick_at {
+        use super::*;
+
+        const WALL_NOW: OffsetDateTime = datetime!(2026-01-01 12:00:00 UTC);
+
+        #[test]
         fn is_the_next_minute_for_the_current_time_segment() {
-            let bar = bar_with(vec![StatusLineSegment::CurrentTime]);
-            let now = Instant::now();
+            for (time, wait) in [
+                (time!(12:34:00), Duration::from_mins(1)),
+                (time!(12:34:59.950), Duration::from_millis(50)),
+            ] {
+                let bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::CurrentTime]));
+                let now = crate::now();
 
-            let due = bar.next_tick(now).unwrap();
-
-            assert!(due > now && due <= now + Duration::from_mins(1), "{due:?}");
+                assert_eq!(
+                    bar.next_tick_at(now, WALL_NOW.replace_time(time)),
+                    Some(now + wait),
+                    "{time}",
+                );
+            }
         }
 
         #[test]
         fn is_the_earliest_usage_limit_reset() {
-            let mut bar = bar_with(vec![StatusLineSegment::Model]);
-            let unix_now = OffsetDateTime::now_utc().unix_timestamp();
-            let window = |resets_at| {
-                Some(RateLimitWindow {
-                    utilization: 0.5,
-                    resets_at,
-                })
-            };
-            bar.set_rate_limits(Some(RateLimits {
-                five_hour: window(unix_now + 120),
-                seven_day: window(FUTURE_RESET),
-            }));
-            let now = Instant::now();
+            for (five_hour_wait, seven_day_wait) in [(120, 240), (240, 120)] {
+                let mut bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::Model]));
+                let window = |wait| {
+                    Some(RateLimitWindow {
+                        utilization: 0.5,
+                        resets_at: WALL_NOW.unix_timestamp() + wait,
+                    })
+                };
+                bar.set_rate_limits(Some(RateLimits {
+                    five_hour: window(five_hour_wait),
+                    seven_day: window(seven_day_wait),
+                }));
+                let now = crate::now();
 
-            let due = bar.next_tick(now).unwrap();
-
-            let wait = due - now;
-            assert!(
-                (Duration::from_secs(119)..=Duration::from_secs(120)).contains(&wait),
-                "{wait:?}"
-            );
+                assert_eq!(
+                    bar.next_tick_at(now, WALL_NOW),
+                    Some(now + Duration::from_secs(120)),
+                    "{five_hour_wait} / {seven_day_wait}",
+                );
+            }
         }
 
         #[test]
-        fn never_changes_an_idle_bar_without_a_clock_or_usage_limits() {
-            let bar = bar_with(vec![StatusLineSegment::Model]);
+        fn selects_the_earliest_spinner_minute_or_reset() {
+            for (time, reset_wait, wait) in [
+                (time!(12:34:00), 120, SPINNER_FRAME_INTERVAL),
+                (time!(12:34:59.950), 120, Duration::from_millis(50)),
+                (time!(12:34:59.950), -1, Duration::ZERO),
+            ] {
+                let mut bar = StatusBar::new(status_bar_init(vec![
+                    StatusLineSegment::RunState,
+                    StatusLineSegment::CurrentTime,
+                ]));
+                let now = crate::now();
+                let wall_now = WALL_NOW.replace_time(time);
+                bar.set_status(Status::Streaming);
+                bar.next_spinner_frame = now + SPINNER_FRAME_INTERVAL;
+                bar.set_rate_limits(Some(RateLimits {
+                    five_hour: Some(RateLimitWindow {
+                        utilization: 0.5,
+                        resets_at: wall_now.unix_timestamp() + reset_wait,
+                    }),
+                    seven_day: None,
+                }));
 
-            assert_eq!(bar.next_tick(Instant::now()), None);
+                assert_eq!(
+                    bar.next_tick_at(now, wall_now),
+                    Some(now + wait),
+                    "{time} / {reset_wait}",
+                );
+            }
+        }
+    }
+
+    mod refresh_current_time {
+        use super::*;
+
+        #[test]
+        fn updates_only_when_the_displayed_minute_changes() {
+            for (shown, current, changed) in [(720, 720, false), (720, 721, true), (1439, 0, true)]
+            {
+                let mut bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::CurrentTime]));
+                bar.current_minute = Some(shown);
+
+                let dirty = bar.refresh_current_time(current);
+
+                assert_eq!(dirty, changed, "{shown} → {current}");
+                assert_eq!(bar.current_minute, Some(current), "{shown} → {current}");
+            }
         }
     }
 

@@ -6,6 +6,7 @@ mod session_list;
 use std::env;
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal as _, Write as _};
+use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
@@ -370,14 +371,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let project_root = util::git::project_root(&cwd);
 
     if cli.list {
-        let store = SessionStore::open(&cwd, &project_root)?;
-        session_list::write(
-            &mut io::stdout().lock(),
-            &store,
-            cli.list_scope(),
-            cli.limit,
-            terminal::stdout_width(),
-        )?;
+        list_sessions(&cli, &cwd, &project_root)?;
         return Ok(Exit::Success);
     }
 
@@ -408,7 +402,8 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         git_branch.clone(),
         cli.session_target(),
         cli.projects(),
-    )?;
+    )
+    .await?;
     if prior == ArchiveState::Archived && !tui_mode {
         _ = writeln!(
             io::stderr(),
@@ -482,6 +477,17 @@ fn check_config() -> Result<Exit> {
     }
     writeln!(stdout, "Config is valid")?;
     Ok(Exit::Success)
+}
+
+fn list_sessions(cli: &Cli, cwd: &Path, project_root: &Path) -> Result<()> {
+    let store = SessionStore::open(cwd, project_root)?;
+    session_list::write(
+        &mut io::stdout().lock(),
+        &store,
+        cli.list_scope(),
+        cli.limit,
+        terminal::stdout_width(),
+    )
 }
 
 #[cfg(test)]

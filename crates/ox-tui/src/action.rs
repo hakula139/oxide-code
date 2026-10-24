@@ -15,10 +15,10 @@ pub(crate) enum Action {
     /// queue while a turn runs.
     Submit(String),
     Op(Op),
-    /// A prompt a slash command built from the command `line`, which starts a turn. A fresh session
-    /// takes `line` as its first-prompt title, and auto-compaction replays it. A failed turn hands
-    /// the line back to an empty input, where it runs again as a command, or returns the pair to
-    /// the queue head, where the built prompt runs as it is.
+    /// A prompt built from `line`, whose slash command has already echoed in chat. A fresh session
+    /// takes `line` as its first-prompt title, and auto-compaction replays it. A failed turn hands the
+    /// line back to an empty input, where it runs again as a command, or returns the pair to the
+    /// queue head, where the built prompt runs as it is.
     SlashPrompt {
         line: String,
         prompt: String,

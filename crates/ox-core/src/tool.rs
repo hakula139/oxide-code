@@ -153,6 +153,11 @@ impl ToolOutput {
         self
     }
 
+    fn with_result_view(mut self, view: ToolResultView) -> Self {
+        self.metadata.result_view = Some(view);
+        self
+    }
+
     fn with_tasks(mut self, tasks: Vec<Task>) -> Self {
         self.tasks = Some(tasks);
         self
@@ -171,6 +176,9 @@ pub struct ToolMetadata {
     /// Unbounded match count when a tool capped returned rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) truncated_total: Option<usize>,
+    /// The view produced with the result, whose paths already use the call's working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) result_view: Option<ToolResultView>,
 }
 
 // ── Tool Trait ──
@@ -362,6 +370,9 @@ impl ToolRegistry {
             return ToolResultView::Text {
                 content: content.to_owned(),
             };
+        }
+        if let Some(view) = &metadata.result_view {
+            return view.clone();
         }
         self.get(name)
             .and_then(|(_, tool)| tool.result_view(input, content, metadata, cwd))
@@ -1235,7 +1246,14 @@ mod tests {
                     "old_string": "a",
                     "new_string": "b",
                 });
-                let metadata = ToolMetadata::default();
+                let metadata = ToolMetadata {
+                    result_view: Some(ToolResultView::GlobFiles {
+                        pattern: "*.rs".to_owned(),
+                        files: vec!["stale.rs".to_owned()],
+                        total: 1,
+                    }),
+                    ..ToolMetadata::default()
+                };
                 let view = registry.result_view(
                     "edit",
                     &input,
@@ -1250,6 +1268,30 @@ mod tests {
                         content: "old_string not found".to_owned(),
                     },
                 );
+            }
+
+            #[test]
+            fn stored_view_precedes_the_tools_legacy_parser() {
+                let registry =
+                    ToolRegistry::new(vec![Box::new(GlobTool::new(ReadFilter::default()))]);
+                let expected = ToolResultView::Text {
+                    content: "kept\n... [output omitted] ...\ntail".to_owned(),
+                };
+                let metadata = ToolMetadata {
+                    result_view: Some(expected.clone()),
+                    ..ToolMetadata::default()
+                };
+
+                let view = registry.result_view(
+                    "glob",
+                    &serde_json::json!({"pattern": "*.rs"}),
+                    "a.rs\nb.rs",
+                    &metadata,
+                    false,
+                    Path::new("/repo"),
+                );
+
+                assert_eq!(view, expected);
             }
 
             #[test]

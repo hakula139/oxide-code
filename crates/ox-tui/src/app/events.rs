@@ -71,6 +71,9 @@ impl App {
                     self.status_bar.set_title(Some(title));
                 }
             }
+            Event::ArchiveUpdated { id, result } => {
+                self.apply_archive_updated(&id, &result);
+            }
             Event::SessionRolled { id, old_session } => {
                 self.apply_session_rolled(id, old_session);
             }
@@ -127,8 +130,9 @@ impl App {
     }
 
     fn apply_prompt_drained(&mut self, text: String) {
-        let display = self.queue.confirm_drained(text);
-        self.chat.push_user_message(display);
+        if let Some(display) = self.queue.confirm_drained(text) {
+            self.chat.push_user_message(display);
+        }
     }
 
     /// Opens the approve-or-deny overlay for a gated tool call. Pushing onto the stack lets it nest
@@ -146,6 +150,16 @@ impl App {
             basis.reason(),
             grant,
         )));
+    }
+
+    /// Leaves held prompts queued, since a retained picker can submit another idle-only operation.
+    fn apply_archive_updated(&mut self, id: &str, result: &Result<ArchiveState, String>) {
+        self.modals.archive_updated(id, result);
+        match result {
+            Ok(state) => self.chat.push_system_message(archive_notice(id, *state)),
+            Err(message) => self.chat.push_error(message),
+        }
+        self.enter_idle();
     }
 
     fn finish_turn(&mut self) {
@@ -399,7 +413,6 @@ impl App {
     /// Starts a turn with the oldest queued prompt.
     pub(super) fn drain_pending_prompt(&mut self) {
         if let Some(next) = self.queue.pop_next() {
-            self.chat.push_user_message(next.display().to_owned());
             self.start_turn(next);
         }
     }
@@ -467,6 +480,7 @@ mod tests {
     use std::io;
     use std::time::Duration;
 
+    use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
     use indoc::indoc;
     use tokio::sync::mpsc::error::TryRecvError;
 
@@ -478,6 +492,7 @@ mod tests {
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::text_result;
     use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
+    use ox_core::session::store::testing::{isolated_store, seed_test_session};
     use ox_core::tool::bash::background::ShellState;
     use ox_core::tool::bash::background::testing::{shell, shells_in_each_state};
     use ox_core::tool::tasks::TaskStatus;
@@ -492,7 +507,7 @@ mod tests {
     use crate::glyphs::INTERRUPTED_MARKER;
     use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
-    use crate::slash::WorkingTreeDiff;
+    use crate::slash::{ResumePicker, WorkingTreeDiff};
     use crate::theme::builtin;
 
     fn bash_call_start(id: &str, command: &str) -> Event {
@@ -914,35 +929,24 @@ mod tests {
 
         #[tokio::test]
         async fn prompt_unsent_reruns_a_slash_prompt_as_built() {
+            let root = tempfile::tempdir().unwrap();
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.dispatch_action(Action::SlashPrompt {
-                line: "/init".to_owned(),
-                prompt: "Create AGENTS.md for this repository.".to_owned(),
-            });
-            rx.try_recv().expect("prompt forwarded");
+            app.session_info.project_root = root.path().to_owned();
+            app.dispatch_action(Action::Submit("/init AGENTS.md".to_owned()));
+            let original = rx.try_recv().expect("prompt forwarded");
             app.handle_engine_event(Event::AutoCompactionStarted);
             app.dispatch_action(Action::Submit("queued".to_owned()));
             app.handle_engine_event(Event::PromptUnsent);
             app.handle_engine_event(Event::TurnFailed(
                 "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
             ));
-            assert_eq!(*app.queue.pending(), ["/init", "queued"]);
+            assert_eq!(*app.queue.pending(), ["/init AGENTS.md", "queued"]);
 
             app.dispatch_action(Action::Submit("go".to_owned()));
 
-            assert_eq!(
-                rx.try_recv().ok(),
-                Some(Op::Prompt {
-                    text: "Create AGENTS.md for this repository.".to_owned(),
-                    title: Some("/init".to_owned()),
-                }),
-                "the command's prompt runs, not its line",
-            );
+            assert_eq!(rx.try_recv(), Ok(original));
             let text = rendered_text(&mut app, 80, 20);
-            assert!(
-                text.contains("/init") && !text.contains("Create AGENTS.md"),
-                "the chat shows the line: {text}"
-            );
+            assert_eq!(text.matches("/init AGENTS.md").count(), 2, "{text}");
         }
 
         #[test]
@@ -2129,6 +2133,99 @@ mod tests {
 
             assert_eq!(app.session_info.background_shells, shells_in_each_state());
             assert!(app.dirty);
+        }
+    }
+
+    mod apply_archive_updated {
+        use super::*;
+
+        #[test]
+        fn successful_completion_keeps_held_input_until_the_next_picker_action() {
+            let archive_key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+            for (next_key, next_status) in [
+                (archive_key, Status::Archiving),
+                (KeyEvent::from(KeyCode::Enter), Status::Resuming),
+            ] {
+                let (_dir, store) = isolated_store();
+                for (id, second) in [("first", 0), ("second", 1)] {
+                    seed_test_session(
+                        &store,
+                        id,
+                        Some(id),
+                        Some(1),
+                        time::macros::datetime!(2026-04-18 09:00:00 UTC)
+                            + time::Duration::seconds(second),
+                    );
+                }
+                let first = store.find_session_path("first").unwrap();
+                let second = store.find_session_path("second").unwrap();
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.queue.push("held prompt".to_owned());
+                app.set_status(Status::Cancelling);
+                app.handle_engine_event(Event::Cancelled);
+                let picker = ResumePicker::loaded(store, app.session_info.session_id.clone());
+                app.push_modal(Box::new(picker));
+
+                app.handle_crossterm_event(&CrosstermEvent::Key(archive_key));
+
+                assert_eq!(
+                    rx.try_recv(),
+                    Ok(Op::SetArchive {
+                        path: second,
+                        session_id: "second".to_owned(),
+                        state: ArchiveState::Archived,
+                    })
+                );
+
+                app.handle_engine_event(Event::ArchiveUpdated {
+                    id: "second".to_owned(),
+                    result: Ok(ArchiveState::Archived),
+                });
+
+                assert_eq!(app.status, Status::Idle, "{next_key:?}");
+                assert_eq!(*app.queue.pending(), ["held prompt"], "{next_key:?}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{next_key:?}");
+
+                app.handle_crossterm_event(&CrosstermEvent::Key(next_key));
+
+                let expected = if next_key == archive_key {
+                    Op::SetArchive {
+                        path: first,
+                        session_id: "first".to_owned(),
+                        state: ArchiveState::Archived,
+                    }
+                } else {
+                    Op::Resume {
+                        target: ResumeTarget::Path(first),
+                    }
+                };
+                assert_eq!(rx.try_recv(), Ok(expected), "{next_key:?}");
+                assert_eq!(app.status, next_status, "{next_key:?}");
+                assert_eq!(*app.queue.pending(), ["held prompt"], "{next_key:?}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{next_key:?}");
+            }
+        }
+
+        #[test]
+        fn completion_keeps_queued_input_for_the_user() {
+            for (status, result) in [
+                (Status::Archiving, Ok(ArchiveState::Archived)),
+                (Status::Cancelling, Ok(ArchiveState::Archived)),
+                (Status::Archiving, Err("Archive failed".to_owned())),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.queue.push("next prompt".to_owned());
+                app.set_status(status);
+
+                app.apply_archive_updated("saved", &result);
+
+                assert_eq!(app.status, Status::Idle);
+                assert_eq!(*app.queue.pending(), ["next prompt"]);
+                assert_eq!(
+                    rx.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                );
+            }
         }
     }
 
