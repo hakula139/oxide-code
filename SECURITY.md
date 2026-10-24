@@ -34,6 +34,8 @@ A gap in either of these properties is a vulnerability:
 - In `manual` mode, a `bash` command runs without approval only if the gate recognizes all of its syntax, every simple command in it, including those inside a substitution or a literal `sh -c` or `eval` script, is allowed by a rule or is a known-safe read, and every file it redirects output to is inside the working directory or an extra root, or allowed by an `edit` rule.
 - A path `deny` rule, built-in or configured, and a configured path `ask` rule hold for the read, grep, glob, edit, and write tools in every mode, and a built-in path `ask` rule and a protected path hold for them in every mode except `yolo`, since the gate resolves the path and the tool opens the path it checked. The exception is a symlink swapped into a parent directory after the check, which `openat`-style traversal or an OS-level sandbox ([#133](https://github.com/hakula139/oxide-code/issues/133)) would close.
 
+Edit and Write recheck the original file's identity, content, and supported metadata, then the staged bytes and metadata, before atomically replacing the pathname. Concurrent writers can still modify either file during those checks or before publication. The [file mutation contract](docs/design/tools/permissions.md#path-targets) defines metadata preservation and precommit refusals.
+
 To run untrusted work without watching it, run `ox` inside a sandbox or container, since `yolo` mode runs whatever the guardrails miss and every call that only a built-in `ask` rule or protected path holds.
 
 In scope:

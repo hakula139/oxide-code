@@ -26,7 +26,7 @@ The `FileTracker` is shared across a session's tool calls. Read populates its mu
 
 7. **xxh64 for change detection.** Cryptographic integrity isn't required, since the tracker only needs to spot drift, and xxh64 is already used elsewhere in the crate.
 
-8. **No tracker-managed file lock.** One agent runs its edit-class calls one at a time, and only read-only calls share a batch, so the only concurrent writer is an external editor, which the staleness check catches. Subagents would add concurrent writers within one session ([#136](https://github.com/hakula139/oxide-code/issues/136)).
+8. **No tracker-managed file lock.** One agent runs its edit-class calls one at a time, and only read-only calls share a batch. Edit and Write retain the gated bytes and recheck the original identity and metadata, followed by the prepared bytes and metadata, before atomic replacement. An external writer can still change either file during those checks or before publication. Subagents would add concurrent writers within one session ([#136](https://github.com/hakula139/oxide-code/issues/136)).
 
 ## Sources
 
@@ -36,7 +36,7 @@ The `FileTracker` is shared across a session's tool calls. Read populates its mu
 - `crates/ox-core/src/session/entry.rs`: `Entry::FileSnapshot`.
 - `crates/ox-core/src/session/sanitize.rs`: `retain_visible_file_snapshots`, the resume-time provenance filter.
 - `crates/ox-core/src/tool/edit.rs`: Read-before-Edit gate, current-content verification.
-- `crates/ox-core/src/tool/file.rs`: `tracker_key`, `write_file`.
+- `crates/ox-core/src/tool/file.rs`: `tracker_key`, `write_file`, which resolves the tracker key before publication and returns the committed bytes directly to recording. Its `commit` module owns private preparation, metadata preservation, final validation, and publication.
 - `crates/ox-core/src/tool/read.rs`: `FileTracker::record_read`, cache-hit stub.
 - `crates/ox-core/src/tool/write.rs`: Read-before-Write gate.
 - `crates/ox-core/src/util/fs.rs`: bounded regular-file reads through no-follow handles, shared by tools and resume verification.

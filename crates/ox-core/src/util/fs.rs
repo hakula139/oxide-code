@@ -111,11 +111,32 @@ pub(crate) fn open_no_follow(path: &Path, mut options: OpenOptions) -> io::Resul
     }
 }
 
-/// The volume and file index that identify a file across handles.
+/// The volume and full file ID, including the upper 64 bits required by `ReFS`.
 #[cfg(windows)]
-fn file_id(file: &File) -> io::Result<(u64, u64)> {
-    let info = winapi_util::file::information(file)?;
-    Ok((info.volume_serial_number(), info.file_index()))
+#[expect(
+    unsafe_code,
+    reason = "the Windows file ID query has no safe standard library counterpart"
+)]
+pub(crate) fn file_id(file: impl std::os::windows::io::AsHandle) -> io::Result<(u64, [u8; 16])> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+    };
+
+    let mut info = FILE_ID_INFO::default();
+    // The handle stays borrowed and Windows receives an aligned output of exactly FILE_ID_INFO size.
+    let result = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_handle().as_raw_handle(),
+            FileIdInfo,
+            (&raw mut info).cast(),
+            u32::try_from(std::mem::size_of_val(&info)).expect("FILE_ID_INFO fits u32"),
+        )
+    };
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((info.VolumeSerialNumber, info.FileId.Identifier))
 }
 
 // ── File Locking ──

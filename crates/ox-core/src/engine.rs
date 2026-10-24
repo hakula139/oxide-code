@@ -714,10 +714,14 @@ fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::process::Command;
     use std::time::Duration;
 
     use anyhow::anyhow;
     use indoc::indoc;
+    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -759,10 +763,11 @@ mod tests {
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
     use crate::tool::bash::background::testing::shell;
-    use crate::tool::local_testing::ctx;
+    use crate::tool::local_testing::{WorkspaceWrite, ctx};
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
+    use crate::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec};
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::tls::testing::NoRoots;
 
@@ -2056,18 +2061,47 @@ mod tests {
     }
 
     mod submit_prompt {
-        use std::pin::Pin;
-
-        use tokio::sync::Notify;
-        use tokio_util::sync::CancellationToken;
-
         use super::*;
-        use crate::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec};
 
         struct BlockedWriteTool {
             path: PathBuf,
             started: mpsc::UnboundedSender<CancellationToken>,
             release: Arc<Notify>,
+        }
+
+        fn assert_workspace_write(
+            attempt: &WorkspaceWrite,
+            path: &Path,
+            tracker: &FileTracker,
+            expected: &[u8],
+        ) {
+            if attempt.acl_available {
+                assert_eq!(std::fs::read(path).unwrap(), expected);
+                assert_eq!(
+                    tracker.verify_current_content(path, expected, GatePurpose::Write),
+                    Ok(())
+                );
+            } else {
+                attempt.assert_unchanged();
+                assert_eq!(tracker.snapshot_all(), []);
+            }
+        }
+
+        fn assert_resumed_write(attempt: &WorkspaceWrite, sink: &CapturingSink, path: &Path) {
+            let events = sink.events();
+            let result = events
+                .iter()
+                .find_map(|event| match event {
+                    Event::ToolCallEnd(result) if result.id == "toolu_next" => Some(result),
+                    _ => None,
+                })
+                .unwrap();
+            if attempt.acl_available {
+                assert!(!result.is_error, "{}", result.content);
+            } else {
+                assert!(result.is_error);
+                attempt.assert_refusal(&result.content, path.to_str().unwrap());
+            }
         }
 
         impl Tool for BlockedWriteTool {
@@ -2091,7 +2125,7 @@ mod tests {
                 ctx: &'a ToolCtx,
             ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
                 Box::pin(async move {
-                    crate::tool::write::testing::write_with_blocked_parent(
+                    match crate::tool::write::testing::write_with_blocked_parent(
                         &self.path,
                         prepared.input["text"].as_str().unwrap(),
                         ctx,
@@ -2099,111 +2133,152 @@ mod tests {
                         Arc::clone(&self.release),
                     )
                     .await
-                    .unwrap();
-                    ToolOutput::success("wrote")
+                    {
+                        Ok(()) => ToolOutput::success("wrote"),
+                        Err(error) => ToolOutput::error(error),
+                    }
                 })
             }
         }
 
+        async fn assert_workspace_writes_drained(
+            log_path: &Path,
+            name: &str,
+            op: Op,
+            expected: TurnEnd,
+        ) {
+            let server = MockServer::start().await;
+            mount_tool_call_once(
+                &server,
+                "toolu_write",
+                "blocked-write",
+                r#"{"text":"committed"}"#,
+            )
+            .await;
+            let dir = canonical_tempdir();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            let session_id = engine.session_id().to_owned();
+            let parent = dir.path().join("nested");
+            let path = parent.join("notes.txt");
+            let attempt = WorkspaceWrite::new(&path);
+            let tracker = Arc::clone(&engine.file_tracker);
+            let (started, mut started_rx) = mpsc::unbounded_channel();
+            let release = Arc::new(Notify::new());
+            engine.tools = Arc::new(ToolRegistry::new(vec![Box::new(BlockedWriteTool {
+                path: path.clone(),
+                started,
+                release: Arc::clone(&release),
+            })]));
+            let sink = CapturingSink::default();
+            let (tx, mut ops) = mpsc::channel(1);
+            let ended = {
+                let mut turn = std::pin::pin!(engine.submit_prompt("write", None, &sink, &mut ops));
+                let cancel = tokio::select! {
+                    token = started_rx.recv() => token.unwrap(),
+                    end = turn.as_mut() => panic!("turn ended before its write started: {end:?}"),
+                };
+
+                tx.try_send(op).unwrap();
+                assert!(futures::poll!(turn.as_mut()).is_pending(), "{name}");
+                assert_writes_draining(&tracker);
+                assert!(cancel.is_cancelled(), "{name}");
+                assert!(!parent.exists(), "{name}");
+                assert_eq!(tracker.snapshot_all(), [], "{name}");
+                assert!(
+                    !sink
+                        .events()
+                        .iter()
+                        .any(|event| { matches!(event, Event::ToolCallEnd(_) | Event::Cancelled) }),
+                    "{name}"
+                );
+                release.notify_one();
+                turn.await
+            };
+            assert_eq!(ended, expected, "{name}");
+
+            assert_workspace_write(&attempt, &path, &tracker, b"committed");
+            if !attempt.acl_available {
+                let log = std::fs::read_to_string(log_path).unwrap();
+                attempt.assert_logged_refusal(&log, "toolu_write");
+            }
+            assert_eq!(
+                sink.events()
+                    .iter()
+                    .filter(|event| matches!(event, Event::Cancelled))
+                    .count(),
+                usize::from(expected == TurnEnd::Cancelled),
+                "{name}",
+            );
+            if expected == TurnEnd::Cancelled {
+                server.reset().await;
+                mount_tool_call_once(
+                    &server,
+                    "toolu_next",
+                    "blocked-write",
+                    r#"{"text":"later"}"#,
+                )
+                .await;
+                mount_reply(&server, "done").await;
+                let mut next =
+                    std::pin::pin!(engine.submit_prompt("write again", None, &sink, &mut ops));
+                let token = tokio::select! {
+                    token = started_rx.recv() => token.unwrap(),
+                    end = next.as_mut() => panic!("next turn ended before its write started: {end:?}"),
+                };
+                assert!(!token.is_cancelled(), "{name}");
+                assert_workspace_write(&attempt, &path, &tracker, b"committed");
+                release.notify_one();
+                assert_eq!(next.await, TurnEnd::Completed, "{name}");
+                assert_resumed_write(&attempt, &sink, &path);
+                assert_workspace_write(&attempt, &path, &tracker, b"later");
+            }
+            assert_eq!(engine.finalize().await, None, "{name}");
+            assert_eq!(
+                store.load_session_data(&session_id).unwrap().file_snapshots,
+                tracker.snapshot_all(),
+                "{name}",
+            );
+        }
+
         #[tokio::test]
         async fn interrupt_and_shutdown_wait_for_workspace_writes_before_ending() {
+            // Tracing caches callsite interest process-wide, including other test threads.
+            const CHILD: &str = "WORKSPACE_WRITE_DRAIN_TEST_CHILD";
+            if std::env::var_os(CHILD).is_none() {
+                let thread = std::thread::current();
+                let name = thread.name().unwrap();
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", name])
+                    .env(CHILD, "1")
+                    .output()
+                    .unwrap();
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(output.status.success(), "{stdout}{stderr}");
+                assert!(stdout.contains(&format!("test {name} ... ok")), "{stdout}");
+                return;
+            }
+
+            let dir = canonical_tempdir();
+            let log_path = dir.path().join("events.log");
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(std::fs::File::create(&log_path).unwrap())
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).unwrap();
+
             with_pinned_home(async {
                 for (name, op, expected) in [
                     ("interrupt", Op::Interrupt, TurnEnd::Cancelled),
                     ("shutdown", Op::Shutdown, TurnEnd::Shutdown),
                 ] {
-                    let server = MockServer::start().await;
-                    mount_tool_call_once(
-                        &server,
-                        "toolu_write",
-                        "blocked-write",
-                        r#"{"text":"committed"}"#,
-                    ).await;
-                    let dir = canonical_tempdir();
-                    let store = test_store(dir.path());
-                    let mut engine = engine(server.uri(), &store, dir.path()).await;
-                    let session_id = engine.session_id().to_owned();
-                    let parent = dir.path().join("nested");
-                    let path = parent.join("notes.txt");
-                    let tracker = Arc::clone(&engine.file_tracker);
-                    let (started, mut started_rx) = mpsc::unbounded_channel();
-                    let release = Arc::new(Notify::new());
-                    engine.tools = Arc::new(ToolRegistry::new(vec![Box::new(
-                        BlockedWriteTool {
-                            path: path.clone(),
-                            started,
-                            release: Arc::clone(&release),
-                        },
-                    )]));
-                    let sink = CapturingSink::default();
-                    let (tx, mut ops) = mpsc::channel(1);
-                    let ended = {
-                        let mut turn = std::pin::pin!(
-                            engine.submit_prompt("write", None, &sink, &mut ops)
-                        );
-                        let cancel = tokio::select! {
-                            token = started_rx.recv() => token.unwrap(),
-                            end = turn.as_mut() => panic!("turn ended before its write started: {end:?}"),
-                        };
-
-                        tx.try_send(op).unwrap();
-                        assert!(futures::poll!(turn.as_mut()).is_pending(), "{name}");
-                        assert_writes_draining(&tracker);
-                        assert!(cancel.is_cancelled(), "{name}");
-                        assert!(!parent.exists(), "{name}");
-                        assert_eq!(tracker.snapshot_all(), [], "{name}");
-                        assert!(!sink.events().iter().any(|event| {
-                            matches!(event, Event::ToolCallEnd(_) | Event::Cancelled)
-                        }), "{name}");
-                        release.notify_one();
-                        turn.await
-                    };
-                    assert_eq!(ended, expected, "{name}");
-
-                    assert_eq!(std::fs::read(&path).unwrap(), b"committed", "{name}");
-                    assert_eq!(
-                        tracker.verify_current_content(&path, b"committed", GatePurpose::Write),
-                        Ok(()),
-                        "{name}",
-                    );
-                    assert_eq!(
-                        sink.events().iter().filter(|event| matches!(event, Event::Cancelled)).count(),
-                        usize::from(expected == TurnEnd::Cancelled),
-                        "{name}",
-                    );
-                    if expected == TurnEnd::Cancelled {
-                        server.reset().await;
-                        mount_tool_call_once(
-                            &server,
-                            "toolu_next",
-                            "blocked-write",
-                            r#"{"text":"later"}"#,
-                        ).await;
-                        mount_reply(&server, "done").await;
-                        let mut next = std::pin::pin!(
-                            engine.submit_prompt("write again", None, &sink, &mut ops)
-                        );
-                        let token = tokio::select! {
-                            token = started_rx.recv() => token.unwrap(),
-                            end = next.as_mut() => panic!("next turn ended before its write started: {end:?}"),
-                        };
-                        assert!(!token.is_cancelled(), "{name}");
-                        assert_eq!(std::fs::read(&path).unwrap(), b"committed", "{name}");
-                        release.notify_one();
-                        assert_eq!(next.await, TurnEnd::Completed, "{name}");
-                        assert_eq!(std::fs::read(&path).unwrap(), b"later", "{name}");
-                        assert_eq!(
-                            tracker.verify_current_content(&path, b"later", GatePurpose::Write),
-                            Ok(()),
-                            "{name}",
-                        );
-                    }
-                    assert_eq!(engine.finalize().await, None, "{name}");
-                    assert_eq!(
-                        store.load_session_data(&session_id).unwrap().file_snapshots,
-                        tracker.snapshot_all(),
-                        "{name}",
-                    );
+                    Box::pin(assert_workspace_writes_drained(
+                        &log_path, name, op, expected,
+                    ))
+                    .await;
                 }
             })
             .await;

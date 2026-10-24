@@ -146,10 +146,12 @@ where
         Err(e) => return Err(format!("Failed to access {path}: {e}")),
     };
 
-    if let Some(meta) = &pre_meta {
+    let expected = if let Some(meta) = &pre_meta {
         validate_write_target(path, meta)?;
-        check_gate(&file_path, path, &ctx.tracker).await?;
-    }
+        Some(check_gate(&file_path, path, &ctx.tracker).await?)
+    } else {
+        None
+    };
 
     let mode = if pre_meta.is_some() {
         WriteMode::Overwrite
@@ -165,7 +167,7 @@ where
                     .await
                     .with_context(|| format!("Failed to create directory {}", parent.display()))?;
             }
-            super::file::write_file(file_path, shown, bytes, mode).await
+            super::file::write_file(file_path, shown, bytes, expected).await
         })
         .await
         .map_err(|error| format!("{error:#}"))?;
@@ -183,7 +185,7 @@ fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(),
     super::file::validate_file_target(path, metadata, FileVerb::Write)
 }
 
-async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<(), String> {
+async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<Vec<u8>, String> {
     let bytes = read_target(path, shown).await?;
     tracker
         .verify_current_content(
@@ -191,7 +193,8 @@ async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<(
             &bytes,
             GatePurpose::Write,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 
 /// Reads the existing target `path`, spelled `shown`. The no-follow open refuses a symlink, and
@@ -248,7 +251,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
     use crate::file_tracker::testing::{assert_writes_draining, seed_full_read};
-    use crate::tool::local_testing::{self, ctx, temp_ctx};
+    use crate::tool::local_testing::{self, WorkspaceWrite, ctx, temp_ctx};
     use crate::tool::read::ReadTool;
     use crate::tool::view::{DiffChunk, NumberedLine};
     use crate::util::fs::testing::{deny_subdir_creation, symlink_file};
@@ -350,21 +353,32 @@ mod tests {
         async fn new_file_reports_creation() {
             let dir = canonical_tempdir();
             let path = dir.path().join("new.txt");
+            let ctx = ctx(dir.path());
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&path);
 
             let input = serde_json::json!({
                 "file_path": path.to_str().unwrap(),
                 "content": "hello world"
             });
 
-            let output = local_testing::run(&WriteTool, input, &ctx(dir.path())).await;
+            let output = local_testing::run(&WriteTool, input, &ctx).await;
 
-            assert!(!output.is_error);
-            assert_eq!(
-                output.content,
-                format!("Successfully created {}.", path.display())
-            );
-            assert_eq!(output.metadata.title.as_deref(), Some("Created new.txt"));
-            assert_eq!(fs::read_to_string(&path).unwrap(), "hello world");
+            if attempt.acl_available {
+                assert!(!output.is_error);
+                assert_eq!(
+                    output.content,
+                    format!("Successfully created {}.", path.display())
+                );
+                assert_eq!(output.metadata.title.as_deref(), Some("Created new.txt"));
+                assert_eq!(fs::read_to_string(&path).unwrap(), "hello world");
+            } else {
+                assert!(output.is_error);
+                attempt.assert_refusal(&output.content, path.to_str().unwrap());
+                assert_eq!(output.metadata.title, None);
+                assert_eq!(output.metadata.diff, None);
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
@@ -382,6 +396,8 @@ mod tests {
             fs::write(&path, "old").unwrap();
             let ctx = temp_ctx();
             seed_full_read(&ctx.tracker, &path);
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&path);
 
             let output = run(
                 serde_json::json!({
@@ -392,17 +408,25 @@ mod tests {
             )
             .await;
 
-            assert!(!output.is_error);
-            assert_eq!(
-                output.content,
-                format!("Successfully updated {}.", path.display())
-            );
-            assert_eq!(
-                output.metadata.title.as_deref(),
-                Some("Updated existing.txt"),
-                "overwrite should surface as Updated",
-            );
-            assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+            if attempt.acl_available {
+                assert!(!output.is_error);
+                assert_eq!(
+                    output.content,
+                    format!("Successfully updated {}.", path.display())
+                );
+                assert_eq!(
+                    output.metadata.title.as_deref(),
+                    Some("Updated existing.txt"),
+                    "overwrite should surface as Updated",
+                );
+                assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+            } else {
+                assert!(output.is_error);
+                attempt.assert_refusal(&output.content, path.to_str().unwrap());
+                assert_eq!(output.metadata.title, None);
+                assert_eq!(output.metadata.diff, None);
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
@@ -435,30 +459,44 @@ mod tests {
         async fn new_path_creates_content() {
             let dir = canonical_tempdir();
             let path = dir.path().join("new.txt");
+            let ctx = temp_ctx();
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&path);
 
-            let mode = write_file(path.to_str().unwrap(), "content", &temp_ctx())
-                .await
-                .unwrap();
+            let result = write_file(path.to_str().unwrap(), "content", &ctx).await;
 
-            assert_eq!(mode, WriteMode::CreateNew);
-            assert_eq!(fs::read_to_string(&path).unwrap(), "content");
+            if attempt.acl_available {
+                assert_eq!(result.unwrap(), WriteMode::CreateNew);
+                assert_eq!(fs::read_to_string(&path).unwrap(), "content");
+            } else {
+                attempt.assert_refusal(&result.unwrap_err(), path.to_str().unwrap());
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
         async fn resolves_a_relative_path_against_the_ctx_cwd() {
             let dir = canonical_tempdir();
             let ctx = ctx(dir.path());
-
-            let mode = write_file("notes/new.txt", "content", &ctx).await.unwrap();
-
-            assert_eq!(mode, WriteMode::CreateNew);
             let path = dir.path().join("notes/new.txt");
-            assert_eq!(fs::read_to_string(&path).unwrap(), "content");
-            assert_eq!(
-                ctx.tracker
-                    .verify_current_content(&path, b"content", GatePurpose::Write),
-                Ok(()),
-            );
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&path);
+
+            let result = write_file("notes/new.txt", "content", &ctx).await;
+
+            assert!(path.parent().unwrap().is_dir());
+            if attempt.acl_available {
+                assert_eq!(result.unwrap(), WriteMode::CreateNew);
+                assert_eq!(fs::read_to_string(&path).unwrap(), "content");
+                assert_eq!(
+                    ctx.tracker
+                        .verify_current_content(&path, b"content", GatePurpose::Write),
+                    Ok(()),
+                );
+            } else {
+                attempt.assert_refusal(&result.unwrap_err(), "notes/new.txt");
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
@@ -469,35 +507,79 @@ mod tests {
 
             let ctx = temp_ctx();
             seed_full_read(&ctx.tracker, &path);
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&path);
 
-            let mode = write_file(path.to_str().unwrap(), "new content", &ctx)
+            let result = write_file(path.to_str().unwrap(), "new content", &ctx).await;
+
+            if attempt.acl_available {
+                assert_eq!(result.unwrap(), WriteMode::Overwrite);
+                assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
+            } else {
+                attempt.assert_refusal(&result.unwrap_err(), path.to_str().unwrap());
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_change_after_the_gate_keeps_the_tracker_unchanged() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("existing.txt");
+            fs::write(&path, "original").unwrap();
+            let ctx = temp_ctx();
+            seed_full_read(&ctx.tracker, &path);
+            let before = ctx.tracker.snapshot_all();
+            let changed = path.clone();
+
+            let error =
+                write_file_with_parent(path.to_str().unwrap(), "ours", &ctx, |_| async move {
+                    fs::write(changed, "theirs")
+                })
                 .await
-                .unwrap();
+                .unwrap_err();
 
-            assert_eq!(mode, WriteMode::Overwrite);
-            assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
+            assert!(error.contains("the file changed"), "{error}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
+            assert_eq!(ctx.tracker.snapshot_all(), before);
         }
 
         #[tokio::test]
         async fn creates_parent_directories() {
             let dir = canonical_tempdir();
             let path = dir.path().join("a").join("b").join("c.txt");
+            let ctx = temp_ctx();
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&path);
 
-            write_file(path.to_str().unwrap(), "deep", &temp_ctx())
-                .await
-                .unwrap();
-            assert_eq!(fs::read_to_string(&path).unwrap(), "deep");
+            let result = write_file(path.to_str().unwrap(), "deep", &ctx).await;
+
+            assert!(path.parent().unwrap().is_dir());
+            if attempt.acl_available {
+                assert_eq!(result.unwrap(), WriteMode::CreateNew);
+                assert_eq!(fs::read_to_string(&path).unwrap(), "deep");
+            } else {
+                attempt.assert_refusal(&result.unwrap_err(), path.to_str().unwrap());
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
         async fn empty_content_creates_empty_file() {
             let dir = canonical_tempdir();
             let path = dir.path().join("empty.txt");
+            let ctx = temp_ctx();
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&path);
 
-            write_file(path.to_str().unwrap(), "", &temp_ctx())
-                .await
-                .unwrap();
-            assert_eq!(fs::read_to_string(&path).unwrap(), "");
+            let result = write_file(path.to_str().unwrap(), "", &ctx).await;
+
+            if attempt.acl_available {
+                assert_eq!(result.unwrap(), WriteMode::CreateNew);
+                assert_eq!(fs::read_to_string(&path).unwrap(), "");
+            } else {
+                attempt.assert_refusal(&result.unwrap_err(), path.to_str().unwrap());
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
@@ -555,10 +637,18 @@ mod tests {
             )
             .await;
             assert!(!rest.is_error, "{}", rest.content);
-            write_file(path.to_str().unwrap(), "new", &ctx)
-                .await
-                .unwrap();
-            assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&path);
+
+            let result = write_file(path.to_str().unwrap(), "new", &ctx).await;
+
+            if attempt.acl_available {
+                assert_eq!(result.unwrap(), WriteMode::Overwrite);
+                assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+            } else {
+                attempt.assert_refusal(&result.unwrap_err(), path.to_str().unwrap());
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[tokio::test]
@@ -787,15 +877,24 @@ mod tests {
             let ctx = temp_ctx();
 
             let via_link = dir.path().join("link/new.txt");
-            write_file(via_link.to_str().unwrap(), "fresh", &ctx)
-                .await
-                .unwrap();
+            let before = ctx.tracker.snapshot_all();
+            let attempt = WorkspaceWrite::new(&via_link);
 
-            let real = dir.path().join("real/new.txt");
-            let result = ctx
-                .tracker
-                .verify_current_content(&real, b"fresh", GatePurpose::Write);
-            assert_eq!(result, Ok(()));
+            let result = write_file(via_link.to_str().unwrap(), "fresh", &ctx).await;
+
+            if attempt.acl_available {
+                assert_eq!(result.unwrap(), WriteMode::CreateNew);
+                let real = dir.path().join("real/new.txt");
+                assert_eq!(fs::read_to_string(&real).unwrap(), "fresh");
+                assert_eq!(
+                    ctx.tracker
+                        .verify_current_content(&real, b"fresh", GatePurpose::Write),
+                    Ok(()),
+                );
+            } else {
+                attempt.assert_refusal(&result.unwrap_err(), via_link.to_str().unwrap());
+                assert_eq!(ctx.tracker.snapshot_all(), before);
+            }
         }
 
         #[cfg(unix)]

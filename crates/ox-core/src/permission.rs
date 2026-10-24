@@ -26,7 +26,7 @@ use unicode_normalization::UnicodeNormalization as _;
 use self::defaults::{ProtectedRoots, Shipped, ShippedTier, protected_roots};
 use self::rule::{MatchDiscipline, Rule};
 use self::shell::{CommandTarget, Segment};
-use crate::util::path::{expand_user, lexical_normalize, slash_separated};
+use crate::util::path::{expand_user, lexical_normalize, requires_directory, slash_separated};
 use crate::util::variant;
 
 // ── Mode ──
@@ -681,14 +681,6 @@ fn enqueue(path: &Path, resolved: &mut PathBuf, pending: &mut Vec<OsString>) {
         Component::Normal(name) => Some(name.to_owned()),
         Component::Prefix(_) | Component::RootDir | Component::CurDir => None,
     }));
-}
-
-fn requires_directory(path: &Path) -> bool {
-    path.as_os_str()
-        .as_encoded_bytes()
-        .rsplit(|byte| std::path::is_separator(char::from(*byte)))
-        .next()
-        .is_some_and(|last| last.is_empty() || last == b".")
 }
 
 fn folded_names(path: &Path) -> Vec<String> {
