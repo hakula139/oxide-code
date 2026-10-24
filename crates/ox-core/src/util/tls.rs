@@ -173,7 +173,10 @@ impl ExtraCaVerifier {
                 Arc::clone(trust),
             )?,
             Err(e) => {
-                warn!("keeping Apple's validity limit for extra CAs: {e:#}");
+                warn!(
+                    error = %format_args!("{e:#}"),
+                    "keeping Apple's validity limit for extra CAs"
+                );
                 ExemptAnchors::new([], provider, Arc::clone(trust))?
             }
         };
@@ -534,6 +537,8 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use std::collections::BTreeMap;
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::net::{SocketAddr, TcpListener};
     use std::sync::Arc;
@@ -548,6 +553,8 @@ mod tests {
 
     use super::local_testing::TEST_CA_PEM;
     use super::*;
+    #[cfg(target_os = "macos")]
+    use crate::util::log::testing::LogCapture;
 
     /// A P-256 CA that issued the leaves below, valid for 100 years.
     const ISSUING_CA_PEM: &str = indoc! {"
@@ -1015,7 +1022,11 @@ mod tests {
                     roots: None,
                     ..FakeAppleTrust::new(Err(validity_limit_rejection()))
                 });
-                let verifier = verifier(&trust, &[ISSUING_CA_PEM]);
+                let logs = LogCapture::default();
+
+                let verifier = tracing::dispatcher::with_default(&logs.dispatch(), || {
+                    verifier(&trust, &[ISSUING_CA_PEM])
+                });
 
                 let err = verify_leaf(&verifier, LONG_LIVED_LEAF_PEM, "localhost", UnixTime::now())
                     .unwrap_err();
@@ -1026,6 +1037,19 @@ mod tests {
                 );
                 assert_eq!(trust.extra_roots(), [cert(ISSUING_CA_PEM)]);
                 assert_eq!(trust.evaluations(), Vec::new());
+                assert_eq!(
+                    logs.events(),
+                    [BTreeMap::from([
+                        (
+                            "error".to_owned(),
+                            "the system trust settings are unreadable".to_owned(),
+                        ),
+                        (
+                            "message".to_owned(),
+                            "keeping Apple's validity limit for extra CAs".to_owned(),
+                        ),
+                    ])]
+                );
             }
         }
 

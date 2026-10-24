@@ -177,7 +177,7 @@ impl BackgroundShells {
             .collect();
         for supervisor in supervisors {
             if let Err(e) = supervisor.await {
-                error!("background shell supervisor failed: {e}");
+                error!(error = %e, "background shell supervisor failed");
             }
         }
     }

@@ -36,7 +36,7 @@ impl SavedError {
     }
 
     fn failed(action: &'static str, session_id: &str, cause: anyhow::Error) -> Self {
-        warn!("failed to {action} session {session_id}: {cause:#}");
+        warn!(action, session_id, error = %format_args!("{cause:#}"), "session operation failed");
         Self::Failed {
             action,
             id: id_prefix(session_id).to_owned(),
@@ -92,11 +92,14 @@ pub fn saved_error_message(error: SavedError, live_recovery: Option<&str>) -> St
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use time::macros::datetime;
 
     use super::*;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{listed_ids, seed_test_session, test_store};
+    use crate::util::log::testing::LogCapture;
 
     mod set_archived {
         use super::*;
@@ -175,13 +178,26 @@ mod tests {
         fn names_the_session_and_the_cause_of_a_failed_delete() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("missing.jsonl");
+            let logs = LogCapture::default();
 
-            let err = delete(&path, "missing-session", "live-session").unwrap_err();
+            let err = tracing::dispatcher::with_default(&logs.dispatch(), || {
+                delete(&path, "missing-session", "live-session")
+            })
+            .unwrap_err();
 
             let cause = delete_at(&path).unwrap_err();
             assert_eq!(
                 err.to_string(),
                 format!("failed to delete session missing-: {cause:#}")
+            );
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    ("action".to_owned(), "delete".to_owned()),
+                    ("session_id".to_owned(), "missing-session".to_owned()),
+                    ("error".to_owned(), format!("{cause:#}")),
+                    ("message".to_owned(), "session operation failed".to_owned()),
+                ])]
             );
         }
     }

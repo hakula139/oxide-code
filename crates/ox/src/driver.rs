@@ -66,7 +66,10 @@ pub(crate) async fn shutdown_signal() -> Shutdown {
         ) {
             (Ok(sigterm), Ok(sighup)) => (sigterm, sighup),
             (Err(e), _) | (_, Err(e)) => {
-                warn!("failed to listen for SIGTERM and SIGHUP, so only SIGINT stops ox: {e}");
+                warn!(
+                    error = %e,
+                    "failed to listen for SIGTERM and SIGHUP, so only SIGINT stops ox"
+                );
                 _ = ctrl_c.await;
                 return Shutdown::Interrupt;
             }

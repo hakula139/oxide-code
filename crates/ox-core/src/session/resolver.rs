@@ -75,7 +75,7 @@ pub async fn resolve_session(
         }
     };
 
-    debug!("resuming session from {}", path.display());
+    debug!(path = %path.display(), "resuming session");
     let store = store.clone();
     tokio::task::spawn_blocking(move || handle::resume_from_path(&store, &path))
         .await

@@ -7,14 +7,17 @@ use tracing::warn;
 /// Locks `mutex` even when a panicking holder poisoned it, logging a warning that names `label`.
 pub fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, label: &str) -> MutexGuard<'a, T> {
     mutex.lock().unwrap_or_else(|error| {
-        warn!("{label} mutex poisoned, recovering");
+        warn!(label, "mutex poisoned, recovering");
         error.into_inner()
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::util::log::testing::LogCapture;
 
     mod lock_or_recover {
         use super::*;
@@ -33,8 +36,23 @@ mod tests {
                 assert!(result.is_err());
             });
             assert!(mutex.is_poisoned());
-            lock_or_recover(&mutex, "test").push(3);
+            let logs = LogCapture::default();
+
+            tracing::dispatcher::with_default(&logs.dispatch(), || {
+                lock_or_recover(&mutex, "test").push(3);
+            });
+
             assert_eq!(*lock_or_recover(&mutex, "test"), [1, 2, 3]);
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    ("label".to_owned(), "test".to_owned()),
+                    (
+                        "message".to_owned(),
+                        "mutex poisoned, recovering".to_owned()
+                    ),
+                ])]
+            );
         }
     }
 }

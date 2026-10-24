@@ -162,7 +162,10 @@ impl PendingLogin {
                     let target = match target {
                         Ok(target) => target,
                         Err(e) => {
-                            debug!("ignoring a sign-in listener request: {e:#}");
+                            debug!(
+                                error = %format_args!("{e:#}"),
+                                "ignoring a sign-in listener request"
+                            );
                             continue;
                         }
                     };
@@ -329,21 +332,25 @@ fn response(status: &str, (name, value): (&str, &str), body: &str) -> String {
 /// only logs.
 async fn respond(stream: &mut TcpStream, reply: &str) {
     if let Err(e) = stream.write_all(reply.as_bytes()).await {
-        debug!("failed to answer the browser: {e}");
+        debug!(error = %e, "failed to answer the browser");
     }
     _ = stream.shutdown().await;
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use indoc::{formatdoc, indoc};
     use serde_json::json;
+    use tracing::instrument::WithSubscriber as _;
     use wiremock::matchers::{body_json, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::config::auth::AuthSource;
     use crate::config::oauth::{ClaudeCodeKeychain, Login, SessionLogin};
+    use crate::util::log::testing::LogCapture;
     use crate::util::tls::testing::NoRoots;
 
     fn port(pending: &PendingLogin) -> u16 {
@@ -648,11 +655,13 @@ mod tests {
                 redirect.write_all(callback.as_bytes()).await.unwrap();
                 (idle, not_found, foreign, malformed, redirect)
             };
+            let logs = LogCapture::default();
 
             let (code, (_idle, not_found, foreign, malformed, _redirect)) =
                 tokio::time::timeout(Duration::from_secs(5), async {
                     tokio::join!(pending.await_code(), browser)
                 })
+                .with_subscriber(logs.dispatch())
                 .await
                 .expect("an idle connection must not hold up the others");
 
@@ -667,6 +676,25 @@ mod tests {
                 "{foreign}"
             );
             assert_eq!(malformed, "");
+            assert_eq!(
+                logs.events(),
+                [
+                    BTreeMap::from([(
+                        "message".to_owned(),
+                        "refusing a callback from another sign-in attempt".to_owned(),
+                    )]),
+                    BTreeMap::from([
+                        (
+                            "error".to_owned(),
+                            "unexpected request line \"POST /callback HTTP/1.1\"".to_owned(),
+                        ),
+                        (
+                            "message".to_owned(),
+                            "ignoring a sign-in listener request".to_owned(),
+                        ),
+                    ]),
+                ]
+            );
         }
     }
 
@@ -837,6 +865,38 @@ mod tests {
                     other => panic!("{target}: expected a rejection, got {other:?}"),
                 }
             }
+        }
+    }
+
+    mod respond {
+        use super::*;
+
+        #[tokio::test]
+        async fn logs_when_the_write_half_is_closed() {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let (mut stream, (_peer, _)) = tokio::try_join!(
+                TcpStream::connect(listener.local_addr().unwrap()),
+                listener.accept(),
+            )
+            .unwrap();
+            stream.shutdown().await.unwrap();
+            let error = stream.write_all(b"reply").await.unwrap_err();
+            let logs = LogCapture::default();
+
+            respond(&mut stream, "reply")
+                .with_subscriber(logs.dispatch())
+                .await;
+
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    ("error".to_owned(), error.to_string()),
+                    (
+                        "message".to_owned(),
+                        "failed to answer the browser".to_owned(),
+                    ),
+                ])]
+            );
         }
     }
 }

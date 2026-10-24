@@ -470,7 +470,7 @@ fn resolve_extra_ca_certs(
     match expand_user(&raw.value).and_then(|path| check_ca_bundle(&path).map(|()| path)) {
         Ok(path) => Ok(Sourced::new(Some(path), raw.source)),
         Err(e) => {
-            warn!("ignoring NODE_EXTRA_CA_CERTS: {e:#}");
+            warn!(error = %format_args!("{e:#}"), "ignoring NODE_EXTRA_CA_CERTS");
             Ok(Sourced::fallback(None))
         }
     }

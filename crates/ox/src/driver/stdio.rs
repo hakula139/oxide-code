@@ -9,6 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
+use tracing::debug;
 
 use ox_core::engine::TurnEnd;
 use ox_core::permission::{Basis, SessionGrant};
@@ -39,6 +40,7 @@ impl<'a> Renderer<'a> {
 
     pub(super) fn render(&mut self, event: Event) {
         if let Err(error) = self.sink.send(event) {
+            debug!(error = %format_args!("{error:#}"), "stdio render failed");
             self.failure.get_or_insert(error);
         }
     }
@@ -417,6 +419,8 @@ fn resumed_notice(id: &str, title: Option<&str>, prior: ArchiveState) -> String 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use indoc::indoc;
     use wiremock::MockServer;
 
@@ -433,6 +437,7 @@ mod tests {
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::{plan, task};
     use ox_core::tool::testing::bash_preview;
+    use ox_core::util::log::testing::LogCapture;
 
     use super::*;
     use crate::driver::testing::{ClosedPipe, Screen};
@@ -460,6 +465,43 @@ mod tests {
             renderer.render(Event::TurnComplete);
 
             assert_eq!(renderer.finish().unwrap_err().to_string(), "first failure");
+        }
+
+        mod render {
+            use super::*;
+
+            struct ChainedFailure;
+
+            impl EventSink for ChainedFailure {
+                fn send(&self, _event: Event) -> Result<()> {
+                    Err(anyhow::anyhow!("pipe closed").context("failed to render event"))
+                }
+            }
+
+            #[test]
+            fn records_the_full_render_failure_chain() {
+                let logs = LogCapture::default();
+                let mut renderer = Renderer::new(&ChainedFailure);
+
+                tracing::dispatcher::with_default(&logs.dispatch(), || {
+                    renderer.render(Event::TurnComplete);
+                });
+
+                assert_eq!(
+                    logs.events(),
+                    [BTreeMap::from([
+                        (
+                            "error".to_owned(),
+                            "failed to render event: pipe closed".to_owned()
+                        ),
+                        ("message".to_owned(), "stdio render failed".to_owned()),
+                    ])]
+                );
+                assert_eq!(
+                    format!("{:#}", renderer.finish().unwrap_err()),
+                    "failed to render event: pipe closed"
+                );
+            }
         }
 
         mod session_write_error {
