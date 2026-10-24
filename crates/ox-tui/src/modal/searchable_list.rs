@@ -527,6 +527,30 @@ mod tests {
             assert_eq!(l.visible_len(), 1);
             assert_eq!(l.cursor_index(), 0, "a refilter resets the cursor");
         }
+
+        #[test]
+        fn empty_paste_preserves_the_selected_query_and_filtered_rows() {
+            let mut l = list(vec![
+                FakeItem::new("alpha"),
+                FakeItem::new("beta"),
+                FakeItem::new("alphabet"),
+            ]);
+            l.set_query("alpha");
+            l.select_next();
+            l.edit_query(&KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+
+            l.paste_query("\n");
+
+            assert_eq!(l.query(), "alpha");
+            assert_eq!(l.visible, [0, 2]);
+            assert_eq!(l.cursor_index(), 1);
+
+            l.paste_query("beta");
+
+            assert_eq!(l.query(), "beta");
+            assert_eq!(l.visible, [1]);
+            assert_eq!(l.cursor_index(), 0);
+        }
     }
 
     mod replace_items {
