@@ -9,6 +9,7 @@ pub(crate) mod project;
 pub mod rule;
 pub(crate) mod shell;
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
@@ -22,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 use unicode_normalization::UnicodeNormalization as _;
 
-use self::defaults::{Shipped, ShippedTier, protected_by, protected_roots};
+use self::defaults::{ProtectedRoots, Shipped, ShippedTier, protected_roots};
 use self::rule::{MatchDiscipline, Rule};
 use self::shell::{CommandTarget, Segment};
 use crate::util::path::{expand_user, lexical_normalize};
@@ -194,11 +195,12 @@ impl Workspace {
 
     /// Every spelling of `path` relative to an anchor directory in either of its spellings, with
     /// names compared by [`fold_name`].
-    fn loose_rooted(&self, path: &Path) -> impl Iterator<Item = String> {
+    fn loose_rooted(&self, path: &Path, aliases: &mut DirectoryAliases) -> Vec<String> {
         self.anchors
             .iter()
             .flat_map(|anchor| [&anchor.resolved, &anchor.spelled])
-            .filter_map(move |base| loose_relative_to(path, base))
+            .filter_map(|base| aliases.relative_to(path, base))
+            .collect()
     }
 }
 
@@ -305,46 +307,7 @@ impl Access {
     /// resolved path that is not valid UTF-8 never auto-allows either, since the input a file tool
     /// opens can only pin its lossy spelling.
     pub(crate) fn for_path(path: impl AsRef<Path>, workspace: &Workspace) -> Self {
-        let joined = workspace.cwd().join(path);
-        let requested = lexical_normalize(&joined);
-        let resolved = resolve(&joined).ok();
-        let cwd = workspace.resolved_cwd();
-        let relative = resolved.as_deref().and_then(|r| relative_to(r, cwd));
-        let rooted = resolved.as_deref().map_or_else(Vec::new, |r| {
-            workspace
-                .anchors
-                .iter()
-                .filter_map(|anchor| relative_to(r, &anchor.resolved))
-                .collect()
-        });
-        let mut deny_rooted: Vec<String> = [resolved.as_deref(), Some(&*requested)]
-            .into_iter()
-            .flatten()
-            .flat_map(|path| workspace.loose_rooted(path))
-            .collect();
-        deny_rooted.sort();
-        deny_rooted.dedup();
-        let in_root = resolved.as_deref().is_some_and(|r| workspace.contains(r));
-        let canonical = resolved.unwrap_or(joined);
-
-        let lossy = canonical.to_str().is_none();
-        let roots = protected_roots(cwd, workspace.roots());
-        let protected = protected_by(&[&canonical, &requested], &roots);
-        let zone = if in_root && !lossy && !is_hard_linked(&canonical) {
-            Zone::Workspace
-        } else {
-            Zone::Outside
-        };
-        Self::Path {
-            canonical: canonical.to_string_lossy().into_owned(),
-            exact: lossy.then_some(canonical),
-            relative,
-            rooted,
-            requested: requested.to_string_lossy().into_owned(),
-            deny_rooted,
-            zone,
-            protected,
-        }
+        PathResolver::new(workspace).resolve(path)
     }
 
     /// Where a path target lands, exactly as the file system names it.
@@ -384,6 +347,69 @@ impl Access {
     }
 }
 
+/// Path resolution for one tool call, sharing protected roots and directory metadata.
+struct PathResolver<'a> {
+    workspace: &'a Workspace,
+    roots: Option<ProtectedRoots>,
+    aliases: DirectoryAliases,
+}
+
+impl<'a> PathResolver<'a> {
+    fn new(workspace: &'a Workspace) -> Self {
+        Self {
+            workspace,
+            roots: None,
+            aliases: DirectoryAliases::default(),
+        }
+    }
+
+    fn resolve(&mut self, path: impl AsRef<Path>) -> Access {
+        let workspace = self.workspace;
+        let joined = workspace.cwd().join(path);
+        let requested = lexical_normalize(&joined);
+        let resolved = resolve(&joined).ok();
+        let cwd = workspace.resolved_cwd();
+        let relative = resolved.as_deref().and_then(|r| relative_to(r, cwd));
+        let rooted = resolved.as_deref().map_or_else(Vec::new, |r| {
+            workspace
+                .anchors
+                .iter()
+                .filter_map(|anchor| relative_to(r, &anchor.resolved))
+                .collect()
+        });
+        let mut deny_rooted: Vec<String> = [resolved.as_deref(), Some(&*requested)]
+            .into_iter()
+            .flatten()
+            .flat_map(|path| workspace.loose_rooted(path, &mut self.aliases))
+            .collect();
+        deny_rooted.sort();
+        deny_rooted.dedup();
+        let in_root = resolved.as_deref().is_some_and(|r| workspace.contains(r));
+        let canonical = resolved.unwrap_or(joined);
+
+        let lossy = canonical.to_str().is_none();
+        let roots = self
+            .roots
+            .get_or_insert_with(|| protected_roots(cwd, workspace.roots()).into());
+        let protected = roots.protected_by(&[&canonical, &requested], &mut self.aliases);
+        let zone = if in_root && !lossy && !is_hard_linked(&canonical) {
+            Zone::Workspace
+        } else {
+            Zone::Outside
+        };
+        Access::Path {
+            canonical: canonical.to_string_lossy().into_owned(),
+            exact: lossy.then_some(canonical),
+            relative,
+            rooted,
+            requested: requested.to_string_lossy().into_owned(),
+            deny_rooted,
+            zone,
+            protected,
+        }
+    }
+}
+
 /// `path` relative to `base` when it sits under it. A relative base never matches, since
 /// `strip_prefix("")` succeeds for every path.
 fn relative_to(path: &Path, base: &Path) -> Option<String> {
@@ -395,17 +421,98 @@ fn relative_to(path: &Path, base: &Path) -> Option<String> {
         .map(|r| r.to_string_lossy().into_owned())
 }
 
-/// [`relative_to`] with names compared by [`fold_name`], keeping the remainder as `path` spells it.
-fn loose_relative_to(path: &Path, base: &Path) -> Option<String> {
-    if !base.is_absolute() {
-        return None;
-    }
-    relative_to_folded(path, &folded_names(base))
+/// Directory identities shared within one path check or walk setup. Each operation gets a fresh
+/// instance so directories created or replaced between calls remain visible.
+#[derive(Default)]
+struct DirectoryAliases {
+    identities: HashMap<PathBuf, Option<DirectoryIdentity>>,
 }
 
-/// [`loose_relative_to`] against a base already split into [`fold_name`]-folded names.
+impl DirectoryAliases {
+    fn relative_to(&mut self, path: &Path, base: &Path) -> Option<String> {
+        if !base.is_absolute() {
+            return None;
+        }
+        let folded = folded_components(base);
+        relative_to_folded(path, &folded).or_else(|| {
+            let aliased = self.respell(path, base)?;
+            if aliased == path {
+                return None;
+            }
+            relative_to_folded(&aliased, &folded)
+        })
+    }
+
+    /// `path` spelled below the deepest existing directory of `base` when an ancestor has the same
+    /// filesystem identity, retaining its suffix even when it does not exist yet.
+    fn respell(&mut self, path: &Path, base: &Path) -> Option<PathBuf> {
+        let (existing, identity) = base
+            .ancestors()
+            .find_map(|ancestor| Some((ancestor, self.identity(ancestor)?)))?;
+        if path.starts_with(existing) {
+            return Some(path.to_path_buf());
+        }
+        path.ancestors().find_map(|ancestor| {
+            if self.identity(ancestor)? != identity {
+                return None;
+            }
+            let rest = path.strip_prefix(ancestor).ok()?;
+            Some(if rest.as_os_str().is_empty() {
+                existing.to_path_buf()
+            } else {
+                existing.join(rest)
+            })
+        })
+    }
+
+    fn identity(&mut self, path: &Path) -> Option<DirectoryIdentity> {
+        self.identities
+            .entry(path.to_path_buf())
+            .or_insert_with(|| directory_identity(path))
+            .clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectoryIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    handle: Arc<same_file::Handle>,
+}
+
+fn directory_identity(path: &Path) -> Option<DirectoryIdentity> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_dir() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(DirectoryIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    Some(DirectoryIdentity {
+        handle: Arc::new(same_file::Handle::from_path(path).ok()?),
+    })
+}
+
+/// `path` expressed in the directory spelling used by a walk of `base`.
+fn walk_spelling(path: &Path, base: &Path) -> PathBuf {
+    let mut aliases = DirectoryAliases::default();
+    base.ancestors()
+        .find_map(|ancestor| aliases.respell(path, ancestor))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// `path` beneath a base already split into [`fold_name`]-folded components, including its root.
 fn relative_to_folded(path: &Path, base: &[String]) -> Option<String> {
-    let names: Vec<&OsStr> = names(path).collect();
+    let names: Vec<&OsStr> = path.components().map(Component::as_os_str).collect();
     let rest = names.get(base.len()..)?;
     names
         .iter()
@@ -585,6 +692,12 @@ fn requires_directory(path: &Path) -> bool {
 fn folded_names(path: &Path) -> Vec<String> {
     names(path)
         .map(|name| fold_name(&name.to_string_lossy()))
+        .collect()
+}
+
+fn folded_components(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| fold_name(&component.as_os_str().to_string_lossy()))
         .collect()
 }
 
@@ -881,18 +994,16 @@ impl Policy {
         let with_prefixes = |rules: Vec<TierRule>| {
             rules
                 .into_iter()
-                .map(|entry| {
-                    Ok(TierRule {
-                        rule: entry.rule.with_resolved_prefixes(&anchors)?,
-                        builtin: entry.builtin,
-                    })
+                .map(|entry| TierRule {
+                    rule: entry.rule.with_resolved_prefixes(&anchors),
+                    builtin: entry.builtin,
                 })
-                .collect::<Result<Vec<_>>>()
+                .collect()
         };
         Ok(Self {
             mode,
-            deny: with_prefixes(deny)?,
-            ask: with_prefixes(ask)?,
+            deny: with_prefixes(deny),
+            ask: with_prefixes(ask),
             allow,
             session_allow: Vec::new(),
             enabled: enabled().collect(),
@@ -1340,15 +1451,15 @@ pub(crate) struct ReadFilter(Arc<[Rule]>);
 impl ReadFilter {
     /// The filter for one walk of `base`, the resolved search root, which the call spelled as
     /// `requested` relative to `workspace`'s cwd.
-    pub(crate) fn walk(
-        &self,
-        base: &Path,
-        requested: &Path,
-        workspace: &Workspace,
-    ) -> WalkFilter<'_> {
+    pub(crate) fn walk(&self, base: &Path, requested: &Path, workspace: &Workspace) -> WalkFilter {
         let requested = lexical_normalize(&workspace.cwd().join(requested));
         WalkFilter {
-            rules: &self.0,
+            rules: self
+                .0
+                .iter()
+                .cloned()
+                .map(|rule| rule.for_walk(base))
+                .collect(),
             base: base.to_path_buf(),
             requested_base: (requested != base).then_some(requested),
             folded_anchors: workspace
@@ -1356,23 +1467,28 @@ impl ReadFilter {
                 .iter()
                 .flat_map(|anchor| [&anchor.resolved, &anchor.spelled])
                 .filter(|base| base.is_absolute())
-                .map(|base| folded_names(base))
+                .flat_map(|anchor| {
+                    [
+                        folded_components(anchor),
+                        folded_components(&walk_spelling(anchor, base)),
+                    ]
+                })
                 .collect(),
         }
     }
 }
 
 /// [`ReadFilter`] bound to one walk, with the spellings every file of the walk shares.
-pub(crate) struct WalkFilter<'a> {
-    rules: &'a [Rule],
+pub(crate) struct WalkFilter {
+    rules: Vec<Rule>,
     base: PathBuf,
     /// The base as the call spelled it, when that differs from `base`.
     requested_base: Option<PathBuf>,
-    /// Each spelling of each anchor directory, split into [`fold_name`]-folded names.
+    /// Each spelling of each anchor directory, split into [`fold_name`]-folded components.
     folded_anchors: Vec<Vec<String>>,
 }
 
-impl WalkFilter<'_> {
+impl WalkFilter {
     /// Returns whether a rule withholds `path`, a file found below the walk's base. The walk
     /// follows no symlink, so `path` is where the file resolves. The same names below the requested
     /// base spell it the way the call does.
@@ -1436,6 +1552,7 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permission::rule::escaped;
     use crate::session::store::local_testing::sample_header;
     use crate::session::store::{SessionStore, artifact_dir};
     use crate::util::fs::testing::{symlink_dir, symlink_file};
@@ -2731,6 +2848,307 @@ mod tests {
                 }
             }
 
+            #[test]
+            fn escaped_literal_directories_keep_symlink_targets_protected() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                std::fs::create_dir(root.join("real")).unwrap();
+                let workspace = Workspace::new(root);
+                for name in [
+                    "secrets[1]",
+                    "secrets{one}",
+                    #[cfg(unix)]
+                    "secrets*",
+                    #[cfg(unix)]
+                    r"secrets\vault",
+                ] {
+                    symlink_dir(Path::new("real"), &root.join(name));
+                    let pattern = format!("./{}/**", escaped(Path::new(name)));
+
+                    let p =
+                        resolved_policy(Mode::Yolo, &[(READ, &pattern)], &[], &[], &[], &workspace);
+                    let target = Access::for_path("real/key", &workspace);
+
+                    assert_eq!(decide(&p, READ, &target), Decision::Deny, "{name}");
+                    assert!(
+                        p.read_filter()
+                            .walk(root, root, &workspace)
+                            .withholds(&root.join("real/key")),
+                        "{name}"
+                    );
+                }
+            }
+
+            #[test]
+            fn literal_separators_keep_symlink_targets_protected() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                std::fs::create_dir(root.join("real")).unwrap();
+                symlink_dir(Path::new("real"), &root.join("secrets"));
+                let workspace = Workspace::new(root);
+                for pattern in [
+                    "./secrets[/]key",
+                    "./{secrets/key}",
+                    #[cfg(unix)]
+                    r"./secrets\/key",
+                ] {
+                    let p =
+                        resolved_policy(Mode::Yolo, &[(READ, pattern)], &[], &[], &[], &workspace);
+                    let filter = p.read_filter();
+                    let walk = filter.walk(root, root, &workspace);
+
+                    for (name, expected) in [
+                        ("real/key", Decision::Deny),
+                        ("real/other", Decision::Allow),
+                    ] {
+                        let target = Access::for_path(name, &workspace);
+
+                        assert_eq!(decide(&p, READ, &target), expected, "{pattern}: {name}");
+                        assert_eq!(
+                            walk.withholds(&root.join(name)),
+                            expected == Decision::Deny,
+                            "{pattern}: {name}"
+                        );
+                    }
+                }
+            }
+
+            #[test]
+            fn escaped_home_directories_keep_shipped_symlink_targets_protected() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                let home = root.join("home[1]");
+                std::fs::create_dir(&home).unwrap();
+                std::fs::create_dir(root.join("vault")).unwrap();
+                symlink_dir(Path::new("../vault"), &home.join(".ssh"));
+
+                temp_env::with_var(HOME_VAR, Some(&home), || {
+                    let workspace = Workspace::new(root);
+                    let p = resolved_policy(Mode::Yolo, &[], &[], &[], &[], &workspace);
+                    let target = Access::for_path("vault/key", &workspace);
+
+                    assert_eq!(decide(&p, READ, &target), Decision::Deny);
+                });
+            }
+
+            #[test]
+            fn a_replaced_literal_directory_keeps_old_and_current_targets_protected() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                let workspace = Workspace::new(root);
+                for name in ["first", "second"] {
+                    std::fs::create_dir(root.join(name)).unwrap();
+                }
+                let link = root.join("secrets[1]");
+                symlink_dir(Path::new("first"), &link);
+                let pattern = format!("./{}/**", globset::escape("secrets[1]"));
+                let p = resolved_policy(Mode::Yolo, &[(READ, &pattern)], &[], &[], &[], &workspace);
+
+                #[cfg(unix)]
+                std::fs::remove_file(&link).unwrap();
+                #[cfg(windows)]
+                std::fs::remove_dir(&link).unwrap();
+                symlink_dir(Path::new("second"), &link);
+
+                for name in ["first/key", "second/key"] {
+                    let target = Access::for_path(name, &workspace);
+
+                    assert_eq!(decide(&p, READ, &target), Decision::Deny, "{name}");
+                    assert!(
+                        p.read_filter()
+                            .walk(root, root, &workspace)
+                            .withholds(&root.join(name)),
+                        "{name}"
+                    );
+                }
+            }
+
+            #[test]
+            fn a_literal_directory_created_after_policy_load_is_protected() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                let workspace = Workspace::new(root);
+                std::fs::create_dir(root.join("real")).unwrap();
+                let p = resolved_policy(
+                    Mode::Yolo,
+                    &[(READ, "./secrets/**")],
+                    &[],
+                    &[],
+                    &[],
+                    &workspace,
+                );
+
+                symlink_dir(Path::new("real"), &root.join("secrets"));
+                let target = Access::for_path("real/key", &workspace);
+
+                assert_eq!(decide(&p, READ, &target), Decision::Deny);
+                assert!(
+                    p.read_filter()
+                        .walk(root, root, &workspace)
+                        .withholds(&root.join("real/key"))
+                );
+            }
+
+            #[test]
+            fn a_literal_file_link_created_after_policy_load_is_protected() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                let workspace = Workspace::new(root);
+                std::fs::write(root.join("real"), "fixture").unwrap();
+                let p = resolved_policy(Mode::Yolo, &[(READ, "./key")], &[], &[], &[], &workspace);
+
+                symlink_file(Path::new("real"), &root.join("key"));
+                let target = Access::for_path("real", &workspace);
+
+                assert_eq!(decide(&p, READ, &target), Decision::Deny);
+                assert!(
+                    p.read_filter()
+                        .walk(root, root, &workspace)
+                        .withholds(&root.join("real"))
+                );
+            }
+
+            #[test]
+            fn a_literal_dangling_directory_link_created_after_policy_load_is_protected() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                let workspace = Workspace::new(root);
+                let p = resolved_policy(
+                    Mode::Yolo,
+                    &[(EDIT, "./secrets/key")],
+                    &[],
+                    &[],
+                    &[],
+                    &workspace,
+                );
+
+                symlink_dir(Path::new("missing"), &root.join("secrets"));
+                let target = Access::for_path("missing/key", &workspace);
+
+                assert_eq!(decide(&p, EDIT, &target), Decision::Deny);
+            }
+
+            #[cfg(target_os = "macos")]
+            #[test]
+            fn volume_aliases_keep_absolute_and_anchored_rules_effective() {
+                let root_dir = tempfile::tempdir_in("/private/tmp").unwrap();
+                let root = root_dir.path();
+                std::fs::create_dir(root.join("secrets")).unwrap();
+                std::fs::write(root.join("secrets/key"), "fixture").unwrap();
+                let alias = Path::new("/System/Volumes/Data").join(root.strip_prefix("/").unwrap());
+                assert!(same_file::is_same_file(root, &alias).unwrap());
+                assert_ne!(resolve(root).unwrap(), resolve(&alias).unwrap());
+
+                for (base, requested) in [(root, alias.as_path()), (alias.as_path(), root)] {
+                    let workspace = Workspace::new(base);
+                    let absolute = slash_separated(&base.join("secrets"));
+                    for pattern in [&absolute, "./secrets"] {
+                        for &mode in Mode::VARIANTS {
+                            for class in [READ, EDIT] {
+                                for (deny, ask, expected) in [
+                                    (vec![(class, pattern)], vec![], Decision::Deny),
+                                    (
+                                        vec![],
+                                        vec![(class, pattern)],
+                                        if mode == Mode::Plan && class == EDIT {
+                                            Decision::Deny
+                                        } else {
+                                            Decision::Ask
+                                        },
+                                    ),
+                                ] {
+                                    let p =
+                                        resolved_policy(mode, &deny, &ask, &[], &[], &workspace);
+                                    let filter = p.read_filter();
+                                    let walk = filter.walk(requested, requested, &workspace);
+                                    for name in ["secrets", "secrets/key", "secrets/new/deep/key"] {
+                                        let file = requested.join(name);
+                                        let target = Access::for_path(&file, &workspace);
+
+                                        assert_eq!(
+                                            decide(&p, class, &target),
+                                            expected,
+                                            "{mode} {class} {pattern} {name}"
+                                        );
+                                        assert_eq!(
+                                            walk.withholds(&file),
+                                            class == READ,
+                                            "{mode} {class} {pattern} {name}"
+                                        );
+                                    }
+                                    assert!(!walk.withholds(&requested.join("secrets-other/key")));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            #[cfg(target_os = "macos")]
+            #[test]
+            fn volume_aliases_leave_allow_rules_exact() {
+                let root_dir = tempfile::tempdir_in("/private/tmp").unwrap();
+                let root = root_dir.path();
+                std::fs::create_dir(root.join("repo")).unwrap();
+                let workspace = Workspace::new(&root.join("repo"));
+                let pattern = slash_separated(&root.join("notes"));
+                let alias = Path::new("/System/Volumes/Data").join(root.strip_prefix("/").unwrap());
+                let p =
+                    resolved_policy(Mode::Manual, &[], &[], &[(EDIT, &pattern)], &[], &workspace);
+
+                let exact = Access::for_path(root.join("notes/key"), &workspace);
+                let aliased = Access::for_path(alias.join("notes/key"), &workspace);
+
+                assert_eq!(decide(&p, EDIT, &exact), Decision::Allow);
+                assert_eq!(decide(&p, EDIT, &aliased), Decision::Ask);
+            }
+
+            #[cfg(target_os = "macos")]
+            #[test]
+            fn volume_aliases_keep_requested_dangling_links_denied() {
+                let root_dir = tempfile::tempdir_in("/private/tmp").unwrap();
+                let root = root_dir.path();
+                let workspace = Workspace::new(root);
+                let pattern = slash_separated(&root.join("secrets"));
+                let p = resolved_policy(Mode::Yolo, &[(READ, &pattern)], &[], &[], &[], &workspace);
+                let alias = Path::new("/System/Volumes/Data").join(root.strip_prefix("/").unwrap());
+
+                symlink_dir(Path::new("missing"), &root.join("secrets"));
+                let target = Access::for_path(alias.join("secrets/key"), &workspace);
+
+                assert_eq!(decide(&p, READ, &target), Decision::Deny);
+            }
+
+            #[cfg(target_os = "macos")]
+            #[test]
+            fn volume_aliases_keep_shipped_home_rules_effective() {
+                let home_dir = tempfile::tempdir_in("/private/tmp").unwrap();
+                let home = home_dir.path();
+                std::fs::create_dir(home.join(".ssh")).unwrap();
+                let alias = Path::new("/System/Volumes/Data").join(home.strip_prefix("/").unwrap());
+
+                temp_env::with_var(HOME_VAR, Some(home), || {
+                    let workspace = Workspace::new(&home.join("repo"));
+                    for &mode in Mode::VARIANTS {
+                        let p = resolved_policy(mode, &[], &[], &[(EDIT, "*")], &[], &workspace);
+                        let target = Access::for_path(alias.join(".ssh/fixture"), &workspace);
+
+                        assert_eq!(decide(&p, READ, &target), Decision::Deny, "{mode}");
+                        assert_eq!(
+                            decide(&p, EDIT, &target),
+                            if mode == Mode::Plan {
+                                Decision::Deny
+                            } else if mode == Mode::Yolo {
+                                Decision::Allow
+                            } else {
+                                Decision::Ask
+                            },
+                            "{mode}"
+                        );
+                    }
+                });
+            }
+
             #[cfg(unix)]
             #[test]
             fn denies_reading_a_process_environment_until_credentials_are_off() {
@@ -2934,6 +3352,21 @@ mod tests {
 
         mod read_filter {
             use super::*;
+
+            #[test]
+            fn a_class_wide_read_hold_filters_every_file() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                let workspace = Workspace::new(root);
+                let p = resolved_policy(Mode::Yolo, &[(READ, "*")], &[], &[], &[], &workspace);
+
+                let filter = p.read_filter();
+                let walk = filter.walk(root, root, &workspace);
+
+                for name in ["src/main.rs", "notes.md"] {
+                    assert!(walk.withholds(&root.join(name)), "{name}");
+                }
+            }
 
             #[test]
             fn withholds_exactly_the_files_the_gate_holds_back() {
