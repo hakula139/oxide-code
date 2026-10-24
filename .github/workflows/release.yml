@@ -5,11 +5,13 @@ on:
     tags: ['v[0-9]+.*']
   pull_request:
     paths:
+      - .gitattributes
       - .github/workflows/release.yml
       - about.hbs
       - about.toml
       - LICENSE
       - licenses/**
+      - scripts/generate-notices.sh
       - Cargo.lock
       - Cargo.toml
       - crates/*/Cargo.toml
@@ -72,14 +74,7 @@ jobs:
       - name: Generate third-party notices
         shell: bash
         run: |
-          # A workspace scan would also count ox-core's test-only `testing` dependencies.
-          cargo about generate \
-            --locked \
-            --manifest-path crates/ox/Cargo.toml \
-            --config about.toml \
-            about.hbs \
-            -o THIRD-PARTY-NOTICES
-          cat licenses/syntect-assets.txt >> THIRD-PARTY-NOTICES
+          ./scripts/generate-notices.sh "${{ matrix.target }}" THIRD-PARTY-NOTICES
 
       - name: Build archive
         id: binary
