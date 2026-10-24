@@ -34,7 +34,7 @@ In the compact view, a plain click on a block's overflow footer, such as `... +3
 
 ## Copying
 
-`ox_tui::clipboard::Clipboard` runs each copy in a tokio task, off the event loop, and reports the outcome back to `App` through a channel the loop selects on. A copy that takes over 2 s reports a timeout, and dropping the timed-out task kills any tmux child, which tokio reaps. The routes depend on where `ox` runs:
+`ox_tui::clipboard::Clipboard` runs copies in one worker off the event loop, keeping only the latest pending selection. It reports outcomes through a channel the loop selects on, discarding reports for superseded copies. Starting another copy clears any earlier OSC 52 sequence still waiting for the next frame. A copy that takes over 2 s reports a timeout. The worker waits for a started native write to finish or a timed-out tmux child to be killed and reaped before taking the next selection. Tmux fallback attempts share the original deadline. Killing the client does not acknowledge cancellation of actions already accepted by the tmux server. The worker drains the latest pending selection when the App drops. The routes depend on where `ox` runs:
 
 | Session                                         | Routes                                                                       |
 | ----------------------------------------------- | ---------------------------------------------------------------------------- |
