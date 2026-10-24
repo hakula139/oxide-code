@@ -109,12 +109,12 @@ where
     E: Write + Send,
 {
     let prompt = Op::prompt(command::unescape_literal(prompt));
-    let mut renderer = Renderer::new(printer);
+    let renderer = Renderer::new(printer);
     // A send fails only once the engine has stopped, which `render_op` then reports.
     _ = handle.ops.send(prompt.clone()).await;
     let operation = render_op(
         &mut handle.events,
-        &mut renderer,
+        &renderer,
         &handle.ops,
         &prompt,
         None::<&mut Unattended>,
@@ -619,7 +619,7 @@ mod tests {
                     };
                     let printer =
                         Printer::new(format, false, SESSION_ID.to_owned(), stdout, Vec::new());
-                    let mut renderer = Renderer::new(&printer);
+                    let renderer = Renderer::new(&printer);
 
                     for event in [
                         Event::StreamToken("lost".to_owned()),
