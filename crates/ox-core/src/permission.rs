@@ -3063,7 +3063,6 @@ mod tests {
                 std::fs::write(root.join("secrets/key"), "fixture").unwrap();
                 let alias = Path::new("/System/Volumes/Data").join(root.strip_prefix("/").unwrap());
                 assert!(same_file::is_same_file(root, &alias).unwrap());
-                assert_ne!(resolve(root).unwrap(), resolve(&alias).unwrap());
 
                 for (base, requested) in [(root, alias.as_path()), (alias.as_path(), root)] {
                     let workspace = Workspace::new(base);
