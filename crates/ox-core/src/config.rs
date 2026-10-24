@@ -239,9 +239,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// Resolves environment values, config files within `cwd`'s [`project_root`], and defaults.
-    /// Invalid TOML or environment values fail the load. Resolves explicit credentials only,
-    /// leaving stored logins to [`Config::resolve_auth`].
+    /// Resolves defaults, user and project config files, and environment values. Project discovery
+    /// stays within `cwd`'s [`project_root`]. Invalid TOML or environment values fail the load.
+    /// Resolves explicit credentials only, leaving stored logins to [`Config::resolve_auth`].
     pub fn load(cwd: &Path) -> Result<Self> {
         Self::resolve(cwd, |path| load_extra_ca_certs(path).map(drop))
     }

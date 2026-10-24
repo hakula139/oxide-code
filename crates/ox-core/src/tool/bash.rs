@@ -339,7 +339,8 @@ fn git_bash_on(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
 
 // ── Output Rendering ──
 
-/// Renders stdout and stderr within [`OUTPUT_BUDGET`], spilling each pipe it cuts.
+/// Renders stdout and stderr with a shared [`OUTPUT_BUDGET`] for decoded content, spilling
+/// truncated pipes. Omission markers add text beyond the content budget.
 fn render_streams(stdout: &mut PipeCapture, stderr: &mut PipeCapture) -> String {
     let paths = stdout.spill.path().as_os_str().len() + stderr.spill.path().as_os_str().len();
     let (stdout_kept, stderr_kept) = (stdout.kept_bytes(), stderr.kept_bytes());
@@ -373,9 +374,10 @@ fn split_budget(first: usize, second: usize, budget: usize) -> (usize, usize) {
     (first.min(budget - second), second)
 }
 
-/// Renders `name` within `budget` decoded bytes, replacing invalid UTF-8 with U+FFFD. Cuts move to
-/// nearby line boundaries, and omission markers count raw bytes. A truncated pipe spills its
-/// [`PipeCapture::kept_bytes`] in `kept` if needed so the marker names the full output.
+/// Renders `name` with at most `budget` decoded payload bytes, plus omission markers, replacing
+/// invalid UTF-8 with U+FFFD. Cuts move to nearby line boundaries, and omission markers count raw
+/// bytes. A truncated pipe spills its [`PipeCapture::kept_bytes`] in `kept` if needed so the marker
+/// names the full output.
 fn render_pipe(pipe: &mut PipeCapture, kept: &[u8], budget: usize, name: &str) -> String {
     let text = if pipe.omitted == 0 && decoded_len(kept) <= budget {
         String::from_utf8_lossy(kept).into_owned()
@@ -1340,7 +1342,7 @@ mod tests {
             )
         }
 
-        /// Renders `pipe` as stdout within `budget` bytes.
+        /// Renders stdout with up to `budget` decoded bytes from `pipe`, plus omission markers.
         fn render(pipe: &mut PipeCapture, budget: usize) -> String {
             let kept = pipe.kept_bytes();
             render_pipe(pipe, &kept, budget, "stdout")
