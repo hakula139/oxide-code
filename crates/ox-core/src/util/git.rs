@@ -248,7 +248,7 @@ fn check_output(name: &str, cwd: &Path, result: io::Result<Output>) -> Option<Ou
     let output = match result {
         Ok(output) => output,
         Err(e) => {
-            debug!(error = %e, ?cwd, "{name} probe: spawn failed");
+            debug!(probe = name, error = %e, ?cwd, "probe spawn failed");
             return None;
         }
     };
@@ -257,7 +257,8 @@ fn check_output(name: &str, cwd: &Path, result: io::Result<Output>) -> Option<Ou
             code = output.status.code().unwrap_or(-1),
             stderr = stderr_summary(&output.stderr),
             ?cwd,
-            "{name} probe: non-zero exit",
+            probe = name,
+            "probe exited unsuccessfully",
         );
         return None;
     }
@@ -350,14 +351,17 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     #[cfg(target_os = "linux")]
     use std::ffi::OsStr;
     #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStrExt as _;
+    use std::process::ExitStatus;
 
     use super::local_testing::init_fixture_repo;
     use super::testing::{isolated_git, with_isolated_git_env_async};
     use super::*;
+    use crate::util::log::testing::LogCapture;
 
     mod current_branch {
         use super::*;
@@ -701,8 +705,6 @@ mod tests {
     }
 
     mod check_output {
-        use std::process::ExitStatus;
-
         use super::*;
 
         fn exit_code_one() -> ExitStatus {
@@ -729,27 +731,43 @@ mod tests {
         }
 
         #[test]
-        fn drops_output_on_non_zero_exit() {
-            let result = check_output(
-                "test",
-                Path::new("/tmp/cwd"),
-                Ok(Output {
-                    status: exit_code_one(),
-                    stdout: b"unused".to_vec(),
-                    stderr: b"fatal: not a git repository\n".to_vec(),
-                }),
-            );
-            assert!(result.is_none());
-        }
+        fn records_the_probe_context_when_dropping_failed_output() {
+            for (result, message, fields) in [
+                (
+                    Ok(Output {
+                        status: exit_code_one(),
+                        stdout: b"unused".to_vec(),
+                        stderr: b"fatal: not a git repository\n".to_vec(),
+                    }),
+                    "probe exited unsuccessfully",
+                    vec![("code", "1"), ("stderr", "fatal: not a git repository")],
+                ),
+                (
+                    Err(io::Error::new(io::ErrorKind::NotFound, "binary missing")),
+                    "probe spawn failed",
+                    vec![("error", "binary missing")],
+                ),
+            ] {
+                let logs = LogCapture::default();
+                let cwd = Path::new("/repo");
+                let mut expected = BTreeMap::from([
+                    ("probe".to_owned(), "test".to_owned()),
+                    ("cwd".to_owned(), format!("{cwd:?}")),
+                    ("message".to_owned(), message.to_owned()),
+                ]);
+                expected.extend(
+                    fields
+                        .into_iter()
+                        .map(|(key, value)| (key.to_owned(), value.to_owned())),
+                );
 
-        #[test]
-        fn drops_output_on_spawn_failure() {
-            let result = check_output(
-                "test",
-                Path::new("/tmp/cwd"),
-                Err(io::Error::new(io::ErrorKind::NotFound, "binary missing")),
-            );
-            assert!(result.is_none());
+                let output = tracing::dispatcher::with_default(&logs.dispatch(), || {
+                    check_output("test", cwd, result)
+                });
+
+                assert!(output.is_none(), "{message}");
+                assert_eq!(logs.events(), [expected], "{message}");
+            }
         }
     }
 

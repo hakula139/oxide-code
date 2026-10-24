@@ -104,7 +104,7 @@ pub(super) fn render_queued(events: &mut mpsc::UnboundedReceiver<Event>, sink: &
 
 fn render(sink: &dyn EventSink, event: Event) {
     if let Err(e) = sink.send(event) {
-        debug!("stdio render failed: {e}");
+        debug!(error = %format_args!("{e:#}"), "stdio render failed");
     }
 }
 
@@ -390,6 +390,8 @@ fn resumed_notice(id: &str, title: Option<&str>, prior: ArchiveState) -> String 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use indoc::indoc;
     use wiremock::MockServer;
 
@@ -406,6 +408,7 @@ mod tests {
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::{plan, task};
     use ox_core::tool::testing::bash_preview;
+    use ox_core::util::log::testing::LogCapture;
 
     use super::*;
     use crate::driver::testing::{ClosedPipe, Screen};
@@ -682,6 +685,38 @@ mod tests {
 
             assert_eq!(end, None);
             assert_eq!(sink.events(), [Event::StreamToken("partial".to_owned())]);
+        }
+    }
+
+    mod render {
+        use super::*;
+
+        struct ChainedFailure;
+
+        impl EventSink for ChainedFailure {
+            fn send(&self, _event: Event) -> Result<()> {
+                Err(anyhow::anyhow!("pipe closed").context("failed to render event"))
+            }
+        }
+
+        #[test]
+        fn records_the_full_render_failure_chain() {
+            let logs = LogCapture::default();
+
+            tracing::dispatcher::with_default(&logs.dispatch(), || {
+                render(&ChainedFailure, Event::TurnComplete);
+            });
+
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    (
+                        "error".to_owned(),
+                        "failed to render event: pipe closed".to_owned()
+                    ),
+                    ("message".to_owned(), "stdio render failed".to_owned()),
+                ])]
+            );
         }
     }
 

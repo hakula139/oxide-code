@@ -469,7 +469,7 @@ impl App {
             Ok(Ok(ChatOutput::SystemMessage(text))) => self.chat.push_system_message(text),
             Ok(Ok(ChatOutput::GitDiff(diff))) => self.chat.push_git_diff(diff),
             Ok(Err(msg)) => self.chat.push_error(&msg),
-            Err(e) => warn!("background slash command failed: {e}"),
+            Err(e) => warn!(error = %e, "background slash command failed"),
         }
         self.dirty = true;
     }

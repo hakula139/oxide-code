@@ -211,10 +211,7 @@ impl Spill {
 
     /// Logs `error` and returns the state that ends the spill.
     fn fail(&self, error: &str) -> SpillState {
-        warn!(
-            "failed to spill tool output to {}: {error}",
-            self.path.display()
-        );
+        warn!(path = %self.path.display(), error, "failed to spill tool output");
         SpillState::Failed(error.to_owned())
     }
 

@@ -131,7 +131,7 @@ impl App {
             return false;
         };
         if let Err(e) = (self.open_browser)(&link.url) {
-            debug!("failed to open the browser: {e}");
+            debug!(error = %e, "failed to open the browser");
             let message = format!(
                 "Could not open the browser. Open {} in a browser.",
                 link.url

@@ -160,7 +160,7 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
         use tracing::debug;
 
         if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
-            debug!("failed to tighten {} to 0o700: {e}", path.display());
+            debug!(path = %path.display(), error = %e, "failed to tighten directory to 0o700");
         }
     }
     Ok(())
@@ -187,9 +187,20 @@ pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Opens `path` for appending with `0600` perms on Unix, also tightening an existing file's mode.
-pub(crate) fn open_private_append(path: &Path) -> io::Result<File> {
+pub(super) fn open_private_append(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.append(true).create(true);
+    open_private(path, &mut options)
+}
+
+/// Opens a lockable coordination file without truncating it, enforcing `0600` perms on Unix.
+pub(super) fn open_private_lock(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    open_private(path, &mut options)
+}
+
+fn open_private(path: &Path, options: &mut OpenOptions) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -810,6 +821,23 @@ mod tests {
             open_private_append(&path).unwrap();
 
             assert_eq!(mode(&path), 0o600);
+        }
+    }
+
+    mod open_private_lock {
+        use super::*;
+
+        #[test]
+        fn preserves_existing_content_while_locking() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("writer.lock");
+            fs::write(&path, b"existing").unwrap();
+
+            let file = open_private_lock(&path).unwrap();
+            let lock = FileLock::lock(file).unwrap();
+            drop(lock);
+
+            assert_eq!(fs::read(&path).unwrap(), b"existing");
         }
     }
 }
