@@ -3,6 +3,8 @@
 
 use ratatui::style::Style;
 
+use ox_core::util::text::escape_line;
+
 use super::{MAX_TOOL_OUTPUT_LINES, overflow_footer};
 use crate::components::chat::blocks::rows::body_row;
 use crate::components::chat::blocks::{BlockRows, RenderCtx};
@@ -40,7 +42,7 @@ pub(super) fn render(
     );
 
     for path in &files[..visible] {
-        let display = ctx.cap_row(path);
+        let display = ctx.cap_row(&escape_line(path));
         body_row(&mut out.lines, ctx, border_style, display, ctx.theme.text());
     }
 
@@ -101,6 +103,25 @@ mod tests {
             assert_eq!(
                 rows,
                 ["▎   **/*.rs (2 of 2)", "▎   src/main.rs", "▎   src/lib.rs"]
+            );
+        }
+
+        #[test]
+        fn counts_native_paths_without_splitting_their_newlines() {
+            let files = vec![
+                "src/line\nname.rs".to_owned(),
+                "src/name:12:part.rs".to_owned(),
+            ];
+
+            let rows = render_rows("**/*.rs", &files, 2, false);
+
+            assert_eq!(
+                rows,
+                [
+                    "▎   **/*.rs (2 of 2)",
+                    r"▎   src/line\nname.rs",
+                    "▎   src/name:12:part.rs"
+                ],
             );
         }
 
