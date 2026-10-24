@@ -274,6 +274,10 @@ impl App {
                 self.queue.mark_switch();
                 self.set_status(Status::Archiving);
             }
+            Op::SetArchive { session_id, .. } => {
+                self.set_status(Status::Archiving);
+                self.modals.archive_started(session_id);
+            }
             Op::SetMode(mode) => self.requested_mode = *mode,
             Op::Prompt { .. }
             | Op::Queue(_)
@@ -2117,6 +2121,74 @@ mod tests {
                 assert!(!app.should_quit);
                 assert_eq!(app.chat.entry_count(), 0);
             }
+        }
+
+        #[test]
+        fn saved_archive_retains_ownership_and_reports_after_the_picker_closes() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            let modal = ScriptedModal::new(ModalAction::Cancelled);
+            let observed = Arc::clone(&modal.archive_events);
+            app.push_modal(Box::new(modal));
+            let op = Op::SetArchive {
+                path: "/repo/saved.jsonl".into(),
+                session_id: "saved".to_owned(),
+                state: ArchiveState::Archived,
+            };
+            let buffered = fill_channel(&app);
+
+            app.dispatch_op(op.clone());
+
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(*observed.lock().unwrap(), [] as [String; 0]);
+            for op in buffered {
+                assert_eq!(rx.try_recv(), Ok(op));
+            }
+
+            app.dispatch_op(op.clone());
+
+            assert_eq!(rx.try_recv(), Ok(op.clone()));
+            assert_eq!(app.status, Status::Archiving);
+            assert_eq!(*observed.lock().unwrap(), ["started:saved"]);
+
+            app.handle_engine_event(Event::ArchiveUpdated {
+                id: "saved".to_owned(),
+                result: Ok(ArchiveState::Archived),
+            });
+
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(
+                *observed.lock().unwrap(),
+                ["started:saved", "completed:saved:Ok(Archived)"]
+            );
+            assert_eq!(
+                app.chat.last_system_text(),
+                Some(
+                    ox_core::session::display::archive_notice("saved", ArchiveState::Archived)
+                        .as_str()
+                )
+            );
+
+            app.dispatch_op(op.clone());
+            assert_eq!(rx.try_recv(), Ok(op));
+            app.modals.clear();
+            app.handle_engine_event(Event::ArchiveUpdated {
+                id: "saved".to_owned(),
+                result: Err("Archive failed: disk full".to_owned()),
+            });
+
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(
+                app.chat.last_error_text(),
+                Some("Archive failed: disk full")
+            );
+            assert_eq!(
+                *observed.lock().unwrap(),
+                [
+                    "started:saved",
+                    "completed:saved:Ok(Archived)",
+                    "started:saved"
+                ]
+            );
         }
 
         #[test]

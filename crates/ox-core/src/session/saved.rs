@@ -9,6 +9,8 @@ use super::display::id_prefix;
 use super::entry::ArchiveState;
 use super::store::{delete_at, set_archived_at};
 
+pub const BARE_ARCHIVE_HINT: &str = "Use bare `/archive` to archive it and start a new one.";
+
 /// Why an operation on a saved session failed, where `id` is the session's [`id_prefix`]. Resume
 /// refuses the live session through [`Self::Live`] too. `Display` is the lowercase `anyhow`
 /// headline, which slash commands phrase as a sentence.
@@ -44,7 +46,8 @@ impl SavedError {
 }
 
 /// Archives or unarchives the session file at `path`, keeping its last-active time. Refuses to
-/// archive the live session, since only bare `/archive` can roll it to a new one.
+/// archive the live session, since only bare `/archive` can roll it to a new one. Blocks while
+/// another writer owns the directory's lock, so async callers must use a blocking worker.
 pub fn set_archived(
     path: &Path,
     session_id: &str,
@@ -69,6 +72,22 @@ pub fn delete(path: &Path, session_id: &str, live_id: &str) -> Result<(), SavedE
         return Err(SavedError::live(session_id));
     }
     delete_at(path).map_err(|e| SavedError::failed("delete", session_id, e))
+}
+
+/// Phrases `error` as a sentence, ending a live-session refusal with `live_recovery` when given.
+pub fn saved_error_message(error: SavedError, live_recovery: Option<&str>) -> String {
+    match error {
+        SavedError::Live { id } => {
+            let live = format!("Session {id} is the live session");
+            match live_recovery {
+                Some(recovery) => format!("{live}. {recovery}"),
+                None => live,
+            }
+        }
+        SavedError::Failed { action, id, cause } => {
+            format!("Failed to {action} session {id}: {cause:#}")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +182,36 @@ mod tests {
             assert_eq!(
                 err.to_string(),
                 format!("failed to delete session missing-: {cause:#}")
+            );
+        }
+    }
+
+    mod saved_error_message {
+        use super::*;
+
+        #[test]
+        fn ends_a_live_refusal_with_the_recovery_and_capitalizes_a_failure() {
+            let live = || SavedError::Live {
+                id: "abababab".to_owned(),
+            };
+            assert_eq!(
+                saved_error_message(live(), Some(BARE_ARCHIVE_HINT)),
+                "Session abababab is the live session. \
+                 Use bare `/archive` to archive it and start a new one.",
+            );
+            assert_eq!(
+                saved_error_message(live(), None),
+                "Session abababab is the live session",
+            );
+
+            let failed = SavedError::Failed {
+                action: "unarchive",
+                id: "abababab".to_owned(),
+                cause: anyhow::anyhow!("disk unavailable"),
+            };
+            assert_eq!(
+                saved_error_message(failed, None),
+                "Failed to unarchive session abababab: disk unavailable",
             );
         }
     }

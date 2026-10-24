@@ -2,6 +2,9 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use time::OffsetDateTime;
@@ -9,7 +12,7 @@ use time::OffsetDateTime;
 use super::listing::{ListScope, ProjectScope};
 use super::{
     Project, SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
-    load_session_data_from_path, open_append_file, set_archived_at,
+    load_session_data_from_path, lock_writer, open_append_file, set_archived_at,
 };
 use crate::session::entry::{ArchiveState, CURRENT_VERSION, Entry, Header, SessionInfo};
 
@@ -79,6 +82,39 @@ impl SessionWriter {
 }
 
 // ── Fixtures ──
+
+/// Holds a competing writer's lock until the test releases it. The deadline fails a blocked
+/// runtime or UI test before it can strand the suite.
+pub struct WriterBarrier {
+    release: mpsc::Sender<()>,
+    completed: JoinHandle<()>,
+}
+
+impl WriterBarrier {
+    pub fn hold(path: &Path) -> Self {
+        let path = path.to_owned();
+        let (ready, acquired) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let completed = thread::spawn(move || {
+            let _lock = lock_writer(&path).expect("the competing writer acquires the lock");
+            ready.send(()).expect("the test waits for the writer");
+            released
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the test remains responsive while the writer holds the lock");
+        });
+        acquired.recv().expect("the competing writer starts");
+        Self { release, completed }
+    }
+
+    pub fn release(self) {
+        self.release
+            .send(())
+            .expect("the competing writer is still waiting");
+        self.completed
+            .join()
+            .expect("the competing writer finishes");
+    }
+}
 
 pub fn test_store(dir: &Path) -> SessionStore {
     SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).expect("the test store opens")
