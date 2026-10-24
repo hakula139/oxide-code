@@ -14,7 +14,9 @@ use super::{
     Project, SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
     load_session_data_from_path, lock_writer, open_append_file, set_archived_at,
 };
-use crate::session::entry::{ArchiveState, CURRENT_VERSION, Entry, Header, SessionInfo};
+use crate::session::entry::{
+    ArchiveState, CURRENT_VERSION, Entry, ExitInfo, Header, SessionInfo, TitleInfo,
+};
 
 pub(crate) const TEST_PROJECT: &str = "test-project";
 
@@ -184,18 +186,18 @@ pub fn seed_test_session(
         .expect("the session is created");
     if let Some(t) = title {
         writer
-            .append(&[Entry::Title {
+            .append(&[Entry::Title(TitleInfo {
                 title: t.to_owned(),
                 updated_at: created_at,
-            }])
+            })])
             .expect("the title is appended");
     }
     if let Some(count) = message_count {
         writer
-            .append(&[Entry::Summary {
+            .append(&[Entry::Summary(ExitInfo {
                 message_count: count,
                 updated_at: created_at,
-            }])
+            })])
             .expect("the summary is appended");
     }
     set_modified(writer.path(), created_at);

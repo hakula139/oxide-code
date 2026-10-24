@@ -939,9 +939,7 @@ mod tests {
                         ResponseEvent::Text("Hi".to_owned()),
                         ResponseEvent::Usage(TokenUsage::new(1_000, 100)),
                         ResponseEvent::Completed(Response {
-                            content: vec![ContentBlock::Text {
-                                text: "Hi".to_owned(),
-                            }],
+                            content: vec![ContentBlock::text("Hi")],
                             stop_reason: Some(StopReason::EndTurn),
                             ..Response::default()
                         }),
@@ -974,9 +972,7 @@ mod tests {
                     [
                         ResponseEvent::Text("🦀rust".to_owned()),
                         ResponseEvent::Completed(Response {
-                            content: vec![ContentBlock::Text {
-                                text: "🦀rust".to_owned(),
-                            }],
+                            content: vec![ContentBlock::text("🦀rust")],
                             ..Response::default()
                         }),
                     ],

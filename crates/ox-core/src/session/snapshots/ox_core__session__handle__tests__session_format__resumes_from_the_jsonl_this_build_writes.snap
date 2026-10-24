@@ -74,9 +74,20 @@ expression: recovered
     {
       "content": [
         {
-          "text": "Summary: asked to edit f.rs.",
+          "origin": "compaction_summary",
+          "text": "This conversation has been compacted. The summary below covers the prior work. Continue from here without re-asking the engineer what to do.\n\nAsked to edit f.rs.\n",
           "type": "text"
         },
+        {
+          "origin": "system_reminder",
+          "text": "<system-reminder>\nYour task list carries over from before the summary. Keep it current with the tasks tool:\n\n- [completed] Read the config loader\n- [in_progress] Add the entry type\n- [pending] Write the tests\n</system-reminder>",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
         {
           "text": "Rename main in f.rs",
           "type": "text"
@@ -261,6 +272,16 @@ expression: recovered
       "title": "Read g.rs"
     },
     "t3": {
+      "result_view": {
+        "data": {
+          "files": [
+            "g.rs"
+          ],
+          "pattern": "*.rs",
+          "total": 250
+        },
+        "type": "glob_files"
+      },
       "title": "Found 100 files",
       "truncated_total": 250
     }

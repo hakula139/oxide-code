@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 use uuid::Uuid;
 
-use super::entry::{CompactBoundary, Entry, UsageRecord};
+use super::entry::{CompactBoundary, Entry, TitleInfo, UsageRecord};
 use super::handle::{Checkpoint, CompactOutcome, Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
 use crate::file_tracker::FileSnapshot;
@@ -165,7 +165,8 @@ impl Batch {
                 BatchFlow::Continue
             }
             SessionCmd::Rewind { checkpoint, ack } => {
-                self.entries.push(state.rewind_entry(checkpoint, now));
+                self.entries
+                    .push(state.rewind_entry(checkpoint, shared.manual_title_set(), now));
                 self.acks.push(PendingAck::Outcome(ack));
                 BatchFlow::Continue
             }
@@ -188,10 +189,10 @@ impl Batch {
                     _ = ack.send(Outcome { failure: None });
                     return BatchFlow::Continue;
                 }
-                self.entries.push(Entry::Title {
+                self.entries.push(Entry::Title(TitleInfo {
                     title,
                     updated_at: now,
-                });
+                }));
                 self.acks.push(PendingAck::Outcome(ack));
                 BatchFlow::Continue
             }
@@ -199,10 +200,10 @@ impl Batch {
                 match state.try_defer_title(title) {
                     None => _ = ack.send(Outcome { failure: None }),
                     Some(title) => {
-                        self.entries.push(Entry::Title {
+                        self.entries.push(Entry::Title(TitleInfo {
                             title,
                             updated_at: now,
-                        });
+                        }));
                         self.acks.push(PendingAck::Outcome(ack));
                     }
                 }
@@ -384,6 +385,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::session::entry::ExitInfo;
     use crate::session::handle::testing::boundary;
     use crate::session::state::MAX_UNWRITTEN_BYTES;
     use crate::session::store::local_testing::{saved_entries, saved_titles, test_session_file};
@@ -484,12 +486,12 @@ mod tests {
                     entries.as_slice(),
                     [
                         Entry::Header(_),
-                        Entry::Title { .. },
+                        Entry::Title(_),
                         Entry::Message { .. },
-                        Entry::Summary {
+                        Entry::Summary(ExitInfo {
                             message_count: 1,
                             ..
-                        },
+                        }),
                     ]
                 ),
                 "{entries:?}",
@@ -628,12 +630,7 @@ mod tests {
             assert!(
                 matches!(
                     entries[..],
-                    [
-                        Entry::Header(_),
-                        Entry::Title { .. },
-                        Entry::Message { .. },
-                        ..
-                    ]
+                    [Entry::Header(_), Entry::Title(_), Entry::Message { .. }, ..]
                 ),
                 "deferred title must flush after the header and before the message: {entries:?}",
             );
@@ -762,7 +759,7 @@ mod tests {
 
             let summary_count = saved_entries(dir.path(), &session_id)
                 .iter()
-                .filter(|entry| matches!(entry, Entry::Summary { .. }))
+                .filter(|entry| matches!(entry, Entry::Summary(_)))
                 .count();
             assert_eq!(summary_count, 1, "second finish must not duplicate");
         }
@@ -805,7 +802,7 @@ mod tests {
                     entries[..],
                     [
                         Entry::Header(_),
-                        Entry::Title { .. },
+                        Entry::Title(_),
                         Entry::Message { .. },
                         Entry::Message { .. },
                         Entry::Compact { .. },
@@ -863,11 +860,11 @@ mod tests {
             assert_eq!(data.messages.len(), 2);
             assert!(matches!(
                 &data.messages[0].content[0],
-                crate::message::ContentBlock::Text { text } if text == "synthetic summary"
+                crate::message::ContentBlock::Text { text, .. } if text == "synthetic summary"
             ));
             assert!(matches!(
                 &data.messages[1].content[0],
-                crate::message::ContentBlock::Text { text } if text == "after compact"
+                crate::message::ContentBlock::Text { text, .. } if text == "after compact"
             ));
         }
 

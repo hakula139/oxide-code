@@ -950,14 +950,13 @@ mod tests {
                     ])
                 );
                 let request = &request_bodies(&server).await[0];
-                let replayed: Vec<&str> = request["messages"][1]["content"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|block| block["text"].as_str().unwrap())
-                    .collect();
-                assert_eq!(replayed, ["write a story", "[Request interrupted by user]"]);
-                assert_eq!(texts(request)[2..], ["what is 7 times 6?"]);
+                assert_eq!(request["messages"][1], serde_json::json!({
+                    "role": "user", "content": [{"type": "text", "text": "write a story"}],
+                }));
+                assert_eq!(request["messages"][2], serde_json::json!({
+                    "role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}],
+                }));
+                assert_eq!(texts(request)[3..], ["what is 7 times 6?"]);
             })
             .await;
         }

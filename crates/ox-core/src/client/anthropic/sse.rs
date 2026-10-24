@@ -408,9 +408,7 @@ mod tests {
 
         fn hi_reply() -> ResponseEvent {
             ResponseEvent::Completed(Response {
-                content: vec![ContentBlock::Text {
-                    text: "Hi".to_owned(),
-                }],
+                content: vec![ContentBlock::text("Hi")],
                 ..Response::default()
             })
         }

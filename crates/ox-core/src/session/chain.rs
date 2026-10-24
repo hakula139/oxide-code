@@ -74,13 +74,13 @@ impl ChainBuilder {
 
     /// Moves the tip to `tip`, superseding any earlier rewind, and abandons every other leaf so the
     /// newest-leaf rule skips them. Ignores a rewind to a message not read before it, such as one
-    /// before the last compaction.
-    pub(super) fn rewind(&mut self, tip: Option<Uuid>) {
+    /// before the last compaction, returning whether the rewind took effect.
+    pub(super) fn rewind(&mut self, tip: Option<Uuid>) -> bool {
         if let Some(uuid) = tip
             && !self.nodes.contains_key(&uuid)
         {
             warn!("ignoring rewind to unknown message {uuid}");
-            return;
+            return false;
         }
         let leaves = self
             .nodes
@@ -88,6 +88,7 @@ impl ChainBuilder {
             .filter(|uuid| !self.referenced.contains(uuid) && Some(**uuid) != tip);
         self.abandoned.extend(leaves);
         self.tip = Tip::Rewound(tip);
+        true
     }
 
     /// Resolves the latest rewind not followed by a message, or the newest non-abandoned leaf,
@@ -151,7 +152,7 @@ mod tests {
             assert_eq!(chain.len(), want.len());
             for (msg, want_text) in chain.iter().zip(want) {
                 assert!(
-                    matches!(&msg.content[0], ContentBlock::Text { text } if text == want_text)
+                    matches!(&msg.content[0], ContentBlock::Text { text, .. } if text == want_text)
                 );
             }
         }

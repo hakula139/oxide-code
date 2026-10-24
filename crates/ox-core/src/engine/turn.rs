@@ -534,9 +534,7 @@ mod tests {
     use crate::util::path::local_testing::canonical_tempdir;
 
     fn text_block(text: &str) -> ContentBlock {
-        ContentBlock::Text {
-            text: text.to_owned(),
-        }
+        ContentBlock::text(text)
     }
 
     mod agent_turn {
@@ -603,7 +601,7 @@ mod tests {
             let mut events: Vec<ResponseEvent> = content
                 .iter()
                 .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(ResponseEvent::Text(text.clone())),
+                    ContentBlock::Text { text, .. } => Some(ResponseEvent::Text(text.clone())),
                     ContentBlock::Thinking { thinking, .. } => {
                         Some(ResponseEvent::Thinking(thinking.clone()))
                     }
@@ -1182,7 +1180,7 @@ mod tests {
                 [TokenUsage::new(9, 2), TokenUsage::new(1, 2)]
             );
             assert!(
-                matches!(&messages[5].content[0], ContentBlock::Text { text } if text == "Done")
+                matches!(&messages[5].content[0], ContentBlock::Text { text, .. } if text == "Done")
             );
         }
 
@@ -1222,7 +1220,7 @@ mod tests {
             assert!(
                 matches!(
                     &messages[3].content[0],
-                    ContentBlock::Text { text } if text == "follow up",
+                    ContentBlock::Text { text, .. } if text == "follow up",
                 ),
                 "drained prompt must land between tool_result and round 2: {:?}",
                 messages[3],
@@ -1271,11 +1269,11 @@ mod tests {
             assert_eq!(messages.len(), 6, "{messages:#?}");
             assert!(matches!(
                 &messages[3].content[0],
-                ContentBlock::Text { text } if text == "first",
+                ContentBlock::Text { text, .. } if text == "first",
             ));
             assert!(matches!(
                 &messages[4].content[0],
-                ContentBlock::Text { text } if text == "second",
+                ContentBlock::Text { text, .. } if text == "second",
             ));
 
             let drained: Vec<_> = sink
@@ -2070,7 +2068,7 @@ mod tests {
                     [user, paused]
                         if user.role == Role::User
                             && paused.role == Role::Assistant
-                            && matches!(&paused.content[..], [ContentBlock::Text { text }] if text == "searching"),
+                            && matches!(&paused.content[..], [ContentBlock::Text { text, .. }] if text == "searching"),
                 ),
                 "resume must end on the paused reply: {:?}",
                 requests[1],
@@ -2078,7 +2076,7 @@ mod tests {
             assert!(
                 matches!(
                     &messages[2].content[..],
-                    [ContentBlock::Text { text }] if text == "found it"
+                    [ContentBlock::Text { text, .. }] if text == "found it"
                 ),
                 "{messages:?}",
             );
@@ -2118,7 +2116,7 @@ mod tests {
                  Ask for smaller steps, or raise `client.max_tokens`.",
             );
             assert!(
-                matches!(&messages[1..], [reply] if matches!(&reply.content[..], [ContentBlock::Text { text }] if text == "Writing it now.")),
+                matches!(&messages[1..], [reply] if matches!(&reply.content[..], [ContentBlock::Text { text, .. }] if text == "Writing it now.")),
                 "only the finished prose is kept: {messages:?}",
             );
             assert_eq!(client.requests().len(), 1, "the cut call is never retried");
@@ -2758,9 +2756,7 @@ mod tests {
 
         #[test]
         fn names_the_cause_and_whether_tools_were_skipped() {
-            let text = || ContentBlock::Text {
-                text: "prose".to_owned(),
-            };
+            let text = || ContentBlock::text("prose");
             let tool_use = ContentBlock::ToolUse {
                 id: "tool_1".to_owned(),
                 name: "echo".to_owned(),
