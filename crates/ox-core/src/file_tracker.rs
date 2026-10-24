@@ -8,6 +8,7 @@ use anyhow::{Context as _, ensure};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio_util::task::TaskTracker;
+use tracing::instrument::WithSubscriber as _;
 use tracing::{debug, warn};
 use xxhash_rust::xxh64::xxh64;
 
@@ -172,18 +173,21 @@ impl FileTracker {
         let tracker = Arc::clone(self);
         let tool_use_id = tool_use_id.to_owned();
         self.writes
-            .spawn(async move {
-                match write.await {
-                    Ok((key, bytes)) => {
-                        tracker.record_modify(key, &bytes, tool_use_id);
-                        Ok(())
-                    }
-                    Err(error) => {
-                        warn!(tool_use_id, error = %format_args!("{error:#}"), "workspace write failed");
-                        Err(error)
+            .spawn(
+                async move {
+                    match write.await {
+                        Ok((key, bytes)) => {
+                            tracker.record_modify(key, &bytes, tool_use_id);
+                            Ok(())
+                        }
+                        Err(error) => {
+                            warn!(tool_use_id, error = %format_args!("{error:#}"), "workspace write failed");
+                            Err(error)
+                        }
                     }
                 }
-            })
+                .with_current_subscriber(),
+            )
             .await
             .unwrap_or_else(|e| Err(e.into()))
     }

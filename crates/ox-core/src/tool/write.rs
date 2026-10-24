@@ -242,6 +242,7 @@ mod tests {
     use std::sync::Arc;
 
     use tokio::sync::{Notify, mpsc};
+    use tracing::instrument::WithSubscriber as _;
 
     use super::*;
     use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
@@ -702,7 +703,7 @@ mod tests {
             );
         }
 
-        #[tokio::test]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn logs_parent_creation_failure_after_the_caller_is_dropped() {
             let dir = canonical_tempdir();
             let parent = dir.path().join("nested");
@@ -714,16 +715,18 @@ mod tests {
                 .with_ansi(false)
                 .with_writer(fs::File::create(&log_path).unwrap())
                 .finish();
-            let _subscriber = tracing::subscriber::set_default(subscriber);
             let (started, mut started_rx) = mpsc::unbounded_channel();
             let release = Arc::new(Notify::new());
-            let mut caller = Box::pin(testing::write_with_blocked_parent(
-                &path,
-                "content",
-                &ctx,
-                started,
-                Arc::clone(&release),
-            ));
+            let mut caller = Box::pin(
+                testing::write_with_blocked_parent(
+                    &path,
+                    "content",
+                    &ctx,
+                    started,
+                    Arc::clone(&release),
+                )
+                .with_subscriber(subscriber),
+            );
             tokio::select! {
                 token = started_rx.recv() => assert!(token.is_some()),
                 result = caller.as_mut() => panic!("write ended before parent creation: {result:?}"),
