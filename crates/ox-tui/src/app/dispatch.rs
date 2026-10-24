@@ -518,6 +518,7 @@ mod tests {
     use ox_core::protocol::testing::text_result;
     use ox_core::protocol::{ApprovalDecision, ConfigPick, Event, ResumeTarget};
     use ox_core::session::entry::ArchiveState;
+    use ox_core::session::store::testing::{seed_test_session, stamped_id, with_isolated_xdg};
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
     use super::*;
@@ -554,6 +555,43 @@ mod tests {
 
     mod handle_crossterm_event {
         use super::*;
+
+        #[test]
+        fn buffered_confirmation_keys_leave_the_saved_session_untouched() {
+            for code in [KeyCode::Enter, KeyCode::Char('y')] {
+                for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+                    with_isolated_xdg(|_| {
+                        let (mut app, _rx, _event_tx) = test_app(None);
+                        let store = ox_core::session::store::SessionStore::open(
+                            &app.session_info.cwd,
+                            &app.session_info.project_root,
+                        )
+                        .unwrap();
+                        let id = stamped_id(0xab);
+                        seed_test_session(
+                            &store,
+                            &id,
+                            Some("Delete target"),
+                            Some(1),
+                            time::macros::datetime!(2026-04-18 09:00:00 UTC),
+                        );
+                        let path = store.find_session_path(&id).unwrap();
+                        app.input.set_text(&format!("/delete {}", &id[..8]));
+                        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+                        assert!(app.modals.is_active());
+
+                        app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::new_with_kind(
+                            code,
+                            KeyModifiers::NONE,
+                            kind,
+                        )));
+
+                        assert!(path.exists(), "{code:?} {kind:?} deleted an unseen target");
+                        assert!(app.modals.is_active(), "{code:?} {kind:?}");
+                    });
+                }
+            }
+        }
 
         /// Double-clicks the word `needle`, which selects and copies it.
         async fn select_word(app: &mut App, needle: &str) {

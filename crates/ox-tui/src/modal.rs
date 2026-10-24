@@ -1,5 +1,6 @@
 //! Modal stack that routes keys to the top overlay and renders it between chat and input.
 
+pub(crate) mod acceptance;
 pub(crate) mod approval;
 pub(crate) mod chrome;
 pub(crate) mod kv_overview;
@@ -32,6 +33,7 @@ pub(crate) trait Modal: Send {
     /// `max_height`, and the stack clips anything taller.
     fn height(&self, width: u16, max_height: u16) -> u16;
 
+    /// Updates the current view even when `area` has no cells, invalidating hidden acceptance.
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme);
 
     /// Routes one key event. Returns whether the modal consumed it, was cancelled, or submitted a
@@ -165,9 +167,6 @@ impl ModalStack {
         let Some(top) = self.stack.last() else {
             return;
         };
-        if area.height == 0 {
-            return;
-        }
         let border_area = Rect {
             height: TOP_BORDER_HEIGHT.min(area.height),
             ..area
@@ -179,9 +178,6 @@ impl ModalStack {
         frame.render_widget(Paragraph::new(border).style(theme.surface()), border_area);
 
         let body_height = area.height.saturating_sub(TOP_BORDER_HEIGHT);
-        if body_height == 0 {
-            return;
-        }
         let body_area = Rect {
             x: area.x,
             y: area.y.saturating_add(TOP_BORDER_HEIGHT),
@@ -293,7 +289,7 @@ pub(crate) mod testing {
     }
 
     /// [`render_rows`] for any render closure, such as a picker that is not a [`Modal`].
-    pub(super) fn render_rows_with(
+    pub(crate) fn render_rows_with(
         width: u16,
         height: u16,
         render: impl FnOnce(&mut Frame<'_>, Rect, &Theme),

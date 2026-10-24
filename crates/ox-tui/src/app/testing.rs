@@ -175,6 +175,7 @@ pub(super) fn push_answerable_approval(app: &mut App, command: &str) {
         None,
         None,
     );
+    crate::modal::testing::render_rows(&modal, 60, modal.height(60, 40));
     modal.expire_guard();
     app.push_modal(Box::new(modal));
 }
