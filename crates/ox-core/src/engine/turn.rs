@@ -510,7 +510,7 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::local_testing::{serve, test_client};
-    use crate::client::anthropic::testing::{api_key, sse_response};
+    use crate::client::anthropic::testing::{api_key, sse_body, sse_response};
     use crate::client::testing::five_hour_limit;
     use crate::config::compaction::CompactionConfig;
     use crate::engine::dispatch::NOT_RUN;
@@ -2193,6 +2193,106 @@ mod tests {
 
             outcome.into_result().unwrap();
             assert_eq!(messages, [Message::user("hi"), Message::assistant("hello")]);
+        }
+
+        #[tokio::test]
+        async fn real_client_reads_with_input_from_the_start_block() {
+            let dir = canonical_tempdir();
+            let file = dir.path().join("notes.txt");
+            std::fs::write(&file, "A note from the requested file.\n").unwrap();
+            let body = sse_body(&[
+                json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-sonnet-5-5"}}),
+                json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "read_1", "name": "read", "input": {"file_path": file}}}),
+                json!({"type": "content_block_stop", "index": 0}),
+                json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+                json!({"type": "message_stop"}),
+            ]);
+
+            let (outcome, messages, sink) = real_client_turn(
+                vec![sse_response(body), sse_response(HELLO_SSE)],
+                &ToolRegistry::new(vec![Box::new(crate::tool::read::ReadTool)]),
+            )
+            .await;
+            outcome.into_result().expect("the read round completes");
+
+            let (calls, results) = tool_events(&sink.events());
+            let result = &results[0];
+            assert_eq!(calls[0].input, json!({"file_path": file}));
+            assert!(!result.is_error, "{result:?}");
+            assert!(
+                result.content.contains("A note from the requested file."),
+                "{result:?}"
+            );
+            assert_eq!(messages.last(), Some(&Message::assistant("hello")));
+        }
+
+        #[tokio::test]
+        async fn real_client_never_executes_tool_input_with_a_corrupt_middle_frame() {
+            let cases = [
+                (
+                    sse_body(&[
+                        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": 42}}),
+                    ]),
+                    "failed to parse SSE data",
+                ),
+                (
+                    indoc! {r#"
+                        event: content_block_delta
+                        data: {"type":"future_event","index":0,"delta":{"type":"input_json_delta","partial_json":42}}
+
+                    "#}.to_owned(),
+                    "SSE event \"content_block_delta\" does not match data type",
+                ),
+                (
+                    indoc! {r#"
+                        event: error
+                        data: {"type":"overloaded_error","message":"Overloaded"}
+
+                    "#}.to_owned(),
+                    "SSE event \"error\" does not match data type",
+                ),
+            ];
+
+            for (corrupt, expected) in cases {
+                let dir = canonical_tempdir();
+                let file = dir.path().join("notes.txt");
+                let input = json!({"file_path": file, "content": "A"}).to_string();
+                let split = input.len() - 2;
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&input).unwrap()["content"],
+                    "A"
+                );
+                let start = sse_body(&[
+                    json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-sonnet-5-5"}}),
+                    json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "write_1", "name": "write", "input": {}}}),
+                    json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": &input[..split]}}),
+                ]);
+                let end = sse_body(&[
+                    json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": &input[split..]}}),
+                    json!({"type": "content_block_stop", "index": 0}),
+                    json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+                    json!({"type": "message_stop"}),
+                ]);
+                let body = [start, corrupt, end].concat();
+
+                let (outcome, messages, sink) = real_client_turn(
+                    vec![sse_response(body), sse_response(HELLO_SSE)],
+                    &ToolRegistry::new(vec![Box::new(crate::tool::write::WriteTool)]),
+                )
+                .await;
+
+                let error = outcome
+                    .into_result()
+                    .expect_err("a corrupt tool stream fails the turn");
+                let error = error.into_failure();
+                assert!(format!("{error:#}").contains(expected), "{error:#}");
+                assert_eq!(messages, [Message::user("hi")]);
+                assert_eq!(tool_events(&sink.events()), (vec![], vec![]));
+                assert!(
+                    !file.exists(),
+                    "the corrupted tool call cannot create the file"
+                );
+            }
         }
 
         #[tokio::test]
