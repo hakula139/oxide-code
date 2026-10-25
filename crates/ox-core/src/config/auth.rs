@@ -13,6 +13,7 @@ use tracing::warn;
 use super::gateway::CUSTOM_HEADERS_VAR;
 use super::load::user_config_hint;
 use super::oauth::{ClaudeCodeKeychain, Login, LoginError, SessionLogin, login_stores};
+use super::schema::{AuthValue, ClientAuth};
 use crate::util::env;
 use crate::util::text::join_sentences;
 use crate::util::tls::Trust;
@@ -58,6 +59,9 @@ pub enum AuthSource {
     AuthTokenEnv,
     ApiKeyEnv,
     ApiKeyFile,
+    ClientBearer,
+    ClientApiKey,
+    ClientOAuth,
     OAuthTokenEnv,
     /// oxide-code's stored login from `/login` (`$XDG_DATA_HOME/ox/credentials.json`), refreshed
     /// before a request near its expiry and reloaded after a 401.
@@ -79,9 +83,11 @@ impl AuthSource {
 
     pub const fn kind(self) -> AuthKind {
         match self {
-            Self::AuthTokenEnv => AuthKind::AuthToken,
-            Self::ApiKeyEnv | Self::ApiKeyFile => AuthKind::ApiKey,
-            Self::OAuthTokenEnv | Self::OxLogin | Self::ClaudeCodeLogin => AuthKind::OAuth,
+            Self::AuthTokenEnv | Self::ClientBearer => AuthKind::AuthToken,
+            Self::ApiKeyEnv | Self::ApiKeyFile | Self::ClientApiKey => AuthKind::ApiKey,
+            Self::OAuthTokenEnv | Self::ClientOAuth | Self::OxLogin | Self::ClaudeCodeLogin => {
+                AuthKind::OAuth
+            }
         }
     }
 
@@ -94,7 +100,13 @@ impl AuthSource {
         match self {
             Self::OxLogin => Some(Login::Ox),
             Self::ClaudeCodeLogin => Some(Login::ClaudeCode),
-            Self::AuthTokenEnv | Self::ApiKeyEnv | Self::ApiKeyFile | Self::OAuthTokenEnv => None,
+            Self::AuthTokenEnv
+            | Self::ApiKeyEnv
+            | Self::ApiKeyFile
+            | Self::OAuthTokenEnv
+            | Self::ClientBearer
+            | Self::ClientApiKey
+            | Self::ClientOAuth => None,
         }
     }
 
@@ -104,12 +116,23 @@ impl AuthSource {
             Self::AuthTokenEnv => Some("ANTHROPIC_AUTH_TOKEN"),
             Self::ApiKeyEnv => Some("ANTHROPIC_API_KEY"),
             Self::OAuthTokenEnv => Some("CLAUDE_CODE_OAUTH_TOKEN"),
-            Self::ApiKeyFile | Self::OxLogin | Self::ClaudeCodeLogin => None,
+            Self::ApiKeyFile
+            | Self::ClientBearer
+            | Self::ClientApiKey
+            | Self::ClientOAuth
+            | Self::OxLogin
+            | Self::ClaudeCodeLogin => None,
         }
     }
 
     /// The env var, config key, or store the credential was read from.
     fn origin(self) -> &'static str {
+        if matches!(
+            self,
+            Self::ClientBearer | Self::ClientApiKey | Self::ClientOAuth
+        ) {
+            return "client.auth";
+        }
         self.env_var()
             .or(self.login().map(Login::name))
             .unwrap_or("client.api_key")
@@ -122,6 +145,9 @@ impl AuthSource {
             Self::ApiKeyEnv => "Check ANTHROPIC_API_KEY.",
             Self::ApiKeyFile => {
                 "Check client.api_key in your user config. `/config` shows which file sets it."
+            }
+            Self::ClientBearer | Self::ClientApiKey | Self::ClientOAuth => {
+                "Check client.auth in your user config. `/config` shows which file sets it."
             }
             Self::OAuthTokenEnv => {
                 "CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
@@ -290,6 +316,45 @@ impl Credential {
 }
 
 // ── Resolution ──
+
+/// Selected file credential, whose contents are read once at startup after declaration checks.
+#[derive(Debug, Clone)]
+pub(super) struct PendingAuth {
+    pub(super) source: AuthSource,
+    path: std::path::PathBuf,
+}
+
+impl PendingAuth {
+    pub(super) fn load(&self) -> Result<Auth> {
+        let raw = std::fs::read_to_string(&self.path).with_context(|| {
+            format!("failed to read client.auth.file at {}", self.path.display())
+        })?;
+        let secret = raw.trim_end_matches(['\r', '\n']);
+        anyhow::ensure!(
+            !secret.is_empty(),
+            "client.auth.file at {} is empty",
+            self.path.display()
+        );
+        Credential::new(self.source, secret.to_owned())
+            .with_context(|| format!("invalid client.auth.file at {}", self.path.display()))?;
+        Ok(Auth::new(self.source, secret))
+    }
+}
+
+pub(super) fn configured_auth(auth: ClientAuth) -> Result<(Option<Auth>, Option<PendingAuth>)> {
+    let (source, AuthValue { value, file }) = match auth {
+        ClientAuth::Bearer(value) => (AuthSource::ClientBearer, value),
+        ClientAuth::ApiKey(value) => (AuthSource::ClientApiKey, value),
+        ClientAuth::Oauth(value) => (AuthSource::ClientOAuth, value),
+        ClientAuth::Login {} => return Ok((None, None)),
+    };
+    if let Some(secret) = value {
+        Credential::new(source, secret.clone())?;
+        return Ok((Some(Auth::new(source, secret)), None));
+    }
+    let path = crate::util::path::expand_user(&file.expect("validated auth has a source"))?;
+    Ok((None, Some(PendingAuth { source, path })))
+}
 
 /// Credential resolution failure. Messages capture config paths when the error is constructed
 /// because those paths depend on the current environment.

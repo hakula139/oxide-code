@@ -15,6 +15,7 @@ use crate::permission::defaults::Shipped;
 use crate::permission::rule::Rule;
 use crate::permission::{Mode, PermissionClass, Tier};
 use crate::util::env::whole_number_in;
+use crate::util::path::expand_user;
 
 /// One config file, or several merged. Every key is optional.
 #[derive(Debug, Default, Deserialize)]
@@ -25,12 +26,16 @@ pub(super) struct FileConfig {
     pub(super) tui: TuiTable,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct ClientTable {
     pub(super) api_key: Option<String>,
+    pub(super) auth: Option<ClientAuth>,
     pub(super) base_url: Option<String>,
     pub(super) extra_ca_certs: Option<String>,
+    pub(super) headers: Option<BTreeMap<String, String>>,
+    pub(super) attribution: Option<bool>,
+    pub(super) structured_outputs: Option<bool>,
     pub(super) model: Option<String>,
     pub(super) effort: Option<Effort>,
     #[serde(deserialize_with = "count")]
@@ -39,6 +44,75 @@ pub(super) struct ClientTable {
     pub(super) max_tool_rounds: Option<u32>,
     pub(super) prompt_cache_ttl: Option<PromptCacheTtl>,
     pub(super) compaction: CompactionTable,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) enum ClientAuth {
+    Bearer(AuthValue),
+    ApiKey(AuthValue),
+    Oauth(AuthValue),
+    Login {},
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AuthValue {
+    pub(super) value: Option<String>,
+    pub(super) file: Option<String>,
+}
+
+impl fmt::Debug for AuthValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthValue").finish_non_exhaustive()
+    }
+}
+
+impl ClientTable {
+    pub(super) fn validate(&self) -> Result<()> {
+        if let Some(headers) = &self.headers {
+            super::gateway::file_headers(headers)?;
+        }
+        anyhow::ensure!(
+            self.api_key.is_none() || self.auth.is_none(),
+            "client.api_key and client.auth cannot be set in the same file"
+        );
+        let Some(auth) = &self.auth else {
+            return Ok(());
+        };
+        let (ClientAuth::Bearer(source) | ClientAuth::ApiKey(source) | ClientAuth::Oauth(source)) =
+            auth
+        else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            source.value.is_some() != source.file.is_some(),
+            "client.auth requires exactly one of value or file"
+        );
+        if let Some(value) = &source.value {
+            anyhow::ensure!(!value.is_empty(), "client.auth.value must not be empty");
+            reqwest::header::HeaderValue::from_str(value)
+                .context("invalid client.auth.value: expected an HTTP header value")?;
+        }
+        if let Some(file) = &source.file {
+            let path = expand_user(file).context("invalid client.auth.file")?;
+            anyhow::ensure!(
+                path.is_absolute()
+                    && (std::path::Path::new(file).is_absolute() || file.starts_with("~/")),
+                "client.auth.file must be an absolute or ~/ path"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for ClientTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientTable")
+            .field("auth", &self.auth)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

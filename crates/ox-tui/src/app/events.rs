@@ -356,6 +356,12 @@ impl App {
                 "Signed in. {auth} takes precedence, so requests keep using it. \
                  Remove `client.api_key` and restart ox to use the new login."
             ),
+            AuthSource::ClientBearer | AuthSource::ClientApiKey | AuthSource::ClientOAuth => {
+                format!(
+                    "Signed in. {auth} takes precedence, so requests keep using it. \
+                 Remove `client.auth` and restart ox to use the new login."
+                )
+            }
             AuthSource::AuthTokenEnv | AuthSource::ApiKeyEnv | AuthSource::OAuthTokenEnv => {
                 format!(
                     "Signed in. {auth} takes precedence, so requests keep using it. \

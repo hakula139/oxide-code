@@ -135,6 +135,13 @@ in
           + "which every local user can read. Export ANTHROPIC_API_KEY from your secret manager "
           + "instead.";
       }
+
+      {
+        assertion = !(cfg.settings ? client.auth.value);
+        message =
+          "programs.oxide-code.settings.client.auth.value would write the credential into the Nix store, "
+          + "which every local user can read. Set client.auth.file to a secret file path.";
+      }
     ];
 
     home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];

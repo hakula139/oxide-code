@@ -1,9 +1,10 @@
-//! Request-shape settings for LLM gateways, read from the env vars Claude Code uses.
+//! Request-shape settings for LLM gateways, from user configuration and Claude Code env vars.
 
 use anyhow::{Context as _, Result, bail};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use super::auth::AuthSource;
+use super::schema::ClientTable;
 use crate::util::env;
 
 /// The env var holding extra request headers, which gateways also use to carry their keys.
@@ -14,7 +15,7 @@ pub(super) const CUSTOM_HEADERS_VAR: &str = "ANTHROPIC_CUSTOM_HEADERS";
 /// How requests adapt to a gateway between ox and the Anthropic API.
 #[derive(Debug, Clone)]
 pub(crate) struct GatewayCompat {
-    /// `ANTHROPIC_CUSTOM_HEADERS`, sent on every API request after the built-in headers.
+    /// Sent on every API request after the built-in headers.
     pub(crate) custom_headers: HeaderMap,
     /// Whether requests carry the `x-anthropic-billing-header` attribution block.
     pub(crate) attribution: bool,
@@ -24,18 +25,31 @@ pub(crate) struct GatewayCompat {
 }
 
 impl GatewayCompat {
-    pub(super) fn load() -> Result<Self> {
-        let custom_headers = env::string(CUSTOM_HEADERS_VAR)
-            .map(|raw| parse_headers(&raw))
-            .transpose()
-            .context("invalid ANTHROPIC_CUSTOM_HEADERS")?
-            .unwrap_or_default();
+    pub(super) fn from_client(client: &ClientTable) -> Result<Self> {
+        let custom_headers = match env::string(CUSTOM_HEADERS_VAR) {
+            Some(raw) => parse_headers(&raw).context("invalid ANTHROPIC_CUSTOM_HEADERS")?,
+            None => client
+                .headers
+                .as_ref()
+                .map(file_headers)
+                .transpose()?
+                .unwrap_or_default(),
+        };
         Ok(Self {
             custom_headers,
-            attribution: env::bool("CLAUDE_CODE_ATTRIBUTION_HEADER")?.unwrap_or(true),
-            structured_outputs: !env::bool("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS")?
-                .unwrap_or(false),
+            attribution: env::bool("CLAUDE_CODE_ATTRIBUTION_HEADER")?
+                .or(client.attribution)
+                .unwrap_or(true),
+            structured_outputs: env::bool("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS")?
+                .map(|disabled| !disabled)
+                .or(client.structured_outputs)
+                .unwrap_or(true),
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn load() -> Result<Self> {
+        Self::from_client(&ClientTable::default())
     }
 
     pub(crate) fn snapshot(&self) -> GatewaySnapshot {
@@ -51,16 +65,44 @@ impl GatewayCompat {
     }
 
     /// Rejects a custom header that would replace the header carrying the active credential.
+    #[cfg(test)]
     pub(super) fn check_credential_header(&self, auth: AuthSource) -> Result<()> {
+        self.check_credential_header_from(auth, CUSTOM_HEADERS_VAR)
+    }
+
+    pub(super) fn check_credential_header_from(
+        &self,
+        auth: AuthSource,
+        setting: &str,
+    ) -> Result<()> {
         let name = auth.kind().header_name();
         if self.custom_headers.contains_key(&name) {
             bail!(
-                "invalid ANTHROPIC_CUSTOM_HEADERS: \
+                "invalid {setting}: \
                  {name} carries the {auth} credential and cannot be overridden"
             );
         }
         Ok(())
     }
+}
+
+pub(super) fn file_headers(raw: &std::collections::BTreeMap<String, String>) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in raw {
+        let name =
+            HeaderName::from_bytes(name.as_bytes()).context("invalid client.headers name")?;
+        anyhow::ensure!(
+            !RESERVED.contains(&name.as_str()),
+            "invalid client.headers: {name} is set by ox and cannot be overridden"
+        );
+        let mut value = HeaderValue::from_str(value).context("invalid client.headers value")?;
+        value.set_sensitive(true);
+        anyhow::ensure!(
+            headers.insert(name, value).is_none(),
+            "client.headers sets the same header more than once"
+        );
+    }
+    Ok(headers)
 }
 
 // ── GatewaySnapshot ──

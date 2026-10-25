@@ -185,7 +185,15 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     // A project file can link to another file in the checkout, and a parser message can quote one
     // of its values, as in `invalid type: string "..."`, so a project error gives only where it is.
     let invalid_toml = |e: toml::de::Error| {
-        let detail = if layer.is_project() {
+        let location = locate_error(&content, &e);
+        let sensitive = location.as_ref().is_some_and(|location| {
+            location.contains("`client.auth") || location.contains("`client.headers")
+        });
+        let detail = if sensitive {
+            location.map(|location| {
+                format!("{location}: expected a valid client credential or header declaration")
+            })
+        } else if layer.is_project() {
             locate_error(&content, &e)
         } else {
             Some(describe_error(&content, &e))
@@ -200,6 +208,7 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
         reject_project_keys(&table, path)?;
     }
     let config: FileConfig = toml::from_str(&content).map_err(invalid_toml)?;
+    config.client.validate().with_context(invalid)?;
     let permission = &config.permission;
     for (tier, table) in [
         (Tier::Deny, &permission.deny),

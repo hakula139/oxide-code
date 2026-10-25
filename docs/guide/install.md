@@ -133,6 +133,8 @@ With `checkConfig` on, the build runs the configured package's [`ox config check
 
 Paths in `settings` resolve in that environment, where `~` names the scratch home and your own home directory is out of reach. Give a theme file as a Nix path, such as `tui.theme.base = ./theme.toml`, and write an extra root under your home directory with `~/`. Set `checkConfig = false` if the check still rejects a path that exists where `ox` runs.
 
+The Home Manager module rejects `client.api_key` and `client.auth.value` because generated settings enter the Nix store. Set `client.auth.file` to an absolute or `~/` secret path, and select its scheme with `client.auth.type` as described in [Authentication](configuration.md#authentication). The configuration check validates credential declarations without opening secret files.
+
 ## Verify Your Installation
 
 ```bash

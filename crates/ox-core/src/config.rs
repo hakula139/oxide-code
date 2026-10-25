@@ -27,14 +27,14 @@ use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr, VariantArray};
 use tracing::warn;
 
-use self::auth::{Auth, AuthSource, CredentialError, LoginUnavailable};
+use self::auth::{Auth, AuthSource, CredentialError, LoginUnavailable, PendingAuth};
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
 use self::merge::Origins;
 use self::oauth::ClaudeCodeKeychain;
 use self::provenance::{Provenance, Source, Sourced, TierPattern};
-use self::schema::{FileConfig, PermissionTable, TierTable};
+use self::schema::{ClientAuth, FileConfig, PermissionTable, TierTable};
 use crate::model::{Effort, ModelSpec, PromptCacheTtl};
 use crate::permission::defaults::Shipped;
 use crate::permission::{Mode, Policy, Tier, Workspace};
@@ -213,6 +213,7 @@ pub struct Config {
     /// `None` until [`Config::resolve_auth`] finds a stored login, and while signed out, which only
     /// a session that can run `/login` starts in.
     pub(crate) auth: Option<Auth>,
+    pending_auth: Option<PendingAuth>,
     /// Why the session started signed out.
     pub(crate) signed_out: Option<LoginUnavailable>,
     pub(crate) base_url: String,
@@ -241,13 +242,13 @@ pub struct Config {
 impl Config {
     /// Resolves defaults, user and project config files, and environment values. Project discovery
     /// stays within `cwd`'s [`project_root`]. Invalid TOML or environment values fail the load.
-    /// Resolves explicit credentials only, leaving stored logins to [`Config::resolve_auth`].
+    /// Resolves inline explicit credentials, leaving secret files and stored logins to
+    /// [`Config::resolve_auth`].
     pub fn load(cwd: &Path) -> Result<Self> {
         Self::resolve(cwd, |path| load_extra_ca_certs(path).map(drop))
     }
 
-    /// Checks config as [`Config::load`] does without reading a CA bundle or stored login. The
-    /// bundle may be a secret the caller cannot read.
+    /// Checks declarations without reading a credential file, CA bundle, or stored login.
     pub fn check(cwd: &Path) -> Result<ConfigCheck> {
         let config = Self::resolve(cwd, |_| Ok(()))?;
         Ok(ConfigCheck {
@@ -271,6 +272,8 @@ impl Config {
             tui,
         } = config;
 
+        let gateway = GatewayCompat::from_client(&client)?;
+
         let base_url = env_string("ANTHROPIC_BASE_URL")
             .or_else(|| origins.sourced("client.base_url", client.base_url))
             .unwrap_or_else(|| Sourced::fallback(DEFAULT_BASE_URL.to_owned()));
@@ -281,9 +284,8 @@ impl Config {
             check_ca_bundle,
         )?;
 
-        let gateway = GatewayCompat::load()?;
-
-        let auth = resolve_explicit_auth(client.api_key, &origins, &gateway)?;
+        let (auth, pending_auth) =
+            resolve_explicit_auth(client.api_key, client.auth, &origins, &gateway)?;
 
         let model_id = env_string("OX_MODEL")
             .or_else(|| origins.sourced("client.model", client.model))
@@ -330,17 +332,18 @@ impl Config {
             overrides: tui.theme.overrides,
         };
         let theme_overrides = origins.sources_under("tui.theme.overrides");
+        let [custom_headers, attribution, structured_outputs] = gateway_sources(&origins);
 
         let provenance = Provenance {
-            layers: origins.into_layers(),
             model: model_id.source,
             effort: effort.source,
             auth: auth.source,
             base_url: base_url.source,
             extra_ca_certs: extra_ca_certs.source,
-            custom_headers: Source::env_if_set(gateway::CUSTOM_HEADERS_VAR),
-            attribution: Source::env_if_set("CLAUDE_CODE_ATTRIBUTION_HEADER"),
-            structured_outputs: Source::env_if_set("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS"),
+            custom_headers,
+            attribution,
+            structured_outputs,
+            layers: origins.into_layers(),
             max_tokens: max_tokens.source,
             max_tool_rounds: max_tool_rounds.source,
             prompt_cache_ttl: prompt_cache_ttl.source,
@@ -360,6 +363,7 @@ impl Config {
             model,
             effort: effort.value,
             auth: auth.value,
+            pending_auth,
             signed_out: None,
             base_url: base_url.value,
             extra_ca_certs: extra_ca_certs.value,
@@ -378,11 +382,15 @@ impl Config {
         })
     }
 
-    /// Falls back to a stored login when no explicit credential is set. Run after other startup
+    /// Loads a selected credential file or falls back to a stored login. Run after other startup
     /// checks so invalid settings fail before a Keychain prompt or token refresh. A TUI that
     /// `can_sign_in` may start signed out against the first-party API. Other sessions and gateways
     /// require credentials.
     pub async fn resolve_auth(&mut self, can_sign_in: bool) -> Result<()> {
+        if let Some(pending) = &self.pending_auth {
+            self.auth = Some(pending.load()?);
+            self.pending_auth = None;
+        }
         if self.auth.is_some() {
             return Ok(());
         }
@@ -481,18 +489,56 @@ fn resolve_extra_ca_certs(
 /// the header check covers the OAuth header that a stored login or `/login` sends.
 fn resolve_explicit_auth(
     file_api_key: Option<String>,
+    file_auth: Option<ClientAuth>,
     origins: &Origins,
     gateway: &GatewayCompat,
-) -> Result<Sourced<Option<Auth>>> {
-    let auth = auth::first_explicit(auth::explicit_credentials(file_api_key));
-    let source = auth.as_ref().map_or(AuthSource::OxLogin, Auth::source);
-    gateway.check_credential_header(source)?;
+) -> Result<(Sourced<Option<Auth>>, Option<PendingAuth>)> {
+    let mut explicit = auth::explicit_credentials(file_api_key).into_iter();
+    let mut auth = auth::first_explicit(explicit.by_ref().take(2));
+    let mut pending = None;
+    if auth.is_none() {
+        if let Some(file_auth) = file_auth {
+            (auth, pending) = auth::configured_auth(file_auth)?;
+        }
+        if auth.is_none() && pending.is_none() {
+            auth = auth::first_explicit(explicit);
+        }
+    }
+    let source = auth
+        .as_ref()
+        .map(Auth::source)
+        .or_else(|| pending.as_ref().map(|pending| pending.source))
+        .unwrap_or(AuthSource::OxLogin);
+    let header_setting = if env::string(gateway::CUSTOM_HEADERS_VAR).is_some() {
+        gateway::CUSTOM_HEADERS_VAR
+    } else {
+        "client.headers"
+    };
+    gateway.check_credential_header_from(source, header_setting)?;
 
     let source = match source {
         AuthSource::ApiKeyFile => origins.source("client.api_key"),
+        AuthSource::ClientBearer | AuthSource::ClientApiKey | AuthSource::ClientOAuth => {
+            origins.source("client.auth")
+        }
         source => source.env_var().map_or(Source::Default, Source::Env),
     };
-    Ok(Sourced::new(auth, source))
+    Ok((Sourced::new(auth, source), pending))
+}
+
+fn gateway_sources(origins: &Origins) -> [Source; 3] {
+    [
+        (gateway::CUSTOM_HEADERS_VAR, "client.headers"),
+        ("CLAUDE_CODE_ATTRIBUTION_HEADER", "client.attribution"),
+        (
+            "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
+            "client.structured_outputs",
+        ),
+    ]
+    .map(|(var, key)| match Source::env_if_set(var) {
+        Source::Default => origins.source(key),
+        source => source,
+    })
 }
 
 /// The effort the model takes. A pick the model ignores leaves the source at the default.
@@ -1257,8 +1303,9 @@ mod tests {
                 format!("{err:#}"),
                 format!(
                     "invalid config at {}: line 3, column 1, in `client`: \
-                     unknown field `show_thinking`, expected one of `api_key`, `base_url`, \
-                     `extra_ca_certs`, `model`, `effort`, `max_tokens`, `max_tool_rounds`, \
+                     unknown field `show_thinking`, expected one of `api_key`, `auth`, `base_url`, \
+                     `extra_ca_certs`, `headers`, `attribution`, `structured_outputs`, `model`, \
+                     `effort`, `max_tokens`, `max_tool_rounds`, \
                      `prompt_cache_ttl`, `compaction`",
                     user.path().display()
                 ),
