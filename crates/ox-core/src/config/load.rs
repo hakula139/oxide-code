@@ -187,7 +187,9 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     let invalid_toml = |e: toml::de::Error| {
         let location = locate_error(&content, &e);
         let expected = location.as_ref().and_then(|location| {
-            if location.contains("`client.auth") {
+            if location.contains("`client.api_key") {
+                Some("expected client.api_key to be a string")
+            } else if location.contains("`client.auth") {
                 Some("expected client.auth type bearer, api-key, oauth, or login with a valid source")
             } else if location.contains("`client.headers") {
                 Some("expected client.headers to map header names to string values")

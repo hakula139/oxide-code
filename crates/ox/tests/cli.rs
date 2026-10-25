@@ -119,9 +119,14 @@ fn tree(root: &Path) -> Vec<PathBuf> {
 }
 
 fn assert_private_auth_run(root: &Path, output: &Output) {
+    let secrets = [
+        "private-token-sentinel",
+        "private-header-sentinel",
+        "987654321",
+    ];
     for bytes in [&output.stdout, &output.stderr] {
         let text = String::from_utf8_lossy(bytes);
-        for secret in ["private-token-sentinel", "private-header-sentinel"] {
+        for secret in secrets {
             assert!(!text.contains(secret), "{text}");
         }
     }
@@ -132,7 +137,7 @@ fn assert_private_auth_run(root: &Path, output: &Output) {
         for path in tree(&dir).into_iter().filter(|path| path.is_file()) {
             let bytes = std::fs::read(&path).expect("the run's artifact can be read");
             let text = String::from_utf8_lossy(&bytes);
-            for secret in ["private-token-sentinel", "private-header-sentinel"] {
+            for secret in secrets {
                 assert!(!text.contains(secret), "{}: {text}", path.display());
             }
         }
@@ -185,6 +190,7 @@ fn config_check_rejects_native_auth_shapes_without_echoing_private_values() {
         "client.auth = 'private-token-sentinel'",
         "client.auth = { type = 'private-token-sentinel', value = 'private-token-sentinel' }",
         "client.auth = { type = 'bearer', value = ['private-token-sentinel'] }",
+        "client.auth = { type = 'bearer', value = 987654321 }",
         "client.auth = { type = 'bearer', file = ['private-token-sentinel'] }",
         "client.auth = { type = 'bearer' }",
         "client.auth = { type = 'bearer', value = '' }",
@@ -204,6 +210,10 @@ fn config_check_rejects_native_auth_shapes_without_echoing_private_values() {
         "},
         "client.headers = 'private-header-sentinel'",
         "client.headers = { x-private = ['private-header-sentinel'] }",
+        "client.headers = { 'private-header-sentinel name' = 'private-header-sentinel' }",
+        r#"client.headers = { x-private = "private-header-sentinel\nsecond-line" }"#,
+        "client.headers = { X-Private = 'private-header-sentinel', x-private = 'private-header-sentinel' }",
+        "client.api_key = 987654321",
         indoc! {"
             client.auth = { type = 'bearer', value = 'private-token-sentinel' }
             [private-token-sentinel
