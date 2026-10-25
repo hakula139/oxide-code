@@ -28,6 +28,7 @@ desync
 direnv
 disambiguable
 doas
+dotenv
 EACCES
 einval
 ELOOP
