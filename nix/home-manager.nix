@@ -17,12 +17,58 @@ let
   cfg = config.programs.oxide-code;
   toml = pkgs.formats.toml { };
 
+  credentialFileType = lib.types.either (lib.types.pathWith {
+    inStore = false;
+    absolute = true;
+  }) (lib.types.strMatching "~/.*");
+
+  credentialAssertions = [
+    {
+      assertion = !(cfg.settings ? client.api_key);
+      message =
+        "programs.oxide-code.settings.client.api_key would write the key into the Nix store, "
+        + "which every local user can read. Export ANTHROPIC_API_KEY from your secret manager "
+        + "instead.";
+    }
+
+    {
+      assertion = !(cfg.settings ? client.auth.value);
+      message =
+        "programs.oxide-code.settings.client.auth.value would write the credential into the Nix store, "
+        + "which every local user can read. Set client.auth.file to a secret file path.";
+    }
+
+    {
+      assertion =
+        !(cfg.settings ? client.auth.file)
+        || (
+          let
+            file = cfg.settings.client.auth.file;
+          in
+          credentialFileType.check file && !(builtins.hasContext file)
+        );
+      message =
+        "programs.oxide-code.settings.client.auth.file must be a quoted absolute or ~/ runtime path "
+        + "outside the Nix store, without string context. Interpolating a Nix path can already copy "
+        + "its contents into the store.";
+    }
+  ];
+
+  checkedSettings =
+    let
+      failures = builtins.filter (check: !check.assertion) credentialAssertions;
+    in
+    if failures == [ ] then
+      cfg.settings
+    else
+      throw (lib.concatMapStringsSep "\n" (check: check.message) failures);
+
   contextTarget =
     if builtins.isString cfg.context then { text = cfg.context; } else { source = cfg.context; };
 
   # Only the files the check reads go through configDir, so an out-of-store context link stays live.
   checkedFiles = lib.optionalAttrs (cfg.settings != { }) {
-    "config.toml" = toml.generate "ox-config.toml" cfg.settings;
+    "config.toml" = toml.generate "ox-config.toml" checkedSettings;
   };
 
   configDir = pkgs.runCommandLocal "ox-config" { } ''
@@ -128,21 +174,8 @@ in
           + "which is null. Set a package or checkConfig = false.";
       }
 
-      {
-        assertion = !(cfg.settings ? client.api_key);
-        message =
-          "programs.oxide-code.settings.client.api_key would write the key into the Nix store, "
-          + "which every local user can read. Export ANTHROPIC_API_KEY from your secret manager "
-          + "instead.";
-      }
-
-      {
-        assertion = !(cfg.settings ? client.auth.value);
-        message =
-          "programs.oxide-code.settings.client.auth.value would write the credential into the Nix store, "
-          + "which every local user can read. Set client.auth.file to a secret file path.";
-      }
-    ];
+    ]
+    ++ credentialAssertions;
 
     home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
 

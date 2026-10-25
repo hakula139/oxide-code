@@ -181,6 +181,44 @@ let
     }
   );
 
+  homeFileAuth = evalHome {
+    programs.oxide-code = {
+      enable = true;
+      package = stub;
+
+      settings.client.auth = {
+        type = "bearer";
+        file = "~/secrets/ox-token";
+      };
+    };
+  };
+
+  unsafeFileAuth =
+    lib.mapAttrs
+      (
+        _: file:
+        evalHome {
+          programs.oxide-code = {
+            enable = true;
+            package = stub;
+
+            settings.client.auth = {
+              type = "bearer";
+              inherit file;
+            };
+          };
+        }
+      )
+      {
+        nixPath = ./fixtures/credential-token;
+        storeString = "${builtins.storeDir}/00000000000000000000000000000000-credential-token";
+        interpolatedPath = "${./fixtures/credential-token}";
+        contextString = builtins.appendContext "/run/secrets/ox-token" (
+          builtins.getContext "${contextPackage}"
+        );
+        relativeString = "secrets/ox-token";
+      };
+
   loginAuth = evalHome {
     programs.oxide-code = {
       enable = true;
@@ -296,13 +334,45 @@ let
       ]);
     };
 
+    testInlineCredentialsFailBeforeConfigGeneration = {
+      expr = lib.mapAttrs (_: hm: (builtins.tryEval hm.programs.oxide-code.configDir.drvPath).success) (
+        inlineAuth // { legacy = apiKey; }
+      );
+
+      expected = {
+        bearer = false;
+        api-key = false;
+        oauth = false;
+        legacy = false;
+      };
+    };
+
     testFileAuthIsAllowed = {
-      expr = lib.mapAttrs (_: complaints) fileAuth;
+      expr = lib.mapAttrs (_: complaints) (fileAuth // { home = homeFileAuth; });
       expected = {
         bearer = [ ];
         api-key = [ ];
         oauth = [ ];
+        home = [ ];
       };
+    };
+
+    testUnsafeAuthFileFails = {
+      expr = lib.mapAttrs (_: failedAssertions) unsafeFileAuth;
+      expected = lib.mapAttrs (_: _: [
+        (
+          "programs.oxide-code.settings.client.auth.file must be a quoted absolute or ~/ runtime path "
+          + "outside the Nix store, without string context. "
+          + "Interpolating a Nix path can already copy its contents into the store."
+        )
+      ]) unsafeFileAuth;
+    };
+
+    testUnsafeAuthFileFailsBeforeConfigGeneration = {
+      expr = lib.mapAttrs (
+        _: hm: (builtins.tryEval hm.programs.oxide-code.configDir.drvPath).success
+      ) unsafeFileAuth;
+      expected = lib.mapAttrs (_: _: false) unsafeFileAuth;
     };
 
     testLoginAuthIsAllowed = {
@@ -330,6 +400,9 @@ pkgs.runCommand "ox-home-manager-module"
       toml2json < ${hm.xdg.configFile."ox/config.toml".source} | \
         jq -e '.client.auth == {"type":"${type}","file":"/run/secrets/ox-token"}'
     '') fileAuth}
+
+    toml2json < ${homeFileAuth.xdg.configFile."ox/config.toml".source} | \
+      jq -e '.client.auth == {"type":"bearer","file":"~/secrets/ox-token"}'
 
     diff -u ${pkgs.writeText "expected-AGENTS.md" "Be terse.\n"} \
       ${checked.xdg.configFile."ox/AGENTS.md".source}

@@ -14,8 +14,10 @@ Run `/config` to see each resolved value next to the layer that set it: `default
 
 ### Merging
 
-Each file sets only the keys it names, and a later layer wins key by key, so a drop-in that sets `client.effort` keeps the `client.model` from `config.toml`. Tables merge recursively, including `[tui.theme.overrides]`.
+Each file sets only the keys it names, and a later layer wins key by key, so a drop-in that sets `client.effort` keeps the `client.model` from `config.toml`. Tables merge recursively, including `[tui.theme.overrides]`, with these replacement and list rules:
 
+- **`client.auth` and `client.headers`** come whole from the last layer that sets them. An empty header map clears the lower map.
+- **`client.api_key` and `client.auth`** are alternative credential settings, so a layer that sets either clears the other from lower layers. A single file cannot set both.
 - **`permission.extra_roots` and the class lists under `permission.deny`, `permission.ask`, and `permission.allow`**, such as `permission.allow.exec`, concatenate, so the entries from every layer apply.
 - **Other arrays**, such as `tui.status_line`, come whole from the last layer that sets them.
 - **`auto_threshold_tokens` and `auto_threshold_percent`** act as one setting, so a layer that sets either replaces both.
@@ -223,13 +225,13 @@ file = "~/.secrets/gateway-token"
 
 `type` is `"bearer"` for an `Authorization: Bearer` gateway token, `"api-key"` for `x-api-key`, or `"oauth"` for a fixed OAuth token with the OAuth request shape. Set exactly one of `file` or `value`. A `file` path must be absolute or start with `~/`, and ox reads only the winning file once during startup, trimming trailing line endings. Restart ox to read a rotated file. `ox config check` validates the declaration without opening the credential file. A fixed OAuth token can use the configured endpoint and is never refreshed.
 
-An inline `value` or legacy `client.api_key` sits on disk in plaintext, so keep that user config private, conventionally mode `0600`. ox does not change its permissions. A file cannot set both `client.api_key` and `client.auth`. Across user layers, the later choice replaces the earlier credential whole. `type = "login"` takes neither `file` nor `value` and clears a lower file credential, allowing the remaining environment and stored-login fallback chain to apply. Stored logins retain their first-party endpoint restriction.
+An inline `value` or legacy `client.api_key` sits on disk in plaintext, so keep that user config private, conventionally mode `0600`. ox does not change its permissions. `type = "login"` takes neither `file` nor `value` and selects the remaining environment and stored-login fallback chain. Stored logins retain their first-party endpoint restriction.
 
 Commands the assistant runs with `bash` cannot access `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or `ANTHROPIC_CUSTOM_HEADERS`, so no command finds your credential in its own environment. On Linux, the built-in [`credentials` rule](permissions.md#built-in-rules) also covers each process's environment under `/proc`, including `ox`'s own. A script that needs its own Anthropic key, such as a test suite that calls the API, must read it from another variable or a file.
 
 ## LLM Gateways
 
-User configuration supports `client.headers` as a map of header names to string values, `client.attribution` (default `true`), and `client.structured_outputs` (default `true`). Each header map replaces the earlier map whole, including an empty map. These settings, authentication, the endpoint, and CA trust are user-only. A project config cannot set them.
+User configuration supports `client.headers` as a map of header names to string values, `client.attribution` (default `true`), and `client.structured_outputs` (default `true`). These settings, authentication, the endpoint, and CA trust are user-only. A project config cannot set them.
 
 oxide-code reads the gateway variables Claude Code uses, which override the corresponding file settings:
 
@@ -267,8 +269,8 @@ Each key goes in the table its prefix names, so `client.compaction.auto_enabled`
 | Key                                        | Type    | Default                         | Description                                                                                                 |
 | ------------------------------------------ | ------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `client.api_key`                           | string  | -                               | [Anthropic API key](#authentication), user config only                                                      |
-| `client.auth`                              | table   | -                               | [Typed credential](#authentication), user config only                                                       |
 | `client.attribution`                       | boolean | `true`                          | Send the [attribution block](#llm-gateways), user config only                                               |
+| `client.auth`                              | table   | -                               | [Typed credential](#authentication), user config only                                                       |
 | `client.base_url`                          | string  | `"https://api.anthropic.com"`   | [API base URL](#base_url-endpoint), user config only                                                        |
 | `client.compaction.auto_enabled`           | boolean | `true`                          | Enable [automatic context compaction](#clientcompaction-context-compression)                                |
 | `client.compaction.auto_threshold_percent` | integer | model-derived                   | Share of the context window that [triggers compaction](#clientcompaction-context-compression), `1` to `100` |

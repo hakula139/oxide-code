@@ -87,7 +87,7 @@ impl Engine {
         }
     }
 
-    /// Uses a new oxide-code login for requests unless an env var or `client.api_key` outranks it.
+    /// Uses a new oxide-code login for requests unless an explicit credential outranks it.
     fn adopt_login(&mut self, sink: &dyn EventSink, auth: Auth) {
         let active = match self.client.auth_source() {
             Some(source) if !source.is_stored_login() => source,
