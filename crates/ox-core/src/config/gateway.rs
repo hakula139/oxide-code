@@ -1,6 +1,6 @@
 //! Request-shape settings for LLM gateways, from user configuration and Claude Code env vars.
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use super::auth::AuthSource;
@@ -81,13 +81,13 @@ pub(super) fn file_headers(raw: &std::collections::BTreeMap<String, String>) -> 
     for (name, value) in raw {
         let name =
             HeaderName::from_bytes(name.as_bytes()).context("invalid client.headers name")?;
-        anyhow::ensure!(
+        ensure!(
             !RESERVED.contains(&name.as_str()),
             "invalid client.headers: {name} is set by ox and cannot be overridden"
         );
         let mut value = HeaderValue::from_str(value).context("invalid client.headers value")?;
         value.set_sensitive(true);
-        anyhow::ensure!(
+        ensure!(
             headers.insert(name, value).is_none(),
             "client.headers sets the same header more than once"
         );
@@ -107,8 +107,8 @@ pub struct GatewaySnapshot {
 
 // ── Custom Headers ──
 
-/// Headers the client sets on each request. The credential header depends on the auth kind, so
-/// [`GatewayCompat::check_credential_header_from`] guards it once the credential resolves.
+/// `authorization` and `x-api-key` are checked against the selected credential so a gateway can
+/// use the other header for its own credential.
 const RESERVED: &[&str] = &[
     "anthropic-beta",
     "anthropic-version",

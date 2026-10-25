@@ -4,7 +4,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, ensure};
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use tokio_util::task::TaskTracker;
@@ -330,7 +330,7 @@ impl PendingAuth {
             format!("failed to read client.auth.file at {}", self.path.display())
         })?;
         let secret = raw.trim_end_matches(['\r', '\n']);
-        anyhow::ensure!(
+        ensure!(
             !secret.is_empty(),
             "client.auth.file at {} is empty",
             self.path.display()

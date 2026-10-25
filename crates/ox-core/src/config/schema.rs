@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::RangeInclusive;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, ensure};
 use serde::de::{self, Unexpected};
 use serde::{Deserialize, Deserializer};
 
@@ -73,7 +73,7 @@ impl ClientTable {
         if let Some(headers) = &self.headers {
             super::gateway::file_headers(headers)?;
         }
-        anyhow::ensure!(
+        ensure!(
             self.api_key.is_none() || self.auth.is_none(),
             "client.api_key and client.auth cannot be set in the same file"
         );
@@ -85,18 +85,18 @@ impl ClientTable {
         else {
             return Ok(());
         };
-        anyhow::ensure!(
+        ensure!(
             source.value.is_some() != source.file.is_some(),
             "client.auth requires exactly one of value or file"
         );
         if let Some(value) = &source.value {
-            anyhow::ensure!(!value.is_empty(), "client.auth.value must not be empty");
+            ensure!(!value.is_empty(), "client.auth.value must not be empty");
             reqwest::header::HeaderValue::from_str(value)
                 .context("invalid client.auth.value: expected an HTTP header value")?;
         }
         if let Some(file) = &source.file {
             let path = expand_user(file).context("invalid client.auth.file")?;
-            anyhow::ensure!(
+            ensure!(
                 path.is_absolute()
                     && (std::path::Path::new(file).is_absolute() || file.starts_with("~/")),
                 "client.auth.file must be an absolute or ~/ path"
