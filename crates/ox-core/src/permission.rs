@@ -4477,6 +4477,177 @@ mod tests {
             }
 
             #[test]
+            fn recursive_reader_globs_reparse_expanded_argument_roles() {
+                for (name, command, protected, files) in [
+                    (
+                        "expanded pattern-file value leaves a recursive search root",
+                        "grep -r -f patterns/* src",
+                        "./patterns/z-vault/key",
+                        &["patterns/a-patterns", "patterns/z-vault/key", "src/file"][..],
+                    ),
+                    (
+                        "expanded search operand supplies a recursive option",
+                        "grep PRIVATE *",
+                        "./vault/key",
+                        &["-r", "src/file", "vault/key"][..],
+                    ),
+                    (
+                        "expanded option upgrades a root in another source word",
+                        "grep PRIVATE *r vault",
+                        "./vault/key",
+                        &["-r", "other", "vault/key"][..],
+                    ),
+                    (
+                        "expanded long option supplies recursive directory mode",
+                        "grep PRIVATE *",
+                        "./vault/key",
+                        &["--directories=recurse", "src/file", "vault/key"][..],
+                    ),
+                    (
+                        "expanded directory mode can take another expansion's value",
+                        "grep PRIVATE *",
+                        "./vault/key",
+                        &["-d", "recurse", "src/file", "vault/key"][..],
+                    ),
+                    (
+                        "single match supplies a recursive option",
+                        "grep PRIVATE *r vault",
+                        "./vault/key",
+                        &["-r", "vault/key"][..],
+                    ),
+                    (
+                        "a build-specific option value may be an ordinary root",
+                        "ls -D vault -* 80",
+                        "./vault/key",
+                        &["-w", "-R", "vault/key"][..],
+                    ),
+                    (
+                        "an expanded option may consume the final explicit root",
+                        "grep -e PRIVATE -* pats",
+                        "./vault/key",
+                        &["-f", "-R", "pats", "vault/key"][..],
+                    ),
+                    (
+                        "an expanded find expression may make cwd implicit",
+                        r"find [-\(v]* \)",
+                        "./secret/key",
+                        &["vault/file", "(", "-name", "secret/key"][..],
+                    ),
+                    (
+                        "an earlier single match changes a later group's roles",
+                        "grep -r -e needle -? patterns/* src",
+                        "./patterns/z-vault/key",
+                        &[
+                            "-f",
+                            "patterns/a-patterns",
+                            "patterns/z-vault/key",
+                            "src/file",
+                        ][..],
+                    ),
+                    (
+                        "an earlier single match consumes an apparent fixed root",
+                        "grep -e PRIVATE -[f] pats -* more",
+                        "./vault/key",
+                        &["-f", "-R", "pats", "more", "vault/key"][..],
+                    ),
+                ] {
+                    let dir = canonical_tempdir();
+                    let cwd = dir.path();
+                    for file in files {
+                        let path = cwd.join(file);
+                        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                        std::fs::write(path, "needle").unwrap();
+                    }
+                    temp_env::with_var(HOME_VAR, Some(cwd), || {
+                        let workspace = Workspace::new(cwd);
+                        for (tier, deny, ask) in [
+                            (Tier::Deny, &[(READ, protected)][..], &[][..]),
+                            (Tier::Ask, &[][..], &[(READ, protected)][..]),
+                        ] {
+                            for mode in [Mode::Manual, Mode::Yolo] {
+                                let p = resolved_policy(
+                                    mode,
+                                    deny,
+                                    ask,
+                                    &[(EXEC, "grep *"), (EXEC, "find *"), (EXEC, "ls *")],
+                                    &[Shipped::Ssh, Shipped::Credentials],
+                                    &workspace,
+                                );
+                                let expected = if mode == Mode::Yolo && tier == Tier::Deny {
+                                    Decision::Deny
+                                } else {
+                                    Decision::Ask
+                                };
+
+                                let access = Access::for_command(command, &workspace);
+                                let verdict = p.verdict(EXEC, &access.as_target());
+
+                                assert_eq!(
+                                    (verdict.decision, verdict.basis),
+                                    (expected, rule_basis(tier, READ, protected)),
+                                    "{name}, {mode:?}: {command}"
+                                );
+                            }
+                        }
+                    });
+                }
+            }
+
+            #[test]
+            fn recursive_reader_globs_keep_unrelated_roots_and_fixed_auxiliary_files_exact() {
+                let dir = canonical_tempdir();
+                let cwd = dir.path();
+                for file in [
+                    "aux/list",
+                    "aux/protected/key",
+                    "aux/public",
+                    "src/a/file",
+                    "src/b/file",
+                    "-r",
+                    "other",
+                ] {
+                    let path = cwd.join(file);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, "needle").unwrap();
+                }
+                temp_env::with_var(HOME_VAR, Some(cwd), || {
+                    let workspace = Workspace::new(cwd);
+                    for mode in [Mode::Manual, Mode::Yolo] {
+                        let p = resolved_policy(
+                            mode,
+                            &[(READ, "./aux/list"), (READ, "./aux/protected/key")],
+                            &[],
+                            &[(EXEC, "grep *"), (EXEC, "find *"), (EXEC, "ls *")],
+                            &[Shipped::Ssh, Shipped::Credentials],
+                            &workspace,
+                        );
+                        for (case, unknown) in [
+                            ("grep -r -f aux/public* src", false),
+                            ("grep -r -f aux/protected* src", false),
+                            ("grep -r --file=aux/lis? src", false),
+                            ("grep -r -faux/lis? src", false),
+                            ("grep -r PRIVATE src/*", false),
+                            ("find src/*", false),
+                            ("ls -R src/*", false),
+                            ("grep -- PRIVATE *r src", false),
+                            ("grep -r -- PRIVATE -* src", false),
+                            ("grep -f aux/protected PRIVATE *r src", true),
+                        ] {
+                            let expected = if unknown && mode == Mode::Manual {
+                                Decision::Ask
+                            } else {
+                                Decision::Allow
+                            };
+
+                            let decision = decide_command(&p, case, &workspace);
+
+                            assert_eq!(decision, expected, "{mode:?}: {case}");
+                        }
+                    }
+                });
+            }
+
+            #[test]
             fn recursive_options_keep_pattern_files_and_regular_files_exact() {
                 let dir = canonical_tempdir();
                 let cwd = dir.path();
