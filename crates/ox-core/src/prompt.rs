@@ -442,15 +442,17 @@ mod tests {
 
         #[tokio::test]
         async fn with_a_git_root_has_system_and_user_context() {
-            let tmp = tempfile::tempdir().expect("failed to create tempdir");
-            std::fs::write(tmp.path().join("CLAUDE.md"), "Test project rules.").unwrap();
+            let (home, tmp) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let path = tmp.path().join("CLAUDE.md");
+            std::fs::write(&path, "Test project rules.").unwrap();
+            let model = ModelSpec::resolve("test-model");
 
-            let (parts, _) = assemble(
-                &ModelSpec::resolve("test-model"),
-                tmp.path(),
-                Some(tmp.path()),
+            let (parts, warnings) = temp_env::async_with_vars(
+                pinned_home(home.path()),
+                assemble(&model, tmp.path(), Some(tmp.path())),
             )
             .await;
+            assert_eq!(warnings, [] as [String; 0]);
 
             let expected_stable_sections = [
                 "You are an interactive agent",
@@ -485,34 +487,61 @@ mod tests {
             assert!(!stable.contains("Test project rules."));
             assert!(!dynamic.contains("Test project rules."));
 
+            let path = path.display();
+            let expected_instructions = formatdoc! {"
+                # User instructions
+
+                Codebase and user instructions are shown below. Be sure to adhere to these instructions.
+
+                Contents of {path} (project instructions):
+
+                Test project rules."
+            };
+            assert_eq!(parts.seen.instructions, expected_instructions);
             let ctx = &parts.user_context;
-            assert!(ctx.contains("Test project rules."));
+            assert!(ctx.contains(&expected_instructions), "{ctx}");
             assert!(ctx.contains("<system-reminder>"));
         }
 
         #[tokio::test]
         async fn walks_root_to_cwd_for_instruction_discovery() {
-            let tmp = tempfile::tempdir().expect("failed to create tempdir");
+            let (home, tmp) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let root = tmp.path();
             init_fixture_repo(root);
 
-            std::fs::write(root.join("CLAUDE.md"), "Root rules.").unwrap();
+            let root_path = root.join("CLAUDE.md");
+            std::fs::write(&root_path, "Root rules.").unwrap();
             let sub = root.join("crates").join("core");
             std::fs::create_dir_all(&sub).unwrap();
-            std::fs::write(sub.join("CLAUDE.md"), "Subdir rules.").unwrap();
+            let sub_path = sub.join("CLAUDE.md");
+            std::fs::write(&sub_path, "Subdir rules.").unwrap();
+            let model = ModelSpec::resolve("test-model");
 
-            let (parts, _) = assemble(&ModelSpec::resolve("test-model"), &sub, Some(root)).await;
+            let (parts, warnings) = temp_env::async_with_vars(
+                pinned_home(home.path()),
+                assemble(&model, &sub, Some(root)),
+            )
+            .await;
+            assert_eq!(warnings, [] as [String; 0]);
+
+            let root_path = root_path.display();
+            let sub_path = sub_path.display();
+            let expected_instructions = formatdoc! {"
+                # User instructions
+
+                Codebase and user instructions are shown below. Be sure to adhere to these instructions.
+
+                Contents of {root_path} (project instructions):
+
+                Root rules.
+
+                Contents of {sub_path} (project instructions):
+
+                Subdir rules."
+            };
+            assert_eq!(parts.seen.instructions, expected_instructions);
             let ctx = &parts.user_context;
-
-            assert!(ctx.contains("Root rules."));
-            assert!(ctx.contains("Subdir rules."));
-
-            let root_pos = ctx.find("Root rules.").unwrap();
-            let sub_pos = ctx.find("Subdir rules.").unwrap();
-            assert!(
-                root_pos < sub_pos,
-                "root instructions should appear before subdirectory"
-            );
+            assert!(ctx.contains(&expected_instructions), "{ctx}");
         }
     }
 
