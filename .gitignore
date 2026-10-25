@@ -20,7 +20,7 @@ result-*
 # Snapshot review
 *.snap.new
 
-# Editor / assistant local settings
+# Assistant local state
 .agents/plans/
 **/.claude/settings.local.json
 .claude/worktrees/

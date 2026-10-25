@@ -63,7 +63,7 @@ Prettier and Taplo leave long strings alone, and no formatter covers shell code,
 
 ## Git Ignore
 
-Keep portable generated dependencies, build outputs, and files required by the shared development workflow in the repository's `.gitignore`. Personal OS and editor state belongs in the user's global ignore file. Keep repository rules for contributor files that may contain private settings, such as `.claude/settings.local.json`, including when contributors create them manually.
+Keep portable generated dependencies, build outputs, and local artifacts produced by the shared development workflow in the repository's `.gitignore`. Personal OS and editor state belongs in the user's global ignore file. Keep repository rules for contributor files that may contain private settings, such as `.claude/settings.local.json`, including when contributors create them manually.
 
 Match generic generated directory names at any depth, such as `node_modules/` and `.pnpm-store/`. Anchor an entry with `/` when its producer owns that specific repository path. Use a trailing `/` when only directories should match, and preserve exceptions that keep source directories tracked.
 
