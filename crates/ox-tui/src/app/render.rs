@@ -610,6 +610,132 @@ mod tests {
         }
 
         #[test]
+        fn input_footer_keeps_complete_shortcuts_in_the_available_width() {
+            for (width, footer) in [
+                (
+                    80,
+                    "  Tab / Shift+Tab mode · Enter send · Alt+Enter newline · / commands",
+                ),
+                (40, "  Tab / Shift+Tab mode · Enter send"),
+                (22, "  Tab / Shift+Tab mode"),
+                (21, "─────────────────────"),
+            ] {
+                let (mut app, _rx, _event_tx) = test_app(None);
+                app.chat.push_system_message("Chat stays visible");
+                app.input.set_text("draft");
+
+                let backend = render_app(&mut app, width, 10);
+
+                let rows = buffer_rows(backend.buffer());
+                assert_eq!(rows.last().unwrap().trim_end(), footer, "width={width}");
+                assert!(rows.iter().any(|row| row.contains("draft")), "{rows:?}");
+                assert!(
+                    rows.iter().any(|row| row.contains("Chat stays visible")),
+                    "{rows:?}",
+                );
+                if width >= 22 {
+                    assert_eq!(
+                        backend.buffer()[(2, 9)].fg,
+                        app.theme.dim().fg.unwrap(),
+                        "width={width}",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn input_footer_uses_the_queue_hint_below_a_busy_multiline_draft() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.set_status(Status::Streaming);
+            app.input.set_text("one\ntwo");
+
+            let backend = render_app(&mut app, 80, 8);
+
+            let rows = buffer_rows(backend.buffer());
+            let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
+            assert_eq!(rows[4..6], ["❯ one", "  two"]);
+            assert_eq!(rows[6], "─".repeat(80));
+            assert_eq!(
+                rows[7],
+                "  Tab / Shift+Tab mode · Enter queue · Alt+Enter newline · / commands",
+            );
+        }
+
+        #[test]
+        fn popup_footer_names_completion_controls_until_the_popup_closes() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.handle_crossterm_event(&CrosstermEvent::Paste("/mo".to_owned()));
+
+            let text = rendered_text(&mut app, 80, 18);
+
+            assert_eq!(
+                text.lines().last().unwrap().trim_end(),
+                "  Tab complete · ↑/↓ select · Esc close · Enter run",
+            );
+            assert!(text.contains("/mode"), "{text}");
+            assert!(text.contains("/model"), "{text}");
+
+            app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
+            let text = rendered_text(&mut app, 80, 18);
+            assert_eq!(
+                text.lines().last().unwrap().trim_end(),
+                "  Tab / Shift+Tab mode · Enter send · Alt+Enter newline · / commands",
+            );
+            assert_eq!(app.input.lines(), ["/mo"]);
+        }
+
+        #[test]
+        fn input_footer_yields_to_the_input_at_short_heights_and_to_modal_focus() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.chat.push_system_message("Chat stays visible");
+            app.input.set_text("draft");
+
+            let short = rendered_text(&mut app, 80, 6);
+
+            let rows: Vec<&str> = short.lines().map(str::trim_end).collect();
+            assert!(rows[0].contains("Ready"), "{short}");
+            assert_eq!(rows[4], "❯ draft");
+            assert_eq!(rows[5], "─".repeat(80));
+
+            let taller = rendered_text(&mut app, 80, 7);
+
+            assert_eq!(
+                taller.lines().last().unwrap().trim_end(),
+                "  Tab / Shift+Tab mode · Enter send · Alt+Enter newline · / commands",
+            );
+
+            app.push_modal(Box::new(FakeModal::new("Modal controls")));
+
+            let modal = rendered_text(&mut app, 80, 7);
+            assert_eq!(modal.lines().last().unwrap().trim_end(), "Modal controls");
+            assert!(!modal.contains("Tab / Shift+Tab mode"), "{modal}");
+            assert!(!modal.contains("❯ draft"), "{modal}");
+        }
+
+        #[test]
+        fn input_footer_yields_to_queued_prompts_and_task_rows() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.input.set_text("draft");
+            app.queue.push("queued prompt".to_owned());
+            app.handle_engine_event(Event::TasksUpdated(plan()));
+
+            let text = rendered_text(&mut app, 80, 11);
+
+            for task in [
+                "Read the config loader",
+                "Add the entry type",
+                "Write the tests",
+            ] {
+                assert!(text.contains(task), "{task}: {text}");
+            }
+            assert!(text.contains("queued prompt"), "{text}");
+            assert!(text.contains("draft"), "{text}");
+            assert_eq!(text.lines().last().unwrap(), "─".repeat(80));
+            assert!(!text.contains("Tab / Shift+Tab mode"), "{text}");
+        }
+
+        #[test]
         fn shows_rate_limits_and_app_state_in_opt_in_segments() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.status_bar = StatusBar::new(status_bar_init(vec![

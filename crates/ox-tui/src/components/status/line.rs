@@ -776,9 +776,15 @@ mod tests {
         }
 
         #[test]
-        fn permission_mode_flags_plan_and_yolo_and_hides_manual() {
-            let rendered = |permission_mode| {
-                render(
+        fn permission_mode_shows_each_mode_in_its_style() {
+            let theme = Theme::default();
+
+            for (permission_mode, label, style) in [
+                (Mode::Manual, "Mode: manual", theme.muted()),
+                (Mode::Plan, "Mode: plan", theme.accent()),
+                (Mode::Yolo, "Mode: yolo", theme.error()),
+            ] {
+                let rendered = render(
                     vec![
                         StatusLineSegment::PermissionMode,
                         StatusLineSegment::RunState,
@@ -787,19 +793,24 @@ mod tests {
                         permission_mode,
                         ..bare_state()
                     },
-                )
-            };
-            let theme = Theme::default();
+                );
 
-            let plan = rendered(Mode::Plan);
-            assert_eq!(text_of(&plan), "  Mode: plan │ Ready");
-            assert_eq!(plan.line.spans[1].style, theme.accent());
+                assert_eq!(text_of(&rendered), format!("  {label} │ Ready"));
+                assert_eq!(rendered.line.spans[1].style, style, "{permission_mode}");
+            }
+        }
 
-            let yolo = rendered(Mode::Yolo);
-            assert_eq!(text_of(&yolo), "  Mode: yolo │ Ready");
-            assert_eq!(yolo.line.spans[1].style, theme.error());
+        #[test]
+        fn omitting_permission_mode_keeps_it_out_of_the_roster() {
+            let rendered = render(
+                vec![StatusLineSegment::Model, StatusLineSegment::RunState],
+                &StatusLineState {
+                    permission_mode: Mode::Yolo,
+                    ..bare_state()
+                },
+            );
 
-            assert_eq!(text_of(&rendered(Mode::Manual)), "  Ready");
+            assert_eq!(text_of(&rendered), "  m │ Ready");
         }
 
         #[test]
