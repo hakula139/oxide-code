@@ -2,7 +2,7 @@
 source: crates/ox-tui/src/app/render.rs
 expression: "render_app(&mut app, 60, 16)"
 ---
-"  test-model (high) │ ⣷ Compacting · Esc to interrupt       "
+"  main │ test-model (high) │ ⣷ Compacting · Esc to interrupt"
 "────────────────────────────────────────────────────────────"
 "                                                            "
 "◉ Fixed the token refresh.                                  "

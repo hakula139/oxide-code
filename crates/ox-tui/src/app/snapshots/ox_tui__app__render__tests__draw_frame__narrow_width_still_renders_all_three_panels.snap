@@ -2,7 +2,7 @@
 source: crates/ox-tui/src/app/render.rs
 expression: "render_app(&mut app, 40, 8)"
 ---
-"  test-model (high) │ Ready             "
+"  ~/test │ test-model (high) │ Ready    "
 "────────────────────────────────────────"
 "❯ hi                                    "
 "                                        "

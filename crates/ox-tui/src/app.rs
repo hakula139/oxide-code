@@ -471,7 +471,7 @@ mod tests {
             assert_eq!(
                 status.trim_end(),
                 format!(
-                    "  test-model (high) │ {} Streaming · Esc to interrupt",
+                    "  main │ test-model (high) │ {} Streaming · Esc to interrupt",
                     SPINNER_FRAMES[1],
                 ),
             );

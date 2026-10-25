@@ -307,7 +307,7 @@ fn total_width(segments: &[RenderedSegment], sep_width: usize) -> usize {
         + sep_width.saturating_mul(segments.len().saturating_sub(1))
 }
 
-/// Per-segment narrow-width rank. Lower numbers drop earlier.
+/// Per-segment narrow-width rank. Higher numbers are considered first.
 fn segment_utility(segment: StatusLineSegment, mode: Mode) -> u8 {
     match segment {
         StatusLineSegment::Theme => 0,
@@ -1064,10 +1064,9 @@ mod tests {
     mod segment_utility {
         use super::*;
 
-        /// The drop order the configuration guide documents.
         #[test]
-        fn follows_the_documented_drop_order() {
-            let drop_order = [
+        fn follows_the_documented_utility_order() {
+            let utility_order = [
                 StatusLineSegment::Theme,
                 StatusLineSegment::SessionId,
                 StatusLineSegment::ThreadTitle,
@@ -1088,10 +1087,11 @@ mod tests {
                 StatusLineSegment::PermissionMode,
                 StatusLineSegment::RunState,
             ];
-            for (earlier, later) in drop_order.iter().zip(&drop_order[1..]) {
+
+            for (earlier, later) in utility_order.iter().zip(&utility_order[1..]) {
                 assert!(
                     segment_utility(*earlier, Mode::Plan) < segment_utility(*later, Mode::Plan),
-                    "{earlier:?} must drop before {later:?}",
+                    "{earlier:?} must have lower utility than {later:?}",
                 );
             }
         }
