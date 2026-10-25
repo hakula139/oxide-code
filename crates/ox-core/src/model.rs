@@ -208,13 +208,14 @@ impl ModelSpec {
         let mut notice = format!(
             "`{}` is not a supported model, \
              so requests go without thinking, effort, and context management, \
-             and auto-compaction and cost tracking stay off",
+             and cost tracking stays off. \
+             Auto-compaction requires an explicit token threshold.",
             self.id,
         );
         if let Some(info) = replacement_for(&self.id) {
             _ = write!(
                 notice,
-                ". Did you mean `{}` ({})?",
+                " Did you mean `{}` ({})?",
                 info.id, info.display_name
             );
         }
@@ -573,7 +574,8 @@ mod tests {
                 Some(
                     "`claude-opus-5-5-20261001` is not a supported model, \
                      so requests go without thinking, effort, and context management, \
-                     and auto-compaction and cost tracking stay off. \
+                     and cost tracking stays off. \
+                     Auto-compaction requires an explicit token threshold. \
                      Did you mean `claude-opus-5-5` (Claude Opus 5.5)?"
                 ),
             );
@@ -584,7 +586,8 @@ mod tests {
                 Some(
                     "`gateway-model` is not a supported model, \
                      so requests go without thinking, effort, and context management, \
-                     and auto-compaction and cost tracking stay off"
+                     and cost tracking stays off. \
+                     Auto-compaction requires an explicit token threshold."
                 ),
             );
         }

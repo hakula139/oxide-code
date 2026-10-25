@@ -1869,6 +1869,63 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn compaction_for_an_unknown_model_requires_tokens_and_explains_the_policy() {
+            for (name, setting, enabled, threshold_tokens) in [
+                ("default", "", true, None),
+                (
+                    "tokens",
+                    "auto_threshold_tokens = 400000",
+                    true,
+                    Some(400_000),
+                ),
+                ("percent", "auto_threshold_percent = 40", true, None),
+                (
+                    "disabled tokens",
+                    "auto_enabled = false\nauto_threshold_tokens = 400000",
+                    false,
+                    None,
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                write_user_config(
+                    dir.path(),
+                    &formatdoc! {r#"
+                        [client]
+                        model = "custom-model"
+
+                        [client.compaction]
+                        {setting}
+                    "#},
+                );
+
+                let config = load_with(&dir, &[]).await.unwrap();
+
+                assert_eq!(
+                    config.compaction.auto,
+                    AutoCompactionConfig {
+                        enabled,
+                        threshold_tokens,
+                    },
+                    "{name}",
+                );
+                assert!(!config.compaction.auto.should_trigger(399_999), "{name}");
+                assert_eq!(
+                    config.compaction.auto.should_trigger(400_000),
+                    threshold_tokens.is_some(),
+                    "{name}",
+                );
+                assert_eq!(
+                    config.notices(),
+                    ["`custom-model` is not a supported model, \
+                      so requests go without thinking, effort, and context management, \
+                      and cost tracking stays off. \
+                      Auto-compaction requires an explicit token threshold."],
+                    "{name}",
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn compaction_rejects_ambiguous_auto_thresholds() {
             let dir = tempfile::tempdir().unwrap();
             write_user_config(

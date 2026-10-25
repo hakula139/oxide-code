@@ -1513,6 +1513,10 @@ mod tests {
             let prompt_at = text.find("only msg").unwrap();
             let notice_at = text.find("`test-model` is not a supported model").unwrap();
             assert!(prompt_at < notice_at, "{text}");
+            assert!(
+                text.contains("Auto-compaction requires an explicit token threshold."),
+                "{text}",
+            );
         }
 
         #[test]
