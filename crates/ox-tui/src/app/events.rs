@@ -1910,6 +1910,24 @@ mod tests {
                      API key (client.api_key) takes precedence, so requests keep using it. \
                      Remove `client.api_key` and restart ox to use the new login.",
                 ),
+                (
+                    AuthSource::ClientBearer,
+                    "Signed in. \
+                     Auth token (client.auth) takes precedence, so requests keep using it. \
+                     Remove `client.auth` and restart ox to use the new login.",
+                ),
+                (
+                    AuthSource::ClientApiKey,
+                    "Signed in. \
+                     API key (client.auth) takes precedence, so requests keep using it. \
+                     Remove `client.auth` and restart ox to use the new login.",
+                ),
+                (
+                    AuthSource::ClientOAuth,
+                    "Signed in. \
+                     OAuth (client.auth) takes precedence, so requests keep using it. \
+                     Remove `client.auth` and restart ox to use the new login.",
+                ),
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);
                 app.session_info.config.auth = None;

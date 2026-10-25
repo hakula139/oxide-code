@@ -770,6 +770,7 @@ mod tests {
     use super::testing::test_config;
     use super::*;
     use crate::permission::{Access, Decision, PermissionClass};
+    use crate::util::fs::testing::deny_read_access;
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::local_testing::TEST_CA_PEM;
     use crate::util::tls::testing::TEST_CA_PATH;
@@ -1503,6 +1504,162 @@ mod tests {
             let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "")]).await.unwrap();
             assert_auth(&config, AuthSource::ApiKeyFile, "sk-from-file");
             assert_eq!(config.provenance.auth, Source::File(user));
+        }
+
+        #[tokio::test]
+        async fn native_auth_reads_only_the_selected_credential_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let token = dir.path().join("token");
+            std::fs::write(&token, "private-token-sentinel\n").unwrap();
+            let path = token.display();
+            write_user_config(
+                dir.path(),
+                &formatdoc! {"
+                    [client.auth]
+                    type = 'bearer'
+                    file = '{path}'
+                "},
+            );
+            let _denied = deny_read_access(&token);
+
+            for (overrides, expected_source, expected_secret) in [
+                (
+                    vec![("ANTHROPIC_AUTH_TOKEN", "env-token")],
+                    AuthSource::AuthTokenEnv,
+                    "env-token",
+                ),
+                (vec![], AuthSource::ApiKeyEnv, "sk-default"),
+            ] {
+                let config = load_with(&dir, &overrides).await.unwrap();
+
+                assert_auth(&config, expected_source, expected_secret);
+            }
+
+            let err = load_with(&dir, &[("ANTHROPIC_API_KEY", "")])
+                .await
+                .expect_err("the selected unreadable file must fail startup");
+
+            let message = format!("{err:#}");
+            assert!(message.contains("client.auth.file"), "{message}");
+            assert!(message.contains(&token.display().to_string()), "{message}");
+            assert!(!message.contains("private-token-sentinel"), "{message}");
+        }
+
+        #[tokio::test]
+        async fn native_auth_keeps_the_loaded_file_credential_for_the_session() {
+            let dir = tempfile::tempdir().unwrap();
+            let token = dir.path().join("token");
+            std::fs::write(&token, "first-token \r\n").unwrap();
+            let path = token.display();
+            write_user_config(
+                dir.path(),
+                &formatdoc! {"
+                    [client.auth]
+                    type = 'bearer'
+                    file = '{path}'
+                "},
+            );
+            let mut config = load_with(&dir, &[("ANTHROPIC_API_KEY", "")]).await.unwrap();
+            std::fs::write(&token, "second-token\n").unwrap();
+
+            config.resolve_auth(false).await.unwrap();
+
+            assert_auth(&config, AuthSource::ClientBearer, "first-token ");
+        }
+
+        #[tokio::test]
+        async fn native_auth_preserves_inline_credential_bytes() {
+            for (kind, source) in [
+                ("bearer", AuthSource::ClientBearer),
+                ("api-key", AuthSource::ClientApiKey),
+                ("oauth", AuthSource::ClientOAuth),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                write_user_config(
+                    dir.path(),
+                    &formatdoc! {"
+                        [client.auth]
+                        type = '{kind}'
+                        value = ' inline-token '
+                    "},
+                );
+
+                let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "")]).await.unwrap();
+
+                assert_auth(&config, source, " inline-token ");
+            }
+        }
+
+        #[tokio::test]
+        async fn native_auth_records_the_winning_file_without_exposing_private_values() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {"
+                    [client]
+                    auth = { type = 'bearer', value = 'lower-token' }
+                    headers = { x-route = 'lower' }
+                    attribution = false
+                    structured_outputs = false
+                "},
+            );
+            let token = dir.path().join("token");
+            std::fs::write(&token, "private-token-sentinel\n").unwrap();
+            let path = token.display();
+            let upper = write_drop_in(
+                dir.path(),
+                "50-profile.toml",
+                &formatdoc! {"
+                    [client]
+                    auth = {{ type = 'api-key', file = '{path}' }}
+                    headers = {{ x-route = 'private-header-sentinel' }}
+                    attribution = true
+                    structured_outputs = true
+                "},
+            );
+
+            let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "")]).await.unwrap();
+
+            assert_auth(&config, AuthSource::ClientApiKey, "private-token-sentinel");
+            for source in [
+                &config.provenance.auth,
+                &config.provenance.custom_headers,
+                &config.provenance.attribution,
+                &config.provenance.structured_outputs,
+            ] {
+                assert_eq!(source, &Source::File(upper.clone()));
+            }
+            for debug in [format!("{config:?}"), format!("{:?}", config.snapshot())] {
+                assert!(!debug.contains("private-token-sentinel"), "{debug}");
+                assert!(!debug.contains("private-header-sentinel"), "{debug}");
+            }
+        }
+
+        #[tokio::test]
+        async fn native_auth_login_preserves_the_environment_credential_chain() {
+            for (auth_token, api_key, expected_source, expected_secret) in [
+                (
+                    Some("env-token"),
+                    Some("env-key"),
+                    AuthSource::AuthTokenEnv,
+                    "env-token",
+                ),
+                (None, Some("env-key"), AuthSource::ApiKeyEnv, "env-key"),
+                (None, None, AuthSource::OAuthTokenEnv, "oauth-token"),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                write_user_config(dir.path(), "client.auth = { type = 'login' }\n");
+                let vars = env_vars(vec![
+                    xdg(&dir),
+                    ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
+                    ("ANTHROPIC_API_KEY", api_key.map(str::to_owned)),
+                    env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
+                ]);
+
+                let config = load_in(&dir, vars, false).await.unwrap();
+
+                assert_auth(&config, expected_source, expected_secret);
+            }
         }
 
         #[tokio::test]

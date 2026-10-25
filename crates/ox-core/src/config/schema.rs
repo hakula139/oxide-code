@@ -244,3 +244,38 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use indoc::formatdoc;
+
+    use super::*;
+
+    mod file_config {
+        use super::*;
+
+        #[test]
+        fn debug_omits_inline_credentials_and_custom_header_values() {
+            for auth in [
+                "api_key = 'private-token-sentinel'",
+                "auth = { type = 'bearer', value = 'private-token-sentinel' }",
+                "auth = { type = 'api-key', value = 'private-token-sentinel' }",
+                "auth = { type = 'oauth', value = 'private-token-sentinel' }",
+            ] {
+                let config: FileConfig = toml::from_str(&formatdoc! {"
+                    [client]
+                    {auth}
+                    headers = {{ x-private = 'private-header-sentinel' }}
+                    model = 'claude-haiku-5-5'
+                "})
+                .unwrap();
+
+                let debug = format!("{config:?}");
+
+                assert!(!debug.contains("private-token-sentinel"), "{debug}");
+                assert!(!debug.contains("private-header-sentinel"), "{debug}");
+                assert!(debug.contains("claude-haiku-5-5"), "{debug}");
+            }
+        }
+    }
+}

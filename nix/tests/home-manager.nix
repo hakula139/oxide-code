@@ -151,6 +151,44 @@ let
     };
   };
 
+  inlineAuth = lib.genAttrs [ "bearer" "api-key" "oauth" ] (
+    type:
+    evalHome {
+      programs.oxide-code = {
+        enable = true;
+        package = stub;
+
+        settings.client.auth = {
+          inherit type;
+          value = "private-token-sentinel";
+        };
+      };
+    }
+  );
+
+  fileAuth = lib.genAttrs [ "bearer" "api-key" "oauth" ] (
+    type:
+    evalHome {
+      programs.oxide-code = {
+        enable = true;
+        package = stub;
+
+        settings.client.auth = {
+          inherit type;
+          file = "/run/secrets/ox-token";
+        };
+      };
+    }
+  );
+
+  loginAuth = evalHome {
+    programs.oxide-code = {
+      enable = true;
+      package = stub;
+      settings.client.auth.type = "login";
+    };
+  };
+
   # ------------------------------------------------------------------------------------------------
   # Evaluation Tests
   # ------------------------------------------------------------------------------------------------
@@ -247,6 +285,30 @@ let
         )
       ];
     };
+
+    testInlineAuthFails = {
+      expr = lib.mapAttrs (_: failedAssertions) inlineAuth;
+      expected = lib.genAttrs [ "bearer" "api-key" "oauth" ] (_: [
+        (
+          "programs.oxide-code.settings.client.auth.value would write the credential into the Nix store, "
+          + "which every local user can read. Set client.auth.file to a secret file path."
+        )
+      ]);
+    };
+
+    testFileAuthIsAllowed = {
+      expr = lib.mapAttrs (_: complaints) fileAuth;
+      expected = {
+        bearer = [ ];
+        api-key = [ ];
+        oauth = [ ];
+      };
+    };
+
+    testLoginAuthIsAllowed = {
+      expr = complaints loginAuth;
+      expected = [ ];
+    };
   };
 in
 assert lib.assertMsg (failures == [ ]) "failed tests: ${builtins.toJSON failures}";
@@ -263,6 +325,11 @@ pkgs.runCommand "ox-home-manager-module"
     {"permission":{"mode":"yolo"},"tui":{"status_line":["model","run-state"]}}
     EOF
     diff -u expected.json actual.json
+
+    ${lib.concatMapAttrsStringSep "\n" (type: hm: ''
+      toml2json < ${hm.xdg.configFile."ox/config.toml".source} | \
+        jq -e '.client.auth == {"type":"${type}","file":"/run/secrets/ox-token"}'
+    '') fileAuth}
 
     diff -u ${pkgs.writeText "expected-AGENTS.md" "Be terse.\n"} \
       ${checked.xdg.configFile."ox/AGENTS.md".source}

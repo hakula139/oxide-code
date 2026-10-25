@@ -546,9 +546,12 @@ mod tests {
 
     #[test]
     fn debug_omits_secret() {
-        let debug = format!("{:?}", Auth::new(AuthSource::ApiKeyEnv, "sk-must-not-leak"));
-        assert!(!debug.contains("sk-must-not-leak"), "{debug}");
-        assert!(debug.contains("ApiKeyEnv"), "{debug}");
+        for source in AuthSource::VARIANTS {
+            let debug = format!("{:?}", Auth::new(*source, "sk-must-not-leak"));
+
+            assert!(!debug.contains("sk-must-not-leak"), "{debug}");
+            assert!(debug.contains(&format!("{source:?}")), "{debug}");
+        }
     }
 
     mod auth_source {
@@ -568,6 +571,9 @@ mod tests {
                     "Auth token (ANTHROPIC_AUTH_TOKEN)",
                     "API key (ANTHROPIC_API_KEY)",
                     "API key (client.api_key)",
+                    "Auth token (client.auth)",
+                    "API key (client.auth)",
+                    "OAuth (client.auth)",
                     "OAuth (CLAUDE_CODE_OAUTH_TOKEN)",
                     "OAuth (oxide-code login)",
                     "OAuth (Claude Code login)",
@@ -587,6 +593,9 @@ mod tests {
                         AuthKind::AuthToken,
                         AuthKind::ApiKey,
                         AuthKind::ApiKey,
+                        AuthKind::AuthToken,
+                        AuthKind::ApiKey,
+                        AuthKind::OAuth,
                         AuthKind::OAuth,
                         AuthKind::OAuth,
                         AuthKind::OAuth,
@@ -602,7 +611,7 @@ mod tests {
             fn holds_only_for_the_two_logins() {
                 assert_eq!(
                     each_source(AuthSource::is_stored_login),
-                    [false, false, false, false, true, true],
+                    [false, false, false, false, false, false, false, true, true],
                 );
             }
         }
@@ -617,6 +626,9 @@ mod tests {
                     [
                         Some("ANTHROPIC_AUTH_TOKEN"),
                         Some("ANTHROPIC_API_KEY"),
+                        None,
+                        None,
+                        None,
                         None,
                         Some("CLAUDE_CODE_OAUTH_TOKEN"),
                         None,
@@ -637,6 +649,12 @@ mod tests {
                         "Check ANTHROPIC_AUTH_TOKEN.",
                         "Check ANTHROPIC_API_KEY.",
                         "Check client.api_key in your user config. \
+                         `/config` shows which file sets it.",
+                        "Check client.auth in your user config. \
+                         `/config` shows which file sets it.",
+                        "Check client.auth in your user config. \
+                         `/config` shows which file sets it.",
+                        "Check client.auth in your user config. \
                          `/config` shows which file sets it.",
                         "CLAUDE_CODE_OAUTH_TOKEN may be expired or revoked. \
                          Generate a new one with `claude setup-token`.",
@@ -662,6 +680,17 @@ mod tests {
                 ),
                 (
                     AuthSource::OAuthTokenEnv,
+                    "authorization",
+                    "Bearer secret-value",
+                ),
+                (AuthSource::ClientApiKey, "x-api-key", "secret-value"),
+                (
+                    AuthSource::ClientBearer,
+                    "authorization",
+                    "Bearer secret-value",
+                ),
+                (
+                    AuthSource::ClientOAuth,
                     "authorization",
                     "Bearer secret-value",
                 ),

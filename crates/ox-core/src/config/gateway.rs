@@ -149,7 +149,10 @@ pub(super) fn parse_headers(raw: &str) -> Result<HeaderMap> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
+    use crate::config::schema::FileConfig;
 
     fn pairs(headers: &HeaderMap) -> Vec<(&str, &str)> {
         headers
@@ -170,6 +173,82 @@ mod tests {
             (key, value)
         });
         temp_env::with_vars(vars, || GatewayCompat::from_client(&ClientTable::default()))
+    }
+
+    mod from_client {
+        use super::*;
+
+        #[test]
+        fn file_values_supply_defaults_and_environment_replaces_each_setting() {
+            for (body, vars, expected_headers, attribution, structured_outputs) in [
+                ("", vec![], vec![], true, true),
+                (
+                    indoc! {"
+                        client.headers = { x-file = 'private-header-sentinel' }
+                        client.attribution = false
+                        client.structured_outputs = false
+                    "},
+                    vec![],
+                    vec![("x-file", "private-header-sentinel")],
+                    false,
+                    false,
+                ),
+                (
+                    indoc! {"
+                        client.headers = { x-file = 'private-header-sentinel' }
+                        client.attribution = false
+                        client.structured_outputs = false
+                    "},
+                    vec![
+                        (CUSTOM_HEADERS_VAR, "x-env: env"),
+                        ("CLAUDE_CODE_ATTRIBUTION_HEADER", "1"),
+                        ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "0"),
+                    ],
+                    vec![("x-env", "env")],
+                    true,
+                    true,
+                ),
+                (
+                    indoc! {"
+                        client.headers = {}
+                        client.attribution = true
+                        client.structured_outputs = true
+                    "},
+                    vec![
+                        ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
+                        ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "1"),
+                    ],
+                    vec![],
+                    false,
+                    false,
+                ),
+                (
+                    "client.headers = { x-file = 'private-header-sentinel' }",
+                    vec![(CUSTOM_HEADERS_VAR, " \n ")],
+                    vec![],
+                    true,
+                    true,
+                ),
+            ] {
+                let config: FileConfig = toml::from_str(body).unwrap();
+                let vars = ENV_KEYS.map(|key| {
+                    let value = vars
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .map(|(_, value)| *value);
+                    (key, value)
+                });
+
+                let gateway = temp_env::with_vars(vars, || {
+                    GatewayCompat::from_client(&config.client).unwrap()
+                });
+
+                assert_eq!(pairs(&gateway.custom_headers), expected_headers, "{body}");
+                assert_eq!(gateway.attribution, attribution, "{body}");
+                assert_eq!(gateway.structured_outputs, structured_outputs, "{body}");
+                assert!(!format!("{gateway:?}").contains("private-header-sentinel"));
+            }
+        }
     }
 
     mod load {
