@@ -2,7 +2,7 @@
 source: crates/ox-tui/src/app/render.rs
 expression: "render_app(&mut app, 60, 16)"
 ---
-"  ~/test │ main │ test-model (high) │ Ready                 "
+"  ~/test │ main │ test-model (high) │ Mode: manual │ Ready  "
 "────────────────────────────────────────────────────────────"
 "▎ Compacted 3 messages into a summary                       "
 "▎                                                           "
@@ -14,7 +14,7 @@ expression: "render_app(&mut app, 60, 16)"
 "                                                            "
 "                                                            "
 "                                                            "
-"                                                            "
 "────────────────────────────────────────────────────────────"
 "❯                                                           "
 "────────────────────────────────────────────────────────────"
+"  Tab / Shift+Tab mode · Enter send · Alt+Enter newline     "

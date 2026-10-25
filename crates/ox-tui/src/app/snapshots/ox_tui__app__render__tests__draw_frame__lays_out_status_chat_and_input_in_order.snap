@@ -2,13 +2,13 @@
 source: crates/ox-tui/src/app/render.rs
 expression: "render_app(&mut app, 80, 10)"
 ---
-"  ~/test │ main │ test-model (high) │ Ready │ Session title                     "
+"  ~/test │ main │ test-model (high) │ Mode: manual │ Ready │ Session title      "
 "────────────────────────────────────────────────────────────────────────────────"
 "                                                                                "
 "                        ━━━━ oxide-code v0.0.0-test ━━━━                        "
 "                                                                                "
 "                       test-model · high effort · API key                       "
-"                       ~/test                                                   "
 "────────────────────────────────────────────────────────────────────────────────"
 "❯                                                                               "
 "────────────────────────────────────────────────────────────────────────────────"
+"  Tab / Shift+Tab mode · Enter send · Alt+Enter newline · / commands            "
