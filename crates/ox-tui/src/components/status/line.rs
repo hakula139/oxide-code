@@ -389,11 +389,12 @@ fn usage_style(percent: f64) -> SegmentStyle {
 }
 
 fn permission_mode_label(mode: Mode) -> (&'static str, SegmentStyle) {
-    match mode {
-        Mode::Manual => ("manual", SegmentStyle::Muted),
-        Mode::Plan => ("plan", SegmentStyle::Accent),
-        Mode::Yolo => ("yolo", SegmentStyle::Error),
-    }
+    let style = match mode {
+        Mode::Manual => SegmentStyle::Muted,
+        Mode::Plan => SegmentStyle::Accent,
+        Mode::Yolo => SegmentStyle::Error,
+    };
+    (mode.as_str(), style)
 }
 
 fn checks_label(checks: Checks) -> (String, SegmentStyle) {
