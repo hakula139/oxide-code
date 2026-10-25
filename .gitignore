@@ -4,26 +4,24 @@
 /target/
 
 # Dependencies
-/node_modules/
+.pnpm-store/
+node_modules/
 
 # Nix
-/.direnv/
+.direnv/
 /.pre-commit-config.yaml
-# `nix build` links its output from whichever directory it runs in, while a real `result/` directory
-# stays tracked.
+# `nix build` creates output links wherever it runs. Keep real source directories visible.
 result
 result-*
 !result/
+!result-*/
 
 # Snapshot review
 *.snap.new
 
-# OS files
-.DS_Store
-
-# Editor / assistant local settings
-.agents/plans
+# Assistant local state
+.agents/plans/
 .claude/agent-memory-local
 .claude/plans
-.claude/settings.local.json
-.claude/worktrees
+**/.claude/settings.local.json
+.claude/worktrees/
