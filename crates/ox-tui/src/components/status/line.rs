@@ -806,6 +806,39 @@ mod tests {
         }
 
         #[test]
+        fn manual_mode_yields_to_the_model_while_plan_and_yolo_stay_visible() {
+            for (model_segment, label) in [
+                (StatusLineSegment::Model, "m"),
+                (StatusLineSegment::ModelWithEffort, "m (high)"),
+            ] {
+                for (permission_mode, expected) in [
+                    (Mode::Manual, format!("  {label} │ Ready")),
+                    (Mode::Plan, "  Mode: plan │ Ready".to_owned()),
+                    (Mode::Yolo, "  Mode: yolo │ Ready".to_owned()),
+                ] {
+                    let state = StatusLineState {
+                        effort: Some(Effort::High),
+                        permission_mode,
+                        ..bare_state()
+                    };
+
+                    let rendered = StatusLine::new(vec![
+                        model_segment,
+                        StatusLineSegment::PermissionMode,
+                        StatusLineSegment::RunState,
+                    ])
+                    .render(&Theme::default(), &state, 22);
+
+                    assert_eq!(
+                        text_of(&rendered),
+                        expected,
+                        "{model_segment:?} / {permission_mode}"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn omitting_permission_mode_keeps_it_out_of_the_roster() {
             let rendered = render(
                 vec![StatusLineSegment::Model, StatusLineSegment::RunState],
@@ -982,7 +1015,7 @@ mod tests {
             ];
             for (earlier, later) in drop_order.iter().zip(&drop_order[1..]) {
                 assert!(
-                    segment_utility(*earlier) < segment_utility(*later),
+                    segment_utility(*earlier, Mode::Plan) < segment_utility(*later, Mode::Plan),
                     "{earlier:?} must drop before {later:?}",
                 );
             }

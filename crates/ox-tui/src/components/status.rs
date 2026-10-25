@@ -891,7 +891,7 @@ mod tests {
         #[test]
         fn idle_with_title_shows_model_title_and_cwd() {
             let mut bar = bar_idle(Some("Fix login flow"), "~/projects/demo");
-            insta::assert_snapshot!(render_status(&mut bar, 80));
+            insta::assert_snapshot!(render_status(&mut bar, 100));
         }
 
         #[test]

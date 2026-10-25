@@ -765,7 +765,7 @@ mod tests {
             app.chat.append_stream_token("Two files.");
             app.chat.commit_streaming();
 
-            insta::assert_snapshot!(render_app(&mut app, 60, 12));
+            insta::assert_snapshot!(render_app(&mut app, 60, 13));
         }
 
         #[test]
