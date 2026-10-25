@@ -861,16 +861,117 @@ mod tests {
         }
 
         #[test]
-        fn omitting_permission_mode_keeps_it_out_of_the_roster() {
-            let rendered = render(
-                vec![StatusLineSegment::Model, StatusLineSegment::RunState],
-                &StatusLineState {
+        fn configured_roster_controls_every_fields_membership_and_order() {
+            let roster = [
+                (StatusLineSegment::RunState, "Ready"),
+                (StatusLineSegment::PermissionMode, "yolo"),
+                (StatusLineSegment::CurrentTime, "09:05"),
+                (StatusLineSegment::Theme, "Theme: mocha"),
+                (StatusLineSegment::SessionId, "ID: 3f2a9c1e"),
+                (StatusLineSegment::ThreadTitle, "Session title"),
+                (StatusLineSegment::TaskProgress, "Tasks: 2/5"),
+                (StatusLineSegment::QueuedPrompts, "Queued: 2"),
+                (StatusLineSegment::WeeklyLimit, "7d: 57%"),
+                (StatusLineSegment::FiveHourLimit, "5h: 42%"),
+                (StatusLineSegment::SessionCost, "Cost: $0.12"),
+                (StatusLineSegment::ContextUsed, "Ctx: 50% (100k/200k)"),
+                (StatusLineSegment::ModelWithEffort, "m (high)"),
+                (StatusLineSegment::Model, "m"),
+                (StatusLineSegment::PullRequestReview, "Review: approved"),
+                (StatusLineSegment::PullRequestChecks, "Checks: passing"),
+                (StatusLineSegment::PullRequest, "#86"),
+                (StatusLineSegment::GitBranch, "main"),
+                (StatusLineSegment::CurrentDir, "~/repo"),
+            ];
+            let pr = PullRequest {
+                checks: Some(Checks::Passing),
+                review: Some(ReviewDecision::Approved),
+                ..pr_state(86)
+            };
+            let state = StatusLineState {
+                effort: Some(Effort::High),
+                title: Some("Session title"),
+                usage: Some(UsageSnapshot {
+                    context_tokens: Some(100_000),
+                    context_window: Some(200_000),
+                    estimated_cost_usd: Some(0.1234),
+                }),
+                git_branch: Some("main"),
+                pull_request: Some(&pr),
+                rate_limits: Some(RateLimits {
+                    five_hour: Some(RateLimitWindow {
+                        utilization: 0.42,
+                        resets_at: FUTURE_RESET,
+                    }),
+                    seven_day: Some(RateLimitWindow {
+                        utilization: 0.57,
+                        resets_at: FUTURE_RESET,
+                    }),
+                }),
+                permission_mode: Mode::Yolo,
+                queued_prompts: 2,
+                task_progress: Some(Progress {
+                    completed: 2,
+                    total: 5,
+                }),
+                session_id: "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b",
+                theme_name: "mocha",
+                current_minute: Some(9 * 60 + 5),
+                ..bare_state()
+            };
+
+            for reversed in [false, true] {
+                for omitted in
+                    std::iter::once(None).chain(roster.iter().map(|(segment, _)| Some(*segment)))
+                {
+                    let mut included: Vec<_> = roster
+                        .iter()
+                        .copied()
+                        .filter(|(segment, _)| Some(*segment) != omitted)
+                        .collect();
+                    if reversed {
+                        included.reverse();
+                    }
+                    let (segments, labels): (Vec<_>, Vec<_>) = included.into_iter().unzip();
+
+                    let rendered = StatusLine::new(segments).render(&Theme::default(), &state, 512);
+
+                    assert_eq!(
+                        text_of(&rendered),
+                        format!("  {}", labels.join(" │ ")),
+                        "omitted={omitted:?}, reversed={reversed}",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn width_fitting_keeps_the_configured_order_of_retained_fields() {
+            for (reversed, expected) in
+                [(false, "  Ready │ yolo │ m"), (true, "  m │ yolo │ Ready")]
+            {
+                let mut segments = vec![
+                    StatusLineSegment::CurrentDir,
+                    StatusLineSegment::RunState,
+                    StatusLineSegment::PermissionMode,
+                    StatusLineSegment::ThreadTitle,
+                    StatusLineSegment::ModelWithEffort,
+                    StatusLineSegment::Model,
+                ];
+                if reversed {
+                    segments.reverse();
+                }
+                let state = StatusLineState {
+                    effort: Some(Effort::High),
+                    title: Some("Session title"),
                     permission_mode: Mode::Yolo,
                     ..bare_state()
-                },
-            );
+                };
 
-            assert_eq!(text_of(&rendered), "  m │ Ready");
+                let rendered = StatusLine::new(segments).render(&Theme::default(), &state, 22);
+
+                assert_eq!(text_of(&rendered), expected, "reversed={reversed}");
+            }
         }
 
         #[test]
