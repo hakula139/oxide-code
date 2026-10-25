@@ -123,17 +123,7 @@ in
     assertions = [
       {
         assertion = cfg.checkConfig -> cfg.package != null;
-        message =
-          "programs.oxide-code.checkConfig runs ox from programs.oxide-code.package, "
-          + "which is null. Set a package or checkConfig = false.";
-      }
-
-      {
-        assertion = !(cfg.settings ? client.api_key);
-        message =
-          "programs.oxide-code.settings.client.api_key would write the key into the Nix store, "
-          + "which every local user can read. Export ANTHROPIC_API_KEY from your secret manager "
-          + "instead.";
+        message = "programs.oxide-code.checkConfig requires a package.";
       }
     ];
 

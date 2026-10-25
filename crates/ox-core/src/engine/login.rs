@@ -87,7 +87,7 @@ impl Engine {
         }
     }
 
-    /// Uses a new oxide-code login for requests unless an env var or `client.api_key` outranks it.
+    /// Uses a new oxide-code login for requests unless an explicit credential outranks it.
     fn adopt_login(&mut self, sink: &dyn EventSink, auth: Auth) {
         let active = match self.client.auth_source() {
             Some(source) if !source.is_stored_login() => source,
@@ -568,7 +568,7 @@ mod tests {
                     .await;
                 let dir = tempfile::tempdir().unwrap();
                 let data = tempfile::tempdir().unwrap();
-                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
+                Box::pin(temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
                     let mut engine =
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                     engine.client.set_auth(None);
@@ -611,7 +611,7 @@ mod tests {
                         ),
                         "{signed_in:?}"
                     );
-                })
+                }))
                 .await;
             })
             .await;

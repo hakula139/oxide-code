@@ -239,7 +239,7 @@
         checks = {
           pre-commit = preCommitCheck;
 
-          home-manager = import ./nix/tests/home-manager.nix {
+          home-manager = import ./nix/home-manager-tests.nix {
             inherit home-manager pkgs;
             homeModule = self.homeModules.default;
           };

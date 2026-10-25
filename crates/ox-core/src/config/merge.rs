@@ -15,12 +15,17 @@ const APPENDED_TABLES: &[&str] = &["permission.deny", "permission.ask", "permiss
 /// Arrays outside [`APPENDED_TABLES`] that concatenate the same way.
 const APPENDED: &[&str] = &["permission.extra_roots"];
 
+const REPLACED_TABLES: &[&str] = &["client.auth", "client.headers"];
+
 /// Keys under one table that replace each other: a layer that sets any of them clears the rest from
 /// lower layers, so a project's percent threshold takes precedence over a user's token threshold.
-const EXCLUSIVE: &[(&str, &[&str])] = &[(
-    "client.compaction",
-    &["auto_threshold_tokens", "auto_threshold_percent"],
-)];
+const EXCLUSIVE: &[(&str, &[&str])] = &[
+    ("client", &["api_key", "auth"]),
+    (
+        "client.compaction",
+        &["auto_threshold_tokens", "auto_threshold_percent"],
+    ),
+];
 
 // ── Origins ──
 
@@ -109,8 +114,11 @@ impl Origins {
         self.elements.retain(|key, _| !replaced(key));
     }
 
-    /// Attributes every leaf under `value` to `layer`.
+    /// Attributes settings under `value` to `layer`, including empty replacement tables.
     fn record(&mut self, value: &Value, path: String, layer: usize) {
+        if REPLACED_TABLES.contains(&path.as_str()) {
+            self.keys.insert(path.clone(), layer);
+        }
         match value {
             Value::Table(table) => {
                 for (key, value) in table {
@@ -168,7 +176,9 @@ fn merge_table(
             format!("{prefix}.{key}")
         };
         match (base.get_mut(&key), value) {
-            (Some(Value::Table(base)), Value::Table(overlay)) => {
+            (Some(Value::Table(base)), Value::Table(overlay))
+                if !REPLACED_TABLES.contains(&path.as_str()) =>
+            {
                 merge_table(base, overlay, &path, layer, origins);
             }
             (Some(Value::Array(base)), Value::Array(overlay)) if is_appended(&path) => {

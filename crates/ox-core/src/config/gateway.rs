@@ -1,9 +1,10 @@
-//! Request-shape settings for LLM gateways, read from the env vars Claude Code uses.
+//! Request-shape settings for LLM gateways, from user configuration and Claude Code env vars.
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use super::auth::AuthSource;
+use super::schema::ClientTable;
 use crate::util::env;
 
 /// The env var holding extra request headers, which gateways also use to carry their keys.
@@ -14,7 +15,7 @@ pub(super) const CUSTOM_HEADERS_VAR: &str = "ANTHROPIC_CUSTOM_HEADERS";
 /// How requests adapt to a gateway between ox and the Anthropic API.
 #[derive(Debug, Clone)]
 pub(crate) struct GatewayCompat {
-    /// `ANTHROPIC_CUSTOM_HEADERS`, sent on every API request after the built-in headers.
+    /// Sent on every API request after the built-in headers.
     pub(crate) custom_headers: HeaderMap,
     /// Whether requests carry the `x-anthropic-billing-header` attribution block.
     pub(crate) attribution: bool,
@@ -24,17 +25,25 @@ pub(crate) struct GatewayCompat {
 }
 
 impl GatewayCompat {
-    pub(super) fn load() -> Result<Self> {
-        let custom_headers = env::string(CUSTOM_HEADERS_VAR)
-            .map(|raw| parse_headers(&raw))
-            .transpose()
-            .context("invalid ANTHROPIC_CUSTOM_HEADERS")?
-            .unwrap_or_default();
+    pub(super) fn from_client(client: &ClientTable) -> Result<Self> {
+        let custom_headers = match env::string(CUSTOM_HEADERS_VAR) {
+            Some(raw) => parse_headers(&raw).context("invalid ANTHROPIC_CUSTOM_HEADERS")?,
+            None => client
+                .headers
+                .as_ref()
+                .map(file_headers)
+                .transpose()?
+                .unwrap_or_default(),
+        };
         Ok(Self {
             custom_headers,
-            attribution: env::bool("CLAUDE_CODE_ATTRIBUTION_HEADER")?.unwrap_or(true),
-            structured_outputs: !env::bool("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS")?
-                .unwrap_or(false),
+            attribution: env::bool("CLAUDE_CODE_ATTRIBUTION_HEADER")?
+                .or(client.attribution)
+                .unwrap_or(true),
+            structured_outputs: env::bool("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS")?
+                .map(|disabled| !disabled)
+                .or(client.structured_outputs)
+                .unwrap_or(true),
         })
     }
 
@@ -51,16 +60,39 @@ impl GatewayCompat {
     }
 
     /// Rejects a custom header that would replace the header carrying the active credential.
-    pub(super) fn check_credential_header(&self, auth: AuthSource) -> Result<()> {
+    pub(super) fn check_credential_header_from(
+        &self,
+        auth: AuthSource,
+        setting: &str,
+    ) -> Result<()> {
         let name = auth.kind().header_name();
         if self.custom_headers.contains_key(&name) {
             bail!(
-                "invalid ANTHROPIC_CUSTOM_HEADERS: \
+                "invalid {setting}: \
                  {name} carries the {auth} credential and cannot be overridden"
             );
         }
         Ok(())
     }
+}
+
+pub(super) fn file_headers(raw: &std::collections::BTreeMap<String, String>) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in raw {
+        let name =
+            HeaderName::from_bytes(name.as_bytes()).context("invalid client.headers name")?;
+        ensure!(
+            !RESERVED.contains(&name.as_str()),
+            "invalid client.headers: {name} is set by ox and cannot be overridden"
+        );
+        let mut value = HeaderValue::from_str(value).context("invalid client.headers value")?;
+        value.set_sensitive(true);
+        ensure!(
+            headers.insert(name, value).is_none(),
+            "client.headers sets the same header more than once"
+        );
+    }
+    Ok(headers)
 }
 
 // ── GatewaySnapshot ──
@@ -75,8 +107,8 @@ pub struct GatewaySnapshot {
 
 // ── Custom Headers ──
 
-/// Headers the client sets on each request. The credential header depends on the auth kind, so
-/// [`GatewayCompat::check_credential_header`] guards it once the credential resolves.
+/// `authorization` and `x-api-key` are checked against the selected credential so a gateway can
+/// use the other header for its own credential.
 const RESERVED: &[&str] = &[
     "anthropic-beta",
     "anthropic-version",
@@ -117,7 +149,10 @@ pub(super) fn parse_headers(raw: &str) -> Result<HeaderMap> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
+    use crate::config::schema::FileConfig;
 
     fn pairs(headers: &HeaderMap) -> Vec<(&str, &str)> {
         headers
@@ -137,37 +172,82 @@ mod tests {
             let value = vars.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
             (key, value)
         });
-        temp_env::with_vars(vars, GatewayCompat::load)
+        temp_env::with_vars(vars, || GatewayCompat::from_client(&ClientTable::default()))
     }
 
-    mod load {
+    mod from_client {
         use super::*;
 
         #[test]
-        fn defaults_send_attribution_and_allow_structured_outputs() {
-            let compat = load_with(&[]).unwrap();
-            assert!(compat.custom_headers.is_empty());
-            assert!(compat.attribution);
-            assert!(compat.structured_outputs);
-        }
-
-        #[test]
-        fn reads_claude_code_env_names() {
-            let compat = load_with(&[
+        fn file_values_supply_defaults_and_environment_replaces_each_setting() {
+            for (body, vars, expected_headers, attribution, structured_outputs) in [
+                ("", vec![], vec![], true, true),
                 (
-                    "ANTHROPIC_CUSTOM_HEADERS",
-                    "X-Team: platform\nx-route: blue",
+                    indoc! {"
+                        client.headers = { x-file = 'private-header-sentinel' }
+                        client.attribution = false
+                        client.structured_outputs = false
+                    "},
+                    vec![],
+                    vec![("x-file", "private-header-sentinel")],
+                    false,
+                    false,
                 ),
-                ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
-                ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "1"),
-            ])
-            .unwrap();
-            assert_eq!(
-                pairs(&compat.custom_headers),
-                [("x-team", "platform"), ("x-route", "blue")],
-            );
-            assert!(!compat.attribution);
-            assert!(!compat.structured_outputs);
+                (
+                    indoc! {"
+                        client.headers = { x-file = 'private-header-sentinel' }
+                        client.attribution = false
+                        client.structured_outputs = false
+                    "},
+                    vec![
+                        (CUSTOM_HEADERS_VAR, "x-env: env"),
+                        ("CLAUDE_CODE_ATTRIBUTION_HEADER", "1"),
+                        ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "0"),
+                    ],
+                    vec![("x-env", "env")],
+                    true,
+                    true,
+                ),
+                (
+                    indoc! {"
+                        client.headers = {}
+                        client.attribution = true
+                        client.structured_outputs = true
+                    "},
+                    vec![
+                        ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
+                        ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "1"),
+                    ],
+                    vec![],
+                    false,
+                    false,
+                ),
+                (
+                    "client.headers = { x-file = 'private-header-sentinel' }",
+                    vec![(CUSTOM_HEADERS_VAR, " \n ")],
+                    vec![],
+                    true,
+                    true,
+                ),
+            ] {
+                let config: FileConfig = toml::from_str(body).unwrap();
+                let vars = ENV_KEYS.map(|key| {
+                    let value = vars
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .map(|(_, value)| *value);
+                    (key, value)
+                });
+
+                let gateway = temp_env::with_vars(vars, || {
+                    GatewayCompat::from_client(&config.client).unwrap()
+                });
+
+                assert_eq!(pairs(&gateway.custom_headers), expected_headers, "{body}");
+                assert_eq!(gateway.attribution, attribution, "{body}");
+                assert_eq!(gateway.structured_outputs, structured_outputs, "{body}");
+                assert!(!format!("{gateway:?}").contains("private-header-sentinel"));
+            }
         }
 
         #[test]
@@ -199,7 +279,7 @@ mod tests {
         }
     }
 
-    mod check_credential_header {
+    mod check_credential_header_from {
         use super::*;
 
         #[test]
@@ -210,11 +290,11 @@ mod tests {
             )])
             .unwrap();
             compat
-                .check_credential_header(AuthSource::ApiKeyEnv)
+                .check_credential_header_from(AuthSource::ApiKeyEnv, CUSTOM_HEADERS_VAR)
                 .expect("x-api-key carries the credential, so a custom Authorization is free");
 
             let err = compat
-                .check_credential_header(AuthSource::OAuthTokenEnv)
+                .check_credential_header_from(AuthSource::OAuthTokenEnv, CUSTOM_HEADERS_VAR)
                 .unwrap_err();
             assert_eq!(
                 err.to_string(),

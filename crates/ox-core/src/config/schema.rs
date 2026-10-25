@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::RangeInclusive;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, ensure};
 use serde::de::{self, Unexpected};
 use serde::{Deserialize, Deserializer};
 
@@ -15,6 +15,7 @@ use crate::permission::defaults::Shipped;
 use crate::permission::rule::Rule;
 use crate::permission::{Mode, PermissionClass, Tier};
 use crate::util::env::whole_number_in;
+use crate::util::path::expand_user;
 
 /// One config file, or several merged. Every key is optional.
 #[derive(Debug, Default, Deserialize)]
@@ -25,12 +26,16 @@ pub(super) struct FileConfig {
     pub(super) tui: TuiTable,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct ClientTable {
     pub(super) api_key: Option<String>,
+    pub(super) auth: Option<ClientAuth>,
     pub(super) base_url: Option<String>,
     pub(super) extra_ca_certs: Option<String>,
+    pub(super) headers: Option<BTreeMap<String, String>>,
+    pub(super) attribution: Option<bool>,
+    pub(super) structured_outputs: Option<bool>,
     pub(super) model: Option<String>,
     pub(super) effort: Option<Effort>,
     #[serde(deserialize_with = "count")]
@@ -39,6 +44,75 @@ pub(super) struct ClientTable {
     pub(super) max_tool_rounds: Option<u32>,
     pub(super) prompt_cache_ttl: Option<PromptCacheTtl>,
     pub(super) compaction: CompactionTable,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) enum ClientAuth {
+    Bearer(AuthValue),
+    ApiKey(AuthValue),
+    Oauth(AuthValue),
+    Login {},
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AuthValue {
+    pub(super) value: Option<String>,
+    pub(super) file: Option<String>,
+}
+
+impl fmt::Debug for AuthValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthValue").finish_non_exhaustive()
+    }
+}
+
+impl ClientTable {
+    pub(super) fn validate(&self) -> Result<()> {
+        if let Some(headers) = &self.headers {
+            super::gateway::file_headers(headers)?;
+        }
+        ensure!(
+            self.api_key.is_none() || self.auth.is_none(),
+            "client.api_key and client.auth cannot be set in the same file"
+        );
+        let Some(auth) = &self.auth else {
+            return Ok(());
+        };
+        let (ClientAuth::Bearer(source) | ClientAuth::ApiKey(source) | ClientAuth::Oauth(source)) =
+            auth
+        else {
+            return Ok(());
+        };
+        ensure!(
+            source.value.is_some() != source.file.is_some(),
+            "client.auth requires exactly one of value or file"
+        );
+        if let Some(value) = &source.value {
+            ensure!(!value.is_empty(), "client.auth.value must not be empty");
+            reqwest::header::HeaderValue::from_str(value)
+                .context("invalid client.auth.value: expected an HTTP header value")?;
+        }
+        if let Some(file) = &source.file {
+            let path = expand_user(file).context("invalid client.auth.file")?;
+            ensure!(
+                path.is_absolute()
+                    && (std::path::Path::new(file).is_absolute() || file.starts_with("~/")),
+                "client.auth.file must be an absolute or ~/ path"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for ClientTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientTable")
+            .field("auth", &self.auth)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -167,6 +241,41 @@ where
         match T::try_from(raw) {
             Ok(value) if self.0.contains(&value) => Ok(Some(value)),
             _ => Err(E::invalid_value(Unexpected::Signed(raw), &self)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::formatdoc;
+
+    use super::*;
+
+    mod file_config {
+        use super::*;
+
+        #[test]
+        fn debug_omits_inline_credentials_and_custom_header_values() {
+            for auth in [
+                "api_key = 'private-token-sentinel'",
+                "auth = { type = 'bearer', value = 'private-token-sentinel' }",
+                "auth = { type = 'api-key', value = 'private-token-sentinel' }",
+                "auth = { type = 'oauth', value = 'private-token-sentinel' }",
+            ] {
+                let config: FileConfig = toml::from_str(&formatdoc! {"
+                    [client]
+                    {auth}
+                    headers = {{ x-private = 'private-header-sentinel' }}
+                    model = 'claude-haiku-5-5'
+                "})
+                .unwrap();
+
+                let debug = format!("{config:?}");
+
+                assert!(!debug.contains("private-token-sentinel"), "{debug}");
+                assert!(!debug.contains("private-header-sentinel"), "{debug}");
+                assert!(debug.contains("claude-haiku-5-5"), "{debug}");
+            }
         }
     }
 }

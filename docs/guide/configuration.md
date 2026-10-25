@@ -14,8 +14,10 @@ Run `/config` to see each resolved value next to the layer that set it: `default
 
 ### Merging
 
-Each file sets only the keys it names, and a later layer wins key by key, so a drop-in that sets `client.effort` keeps the `client.model` from `config.toml`. Tables merge recursively, including `[tui.theme.overrides]`.
+Each file sets only the keys it names, and a later layer wins key by key, so a drop-in that sets `client.effort` keeps the `client.model` from `config.toml`. Tables merge recursively, including `[tui.theme.overrides]`, with these replacement and list rules:
 
+- **`client.auth` and `client.headers`** come whole from the last layer that sets them. An empty header map clears the lower map.
+- **`client.api_key` and `client.auth`** are alternative credential settings, so a layer that sets either clears the other from lower layers. A single file cannot set both.
 - **`permission.extra_roots` and the class lists under `permission.deny`, `permission.ask`, and `permission.allow`**, such as `permission.allow.exec`, concatenate, so the entries from every layer apply.
 - **Other arrays**, such as `tui.status_line`, come whole from the last layer that sets them.
 - **`auto_threshold_tokens` and `auto_threshold_percent`** act as one setting, so a layer that sets either replaces both.
@@ -36,7 +38,7 @@ The project file must also resolve inside the project root. A `.ox/config.toml` 
 
 `ox config check` loads the config files that apply in the working directory along with the environment variables, validates them as startup does, and prints each file it read. Warnings, such as an unsupported model or an ignored theme override, go to stderr. An invalid value exits with status 1 and the startup error.
 
-The check skips the stored login and the CA bundle, so it never opens the keychain or connects, which lets it run in CI or a Nix build. It covers only the config, so instruction files such as `AGENTS.md` go unchecked. Other paths, such as a theme file or an extra root, resolve against the filesystem where the check runs.
+The check skips credential files, stored logins, and CA bundles, so it never opens the keychain or connects, which lets it run in CI or a Nix build. It covers only the config, so instruction files such as `AGENTS.md` go unchecked. Other paths, such as a theme file or an extra root, resolve against the filesystem where the check runs.
 
 ## Config File
 
@@ -201,7 +203,7 @@ Each request carries one credential. oxide-code uses the first source that is se
 | ---------------------------------------------------- | ------------------------------- | ----------------------------------------------------- |
 | 1. `ANTHROPIC_AUTH_TOKEN`                            | `Authorization: Bearer`         | [LLM gateways](#llm-gateways) that take bearer tokens |
 | 2. `ANTHROPIC_API_KEY`                               | `x-api-key`                     | Anthropic Console API key                             |
-| 3. `api_key` under `[client]`                        | `x-api-key`                     | The same key, stored in the user config file          |
+| 3. `[client.auth]` or legacy `client.api_key`        | Configured scheme               | Private inline credential or secret file              |
 | 4. `CLAUDE_CODE_OAUTH_TOKEN`                         | `Authorization: Bearer` + OAuth | Long-lived token from `claude setup-token`            |
 | 5. oxide-code login                                  | `Authorization: Bearer` + OAuth | Signed in with `/login`                               |
 | 6. [Claude Code](https://code.claude.com/docs) login | `Authorization: Bearer` + OAuth | Claude Code installed and signed in                   |
@@ -213,13 +215,25 @@ Each request carries one credential. oxide-code uses the first source that is se
 - **Without a credential**, `ox` starts signed out and shows how to sign in, and prompts fail until `/login` succeeds. When a stored login failed only for a passing reason, such as an unreachable token endpoint, the next prompt tries it again. `ox -p` and `ox --no-tui` exit at startup with the list of credential options.
 - **`/status` and `/config`** show the active source, such as `OAuth (CLAUDE_CODE_OAUTH_TOKEN)`, without its value.
 
-The environment variables and the stored logins keep credentials out of config files. An `api_key` in `~/.config/ox/config.toml` works but sits on disk in plaintext.
+User configuration can select a fixed credential with `[client.auth]`:
+
+```toml
+[client.auth]
+type = "bearer"
+file = "~/.secrets/gateway-token"
+```
+
+`type` is `"bearer"` for an `Authorization: Bearer` gateway token, `"api-key"` for `x-api-key`, or `"oauth"` for a fixed OAuth token with the OAuth request shape. Set exactly one of `file` or `value`. A `file` path must be absolute or start with `~/`, and ox reads only the winning file once during startup, trimming trailing line endings. Restart ox to read a rotated file. `ox config check` validates the declaration without opening the credential file. A fixed OAuth token can use the configured endpoint and is never refreshed.
+
+An inline `value` or legacy `client.api_key` sits on disk in plaintext, so keep that user config private, conventionally mode `0600`. ox does not change its permissions. `type = "login"` takes neither `file` nor `value` and selects the remaining environment and stored-login fallback chain. Stored logins retain their first-party endpoint restriction.
 
 Commands the assistant runs with `bash` cannot access `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or `ANTHROPIC_CUSTOM_HEADERS`, so no command finds your credential in its own environment. On Linux, the built-in [`credentials` rule](permissions.md#built-in-rules) also covers each process's environment under `/proc`, including `ox`'s own. A script that needs its own Anthropic key, such as a test suite that calls the API, must read it from another variable or a file.
 
 ## LLM Gateways
 
-oxide-code reads the gateway variables Claude Code uses:
+User configuration supports `client.headers` as a map of header names to string values, `client.attribution` (default `true`), and `client.structured_outputs` (default `true`). These settings, authentication, the endpoint, and CA trust are user-only. A project config cannot set them.
+
+oxide-code reads the gateway variables Claude Code uses, which override the corresponding file settings:
 
 ```bash
 export ANTHROPIC_BASE_URL=https://gateway.example.com/anthropic
@@ -255,16 +269,20 @@ Each key goes in the table its prefix names, so `client.compaction.auto_enabled`
 | Key                                        | Type    | Default                         | Description                                                                                                 |
 | ------------------------------------------ | ------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `client.api_key`                           | string  | -                               | [Anthropic API key](#authentication), user config only                                                      |
+| `client.attribution`                       | boolean | `true`                          | Send the [attribution block](#llm-gateways), user config only                                               |
+| `client.auth`                              | table   | -                               | [Typed credential](#authentication), user config only                                                       |
 | `client.base_url`                          | string  | `"https://api.anthropic.com"`   | [API base URL](#base_url-endpoint), user config only                                                        |
 | `client.compaction.auto_enabled`           | boolean | `true`                          | Enable [automatic context compaction](#clientcompaction-context-compression)                                |
 | `client.compaction.auto_threshold_percent` | integer | model-derived                   | Share of the context window that [triggers compaction](#clientcompaction-context-compression), `1` to `100` |
 | `client.compaction.auto_threshold_tokens`  | integer | model-derived                   | Token count that [triggers compaction](#clientcompaction-context-compression)                               |
 | `client.effort`                            | string  | per-model                       | [Effort level](#effort-reasoning-effort), `"low"` to `"max"`                                                |
 | `client.extra_ca_certs`                    | string  | -                               | [PEM bundle](#extra_ca_certs-corporate-trust-anchors) appended to the trust store, user config only         |
+| `client.headers`                           | table   | empty                           | [Extra request headers](#llm-gateways), user config only                                                    |
 | `client.max_tokens`                        | integer | per-model                       | [Max tokens per response](#max_tokens-response-ceiling)                                                     |
 | `client.max_tool_rounds`                   | integer | unset (unbounded)               | [Per-turn safety cap](#max_tool_rounds-agent-loop-safety-cap) on tool rounds                                |
 | `client.model`                             | string  | `"claude-opus-5-5"`             | [Model](#model-supported-models) to use                                                                     |
 | `client.prompt_cache_ttl`                  | string  | `"1h"`                          | [Prompt-cache TTL](#prompt_cache_ttl-cache-duration), `"5m"` or `"1h"`                                      |
+| `client.structured_outputs`                | boolean | `true`                          | Allow [title JSON schemas](#llm-gateways), user config only                                                 |
 | `permission.allow`                         | table   | empty                           | [Calls that run without asking](permissions.md#rule-tables), user config only                               |
 | `permission.ask`                           | table   | empty                           | [Calls that ask first](permissions.md#rule-tables), even when an allow pattern matches                      |
 | `permission.defaults`                      | table   | all on                          | [Built-in rules](permissions.md#built-in-rules) to turn off by name, user config only                       |
@@ -284,11 +302,11 @@ A variable that maps to a config key overrides that key in every file.
 | Variable                                 | Config key                                 | Description                                                                                   |
 | ---------------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------- |
 | `ANTHROPIC_API_KEY`                      | `client.api_key`                           | [Anthropic API key](#authentication)                                                          |
-| `ANTHROPIC_AUTH_TOKEN`                   | -                                          | [Gateway bearer token](#llm-gateways)                                                         |
+| `ANTHROPIC_AUTH_TOKEN`                   | `client.auth`                              | [Gateway bearer token](#llm-gateways)                                                         |
 | `ANTHROPIC_BASE_URL`                     | `client.base_url`                          | API base URL                                                                                  |
-| `ANTHROPIC_CUSTOM_HEADERS`               | -                                          | [Extra request headers](#llm-gateways), one `Name: value` per line                            |
-| `CLAUDE_CODE_ATTRIBUTION_HEADER`         | -                                          | Send the [attribution block](#llm-gateways), default `true`                                   |
-| `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` | -                                          | Drop [title JSON schemas](#llm-gateways), default `false`                                     |
+| `ANTHROPIC_CUSTOM_HEADERS`               | `client.headers`                           | [Extra request headers](#llm-gateways), one `Name: value` per line                            |
+| `CLAUDE_CODE_ATTRIBUTION_HEADER`         | `client.attribution`                       | Send the [attribution block](#llm-gateways), default `true`                                   |
+| `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` | `client.structured_outputs`                | Disable [title JSON schemas](#llm-gateways), default `false`, inverse of the config key       |
 | `CLAUDE_CODE_OAUTH_TOKEN`                | -                                          | [Long-lived OAuth token](#authentication)                                                     |
 | `CLAUDE_CONFIG_DIR`                      | -                                          | [Claude Code's config dir](#authentication), default `~/.claude`                              |
 | `NODE_EXTRA_CA_CERTS`                    | -                                          | [Fallback PEM trust bundle](#llm-gateways)                                                    |

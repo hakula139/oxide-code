@@ -17,6 +17,7 @@ use crate::permission::{Policy, Workspace};
 pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
     Config {
         auth: Some(auth),
+        pending_auth: None,
         signed_out: None,
         base_url: base_url.into(),
         extra_ca_certs: None,
