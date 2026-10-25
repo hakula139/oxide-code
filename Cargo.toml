@@ -3,7 +3,7 @@ members = ["crates/ox-core", "crates/ox-tui", "crates/ox"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0-alpha.8"
+version = "0.1.0-alpha.9"
 edition = "2024"
 rust-version = "1.91"
 authors = ["Hakula <i@hakula.xyz>"]
