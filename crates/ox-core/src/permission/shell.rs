@@ -3059,7 +3059,13 @@ impl ReaderGrammar {
                     .flatten()
                     .find(|value| !value.is_empty() && "recurse".starts_with(value))
             };
-            if recurses(&[*value, next]) {
+            let probe = [*value, next];
+            let probe = if next.is_some() {
+                &probe[..]
+            } else {
+                &probe[..1]
+            };
+            if recurses(probe) {
                 return true;
             }
         }
@@ -5029,6 +5035,24 @@ mod tests {
                 ),
                 ("find", "* )", "vault ( -name )", 0, 3, 0, "."),
                 ("find", "* )", "( -name vault )", 0, 3, 0, "."),
+                (
+                    "ls",
+                    "--format *",
+                    "--format -R long vault",
+                    1,
+                    4,
+                    1,
+                    "vault",
+                ),
+                (
+                    "ls",
+                    "--format *",
+                    "--format long -R vault",
+                    1,
+                    4,
+                    1,
+                    "vault",
+                ),
                 (
                     "grep",
                     "-r -e needle -? patterns/* src",

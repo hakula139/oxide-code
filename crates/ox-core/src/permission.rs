@@ -4522,6 +4522,12 @@ mod tests {
                         &["-w", "-R", "vault/key"][..],
                     ),
                     (
+                        "an exposed ls flag retains recursion without a following value",
+                        "ls --format *",
+                        "./vault/key",
+                        &["-R", "long", "vault/key"][..],
+                    ),
+                    (
                         "an expanded option may consume the final explicit root",
                         "grep -e PRIVATE -* pats",
                         "./vault/key",
@@ -4603,6 +4609,7 @@ mod tests {
                     "aux/public",
                     "src/a/file",
                     "src/b/file",
+                    "--recursive",
                     "-r",
                     "other",
                 ] {
@@ -4624,6 +4631,7 @@ mod tests {
                         for (case, unknown) in [
                             ("grep -r -f aux/public* src", false),
                             ("grep -r -f aux/protected* src", false),
+                            ("grep -f aux/p* PRIVATE src", true),
                             ("grep -r --file=aux/lis? src", false),
                             ("grep -r -faux/lis? src", false),
                             ("grep -r PRIVATE src/*", false),
@@ -4631,6 +4639,7 @@ mod tests {
                             ("ls -R src/*", false),
                             ("grep -- PRIVATE *r src", false),
                             ("grep -r -- PRIVATE -* src", false),
+                            ("grep -- -* aux/protected", true),
                             ("grep -f aux/protected PRIVATE *r src", true),
                         ] {
                             let expected = if unknown && mode == Mode::Manual {
