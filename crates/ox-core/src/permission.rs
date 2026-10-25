@@ -4382,6 +4382,7 @@ mod tests {
                             "find -L ~ -name id_rsa",
                             "find -HL ~ -name id_rsa",
                             "find -f ~",
+                            "find -- ~ -name id_rsa",
                             "ls -laR ~",
                             "ls --recursive ~",
                             "grep -r PRIVATE $HOME",
@@ -4443,6 +4444,8 @@ mod tests {
                                     "grep -r needle",
                                     "find",
                                     "find -name needle",
+                                    r"find \( -name needle \)",
+                                    "find ! -name needle",
                                     "ls -R",
                                 ] {
                                     let access = Access::for_command(case, &workspace);
@@ -4455,6 +4458,18 @@ mod tests {
                                         "{mode:?}, attended={attended}: {case}"
                                     );
                                 }
+
+                                let unknown_expected = if mode == Mode::Yolo {
+                                    Decision::Allow
+                                } else {
+                                    expected
+                                };
+
+                                assert_eq!(
+                                    decide_command(&p, "grep -r needle $DIR", &workspace),
+                                    unknown_expected,
+                                    "{mode:?}, attended={attended}: unknown recursive operand"
+                                );
                             }
                         }
                     }
