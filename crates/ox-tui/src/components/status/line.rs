@@ -193,7 +193,11 @@ impl StatusLine {
                 )
             }),
         }?;
-        Some(RenderedSegment::new(segment, span, hyperlink))
+        Some(RenderedSegment::new(
+            segment_utility(segment, state.permission_mode),
+            span,
+            hyperlink,
+        ))
     }
 }
 
@@ -249,16 +253,16 @@ impl SegmentStyle {
 
 #[derive(Debug, Clone)]
 struct RenderedSegment {
-    segment: StatusLineSegment,
+    utility: u8,
     span: Span<'static>,
     /// OSC 8 target for the visible span.
     hyperlink: Option<String>,
 }
 
 impl RenderedSegment {
-    fn new(segment: StatusLineSegment, span: Span<'static>, hyperlink: Option<String>) -> Self {
+    fn new(utility: u8, span: Span<'static>, hyperlink: Option<String>) -> Self {
         Self {
-            segment,
+            utility,
             span,
             hyperlink,
         }
@@ -295,13 +299,13 @@ fn lowest_priority_index(segments: &[RenderedSegment]) -> usize {
     let (index, _) = segments
         .iter()
         .enumerate()
-        .min_by_key(|(_, segment)| segment_utility(segment.segment))
+        .min_by_key(|(_, segment)| segment.utility)
         .expect("fit_segments drops only while two or more segments remain");
     index
 }
 
 /// Per-segment narrow-width rank. Lower numbers drop earlier.
-fn segment_utility(segment: StatusLineSegment) -> u8 {
+fn segment_utility(segment: StatusLineSegment, mode: Mode) -> u8 {
     match segment {
         StatusLineSegment::Theme => 0,
         StatusLineSegment::SessionId => 1,
@@ -318,10 +322,11 @@ fn segment_utility(segment: StatusLineSegment) -> u8 {
         StatusLineSegment::WeeklyLimit => 12,
         StatusLineSegment::FiveHourLimit => 13,
         StatusLineSegment::ContextUsed => 14,
-        StatusLineSegment::Model => 15,
-        StatusLineSegment::ModelWithEffort => 16,
-        StatusLineSegment::PermissionMode => 17,
-        StatusLineSegment::RunState => 18,
+        StatusLineSegment::PermissionMode if mode == Mode::Manual => 15,
+        StatusLineSegment::Model => 16,
+        StatusLineSegment::ModelWithEffort => 17,
+        StatusLineSegment::PermissionMode => 18,
+        StatusLineSegment::RunState => 19,
     }
 }
 
