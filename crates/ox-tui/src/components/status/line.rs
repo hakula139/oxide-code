@@ -390,9 +390,9 @@ fn usage_style(percent: f64) -> SegmentStyle {
 
 fn permission_mode_label(mode: Mode) -> (&'static str, SegmentStyle) {
     match mode {
-        Mode::Manual => ("Mode: manual", SegmentStyle::Muted),
-        Mode::Plan => ("Mode: plan", SegmentStyle::Accent),
-        Mode::Yolo => ("Mode: yolo", SegmentStyle::Error),
+        Mode::Manual => ("manual", SegmentStyle::Muted),
+        Mode::Plan => ("plan", SegmentStyle::Accent),
+        Mode::Yolo => ("yolo", SegmentStyle::Error),
     }
 }
 
@@ -788,9 +788,9 @@ mod tests {
             let theme = Theme::default();
 
             for (permission_mode, label, style) in [
-                (Mode::Manual, "Mode: manual", theme.muted()),
-                (Mode::Plan, "Mode: plan", theme.accent()),
-                (Mode::Yolo, "Mode: yolo", theme.error()),
+                (Mode::Manual, "manual", theme.muted()),
+                (Mode::Plan, "plan", theme.accent()),
+                (Mode::Yolo, "yolo", theme.error()),
             ] {
                 let rendered = render(
                     vec![
@@ -810,16 +810,17 @@ mod tests {
 
         #[test]
         fn manual_mode_yields_to_the_model_while_plan_and_yolo_stay_visible() {
-            for (model_segment, label) in [
-                (StatusLineSegment::Model, "m"),
-                (StatusLineSegment::ModelWithEffort, "m (high)"),
+            for (model_segment, model, label) in [
+                (StatusLineSegment::Model, "long-model", "long-model"),
+                (StatusLineSegment::ModelWithEffort, "m", "m (high)"),
             ] {
                 for (permission_mode, expected) in [
                     (Mode::Manual, format!("  {label} │ Ready")),
-                    (Mode::Plan, "  Mode: plan │ Ready".to_owned()),
-                    (Mode::Yolo, "  Mode: yolo │ Ready".to_owned()),
+                    (Mode::Plan, "  plan │ Ready".to_owned()),
+                    (Mode::Yolo, "  yolo │ Ready".to_owned()),
                 ] {
                     let state = StatusLineState {
+                        model,
                         effort: Some(Effort::High),
                         permission_mode,
                         ..bare_state()
@@ -844,6 +845,7 @@ mod tests {
         #[test]
         fn an_oversized_manual_label_leaves_room_for_the_working_directory() {
             let state = StatusLineState {
+                cwd: "~/r",
                 model: "test-model",
                 effort: Some(Effort::High),
                 ..bare_state()
@@ -852,10 +854,10 @@ mod tests {
             let rendered = StatusLine::new(StatusLineSegment::DEFAULT.to_vec()).render(
                 &Theme::default(),
                 &state,
-                40,
+                35,
             );
 
-            assert_eq!(text_of(&rendered), "  ~/repo │ test-model (high) │ Ready");
+            assert_eq!(text_of(&rendered), "  ~/r │ test-model (high) │ Ready");
         }
 
         #[test]
@@ -1001,9 +1003,9 @@ mod tests {
                     StatusLineSegment::Model,
                     StatusLineSegment::PermissionMode,
                 ])
-                .render(&theme, &state, 11);
+                .render(&theme, &state, 7);
 
-                assert_eq!(text_of(&rendered), "  Mode: ...", "{permission_mode}");
+                assert_eq!(text_of(&rendered), format!("  {permission_mode}"));
                 assert_eq!(rendered.line.spans[1].style, style, "{permission_mode}");
             }
         }

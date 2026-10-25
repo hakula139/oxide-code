@@ -112,7 +112,7 @@ impl InputArea {
             [
                 "Tab / Shift+Tab mode",
                 if busy { "Enter queue" } else { "Enter send" },
-                "Alt+Enter newline",
+                "Shift+Enter newline",
                 "/ commands",
             ]
         };
