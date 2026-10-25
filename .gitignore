@@ -10,8 +10,7 @@ node_modules/
 # Nix
 .direnv/
 /.pre-commit-config.yaml
-# `nix build` links its output from whichever directory it runs in, while a real `result/` directory
-# stays tracked.
+# `nix build` creates output links wherever it runs. Keep real source directories visible.
 result
 result-*
 !result/
@@ -22,5 +21,7 @@ result-*
 
 # Assistant local state
 .agents/plans/
+.claude/agent-memory-local
+.claude/plans
 **/.claude/settings.local.json
 .claude/worktrees/

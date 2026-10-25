@@ -61,12 +61,6 @@ Prettier and Taplo leave long strings alone, and no formatter covers shell code,
 - Split a shell command that runs past the limit at its pipelines and `&&` or `||` lists, and split one in a Markdown code block the same way where that helps readability. If a part is still too long, keep at most what names the operation on its first line, such as the command, its subcommands, and a leading script, pattern, or message, and put each further flag with its value, or each group of related arguments, on a line of its own. Indent continuation lines one level past the first line, and end each line but the last with `\`, unless it ends with `|`, `&&`, or `||`, which already continue the command. In a workflow, write the command in a `run: |` block.
 - For a multiline command substitution, put the command on the next line and the closing `)` on its own line, aligned with the assignment.
 
-## Git Ignore
-
-Keep portable generated dependencies, build outputs, and local artifacts produced by the shared development workflow in the repository's `.gitignore`. Personal OS and editor state belongs in the user's global ignore file. Keep repository rules for contributor files that may contain private settings, such as `.claude/settings.local.json`, including when contributors create them manually.
-
-Match generic generated directory names at any depth, such as `node_modules/` and `.pnpm-store/`. Anchor an entry with `/` when its producer owns that specific repository path. Use a trailing `/` when only directories should match, and preserve exceptions that keep source directories tracked.
-
 ## Debug Info
 
 Dev and test builds include line tables for the workspace crates and no debug info for dependencies, which limits the size of each checkout's `target/`. Panic messages keep their file and line, and so do backtrace frames in workspace code, while frames in dependency code may show only function names. To inspect variables in a debugger, set `CARGO_PROFILE_DEV_DEBUG=true` to rebuild the workspace crates with full debug info.
