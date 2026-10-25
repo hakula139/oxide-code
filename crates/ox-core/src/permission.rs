@@ -1377,19 +1377,16 @@ fn read_holder<'a>(
     })
 }
 
-/// The first `read` rule among the deny or ask `tiers` that matches a file `segment` names.
+/// The first `read` rule among the deny or ask `tiers` that may match a named read or its descendants.
 fn named_read_holder<'a>(
     segment: &Segment,
     tiers: &(impl Iterator<Item = (&'a TierRule, Tier)> + Clone),
 ) -> Option<Basis> {
     segment.reads().iter().find_map(|read| {
-        let read = read.as_target();
+        let target = read.path.as_target();
         tiers
             .clone()
-            .find(|(rule, _)| {
-                rule.rule
-                    .matches(PermissionClass::Read, &read, MatchDiscipline::Deny)
-            })
+            .find(|(rule, _)| rule.rule.holds_read(&target, read.recursive))
             .map(|(rule, tier)| rule.basis(tier))
     })
 }
@@ -4347,6 +4344,208 @@ mod tests {
             ) -> (Decision, Basis) {
                 let verdict = policy.verdict(class, &target.as_target());
                 (verdict.decision, verdict.basis)
+            }
+
+            #[test]
+            fn recursive_readers_hold_shipped_descendants_by_mode() {
+                let dir = canonical_tempdir();
+                let (cwd, home) = (dir.path().join("repo"), dir.path().join("home"));
+                std::fs::create_dir_all(cwd.join("src")).unwrap();
+                std::fs::create_dir_all(home.join(".ssh")).unwrap();
+                temp_env::with_var(HOME_VAR, Some(&home), || {
+                    let workspace = Workspace::new(&cwd);
+                    for (mode, expected) in
+                        [(Mode::Manual, Decision::Ask), (Mode::Yolo, Decision::Deny)]
+                    {
+                        let p = resolved_policy(
+                            mode,
+                            &[],
+                            &[],
+                            &[(EXEC, "grep *"), (EXEC, "find *"), (EXEC, "ls *")],
+                            &[],
+                            &workspace,
+                        );
+                        for case in [
+                            "grep -r PRIVATE ~",
+                            "grep -R PRIVATE ~",
+                            "grep -nr PRIVATE ~",
+                            "grep -d recurse PRIVATE ~",
+                            "grep --directories=recurse PRIVATE ~",
+                            "grep --rec PRIVATE ~",
+                            "grep --dereference-recursive PRIVATE ~",
+                            "nice timeout 5 grep -r PRIVATE ~",
+                            "sudo grep -r PRIVATE ~",
+                            "cd src && grep -r PRIVATE ~",
+                            r"find src -exec grep -r PRIVATE ~ \;",
+                            "/bin/grep -r PRIVATE ~",
+                            "find ~ -name id_rsa",
+                            "find -L ~ -name id_rsa",
+                            "find -HL ~ -name id_rsa",
+                            "find -f ~",
+                            "ls -laR ~",
+                            "ls --recursive ~",
+                            "grep -r PRIVATE $HOME",
+                            "grep -r PRIVATE \"${HOME}\"",
+                        ] {
+                            let access = Access::for_command(case, &workspace);
+
+                            let verdict = p.verdict(EXEC, &access.as_target());
+
+                            assert_eq!(
+                                (verdict.decision, verdict.basis),
+                                (expected, Basis::Builtin(Shipped::Ssh)),
+                                "{mode:?}: {case}"
+                            );
+                        }
+                        for case in ["grep -r TODO src", "find src -name needle", "ls -R src"] {
+                            assert_eq!(
+                                decide_command(&p, case, &workspace),
+                                Decision::Allow,
+                                "{mode:?}: {case}"
+                            );
+                        }
+                    }
+                });
+            }
+
+            #[test]
+            fn recursive_readers_keep_configured_tiers_and_unattended_decisions() {
+                let dir = canonical_tempdir();
+                let cwd = dir.path();
+                temp_env::with_var(HOME_VAR, Some(cwd), || {
+                    let workspace = Workspace::new(cwd);
+                    for (tier, deny, ask) in [
+                        (Tier::Deny, &[(READ, "./vault/key")][..], &[][..]),
+                        (Tier::Ask, &[][..], &[(READ, "./vault/key")][..]),
+                    ] {
+                        for mode in [Mode::Manual, Mode::Yolo] {
+                            for attended in [true, false] {
+                                let mut p = resolved_policy(
+                                    mode,
+                                    deny,
+                                    ask,
+                                    &[(EXEC, "grep *")],
+                                    &[Shipped::Ssh, Shipped::Credentials],
+                                    &workspace,
+                                );
+                                if !attended {
+                                    p.set_unattended();
+                                }
+                                let expected = if mode == Mode::Yolo && tier == Tier::Deny {
+                                    Decision::Deny
+                                } else if attended {
+                                    Decision::Ask
+                                } else {
+                                    Decision::Unapproved
+                                };
+                                for case in [
+                                    "grep -r needle .",
+                                    "grep -r needle",
+                                    "find",
+                                    "find -name needle",
+                                    "ls -R",
+                                ] {
+                                    let access = Access::for_command(case, &workspace);
+
+                                    let verdict = p.verdict(EXEC, &access.as_target());
+
+                                    assert_eq!(
+                                        (verdict.decision, verdict.basis),
+                                        (expected, rule_basis(tier, READ, "./vault/key")),
+                                        "{mode:?}, attended={attended}: {case}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            #[test]
+            fn recursive_options_keep_pattern_files_and_regular_files_exact() {
+                let dir = canonical_tempdir();
+                let cwd = dir.path();
+                std::fs::create_dir(cwd.join("src")).unwrap();
+                std::fs::write(cwd.join("patterns"), "needle").unwrap();
+                std::fs::write(cwd.join("src/file"), "needle").unwrap();
+                temp_env::with_var(HOME_VAR, Some(cwd), || {
+                    let workspace = Workspace::new(cwd);
+                    let p = resolved_policy(
+                        Mode::Manual,
+                        &[(READ, "./patterns/key"), (READ, "./src/file/key")],
+                        &[],
+                        &[(EXEC, "grep *")],
+                        &[Shipped::Ssh, Shipped::Credentials],
+                        &workspace,
+                    );
+
+                    for case in [
+                        "grep -r -f patterns src/file",
+                        "grep -r --file=patterns src/file",
+                        "grep -r --exclude-from=patterns needle src/file",
+                        "grep -r needle -",
+                    ] {
+                        assert_eq!(
+                            decide_command(&p, case, &workspace),
+                            Decision::Allow,
+                            "{case}"
+                        );
+                    }
+                    let protected = resolved_policy(
+                        Mode::Manual,
+                        &[(READ, "./patterns")],
+                        &[],
+                        &[(EXEC, "grep *")],
+                        &[Shipped::Ssh, Shipped::Credentials],
+                        &workspace,
+                    );
+                    assert_eq!(
+                        decide_command(&protected, "grep -r -f patterns src", &workspace),
+                        Decision::Ask
+                    );
+                });
+            }
+
+            #[test]
+            fn recursive_readers_compare_requested_and_resolved_rule_prefixes() {
+                let dir = canonical_tempdir();
+                let cwd = dir.path();
+                std::fs::create_dir(cwd.join("vault")).unwrap();
+                symlink_dir(Path::new("vault"), &cwd.join("alias"));
+                temp_env::with_var(HOME_VAR, Some(cwd), || {
+                    let workspace = Workspace::new(cwd);
+                    let p = resolved_policy(
+                        Mode::Yolo,
+                        &[(READ, "./alias/nested/key")],
+                        &[],
+                        &[],
+                        &[Shipped::Ssh, Shipped::Credentials],
+                        &workspace,
+                    );
+
+                    for (case, expected) in [
+                        ("grep -r needle vault", Decision::Deny),
+                        ("grep -r needle alias", Decision::Deny),
+                        ("grep -r needle other", Decision::Allow),
+                        ("grep -r needle ALIAS", Decision::Deny),
+                    ] {
+                        assert_eq!(decide_command(&p, case, &workspace), expected, "{case}");
+                    }
+                    let late = resolved_policy(
+                        Mode::Yolo,
+                        &[(READ, "./late/nested/key")],
+                        &[],
+                        &[],
+                        &[Shipped::Ssh, Shipped::Credentials],
+                        &workspace,
+                    );
+                    symlink_dir(Path::new("vault"), &cwd.join("late"));
+
+                    assert_eq!(
+                        decide_command(&late, "grep -r needle vault", &workspace),
+                        Decision::Deny
+                    );
+                });
             }
 
             #[test]
