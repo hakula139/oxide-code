@@ -2298,7 +2298,7 @@ mod tests {
 
                 app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
 
-                assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Plan)), "{draft:?}");
+                assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Yolo)), "{draft:?}");
                 assert_eq!(app.input.lines(), [draft], "{draft:?}");
             }
         }
@@ -2311,66 +2311,54 @@ mod tests {
 
             app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
 
-            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Plan)));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Yolo)));
             assert_eq!(app.input.lines(), ["/mode p"]);
             assert!(app.input.popup_visible());
         }
 
         #[test]
-        fn steps_through_manual_and_plan_plus_yolo_for_a_yolo_start() {
+        fn both_keys_cycle_through_every_mode_from_each_session_start() {
             for (code, modifiers) in [
                 (KeyCode::Tab, KeyModifiers::NONE),
                 (KeyCode::BackTab, KeyModifiers::SHIFT),
             ] {
                 for (start, expected) in [
-                    (Mode::Manual, [Mode::Plan, Mode::Manual, Mode::Plan]),
-                    (Mode::Plan, [Mode::Manual, Mode::Plan, Mode::Manual]),
-                    (Mode::Yolo, [Mode::Manual, Mode::Plan, Mode::Yolo]),
+                    (
+                        Mode::Manual,
+                        [Mode::Yolo, Mode::Plan, Mode::Manual, Mode::Yolo],
+                    ),
+                    (
+                        Mode::Yolo,
+                        [Mode::Plan, Mode::Manual, Mode::Yolo, Mode::Plan],
+                    ),
+                    (
+                        Mode::Plan,
+                        [Mode::Manual, Mode::Yolo, Mode::Plan, Mode::Manual],
+                    ),
                 ] {
-                    let mut info = unknown_model_session_info();
-                    info.config.permission_mode = start;
-                    let (mut app, mut rx, _event_tx) = test_app_with(info, None);
-                    app.input.set_text("draft\nsecond line");
+                    for confirm_switch in [true, false] {
+                        let mut info = unknown_model_session_info();
+                        info.config.permission_mode = start;
+                        let (mut app, mut rx, _event_tx) = test_app_with(info, None);
+                        app.input.set_text("draft\nsecond line");
 
-                    let sent = expected.map(|_| {
-                        app.handle_crossterm_event(&key_event(code, modifiers));
-                        let Some(Op::SetMode(mode)) = rx.try_recv().ok() else {
-                            panic!("{code:?} sends a mode switch from {start}");
-                        };
-                        app.handle_engine_event(Event::ModeChanged(mode));
-                        mode
-                    });
+                        for (step, mode) in expected.into_iter().enumerate() {
+                            app.handle_crossterm_event(&key_event(code, modifiers));
 
-                    assert_eq!(sent, expected, "{code:?} from {start}");
-                    assert_eq!(app.input.lines(), ["draft", "second line"], "{code:?}");
+                            assert_eq!(
+                                rx.try_recv(),
+                                Ok(Op::SetMode(mode)),
+                                "{code:?} from {start}, confirm={confirm_switch}, step={step}",
+                            );
+                            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+                            assert_eq!(app.input.lines(), ["draft", "second line"]);
+
+                            if confirm_switch {
+                                app.handle_engine_event(Event::ModeChanged(mode));
+                            }
+                        }
+                    }
                 }
-            }
-        }
-
-        #[test]
-        fn steps_on_from_a_switch_awaiting_its_confirmation() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-
-            app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
-            app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
-
-            assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Plan)));
-            assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Manual)));
-        }
-
-        #[test]
-        fn from_a_mode_outside_the_cycle_returns_to_manual() {
-            for (code, modifiers) in [
-                (KeyCode::Tab, KeyModifiers::NONE),
-                (KeyCode::BackTab, KeyModifiers::SHIFT),
-            ] {
-                let (mut app, mut rx, _event_tx) = test_app(None);
-                app.dispatch_action(Action::Submit("/mode yolo".to_owned()));
-                assert_eq!(rx.try_recv().ok(), Some(Op::SetMode(Mode::Yolo)));
-
-                app.handle_crossterm_event(&key_event(code, modifiers));
-
-                assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Manual)), "{code:?}");
             }
         }
     }
