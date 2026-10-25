@@ -46,11 +46,11 @@ The modes correspond to these settings in Claude Code and Codex:
 
 ### Switching Modes
 
-`Op::SetMode` switches the engine's policy. The TUI sends it from the `/mode` picker, `/mode <mode>`, or Shift+Tab, while the REPL sends it from `/mode <mode>`. Headless runs send none because `--mode` reaches the engine through `Config` before it starts. The engine confirms each switch with `Event::ModeChanged`, which the TUI records in its session snapshot, the status line shows, and the REPL prints. While idle, the engine applies the switch at once.
+`Op::SetMode` switches the engine's policy. The TUI sends it from the `/mode` picker, `/mode <mode>`, Tab, or Shift+Tab, while the REPL sends it from `/mode <mode>`. Headless runs send none because `--mode` reaches the engine through `Config` before it starts. The engine confirms each switch with `Event::ModeChanged`, which the TUI records in its session snapshot, the status line shows, and the REPL prints. While idle, the engine applies the switch at once.
 
 During a turn, a compaction, or a sign-in, the op arrives at `await_unless_aborted`, `await_or_op`, or `await_approval`, which keep it in the operation's `Inbox` beside the queued prompts and confirm it on receipt. The gate takes a waiting switch before it weighs each call, so a switch applies from the turn's next gated call, including one in the same round. The engine applies any switch still waiting once the operation ends. Calls already gated keep their decisions, so switching to `plan` does not stop a running command.
 
-Shift+Tab cycles `manual` → `plan` → `manual`. The cycle adds `yolo` after `plan` only when the session started in `yolo`, from config, `OX_PERMISSION_MODE`, or `--mode`. When invoked from a mode outside the cycle, such as `yolo` selected with `/mode`, it returns to `manual`. The TUI advances from the last mode it requested, so pressing again before the engine confirms the first request moves on to the next mode. The key is fixed until configurable key bindings land with [#278](https://github.com/hakula139/oxide-code/issues/278).
+Tab and Shift+Tab cycle `manual` → `plan` → `manual` in the same direction. Tab completes the selected command or argument while the command popup is open. The cycle adds `yolo` after `plan` only when the session started in `yolo`, from config, `OX_PERMISSION_MODE`, or `--mode`. When invoked from a mode outside the cycle, such as `yolo` selected with `/mode`, it returns to `manual`. The TUI advances from the last mode it requested, so pressing again before the engine confirms the first request moves on to the next mode. The keys are fixed until configurable key bindings land with [#278](https://github.com/hakula139/oxide-code/issues/278).
 
 ## Decision Pipeline
 
@@ -249,7 +249,7 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 
 11. **Mode switches wait for the next gated call.** A switch mid-turn changes how the remaining calls are weighed without revisiting calls that already passed the gate, which would mean cancelling a running command or a pending approval. Confirming on receipt keeps the status line honest about the mode the next call meets.
 
-12. **Shift+Tab reaches `yolo` only from a `yolo` start.** A stray key press then cannot leave every call unprompted in a session that started with prompts. Claude Code likewise leaves `bypassPermissions` out of its Shift+Tab cycle unless the session started with it allowed, while `/mode yolo` stays available as a deliberate, typed choice.
+12. **Tab and Shift+Tab reach `yolo` only from a `yolo` start.** A stray key press then cannot leave every call unprompted in a session that started with prompts. Claude Code likewise leaves `bypassPermissions` out of its Shift+Tab cycle unless the session started with it allowed, while `/mode yolo` stays available as a deliberate, typed choice.
 
 13. **Approvals stay in process.** A persisted grant has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust. In keeping with the slash-command persistence stance ([decision 6](../slash/commands.md#design-decisions)), session commands remain reversible, and cross-session writes wait for an explicit confirmed action.
 
@@ -290,7 +290,7 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 - `crates/ox-core/src/tool/view.rs`: `ApprovalPreview`.
 - `crates/ox-core/src/tool/write.rs`: new-file creation, symlink refusal, current-content preview.
 - `crates/ox-core/src/util/text.rs`: `is_hidden`, shared by both frontends, plus the stdio sink's `escape_controls` and the REPL preview's `escape_hidden`.
-- `crates/ox-tui/src/app/dispatch.rs`: `App::cycle_mode`, the Shift+Tab cycle.
+- `crates/ox-tui/src/app/dispatch.rs`: `App::cycle_mode`, the Tab and Shift+Tab cycle.
 - `crates/ox-tui/src/components/chat.rs`: `ChatView::push_tool_result`, which places a result under its call.
 - `crates/ox-tui/src/modal.rs`: `ModalStack`, the cancel hook, `captures_esc`.
 - `crates/ox-tui/src/modal/approval.rs`: `ApprovalModal` wrapping, scrolling, character reveal, and the rule and feedback editors.

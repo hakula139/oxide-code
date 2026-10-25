@@ -1,8 +1,8 @@
 ---
 source: crates/ox-tui/src/app/render.rs
-expression: "render_app(&mut app, 60, 12)"
+expression: "render_app(&mut app, 60, 13)"
 ---
-"  ~/test │ main │ test-model (high) │ Ready                 "
+"  ~/test │ main │ test-model (high) │ Mode: manual │ Ready  "
 "────────────────────────────────────────────────────────────"
 "▎ $ ls                                                      "
 "▎ ✓ ran ls                                                  "
@@ -14,3 +14,4 @@ expression: "render_app(&mut app, 60, 12)"
 "────────────────────────────────────────────────────────────"
 "❯                                                           "
 "────────────────────────────────────────────────────────────"
+"  Tab / Shift+Tab mode · Enter send · Alt+Enter newline     "

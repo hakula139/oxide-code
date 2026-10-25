@@ -676,7 +676,7 @@ mod tests {
             // The result header must be the stashed call label (the bash command). It appears twice
             // in the rendered view, once on the tool call line and once in the result header, which
             // shows that both rows carry the same label.
-            let text = rendered_text(&mut app, 60, 8);
+            let text = rendered_text(&mut app, 60, 9);
             let occurrences = text.matches("distinctive_label_xyz").count();
             assert_eq!(
                 occurrences, 2,

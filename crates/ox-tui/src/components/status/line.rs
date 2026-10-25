@@ -1,5 +1,6 @@
 //! Ordered segment rendering for the status line.
 
+use std::cmp::Reverse;
 use std::path::Path;
 
 use ratatui::style::Style;
@@ -155,8 +156,10 @@ impl StatusLine {
                 .rate_limits
                 .and_then(|limits| rate_limit_label("7d", limits.seven_day))
                 .map(|(label, style)| Span::styled(label, style.style(theme))),
-            StatusLineSegment::PermissionMode => permission_mode_label(state.permission_mode)
-                .map(|(label, style)| Span::styled(label, style.style(theme))),
+            StatusLineSegment::PermissionMode => {
+                let (label, style) = permission_mode_label(state.permission_mode);
+                Some(Span::styled(label, style.style(theme)))
+            }
             StatusLineSegment::RunState => Some(state.status_span.clone()),
             StatusLineSegment::QueuedPrompts => (state.queued_prompts > 0).then(|| {
                 Span::styled(
@@ -191,7 +194,11 @@ impl StatusLine {
                 )
             }),
         }?;
-        Some(RenderedSegment::new(segment, span, hyperlink))
+        Some(RenderedSegment::new(
+            segment_utility(segment, state.permission_mode),
+            span,
+            hyperlink,
+        ))
     }
 }
 
@@ -247,16 +254,16 @@ impl SegmentStyle {
 
 #[derive(Debug, Clone)]
 struct RenderedSegment {
-    segment: StatusLineSegment,
+    utility: u8,
     span: Span<'static>,
     /// OSC 8 target for the visible span.
     hyperlink: Option<String>,
 }
 
 impl RenderedSegment {
-    fn new(segment: StatusLineSegment, span: Span<'static>, hyperlink: Option<String>) -> Self {
+    fn new(utility: u8, span: Span<'static>, hyperlink: Option<String>) -> Self {
         Self {
-            segment,
+            utility,
             span,
             hyperlink,
         }
@@ -268,9 +275,21 @@ impl RenderedSegment {
 }
 
 fn fit_segments(segments: &mut Vec<RenderedSegment>, max_width: usize, sep_width: usize) {
-    while segments.len() > 1 && total_width(segments, sep_width) > max_width {
-        segments.remove(lowest_priority_index(segments));
+    let mut ranked: Vec<_> = std::mem::take(segments).into_iter().enumerate().collect();
+    ranked.sort_by_key(|(index, segment)| (Reverse(segment.utility), Reverse(*index)));
+
+    let mut width = LEFT_MARGIN.width();
+    let mut fitting = Vec::with_capacity(ranked.len());
+    for (index, segment) in ranked {
+        let separator = if fitting.is_empty() { 0 } else { sep_width };
+        let next_width = width + separator + segment.width();
+        if fitting.is_empty() || next_width <= max_width {
+            width = next_width;
+            fitting.push((index, segment));
+        }
     }
+    fitting.sort_by_key(|(index, _)| *index);
+    segments.extend(fitting.into_iter().map(|(_, segment)| segment));
 
     if total_width(segments, sep_width) <= max_width {
         return;
@@ -288,18 +307,8 @@ fn total_width(segments: &[RenderedSegment], sep_width: usize) -> usize {
         + sep_width.saturating_mul(segments.len().saturating_sub(1))
 }
 
-/// Index of the segment to drop first. `segments` must not be empty.
-fn lowest_priority_index(segments: &[RenderedSegment]) -> usize {
-    let (index, _) = segments
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, segment)| segment_utility(segment.segment))
-        .expect("fit_segments drops only while two or more segments remain");
-    index
-}
-
-/// Per-segment narrow-width rank. Lower numbers drop earlier.
-fn segment_utility(segment: StatusLineSegment) -> u8 {
+/// Per-segment narrow-width rank. Higher numbers are considered first.
+fn segment_utility(segment: StatusLineSegment, mode: Mode) -> u8 {
     match segment {
         StatusLineSegment::Theme => 0,
         StatusLineSegment::SessionId => 1,
@@ -316,10 +325,11 @@ fn segment_utility(segment: StatusLineSegment) -> u8 {
         StatusLineSegment::WeeklyLimit => 12,
         StatusLineSegment::FiveHourLimit => 13,
         StatusLineSegment::ContextUsed => 14,
-        StatusLineSegment::Model => 15,
-        StatusLineSegment::ModelWithEffort => 16,
-        StatusLineSegment::PermissionMode => 17,
-        StatusLineSegment::RunState => 18,
+        StatusLineSegment::PermissionMode if mode == Mode::Manual => 15,
+        StatusLineSegment::Model => 16,
+        StatusLineSegment::ModelWithEffort => 17,
+        StatusLineSegment::PermissionMode => 18,
+        StatusLineSegment::RunState => 19,
     }
 }
 
@@ -378,11 +388,11 @@ fn usage_style(percent: f64) -> SegmentStyle {
     }
 }
 
-fn permission_mode_label(mode: Mode) -> Option<(&'static str, SegmentStyle)> {
+fn permission_mode_label(mode: Mode) -> (&'static str, SegmentStyle) {
     match mode {
-        Mode::Manual => None,
-        Mode::Plan => Some(("Mode: plan", SegmentStyle::Accent)),
-        Mode::Yolo => Some(("Mode: yolo", SegmentStyle::Error)),
+        Mode::Manual => ("Mode: manual", SegmentStyle::Muted),
+        Mode::Plan => ("Mode: plan", SegmentStyle::Accent),
+        Mode::Yolo => ("Mode: yolo", SegmentStyle::Error),
     }
 }
 
@@ -774,9 +784,15 @@ mod tests {
         }
 
         #[test]
-        fn permission_mode_flags_plan_and_yolo_and_hides_manual() {
-            let rendered = |permission_mode| {
-                render(
+        fn permission_mode_shows_each_mode_in_its_style() {
+            let theme = Theme::default();
+
+            for (permission_mode, label, style) in [
+                (Mode::Manual, "Mode: manual", theme.muted()),
+                (Mode::Plan, "Mode: plan", theme.accent()),
+                (Mode::Yolo, "Mode: yolo", theme.error()),
+            ] {
+                let rendered = render(
                     vec![
                         StatusLineSegment::PermissionMode,
                         StatusLineSegment::RunState,
@@ -785,19 +801,74 @@ mod tests {
                         permission_mode,
                         ..bare_state()
                     },
-                )
+                );
+
+                assert_eq!(text_of(&rendered), format!("  {label} │ Ready"));
+                assert_eq!(rendered.line.spans[1].style, style, "{permission_mode}");
+            }
+        }
+
+        #[test]
+        fn manual_mode_yields_to_the_model_while_plan_and_yolo_stay_visible() {
+            for (model_segment, label) in [
+                (StatusLineSegment::Model, "m"),
+                (StatusLineSegment::ModelWithEffort, "m (high)"),
+            ] {
+                for (permission_mode, expected) in [
+                    (Mode::Manual, format!("  {label} │ Ready")),
+                    (Mode::Plan, "  Mode: plan │ Ready".to_owned()),
+                    (Mode::Yolo, "  Mode: yolo │ Ready".to_owned()),
+                ] {
+                    let state = StatusLineState {
+                        effort: Some(Effort::High),
+                        permission_mode,
+                        ..bare_state()
+                    };
+
+                    let rendered = StatusLine::new(vec![
+                        model_segment,
+                        StatusLineSegment::PermissionMode,
+                        StatusLineSegment::RunState,
+                    ])
+                    .render(&Theme::default(), &state, 22);
+
+                    assert_eq!(
+                        text_of(&rendered),
+                        expected,
+                        "{model_segment:?} / {permission_mode}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn an_oversized_manual_label_leaves_room_for_the_working_directory() {
+            let state = StatusLineState {
+                model: "test-model",
+                effort: Some(Effort::High),
+                ..bare_state()
             };
-            let theme = Theme::default();
 
-            let plan = rendered(Mode::Plan);
-            assert_eq!(text_of(&plan), "  Mode: plan │ Ready");
-            assert_eq!(plan.line.spans[1].style, theme.accent());
+            let rendered = StatusLine::new(StatusLineSegment::DEFAULT.to_vec()).render(
+                &Theme::default(),
+                &state,
+                40,
+            );
 
-            let yolo = rendered(Mode::Yolo);
-            assert_eq!(text_of(&yolo), "  Mode: yolo │ Ready");
-            assert_eq!(yolo.line.spans[1].style, theme.error());
+            assert_eq!(text_of(&rendered), "  ~/repo │ test-model (high) │ Ready");
+        }
 
-            assert_eq!(text_of(&rendered(Mode::Manual)), "  Ready");
+        #[test]
+        fn omitting_permission_mode_keeps_it_out_of_the_roster() {
+            let rendered = render(
+                vec![StatusLineSegment::Model, StatusLineSegment::RunState],
+                &StatusLineState {
+                    permission_mode: Mode::Yolo,
+                    ..bare_state()
+                },
+            );
+
+            assert_eq!(text_of(&rendered), "  m │ Ready");
         }
 
         #[test]
@@ -888,18 +959,53 @@ mod tests {
         }
 
         #[test]
-        fn truncates_single_oversized_segment_to_width() {
-            let rendered = StatusLine::new(vec![StatusLineSegment::RunState]).render(
-                &Theme::default(),
-                &StatusLineState {
-                    cwd: "",
-                    status_span: Span::raw("Running a very long command name"),
+        fn keeps_the_highest_utility_segment_when_it_needs_truncation() {
+            for (segments, status, width, expected) in [
+                (
+                    vec![StatusLineSegment::RunState],
+                    "Running a very long command name",
+                    12,
+                    "  Running...",
+                ),
+                (
+                    vec![StatusLineSegment::Model, StatusLineSegment::RunState],
+                    "Streaming · Esc to interrupt",
+                    22,
+                    "  Streaming · Esc t...",
+                ),
+            ] {
+                let state = StatusLineState {
+                    status_span: Span::raw(status),
                     ..bare_state()
-                },
-                12,
-            );
+                };
 
-            assert_eq!(text_of(&rendered), "  Running...");
+                let rendered = StatusLine::new(segments).render(&Theme::default(), &state, width);
+
+                assert_eq!(text_of(&rendered), expected, "{status} at {width}");
+            }
+        }
+
+        #[test]
+        fn plan_and_yolo_stay_visible_when_the_mode_is_the_highest_configured_segment() {
+            let theme = Theme::default();
+
+            for (permission_mode, style) in
+                [(Mode::Plan, theme.accent()), (Mode::Yolo, theme.error())]
+            {
+                let state = StatusLineState {
+                    permission_mode,
+                    ..bare_state()
+                };
+
+                let rendered = StatusLine::new(vec![
+                    StatusLineSegment::Model,
+                    StatusLineSegment::PermissionMode,
+                ])
+                .render(&theme, &state, 11);
+
+                assert_eq!(text_of(&rendered), "  Mode: ...", "{permission_mode}");
+                assert_eq!(rendered.line.spans[1].style, style, "{permission_mode}");
+            }
         }
 
         #[test]
@@ -935,13 +1041,32 @@ mod tests {
         }
     }
 
+    mod fit_segments {
+        use super::*;
+
+        #[test]
+        fn equal_utility_keeps_the_later_configured_segment() {
+            let mut segments = vec![
+                RenderedSegment::new(7, Span::raw("first"), None),
+                RenderedSegment::new(7, Span::raw("second"), None),
+            ];
+
+            fit_segments(&mut segments, 8, 3);
+
+            let labels: Vec<&str> = segments
+                .iter()
+                .map(|segment| segment.span.content.as_ref())
+                .collect();
+            assert_eq!(labels, ["second"]);
+        }
+    }
+
     mod segment_utility {
         use super::*;
 
-        /// The drop order the configuration guide documents.
         #[test]
-        fn follows_the_documented_drop_order() {
-            let drop_order = [
+        fn follows_the_documented_utility_order() {
+            let utility_order = [
                 StatusLineSegment::Theme,
                 StatusLineSegment::SessionId,
                 StatusLineSegment::ThreadTitle,
@@ -962,10 +1087,11 @@ mod tests {
                 StatusLineSegment::PermissionMode,
                 StatusLineSegment::RunState,
             ];
-            for (earlier, later) in drop_order.iter().zip(&drop_order[1..]) {
+
+            for (earlier, later) in utility_order.iter().zip(&utility_order[1..]) {
                 assert!(
-                    segment_utility(*earlier) < segment_utility(*later),
-                    "{earlier:?} must drop before {later:?}",
+                    segment_utility(*earlier, Mode::Plan) < segment_utility(*later, Mode::Plan),
+                    "{earlier:?} must have lower utility than {later:?}",
                 );
             }
         }

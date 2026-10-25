@@ -2,11 +2,11 @@
 source: crates/ox-tui/src/app/render.rs
 expression: "render_app(&mut app, 60, 8)"
 ---
-"  test-model (high) │ ⣷ Streaming · Esc to interrupt        "
+"  main │ test-model (high) │ ⣷ Streaming · Esc to interrupt "
 "────────────────────────────────────────────────────────────"
-"❯ working...                                                "
 "                                                            "
 "◉ part                                                      "
 "────────────────────────────────────────────────────────────"
 "❯                                                           "
 "────────────────────────────────────────────────────────────"
+"  Tab / Shift+Tab mode · Enter queue · Alt+Enter newline    "

@@ -8,7 +8,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 4. **Project config file**: `.ox/config.toml` in the nearest directory from the working directory up to the project root that has one. The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory outside a repository.
 5. **[Environment variables](#environment-variables)**: override every file. A command-line flag such as `--mode` overrides them in turn.
 
-Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$OX_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, `/mode`, or `/theme` change or a **Shift+Tab** mode switch. Its Permissions section lists every extra root, rule, and turned-off default group the files set, each with the layer that added it, since rule lists and extra roots combine across layers and any user file can turn a default off. It shows what the files set, so it still lists extra roots when a launch from `/`, `$HOME`, or an ancestor of `$HOME` leaves the workspace without roots.
+Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$OX_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, `/mode`, or `/theme` change or a **Tab** or **Shift+Tab** mode switch. Its Permissions section lists every extra root, rule, and turned-off default group the files set, each with the layer that added it, since rule lists and extra roots combine across layers and any user file can turn a default off. It shows what the files set, so it still lists extra roots when a launch from `/`, `$HOME`, or an ancestor of `$HOME` leaves the workspace without roots.
 
 ## Layers
 
@@ -161,7 +161,7 @@ Automatic compaction runs before a prompt and between the tool rounds of a long 
 | `session-cost`        | `Cost: $0.43` running USD estimate                            | Per turn        |
 | `five-hour-limit`     | `5h: 42%` of a subscription's five-hour usage limit           | Per request     |
 | `weekly-limit`        | `7d: 13%` of a subscription's weekly usage limit              | Per request     |
-| `permission-mode`     | `Mode: plan` or `Mode: yolo`, omitted in `manual`             | On switch       |
+| `permission-mode`     | `Mode: manual`, `Mode: plan`, or `Mode: yolo`                 | On switch       |
 | `run-state`           | `Ready` / spinner + label / **Ctrl+C** exit hint              | On state change |
 | `queued-prompts`      | `Queued: 2` while prompts wait for the running turn           | On change       |
 | `task-progress`       | `Tasks: 2/5` completed while the session keeps a task list    | On change       |
@@ -172,7 +172,7 @@ Automatic compaction runs before a prompt and between the tool rounds of a long 
 
 The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears when it resets and remains gone until the next response reports it again. The [theming guide](theming.md#status-line-segments) lists the colors used by the context and usage-limit segments as a window fills.
 
-When the row is too narrow to fit every configured segment, low-utility ones drop in this order before the remaining content gets truncated: `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `model` → `model-with-effort` → `permission-mode` → `run-state`. Run state takes priority over every other segment, and the permission mode over the rest. The last remaining segment is truncated to fit rather than dropped.
+On a narrow row, the highest-priority segment is retained and truncated if needed. Other segments are considered from highest to lowest utility and included when they fit, keeping their configured display order. A smaller segment can use space left after a larger one is omitted. The utility order, from lowest to highest, is `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `permission-mode` in `manual` → `model` → `model-with-effort` → `permission-mode` in `plan` or `yolo` → `run-state`.
 
 `OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). A value with no segments (`","`), an empty entry between commas (`"model,,run-state"`), or an unknown segment name fails startup with a parse error.
 

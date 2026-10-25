@@ -209,7 +209,7 @@ Each status-line segment routes to one of the slots above so re-skinning the slo
 | `session-cost`      | `muted`                      |
 | `five-hour-limit`   | `text` / `warning` / `error` |
 | `weekly-limit`      | `text` / `warning` / `error` |
-| `permission-mode`   | `accent` / `error`           |
+| `permission-mode`   | `muted` / `accent` / `error` |
 | `run-state` (idle)  | `muted`                      |
 | `run-state` (busy)  | `info`                       |
 | `run-state` (warn)  | `warning`                    |
@@ -220,7 +220,7 @@ Each status-line segment routes to one of the slots above so re-skinning the slo
 | `theme`             | `muted`                      |
 | `current-time`      | `dim`                        |
 
-`permission-mode` uses `accent` for `plan` and `error` for `yolo`.
+`permission-mode` uses `muted` for `manual`, `accent` for `plan`, and `error` for `yolo`.
 
 `context-used`, `five-hour-limit`, and `weekly-limit` use `text` until the share they show reaches 70%, then `warning`, and `error` from 90%.
 
