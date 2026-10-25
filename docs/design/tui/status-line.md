@@ -18,7 +18,7 @@ Segment render rules:
 - The pull request checks and review segments color their state with the theme's `success`, `warning`, `error`, and `muted` slots, and link the PR's checks and changed-files pages.
 - The review segment appears only when branch protection requires a review, because GitHub otherwise reports no review decision.
 - The context and usage-limit segments use the `text` slot, switch to `warning` at 70%, and switch to `error` at 90%. Session cost stays `muted` because it has no limit to approach.
-- `permission-mode` shows `Mode: manual` in the `muted` slot, `Mode: plan` in the `accent` slot, and `Mode: yolo` in the `error` slot.
+- `permission-mode` shows `manual` in the `muted` slot, `plan` in the `accent` slot, and `yolo` in the `error` slot.
 - `task-progress` counts the completed tasks on the session's [task list](../tools/tasks.md) and shows only while the list holds a task.
 
 ## Usage Data

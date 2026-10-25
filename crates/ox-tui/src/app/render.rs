@@ -618,7 +618,7 @@ mod tests {
             for (width, footer) in [
                 (
                     80,
-                    "  Tab / Shift+Tab mode · Enter send · Alt+Enter newline · / commands",
+                    "  Tab / Shift+Tab mode · Enter send · Shift+Enter newline · / commands",
                 ),
                 (40, "  Tab / Shift+Tab mode · Enter send"),
                 (22, "  Tab / Shift+Tab mode"),
@@ -666,7 +666,7 @@ mod tests {
             assert_eq!(rows[7], "─".repeat(80));
             assert_eq!(
                 rows[8],
-                "  Tab / Shift+Tab mode · Enter queue · Alt+Enter newline · / commands",
+                "  Tab / Shift+Tab mode · Enter queue · Shift+Enter newline · / commands",
             );
         }
 
@@ -689,7 +689,7 @@ mod tests {
             let text = rendered_text(&mut app, 80, 18);
             assert_eq!(
                 text.lines().last().unwrap().trim_end(),
-                "  Tab / Shift+Tab mode · Enter send · Alt+Enter newline · / commands",
+                "  Tab / Shift+Tab mode · Enter send · Shift+Enter newline · / commands",
             );
             assert_eq!(app.input.lines(), ["/mo"]);
         }
@@ -718,7 +718,7 @@ mod tests {
                     if show_footer {
                         assert_eq!(
                             *rows.last().unwrap(),
-                            "  Tab / Shift+Tab mode · Enter send · Alt+Enter newline · / commands",
+                            "  Tab / Shift+Tab mode · Enter send · Shift+Enter newline · / commands",
                             "{draft:?} at {height}",
                         );
                     } else {

@@ -2,7 +2,7 @@
 source: crates/ox-tui/src/app/render.rs
 expression: "render_app(&mut app, 60, 16)"
 ---
-"  ~/test │ main │ test-model (high) │ Mode: manual │ Ready  "
+"  ~/test │ main │ test-model (high) │ manual │ Ready        "
 "────────────────────────────────────────────────────────────"
 "❯ Fix the login bug.                                        "
 "                                                            "
@@ -17,4 +17,4 @@ expression: "render_app(&mut app, 60, 16)"
 "────────────────────────────────────────────────────────────"
 "❯                                                           "
 "────────────────────────────────────────────────────────────"
-"  Tab / Shift+Tab mode · Enter send · Alt+Enter newline     "
+"  Tab / Shift+Tab mode · Enter send · Shift+Enter newline   "

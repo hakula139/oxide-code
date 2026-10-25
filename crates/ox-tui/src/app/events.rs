@@ -1845,7 +1845,10 @@ mod tests {
             );
             assert_eq!(app.chat.last_system_text(), Some("Switched to plan mode"));
             let text = rendered_text(&mut app, 120, 12);
-            assert!(text.contains("Mode: plan"), "{text}");
+            assert!(
+                text.lines().next().unwrap().contains(" │ plan │ "),
+                "{text}"
+            );
         }
 
         #[test]

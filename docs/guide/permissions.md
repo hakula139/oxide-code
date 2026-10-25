@@ -12,7 +12,7 @@ In every mode, an `exec` deny or ask pattern is a guardrail against mistakes and
 
 Set the mode with `mode` under `[permission]` in your user config. The environment variable `OX_PERMISSION_MODE` overrides `mode`, and `ox --mode <mode>` overrides both for one run.
 
-During a session, `/mode` opens a picker of the three modes, and `/mode <mode>` switches directly. **Tab** or **Shift+Tab** switches between `manual` and `plan`, and its cycle includes `yolo` only when the session started in `yolo`, so a stray key press cannot run every call unprompted. **Tab** completes a selection while the command popup is open. A switch during a turn takes effect with the turn's next tool call. A command already running in the foreground or as a background shell continues after the switch to `plan`. The default status line includes the `permission-mode` [segment](configuration.md#tui-terminal-ui), which displays `manual`, `plan`, or `yolo`. To display the mode in a custom `status_line`, include `permission-mode`. Restarting restores the configured mode.
+During a session, `/mode` opens a picker of the three modes, and `/mode <mode>` switches directly. **Tab** or **Shift+Tab** cycles `manual` → `yolo` → `plan` → `manual`, regardless of the starting mode. **Tab** completes a selection while the command popup is open. A switch during a turn takes effect with the turn's next tool call. A command already running in the foreground or as a background shell continues after the switch to `plan`. The default status line includes the `permission-mode` [segment](configuration.md#tui-terminal-ui), which displays `manual`, `plan`, or `yolo`. To display the mode in a custom `status_line`, include `permission-mode`. Restarting restores the configured mode.
 
 ## Approval Prompt
 

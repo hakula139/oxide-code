@@ -389,11 +389,12 @@ fn usage_style(percent: f64) -> SegmentStyle {
 }
 
 fn permission_mode_label(mode: Mode) -> (&'static str, SegmentStyle) {
-    match mode {
-        Mode::Manual => ("Mode: manual", SegmentStyle::Muted),
-        Mode::Plan => ("Mode: plan", SegmentStyle::Accent),
-        Mode::Yolo => ("Mode: yolo", SegmentStyle::Error),
-    }
+    let style = match mode {
+        Mode::Manual => SegmentStyle::Muted,
+        Mode::Plan => SegmentStyle::Accent,
+        Mode::Yolo => SegmentStyle::Error,
+    };
+    (mode.as_str(), style)
 }
 
 fn checks_label(checks: Checks) -> (String, SegmentStyle) {
@@ -788,9 +789,9 @@ mod tests {
             let theme = Theme::default();
 
             for (permission_mode, label, style) in [
-                (Mode::Manual, "Mode: manual", theme.muted()),
-                (Mode::Plan, "Mode: plan", theme.accent()),
-                (Mode::Yolo, "Mode: yolo", theme.error()),
+                (Mode::Manual, "manual", theme.muted()),
+                (Mode::Plan, "plan", theme.accent()),
+                (Mode::Yolo, "yolo", theme.error()),
             ] {
                 let rendered = render(
                     vec![
@@ -810,16 +811,17 @@ mod tests {
 
         #[test]
         fn manual_mode_yields_to_the_model_while_plan_and_yolo_stay_visible() {
-            for (model_segment, label) in [
-                (StatusLineSegment::Model, "m"),
-                (StatusLineSegment::ModelWithEffort, "m (high)"),
+            for (model_segment, model, label) in [
+                (StatusLineSegment::Model, "long-model", "long-model"),
+                (StatusLineSegment::ModelWithEffort, "m", "m (high)"),
             ] {
                 for (permission_mode, expected) in [
                     (Mode::Manual, format!("  {label} │ Ready")),
-                    (Mode::Plan, "  Mode: plan │ Ready".to_owned()),
-                    (Mode::Yolo, "  Mode: yolo │ Ready".to_owned()),
+                    (Mode::Plan, "  plan │ Ready".to_owned()),
+                    (Mode::Yolo, "  yolo │ Ready".to_owned()),
                 ] {
                     let state = StatusLineState {
+                        model,
                         effort: Some(Effort::High),
                         permission_mode,
                         ..bare_state()
@@ -844,6 +846,7 @@ mod tests {
         #[test]
         fn an_oversized_manual_label_leaves_room_for_the_working_directory() {
             let state = StatusLineState {
+                cwd: "~/r",
                 model: "test-model",
                 effort: Some(Effort::High),
                 ..bare_state()
@@ -852,23 +855,124 @@ mod tests {
             let rendered = StatusLine::new(StatusLineSegment::DEFAULT.to_vec()).render(
                 &Theme::default(),
                 &state,
-                40,
+                35,
             );
 
-            assert_eq!(text_of(&rendered), "  ~/repo │ test-model (high) │ Ready");
+            assert_eq!(text_of(&rendered), "  ~/r │ test-model (high) │ Ready");
         }
 
         #[test]
-        fn omitting_permission_mode_keeps_it_out_of_the_roster() {
-            let rendered = render(
-                vec![StatusLineSegment::Model, StatusLineSegment::RunState],
-                &StatusLineState {
+        fn configured_roster_controls_every_fields_membership_and_order() {
+            let roster = [
+                (StatusLineSegment::RunState, "Ready"),
+                (StatusLineSegment::PermissionMode, "yolo"),
+                (StatusLineSegment::CurrentTime, "09:05"),
+                (StatusLineSegment::Theme, "Theme: mocha"),
+                (StatusLineSegment::SessionId, "ID: 3f2a9c1e"),
+                (StatusLineSegment::ThreadTitle, "Session title"),
+                (StatusLineSegment::TaskProgress, "Tasks: 2/5"),
+                (StatusLineSegment::QueuedPrompts, "Queued: 2"),
+                (StatusLineSegment::WeeklyLimit, "7d: 57%"),
+                (StatusLineSegment::FiveHourLimit, "5h: 42%"),
+                (StatusLineSegment::SessionCost, "Cost: $0.12"),
+                (StatusLineSegment::ContextUsed, "Ctx: 50% (100k/200k)"),
+                (StatusLineSegment::ModelWithEffort, "m (high)"),
+                (StatusLineSegment::Model, "m"),
+                (StatusLineSegment::PullRequestReview, "Review: approved"),
+                (StatusLineSegment::PullRequestChecks, "Checks: passing"),
+                (StatusLineSegment::PullRequest, "#86"),
+                (StatusLineSegment::GitBranch, "main"),
+                (StatusLineSegment::CurrentDir, "~/repo"),
+            ];
+            let pr = PullRequest {
+                checks: Some(Checks::Passing),
+                review: Some(ReviewDecision::Approved),
+                ..pr_state(86)
+            };
+            let state = StatusLineState {
+                effort: Some(Effort::High),
+                title: Some("Session title"),
+                usage: Some(UsageSnapshot {
+                    context_tokens: Some(100_000),
+                    context_window: Some(200_000),
+                    estimated_cost_usd: Some(0.1234),
+                }),
+                git_branch: Some("main"),
+                pull_request: Some(&pr),
+                rate_limits: Some(RateLimits {
+                    five_hour: Some(RateLimitWindow {
+                        utilization: 0.42,
+                        resets_at: FUTURE_RESET,
+                    }),
+                    seven_day: Some(RateLimitWindow {
+                        utilization: 0.57,
+                        resets_at: FUTURE_RESET,
+                    }),
+                }),
+                permission_mode: Mode::Yolo,
+                queued_prompts: 2,
+                task_progress: Some(Progress {
+                    completed: 2,
+                    total: 5,
+                }),
+                session_id: "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b",
+                theme_name: "mocha",
+                current_minute: Some(9 * 60 + 5),
+                ..bare_state()
+            };
+
+            for reversed in [false, true] {
+                for omitted in
+                    std::iter::once(None).chain(roster.iter().map(|(segment, _)| Some(*segment)))
+                {
+                    let mut included: Vec<_> = roster
+                        .iter()
+                        .copied()
+                        .filter(|(segment, _)| Some(*segment) != omitted)
+                        .collect();
+                    if reversed {
+                        included.reverse();
+                    }
+                    let (segments, labels): (Vec<_>, Vec<_>) = included.into_iter().unzip();
+
+                    let rendered = StatusLine::new(segments).render(&Theme::default(), &state, 512);
+
+                    assert_eq!(
+                        text_of(&rendered),
+                        format!("  {}", labels.join(" │ ")),
+                        "omitted={omitted:?}, reversed={reversed}",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn width_fitting_keeps_the_configured_order_of_retained_fields() {
+            for (reversed, expected) in
+                [(false, "  Ready │ yolo │ m"), (true, "  m │ yolo │ Ready")]
+            {
+                let mut segments = vec![
+                    StatusLineSegment::CurrentDir,
+                    StatusLineSegment::RunState,
+                    StatusLineSegment::PermissionMode,
+                    StatusLineSegment::ThreadTitle,
+                    StatusLineSegment::ModelWithEffort,
+                    StatusLineSegment::Model,
+                ];
+                if reversed {
+                    segments.reverse();
+                }
+                let state = StatusLineState {
+                    effort: Some(Effort::High),
+                    title: Some("Session title"),
                     permission_mode: Mode::Yolo,
                     ..bare_state()
-                },
-            );
+                };
 
-            assert_eq!(text_of(&rendered), "  m │ Ready");
+                let rendered = StatusLine::new(segments).render(&Theme::default(), &state, 22);
+
+                assert_eq!(text_of(&rendered), expected, "reversed={reversed}");
+            }
         }
 
         #[test]
@@ -1001,9 +1105,9 @@ mod tests {
                     StatusLineSegment::Model,
                     StatusLineSegment::PermissionMode,
                 ])
-                .render(&theme, &state, 11);
+                .render(&theme, &state, 7);
 
-                assert_eq!(text_of(&rendered), "  Mode: ...", "{permission_mode}");
+                assert_eq!(text_of(&rendered), format!("  {permission_mode}"));
                 assert_eq!(rendered.line.spans[1].style, style, "{permission_mode}");
             }
         }

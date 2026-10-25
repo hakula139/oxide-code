@@ -61,9 +61,6 @@ pub(crate) struct App {
     input: InputArea,
     modals: ModalStack,
     session_info: LiveSessionInfo,
-    /// The keyboard cycle includes `yolo` only when the session starts in it, so a stray key press
-    /// cannot leave every call unprompted.
-    mode_cycle: &'static [Mode],
     /// The mode of the last switch sent to the engine, which cycling advances from so a quick
     /// second press does not repeat a switch still awaiting its confirmation.
     requested_mode: Mode,
@@ -131,10 +128,6 @@ impl App {
             now(),
         );
         let requested_mode = session_info.config.permission_mode;
-        let mode_cycle = match requested_mode {
-            Mode::Yolo => &[Mode::Manual, Mode::Plan, Mode::Yolo][..],
-            Mode::Manual | Mode::Plan => &[Mode::Manual, Mode::Plan][..],
-        };
         Self {
             theme,
             theme_overrides,
@@ -147,7 +140,6 @@ impl App {
             input: InputArea::new(),
             modals: ModalStack::default(),
             session_info,
-            mode_cycle,
             requested_mode,
             events,
             ops,
