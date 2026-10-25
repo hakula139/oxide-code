@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.9] - 2026-10-25
+
+### Highlights
+
+- Configure gateway credentials and request settings in the user config.
+- Cycle through Manual, Yolo, and Plan with Tab or Shift+Tab, and show the current mode when configured in the status line.
+
+### Added
+
+- _(config)_ Set API key, bearer, or fixed OAuth credentials and gateway request settings in the user config, with secret-file support and redacted diagnostics ([#661](https://github.com/hakula139/oxide-code/pull/661))
+- _(tui)_ Show the current mode when configured in the status line, cycle Manual → Yolo → Plan with Tab or Shift+Tab, and show contextual input shortcuts ([#659](https://github.com/hakula139/oxide-code/pull/659), [#662](https://github.com/hakula139/oxide-code/pull/662))
+
+### Fixed
+
+- _(model)_ Explain that unknown models can auto-compact when a token threshold is set, while cost tracking is unavailable ([#657](https://github.com/hakula139/oxide-code/pull/657))
+- _(permission)_ Hold recursive searches when a read rule matches a descendant. For example, `grep -r PRIVATE ~` now asks or denies when a rule protects `~/.ssh` ([#665](https://github.com/hakula139/oxide-code/pull/665))
+
 ## [0.1.0-alpha.8] - 2026-10-25
 
 ### Highlights
@@ -378,6 +395,7 @@ The project fixes security issues publicly before 1.0, and the first two entries
 - _(deps)_ Bump rustls-webpki and rand for Dependabot alerts (#17)
 - _(deps)_ Bump rustls-webpki from 0.103.12 to 0.103.13 (#34)
 
+[0.1.0-alpha.9]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.8..v0.1.0-alpha.9
 [0.1.0-alpha.8]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.7..v0.1.0-alpha.8
 [0.1.0-alpha.7]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.6..v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.5..v0.1.0-alpha.6
