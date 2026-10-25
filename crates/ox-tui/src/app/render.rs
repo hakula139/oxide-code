@@ -651,16 +651,21 @@ mod tests {
         fn input_footer_uses_the_queue_hint_below_a_busy_multiline_draft() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.set_status(Status::Streaming);
+            app.chat.push_system_message("Chat stays visible");
             app.input.set_text("one\ntwo");
 
-            let backend = render_app(&mut app, 80, 8);
+            let backend = render_app(&mut app, 80, 9);
 
             let rows = buffer_rows(backend.buffer());
             let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
-            assert_eq!(rows[4..6], ["❯ one", "  two"]);
-            assert_eq!(rows[6], "─".repeat(80));
+            assert!(
+                rows.iter().any(|row| row.contains("Chat stays visible")),
+                "{rows:?}",
+            );
+            assert_eq!(rows[5..7], ["❯ one", "  two"]);
+            assert_eq!(rows[7], "─".repeat(80));
             assert_eq!(
-                rows[7],
+                rows[8],
                 "  Tab / Shift+Tab mode · Enter queue · Alt+Enter newline · / commands",
             );
         }
@@ -690,28 +695,54 @@ mod tests {
         }
 
         #[test]
-        fn input_footer_yields_to_the_input_at_short_heights_and_to_modal_focus() {
+        fn input_footer_keeps_chat_text_visible_at_its_height_boundary() {
+            for (draft, input_rows, heights) in [
+                ("draft", &["❯ draft"][..], [(7, false), (8, true)]),
+                ("one\ntwo", &["❯ one", "  two"][..], [(8, false), (9, true)]),
+            ] {
+                for (height, show_footer) in heights {
+                    let (mut app, _rx, _event_tx) = test_app(None);
+                    app.chat.push_system_message("Chat stays visible");
+                    app.input.set_text(draft);
+
+                    let text = rendered_text(&mut app, 80, height);
+
+                    let rows: Vec<&str> = text.lines().map(str::trim_end).collect();
+                    assert!(
+                        rows.iter().any(|row| row.contains("Chat stays visible")),
+                        "{draft:?} at {height}: {text}"
+                    );
+                    for row in input_rows {
+                        assert!(rows.contains(row), "{draft:?} at {height}: {text}");
+                    }
+                    if show_footer {
+                        assert_eq!(
+                            *rows.last().unwrap(),
+                            "  Tab / Shift+Tab mode · Enter send · Alt+Enter newline · / commands",
+                            "{draft:?} at {height}",
+                        );
+                    } else {
+                        assert_eq!(
+                            *rows.last().unwrap(),
+                            "─".repeat(80),
+                            "{draft:?} at {height}"
+                        );
+                        assert!(!text.contains("Tab / Shift+Tab mode"), "{text}");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn input_footer_yields_to_modal_focus() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.chat.push_system_message("Chat stays visible");
             app.input.set_text("draft");
-
-            let short = rendered_text(&mut app, 80, 6);
-
-            let rows: Vec<&str> = short.lines().map(str::trim_end).collect();
-            assert!(rows[0].contains("Ready"), "{short}");
-            assert_eq!(rows[4], "❯ draft");
-            assert_eq!(rows[5], "─".repeat(80));
-
-            let taller = rendered_text(&mut app, 80, 7);
-
-            assert_eq!(
-                taller.lines().last().unwrap().trim_end(),
-                "  Tab / Shift+Tab mode · Enter send · Alt+Enter newline · / commands",
-            );
-
             app.push_modal(Box::new(FakeModal::new("Modal controls")));
 
-            let modal = rendered_text(&mut app, 80, 7);
+            let modal = rendered_text(&mut app, 80, 8);
+
+            assert!(modal.contains("Chat stays visible"), "{modal}");
             assert_eq!(modal.lines().last().unwrap().trim_end(), "Modal controls");
             assert!(!modal.contains("Tab / Shift+Tab mode"), "{modal}");
             assert!(!modal.contains("❯ draft"), "{modal}");

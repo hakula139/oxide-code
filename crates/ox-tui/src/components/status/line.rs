@@ -842,6 +842,23 @@ mod tests {
         }
 
         #[test]
+        fn an_oversized_manual_label_leaves_room_for_the_working_directory() {
+            let state = StatusLineState {
+                model: "test-model",
+                effort: Some(Effort::High),
+                ..bare_state()
+            };
+
+            let rendered = StatusLine::new(StatusLineSegment::DEFAULT.to_vec()).render(
+                &Theme::default(),
+                &state,
+                40,
+            );
+
+            assert_eq!(text_of(&rendered), "  ~/repo │ test-model (high) │ Ready");
+        }
+
+        #[test]
         fn omitting_permission_mode_keeps_it_out_of_the_roster() {
             let rendered = render(
                 vec![StatusLineSegment::Model, StatusLineSegment::RunState],
@@ -942,18 +959,53 @@ mod tests {
         }
 
         #[test]
-        fn truncates_single_oversized_segment_to_width() {
-            let rendered = StatusLine::new(vec![StatusLineSegment::RunState]).render(
-                &Theme::default(),
-                &StatusLineState {
-                    cwd: "",
-                    status_span: Span::raw("Running a very long command name"),
+        fn keeps_the_highest_utility_segment_when_it_needs_truncation() {
+            for (segments, status, width, expected) in [
+                (
+                    vec![StatusLineSegment::RunState],
+                    "Running a very long command name",
+                    12,
+                    "  Running...",
+                ),
+                (
+                    vec![StatusLineSegment::Model, StatusLineSegment::RunState],
+                    "Streaming · Esc to interrupt",
+                    22,
+                    "  Streaming · Esc t...",
+                ),
+            ] {
+                let state = StatusLineState {
+                    status_span: Span::raw(status),
                     ..bare_state()
-                },
-                12,
-            );
+                };
 
-            assert_eq!(text_of(&rendered), "  Running...");
+                let rendered = StatusLine::new(segments).render(&Theme::default(), &state, width);
+
+                assert_eq!(text_of(&rendered), expected, "{status} at {width}");
+            }
+        }
+
+        #[test]
+        fn plan_and_yolo_stay_visible_when_the_mode_is_the_highest_configured_segment() {
+            let theme = Theme::default();
+
+            for (permission_mode, style) in
+                [(Mode::Plan, theme.accent()), (Mode::Yolo, theme.error())]
+            {
+                let state = StatusLineState {
+                    permission_mode,
+                    ..bare_state()
+                };
+
+                let rendered = StatusLine::new(vec![
+                    StatusLineSegment::Model,
+                    StatusLineSegment::PermissionMode,
+                ])
+                .render(&theme, &state, 11);
+
+                assert_eq!(text_of(&rendered), "  Mode: ...", "{permission_mode}");
+                assert_eq!(rendered.line.spans[1].style, style, "{permission_mode}");
+            }
         }
 
         #[test]
@@ -986,6 +1038,26 @@ mod tests {
 
             assert_eq!(render_text(segments.clone(), 80), "  m │ m (high) │ Ready");
             assert_eq!(render_text(segments, 18), "  m (high) │ Ready");
+        }
+    }
+
+    mod fit_segments {
+        use super::*;
+
+        #[test]
+        fn equal_utility_keeps_the_later_configured_segment() {
+            let mut segments = vec![
+                RenderedSegment::new(7, Span::raw("first"), None),
+                RenderedSegment::new(7, Span::raw("second"), None),
+            ];
+
+            fit_segments(&mut segments, 8, 3);
+
+            let labels: Vec<&str> = segments
+                .iter()
+                .map(|segment| segment.span.content.as_ref())
+                .collect();
+            assert_eq!(labels, ["second"]);
         }
     }
 
