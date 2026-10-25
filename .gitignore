@@ -7,6 +7,10 @@
 .pnpm-store/
 node_modules/
 
+# Local environment
+.env.local
+.envrc.local
+
 # Nix
 .direnv/
 /.pre-commit-config.yaml
