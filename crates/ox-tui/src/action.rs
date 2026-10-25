@@ -23,7 +23,7 @@ pub(crate) enum Action {
         line: String,
         prompt: String,
     },
-    /// Shift+Tab, which switches to the next permission mode.
+    /// Switches to the next permission mode.
     CycleMode,
     /// A preview of the picker's highlighted theme, without committing it. Cursor moves in the
     /// `/theme` modal emit this, and cancelling the modal restores the open-time snapshot.

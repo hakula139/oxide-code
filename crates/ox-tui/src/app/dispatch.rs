@@ -341,7 +341,7 @@ impl App {
         }
     }
 
-    /// Switches to the mode after the last requested one in the Shift+Tab cycle, or to the cycle's
+    /// Switches to the mode after the last requested one in the keyboard cycle, or to the cycle's
     /// first mode from one outside it.
     fn cycle_mode(&mut self) {
         let next = self

@@ -76,9 +76,13 @@ impl App {
         let spare = modal_max.saturating_sub(modal_height + popup_height + input_height);
         let preview_height = self.preview_height().min(spare);
         let tasks_height = self.tasks.height().min(spare - preview_height);
+        let footer_line = self.input.footer(area.width, self.status.is_busy());
+        let footer_height = u16::from(
+            !modal_active && !footer_line.spans.is_empty() && spare > preview_height + tasks_height,
+        );
         // Pre-fill with surface bg so unpainted gaps inherit the theme.
         frame.render_widget(Block::default().style(self.theme.surface()), area);
-        let [status, chat, tasks, preview, modal, popup, input] = Layout::vertical([
+        let [status, chat, tasks, preview, modal, popup, input, footer] = Layout::vertical([
             Constraint::Length(StatusBar::HEIGHT),
             Constraint::Min(MIN_CHAT_HEIGHT),
             Constraint::Length(tasks_height),
@@ -86,6 +90,7 @@ impl App {
             Constraint::Length(modal_height),
             Constraint::Length(popup_height),
             Constraint::Length(input_height),
+            Constraint::Length(footer_height),
         ])
         .areas(area);
 
@@ -125,6 +130,9 @@ impl App {
             }
             self.input
                 .render(frame, input, self.status.is_busy(), &self.theme);
+            if footer_height > 0 {
+                frame.render_widget(Paragraph::new(footer_line).style(self.theme.dim()), footer);
+            }
         }
     }
 

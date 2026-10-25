@@ -104,6 +104,29 @@ impl InputArea {
     pub(crate) fn render_popup(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         self.popup.render(frame, area, theme);
     }
+
+    pub(crate) fn footer(&self, width: u16, busy: bool) -> Line<'static> {
+        let hints = if self.popup_visible() {
+            ["Tab complete", "↑/↓ select", "Esc close", "Enter run"]
+        } else {
+            [
+                "Tab / Shift+Tab mode",
+                if busy { "Enter queue" } else { "Enter send" },
+                "Alt+Enter newline",
+                "/ commands",
+            ]
+        };
+        let mut line = Line::default();
+        for hint in hints {
+            let separator = if line.spans.is_empty() { "  " } else { " · " };
+            let span = Span::raw(format!("{separator}{hint}"));
+            if line.width() + span.width() > usize::from(width) {
+                break;
+            }
+            line.spans.push(span);
+        }
+        line
+    }
 }
 
 // ── Event Handling & Rendering ──
@@ -201,6 +224,7 @@ impl InputArea {
         }
 
         match key.code {
+            KeyCode::Tab if key.modifiers.is_empty() => InputOutcome::Action(Action::CycleMode),
             KeyCode::Enter => {
                 // Kitty reports SHIFT directly. VS Code and Cursor send Shift+Enter as `\x1b\r`
                 // (ESC CR), which crossterm parses as Alt+Enter.

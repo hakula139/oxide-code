@@ -155,8 +155,10 @@ impl StatusLine {
                 .rate_limits
                 .and_then(|limits| rate_limit_label("7d", limits.seven_day))
                 .map(|(label, style)| Span::styled(label, style.style(theme))),
-            StatusLineSegment::PermissionMode => permission_mode_label(state.permission_mode)
-                .map(|(label, style)| Span::styled(label, style.style(theme))),
+            StatusLineSegment::PermissionMode => {
+                let (label, style) = permission_mode_label(state.permission_mode);
+                Some(Span::styled(label, style.style(theme)))
+            }
             StatusLineSegment::RunState => Some(state.status_span.clone()),
             StatusLineSegment::QueuedPrompts => (state.queued_prompts > 0).then(|| {
                 Span::styled(
@@ -378,11 +380,11 @@ fn usage_style(percent: f64) -> SegmentStyle {
     }
 }
 
-fn permission_mode_label(mode: Mode) -> Option<(&'static str, SegmentStyle)> {
+fn permission_mode_label(mode: Mode) -> (&'static str, SegmentStyle) {
     match mode {
-        Mode::Manual => None,
-        Mode::Plan => Some(("Mode: plan", SegmentStyle::Accent)),
-        Mode::Yolo => Some(("Mode: yolo", SegmentStyle::Error)),
+        Mode::Manual => ("Mode: manual", SegmentStyle::Muted),
+        Mode::Plan => ("Mode: plan", SegmentStyle::Accent),
+        Mode::Yolo => ("Mode: yolo", SegmentStyle::Error),
     }
 }
 

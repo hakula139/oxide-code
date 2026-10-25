@@ -47,7 +47,7 @@ See [`effort`](configuration.md#effort-reasoning-effort) for each model's defaul
 
 ## Permission Mode
 
-`/mode` opens a picker of the [permission modes](permissions.md#modes). Use **Up / Down** or a number key to move, **Enter** to switch, and **Esc** to cancel. `/mode <mode>` switches directly, and **Shift+Tab** switches between `manual` and `plan`. [Modes](permissions.md#modes) explains when its cycle includes `yolo`.
+`/mode` opens a picker of the [permission modes](permissions.md#modes). Use **Up / Down** or a number key to move, **Enter** to switch, and **Esc** to cancel. `/mode <mode>` switches directly, and **Tab** or **Shift+Tab** switches between `manual` and `plan` while the command popup is closed. [Modes](permissions.md#modes) explains when its cycle includes `yolo`.
 
 ## Compaction
 

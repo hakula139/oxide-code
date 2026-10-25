@@ -8,7 +8,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 4. **Project config file**: `.ox/config.toml` in the nearest directory from the working directory up to the project root that has one. The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory outside a repository.
 5. **[Environment variables](#environment-variables)**: override every file. A command-line flag such as `--mode` overrides them in turn.
 
-Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$OX_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, `/mode`, or `/theme` change or a **Shift+Tab** mode switch. Its Permissions section lists every extra root, rule, and turned-off default group the files set, each with the layer that added it, since rule lists and extra roots combine across layers and any user file can turn a default off. It shows what the files set, so it still lists extra roots when a launch from `/`, `$HOME`, or an ancestor of `$HOME` leaves the workspace without roots.
+Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$OX_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, `/mode`, or `/theme` change or a **Tab** or **Shift+Tab** mode switch. Its Permissions section lists every extra root, rule, and turned-off default group the files set, each with the layer that added it, since rule lists and extra roots combine across layers and any user file can turn a default off. It shows what the files set, so it still lists extra roots when a launch from `/`, `$HOME`, or an ancestor of `$HOME` leaves the workspace without roots.
 
 ## Layers
 
@@ -161,7 +161,7 @@ Automatic compaction runs before a prompt and between the tool rounds of a long 
 | `session-cost`        | `Cost: $0.43` running USD estimate                            | Per turn        |
 | `five-hour-limit`     | `5h: 42%` of a subscription's five-hour usage limit           | Per request     |
 | `weekly-limit`        | `7d: 13%` of a subscription's weekly usage limit              | Per request     |
-| `permission-mode`     | `Mode: plan` or `Mode: yolo`, omitted in `manual`             | On switch       |
+| `permission-mode`     | `Mode: manual`, `Mode: plan`, or `Mode: yolo`                 | On switch       |
 | `run-state`           | `Ready` / spinner + label / **Ctrl+C** exit hint              | On state change |
 | `queued-prompts`      | `Queued: 2` while prompts wait for the running turn           | On change       |
 | `task-progress`       | `Tasks: 2/5` completed while the session keeps a task list    | On change       |

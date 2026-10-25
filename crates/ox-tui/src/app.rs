@@ -61,10 +61,10 @@ pub(crate) struct App {
     input: InputArea,
     modals: ModalStack,
     session_info: LiveSessionInfo,
-    /// The modes Shift+Tab steps through. `yolo` joins only when the session starts in it, so a
-    /// stray key press cannot leave every call unprompted.
+    /// The keyboard cycle includes `yolo` only when the session starts in it, so a stray key press
+    /// cannot leave every call unprompted.
     mode_cycle: &'static [Mode],
-    /// The mode of the last switch sent to the engine, which Shift+Tab steps on from so a quick
+    /// The mode of the last switch sent to the engine, which cycling advances from so a quick
     /// second press does not repeat a switch still awaiting its confirmation.
     requested_mode: Mode,
     events: mpsc::UnboundedReceiver<Event>,
