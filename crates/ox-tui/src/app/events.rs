@@ -1500,6 +1500,10 @@ mod tests {
         #[test]
         fn session_resumed_with_an_unsupported_model_repeats_its_notice() {
             let (mut app, _rx, _event_tx) = test_app(None);
+            app.session_info.config.compaction.auto = AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(400_000),
+            };
 
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
@@ -1513,6 +1517,10 @@ mod tests {
             let prompt_at = text.find("only msg").unwrap();
             let notice_at = text.find("`test-model` is not a supported model").unwrap();
             assert!(prompt_at < notice_at, "{text}");
+            assert!(
+                text.contains("Auto-compaction requires an explicit token threshold."),
+                "{text}",
+            );
         }
 
         #[test]

@@ -26,7 +26,7 @@ When a turn reports usage, the checks inside the turn and before the next prompt
 
 ## Threshold
 
-Every supported model in `model.rs` has a `1_000_000`-token context window. Unknown model IDs have no window, so auto-compaction stays disabled for them.
+Every supported model in `model.rs` has a `1_000_000`-token context window. Unknown model IDs have no window, so default and percentage-based auto-compaction stay disabled for them. Explicit token thresholds still apply.
 
 The threshold is:
 
