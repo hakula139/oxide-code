@@ -1,5 +1,6 @@
 //! Ordered segment rendering for the status line.
 
+use std::cmp::Reverse;
 use std::path::Path;
 
 use ratatui::style::Style;
@@ -274,9 +275,21 @@ impl RenderedSegment {
 }
 
 fn fit_segments(segments: &mut Vec<RenderedSegment>, max_width: usize, sep_width: usize) {
-    while segments.len() > 1 && total_width(segments, sep_width) > max_width {
-        segments.remove(lowest_priority_index(segments));
+    let mut ranked: Vec<_> = std::mem::take(segments).into_iter().enumerate().collect();
+    ranked.sort_by_key(|(index, segment)| (Reverse(segment.utility), Reverse(*index)));
+
+    let mut width = LEFT_MARGIN.width();
+    let mut fitting = Vec::with_capacity(ranked.len());
+    for (index, segment) in ranked {
+        let separator = if fitting.is_empty() { 0 } else { sep_width };
+        let next_width = width + separator + segment.width();
+        if fitting.is_empty() || next_width <= max_width {
+            width = next_width;
+            fitting.push((index, segment));
+        }
     }
+    fitting.sort_by_key(|(index, _)| *index);
+    segments.extend(fitting.into_iter().map(|(_, segment)| segment));
 
     if total_width(segments, sep_width) <= max_width {
         return;
@@ -292,16 +305,6 @@ fn total_width(segments: &[RenderedSegment], sep_width: usize) -> usize {
     LEFT_MARGIN.width()
         + segments.iter().map(RenderedSegment::width).sum::<usize>()
         + sep_width.saturating_mul(segments.len().saturating_sub(1))
-}
-
-/// Index of the segment to drop first. `segments` must not be empty.
-fn lowest_priority_index(segments: &[RenderedSegment]) -> usize {
-    let (index, _) = segments
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, segment)| segment.utility)
-        .expect("fit_segments drops only while two or more segments remain");
-    index
 }
 
 /// Per-segment narrow-width rank. Lower numbers drop earlier.

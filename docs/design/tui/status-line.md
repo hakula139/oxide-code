@@ -13,12 +13,12 @@ Segment render rules:
 - Return `None` when data is unavailable, so an absent branch, title, usage, or price renders no placeholder.
 - Use active theme styles, leaving color customization to theme overrides.
 - Join only rendered segments, so omitted segments do not leave extra separators.
-- When the row is too narrow, omit lower-utility segments before truncating the last remaining segment. Run state, the permission mode, and the model have the highest utility, in that order.
+- Retain the highest-priority segment, truncating it if needed, then fit other segments from highest to lowest utility and render them in configured order. Smaller segments can use space left after a larger one is omitted. Run state has the highest utility. The permission mode ranks above the model in `plan` and `yolo`, and below it in `manual`.
 - The `model` and `model-with-effort` segments drop the `Claude` family prefix to save width (e.g., `Opus 5.5 (xhigh)`). Other surfaces (welcome screen, prompt environment, error blocks) keep the full `Claude Opus 5.5` label.
 - The pull request checks and review segments color their state with the theme's `success`, `warning`, `error`, and `muted` slots, and link the PR's checks and changed-files pages.
 - The review segment appears only when branch protection requires a review, because GitHub otherwise reports no review decision.
 - The context and usage-limit segments use the `text` slot, switch to `warning` at 70%, and switch to `error` at 90%. Session cost stays `muted` because it has no limit to approach.
-- `permission-mode` shows `Mode: plan` in the `accent` slot and `Mode: yolo` in the `error` slot, and nothing in `manual`, the default.
+- `permission-mode` shows `Mode: manual` in the `muted` slot, `Mode: plan` in the `accent` slot, and `Mode: yolo` in the `error` slot.
 - `task-progress` counts the completed tasks on the session's [task list](../tools/tasks.md) and shows only while the list holds a task.
 
 ## Usage Data

@@ -21,6 +21,9 @@ use crate::theme::Theme;
 /// Chat rows that stay visible however tall the bands below the chat grow.
 const MIN_CHAT_HEIGHT: u16 = 1;
 
+/// Chat rows that keep content visible above the stack's trailing spacer.
+const FOOTER_MIN_CHAT_HEIGHT: u16 = 2;
+
 /// Maximum queued prompts shown in the preview before collapsing into `... +N prompts`.
 const PREVIEW_VISIBLE: usize = 3;
 
@@ -77,8 +80,9 @@ impl App {
         let preview_height = self.preview_height().min(spare);
         let tasks_height = self.tasks.height().min(spare - preview_height);
         let footer_line = self.input.footer(area.width, self.status.is_busy());
+        let chat_height = MIN_CHAT_HEIGHT + spare - preview_height - tasks_height;
         let footer_height = u16::from(
-            !modal_active && !footer_line.spans.is_empty() && spare > preview_height + tasks_height,
+            !modal_active && !footer_line.spans.is_empty() && chat_height > FOOTER_MIN_CHAT_HEIGHT,
         );
         // Pre-fill with surface bg so unpainted gaps inherit the theme.
         frame.render_widget(Block::default().style(self.theme.surface()), area);
