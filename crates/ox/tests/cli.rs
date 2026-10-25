@@ -304,6 +304,9 @@ fn config_check_warns_about_an_unsupported_model_and_ignored_theme_overrides() {
             [client]
             model = "claude-opus-4"
 
+            [client.compaction]
+            auto_threshold_tokens = 400000
+
             [tui.theme.overrides]
             accnet = "#ffffff"
         "##},
@@ -316,7 +319,8 @@ fn config_check_warns_about_an_unsupported_model_and_ignored_theme_overrides() {
         String::from_utf8(output.stderr).unwrap(),
         "Warning: `claude-opus-4` is not a supported model, \
          so requests go without thinking, effort, and context management, \
-         and auto-compaction and cost tracking stay off. \
+         and cost tracking stays off. \
+         Auto-compaction requires an explicit token threshold. \
          Did you mean `claude-opus-5-5` (Claude Opus 5.5)?\n\
          Warning: Ignored the `accnet` theme override: unknown slot \"accnet\"\n",
     );
