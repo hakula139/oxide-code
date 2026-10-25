@@ -186,13 +186,17 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     // of its values, as in `invalid type: string "..."`, so a project error gives only where it is.
     let invalid_toml = |e: toml::de::Error| {
         let location = locate_error(&content, &e);
-        let sensitive = location.as_ref().is_some_and(|location| {
-            location.contains("`client.auth") || location.contains("`client.headers")
+        let expected = location.as_ref().and_then(|location| {
+            if location.contains("`client.auth") {
+                Some("expected client.auth type bearer, api-key, oauth, or login with a valid source")
+            } else if location.contains("`client.headers") {
+                Some("expected client.headers to map header names to string values")
+            } else {
+                None
+            }
         });
-        let detail = if sensitive {
-            location.map(|location| {
-                format!("{location}: expected a valid client credential or header declaration")
-            })
+        let detail = if let Some(expected) = expected {
+            location.map(|location| format!("{location}: {expected}"))
         } else if layer.is_project() {
             locate_error(&content, &e)
         } else {

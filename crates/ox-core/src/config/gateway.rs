@@ -47,11 +47,6 @@ impl GatewayCompat {
         })
     }
 
-    #[cfg(test)]
-    pub(super) fn load() -> Result<Self> {
-        Self::from_client(&ClientTable::default())
-    }
-
     pub(crate) fn snapshot(&self) -> GatewaySnapshot {
         GatewaySnapshot {
             custom_header_names: self
@@ -65,11 +60,6 @@ impl GatewayCompat {
     }
 
     /// Rejects a custom header that would replace the header carrying the active credential.
-    #[cfg(test)]
-    pub(super) fn check_credential_header(&self, auth: AuthSource) -> Result<()> {
-        self.check_credential_header_from(auth, CUSTOM_HEADERS_VAR)
-    }
-
     pub(super) fn check_credential_header_from(
         &self,
         auth: AuthSource,
@@ -118,7 +108,7 @@ pub struct GatewaySnapshot {
 // ── Custom Headers ──
 
 /// Headers the client sets on each request. The credential header depends on the auth kind, so
-/// [`GatewayCompat::check_credential_header`] guards it once the credential resolves.
+/// [`GatewayCompat::check_credential_header_from`] guards it once the credential resolves.
 const RESERVED: &[&str] = &[
     "anthropic-beta",
     "anthropic-version",
@@ -179,7 +169,7 @@ mod tests {
             let value = vars.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
             (key, value)
         });
-        temp_env::with_vars(vars, GatewayCompat::load)
+        temp_env::with_vars(vars, || GatewayCompat::from_client(&ClientTable::default()))
     }
 
     mod load {
@@ -252,11 +242,11 @@ mod tests {
             )])
             .unwrap();
             compat
-                .check_credential_header(AuthSource::ApiKeyEnv)
+                .check_credential_header_from(AuthSource::ApiKeyEnv, CUSTOM_HEADERS_VAR)
                 .expect("x-api-key carries the credential, so a custom Authorization is free");
 
             let err = compat
-                .check_credential_header(AuthSource::OAuthTokenEnv)
+                .check_credential_header_from(AuthSource::OAuthTokenEnv, CUSTOM_HEADERS_VAR)
                 .unwrap_err();
             assert_eq!(
                 err.to_string(),

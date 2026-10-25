@@ -210,8 +210,8 @@ pub struct Config {
     pub model: ModelSpec,
     /// `None` for models outside the catalog.
     pub(crate) effort: Option<Effort>,
-    /// `None` until [`Config::resolve_auth`] finds a stored login, and while signed out, which only
-    /// a session that can run `/login` starts in.
+    /// `None` until [`Config::resolve_auth`] loads a credential file or stored login, and while
+    /// signed out, which only a session that can run `/login` starts in.
     pub(crate) auth: Option<Auth>,
     pending_auth: Option<PendingAuth>,
     /// Why the session started signed out.
