@@ -1500,10 +1500,6 @@ mod tests {
         #[test]
         fn session_resumed_with_an_unsupported_model_repeats_its_notice() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.session_info.config.compaction.auto = AutoCompactionConfig {
-                enabled: true,
-                threshold_tokens: Some(400_000),
-            };
 
             app.handle_engine_event(Event::SessionResumed {
                 id: "resumed".to_owned(),
