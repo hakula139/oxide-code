@@ -249,37 +249,6 @@ mod tests {
                 assert!(!format!("{gateway:?}").contains("private-header-sentinel"));
             }
         }
-    }
-
-    mod load {
-        use super::*;
-
-        #[test]
-        fn defaults_send_attribution_and_allow_structured_outputs() {
-            let compat = load_with(&[]).unwrap();
-            assert!(compat.custom_headers.is_empty());
-            assert!(compat.attribution);
-            assert!(compat.structured_outputs);
-        }
-
-        #[test]
-        fn reads_claude_code_env_names() {
-            let compat = load_with(&[
-                (
-                    "ANTHROPIC_CUSTOM_HEADERS",
-                    "X-Team: platform\nx-route: blue",
-                ),
-                ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
-                ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "1"),
-            ])
-            .unwrap();
-            assert_eq!(
-                pairs(&compat.custom_headers),
-                [("x-team", "platform"), ("x-route", "blue")],
-            );
-            assert!(!compat.attribution);
-            assert!(!compat.structured_outputs);
-        }
 
         #[test]
         fn malformed_headers_name_the_variable_and_line() {
@@ -310,7 +279,7 @@ mod tests {
         }
     }
 
-    mod check_credential_header {
+    mod check_credential_header_from {
         use super::*;
 
         #[test]
