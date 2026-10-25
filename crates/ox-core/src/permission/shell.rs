@@ -433,7 +433,7 @@ pub(super) struct Segment {
     programs: Vec<usize>,
     /// The files one of [`READERS`] may read, resolved like a read's path: each literal operand,
     /// and each file a globbing one matches when the analysis runs. Empty for any other command.
-    reads: Vec<Access>,
+    reads: Vec<ReaderPath<Access>>,
     /// Whether one of [`READERS`] takes a word whose files the analysis cannot list, such as one
     /// that expands a variable, so it may read any file.
     reads_anything: bool,
@@ -453,11 +453,11 @@ impl Segment {
     }
 
     /// The files a known-safe read-only command reads, or `None` for any other command.
-    pub(super) fn safe_reads(&self) -> Option<&[Access]> {
+    pub(super) fn safe_reads(&self) -> Option<&[ReaderPath<Access>]> {
         self.safe.then_some(self.reads.as_slice())
     }
 
-    pub(super) fn reads(&self) -> &[Access] {
+    pub(super) fn reads(&self) -> &[ReaderPath<Access>] {
         &self.reads
     }
 
@@ -499,6 +499,34 @@ impl Segment {
             }
             recursive && force
         })
+    }
+}
+
+/// A reader's path and whether it may traverse the tree beneath it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(super) struct ReaderPath<T> {
+    pub(super) path: T,
+    pub(super) recursive: bool,
+}
+
+impl<T> ReaderPath<T> {
+    fn exact(path: T) -> Self {
+        Self {
+            path,
+            recursive: false,
+        }
+    }
+}
+
+impl ReaderPath<String> {
+    fn resolve(&self, paths: &mut PathResolver<'_>) -> ReaderPath<Access> {
+        let path = paths.resolve(&self.path);
+        let recursive = self.recursive
+            && !path
+                .resolved()
+                .expect("a reader operand resolves to a path")
+                .is_file();
+        ReaderPath { path, recursive }
     }
 }
 
@@ -918,7 +946,12 @@ impl Walk<'_> {
                     safe_operands(name, args)
                 }
             });
-        let mut operands = unwrapped.reads.clone();
+        let mut operands: Vec<_> = unwrapped
+            .reads
+            .iter()
+            .cloned()
+            .map(ReaderPath::exact)
+            .collect();
         let mut reads_anything = false;
         let mut finds = Vec::new();
         for (i, &start) in unwrapped.starts.iter().enumerate() {
@@ -947,10 +980,12 @@ impl Walk<'_> {
                 _ => {}
             }
         }
-        self.relative_path |= operands.iter().any(|path| Path::new(path).is_relative());
+        self.relative_path |= operands
+            .iter()
+            .any(|read| Path::new(&read.path).is_relative());
         let reads = operands
             .iter()
-            .map(|operand| self.paths.resolve(operand))
+            .map(|read| read.resolve(&mut self.paths))
             .collect();
 
         let mut words: Vec<ShellWord> = all
@@ -2579,7 +2614,7 @@ const TEST_OPERATORS: &[&str] = &["!", "!=", "(", ")", "<", "=", "==", ">", "]"]
 /// be literal and free of globs, so each file it reads is one the gate can check. Every word of a
 /// `test` or `[` call other than an option or a [`TEST_OPERATORS`] word counts as a file, so a
 /// string it compares reads as one too.
-fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<String>> {
+fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<ReaderPath<String>>> {
     let values = args
         .iter()
         .map(|word| word.value.as_deref().filter(|_| !word.glob))
@@ -2596,13 +2631,13 @@ fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<String>> {
             values
                 .iter()
                 .filter(|value| !value.starts_with('-') && !TEST_OPERATORS.contains(value))
-                .map(|&value| value.to_owned())
+                .map(|&value| ReaderPath::exact(value.to_owned()))
                 .collect(),
         ),
         "cat" | "head" | "ls" | "tail" | "wc" => files(),
         "find" if !values.iter().any(|value| FIND_ACTIONS.contains(value)) => files(),
         "grep" if !values.iter().any(|value| is_recursive_grep(value)) => files(),
-        "sed" => sed_files(&values),
+        "sed" => sed_files(&values).map(|files| files.into_iter().map(ReaderPath::exact).collect()),
         _ => None,
     }
 }
@@ -2684,36 +2719,134 @@ fn long_option(arg: &str) -> Option<&str> {
 
 // ── Readers ──
 
-/// The files the reader `name` that is no known-safe read may read, from `args`: each file
-/// [`reader_args`] finds, with each globbing one also expanded in `cwd` as bash does. The second
-/// value is whether it may read a file the arguments do not name, or a word globs to files
-/// [`expand_glob`] cannot list, which leaves what it reads unknown.
-fn reader_operands(name: &str, args: &[Word], cwd: &Path) -> (Vec<String>, bool) {
-    let values: Vec<Option<&str>> = args.iter().map(|word| word.value.as_deref()).collect();
-    let operands = reader_args(name, &values);
-    let mut anything = operands.unknown;
-    let mut files = Vec::new();
-    for (index, operand) in operands.files {
-        if args[index].glob {
-            match expand_glob(&operand, cwd) {
-                Some(matches) => files.extend(matches),
+/// The paths reader `name` may read, expanding whole words before assigning their argument roles.
+/// A multi-match expansion that can change roles leaves the reads unknown and keeps every possible
+/// named operand. Glob match ordering is not assumed, since bash's locale can change it.
+fn reader_operands(name: &str, args: &[Word], cwd: &Path) -> (Vec<ReaderPath<String>>, bool) {
+    let written: Vec<_> = args.iter().map(|word| word.value.as_deref()).collect();
+    let written = reader_args(name, &written);
+    let mut anything = written.unknown;
+    let mut values = Vec::new();
+    let mut groups = Vec::new();
+    for (index, word) in args.iter().enumerate() {
+        if let Some(pattern) = word.value.as_deref().filter(|_| word.glob) {
+            match expand_glob(pattern, cwd) {
+                Some(matches) if !matches.is_empty() => {
+                    if matches.len() > 1 {
+                        groups.push((values.len()..values.len() + matches.len(), index));
+                    }
+                    values.extend(matches.into_iter().map(Some));
+                    continue;
+                }
                 None => anything = true,
+                Some(_) => {}
             }
         }
-        files.push(operand);
+        values.push(word.value.clone());
     }
+    let values: Vec<_> = values.iter().map(Option::as_deref).collect();
+    let (files, unknown) = expanded_reader_paths(name, &written, &values, &groups);
+    (files, anything || unknown)
+}
+
+fn expanded_reader_paths(
+    name: &str,
+    written: &ReaderArgs,
+    values: &[Option<&str>],
+    groups: &[(Range<usize>, usize)],
+) -> (Vec<ReaderPath<String>>, bool) {
+    let grammar = reader_grammar(name);
+    let expanded = reader_args(name, values);
+    let ambiguous = groups
+        .iter()
+        .find(|(range, source)| {
+            !written.operands.contains(source)
+                || range.clone().any(|index| {
+                    !expanded.operands.contains(&index)
+                        || values[index].is_some_and(|value| {
+                            value.starts_with('-') && expanded.options_at(values, range.start)
+                                || grammar.operands == OperandKind::Find
+                                    && grammar.find_expression(value)
+                        })
+                })
+        })
+        .map(|(range, _)| range.start);
+    let anything = written.unknown || expanded.unknown || ambiguous.is_some();
+    let mut files: Vec<_> = expanded
+        .files
+        .iter()
+        .chain(&written.files)
+        .map(|(_, path)| path.clone())
+        .collect();
+    if let Some(start) = ambiguous {
+        let recursive = files.iter().any(|path| path.recursive)
+            || grammar.may_recurse(values, start, &expanded);
+        for (index, value) in values.iter().enumerate() {
+            if index < start && expanded.fixed_values.contains(&index) {
+                continue;
+            }
+            if let Some(path) = value.filter(|path| {
+                !path.is_empty() && (grammar.operands != OperandKind::Stream || *path != "-")
+            }) {
+                files.push(ReaderPath {
+                    path: path.to_owned(),
+                    recursive,
+                });
+            }
+        }
+        let consumes_operand = expanded.options_at(values, start)
+            && values[start..].iter().flatten().any(|value| {
+                reader_args(name, &[Some(value), Some("")])
+                    .option_values
+                    .contains(&1)
+            });
+        let expression = grammar.operands == OperandKind::Find
+            && values[start..]
+                .iter()
+                .flatten()
+                .any(|value| grammar.find_expression(value));
+        if recursive && (consumes_operand || expression) {
+            files.push(ReaderPath {
+                path: ".".to_owned(),
+                recursive: true,
+            });
+        }
+    }
+    files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    files.dedup_by(|next, current| {
+        let same = next.path == current.path;
+        if same {
+            current.recursive |= next.recursive;
+        }
+        same
+    });
     (files, anything)
 }
 
 /// What one of [`READERS`] reads, from its arguments.
 #[derive(Debug, PartialEq, Eq)]
 struct ReaderArgs {
-    /// Each argument that may name a file, with the index of the word it comes from: each operand
-    /// but a leading pattern or script, and each value of an option that names a file.
-    files: Vec<(usize, String)>,
+    /// Each path with the index of its word, or no index for an implicit cwd: each operand but a
+    /// leading pattern or script, and each value of an option that names a file.
+    files: Vec<(Option<usize>, ReaderPath<String>)>,
+    /// Words that supply an option's value in every supported argument order and build.
+    fixed_values: Vec<usize>,
+    /// Words that are ordinary file operands in every supported argument order and build.
+    operands: Vec<usize>,
+    /// Words that supply an option's value in any supported argument order or build.
+    option_values: Vec<usize>,
     /// Whether it may read a file the arguments do not name: a word expands, or an option names a
     /// file that lists the files to read.
     unknown: bool,
+}
+
+impl ReaderArgs {
+    fn options_at(&self, values: &[Option<&str>], index: usize) -> bool {
+        !values[..index]
+            .iter()
+            .enumerate()
+            .any(|(index, value)| *value == Some("--") && !self.option_values.contains(&index))
+    }
 }
 
 /// Reads the arguments of reader `name`, given each word's value or `None` for one that expands.
@@ -2726,6 +2859,9 @@ fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
     let grammar = reader_grammar(name);
     let mut args = ReaderArgs {
         files: Vec::new(),
+        fixed_values: (0..values.len()).collect(),
+        operands: (0..values.len()).collect(),
+        option_values: Vec::new(),
         unknown: values.iter().any(Option::is_none)
             || name == "find" && values.contains(&Some("-files0-from")),
     };
@@ -2737,12 +2873,22 @@ fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
     for dialect in [Dialect::Gnu, Dialect::Bsd] {
         for &permute in orders {
             let read = grammar.read(dialect, permute, values);
+            args.fixed_values
+                .retain(|index| read.option_values.contains(index));
+            args.operands.retain(|index| read.operands.contains(index));
             args.files.extend(read.files);
+            args.option_values.extend(read.option_values);
             args.unknown |= read.unknown;
         }
     }
     args.files.sort_unstable();
-    args.files.dedup();
+    args.files.dedup_by(|next, current| {
+        if next.0 != current.0 || next.1.path != current.1.path {
+            return false;
+        }
+        current.1.recursive |= next.1.recursive;
+        true
+    });
     args
 }
 
@@ -2768,6 +2914,14 @@ struct ReaderGrammar {
     numeric: bool,
     /// Whether the first operand is a pattern or script unless an option gives one.
     pattern: bool,
+    operands: OperandKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OperandKind {
+    Stream,
+    Directory,
+    Find,
 }
 
 impl ReaderGrammar {
@@ -2776,6 +2930,7 @@ impl ReaderGrammar {
         getopt: true,
         numeric: false,
         pattern: false,
+        operands: OperandKind::Stream,
     };
 
     /// The files the `dialect` build reads from `values`, taking options after operands until `--`
@@ -2786,15 +2941,31 @@ impl ReaderGrammar {
     fn read(&self, dialect: Dialect, permute: bool, values: &[Option<&str>]) -> ReaderArgs {
         let mut args = ReaderArgs {
             files: Vec::new(),
+            fixed_values: Vec::new(),
+            operands: Vec::new(),
+            option_values: Vec::new(),
             unknown: false,
         };
         let mut operands = Vec::new();
         let mut pattern_given = false;
+        let mut recursive = self.operands == OperandKind::Find;
         let mut take = |args: &mut ReaderArgs, role: Role, index: usize, value: Option<&str>| {
             pattern_given |= matches!(role, Role::Pattern | Role::PatternFile);
+            recursive |= role.recurses(value);
+            if value.is_some() {
+                args.option_values.push(index);
+            }
             match (role, value) {
-                (Role::File | Role::PatternFile, Some(file)) if !file.is_empty() => {
-                    args.files.push((index, file.to_owned()));
+                (Role::File | Role::PatternFile | Role::Directory, Some(file))
+                    if !file.is_empty() =>
+                {
+                    args.files.push((
+                        Some(index),
+                        ReaderPath {
+                            path: file.to_owned(),
+                            recursive: matches!(role, Role::Directory),
+                        },
+                    ));
                 }
                 (Role::FileList, _) => args.unknown = true,
                 _ => {}
@@ -2809,7 +2980,7 @@ impl ReaderGrammar {
             let Some(arg) = value.filter(|arg| options && arg.starts_with('-') && *arg != "-")
             else {
                 options &= permute;
-                if !matches!(value, Some("-" | "")) {
+                if value != Some("") {
                     operands.push((index, value));
                 }
                 continue;
@@ -2825,45 +2996,148 @@ impl ReaderGrammar {
                     take(&mut args, Role::File, index, attached);
                     continue;
                 };
-                match (option.value(dialect), attached) {
-                    (Value::None, _) | (Value::Optional, None) => {}
-                    (_, Some(value)) => take(&mut args, option.role, index, Some(value)),
-                    (Value::Required, None) => {
-                        if let Some(&next) = values.get(i) {
-                            take(&mut args, option.role, i, next);
-                            i += 1;
-                        }
-                    }
-                }
+                let (index, value) = option.argument(dialect, index, attached, values, &mut i);
+                take(&mut args, option.role, index, value);
             } else {
                 let cluster = &arg[1..];
                 if self.numeric && cluster.starts_with(|c: char| c.is_ascii_digit()) {
                     continue;
                 }
                 for (offset, c) in cluster.char_indices() {
-                    let Some(option) = self.short(c).filter(|o| o.value(dialect) != Value::None)
-                    else {
+                    let Some(option) = self.short(c) else {
                         continue;
                     };
-                    let rest = &cluster[offset + c.len_utf8()..];
-                    if !rest.is_empty() {
-                        take(&mut args, option.role, index, Some(rest));
-                    } else if option.value(dialect) == Value::Required
-                        && let Some(&next) = values.get(i)
-                    {
-                        take(&mut args, option.role, i, next);
-                        i += 1;
+                    if option.value(dialect) == Value::None {
+                        take(&mut args, option.role, index, None);
+                        continue;
                     }
+                    let rest = &cluster[offset + c.len_utf8()..];
+                    let attached = (!rest.is_empty()).then_some(rest);
+                    let (index, value) = option.argument(dialect, index, attached, values, &mut i);
+                    take(&mut args, option.role, index, value);
                     break;
                 }
             }
         }
         let skip = usize::from(self.pattern && !pattern_given && !unplaced);
-        for (index, operand) in operands.into_iter().skip(skip) {
-            args.files
-                .extend(operand.map(|file| (index, file.to_owned())));
-        }
+        let tree_given = args.files.iter().any(|(_, path)| path.recursive);
+        let paths = self.operand_paths(
+            values,
+            operands.into_iter().skip(skip),
+            recursive,
+            tree_given,
+        );
+        args.operands
+            .extend(paths.iter().filter_map(|(index, _)| *index));
+        args.files.extend(paths);
+        args.fixed_values.clone_from(&args.option_values);
         args
+    }
+
+    fn may_recurse(&self, values: &[Option<&str>], ambiguous: usize, args: &ReaderArgs) -> bool {
+        if !args.options_at(values, ambiguous) {
+            return false;
+        }
+        let recurses = |values: &[Option<&str>]| {
+            [Dialect::Gnu, Dialect::Bsd].into_iter().any(|dialect| {
+                self.read(dialect, true, values)
+                    .files
+                    .iter()
+                    .any(|(_, path)| path.recursive)
+            })
+        };
+        for (index, value) in values.iter().enumerate() {
+            if index < ambiguous && args.fixed_values.contains(&index) {
+                continue;
+            }
+            let next = if index + 1 < ambiguous {
+                values[index + 1]
+            } else {
+                values[ambiguous..]
+                    .iter()
+                    .copied()
+                    .flatten()
+                    .find(|value| !value.is_empty() && "recurse".starts_with(value))
+            };
+            let probe = [*value, next];
+            let probe = if next.is_some() {
+                &probe[..]
+            } else {
+                &probe[..1]
+            };
+            if recurses(probe) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn operand_paths<'a>(
+        &self,
+        values: &[Option<&str>],
+        operands: impl Iterator<Item = (usize, Option<&'a str>)>,
+        recursive: bool,
+        tree_given: bool,
+    ) -> Vec<(Option<usize>, ReaderPath<String>)> {
+        let operands: Vec<_> = operands.collect();
+        let has_operand = !operands.is_empty();
+        let tree_end = if self.operands == OperandKind::Find {
+            values
+                .iter()
+                .position(|value| value.is_some_and(|value| self.find_expression(value)))
+                .unwrap_or(values.len())
+        } else {
+            values.len()
+        };
+        let stdin = self.operands == OperandKind::Stream;
+        let mut files: Vec<_> = operands
+            .into_iter()
+            .filter_map(move |(index, operand)| {
+                let path = operand?;
+                if stdin && path == "-" {
+                    return None;
+                }
+                Some((
+                    Some(index),
+                    ReaderPath {
+                        path: path.to_owned(),
+                        recursive: recursive && index < tree_end,
+                    },
+                ))
+            })
+            .collect();
+        if recursive
+            && (self.operands == OperandKind::Find || !has_operand)
+            && !tree_given
+            && !files.iter().any(|(_, path)| path.recursive)
+        {
+            files.push((
+                None,
+                ReaderPath {
+                    path: ".".to_owned(),
+                    recursive: true,
+                },
+            ));
+        }
+        files
+    }
+
+    fn find_expression(&self, arg: &str) -> bool {
+        if matches!(arg, "(" | "!") {
+            return true;
+        }
+        let Some(cluster) = arg.strip_prefix('-').filter(|_| arg != "--") else {
+            return false;
+        };
+        for c in cluster.chars() {
+            let Some(option) = self.short(c) else {
+                return true;
+            };
+            if option.gnu != Value::None || option.bsd != Value::None {
+                return false;
+            }
+        }
+        false
     }
 
     /// The long option `--name`, or the one listed option `name` abbreviates, as getopt accepts. An
@@ -2911,7 +3185,21 @@ fn reader_grammar(name: &str) -> &'static ReaderGrammar {
 }
 
 const FIND_GRAMMAR: ReaderGrammar = ReaderGrammar {
+    options: &[
+        takes("-D"),
+        switch("-E"),
+        switch("-H"),
+        switch("-L"),
+        takes("-O"),
+        switch("-P"),
+        switch("-X"),
+        switch("-d"),
+        takes("-f").with(Role::Directory),
+        switch("-s"),
+        switch("-x"),
+    ],
     getopt: false,
+    operands: OperandKind::Find,
     ..ReaderGrammar::NONE
 };
 
@@ -2921,10 +3209,12 @@ const GREP_GRAMMAR: ReaderGrammar = ReaderGrammar {
         takes("-B"),
         takes("-C"),
         takes("-D"),
-        takes("-d"),
+        takes("-d").with(Role::Directories),
         takes("-e").with(Role::Pattern),
         takes("-f").with(Role::PatternFile),
         takes("-m"),
+        switch("-r").with(Role::Recursive),
+        switch("-R").with(Role::Recursive),
         takes("--after-context"),
         takes("--before-context"),
         takes("--binary-files"),
@@ -2933,7 +3223,8 @@ const GREP_GRAMMAR: ReaderGrammar = ReaderGrammar {
         attached("--colour"),
         takes("--context").bsd(Value::Optional),
         takes("--devices"),
-        takes("--directories"),
+        switch("--dereference-recursive").with(Role::Recursive),
+        takes("--directories").with(Role::Directories),
         takes("--exclude"),
         takes("--exclude-dir"),
         takes("--exclude-from").with(Role::File),
@@ -2944,6 +3235,7 @@ const GREP_GRAMMAR: ReaderGrammar = ReaderGrammar {
         takes("--label"),
         takes("--max-count"),
         takes("--regexp").with(Role::Pattern),
+        switch("--recursive").with(Role::Recursive),
     ],
     numeric: true,
     pattern: true,
@@ -2960,6 +3252,7 @@ const LS_GRAMMAR: ReaderGrammar = ReaderGrammar {
     options: &[
         takes("-D").bsd_only(),
         takes("-I").gnu_only(),
+        switch("-R").with(Role::Recursive),
         takes("-T").gnu_only(),
         takes("-w").gnu_only(),
         takes("--block-size"),
@@ -2970,12 +3263,14 @@ const LS_GRAMMAR: ReaderGrammar = ReaderGrammar {
         takes("--ignore"),
         takes("--indicator-style"),
         takes("--quoting-style"),
+        switch("--recursive").with(Role::Recursive),
         takes("--sort"),
         takes("--tabsize"),
         takes("--time"),
         takes("--time-style"),
         takes("--width"),
     ],
+    operands: OperandKind::Directory,
     ..ReaderGrammar::NONE
 };
 
@@ -3063,6 +3358,28 @@ impl ReaderOpt {
             Dialect::Bsd => self.bsd,
         }
     }
+
+    fn argument<'a>(
+        &self,
+        dialect: Dialect,
+        index: usize,
+        attached: Option<&'a str>,
+        values: &[Option<&'a str>],
+        next: &mut usize,
+    ) -> (usize, Option<&'a str>) {
+        match (self.value(dialect), attached) {
+            (Value::None, _) | (Value::Optional, None) => (index, None),
+            (_, Some(value)) => (index, Some(value)),
+            (Value::Required, None) => match values.get(*next) {
+                Some(&value) => {
+                    let index = *next;
+                    *next += 1;
+                    (index, value)
+                }
+                None => (index, None),
+            },
+        }
+    }
 }
 
 const fn takes(name: &'static str) -> ReaderOpt {
@@ -3103,11 +3420,29 @@ enum Role {
     PatternFile,
     /// A file that lists the files it reads.
     FileList,
+    /// A directory supplied through a `find -f` option.
+    Directory,
+    /// A flag that recursively traverses directory operands.
+    Recursive,
+    /// A value selecting whether `grep` traverses directories.
+    Directories,
 }
 
-/// The paths bash's brace and pathname expansion give `pattern` in `cwd`: each name with `*`, `?`,
-/// `[`, or `{` matches the entries of its directory, skipping those that start with `.` unless the
-/// name starts with `.` too or holds a brace, whose alternatives bash writes out before globbing.
+impl Role {
+    fn recurses(self, value: Option<&str>) -> bool {
+        match self {
+            Self::Recursive => true,
+            Self::Directories => {
+                value.is_some_and(|value| !value.is_empty() && "recurse".starts_with(value))
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The filesystem paths matching `pattern` in `cwd`, including brace alternatives. Each component
+/// with `*`, `?`, `[`, or `{` matches its directory's entries, skipping dot names unless the
+/// component starts with `.` or includes a brace. This does not emit unmatched lexical brace words.
 /// `None` when one name matches more than [`MAX_GLOB_MATCHES`] files, fails to compile, or meets a
 /// file whose name is not UTF-8.
 fn expand_glob(pattern: &str, cwd: &Path) -> Option<Vec<String>> {
@@ -3807,7 +4142,7 @@ mod tests {
             fn reads_the_arguments_file_xargs_names() {
                 let parsed = parse("xargs -a .env echo");
 
-                let Access::Path { requested, .. } = &parsed.segments[0].reads()[0] else {
+                let Access::Path { requested, .. } = &parsed.segments[0].reads()[0].path else {
                     panic!("expected a path read");
                 };
                 assert_eq!(Path::new(requested), Path::new("/repo/.env"));
@@ -4490,7 +4825,9 @@ mod tests {
                 "grep -fpats --file=more -e x -- -y src",
                 &Workspace::new(Path::new("/repo")),
             );
-            let at = |name: &str| Access::for_path(name, &Workspace::new(Path::new("/repo")));
+            let at = |name: &str| {
+                ReaderPath::exact(Access::for_path(name, &Workspace::new(Path::new("/repo"))))
+            };
             assert_eq!(
                 command.segments[0].safe_reads(),
                 Some(&[at("pats"), at("more"), at("-y"), at("src")][..])
@@ -4530,7 +4867,9 @@ mod tests {
 
         #[test]
         fn admits_builtins_that_only_print_test_files_or_trace() {
-            let at = |name: &str| Access::for_path(name, &Workspace::new(Path::new("/repo")));
+            let at = |name: &str| {
+                ReaderPath::exact(Access::for_path(name, &Workspace::new(Path::new("/repo"))))
+            };
             for (command, reads) in [
                 (": done", &[][..]),
                 ("printf '%s\\n' a", &[]),
@@ -4625,10 +4964,10 @@ mod tests {
                 let reads = parse(command).segments[0].safe_reads().unwrap().to_vec();
                 assert_eq!(
                     reads,
-                    [Access::for_path(
+                    [ReaderPath::exact(Access::for_path(
                         "a.rs",
                         &Workspace::new(Path::new("/repo"))
-                    )],
+                    ))],
                     "{command:?}"
                 );
             }
@@ -4656,6 +4995,111 @@ mod tests {
         }
 
         #[test]
+        fn keeps_recursive_roots_for_each_ambiguous_expansion_order() {
+            for (reader, written, expanded, start, end, source, root) in [
+                (
+                    "grep",
+                    "-e PRIVATE -* pats",
+                    "-e PRIVATE -f -R pats",
+                    2,
+                    4,
+                    2,
+                    ".",
+                ),
+                (
+                    "grep",
+                    "-e PRIVATE -* pats",
+                    "-e PRIVATE -R -f pats",
+                    2,
+                    4,
+                    2,
+                    ".",
+                ),
+                (
+                    "ls",
+                    "-D vault -* 80",
+                    "-D vault -w -R 80",
+                    2,
+                    4,
+                    2,
+                    "vault",
+                ),
+                (
+                    "ls",
+                    "-D vault -* 80",
+                    "-D vault -R -w 80",
+                    2,
+                    4,
+                    2,
+                    "vault",
+                ),
+                ("find", "* )", "vault ( -name )", 0, 3, 0, "."),
+                ("find", "* )", "( -name vault )", 0, 3, 0, "."),
+                (
+                    "ls",
+                    "--format *",
+                    "--format -R long vault",
+                    1,
+                    4,
+                    1,
+                    "vault",
+                ),
+                (
+                    "ls",
+                    "--format *",
+                    "--format long -R vault",
+                    1,
+                    4,
+                    1,
+                    "vault",
+                ),
+                (
+                    "grep",
+                    "-r -e needle -? patterns/* src",
+                    "-r -e needle -f patterns/z-vault patterns/a-patterns src",
+                    4,
+                    6,
+                    4,
+                    "patterns/z-vault",
+                ),
+                (
+                    "grep",
+                    "-r -e needle -? patterns/* src",
+                    "-r -e needle -f patterns/a-patterns patterns/z-vault src",
+                    4,
+                    6,
+                    4,
+                    "patterns/z-vault",
+                ),
+                (
+                    "grep",
+                    "-e PRIVATE -[f] pats -* more",
+                    "-e PRIVATE -f pats -f -R more",
+                    4,
+                    6,
+                    4,
+                    ".",
+                ),
+            ] {
+                let written: Vec<_> = written.split_whitespace().map(Some).collect();
+                let expanded: Vec<_> = expanded.split_whitespace().map(Some).collect();
+                let args = reader_args(reader, &written);
+
+                let (paths, unknown) =
+                    expanded_reader_paths(reader, &args, &expanded, &[(start..end, source)]);
+
+                assert!(unknown, "{reader} {expanded:?}");
+                assert!(
+                    paths.contains(&ReaderPath {
+                        path: root.to_owned(),
+                        recursive: true,
+                    }),
+                    "{reader} {expanded:?}: {paths:?}"
+                );
+            }
+        }
+
+        #[test]
         fn read_each_literal_operand_and_each_file_a_glob_matches() {
             let cwd_dir = canonical_tempdir();
             let cwd = cwd_dir.path();
@@ -4667,11 +5111,18 @@ mod tests {
 
             let segment = &command.segments[0];
             assert_eq!(segment.safe_reads(), None);
-            let at = |name: &str| Access::for_path(name, &workspace);
+            let at = |name: &str, recursive| ReaderPath {
+                path: Access::for_path(name, &workspace),
+                recursive,
+            };
             let main = Path::new("src").join("main.rs");
             assert_eq!(
                 segment.reads(),
-                [at(&main.to_string_lossy()), at("src/*.rs"), at("docs")]
+                [
+                    at("docs", true),
+                    at("src/*.rs", true),
+                    at(&main.to_string_lossy(), false)
+                ]
             );
         }
     }
@@ -4679,12 +5130,72 @@ mod tests {
     mod reader_args {
         use super::*;
 
+        // cspell:ignore drecurse rfpatterns
+        #[test]
+        fn distinguishes_recursive_operands_from_exact_auxiliary_files() {
+            for (reader, args, expected) in [
+                (
+                    "grep",
+                    "-r -f patterns src",
+                    &[("patterns", false), ("src", true)][..],
+                ),
+                (
+                    "grep",
+                    "-R --exclude-from=skip -e pat src",
+                    &[("skip", false), ("src", true)],
+                ),
+                ("grep", "-d recurse pat src", &[("src", true)]),
+                ("grep", "-drecurse pat src", &[("src", true)]),
+                ("grep", "--directories=rec pat src", &[("src", true)]),
+                ("grep", "--dereference-rec pat src", &[("src", true)]),
+                ("grep", "--rec pat src", &[("src", true)]),
+                ("grep", "pat src -r", &[("-r", false), ("src", true)]),
+                ("grep", "-d skip pat src", &[("src", false)]),
+                ("grep", "-e -r src", &[("src", false)]),
+                ("grep", "-r pat -", &[]),
+                ("grep", "-r pat", &[(".", true)]),
+                ("grep", "-rfpatterns", &[(".", true), ("patterns", false)]),
+                ("grep", "-- -r src", &[("src", false)]),
+                ("ls", "-laR src", &[("src", true)]),
+                ("ls", "--rec", &[(".", true)]),
+                ("ls", "-- -R", &[("-R", false)]),
+                (
+                    "find",
+                    "-L src -name needle",
+                    &[("needle", false), ("src", true)],
+                ),
+                ("find", "-name needle", &[(".", true), ("needle", false)]),
+                (
+                    "find",
+                    "-HL src -name needle",
+                    &[("needle", false), ("src", true)],
+                ),
+                ("find", "-f src", &[("src", true)]),
+                ("find", "-D search -O3 src", &[("src", true)]),
+                ("find", "", &[(".", true)]),
+            ] {
+                let values: Vec<_> = args.split_whitespace().map(Some).collect();
+
+                let read = reader_args(reader, &values);
+
+                let mut actual: Vec<_> = read
+                    .files
+                    .iter()
+                    .map(|(_, file)| (file.path.as_str(), file.recursive))
+                    .collect();
+                actual.sort_unstable();
+                actual.dedup();
+                assert_eq!(actual, expected, "{reader} {args}");
+                assert!(!read.unknown, "{reader} {args}");
+            }
+        }
+
         /// The files `reader` reads from the literal words of `args`.
         fn files(reader: &str, args: &str) -> Vec<String> {
             let values: Vec<Option<&str>> = args.split(' ').map(Some).collect();
             let read = reader_args(reader, &values);
             assert!(!read.unknown, "{reader} {args}");
-            read.files.into_iter().map(|(_, file)| file).collect()
+            read.files.into_iter().map(|(_, file)| file.path).collect()
         }
 
         #[test]
