@@ -515,7 +515,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn drains_burst_into_single_batch() {
+        async fn persists_queued_messages_in_order() {
             let dir = tempdir().unwrap();
             let store = test_store(dir.path());
             let state = SessionState::fresh(store.clone(), "m", None);
@@ -527,7 +527,14 @@ mod tests {
             drive(state, vec![a, b, c]).await;
 
             let data = store.load_session_data(&session_id).unwrap();
-            assert_eq!(data.messages.len(), 3);
+            assert_eq!(
+                data.messages,
+                [
+                    Message::user("one"),
+                    Message::user("two"),
+                    Message::user("three"),
+                ],
+            );
         }
 
         #[tokio::test]
