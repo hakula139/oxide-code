@@ -199,6 +199,27 @@ impl Rule {
         }
     }
 
+    /// Returns whether a deny or ask `read` rule may match this path or a recursive descendant.
+    pub(super) fn holds_read(&self, target: &Target<'_>, recursive: bool) -> bool {
+        if self.matches(PermissionClass::Read, target, MatchDiscipline::Deny) {
+            return true;
+        }
+        if self.class != PermissionClass::Read || !recursive {
+            return false;
+        }
+        match (&self.pattern, target) {
+            (
+                Pattern::Path(glob),
+                Target::Path {
+                    canonical,
+                    requested,
+                    ..
+                },
+            ) => glob.may_match_below([canonical, requested]),
+            _ => false,
+        }
+    }
+
     /// This rule with its literal path prefix rooted at each absolute anchor and where those roots
     /// resolve when the policy loads.
     pub(super) fn with_resolved_prefixes(mut self, anchors: &[PathBuf]) -> Self {
@@ -488,21 +509,29 @@ impl PathGlob {
             });
         }
         let mut aliases = DirectoryAliases::default();
-        self.bases.iter().any(|base| {
-            let resolved = resolve(base).ok();
-            [
-                Some(base.as_path()),
-                resolved.as_deref().filter(|resolved| *resolved != base),
-            ]
-            .into_iter()
-            .flatten()
-            .any(|base| {
-                paths.iter().any(|path| {
-                    aliases
-                        .relative_to(Path::new(path), base)
-                        .is_some_and(|relative| projected_match(&relative))
-                })
+        self.prefix_locations().any(|base| {
+            paths.iter().any(|path| {
+                aliases
+                    .relative_to(Path::new(path), &base)
+                    .is_some_and(|relative| projected_match(&relative))
             })
+        })
+    }
+
+    fn may_match_below(&self, paths: [&str; 2]) -> bool {
+        let mut aliases = DirectoryAliases::default();
+        self.prefix_locations().any(|base| {
+            paths.iter().any(|path| {
+                let path = Path::new(path);
+                aliases.relative_to(&base, path).is_some()
+                    || aliases.relative_to(path, &base).is_some()
+            })
+        })
+    }
+
+    fn prefix_locations(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.bases.iter().flat_map(|base| {
+            std::iter::once(base.clone()).chain(resolve(base).ok().filter(|path| path != base))
         })
     }
 }
@@ -1271,6 +1300,52 @@ mod tests {
                     "{name}"
                 );
             }
+        }
+    }
+
+    mod holds_read {
+        use super::*;
+
+        #[test]
+        fn intersects_recursive_trees_with_decoded_literal_prefixes() {
+            let dir = canonical_tempdir();
+            let root = dir.path();
+            for (pattern, name, recursive, expected) in [
+                ("./vault/key", "", true, true),
+                ("./vault/key", "vault", true, true),
+                ("./vault/key", "vault", false, false),
+                ("./vault/key", "src", true, false),
+                ("./vault/key", "VAULT", true, true),
+                ("./vault/key", "vault/key", false, true),
+                ("./vault/*.key", "vault/public", true, true),
+                ("./vault/*.key", "src", true, false),
+                ("./vault[[]1[]]/key", "vault[1]", true, true),
+                ("./vault[[]1[]]/key", "vault1", true, false),
+                ("secret", "src", true, true),
+            ] {
+                let rule = rule(PermissionClass::Read, pattern)
+                    .with_resolved_prefixes(&[root.to_path_buf()]);
+                let canonical = slash_separated(&root.join(name));
+                let rooted = [name.to_owned()];
+
+                let held = rule.holds_read(&path(&canonical, &rooted), recursive);
+
+                assert_eq!(
+                    held, expected,
+                    "{pattern}, path={name}, recursive={recursive}"
+                );
+            }
+        }
+
+        #[test]
+        fn keeps_class_and_target_requirements() {
+            let any = rule(PermissionClass::Read, "*");
+            let edit = rule(PermissionClass::Edit, "*");
+            let read = rule(PermissionClass::Read, "./vault/key");
+
+            assert!(any.holds_read(&Target::None, false));
+            assert!(!edit.holds_read(&Target::None, true));
+            assert!(!read.holds_read(&Target::Name("vault"), true));
         }
     }
 
