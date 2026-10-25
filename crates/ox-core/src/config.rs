@@ -2089,7 +2089,7 @@ mod tests {
                 .expect_err("invalid mode must propagate");
             assert_eq!(
                 format!("{err:#}"),
-                r#"invalid OX_PERMISSION_MODE "bypass": expected one of manual, plan, yolo"#,
+                r#"invalid OX_PERMISSION_MODE "bypass": expected one of manual, yolo, plan"#,
             );
         }
 

@@ -420,7 +420,7 @@ mod tests {
         fn unknown_mode_lists_the_valid_ones() {
             assert_eq!(
                 mode("Turbo"),
-                Err("Unknown mode: `Turbo`. Valid: manual, plan, yolo.".to_owned()),
+                Err("Unknown mode: `Turbo`. Valid: manual, yolo, plan.".to_owned()),
             );
         }
     }

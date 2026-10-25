@@ -50,7 +50,7 @@ The modes correspond to these settings in Claude Code and Codex:
 
 During a turn, a compaction, or a sign-in, the op arrives at `await_unless_aborted`, `await_or_op`, or `await_approval`, which keep it in the operation's `Inbox` beside the queued prompts and confirm it on receipt. The gate takes a waiting switch before it weighs each call, so a switch applies from the turn's next gated call, including one in the same round. The engine applies any switch still waiting once the operation ends. Calls already gated keep their decisions, so switching to `plan` does not stop a running command.
 
-Tab and Shift+Tab cycle `manual` → `plan` → `manual` in the same direction. Tab completes the selected command or argument while the command popup is open. The cycle adds `yolo` after `plan` only when the session started in `yolo`, from config, `OX_PERMISSION_MODE`, or `--mode`. When invoked from a mode outside the cycle, such as `yolo` selected with `/mode`, it returns to `manual`. The TUI advances from the last mode it requested, so pressing again before the engine confirms the first request moves on to the next mode. The keys are fixed until configurable key bindings land with [#278](https://github.com/hakula139/oxide-code/issues/278).
+Tab and Shift+Tab cycle `manual` → `yolo` → `plan` → `manual` in the same direction, regardless of the starting mode. The mode enum's declared order also controls the picker and argument completion. Tab completes the selected command or argument while the command popup is open. The TUI advances from the last mode it requested, so pressing again before the engine confirms the first request moves on to the next mode. The keys are fixed until configurable key bindings land with [#278](https://github.com/hakula139/oxide-code/issues/278).
 
 ## Decision Pipeline
 
@@ -249,7 +249,7 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 
 11. **Mode switches wait for the next gated call.** A switch mid-turn changes how the remaining calls are weighed without revisiting calls that already passed the gate, which would mean cancelling a running command or a pending approval. Confirming on receipt keeps the status line honest about the mode the next call meets.
 
-12. **Tab and Shift+Tab reach `yolo` only from a `yolo` start.** A stray key press then cannot leave every call unprompted in a session that started with prompts. Claude Code likewise leaves `bypassPermissions` out of its Shift+Tab cycle unless the session started with it allowed, while `/mode yolo` stays available as a deliberate, typed choice.
+12. **One mode order for keyboard and picker.** Every mode remains reachable during a session, so changing the starting config does not change how the shortcuts behave. The cycle puts `manual` and `yolo` beside each other for switching between prompted and unattended work, followed by read-only `plan`.
 
 13. **Approvals stay in process.** A persisted grant has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust. In keeping with the slash-command persistence stance ([decision 6](../slash/commands.md#design-decisions)), session commands remain reversible, and cross-session writes wait for an explicit confirmed action.
 

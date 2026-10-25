@@ -56,10 +56,10 @@ pub enum Mode {
     /// Asks about every call the rules leave open.
     #[default]
     Manual,
-    /// Read-only analysis: every edit, exec, and net call is denied.
-    Plan,
     /// Runs every call no deny rule or configured ask rule holds, skipping the built-in ask rules.
     Yolo,
+    /// Read-only analysis: every edit, exec, and net call is denied.
+    Plan,
 }
 
 impl Mode {
@@ -1687,7 +1687,7 @@ mod tests {
             #[test]
             fn names_every_valid_value_for_an_unknown_one() {
                 let err = "bypass".parse::<Mode>().unwrap_err().to_string();
-                assert_eq!(err, "expected one of manual, plan, yolo");
+                assert_eq!(err, "expected one of manual, yolo, plan");
             }
         }
     }

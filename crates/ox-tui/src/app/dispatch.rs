@@ -7,11 +7,13 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::Position;
+use strum::VariantArray as _;
 use tokio::sync::mpsc::OwnedPermit;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::debug;
 
 use ox_core::command::{self, Parsed};
+use ox_core::permission::Mode;
 use ox_core::protocol::{Op, SignInCode};
 
 use super::queue::QueuedPrompt;
@@ -341,16 +343,13 @@ impl App {
         }
     }
 
-    /// Switches to the mode after the last requested one in the keyboard cycle, or to the cycle's
-    /// first mode from one outside it.
+    /// Switches to the mode after the last requested one in the keyboard cycle.
     fn cycle_mode(&mut self) {
-        let next = self
-            .mode_cycle
+        let index = Mode::VARIANTS
             .iter()
             .position(|&mode| mode == self.requested_mode)
-            .map_or(self.mode_cycle[0], |index| {
-                self.mode_cycle[wrap_next(index, self.mode_cycle.len())]
-            });
+            .expect("every permission mode is in Mode::VARIANTS");
+        let next = Mode::VARIANTS[wrap_next(index, Mode::VARIANTS.len())];
         self.dispatch_op(Op::SetMode(next));
     }
 
@@ -1087,7 +1086,7 @@ mod tests {
 
             app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
 
-            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Plan)));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Yolo)));
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
             assert_eq!(app.input.lines(), ["next task"]);
             assert_eq!(app.status, Status::Streaming);
