@@ -3493,7 +3493,6 @@ mod tests {
                 let opus = ModelSpec::resolve(MODEL);
                 engine.compaction =
                     CompactionConfig::with_default_policy(&opus, engine.client.max_tokens());
-                let opus_compaction = engine.compaction.auto;
                 let sink = CapturingSink::default();
 
                 for id in ["custom-model", MODEL] {
@@ -3516,12 +3515,10 @@ mod tests {
                          Effort cleared (model has no effort levels). \
                          Auto compaction off (no threshold)."
                             .to_owned(),
-                        format!(
-                            "Switched to Claude Opus 5.5 (claude-opus-5-5) · \
-                             effort medium (model default). \
-                             Auto compaction {}.",
-                            opus_compaction.compact(),
-                        ),
+                        "Switched to Claude Opus 5.5 (claude-opus-5-5) · \
+                         effort medium (model default). \
+                         Auto compaction at 986k tokens."
+                            .to_owned(),
                     ],
                 );
             })

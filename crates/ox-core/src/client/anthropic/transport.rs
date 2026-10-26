@@ -40,8 +40,8 @@ const SERVER_ERROR: &str = "Anthropic API server error";
 /// Advice for an overload or a server failure, both of which usually pass.
 const TRANSIENT_ADVICE: &str = "Retry in a few seconds.";
 /// Advice for a transport failure, which a wrong base URL or proxy often causes.
-const CONNECTION_ADVICE: &str = "Check the network connection, the base URL (`client.base_url` or `ANTHROPIC_BASE_URL`), and \
-     proxy settings.";
+const CONNECTION_ADVICE: &str = "Check the network connection, the base URL \
+                                 (`client.base_url` or `ANTHROPIC_BASE_URL`), and proxy settings.";
 
 // ── Request ──
 

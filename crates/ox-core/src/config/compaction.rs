@@ -62,11 +62,10 @@ impl AutoCompactionConfig {
 
     /// When compaction triggers, with an abbreviated count, as `/status` and the config-change
     /// notice show it.
-    pub fn compact(self) -> String {
+    pub fn abbreviated(self) -> String {
         match (self.enabled, self.threshold_tokens) {
             (true, Some(threshold)) => format!("at {} tokens", compact_count(threshold)),
-            (true, None) => "off (no threshold)".to_owned(),
-            _ => "off".to_owned(),
+            _ => self.to_string(),
         }
     }
 }
@@ -321,6 +320,9 @@ mod tests {
             assert_eq!(windowed.to_string(), "at 400000 tokens");
             assert_eq!(windowless.to_string(), "off (no threshold)");
             assert_eq!(AutoCompactionConfig::disabled().to_string(), "off");
+            assert_eq!(windowed.abbreviated(), "at 400k tokens");
+            assert_eq!(windowless.abbreviated(), "off (no threshold)");
+            assert_eq!(AutoCompactionConfig::disabled().abbreviated(), "off");
         }
 
         mod should_trigger {

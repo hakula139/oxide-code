@@ -19,6 +19,9 @@ use ox_core::util::text::escape_hidden;
 use super::stdio::{Approver, Renderer, StdioSink, render_op, render_queued};
 use super::{Exit, Shutdown, decode_input, shutdown_signal};
 
+/// The command `/help`, which the REPL answers itself.
+const HELP: &str = "help";
+
 /// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session.
 /// EOF after an operation failed, a command was rejected, or output failed exits with failure. An
 /// attended `engine` asks its approvals on stdin, while an unattended one asks none, so a piped line
@@ -101,7 +104,7 @@ where
                 continue;
             }
             let op = match command::parse_slash(input) {
-                Some(parsed) if parsed.name == "help" => {
+                Some(parsed) if parsed.name == HELP => {
                     renderer.render(Event::Notice(repl_help()));
                     continue;
                 }
@@ -165,7 +168,7 @@ where
 /// `/name (aliases)` for every command the REPL runs, comma-separated.
 fn repl_command_list() -> String {
     let mut names = command::NAMES.to_vec();
-    names.push("help");
+    names.push(HELP);
     names.sort_unstable();
     names
         .iter()

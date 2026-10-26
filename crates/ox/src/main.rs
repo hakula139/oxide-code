@@ -39,8 +39,8 @@ use ox_tui::theme::resolve_theme;
 use self::driver::Exit;
 use self::driver::headless::OutputFormat;
 
-/// The flags that name or continue a session, none of which `--list`, `--archived`, or `--limit`
-/// can be combined with.
+/// The arguments that start or resume a conversation, none of which `--list`, `--archived`, or
+/// `--limit` can accompany.
 const SESSION_ARGS: &[&str] = &["continue", "print", "prompt", "resume"];
 
 #[derive(Parser)]
@@ -779,16 +779,16 @@ mod tests {
 
         #[test]
         fn a_double_dash_escapes_a_slash_command_word() {
-            for args in [
-                &["ox", "--", "login"][..],
-                &["ox", "--", "config"],
-                &["ox", "--", "help"],
-                &["ox", "-p", "--", "diff"],
+            for (args, word) in [
+                (&["ox", "--", "login"][..], "login"),
+                (&["ox", "--", "config"], "config"),
+                (&["ox", "--", "help"], "help"),
+                (&["ox", "-p", "--", "diff"], "diff"),
             ] {
                 let cli = Cli::parse_valid_from(args.iter().copied())
                     .expect("a word after `--` is a prompt");
 
-                assert!(cli.prompt.is_some(), "{args:?}");
+                assert_eq!(cli.prompt.as_deref(), Some(word), "{args:?}");
             }
         }
 
