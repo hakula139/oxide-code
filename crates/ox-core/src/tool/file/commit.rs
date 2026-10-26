@@ -472,24 +472,6 @@ mod tests {
                 );
             }
         }
-
-        #[cfg(unix)]
-        #[test]
-        fn refuses_set_id_files() {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("target");
-            fs::write(&path, b"original").unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o4755)).unwrap();
-            let attempt = WorkspaceWrite::new(&path);
-
-            let error = write(&path, b"new", Some(b"original")).unwrap_err();
-
-            assert!(error.to_string().contains("set-ID"), "{error}");
-            assert_eq!(fs::read(&path).unwrap(), b"original");
-            attempt.assert_unchanged();
-        }
     }
 
     mod write {
@@ -668,6 +650,23 @@ mod tests {
                 ]
             );
             assert_ne!(identity_of(&path), before);
+        }
+    }
+
+    #[cfg(unix)]
+    mod validate_mode {
+        use super::*;
+
+        #[test]
+        fn accepts_ordinary_permissions_and_refuses_either_set_id_bit() {
+            for mode in [0o600, 0o751, 0o1777] {
+                validate_mode(mode).unwrap();
+            }
+            for mode in [0o4755, 0o2755, 0o6755] {
+                let error = validate_mode(mode).unwrap_err();
+
+                assert!(error.to_string().contains("set-ID"), "mode={mode:o}");
+            }
         }
     }
 }
