@@ -226,7 +226,7 @@ enum RuleAnswer {
     Accepted(Rule),
     /// Why the grant rejects the typed pattern.
     Rejected(anyhow::Error),
-    /// The input ended before an answer.
+    /// The input ended, or could not be read, before an answer.
     Ended,
 }
 
