@@ -1,6 +1,6 @@
 # File Mutation
 
-`edit` and `write` replace a file's content while keeping its metadata, hard links, and owning identity. A staged copy publishes atomically only when the copy reproduces the original's metadata by itself, and every other file is rewritten in place through the handle that was checked.
+`edit` and `write` replace a file's content while keeping its metadata, hard links, and ownership. A staged copy publishes atomically only when the copy reproduces the original's metadata by itself, and every other file is rewritten in place through the handle that was checked.
 
 Companion docs: [Permissions](permissions.md), [File Tracking](file-tracking.md).
 
@@ -20,7 +20,7 @@ A file with more than one hard link, a parent that refuses a new entry, a differ
 
 ### In-Place Write
 
-`write_in_place` rewrites through the original's held handle with `set_len(0)`, `write_all`, and `sync_all`. The inode keeps its owner, group, mode, ACLs, extended attributes, flags, and every hard link without recreating any of them, and a final `Original::verify` confirms that the path still holds the written bytes. macOS and Windows always take this path, since reproducing macOS ACLs and BSD flags or Windows DACLs, native attributes, alternate streams, and compression needs platform calls outside Rust's safe standard library.
+`write_in_place` rewrites through the original's held handle with `set_len(0)`, `write_all`, and `sync_all`. On Unix the inode keeps its owner, group, mode, ACLs, extended attributes, flags, and every hard link without recreating any of them. On Windows the file keeps its owner, DACL, native attributes, and alternate streams, while content-dependent NTFS compression follows native write behavior. A final `Original::verify` confirms that the path still holds the written bytes. macOS and Windows always take this path, since reproducing macOS ACLs and BSD flags or Windows access-control state needs platform calls outside Rust's safe standard library.
 
 ### New Files
 
@@ -36,7 +36,7 @@ A file with more than one hard link, a parent that refuses a new entry, a differ
 
 4. **Write through the held handle, not a reopened path.** The handle was opened without following a symlink and checked against the tracked bytes, so rewriting through it cannot land on a different file, and every hard link keeps seeing one inode.
 
-5. **In-place publication trades crash atomicity for preservation.** A crash, a full disk, or a kill mid-write can leave partial content, while the atomic path publishes either the complete bytes or none of them. Ordinary workspace files keep the atomic path, and a file that a rename would corrupt is now written in place rather than refused, so no file loses its previous outcome.
+5. **In-place publication trades crash atomicity for preservation.** A crash, a full disk, or a kill mid-write can leave partial content, while the atomic path publishes either the complete bytes or none of them. Ordinary workspace files keep the atomic path. A file whose metadata the copy cannot inherit is now written in place, which gives up the crash atomicity that recreating that metadata used to provide, while files that the recreation refused now succeed.
 
 6. **Hard links and set-ID files.** A file with several links can sit inside the workspace while another link sits outside every root, so the workspace gate never auto-allows it, but an explicit rule or approval writes it in place and every link sees the new content. Set-ID files stay refused because a write can clear the bits and the tool cannot report what the file system did with them.
 
