@@ -841,59 +841,6 @@ mod tests {
             assert_eq!(help.kind(), ErrorKind::DisplayHelp);
         }
 
-        /// A `tui_mode` case: its arguments, whether stdin and stdout are terminals, and the mode
-        /// or the message it rejects with.
-        type ModeCase = (
-            &'static [&'static str],
-            bool,
-            bool,
-            Result<bool, &'static str>,
-        );
-
-        #[test]
-        fn opens_the_tui_only_with_the_terminals_it_needs() {
-            let cases: [ModeCase; 9] = [
-                (&["ox"], true, true, Ok(true)),
-                (&["ox"], false, true, Err("stdin is not a terminal")),
-                (&["ox"], true, false, Ok(false)),
-                (&["ox", "--no-tui"], true, true, Ok(false)),
-                (&["ox", "-p", "hi"], true, true, Ok(false)),
-                (&["ox", "--resume"], true, true, Ok(true)),
-                (
-                    &["ox", "--resume"],
-                    true,
-                    false,
-                    Err("needs a terminal on stdout"),
-                ),
-                (
-                    &["ox", "--resume"],
-                    false,
-                    true,
-                    Err("stdin is not a terminal"),
-                ),
-                (
-                    &["ox", "--resume", "--no-tui"],
-                    true,
-                    true,
-                    Err("needs a terminal on stdout"),
-                ),
-            ];
-
-            for (args, stdin_is_terminal, stdout_is_terminal, expected) in cases {
-                let cli = Cli::try_parse_from(args).unwrap();
-
-                let result = cli.tui_mode(stdin_is_terminal, stdout_is_terminal);
-
-                match (result, expected) {
-                    (Ok(mode), Ok(expected)) => assert_eq!(mode, expected, "{args:?}"),
-                    (Err(error), Err(message)) => {
-                        assert!(error.to_string().contains(message), "{args:?}: {error}");
-                    }
-                    (result, expected) => panic!("{args:?}: expected {expected:?}, got {result:?}"),
-                }
-            }
-        }
-
         mod validate {
             use super::*;
 
@@ -938,27 +885,62 @@ mod tests {
             }
         }
 
-        mod session_target {
+        mod tui_mode {
             use super::*;
 
-            #[test]
-            fn is_the_latest_for_continue_and_the_named_session_for_resume() {
-                let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap();
+            /// A case: its arguments, whether stdin and stdout are terminals, and the mode or the
+            /// message it rejects with.
+            type ModeCase = (
+                &'static [&'static str],
+                bool,
+                bool,
+                Result<bool, &'static str>,
+            );
 
-                assert_eq!(
-                    parse(&["ox", "-c"]).session_target(),
-                    Some(SessionTarget::Latest),
-                );
-                assert_eq!(
-                    parse(&["ox", "-r", "a1b2"]).session_target(),
-                    Some(SessionTarget::Named("a1b2")),
-                );
-                assert_eq!(
-                    parse(&["ox", "-r"]).session_target(),
-                    None,
-                    "the picker starts a new session",
-                );
-                assert_eq!(parse(&["ox"]).session_target(), None);
+            #[test]
+            fn opens_the_tui_only_with_the_terminals_it_needs() {
+                let cases: [ModeCase; 9] = [
+                    (&["ox"], true, true, Ok(true)),
+                    (&["ox"], false, true, Err("stdin is not a terminal")),
+                    (&["ox"], true, false, Ok(false)),
+                    (&["ox", "--no-tui"], true, true, Ok(false)),
+                    (&["ox", "-p", "hi"], true, true, Ok(false)),
+                    (&["ox", "--resume"], true, true, Ok(true)),
+                    (
+                        &["ox", "--resume"],
+                        true,
+                        false,
+                        Err("needs a terminal on stdout"),
+                    ),
+                    (
+                        &["ox", "--resume"],
+                        false,
+                        true,
+                        Err("stdin is not a terminal"),
+                    ),
+                    (
+                        &["ox", "--resume", "--no-tui"],
+                        true,
+                        true,
+                        Err("needs a terminal on stdout"),
+                    ),
+                ];
+
+                for (args, stdin_is_terminal, stdout_is_terminal, expected) in cases {
+                    let cli = Cli::try_parse_from(args).unwrap();
+
+                    let result = cli.tui_mode(stdin_is_terminal, stdout_is_terminal);
+
+                    match (result, expected) {
+                        (Ok(mode), Ok(expected)) => assert_eq!(mode, expected, "{args:?}"),
+                        (Err(error), Err(message)) => {
+                            assert!(error.to_string().contains(message), "{args:?}: {error}");
+                        }
+                        (result, expected) => {
+                            panic!("{args:?}: expected {expected:?}, got {result:?}");
+                        }
+                    }
+                }
             }
         }
 
@@ -992,6 +974,30 @@ mod tests {
                         archive: ArchiveState::Archived,
                     },
                 );
+            }
+        }
+
+        mod session_target {
+            use super::*;
+
+            #[test]
+            fn is_the_latest_for_continue_and_the_named_session_for_resume() {
+                let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap();
+
+                assert_eq!(
+                    parse(&["ox", "-c"]).session_target(),
+                    Some(SessionTarget::Latest),
+                );
+                assert_eq!(
+                    parse(&["ox", "-r", "a1b2"]).session_target(),
+                    Some(SessionTarget::Named("a1b2")),
+                );
+                assert_eq!(
+                    parse(&["ox", "-r"]).session_target(),
+                    None,
+                    "the picker starts a new session",
+                );
+                assert_eq!(parse(&["ox"]).session_target(), None);
             }
         }
     }
