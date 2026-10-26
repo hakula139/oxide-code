@@ -3519,7 +3519,8 @@ mod tests {
                         format!(
                             "Switched to Claude Opus 5.5 (claude-opus-5-5) · \
                              effort medium (model default). \
-                             Auto compaction {opus_compaction}.",
+                             Auto compaction {}.",
+                            opus_compaction.compact(),
                         ),
                     ],
                 );

@@ -37,7 +37,7 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
         Some(failures) => {
             format!("paused after {failures} failures in a row (run `/compact` to resume)")
         }
-        None => info.config.compaction.auto.to_string(),
+        None => info.config.compaction.auto.compact(),
     };
     let rows = vec![
         ("Model".to_owned(), model),

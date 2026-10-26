@@ -59,14 +59,23 @@ impl AutoCompactionConfig {
             _ => false,
         }
     }
+
+    /// When compaction triggers, with an abbreviated count, as `/status` and the config-change
+    /// notice show it.
+    pub fn compact(self) -> String {
+        match (self.enabled, self.threshold_tokens) {
+            (true, Some(threshold)) => format!("at {} tokens", compact_count(threshold)),
+            (true, None) => "off (no threshold)".to_owned(),
+            _ => "off".to_owned(),
+        }
+    }
 }
 
-/// When compaction triggers, or why it never does, as `/status`, `/config`, and the config-change
-/// notice show it.
+/// When compaction triggers, or why it never does, as `/config` shows it, with the exact count.
 impl fmt::Display for AutoCompactionConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (self.enabled, self.threshold_tokens) {
-            (true, Some(threshold)) => write!(f, "at {} tokens", compact_count(threshold)),
+            (true, Some(threshold)) => write!(f, "at {threshold} tokens"),
             (true, None) => f.write_str("off (no threshold)"),
             _ => f.write_str("off"),
         }
@@ -309,7 +318,7 @@ mod tests {
                 threshold_tokens: Some(400_000),
             };
 
-            assert_eq!(windowed.to_string(), "at 400k tokens");
+            assert_eq!(windowed.to_string(), "at 400000 tokens");
             assert_eq!(windowless.to_string(), "off (no threshold)");
             assert_eq!(AutoCompactionConfig::disabled().to_string(), "off");
         }

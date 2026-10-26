@@ -73,7 +73,7 @@ pub(crate) fn config_changed(
         (_, _, Some(eff)) => (format!("{named} · effort {eff}"), None),
     };
     let compaction = (before.auto_compaction != after.auto_compaction)
-        .then(|| format!("Auto compaction {}", after.auto_compaction));
+        .then(|| format!("Auto compaction {}", after.auto_compaction.compact()));
     match (effort, compaction) {
         (None, None) => head,
         (Some(effort), None) => format!("{head}. {effort}."),
