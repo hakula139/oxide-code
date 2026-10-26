@@ -20,7 +20,6 @@ creds
 cshrc
 CTYPE
 dacl
-decmpfs
 DECRC
 DECSC
 deque
@@ -29,8 +28,6 @@ direnv
 disambiguable
 doas
 dotenv
-EACCES
-einval
 ELOOP
 ENOENT
 ENOTDIR
@@ -42,18 +39,14 @@ esac
 esbenp
 ESRCH
 euvx
-fchflags
 fchmod
-fchown
 fcntl
-fcopyfile
 feff
 fffd
 flippable
 fpats
 fprint
 fprintf
-fsctl
 fsmonitor
 getpgid
 Ghostty
@@ -77,7 +70,6 @@ kshrc
 libxo
 lossily
 LSCOLORS
-lznt
 macchiato
 misparse
 mkfifo
@@ -133,9 +125,7 @@ rrggbb
 rsplit
 rustc
 rustls
-sacl
 screenful
-sddl
 serde
 serie
 sess
@@ -175,7 +165,6 @@ WakaTime
 wakeup
 webpki
 xattr
-xattrs
 xhigh
 XPRESS
 Xresources
