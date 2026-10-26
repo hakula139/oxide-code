@@ -350,7 +350,7 @@ fn try_main() -> Result<ExitCode> {
         // tokio's stdin reader can stay blocked in `read`, and a regular drop waits for it.
         runtime.shutdown_background();
     }
-    Ok(exit.code())
+    Ok(exit.finish())
 }
 
 async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {

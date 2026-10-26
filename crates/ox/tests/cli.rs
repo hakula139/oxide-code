@@ -1522,9 +1522,10 @@ async fn repl_exits_with_failure_when_its_prompt_cannot_be_written() {
 }
 
 /// Runs `ox` with `args` until its request reaches a reply that never comes, then sends it
-/// `signal`. Returns its exit status and stdout.
+/// `signal`. Returns the signal that ended it, its stdout, and its stderr.
 #[cfg(unix)]
-async fn interrupted_run(args: &[&str], signal: &str) -> (Option<i32>, String) {
+async fn interrupted_run(args: &[&str], signal: &str) -> (Option<i32>, String, String) {
+    use std::os::unix::process::ExitStatusExt as _;
     use std::time::Duration;
 
     use tokio::io::AsyncWriteExt as _;
@@ -1541,7 +1542,7 @@ async fn interrupted_run(args: &[&str], signal: &str) -> (Option<i32>, String) {
         .env("ANTHROPIC_BASE_URL", server.uri())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("start ox");
     let mut stdin = child.stdin.take().expect("stdin is piped");
@@ -1563,16 +1564,18 @@ async fn interrupted_run(args: &[&str], signal: &str) -> (Option<i32>, String) {
         .expect("wait for ox");
 
     let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
-    (output.status.code(), stdout)
+    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
+    (output.status.signal(), stdout, stderr)
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn headless_exits_with_the_signal_status_after_a_shutdown_result() {
-    for (signal, status) in [("HUP", 129), ("INT", 130), ("TERM", 143)] {
-        let (code, stdout) = interrupted_run(&["-p", "hello", "--output", "json"], signal).await;
+async fn headless_dies_by_the_signal_after_a_shutdown_result() {
+    for (signal, number) in [("HUP", 1), ("INT", 2), ("TERM", 15)] {
+        let (signaled, stdout, _) =
+            interrupted_run(&["-p", "hello", "--output", "json"], signal).await;
 
-        assert_eq!(code, Some(status), "SIG{signal}");
+        assert_eq!(signaled, Some(number), "SIG{signal}");
         let result: serde_json::Value = serde_json::from_str(stdout.trim_end()).unwrap();
         assert_eq!(result["type"], "result", "{stdout}");
         assert_eq!(result["data"]["stop_reason"], "shutdown", "{stdout}");
@@ -1581,10 +1584,14 @@ async fn headless_exits_with_the_signal_status_after_a_shutdown_result() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn repl_with_piped_input_exits_with_the_signal_status() {
-    for (signal, status) in [("HUP", 129), ("INT", 130), ("TERM", 143)] {
-        let (code, _) = interrupted_run(&["--no-tui"], signal).await;
+async fn repl_with_piped_input_dies_by_the_signal() {
+    for (signal, number) in [("HUP", 1), ("INT", 2), ("TERM", 15)] {
+        let (signaled, _, stderr) = interrupted_run(&["--no-tui"], signal).await;
 
-        assert_eq!(code, Some(status), "SIG{signal}");
+        assert_eq!(signaled, Some(number), "SIG{signal}");
+        assert!(
+            stderr.ends_with("> \n"),
+            "SIG{signal}: the break after the prompt proves the handler ran: {stderr:?}"
+        );
     }
 }
