@@ -1,6 +1,6 @@
 # Tool Permissions and Approval
 
-Every tool call passes through a permission gate. Rules place calls in one of three tiers: deny, ask, or allow. The mode decides the calls the rules leave open, and `plan` also denies every `edit`, `exec`, and `net` call. Planned extensions, including a classifier and an OS sandbox, are tracked in [#130](https://github.com/hakula139/oxide-code/issues/130).
+Every tool call passes through a permission gate. Rules place calls in one of three tiers: deny, ask, or allow. The mode decides the calls the rules leave open, and `plan` also denies every `edit`, `exec`, and `net` call.
 
 Companion docs: [research/tools/permissions.md](../../research/tools/permissions.md), [slash/modals.md](../slash/modals.md), [session/file-tracking.md](../session/file-tracking.md).
 
@@ -271,7 +271,8 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 
 ## Out of Scope
 
-An OS sandbox that makes these guardrails an unattended boundary is [#133](https://github.com/hakula139/oxide-code/issues/133). An `auto` mode that decides the calls the rules leave open with a classifier is [#131](https://github.com/hakula139/oxide-code/issues/131), and under it the calls an ask rule matches would still go to the user, since an ask rule records that the user wants to see the call.
+- **An OS sandbox** ([#133](https://github.com/hakula139/oxide-code/issues/133)) would make the guardrails hold for unattended runs.
+- **An `auto` mode** ([#131](https://github.com/hakula139/oxide-code/issues/131)) would decide with a classifier the calls the rules leave open.
 
 ## Sources
 

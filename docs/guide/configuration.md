@@ -111,7 +111,7 @@ When unset, the agent loop has no per-turn round cap. Setting `max_tool_rounds =
 
 #### `base_url`: Endpoint
 
-Set `base_url` in user config or `ANTHROPIC_BASE_URL`. The URL must use HTTPS unless it points at localhost for a local proxy, and it must omit query strings, fragments, and a username or password. Requests go to `/v1/messages` under it, so leave `/v1` off the URL. A path prefix is supported, and a trailing slash makes no difference. To authenticate against a gateway that takes its own token, set `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `[client.auth]`, which [LLM gateways](#llm-gateways) covers.
+Set `base_url` in user config or `ANTHROPIC_BASE_URL`. The URL must use HTTPS unless it points at localhost for a local proxy, and it must omit query strings, fragments, and a username or password. Requests go to `/v1/messages` under it, so leave `/v1` off the URL. A path prefix is supported, and a trailing slash makes no difference. To authenticate against a gateway that takes its own token, set `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `[client.auth]`, which [LLM gateways](authentication.md#llm-gateways) covers.
 
 #### `extra_ca_certs`: Corporate Trust Anchors
 

@@ -12,7 +12,7 @@ Each request carries one credential. oxide-code uses the first source that is se
 | 6. [Claude Code](https://code.claude.com/docs) login | `Authorization: Bearer` + OAuth | Claude Code installed and signed in                   |
 
 - **`CLAUDE_CODE_OAUTH_TOKEN`** is sent as is, so it suits CI, headless machines, and secret managers. oxide-code never refreshes it and does not read either stored login while it is set. When the API rejects it as expired or revoked, the error names the variable, and `claude setup-token` issues a new one.
-- **The oxide-code login** comes from [`/login`](#browser-sign-in), which stores it in `$XDG_DATA_HOME/ox/credentials.json` (default: `~/.local/share/ox/credentials.json`) with mode `0600`. `/logout` deletes that file and leaves the Claude Code login alone. When the oxide-code login exists but stops working, for example after it expires, oxide-code reports it with the fix and does not fall back to the Claude Code login.
+- **The oxide-code login** comes from [`/login`](#browser-sign-in). When it exists but stops working, for example after it expires, oxide-code reports it with the fix and does not fall back to the Claude Code login.
 - **The Claude Code login** comes from the `"Claude Code-credentials"` Keychain entry on macOS, falling back to `.credentials.json` in Claude Code's config directory, which is the only store on Linux. That directory is `~/.claude`, or `$CLAUDE_CONFIG_DIR` when you set it to run Claude Code under another account, and with the variable set, the Keychain entry is the one Claude Code keeps for that directory. Set the same `CLAUDE_CONFIG_DIR` for `ox` to use that account's login.
 - **Both logins** refresh automatically near expiry and are sent only to the Anthropic API. With a custom `base_url` and no other credential, startup fails and names `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, and `CLAUDE_CODE_OAUTH_TOKEN`, and points at `[client.auth]`, so a personal subscription token never reaches a third-party host.
 - **Without a credential**, `ox` starts signed out and shows how to sign in, and prompts fail until `/login` succeeds. When a stored login failed only for a passing reason, such as an unreachable token endpoint, the next prompt tries it again. `ox -p` and `ox --no-tui` exit at startup with the list of credential options.
@@ -22,7 +22,7 @@ Each request carries one credential. oxide-code uses the first source that is se
 
 `/login` opens the Claude sign-in page in your browser, which returns to `ox` when you finish. If the browser does not open or runs on another machine, such as when `ox` runs over SSH, open the printed URL in any browser instead. After you sign in there, the page shows a code. Paste it at the prompt and press **Enter**. While sign-in waits, the prompt takes only the code, so send other prompts after sign-in ends. Other text stays in the input, and slash commands still run. Press **Esc** to cancel. Sign-in also ends automatically after 5 minutes.
 
-After you approve access, oxide-code stores the login in `$XDG_DATA_HOME/ox/credentials.json` (default: `~/.local/share/ox/credentials.json`) and uses it for the current and later sessions.
+After you approve access, oxide-code stores the login in `$XDG_DATA_HOME/ox/credentials.json` (default: `~/.local/share/ox/credentials.json`) with mode `0600` and uses it for the current and later sessions.
 
 `/logout` deletes that file. A session using it switches to the Claude Code login if one is available. Otherwise, it stays open signed out until the next `/login`. If the Claude Code login exists but cannot be used, for example because it expired, `/logout` explains why.
 
@@ -38,9 +38,9 @@ type = "bearer"
 file = "~/.secrets/gateway-token"
 ```
 
-`type` is `"bearer"` for an `Authorization: Bearer` gateway token, `"api-key"` for `x-api-key`, or `"oauth"` for a fixed OAuth token with the OAuth request shape. Set exactly one of `file` or `value`. A `file` path must be absolute or start with `~/`, and ox reads only the winning file once during startup, trimming trailing line endings. Restart ox to read a rotated file. `ox config check` validates the declaration without opening the credential file. A fixed OAuth token can use the configured endpoint and is never refreshed.
+`type` is `"bearer"` for an `Authorization: Bearer` gateway token, `"api-key"` for `x-api-key`, or `"oauth"` for a fixed OAuth token with the OAuth request shape. Set exactly one of `file` or `value`. A `file` path must be absolute or start with `~/`, and `ox` reads only the winning file once during startup, trimming trailing line endings. Restart `ox` to read a rotated file. `ox config check` validates the declaration without opening the credential file. A fixed OAuth token can use the configured endpoint and is never refreshed.
 
-An inline `value` sits on disk in plaintext, so keep that user config private, conventionally mode `0600`. ox does not change its permissions. `type = "login"` takes no other keys and selects the remaining environment and stored-login fallback chain. Stored logins retain their first-party endpoint restriction.
+An inline `value` sits on disk in plaintext, so keep that user config private, conventionally mode `0600`. `ox` does not change its permissions. `type = "login"` takes no other keys and selects the remaining environment and stored-login fallback chain. Stored logins retain their first-party endpoint restriction.
 
 ## Commands and Credentials
 

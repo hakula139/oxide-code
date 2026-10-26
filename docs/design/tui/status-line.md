@@ -80,7 +80,8 @@ The status line retains the highest-priority segment, truncating it if needed, t
 
 ## Related Issues
 
-A user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/166), and pricing for other providers comes with the data-driven model catalog in [#152](https://github.com/hakula139/oxide-code/issues/152).
+- **A user-command segment** ([#166](https://github.com/hakula139/oxide-code/issues/166)).
+- **Pricing for other providers** ([#152](https://github.com/hakula139/oxide-code/issues/152)), with the data-driven model catalog.
 
 ## Sources
 
