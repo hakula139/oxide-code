@@ -539,6 +539,7 @@ mod tests {
 
     use super::*;
     use crate::config::oauth::testing::{ox_login_in, write_creds};
+    use crate::config::testing::base_url;
     use crate::util::log::testing::LogCapture;
     use crate::util::path::local_testing::abs;
     use crate::util::path::testing::HOME_VAR;
@@ -904,7 +905,6 @@ mod tests {
 
     mod fallback {
         use super::*;
-        use crate::config::testing::base_url;
 
         const FIRST_PARTY: &str = "https://api.anthropic.com";
         const GATEWAY: &str = "https://gateway.example.com/anthropic";

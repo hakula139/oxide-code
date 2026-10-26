@@ -13,14 +13,13 @@ use crate::model::{ModelSpec, PromptCacheTtl};
 use crate::permission::{Policy, Workspace};
 
 /// A [`BaseUrl`] parsed from `raw`, for fixtures that supply a valid URL.
-pub(crate) fn base_url(raw: impl Into<String>) -> BaseUrl {
-    let raw = raw.into();
-    BaseUrl::parse(&raw).expect("test base URL must be valid")
+pub(crate) fn base_url(raw: impl AsRef<str>) -> BaseUrl {
+    BaseUrl::parse(raw.as_ref()).expect("test base URL must be valid")
 }
 
 /// Minimal [`Config`] signed in with `auth` against `url`: no effort, compaction off, a 128-token
 /// output cap, and the default permission policy in `/repo`.
-pub(crate) fn test_config(url: impl Into<String>, auth: Auth, model: &str) -> Config {
+pub(crate) fn test_config(url: impl AsRef<str>, auth: Auth, model: &str) -> Config {
     Config {
         auth: Some(auth),
         pending_auth: None,

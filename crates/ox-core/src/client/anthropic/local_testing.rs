@@ -18,7 +18,7 @@ use crate::util::tls::Trust as _;
 use crate::util::tls::testing::NoRoots;
 
 /// [`client_for`] on [`test_config`].
-pub(crate) fn test_client(base_url: impl Into<String>, auth: Auth, model: &str) -> Client {
+pub(crate) fn test_client(base_url: impl AsRef<str>, auth: Auth, model: &str) -> Client {
     client_for(&test_config(base_url, auth, model))
 }
 
@@ -44,10 +44,10 @@ pub(super) fn plain_http() -> reqwest::Client {
 }
 
 /// A `/v1/messages` call to `url` with an empty body and an API key.
-pub(super) fn messages_request(url: impl Into<String>) -> MessagesRequest {
+pub(super) fn messages_request(url: impl AsRef<str>) -> MessagesRequest {
     MessagesRequest {
         url: url
-            .into()
+            .as_ref()
             .parse()
             .expect("a test messages URL must be a URL"),
         betas: String::new(),

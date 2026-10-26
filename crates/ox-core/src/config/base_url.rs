@@ -157,7 +157,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn removes_userinfo_from_a_url_that_does_not_parse() {
+        fn cuts_userinfo_without_parsing_the_url() {
             for (raw, expected) in [
                 (
                     "https://user:secret@gw.example:99999/anthropic",
