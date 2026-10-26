@@ -1,7 +1,10 @@
 //! Headless driver for `--print`: one turn, printed to stdout as text or JSON.
 
+mod wire;
+
 use std::io::{self, IsTerminal as _, Write};
 use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -10,10 +13,11 @@ use clap::ValueEnum;
 use indoc::formatdoc;
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
+use tokio::sync::mpsc;
 
 use ox_core::command;
 use ox_core::engine::{Engine, EngineHandle, EnginePanic, TurnEnd};
-use ox_core::protocol::notice::ENGINE_STOPPED;
+use ox_core::protocol::notice::{self, ENGINE_STOPPED};
 use ox_core::protocol::{Event, EventSink, Op, UsageSnapshot};
 use ox_core::util::sync::lock_or_recover;
 
@@ -109,7 +113,8 @@ where
     E: Write + Send,
 {
     let prompt = Op::prompt(command::unescape_literal(prompt));
-    let renderer = Renderer::new(printer);
+    let sink = InterruptOnClosedStdout::new(printer, &handle.ops);
+    let renderer = Renderer::new(&sink);
     // A send fails only once the engine has stopped, which `render_op` then reports.
     _ = handle.ops.send(prompt.clone()).await;
     let operation = render_op(
@@ -129,22 +134,66 @@ where
             }
         },
         signal = shutdown_signal() => {
-            _ = writeln!(io::stderr());
+            _ = printer.break_line();
             (TurnEnd::Shutdown, Exit::Signal(signal))
         }
     };
+    let output = renderer.finish();
 
     let finished = handle.shutdown().await;
-    if let Ok(failure) = &finished {
-        renderer.session_write_error(failure.as_deref());
+    if let Ok(Some(failure)) = &finished {
+        _ = printer.send(Event::Error(notice::session_write_failed(failure)));
+        printer.record_session_write_error(failure);
+        if !matches!(exit, Exit::Signal(_)) {
+            exit = Exit::Failure;
+        }
     }
-    if let Err(e) = renderer.finish().and(printer.finish(end)) {
-        _ = writeln!(io::stderr(), "Error: failed to print output: {e:#}");
+    if let Err(e) = output.and(printer.finish(end)) {
+        printer.report_failure(&e);
         if !matches!(exit, Exit::Signal(_)) {
             exit = Exit::Failure;
         }
     }
     finished.map(|_| exit)
+}
+
+/// [`EventSink`] that interrupts the turn once stdout's reader goes away, since nothing will read
+/// the rest. The session still finalizes, as it does for an interrupt.
+struct InterruptOnClosedStdout<'a, O, E> {
+    printer: &'a Printer<O, E>,
+    ops: &'a mpsc::Sender<Op>,
+    /// Whether an interrupt was sent, so later broken-pipe writes do not repeat it.
+    interrupted: AtomicBool,
+}
+
+impl<'a, O: Write + Send, E: Write + Send> InterruptOnClosedStdout<'a, O, E> {
+    fn new(printer: &'a Printer<O, E>, ops: &'a mpsc::Sender<Op>) -> Self {
+        Self {
+            printer,
+            ops,
+            interrupted: AtomicBool::new(false),
+        }
+    }
+}
+
+impl<O: Write + Send, E: Write + Send> EventSink for InterruptOnClosedStdout<'_, O, E> {
+    fn send(&self, event: Event) -> Result<()> {
+        let result = self.printer.send(event);
+        if let Err(error) = &result
+            && is_broken_pipe(error)
+            && !self.interrupted.swap(true, Ordering::Relaxed)
+        {
+            _ = self.ops.try_send(Op::Interrupt);
+        }
+        result
+    }
+}
+
+/// Whether `error` is a write that failed because stdout's reader went away.
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
 }
 
 // ── Output Format ──
@@ -178,6 +227,7 @@ struct Output<O, E> {
     /// Reply text since the last tool call, which the result reports as the final message.
     message: String,
     error: Option<String>,
+    session_write_error: Option<String>,
     usage: Option<UsageSnapshot>,
 }
 
@@ -200,6 +250,7 @@ impl<O: Write, E: Write> Printer<O, E> {
                 stderr,
                 message: String::new(),
                 error: None,
+                session_write_error: None,
                 usage: None,
             }),
         }
@@ -215,17 +266,36 @@ impl<O: Write, E: Write> Printer<O, E> {
             stdout,
             message,
             error,
+            session_write_error,
             usage,
             ..
         } = &mut *output;
         let line = Line::Result(RunResult {
             stop_reason,
             error: error.as_deref(),
+            session_write_error: session_write_error.as_deref(),
             message: (stop_reason == TurnEnd::Completed).then_some(message.as_str()),
             usage: usage.as_ref(),
             session_id: &self.session_id,
         });
         write_json_line(stdout, &line)
+    }
+
+    /// Moves past the `^C` a terminal echoes after a signal.
+    fn break_line(&self) -> Result<()> {
+        let mut output = self.lock();
+        let Output { stdout, stderr, .. } = &mut *output;
+        Ok(self.stdio.break_line(stdout, stderr)?)
+    }
+
+    /// Reports that output failed on the stream every other line uses.
+    fn report_failure(&self, error: &anyhow::Error) {
+        let mut output = self.lock();
+        _ = writeln!(output.stderr, "Error: failed to print output: {error:#}");
+    }
+
+    fn record_session_write_error(&self, failure: &str) {
+        self.lock().session_write_error = Some(failure.to_owned());
     }
 
     fn lock(&self) -> MutexGuard<'_, Output<O, E>> {
@@ -242,7 +312,8 @@ impl<O: Write + Send, E: Write + Send> EventSink for Printer<O, E> {
             OutputFormat::Text => self.stdio.render(event, stdout, stderr),
             OutputFormat::Json => self.stdio.render(event, &mut io::sink(), stderr),
             OutputFormat::StreamJson => {
-                let written = write_json_line(stdout, &event);
+                let written =
+                    wire::wire(&event).map_or(Ok(()), |line| write_json_line(stdout, &line));
                 self.stdio
                     .render(event, &mut io::sink(), stderr)
                     .and(written)
@@ -276,6 +347,8 @@ struct RunResult<'a> {
     stop_reason: TurnEnd,
     /// Why the turn failed.
     error: Option<&'a str>,
+    /// Why the session could not be saved, which leaves its run missing from the transcript.
+    session_write_error: Option<&'a str>,
     /// The reply after the last tool call, kept only when the turn completed.
     message: Option<&'a str>,
     /// The latest usage snapshot any request reported.
@@ -284,8 +357,9 @@ struct RunResult<'a> {
 }
 
 fn write_json_line(out: &mut impl Write, value: &impl Serialize) -> Result<()> {
-    serde_json::to_writer(&mut *out, value)?;
-    out.write_all(b"\n")?;
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    out.write_all(&line)?;
     out.flush()?;
     Ok(())
 }
@@ -562,7 +636,7 @@ mod tests {
                 String::from_utf8(stdout).unwrap(),
                 indoc! {r#"
                     {"type":"turn_failed","data":"ox stopped unexpectedly"}
-                    {"type":"result","data":{"stop_reason":"failed","error":"ox stopped unexpectedly","message":null,"usage":null,"session_id":"session-1"}}
+                    {"type":"result","data":{"stop_reason":"failed","error":"ox stopped unexpectedly","session_write_error":null,"message":null,"usage":null,"session_id":"session-1"}}
                 "#},
             );
             assert_eq!(stderr, "Error: ox stopped unexpectedly\n");
@@ -584,9 +658,70 @@ mod tests {
                         .unwrap();
 
                     assert_eq!(exit, Exit::Failure, "{format:?}");
+                    let (_, stderr) = printed(printer);
+                    assert!(
+                        stderr.starts_with("Error: failed to print output: "),
+                        "{format:?}: {stderr}"
+                    );
                 }
             })
             .await;
+        }
+    }
+
+    mod interrupt_on_closed_stdout {
+        use super::*;
+
+        /// A stdout that fails for a reason other than a closed reader.
+        struct FailingStdout;
+
+        impl Write for FailingStdout {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("disk full"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn sends_one_interrupt_after_stdout_closes() {
+            let printer = Printer::new(
+                OutputFormat::StreamJson,
+                false,
+                SESSION_ID.to_owned(),
+                ClosedPipe,
+                Vec::new(),
+            );
+            let (ops, mut received) = mpsc::channel(4);
+            let sink = InterruptOnClosedStdout::new(&printer, &ops);
+
+            sink.send(Event::StreamToken("first".to_owned()))
+                .unwrap_err();
+            sink.send(Event::StreamToken("second".to_owned()))
+                .unwrap_err();
+
+            assert_eq!(received.try_recv().ok(), Some(Op::Interrupt));
+            assert_eq!(received.try_recv().ok(), None);
+        }
+
+        #[test]
+        fn keeps_running_when_stdout_fails_for_another_reason() {
+            let printer = Printer::new(
+                OutputFormat::StreamJson,
+                false,
+                SESSION_ID.to_owned(),
+                FailingStdout,
+                Vec::new(),
+            );
+            let (ops, mut received) = mpsc::channel(4);
+            let sink = InterruptOnClosedStdout::new(&printer, &ops);
+
+            sink.send(Event::StreamToken("first".to_owned()))
+                .unwrap_err();
+
+            assert_eq!(received.try_recv().ok(), None);
         }
     }
 
@@ -707,6 +842,7 @@ mod tests {
                     serde_json::json!({
                         "stop_reason": "completed",
                         "error": null,
+                        "session_write_error": null,
                         "message": "Found it.",
                         "usage": {
                             "context_tokens": 2_000,
@@ -732,6 +868,39 @@ mod tests {
                     printed(printer),
                     (b"partial reply\n".to_vec(), String::new()),
                 );
+            }
+
+            #[test]
+            fn reports_a_session_write_failure_beside_the_completed_turn() {
+                let printer = printer(OutputFormat::Json);
+                printer
+                    .send(Event::StreamToken("reply".to_owned()))
+                    .unwrap();
+                printer.record_session_write_error("disk full");
+
+                printer.finish(TurnEnd::Completed).unwrap();
+
+                let result = result_data(&printed(printer).0);
+                assert_eq!(result["stop_reason"], "completed");
+                assert_eq!(result["message"], "reply");
+                assert_eq!(result["session_write_error"], "disk full");
+            }
+        }
+
+        mod break_line {
+            use super::*;
+
+            #[test]
+            fn ends_an_open_reply_line_once() {
+                let printer = printer(OutputFormat::Text);
+                printer
+                    .send(Event::StreamToken("partial".to_owned()))
+                    .unwrap();
+
+                printer.break_line().unwrap();
+                printer.finish(TurnEnd::Shutdown).unwrap();
+
+                assert_eq!(printed(printer), (b"partial\n".to_vec(), String::new()),);
             }
         }
 
@@ -772,7 +941,7 @@ mod tests {
 
                 let sent = printer.send(Event::Error("boom".to_owned()));
 
-                assert!(sent.is_err());
+                assert!(is_broken_pipe(&sent.unwrap_err()));
                 assert_eq!(printed(printer).1, "Error: boom\n");
             }
         }

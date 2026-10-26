@@ -1,0 +1,29 @@
+---
+source: crates/ox/src/driver/headless/wire.rs
+expression: "lines.join(\"\\n\")"
+---
+{"type":"stream_token","data":"Done."}
+{"type":"thinking_token","data":"Hmm."}
+{"type":"progress_update","data":"Reading."}
+{"type":"retrying","data":"HTTP 529 overloaded_error. Retrying in 1 s."}
+{"type":"tool_call_start","data":{"id":"t1","name":"bash","input":{"command":"ls"},"icon":"$","label":"ls"}}
+{"type":"usage_updated","data":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018}}
+{"type":"rate_limits_updated","data":{"five_hour":{"utilization":0.5,"resets_at":1760000000},"seven_day":null}}
+{"type":"tasks_updated","data":[{"content":"Read the config loader","status":"completed"},{"content":"Add the entry type","status":"in_progress"},{"content":"Write the tests","status":"pending"}]}
+{"type":"background_shells_updated","data":[{"id":"shell-1","command":"cargo watch","state":{"type":"running"}},{"id":"shell-2","command":"make test","state":{"type":"exited","data":2}},{"id":"shell-3","command":"sleep 60","state":{"type":"killed","data":15}}]}
+{"type":"auto_compaction_started"}
+{"type":"summary_token","data":"Summary."}
+{"type":"summary_discarded"}
+{"type":"session_compacted","data":{"summary":"Summary.","pre_count":4,"instructions":"focus","trigger":"mid_turn"}}
+{"type":"notice","data":"Skipped instruction file /repo/CLAUDE.md."}
+{"type":"error","data":"Session write failed: disk full"}
+{"type":"turn_complete"}
+{"type":"prompt_unsent"}
+{"type":"turn_rolled_back"}
+{"type":"turn_failed","data":"Anthropic API error (HTTP 400 Bad Request)"}
+{"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"text","data":{"content":"ok"}}}}
+{"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"read_excerpt","data":{"path":"src/main.rs","lines":[{"number":1,"text":"fn main() {}"}],"total_lines":1}}}}
+{"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"diff","data":{"chunk":{"old":[{"number":3,"text":"old"}],"new":[{"number":3,"text":"new"}]},"locations":[3]}}}}
+{"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"grep_matches","data":{"groups":[{"path":"src/lib.rs","lines":[{"number":7,"text":"TODO","is_match":true}]}],"truncated":true}}}}
+{"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"glob_files","data":{"pattern":"*.rs","files":["src/main.rs"],"total":1}}}}
+{"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"tasks","data":{"tasks":[{"content":"Read the config loader","status":"completed"},{"content":"Add the entry type","status":"in_progress"},{"content":"Write the tests","status":"pending"}]}}}}

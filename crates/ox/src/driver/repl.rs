@@ -150,6 +150,7 @@ where
 
     let failure = handle.shutdown().await?;
     renderer.session_write_error(failure.as_deref());
+    failed |= failure.is_some();
     result?;
     if let Some(signal) = stopped {
         return Ok(Exit::Signal(signal));
