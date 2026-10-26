@@ -118,6 +118,7 @@ tree-sitter-bash = "0.25"
 unicode-normalization = "0.1"
 unicode-segmentation = "1"
 unicode-width = "0.2"
+url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 winapi-util = "0.1"
 windows-sys = { version = "0.61", features = [

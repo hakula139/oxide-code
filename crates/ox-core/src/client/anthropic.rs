@@ -33,16 +33,16 @@ use uuid::Uuid;
 use self::accumulator::ReplySpec;
 use self::betas::compute_betas;
 use self::sse::spawn_stream;
-use self::transport::{MessagesRequest, messages_url};
+use self::transport::MessagesRequest;
 use self::wire::{
     CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
     RequestMetadata, SystemBlock, ThinkingConfig,
 };
 use super::{ResponseEvent, Wire};
+use crate::config::Config;
 use crate::config::auth::{self, Auth, AuthSource, LoginUnavailable};
 use crate::config::gateway::GatewayCompat;
 use crate::config::oauth::ClaudeCodeKeychain;
-use crate::config::{Config, is_first_party_base_url};
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::{Effort, ModelSpec, PromptCacheTtl};
 use crate::prompt::SystemPrompt;
@@ -114,8 +114,8 @@ impl Client {
         } = config;
         Ok(Self {
             http: build_http(gateway, &trust)?,
-            messages_url: messages_url(base_url),
-            is_first_party: is_first_party_base_url(base_url),
+            messages_url: base_url.messages_url(),
+            is_first_party: base_url.is_first_party(),
             gateway: gateway.clone(),
             auth: auth.clone(),
             trust: Arc::new(trust),
@@ -532,7 +532,9 @@ mod tests {
     use super::local_testing::{
         client_for, completion_body, oauth, request_count, serve, test_client,
     };
-    use super::testing::{DEVICE_ID, api_key, sse_body, sse_response, text_stream_body};
+    use super::testing::{
+        DEVICE_ID, api_key, messages_url, sse_body, sse_response, text_stream_body,
+    };
     use super::*;
     use crate::client::{Response, StopReason};
     use crate::config::oauth::testing::{HeldRefresh, ok_refresh_body, ox_login_in, write_creds};
@@ -578,7 +580,7 @@ mod tests {
             user_context: Option<&str>,
         ) -> Request {
             let server = serve(vec![sse_response(text_stream_body("", "Hi"))]).await;
-            client.messages_url = messages_url(&server.uri());
+            client.messages_url = messages_url(server.uri());
             collect_events(
                 client
                     .stream_message(messages, system, user_context, &[])

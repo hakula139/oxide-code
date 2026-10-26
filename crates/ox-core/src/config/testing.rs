@@ -8,7 +8,7 @@ use super::auth::{Auth, AuthSource};
 use super::compaction::CompactionConfig;
 use super::gateway::GatewayCompat;
 use super::provenance::{Provenance, Source};
-use super::{Config, ConfigSnapshot, DEFAULT_THEME, StatusLineSegment, ThemeConfig};
+use super::{BaseUrl, Config, ConfigSnapshot, DEFAULT_THEME, StatusLineSegment, ThemeConfig};
 use crate::model::{ModelSpec, PromptCacheTtl};
 use crate::permission::{Policy, Workspace};
 
@@ -19,7 +19,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         auth: Some(auth),
         pending_auth: None,
         signed_out: None,
-        base_url: base_url.into(),
+        base_url: BaseUrl::parse(base_url.into()).expect("test base URL must be valid"),
         extra_ca_certs: None,
         gateway: GatewayCompat {
             custom_headers: HeaderMap::new(),

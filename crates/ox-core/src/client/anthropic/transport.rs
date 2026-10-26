@@ -55,12 +55,6 @@ pub(super) struct MessagesRequest {
     pub(super) reloads: TaskTracker,
 }
 
-/// The `/v1/messages` endpoint under `base_url`, dropping a trailing slash as the Anthropic SDKs
-/// do, since routers that keep empty path segments answer `//v1/messages` with a 404.
-pub(super) fn messages_url(base_url: &str) -> String {
-    format!("{}/v1/messages?beta=true", base_url.trim_end_matches('/'))
-}
-
 impl Client {
     pub(super) fn messages_request(
         &self,
@@ -494,34 +488,6 @@ mod tests {
         messages_request, plain_http, retry_counts, serve,
     };
     use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
-
-    mod messages_url {
-        use super::*;
-
-        #[test]
-        fn appends_the_messages_path_after_an_optional_prefix() {
-            for (base, expected) in [
-                (
-                    "https://example.com",
-                    "https://example.com/v1/messages?beta=true",
-                ),
-                (
-                    "https://example.com/",
-                    "https://example.com/v1/messages?beta=true",
-                ),
-                (
-                    "https://example.com/anthropic",
-                    "https://example.com/anthropic/v1/messages?beta=true",
-                ),
-                (
-                    "https://example.com/anthropic/",
-                    "https://example.com/anthropic/v1/messages?beta=true",
-                ),
-            ] {
-                assert_eq!(messages_url(base), expected, "{base}");
-            }
-        }
-    }
 
     mod post_messages {
         use super::*;

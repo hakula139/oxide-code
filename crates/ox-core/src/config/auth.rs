@@ -370,7 +370,7 @@ pub(super) enum CredentialError {
 }
 
 impl CredentialError {
-    fn gateway(base_url: &str) -> Self {
+    fn gateway(base_url: &super::BaseUrl) -> Self {
         let message = format!(
             "no credentials for {base_url}. \
              Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
@@ -471,10 +471,10 @@ pub(super) fn first_explicit(
 /// only when `base_url` is first-party, so a personal subscription token never reaches a gateway
 /// the user did not hand it to.
 pub(super) async fn fallback(
-    base_url: &str,
+    base_url: &super::BaseUrl,
     stored: impl Future<Output = Result<Auth, LoginError>>,
 ) -> Result<Auth, CredentialError> {
-    if !super::is_first_party_base_url(base_url) {
+    if !base_url.is_first_party() {
         return Err(CredentialError::gateway(base_url));
     }
     stored.await.map_err(CredentialError::signed_out)
@@ -907,6 +907,10 @@ mod tests {
         const FIRST_PARTY: &str = "https://api.anthropic.com";
         const GATEWAY: &str = "https://gateway.example.com/anthropic";
 
+        fn base_url(raw: &str) -> crate::config::BaseUrl {
+            crate::config::BaseUrl::parse(raw.to_owned()).unwrap()
+        }
+
         fn unreachable_store() -> impl Future<Output = Result<Auth, LoginError>> {
             std::future::poll_fn(|_| panic!("stored credentials must not be read"))
         }
@@ -917,7 +921,9 @@ mod tests {
 
         #[tokio::test]
         async fn falls_back_to_stored_login_on_first_party_host() {
-            let auth = fallback(FIRST_PARTY, stored_ox_login()).await.unwrap();
+            let auth = fallback(&base_url(FIRST_PARTY), stored_ox_login())
+                .await
+                .unwrap();
             assert_eq!(auth.source(), AuthSource::OxLogin);
             assert_eq!(auth.secret(), "stored-token");
         }
@@ -928,7 +934,7 @@ mod tests {
 
             let err = temp_env::async_with_vars(
                 [("XDG_CONFIG_HOME", Some(config.as_str()))],
-                fallback(GATEWAY, unreachable_store()),
+                fallback(&base_url(GATEWAY), unreachable_store()),
             )
             .await
             .expect_err("stored login must not go to a gateway");
@@ -956,7 +962,7 @@ mod tests {
                     ("CLAUDE_CONFIG_DIR", Some(claude_dir.as_str())),
                     ("XDG_CONFIG_HOME", Some(config.as_str())),
                 ],
-                fallback(FIRST_PARTY, async { Err(LoginError::Missing) }),
+                fallback(&base_url(FIRST_PARTY), async { Err(LoginError::Missing) }),
             )
             .await
             .expect_err("no credential anywhere");
@@ -996,7 +1002,7 @@ mod tests {
 
         #[tokio::test]
         async fn other_login_failures_keep_their_own_recovery_step() {
-            let err = fallback(FIRST_PARTY, async {
+            let err = fallback(&base_url(FIRST_PARTY), async {
                 Err(LoginError::Expired(Login::ClaudeCode))
             })
             .await
