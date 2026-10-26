@@ -7,8 +7,8 @@ use ox_core::util::text::format_size;
 
 // ── Constants ──
 
-/// Bytes of git output a view keeps.
-const MAX_BYTES: usize = 64 * 1024;
+/// Bytes of git output a view keeps, and the read cap `/diff` passes to git.
+pub(super) const MAX_BYTES: usize = 64 * 1024;
 
 // ── WorkingTreeDiff ──
 
@@ -52,16 +52,23 @@ pub(crate) enum DiffRow {
 /// The part of git's output a [`WorkingTreeDiff`] dropped.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Truncation {
-    dropped_bytes: usize,
+    /// Bytes the view dropped, or `None` when the read stopped at the budget before git finished.
+    dropped_bytes: Option<usize>,
     /// The git commands that print what was cut.
     full_command: &'static str,
 }
 
 impl WorkingTreeDiff {
     /// Parses the `tracked` diff sections and the NUL-separated `untracked` paths in order, until
-    /// the byte budget runs out. `diff_command` names the git commands that print the full diff,
-    /// for a truncation note on a cut inside it.
-    pub(crate) fn new(tracked: &[&str], untracked: &str, diff_command: &'static str) -> Self {
+    /// the byte budget runs out. `read_truncated` records that git wrote more than the reader kept,
+    /// and `diff_command` names the git commands that print the full diff, for a truncation note on
+    /// a cut inside it.
+    pub(crate) fn new(
+        tracked: &[&str],
+        untracked: &str,
+        diff_command: &'static str,
+        read_truncated: bool,
+    ) -> Self {
         let total = tracked.iter().map(|s| s.len()).sum::<usize>() + untracked.len();
         let mut budget = Budget::default();
         let mut parser = Parser::default();
@@ -74,7 +81,7 @@ impl WorkingTreeDiff {
             }
             parser.end_file();
         }
-        let full_command = if budget.exhausted {
+        let full_command = if read_truncated || budget.exhausted {
             diff_command
         } else {
             "`git status`"
@@ -84,8 +91,8 @@ impl WorkingTreeDiff {
             .take_while(|path| budget.take(path.len() + 1))
             .map(str::to_owned)
             .collect();
-        let truncation = (budget.used < total).then(|| Truncation {
-            dropped_bytes: total - budget.used,
+        let truncation = (read_truncated || budget.used < total).then(|| Truncation {
+            dropped_bytes: (!read_truncated).then(|| total - budget.used),
             full_command,
         });
         Self {
@@ -103,12 +110,20 @@ impl WorkingTreeDiff {
 
 impl fmt::Display for Truncation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "(Truncated {}. Run {} for the full output.)",
-            format_size(self.dropped_bytes as u64),
-            self.full_command,
-        )
+        match self.dropped_bytes {
+            Some(bytes) => write!(
+                f,
+                "(Truncated {}. Run {} for the full output.)",
+                format_size(bytes as u64),
+                self.full_command,
+            ),
+            None => write!(
+                f,
+                "(Showing the first {}. Run {} for the full output.)",
+                format_size(MAX_BYTES as u64),
+                self.full_command,
+            ),
+        }
     }
 }
 
@@ -355,8 +370,6 @@ fn context_text(line: &str) -> Option<&str> {
     }
 }
 
-// ── Helpers ──
-
 // ── Testing ──
 
 #[cfg(test)]
@@ -403,7 +416,7 @@ mod tests {
             }
 
             fn rows_of(diff: &str) -> Vec<DiffRow> {
-                WorkingTreeDiff::new(&[diff], "", HINT).rows
+                WorkingTreeDiff::new(&[diff], "", HINT, false).rows
             }
 
             #[test]
@@ -563,7 +576,7 @@ mod tests {
                 let cached = "@@ -0,0 +1,3 @@\n+a\n";
                 let unstaged = "--- a/x\n+++ b/x\n";
 
-                let diff = WorkingTreeDiff::new(&[cached, unstaged], "", HINT);
+                let diff = WorkingTreeDiff::new(&[cached, unstaged], "", HINT, false);
 
                 assert_eq!(diff.rows, [hunk("@@ -0,0 +1,3 @@"), added(1, "a")]);
             }
@@ -627,7 +640,7 @@ mod tests {
 
             #[test]
             fn splits_untracked_paths_on_nul() {
-                let diff = WorkingTreeDiff::new(&[], "new.txt\0dir/a b.rs\0", HINT);
+                let diff = WorkingTreeDiff::new(&[], "new.txt\0dir/a b.rs\0", HINT, false);
                 assert_eq!(diff.untracked, ["new.txt", "dir/a b.rs"]);
                 assert_eq!(diff.truncation, None);
             }
@@ -638,10 +651,23 @@ mod tests {
                 let diff = format!("{header}+{}\n", "a".repeat(MAX_BYTES - header.len() - 2));
                 assert_eq!(diff.len(), MAX_BYTES);
 
-                let view = WorkingTreeDiff::new(&[&diff], "", HINT);
+                let view = WorkingTreeDiff::new(&[&diff], "", HINT, false);
 
                 assert_eq!(view.truncation, None);
                 assert_eq!(view.rows.len(), 2);
+            }
+
+            #[test]
+            fn records_a_read_that_stopped_at_the_budget() {
+                let view = WorkingTreeDiff::new(&["@@ -1 +1 @@\n"], "", HINT, true);
+
+                assert_eq!(
+                    view.truncation,
+                    Some(Truncation {
+                        dropped_bytes: None,
+                        full_command: HINT,
+                    })
+                );
             }
 
             #[test]
@@ -651,7 +677,7 @@ mod tests {
                 let diff = format!("{header}{}", line.repeat(6000));
                 let (later, untracked) = ("@@ -1 +1 @@\n", "late.txt\0");
 
-                let view = WorkingTreeDiff::new(&[&diff, later], untracked, HINT);
+                let view = WorkingTreeDiff::new(&[&diff, later], untracked, HINT, false);
 
                 let kept = (MAX_BYTES - header.len()) / line.len();
                 assert_eq!(view.rows.len(), 1 + kept);
@@ -661,7 +687,7 @@ mod tests {
                 assert_eq!(
                     view.truncation,
                     Some(Truncation {
-                        dropped_bytes: total - (header.len() + kept * line.len()),
+                        dropped_bytes: Some(total - (header.len() + kept * line.len())),
                         full_command: HINT,
                     })
                 );
@@ -672,13 +698,13 @@ mod tests {
                 let path = format!("{}\0", "a".repeat(1023));
                 let untracked = path.repeat(65);
 
-                let view = WorkingTreeDiff::new(&["@@ -1 +1 @@\n"], &untracked, HINT);
+                let view = WorkingTreeDiff::new(&["@@ -1 +1 @@\n"], &untracked, HINT, false);
 
                 assert_eq!(view.untracked.len(), 63);
                 assert_eq!(
                     view.truncation,
                     Some(Truncation {
-                        dropped_bytes: 2 * 1024,
+                        dropped_bytes: Some(2 * 1024),
                         full_command: "`git status`",
                     })
                 );
@@ -690,9 +716,9 @@ mod tests {
 
             #[test]
             fn holds_only_without_rows_paths_or_truncation() {
-                assert!(WorkingTreeDiff::new(&["", ""], "", HINT).is_empty());
-                assert!(!WorkingTreeDiff::new(&[], "a\0", HINT).is_empty());
-                assert!(!WorkingTreeDiff::new(&["@@ -1 +1 @@\n"], "", HINT).is_empty());
+                assert!(WorkingTreeDiff::new(&["", ""], "", HINT, false).is_empty());
+                assert!(!WorkingTreeDiff::new(&[], "a\0", HINT, false).is_empty());
+                assert!(!WorkingTreeDiff::new(&["@@ -1 +1 @@\n"], "", HINT, false).is_empty());
             }
         }
     }
@@ -703,12 +729,24 @@ mod tests {
         #[test]
         fn display_names_the_dropped_size_and_the_full_command() {
             let truncation = Truncation {
-                dropped_bytes: 1536,
+                dropped_bytes: Some(1536),
                 full_command: "`git diff --cached` and `git diff`",
             };
             assert_eq!(
                 truncation.to_string(),
                 "(Truncated 1.5 KiB. Run `git diff --cached` and `git diff` for the full output.)"
+            );
+        }
+
+        #[test]
+        fn display_names_the_budget_when_the_read_stopped_at_it() {
+            let truncation = Truncation {
+                dropped_bytes: None,
+                full_command: "`git diff HEAD`",
+            };
+            assert_eq!(
+                truncation.to_string(),
+                "(Showing the first 64 KiB. Run `git diff HEAD` for the full output.)"
             );
         }
     }

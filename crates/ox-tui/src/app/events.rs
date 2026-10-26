@@ -438,7 +438,14 @@ impl App {
 
     pub(super) fn apply_git_update(&mut self, update: GitUpdate) {
         let changed = match update {
-            GitUpdate::Branch(branch) => self.status_bar.set_git_branch(branch),
+            GitUpdate::Branch(branch) => {
+                let changed = self.status_bar.set_git_branch(branch);
+                if changed {
+                    self.status_bar.set_pull_request(None);
+                    self.git_probes.invalidate_pull_request(now());
+                }
+                changed
+            }
             GitUpdate::PullRequest(pull_request) => self.status_bar.set_pull_request(pull_request),
         };
         self.dirty |= changed;
@@ -484,12 +491,14 @@ impl App {
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
     use indoc::indoc;
     use tokio::sync::mpsc::error::TryRecvError;
 
+    use ox_core::config::StatusLineSegment;
     use ox_core::config::compaction::testing::WINDOW_1M_THRESHOLD;
     use ox_core::config::provenance::Source;
     use ox_core::model::ResolvedModelId;
@@ -504,7 +513,7 @@ mod tests {
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::{plan, task};
     use ox_core::tool::view::{ApprovalBody, ToolResultView};
-    use ox_core::util::git::PullRequest;
+    use ox_core::util::git::testing::pull_request;
 
     use super::*;
     use crate::action::Action;
@@ -2284,6 +2293,18 @@ mod tests {
     mod apply_git_update {
         use super::*;
 
+        fn app_showing_pull_request_7() -> App {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.git_probes = crate::git_probes::GitProbes::new(
+                PathBuf::from("/repo"),
+                &[StatusLineSegment::PullRequest],
+                now(),
+            );
+            app.status_bar.set_git_branch(Some("main".to_owned()));
+            app.apply_git_update(GitUpdate::PullRequest(Some(pull_request(7))));
+            app
+        }
+
         #[test]
         fn marks_dirty_only_when_the_status_bar_changes() {
             let (mut app, _rx, _event_tx) = test_app(None);
@@ -2293,14 +2314,42 @@ mod tests {
 
             assert!(!app.dirty, "unchanged branch skips the repaint");
 
-            app.apply_git_update(GitUpdate::PullRequest(Some(PullRequest {
-                number: 7,
-                url: "https://example.com/pull/7".to_owned(),
-                checks: None,
-                review: None,
-            })));
+            app.apply_git_update(GitUpdate::PullRequest(Some(pull_request(7))));
 
             assert!(app.dirty, "new pull request repaints");
+        }
+
+        #[test]
+        fn a_branch_change_clears_the_pull_request_and_probes_it_again() {
+            let mut app = app_showing_pull_request_7();
+            app.dirty = false;
+
+            let before = now();
+            app.apply_git_update(GitUpdate::Branch(Some("feature".to_owned())));
+            let after = now();
+
+            assert!(app.dirty, "the branch change repaints");
+            assert_eq!(app.status_bar.git_branch(), Some("feature"));
+            assert_eq!(app.status_bar.pull_request(), None);
+            assert!(app.git_probes.pull_request_stale());
+            let due = app
+                .git_probes
+                .pull_request_due()
+                .expect("the roster reads the pull request");
+            assert!(
+                before <= due && due <= after,
+                "an idle probe is due at once"
+            );
+        }
+
+        #[test]
+        fn an_unchanged_branch_keeps_the_pull_request() {
+            let mut app = app_showing_pull_request_7();
+
+            app.apply_git_update(GitUpdate::Branch(Some("main".to_owned())));
+
+            assert_eq!(app.status_bar.pull_request().map(|pr| pr.number), Some(7));
+            assert!(!app.git_probes.pull_request_stale());
         }
     }
 

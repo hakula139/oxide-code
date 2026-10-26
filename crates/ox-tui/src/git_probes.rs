@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use futures::FutureExt as _;
 use tokio::sync::mpsc;
 
 use ox_core::config::StatusLineSegment;
@@ -19,6 +20,10 @@ const BRANCH_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Gap between pull-request probes, longer than the branch gap since `gh pr view` hits the network.
 const PULL_REQUEST_REFRESH_INTERVAL: Duration = Duration::from_mins(1);
 
+/// A probe that outlives this deadline is killed, so a hung `git` or network-bound `gh` cannot
+/// freeze its segment for the rest of the session.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Result of one finished probe.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum GitUpdate {
@@ -32,7 +37,7 @@ enum Probe {
     PullRequest,
 }
 
-/// One probe run's end, with no update when the run panicked.
+/// One probe run's end, with no update when the run panicked or timed out.
 type Finished = (Probe, Option<GitUpdate>);
 
 /// Schedules the probes and collects their results. At most one run per probe is in flight.
@@ -43,14 +48,15 @@ pub(crate) struct GitProbes {
     /// `None` when no status line segment reads the pull request.
     pull_request: Option<Schedule>,
     pull_request_detail: PullRequestDetail,
+    /// Set while a pull-request run may still report a value from before a branch change.
+    pull_request_stale: bool,
     tx: mpsc::UnboundedSender<Finished>,
     rx: mpsc::UnboundedReceiver<Finished>,
 }
 
 impl GitProbes {
-    /// Probes the branch and the pull request only as far as `segments` read them. The caller
-    /// resolved the branch at startup, so the first branch probe waits one interval. The pull
-    /// request has no startup value and probes on the first [`poll`](Self::poll).
+    /// Probes the branch and the pull request only as far as `segments` read them. The first branch
+    /// probe waits one interval, and the pull request probes on the first [`poll`](Self::poll).
     pub(crate) fn new(cwd: PathBuf, segments: &[StatusLineSegment], now: Instant) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let detail = segments
@@ -70,6 +76,7 @@ impl GitProbes {
                 .then(|| Schedule::new(BRANCH_REFRESH_INTERVAL, now + BRANCH_REFRESH_INTERVAL)),
             pull_request: detail.map(|_| Schedule::new(PULL_REQUEST_REFRESH_INTERVAL, now)),
             pull_request_detail: detail.unwrap_or(PullRequestDetail::Link),
+            pull_request_stale: false,
             tx,
             rx,
         }
@@ -88,6 +95,7 @@ impl GitProbes {
         if let Some(schedule) = &mut self.pull_request
             && schedule.start(now)
         {
+            self.pull_request_stale = false;
             let cwd = self.cwd.clone();
             let detail = self.pull_request_detail;
             spawn_probe(&self.tx, Probe::PullRequest, async move {
@@ -106,20 +114,40 @@ impl GitProbes {
     }
 
     /// Waits for the next probe update, scheduling each finished probe's next run one interval out.
-    /// Cancel-safe, so it can sit in a `tokio::select!` arm.
+    /// A stale pull-request run reports a clear and asks for a fresh one. Cancel-safe, so it can sit
+    /// in a `tokio::select!` arm.
     pub(crate) async fn recv(&mut self) -> Option<GitUpdate> {
         loop {
             let (probe, update) = self.rx.recv().await?;
+            let current = now();
             let schedule = match probe {
                 Probe::Branch => self.branch.as_mut(),
                 Probe::PullRequest => self.pull_request.as_mut(),
             };
             if let Some(schedule) = schedule {
-                schedule.finish(now());
+                schedule.finish(current);
+            }
+            if probe == Probe::PullRequest && self.pull_request_stale {
+                if let Some(schedule) = self.pull_request.as_mut() {
+                    schedule.next_due = Some(current);
+                }
+                return Some(GitUpdate::PullRequest(None));
             }
             if update.is_some() {
                 return update;
             }
+        }
+    }
+
+    /// Discards whatever a pull-request run in flight reports and asks for a fresh one, so a branch
+    /// change never pairs the new branch with the old branch's link, checks, or review state.
+    pub(crate) fn invalidate_pull_request(&mut self, now: Instant) {
+        let Some(schedule) = &mut self.pull_request else {
+            return;
+        };
+        self.pull_request_stale = true;
+        if schedule.next_due.is_some() {
+            schedule.next_due = Some(now);
         }
     }
 
@@ -131,19 +159,35 @@ impl GitProbes {
         };
         self.tx.send((probe, Some(update))).unwrap();
     }
+
+    #[cfg(test)]
+    pub(crate) fn pull_request_due(&self) -> Option<Instant> {
+        self.pull_request
+            .as_ref()
+            .and_then(|schedule| schedule.next_due)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pull_request_stale(&self) -> bool {
+        self.pull_request_stale
+    }
 }
 
-/// Runs `run` on its own task and reports its end to `tx`, so a run that panics still frees its
-/// probe's schedule.
+/// Runs `run` on its own task and reports its end to `tx`, so a run that panics or times out still
+/// frees its probe's schedule. A timed-out run is dropped, which kills its child process.
 fn spawn_probe(
     tx: &mpsc::UnboundedSender<Finished>,
     probe: Probe,
     run: impl Future<Output = GitUpdate> + Send + 'static,
 ) {
     let tx = tx.clone();
-    let run = tokio::spawn(run);
     tokio::spawn(async move {
-        _ = tx.send((probe, run.await.ok()));
+        let run = std::panic::AssertUnwindSafe(run).catch_unwind();
+        let update = tokio::time::timeout(PROBE_TIMEOUT, run)
+            .await
+            .ok()
+            .and_then(Result::ok);
+        _ = tx.send((probe, update));
     });
 }
 
@@ -173,7 +217,7 @@ impl Schedule {
 
 #[cfg(test)]
 mod tests {
-    use ox_core::util::git::testing::with_isolated_git_env_async;
+    use ox_core::util::git::testing::{pull_request, with_isolated_git_env_async};
 
     use super::*;
 
@@ -337,6 +381,26 @@ mod tests {
             assert_eq!(probes.branch.unwrap().next_due, Some(branch_due));
         }
 
+        #[tokio::test(start_paused = true)]
+        async fn a_stale_run_reports_a_clear_and_asks_for_a_fresh_one() {
+            let start = now();
+            let mut probes = GitProbes::new(PathBuf::from("/repo"), BOTH, start);
+            assert!(probes.pull_request.as_mut().unwrap().start(start));
+            probes.invalidate_pull_request(now());
+
+            probes.inject(GitUpdate::PullRequest(Some(pull_request(7))));
+            assert_eq!(
+                probes.recv().await,
+                Some(GitUpdate::PullRequest(None)),
+                "the stale run must not report its value",
+            );
+            assert_eq!(
+                probes.pull_request_due(),
+                Some(now()),
+                "the fresh run is due immediately",
+            );
+        }
+
         #[tokio::test]
         async fn reschedules_a_panicked_run_and_returns_the_next_update() {
             let now = Instant::now();
@@ -372,6 +436,26 @@ mod tests {
             drop(tx);
 
             assert_eq!(rx.recv().await, Some((Probe::Branch, None)));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn reports_a_timed_out_run_without_an_update_and_drops_it() {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel::<()>();
+
+            spawn_probe(&tx, Probe::Branch, async move {
+                let _sender = dropped_tx;
+                std::future::pending::<GitUpdate>().await
+            });
+            drop(tx);
+            tokio::time::advance(PROBE_TIMEOUT).await;
+
+            assert_eq!(rx.recv().await, Some((Probe::Branch, None)));
+            assert_eq!(
+                dropped_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed),
+                "the timed-out run is dropped",
+            );
         }
     }
 
