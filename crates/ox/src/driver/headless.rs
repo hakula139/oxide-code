@@ -139,8 +139,8 @@ where
         }
     };
     let finished = handle.shutdown().await;
-    let session_failed = matches!(&finished, Ok(Some(_)));
-    if let Ok(Some(failure)) = &finished {
+    let session_failure = finished.as_ref().ok().and_then(Option::as_deref);
+    if let Some(failure) = session_failure {
         renderer.session_write_error(Some(failure));
         printer.record_session_write_error(failure);
     }
@@ -148,7 +148,7 @@ where
     if let Err(error) = &output {
         printer.report_failure(error);
     }
-    if (output.is_err() || session_failed) && !matches!(exit, Exit::Signal(_)) {
+    if (output.is_err() || session_failure.is_some()) && !matches!(exit, Exit::Signal(_)) {
         exit = Exit::Failure;
     }
     finished.map(|_| exit)
@@ -432,7 +432,6 @@ mod tests {
     use ox_core::permission::PermissionClass;
     use ox_core::protocol::testing::ls_call;
     use ox_core::session::store::testing::test_store;
-
     use ox_core::tool::testing::bash_registry;
     use ox_core::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec};
 
