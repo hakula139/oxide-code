@@ -362,12 +362,12 @@ impl Engine {
         let mut inbox = Inbox::default();
         if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
             self.adopt_mode(&mut inbox);
-            return report_abort(sink, abort, "turn-failed");
+            return report_unsent(sink, abort, "turn-failed");
         }
         let compacted = self.auto_compact(sink, ops, &mut inbox).await;
         self.adopt_mode(&mut inbox);
         if let Err(abort) = compacted {
-            return report_abort(sink, abort, "auto-compact-failed");
+            return report_unsent(sink, abort, "auto-compact-failed");
         }
 
         let mut start = self.turn_start();
@@ -710,6 +710,16 @@ fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> 
             TurnEnd::Failed
         }
     }
+}
+
+/// Reports an abort that stopped the operation before it recorded its prompt, handing the prompt
+/// back for any outcome but shutdown. The frontend returns it to the user, and the abort's terminal
+/// event follows.
+fn report_unsent(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> TurnEnd {
+    if !matches!(abort, TurnAbort::Shutdown) {
+        sink.emit(Event::PromptUnsent, "prompt-unsent");
+    }
+    report_abort(sink, abort, label)
 }
 
 #[cfg(test)]
@@ -1917,7 +1927,11 @@ mod tests {
                 assert!(
                     matches!(
                         events.as_slice(),
-                        [Event::AutoCompactionStarted, Event::Cancelled]
+                        [
+                            Event::AutoCompactionStarted,
+                            Event::PromptUnsent,
+                            Event::Cancelled
+                        ]
                     ),
                     "{events:?}"
                 );
@@ -3106,7 +3120,8 @@ mod tests {
                 assert!(
                     matches!(
                         events.as_slice(),
-                        [Event::TurnFailed(msg)] if msg == "Not signed in. Run `/login` to sign in."
+                        [Event::PromptUnsent, Event::TurnFailed(msg)]
+                            if msg == "Not signed in. Run `/login` to sign in."
                     ),
                     "{events:?}"
                 );
@@ -3974,6 +3989,42 @@ mod tests {
                 matches!(
                     events.as_slice(),
                     [Event::Cancelled, Event::TurnFailed(msg)] if msg == "boom"
+                ),
+                "{events:?}",
+            );
+        }
+    }
+
+    mod report_unsent {
+        use super::*;
+
+        #[test]
+        fn hands_the_prompt_back_before_the_terminal_event_but_not_on_shutdown() {
+            let sink = CapturingSink::default();
+
+            assert_eq!(
+                report_unsent(&sink, TurnAbort::Cancelled, "label"),
+                TurnEnd::Cancelled
+            );
+            assert_eq!(
+                report_unsent(&sink, TurnAbort::Shutdown, "label"),
+                TurnEnd::Shutdown
+            );
+            assert_eq!(
+                report_unsent(&sink, TurnAbort::Failed(anyhow!("boom")), "label"),
+                TurnEnd::Failed
+            );
+
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        Event::PromptUnsent,
+                        Event::Cancelled,
+                        Event::PromptUnsent,
+                        Event::TurnFailed(msg)
+                    ] if msg == "boom"
                 ),
                 "{events:?}",
             );

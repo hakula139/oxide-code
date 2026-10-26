@@ -169,8 +169,8 @@ impl Engine {
     }
 
     /// Compacts the transcript ahead of a prompt once [`auto_compaction_due`] holds for the stored
-    /// context estimate. A failure counts toward the pause, reports [`Event::PromptUnsent`], and
-    /// fails the unsent prompt.
+    /// context estimate. A failure counts toward the pause and fails the unsent prompt, which the
+    /// caller hands back.
     pub(super) async fn auto_compact(
         &mut self,
         sink: &dyn EventSink,
@@ -185,13 +185,9 @@ impl Engine {
             return Ok(());
         }
 
-        let compacted = self
-            .run_auto_compaction(sink, ops, inbox, AutoPoint::BeforePrompt)
-            .await;
-        if let Err(TurnAbort::Failed(_)) = compacted {
-            sink.emit(Event::PromptUnsent, "prompt-unsent");
-        }
-        compacted.map(drop)
+        self.run_auto_compaction(sink, ops, inbox, AutoPoint::BeforePrompt)
+            .await
+            .map(drop)
     }
 
     /// Compacts the transcript at a round boundary of a turn whose context crossed the threshold,
@@ -947,7 +943,6 @@ mod tests {
                             Event::SummaryDiscarded,
                             Event::UsageUpdated(_),
                             Event::AutoCompactionPaused { failures: 3 },
-                            Event::PromptUnsent,
                         ]
                     ),
                     "{events:?}",
@@ -995,7 +990,6 @@ mod tests {
                             Event::SummaryDiscarded,
                             Event::Error(write),
                             Event::UsageUpdated(_),
-                            Event::PromptUnsent,
                         ] if summary == "auto summary"
                             && write == "Session write failed: \
                                          session writer task has stopped. \

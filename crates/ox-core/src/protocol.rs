@@ -231,8 +231,10 @@ pub enum Event {
     /// prompts to the user, then [`Self::TurnFailed`] ends the operation. After
     /// [`CompactTrigger::MidTurn`], only content after the summary is removed.
     TurnRolledBack,
-    /// Automatic compaction failed before the prompt was sent. The frontend returns the prompt to
-    /// the user, then [`Self::TurnFailed`] ends the operation.
+    /// The prompt was not recorded, because a failure or a cancel stopped the operation before it
+    /// reached the model: automatic compaction failed, or sign-in failed or was interrupted. The
+    /// frontend returns the prompt to the user, then [`Self::TurnFailed`] or [`Self::Cancelled`]
+    /// ends the operation.
     PromptUnsent,
     /// The in-flight prompt, compaction, resume, archive, sign-in, or sign-out failed. Like
     /// [`Self::TurnComplete`] and [`Self::Cancelled`], it ends the operation.
