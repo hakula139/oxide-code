@@ -124,7 +124,7 @@ pub(crate) fn file_id(file: impl std::os::windows::io::AsHandle) -> io::Result<(
     };
 
     let mut info = FILE_ID_INFO::default();
-    // The handle stays borrowed and Windows receives an aligned output of exactly FILE_ID_INFO size.
+    // The handle stays borrowed, and the output is an aligned FILE_ID_INFO of exactly its size.
     let result = unsafe {
         GetFileInformationByHandleEx(
             file.as_handle().as_raw_handle(),
