@@ -72,7 +72,7 @@ On Unix, session files are created with mode `0600`.
 
 Each process uses a single `tokio::spawn`-ed actor task for its session. The rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, drains any queued commands with `try_recv()`, then moves its state and entries into a `spawn_blocking` operation. That operation flushes the batch and returns the state before the actor sends its acknowledgments, so waiting for another process's file lock leaves the async runtime available.
 
-`agent_turn` records a tool round with one `SessionCmd::RecordRound`, which writes the assistant message, the tool results answering it, and their sidecars contiguously in that order. The text-only branch records its single assistant message through the same actor. Because one command owns the whole round, a resumed session always reads the assistant turn before the results that answer it, even when the runtime's cooperative budget runs out between awaits. Resume sanitization still drops a tool call whose result was torn off.
+`agent_turn` records a tool round with one `SessionCmd::RecordRound`, which writes the assistant message, the tool results answering it, and their sidecars contiguously in that order. The text-only branch records its single assistant message through the same actor. Because one command owns the whole round, a resumed session always reads the assistant turn before the results that answer it, even when the runtime's cooperative budget runs out between awaits. Resume sanitization drops a tool call whose result was torn off.
 
 ### Writer Recovery on Write Error
 

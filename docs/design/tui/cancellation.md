@@ -38,7 +38,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 ## Sources
 
-- `crates/ox-core/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt`, `report_abort`, and `report_unsent`, shared by the TUI, REPL, and headless drivers.
+- `crates/ox-core/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt`, `report_abort`, and `report_unsent`, which every frontend's operation ends through.
 - `crates/ox-core/src/engine/abort.rs`: `TurnAbort` enum, `await_unless_aborted`.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `Dispatcher::run_ready`, which cancels the running calls on an abort.
 - `crates/ox-core/src/engine/turn.rs`: `agent_turn` round loop, `interrupt_turn`, `record_drained_prompts`.
