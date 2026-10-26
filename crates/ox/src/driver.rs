@@ -7,9 +7,17 @@ mod stdio;
 
 use std::process::ExitCode;
 
+// ── Input ──
+
+/// Decodes stdin bytes, replacing each invalid sequence with U+FFFD, so one stray byte does not
+/// end the run, as Claude Code does.
+fn decode_input(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
 // ── Exit Status ──
 
-/// How a driver ended, mapped to the process exit status by [`Exit::code`].
+/// How a driver ended, mapped to the process exit status by [`Exit::finish`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Exit {
     Success,
@@ -18,11 +26,13 @@ pub(crate) enum Exit {
 }
 
 impl Exit {
-    pub(crate) fn code(self) -> ExitCode {
+    /// Ends the process by its signal when one stopped the run, as [`Shutdown::end_process`]
+    /// describes, and otherwise returns the status to exit with.
+    pub(crate) fn finish(self) -> ExitCode {
         match self {
             Self::Success => ExitCode::SUCCESS,
             Self::Failure => ExitCode::FAILURE,
-            Self::Signal(signal) => ExitCode::from(signal.exit_status()),
+            Self::Signal(signal) => signal.end_process(),
         }
     }
 }
@@ -40,14 +50,34 @@ pub(crate) enum Shutdown {
 }
 
 impl Shutdown {
-    /// 128 plus the signal number, following the shell convention.
+    /// Ends the process by the signal on Unix, so a shell, `xargs`, or make sees the child die as
+    /// git does and stops its loop. Windows cannot die by a signal, so it reports 130.
+    fn end_process(self) -> ExitCode {
+        #[cfg(unix)]
+        {
+            // Aborts when it cannot restore or raise the signal, so it does not return.
+            _ = signal_hook::low_level::emulate_default_handler(self.number());
+            unreachable!("emulate_default_handler aborts when it cannot raise the signal")
+        }
+
+        #[cfg(not(unix))]
+        ExitCode::from(self.exit_status())
+    }
+
+    #[cfg(unix)]
+    const fn number(self) -> i32 {
+        match self {
+            Self::Hangup => signal_hook::consts::SIGHUP,
+            Self::Interrupt => signal_hook::consts::SIGINT,
+            Self::Terminate => signal_hook::consts::SIGTERM,
+        }
+    }
+
+    /// 128 plus the signal number, the shell convention for the one signal Windows reports.
+    #[cfg(not(unix))]
     const fn exit_status(self) -> u8 {
         match self {
-            #[cfg(unix)]
-            Self::Hangup => 129,
             Self::Interrupt => 130,
-            #[cfg(unix)]
-            Self::Terminate => 143,
         }
     }
 }
@@ -137,16 +167,30 @@ mod tests {
     mod shutdown {
         use super::*;
 
+        #[cfg(unix)]
+        mod number {
+            use super::*;
+
+            #[test]
+            fn names_each_signals_number() {
+                assert_eq!(
+                    (
+                        Shutdown::Hangup.number(),
+                        Shutdown::Interrupt.number(),
+                        Shutdown::Terminate.number(),
+                    ),
+                    (1, 2, 15),
+                );
+            }
+        }
+
+        #[cfg(not(unix))]
         mod exit_status {
             use super::*;
 
             #[test]
-            fn is_128_plus_the_signal_number() {
-                #[cfg(unix)]
-                assert_eq!(Shutdown::Hangup.exit_status(), 129);
+            fn reports_128_plus_the_signal_number() {
                 assert_eq!(Shutdown::Interrupt.exit_status(), 130);
-                #[cfg(unix)]
-                assert_eq!(Shutdown::Terminate.exit_status(), 143);
             }
         }
     }
