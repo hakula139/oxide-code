@@ -117,7 +117,7 @@ fn validate_mode(mode: u32) -> io::Result<()> {
 fn attributes(file: &File) -> io::Result<BTreeMap<OsString, Vec<u8>>> {
     let names = match file.list_xattr() {
         Ok(names) => Some(names),
-        Err(error) if error.raw_os_error() == Some(nix::errno::Errno::EOPNOTSUPP as i32) => None,
+        Err(error) if error.raw_os_error() == Some(nix::libc::EOPNOTSUPP) => None,
         Err(error) => return Err(error),
     };
     let mut attributes = BTreeMap::new();
@@ -132,11 +132,10 @@ fn attributes(file: &File) -> io::Result<BTreeMap<OsString, Vec<u8>>> {
     }
     #[cfg(target_os = "linux")]
     {
-        if let Some(value) = supported_attribute(file, "system.posix_acl_access")? {
-            attributes.insert("system.posix_acl_access".into(), value);
-        }
-        if let Some(value) = supported_attribute(file, "security.selinux")? {
-            attributes.insert("security.selinux".into(), value);
+        for name in ["system.posix_acl_access", "security.selinux"] {
+            if let Some(value) = supported_attribute(file, name)? {
+                attributes.insert(name.into(), value);
+            }
         }
         for name in [
             "security.capability",

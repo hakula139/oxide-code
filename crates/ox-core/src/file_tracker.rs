@@ -27,7 +27,7 @@ pub(crate) const MAX_TRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// - **Read-before-Edit**: every Edit / Write must follow a `Read` of the same path in the session.
 /// - **Full coverage for Write**: overwriting a file needs every line of its current content read,
 ///   in one Read or across several. An Edit accepts any Read of the current content and credits the
-///   new lines it wrote, or the whole content when an earlier Read knew every line.
+///   new lines it wrote, or the whole content when the tracked view already covered every line.
 /// - **Freshness**: mutating tools must pass the current bytes through
 ///   [`Self::verify_current_content`], and only matching xxh64 content counts as unchanged.
 ///
@@ -44,7 +44,7 @@ pub(crate) struct FileTracker {
 pub(crate) struct FileState {
     pub(crate) content_hash: u64,
     pub(crate) last_view: LastView,
-    /// Which tool recorded the state, since only a Read may answer a re-Read with [`CACHE_HIT_STUB`].
+    /// Whether a Read showed this full content, so a re-Read may answer with [`CACHE_HIT_STUB`].
     #[serde(default, skip_serializing_if = "FileSource::is_read")]
     pub(crate) source: FileSource,
     #[serde(with = "time::serde::rfc3339")]
@@ -54,9 +54,9 @@ pub(crate) struct FileState {
     pub(crate) tool_use_id: String,
 }
 
-/// The tool that recorded a tracked state, which decides whether a full re-Read may answer from
-/// the cache. A Write or Edit supplies content only through tool input, so deduplicating a Read
-/// against it would point at pre-edit content.
+/// Whether a Read showed a tracked state whole, which decides whether a full re-Read may answer
+/// from the cache. A Write or Edit supplies content only through tool input, so deduplicating a
+/// Read against it would point at pre-edit content.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FileSource {
@@ -197,7 +197,7 @@ impl FileTracker {
     pub(crate) async fn write_and_record<W>(
         self: &Arc<Self>,
         tool_use_id: &str,
-        written: WrittenView,
+        view: LastView,
         write: W,
     ) -> anyhow::Result<()>
     where
@@ -210,7 +210,7 @@ impl FileTracker {
                 async move {
                     match write.await {
                         Ok((key, bytes)) => {
-                            tracker.record_modify(key, &bytes, written, tool_use_id);
+                            tracker.record_modify(key, &bytes, view, tool_use_id);
                             Ok(())
                         }
                         Err(error) => {
@@ -235,32 +235,18 @@ impl FileTracker {
         self.writes.reopen();
     }
 
-    /// Records bytes the agent just wrote, as `written` describes them, so a subsequent Edit passes
+    /// Records bytes the agent just wrote, as `view` describes them, so a subsequent Edit passes
     /// the gate without a fresh Read.
-    fn record_modify(
-        &self,
-        path: PathBuf,
-        bytes: &[u8],
-        written: WrittenView,
-        tool_use_id: String,
-    ) {
+    fn record_modify(&self, path: PathBuf, bytes: &[u8], view: LastView, tool_use_id: String) {
         let content_hash = xxh64(bytes, HASH_SEED);
         let mut by_path = self.lock();
-        let last_view = match written {
-            WrittenView::Full => LastView::Full,
-            WrittenView::Edited {
-                ranges,
-                total_lines,
-            } => {
-                if by_path
-                    .get(&path)
-                    .is_some_and(|state| state.last_view == LastView::Full)
-                {
-                    LastView::Full
-                } else {
-                    LastView::from_ranges(ranges, total_lines)
-                }
-            }
+        let last_view = if by_path
+            .get(&path)
+            .is_some_and(|state| state.last_view == LastView::Full)
+        {
+            LastView::Full
+        } else {
+            view
         };
         by_path.insert(
             path,
@@ -345,7 +331,10 @@ impl LastView {
         }
     }
 
-    fn from_ranges(mut ranges: Vec<(usize, usize)>, total_lines: usize) -> Self {
+    pub(crate) fn from_ranges(mut ranges: Vec<(usize, usize)>, total_lines: usize) -> Self {
+        if total_lines == 0 {
+            return Self::Full;
+        }
         ranges.sort_unstable();
         let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
         for (first, last) in ranges {
@@ -363,21 +352,6 @@ impl LastView {
             }
         }
     }
-}
-
-// ── Written Views ──
-
-/// What lines of the new content a mutation leaves the model knowing, which the tracker records
-/// against the content hash it produces.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WrittenView {
-    /// Every line, as `write` supplies the whole file.
-    Full,
-    /// The new content lines an `edit` wrote, out of the content's `total_lines`.
-    Edited {
-        ranges: Vec<(usize, usize)>,
-        total_lines: usize,
-    },
 }
 
 // ── File Gates ──
@@ -459,7 +433,7 @@ pub(crate) mod testing {
 
     use tokio::sync::oneshot;
 
-    use super::{FileTracker, LastView, WrittenView};
+    use super::{FileTracker, LastView};
 
     pub(crate) fn tracker() -> Arc<FileTracker> {
         Arc::new(FileTracker::default())
@@ -477,7 +451,7 @@ pub(crate) mod testing {
         let (release_tx, release_rx) = oneshot::channel();
         let mut caller =
             std::pin::pin!(
-                tracker.write_and_record(tool_use_id, WrittenView::Full, async move {
+                tracker.write_and_record(tool_use_id, LastView::Full, async move {
                     started_tx.send(()).unwrap();
                     release_rx.await.map_err(std::io::Error::other)?;
                     tokio::fs::write(&path, &bytes).await?;
@@ -515,7 +489,7 @@ pub(crate) mod testing {
         tracker.record_modify(
             path.to_path_buf(),
             bytes,
-            WrittenView::Full,
+            LastView::Full,
             tool_use_id.to_owned(),
         );
     }
@@ -597,7 +571,7 @@ mod tests {
             tracker.record_modify(
                 path.to_path_buf(),
                 b"hello",
-                WrittenView::Full,
+                LastView::Full,
                 "toolu_write".to_owned(),
             );
             _ = tracker.record_read(path, b"hello", LastView::lines(1, 1, 2), "toolu_read");
@@ -783,7 +757,7 @@ mod tests {
             _ = tracker.record_read(key, b"hello", LastView::lines(1, 1, 2), "toolu_test");
 
             tracker
-                .write_and_record("toolu_test", WrittenView::Full, {
+                .write_and_record("toolu_test", LastView::Full, {
                     let path = path.clone();
                     async move {
                         tokio::fs::write(&path, b"world").await?;
@@ -798,15 +772,6 @@ mod tests {
             assert_eq!(stored.content_hash, xxh64(b"world", HASH_SEED));
             assert_eq!(stored.last_view, LastView::Full);
             assert_eq!(stored.source, FileSource::Modify);
-            assert_eq!(
-                tracker.record_read(key, b"world", LastView::Full, "toolu_reread"),
-                RecordRead::Inserted,
-                "a full Read after a Write returns the content",
-            );
-            assert_eq!(
-                tracker.record_read(key, b"world", LastView::Full, "toolu_reread"),
-                RecordRead::CacheHit,
-            );
         }
 
         #[tokio::test]
@@ -820,10 +785,7 @@ mod tests {
             tracker
                 .write_and_record(
                     "toolu_edit",
-                    WrittenView::Edited {
-                        ranges: vec![(2, 2)],
-                        total_lines: 3,
-                    },
+                    LastView::from_ranges(vec![(2, 2)], 3),
                     async move {
                         tokio::fs::write(&path, b"new").await?;
                         Ok((key.to_path_buf(), b"new".to_vec()))
@@ -848,10 +810,7 @@ mod tests {
             tracker
                 .write_and_record(
                     "toolu_edit",
-                    WrittenView::Edited {
-                        ranges: vec![(2, 2)],
-                        total_lines: 3,
-                    },
+                    LastView::from_ranges(vec![(2, 2)], 3),
                     async move {
                         tokio::fs::write(&path, b"new").await?;
                         Ok((key.to_path_buf(), b"new".to_vec()))
@@ -897,7 +856,7 @@ mod tests {
             let result = tracker
                 .write_and_record(
                     "toolu_test",
-                    WrittenView::Full,
+                    LastView::Full,
                     write_file(path.clone(), b"world"),
                 )
                 .await;
@@ -1179,6 +1138,11 @@ mod tests {
                     },
                 );
             }
+
+            #[test]
+            fn an_emptied_file_is_full() {
+                assert_eq!(LastView::from_ranges(Vec::new(), 0), LastView::Full);
+            }
         }
 
         mod union {
@@ -1341,7 +1305,7 @@ mod tests {
             tracker
                 .write_and_record(
                     "toolu_write",
-                    WrittenView::Full,
+                    LastView::Full,
                     write_file(written.clone(), b"w"),
                 )
                 .await

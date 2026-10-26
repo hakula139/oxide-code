@@ -9,7 +9,7 @@ use serde::Deserialize;
 use super::file::{FileVerb, WriteMode};
 use super::view::{ApprovalBody, ApprovalPreview};
 use super::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field};
-use crate::file_tracker::{FileTracker, GatePurpose, WrittenView};
+use crate::file_tracker::{FileTracker, GatePurpose, LastView};
 use crate::permission::PermissionClass;
 
 pub(crate) struct WriteTool;
@@ -161,7 +161,7 @@ where
     let shown = path.to_owned();
     let bytes = content.as_bytes().to_vec();
     ctx.tracker
-        .write_and_record(&ctx.tool_use_id, WrittenView::Full, async move {
+        .write_and_record(&ctx.tool_use_id, LastView::Full, async move {
             if let Some(parent) = file_path.parent() {
                 create_parent(parent.to_owned())
                     .await

@@ -257,8 +257,6 @@ impl Drop for TemporaryFile {
 mod tests {
     use super::*;
 
-    use crate::file_tracker::WrittenView;
-
     mod write {
         use super::*;
 
@@ -455,6 +453,7 @@ mod tests {
                 atomic::{AtomicUsize, Ordering},
             };
 
+            use crate::file_tracker::LastView;
             use crate::file_tracker::testing::{seed_full_read, tracker};
             use crate::util::fs::testing::symlink_file;
 
@@ -480,7 +479,7 @@ mod tests {
                     let target = victim.clone();
 
                     let error = tracker
-                        .write_and_record("toolu_replace", WrittenView::Full, async move {
+                        .write_and_record("toolu_replace", LastView::Full, async move {
                             write_with(
                                 &destination,
                                 b"ours",

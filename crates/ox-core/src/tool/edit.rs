@@ -11,7 +11,7 @@ use super::view::{
     ApprovalBody, ApprovalPreview, DiffChunk, EditDiff, NumberedLine, ToolResultView,
 };
 use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
-use crate::file_tracker::{GatePurpose, WrittenView};
+use crate::file_tracker::{GatePurpose, LastView};
 use crate::permission::PermissionClass;
 
 pub(crate) struct EditTool;
@@ -183,17 +183,16 @@ async fn edit_file(
         new_string: new_string.to_owned(),
         replace_all,
     };
-    let (expected, updated, edited) = super::run_blocking(move || {
-        let (updated, edited) = replacement.apply(&content_bytes)?;
-        Ok((content_bytes, updated, edited))
+    let (expected, updated, edited, view) = super::run_blocking(move || {
+        let (updated, edited, view) = replacement.apply(&content_bytes)?;
+        Ok((content_bytes, updated, edited, view))
     })
     .await?;
 
-    let written = edited.written.clone();
     ctx.tracker
         .write_and_record(
             &ctx.tool_use_id,
-            written,
+            view,
             super::file::write_file(
                 file_path,
                 path.to_owned(),
@@ -211,8 +210,6 @@ async fn edit_file(
 struct Edited {
     replacements: usize,
     diff: EditDiff,
-    /// The new content lines the replacement wrote, which the tracker records.
-    written: WrittenView,
 }
 
 /// One edit call's replacement, which runs on the blocking pool since a `replace_all` over a large
@@ -226,8 +223,9 @@ struct Replacement {
 }
 
 impl Replacement {
-    /// The file's updated text and what changed, given its current `content`.
-    fn apply(&self, content: &[u8]) -> Result<(String, Edited), String> {
+    /// The file's updated text, what changed, and the written-line view the tracker records, given
+    /// its current `content`.
+    fn apply(&self, content: &[u8]) -> Result<(String, Edited, LastView), String> {
         let path = &self.path;
         let content =
             std::str::from_utf8(content).map_err(|e| format!("Failed to read {path}: {e}"))?;
@@ -253,56 +251,32 @@ impl Replacement {
             ));
         }
 
-        let diff = build_diff(&content, &old_string, &new_string);
+        let (diff, written) = build_diff(&content, &old_string, &new_string);
         let updated = content.replace(old_string.as_ref(), new_string.as_ref());
-        let written = WrittenView::Edited {
-            ranges: written_ranges(&content, &old_string, &new_string),
-            total_lines: updated.lines().count(),
-        };
-        Ok((
-            apply_eol(updated, eol),
-            Edited {
-                replacements,
-                diff,
-                written,
-            },
-        ))
+        let view = LastView::from_ranges(written, updated.lines().count());
+        Ok((apply_eol(updated, eol), Edited { replacements, diff }, view))
     }
-}
-
-/// The 1-indexed new-content lines each occurrence's replacement text holds, in order, leaving out
-/// a replacement that wrote nothing.
-fn written_ranges(content: &str, old_string: &str, new_string: &str) -> Vec<(usize, usize)> {
-    if new_string.is_empty() {
-        return Vec::new();
-    }
-    let new_breaks = new_string.matches('\n').count();
-    let old_breaks = old_string.matches('\n').count();
-    let ends_break = usize::from(new_string.ends_with('\n'));
-    let mut shift: isize = 0;
-    content
-        .match_indices(old_string)
-        .map(|(pos, _)| {
-            let line = 1 + content[..pos].matches('\n').count();
-            let start = (line.cast_signed() + shift).cast_unsigned();
-            shift += new_breaks.cast_signed() - old_breaks.cast_signed();
-            (start, start + new_breaks - ends_break)
-        })
-        .collect()
 }
 
 // ── Diff Production ──
 
 /// The diff of replacing every `old_string` in `original` with `new_string`, counted in one pass
-/// over `original`. Old-side numbers count lines of `original`, and new-side numbers count lines of
-/// the edited text.
-fn build_diff(original: &str, old_string: &str, new_string: &str) -> EditDiff {
+/// over `original`, and the new-content lines each replacement writes. Old-side numbers count lines
+/// of `original`, and new-side numbers count lines of the edited text.
+fn build_diff(
+    original: &str,
+    old_string: &str,
+    new_string: &str,
+) -> (EditDiff, Vec<(usize, usize)>) {
     let hunk = synthesize_chunk(old_string, new_string);
     let old_breaks = old_string.matches('\n').count();
     let new_breaks = new_string.matches('\n').count();
+    let writes_lines = !new_string.is_empty();
+    let written_breaks = new_breaks - usize::from(new_string.ends_with('\n'));
 
     let mut first = None;
     let mut locations = Vec::new();
+    let mut written = Vec::new();
     let (mut old_line, mut new_line, mut scanned) = (1, 1, 0);
     for (pos, _) in original.match_indices(old_string) {
         let breaks = original[scanned..pos].matches('\n').count();
@@ -311,6 +285,9 @@ fn build_diff(original: &str, old_string: &str, new_string: &str) -> EditDiff {
 
         first.get_or_insert((old_line, new_line));
         locations.extend(anchor_line(&hunk, old_line, new_line));
+        if writes_lines {
+            written.push((new_line, new_line + written_breaks));
+        }
 
         old_line += old_breaks;
         new_line += new_breaks;
@@ -318,10 +295,13 @@ fn build_diff(original: &str, old_string: &str, new_string: &str) -> EditDiff {
     }
 
     let (old_line, new_line) = first.unwrap_or((1, 1));
-    EditDiff {
-        chunk: shift_chunk(hunk, old_line, new_line),
-        locations,
-    }
+    (
+        EditDiff {
+            chunk: shift_chunk(hunk, old_line, new_line),
+            locations,
+        },
+        written,
+    )
 }
 
 /// The first removed line, or first added line for an insertion, offset from the hunk's 1-based
@@ -734,20 +714,15 @@ mod tests {
 
         #[tokio::test]
         async fn an_edit_after_a_partial_read_keeps_a_full_read_from_cache_hitting() {
-            use std::fmt::Write as _;
-
             let dir = canonical_tempdir();
-            let path = dir.path().join("long.txt");
-            let mut content = String::new();
-            for n in 1..=2_000 {
-                _ = writeln!(content, "line {n}");
-            }
-            fs::write(&path, &content).unwrap();
+            let path = dir.path().join("short.txt");
+            let content = "line 1\nline 2\nline 3\n";
+            fs::write(&path, content).unwrap();
             let ctx = ctx_with(dir.path(), tracker());
 
             let window = local_testing::run(
                 &ReadTool,
-                serde_json::json!({"file_path": path, "offset": 100, "limit": 51}),
+                serde_json::json!({"file_path": path, "offset": 1, "limit": 1}),
                 &ctx,
             )
             .await;
@@ -756,8 +731,8 @@ mod tests {
                 &EditTool,
                 serde_json::json!({
                     "file_path": path,
-                    "old_string": "line 120\nline 121",
-                    "new_string": "line 120\nline 121 changed",
+                    "old_string": "line 1\n",
+                    "new_string": "line 1 changed\n",
                 }),
                 &ctx,
             )
@@ -770,9 +745,9 @@ mod tests {
             assert!(!full.is_error, "{}", full.content);
             assert_ne!(
                 full.content, CACHE_HIT_STUB,
-                "the edit changed the lines the earlier read showed",
+                "the edit changed a line the earlier read showed",
             );
-            assert!(full.content.contains("line 2000"), "{}", full.content);
+            assert!(full.content.contains("line 3"), "{}", full.content);
         }
 
         #[tokio::test]
@@ -1121,7 +1096,7 @@ mod tests {
                         replace_all: false,
                     };
 
-                    let (updated, edited) = replacement.apply(content.as_bytes()).unwrap();
+                    let (updated, edited, _) = replacement.apply(content.as_bytes()).unwrap();
 
                     assert_eq!(updated, expected, "{name}");
                     assert_eq!(edited.replacements, 1, "{name}");
@@ -1137,7 +1112,7 @@ mod tests {
                     replace_all: true,
                 };
 
-                let (updated, edited) = replacement.apply(b"A\nB\nC\nB\n").unwrap();
+                let (updated, edited, _) = replacement.apply(b"A\nB\nC\nB\n").unwrap();
 
                 assert_eq!(edited.replacements, 2);
                 assert_eq!(
@@ -1170,7 +1145,7 @@ mod tests {
 
         #[test]
         fn numbers_the_hunk_by_its_lines_in_the_file() {
-            let diff = build_diff("A\nB\nC\n", "B", "X");
+            let (diff, _) = build_diff("A\nB\nC\n", "B", "X");
 
             assert_eq!(
                 diff,
@@ -1186,7 +1161,7 @@ mod tests {
 
         #[test]
         fn locates_each_replacement_by_its_first_removed_line() {
-            let diff = build_diff("X\nY\nA\nX\nY\nB\nX\nY\nC\n", "X\nY", "Z");
+            let (diff, _) = build_diff("X\nY\nA\nX\nY\nB\nX\nY\nC\n", "X\nY", "Z");
 
             assert_eq!(
                 diff,
@@ -1202,7 +1177,7 @@ mod tests {
 
         #[test]
         fn locates_each_insertion_by_its_line_after_the_earlier_ones() {
-            let diff = build_diff("fn foo()\nx\nfn foo()\n", "fn foo()", "fn foo()\n    body");
+            let (diff, _) = build_diff("fn foo()\nx\nfn foo()\n", "fn foo()", "fn foo()\n    body");
 
             assert_eq!(
                 diff,
@@ -1218,7 +1193,7 @@ mod tests {
 
         #[test]
         fn a_hunk_that_trims_to_nothing_has_no_locations() {
-            let diff = build_diff("a b\n", "a", "a\n");
+            let (diff, _) = build_diff("a b\n", "a", "a\n");
 
             assert_eq!(
                 diff,
@@ -1230,6 +1205,48 @@ mod tests {
                     locations: vec![],
                 },
             );
+        }
+
+        #[test]
+        fn collects_the_new_lines_each_replacement_writes() {
+            for (case, content, old, new, expected) in [
+                ("one line", "A\nB\nC\n", "B", "X", vec![(2, 2)]),
+                (
+                    "ends with a line break",
+                    "A\nB\nC\n",
+                    "B",
+                    "X\n",
+                    vec![(2, 2)],
+                ),
+                ("several lines", "A\nB\nC\n", "B", "X\nY", vec![(2, 3)]),
+                (
+                    "shifted by an earlier replacement",
+                    "a\na\na\n",
+                    "a",
+                    "x\ny",
+                    vec![(1, 2), (3, 4), (5, 6)],
+                ),
+                (
+                    "added lines before a later occurrence",
+                    "a\nSEP\na\n",
+                    "a",
+                    "x\ny\nz",
+                    vec![(1, 3), (5, 7)],
+                ),
+                (
+                    "removed lines before a later occurrence",
+                    "a\nSEP\nb\na\nSEP\n",
+                    "a\nSEP\n",
+                    "x\n",
+                    vec![(1, 1), (3, 3)],
+                ),
+                ("deleted text", "a\nb\na\n", "a\n", "", vec![]),
+                ("crlf", "a\r\nb\r\na\r\n", "a", "x", vec![(1, 1), (3, 3)]),
+            ] {
+                let (_, written) = build_diff(content, old, new);
+
+                assert_eq!(written, expected, "{case}");
+            }
         }
     }
 
