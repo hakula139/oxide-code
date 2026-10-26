@@ -140,7 +140,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::{FileSource, FileState, LastView};
 
-    fn unresolved_tool_use(id: &str) -> ContentBlock {
+    fn tool_use(id: &str) -> ContentBlock {
         ContentBlock::tool_use(id, "bash", serde_json::Value::Null)
     }
 
@@ -215,11 +215,7 @@ mod tests {
         fn pairs_tool_use_with_result_and_appends_continuation_sentinel() {
             let mut messages = vec![
                 Message::user("do X"),
-                assistant(vec![
-                    text("checking"),
-                    unresolved_tool_use("t1"),
-                    unresolved_tool_use("t2"),
-                ]),
+                assistant(vec![text("checking"), tool_use("t1"), tool_use("t2")]),
                 user(vec![ContentBlock::tool_result("t1", "ok", false)]),
             ];
 
@@ -229,7 +225,7 @@ mod tests {
                 messages,
                 [
                     Message::user("do X"),
-                    assistant(vec![text("checking"), unresolved_tool_use("t1")]),
+                    assistant(vec![text("checking"), tool_use("t1")]),
                     user(vec![ContentBlock::tool_result("t1", "ok", false)]),
                     Message::assistant(RESUME_CONTINUATION_SENTINEL),
                 ],
@@ -283,7 +279,7 @@ mod tests {
         fn preserves_user_boundaries_after_dropping_an_unresolved_assistant() {
             let mut messages = vec![
                 Message::user("do X"),
-                assistant(vec![unresolved_tool_use("unresolved")]),
+                assistant(vec![tool_use("unresolved")]),
                 Message::user("and now Y"),
             ];
 
@@ -320,7 +316,7 @@ mod tests {
         fn drops_orphan_when_assistant_tool_use_was_dropped() {
             let mut messages = vec![
                 Message::user("do X"),
-                assistant(vec![text("checking"), unresolved_tool_use("t1")]),
+                assistant(vec![text("checking"), tool_use("t1")]),
                 user(vec![ContentBlock::tool_result("t2", "stale", false)]),
             ];
 
@@ -398,10 +394,7 @@ mod tests {
         fn drops_records_whose_call_sanitize_removed() {
             let mut messages = vec![
                 Message::user("read both"),
-                assistant(vec![
-                    unresolved_tool_use("seen"),
-                    unresolved_tool_use("lost"),
-                ]),
+                assistant(vec![tool_use("seen"), tool_use("lost")]),
                 user(vec![ContentBlock::tool_result("seen", "a body", false)]),
                 Message::assistant("done"),
             ];
@@ -420,7 +413,7 @@ mod tests {
         #[test]
         fn removes_assistant_block_without_matching_result() {
             let mut messages = vec![
-                assistant(vec![text("checking"), unresolved_tool_use("ghost")]),
+                assistant(vec![text("checking"), tool_use("ghost")]),
                 user(vec![ContentBlock::tool_result(
                     "other",
                     "irrelevant",
@@ -450,7 +443,7 @@ mod tests {
             let mut messages = vec![
                 assistant(vec![
                     server_tool_use("deferred"),
-                    unresolved_tool_use("t1"),
+                    tool_use("t1"),
                     server_tool_use("misplaced"),
                 ]),
                 user(vec![
@@ -470,7 +463,7 @@ mod tests {
             assert_eq!(
                 messages,
                 [
-                    assistant(vec![server_tool_use("deferred"), unresolved_tool_use("t1")]),
+                    assistant(vec![server_tool_use("deferred"), tool_use("t1")]),
                     user(vec![
                         ContentBlock::tool_result("t1", "ok", false),
                         ContentBlock::tool_result("misplaced", "stale", false),
@@ -487,7 +480,7 @@ mod tests {
         #[test]
         fn keeps_resolved_calls_and_ignores_user_role() {
             let mut messages = vec![
-                assistant(vec![unresolved_tool_use("kept")]),
+                assistant(vec![tool_use("kept")]),
                 user(vec![ContentBlock::tool_result("kept", "ok", false)]),
             ];
             let before = messages.clone();
@@ -504,7 +497,7 @@ mod tests {
         #[test]
         fn removes_user_block_without_matching_call() {
             let mut messages = vec![
-                assistant(vec![unresolved_tool_use("real")]),
+                assistant(vec![tool_use("real")]),
                 user(vec![
                     ContentBlock::tool_result("real", "ok", false),
                     ContentBlock::tool_result("ghost", "stale", false),
@@ -516,7 +509,7 @@ mod tests {
             assert_eq!(
                 messages,
                 [
-                    assistant(vec![unresolved_tool_use("real")]),
+                    assistant(vec![tool_use("real")]),
                     user(vec![ContentBlock::tool_result("real", "ok", false)]),
                 ],
             );
