@@ -45,7 +45,7 @@ fi
 leaked=0
 for i in "${!secrets[@]}"; do
   status=0
-  grep -rqF -- "${secrets[$i]}" "${dirs[@]}" || status=$?
+  grep -rqF -f <(printf '%s\n' "${secrets[$i]}") -- "${dirs[@]}" || status=$?
   case "$status" in
     0)
       echo "Found the value of ${names[$i]} in ${dirs[*]}" >&2
