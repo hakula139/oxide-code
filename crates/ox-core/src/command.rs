@@ -145,7 +145,7 @@ pub fn mode(arg: &str) -> Result<Op, String> {
 
 /// `/model <id>`. Matches an exact catalog ID, then a unique substring of one, so family names such
 /// as `opus` work as aliases. Any other ID is accepted verbatim, for a gateway that serves models
-/// outside the catalog, and the engine warns about it with a suggestion when the swap lands.
+/// outside the catalog, and the swap warns that the model is not a supported one.
 pub fn model(arg: &str) -> Result<Op, String> {
     let raw = required(arg, "model ID", "/model <id>")?;
     let arg = raw.to_ascii_lowercase();

@@ -81,12 +81,10 @@ pub(crate) fn config_changed(
         (None, Some(compaction)) => format!("{head}. {compaction}."),
         (Some(effort), Some(compaction)) => format!("{head}. {effort}. {compaction}."),
     };
-    if model.is_near_miss()
-        && let Some(unsupported) = model.unsupported_notice()
-    {
-        return join_sentences(&notice, &unsupported);
+    match model.unsupported_notice() {
+        Some(unsupported) => join_sentences(&notice, &unsupported),
+        None => notice,
     }
-    notice
 }
 
 /// Notes that the model has no effort levels, so the `requested` effort did not apply.
@@ -129,6 +127,12 @@ mod tests {
     mod config_changed {
         use super::*;
 
+        /// The warning a swap to the off-catalog `custom-model` appends.
+        const CUSTOM_NOTICE: &str = "`custom-model` is not a supported model, \
+             so requests go without thinking, effort, and context management, \
+             and cost tracking stays off. \
+             Auto-compaction requires an explicit token threshold.";
+
         fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
             ConfigPick::Model {
                 id: ResolvedModelId::new(model.id()),
@@ -158,7 +162,10 @@ mod tests {
                 &model_pick(&custom, None),
             );
 
-            assert_eq!(s, "Switched to custom-model (custom-model)");
+            assert_eq!(
+                s,
+                format!("Switched to custom-model (custom-model). {CUSTOM_NOTICE}")
+            );
         }
 
         #[test]
@@ -176,8 +183,11 @@ mod tests {
 
             assert_eq!(
                 s,
-                "Switched to custom-model (custom-model). \
-                 Effort unchanged (model has no effort levels, asked for high).",
+                format!(
+                    "Switched to custom-model (custom-model). \
+                     Effort unchanged (model has no effort levels, asked for high). \
+                     {CUSTOM_NOTICE}"
+                ),
             );
         }
 
@@ -194,8 +204,11 @@ mod tests {
 
             assert_eq!(
                 s,
-                "Switched to custom-model (custom-model). \
-                 Effort cleared (model has no effort levels)."
+                format!(
+                    "Switched to custom-model (custom-model). \
+                     Effort cleared (model has no effort levels). \
+                     {CUSTOM_NOTICE}"
+                )
             );
         }
 
@@ -370,8 +383,13 @@ mod tests {
                 format!(
                     "Switched to custom-model (custom-model). \
                      Effort unchanged (model has no effort levels, asked for max). \
+<<<<<<< HEAD
                      Auto-compaction at {} tokens.",
                     compact_count(WINDOW_1M_THRESHOLD),
+=======
+                     Auto-compaction at {WINDOW_1M_THRESHOLD} tokens. \
+                     {CUSTOM_NOTICE}",
+>>>>>>> 29e79041 (fix(model): warn about every off-catalog model swap)
                 ),
             );
         }

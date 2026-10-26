@@ -221,12 +221,6 @@ impl ModelSpec {
         }
         Some(notice)
     }
-
-    /// Whether this ID narrowly misses a catalog row, so [`Self::unsupported_notice`] names the
-    /// row it probably meant.
-    pub(crate) fn is_near_miss(&self) -> bool {
-        self.info.is_none() && replacement_for(&self.id).is_some()
-    }
 }
 
 impl PartialEq for ModelSpec {

@@ -3433,7 +3433,11 @@ mod tests {
                     [
                         "Switched to custom-model (custom-model). \
                          Effort cleared (model has no effort levels). \
-                         Auto-compaction off (no threshold)."
+                         Auto-compaction off (no threshold). \
+                         `custom-model` is not a supported model, \
+                         so requests go without thinking, effort, and context management, \
+                         and cost tracking stays off. \
+                         Auto-compaction requires an explicit token threshold."
                             .to_owned(),
                         "Switched to Claude Opus 5.5 (claude-opus-5-5) · \
                          effort medium (model default). \
