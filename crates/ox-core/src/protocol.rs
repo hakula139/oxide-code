@@ -521,50 +521,6 @@ pub mod testing {
             },
         }
     }
-
-    /// The `stream-json` name of `event`, which lets a test read an event sequence by name.
-    pub fn event_type(event: &Event) -> &'static str {
-        match event {
-            Event::StreamToken(_) => "stream_token",
-            Event::ThinkingToken(_) => "thinking_token",
-            Event::ProgressUpdate(_) => "progress_update",
-            Event::Retrying(_) => "retrying",
-            Event::ToolCallStart(_) => "tool_call_start",
-            Event::ToolCallEnd(_) => "tool_call_end",
-            Event::PromptDrained(_) => "prompt_drained",
-            Event::TurnComplete => "turn_complete",
-            Event::TurnRolledBack => "turn_rolled_back",
-            Event::PromptUnsent => "prompt_unsent",
-            Event::TurnFailed(_) => "turn_failed",
-            Event::UsageUpdated(_) => "usage_updated",
-            Event::RateLimitsUpdated(_) => "rate_limits_updated",
-            Event::Cancelled => "cancelled",
-            Event::AutoCompactionStarted => "auto_compaction_started",
-            Event::AutoCompactionPaused { .. } => "auto_compaction_paused",
-            Event::AutoCompactionResumed => "auto_compaction_resumed",
-            Event::SummaryToken(_) => "summary_token",
-            Event::SummaryDiscarded => "summary_discarded",
-            Event::SessionTitleUpdated { .. } => "session_title_updated",
-            Event::RenameFailed(_) => "rename_failed",
-            Event::ArchiveUpdated { .. } => "archive_updated",
-            Event::SessionRolled { .. } => "session_rolled",
-            Event::SessionResumed { .. } => "session_resumed",
-            Event::SessionCompacted { .. } => "session_compacted",
-            Event::SessionReady => "session_ready",
-            Event::ConfigChanged { .. } => "config_changed",
-            Event::ModeChanged(_) => "mode_changed",
-            Event::LoginStarted { .. } => "login_started",
-            Event::SignedIn { .. } => "signed_in",
-            Event::LoginRestored { .. } => "login_restored",
-            Event::SignedOut { .. } => "signed_out",
-            Event::Notice(_) => "notice",
-            Event::Error(_) => "error",
-            Event::ApprovalRequested { .. } => "approval_requested",
-            Event::SessionRulesUpdated(_) => "session_rules_updated",
-            Event::TasksUpdated(_) => "tasks_updated",
-            Event::BackgroundShellsUpdated(_) => "background_shells_updated",
-        }
-    }
 }
 
 #[cfg(test)]
