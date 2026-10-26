@@ -42,10 +42,10 @@ Manual and automatic compaction both pass the engine's list to `Engine::replace_
 
 ## Sources
 
-- `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::tasks`, adopted after each turn.
 - `crates/ox-core/src/engine/compaction.rs`: `Engine::run_compaction`, which carries the list into the compact boundary.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round`, which emits `TasksUpdated` and records `ToolRound::tasks`.
 - `crates/ox-core/src/engine/sessions.rs`: `emit_restored_tasks`.
+- `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::tasks`, adopted after each turn.
 - `crates/ox-core/src/engine/turn.rs`: `TurnReport::tasks`.
 - `crates/ox-core/src/protocol.rs`: `Event::TasksUpdated`.
 - `crates/ox-core/src/session/entry.rs`: the `tasks` field in `Entry::Compact`.
