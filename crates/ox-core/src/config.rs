@@ -30,12 +30,12 @@ use tracing::warn;
 use self::auth::{Auth, AuthSource, CredentialError, LoginUnavailable, PendingAuth};
 pub(crate) use self::base_url::BaseUrl;
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
-use self::gateway::{GatewayCompat, GatewaySnapshot};
+use self::gateway::{GatewayCompat, GatewaySnapshot, ResolvedGateway};
 use self::load::Loaded;
 use self::merge::Origins;
 use self::oauth::ClaudeCodeKeychain;
 use self::provenance::{Provenance, Source, Sourced, TierPattern};
-use self::schema::{ClientAuth, FileConfig, PermissionTable, TierTable};
+use self::schema::{ClientAuth, FileConfig, PermissionTable, ThemeTable, TierTable, TuiTable};
 use crate::model::{Effort, ModelSpec, PromptCacheTtl};
 use crate::permission::defaults::Shipped;
 use crate::permission::{Mode, Policy, Tier, Workspace};
@@ -273,7 +273,7 @@ impl Config {
             tui,
         } = config;
 
-        let gateway = GatewayCompat::from_client(&client)?;
+        let gateway = GatewayCompat::resolve(&client, &origins)?;
 
         let base_url = resolve_base_url(
             env_string("ANTHROPIC_BASE_URL")
@@ -286,8 +286,7 @@ impl Config {
             check_ca_bundle,
         )?;
 
-        let (auth, pending_auth) =
-            resolve_explicit_auth(client.api_key, client.auth, &origins, &gateway)?;
+        let (auth, pending_auth) = resolve_explicit_auth(client.auth, &origins, &gateway)?;
 
         let model_id = env_string("OX_MODEL")
             .or_else(|| origins.sourced("client.model", client.model))
@@ -296,24 +295,14 @@ impl Config {
 
         let effort = resolve_effort(&model, client.effort, &origins)?;
 
-        let max_tokens = Sourced::from_option(
-            env_number("OX_MAX_TOKENS", 1..=u32::MAX)?
-                .or_else(|| origins.sourced("client.max_tokens", client.max_tokens)),
-        );
-        let max_tool_rounds = Sourced::from_option(
-            env_number("OX_MAX_TOOL_ROUNDS", 1..=u32::MAX)?
-                .or_else(|| origins.sourced("client.max_tool_rounds", client.max_tool_rounds)),
-        );
-
-        let show_thinking = env_bool("OX_SHOW_THINKING")?
-            .or_else(|| origins.sourced("tui.show_thinking", tui.show_thinking))
-            .unwrap_or_else(|| Sourced::fallback(false));
-
-        let show_welcome = env_bool("OX_SHOW_WELCOME")?
-            .or_else(|| origins.sourced("tui.show_welcome", tui.show_welcome))
-            .unwrap_or_else(|| Sourced::fallback(true));
-
-        let status_line = resolve_status_line(origins.sourced("tui.status_line", tui.status_line))?;
+        let max_tokens = resolve_max(
+            "OX_MAX_TOKENS",
+            origins.sourced("client.max_tokens", client.max_tokens),
+        )?;
+        let max_tool_rounds = resolve_max(
+            "OX_MAX_TOOL_ROUNDS",
+            origins.sourced("client.max_tool_rounds", client.max_tool_rounds),
+        )?;
 
         let prompt_cache_ttl = env_parse::<PromptCacheTtl>("OX_PROMPT_CACHE_TTL")?
             .or_else(|| origins.sourced("client.prompt_cache_ttl", client.prompt_cache_ttl))
@@ -328,13 +317,7 @@ impl Config {
 
         let permission = resolve_permission(permission, &origins, cwd)?;
 
-        let theme = ThemeConfig {
-            base: tui.theme.base.unwrap_or_else(|| DEFAULT_THEME.to_owned()),
-            base_source: origins.source("tui.theme.base"),
-            overrides: tui.theme.overrides,
-        };
-        let theme_overrides = origins.sources_under("tui.theme.overrides");
-        let [custom_headers, attribution, structured_outputs] = gateway_sources(&origins);
+        let tui = resolve_tui(tui, &origins)?;
 
         let provenance = Provenance {
             model: model_id.source,
@@ -342,20 +325,20 @@ impl Config {
             auth: auth.source,
             base_url: base_url.source,
             extra_ca_certs: extra_ca_certs.source,
-            custom_headers,
-            attribution,
-            structured_outputs,
+            custom_headers: gateway.custom_headers.source,
+            attribution: gateway.attribution.source,
+            structured_outputs: gateway.structured_outputs.source,
             layers: origins.into_layers(),
             max_tokens: max_tokens.source,
             max_tool_rounds: max_tool_rounds.source,
             prompt_cache_ttl: prompt_cache_ttl.source,
             compaction: compaction.source,
             permission_mode: permission.mode_source,
-            show_thinking: show_thinking.source,
-            show_welcome: show_welcome.source,
-            status_line: status_line.source,
-            theme: theme.base_source.clone(),
-            theme_overrides,
+            show_thinking: tui.show_thinking.source,
+            show_welcome: tui.show_welcome.source,
+            status_line: tui.status_line.source,
+            theme: tui.theme.base_source.clone(),
+            theme_overrides: tui.theme_overrides,
             extra_roots: permission.extra_roots,
             rules: permission.rules,
             disabled_defaults: permission.disabled_defaults,
@@ -369,17 +352,21 @@ impl Config {
             signed_out: None,
             base_url: base_url.value,
             extra_ca_certs: extra_ca_certs.value,
-            gateway,
+            gateway: GatewayCompat {
+                custom_headers: gateway.custom_headers.value,
+                attribution: gateway.attribution.value,
+                structured_outputs: gateway.structured_outputs.value,
+            },
             max_tokens: max_tokens.value,
             max_tool_rounds: max_tool_rounds.value,
             prompt_cache_ttl: prompt_cache_ttl.value,
             compaction: compaction.value,
             permission: permission.policy,
             workspace: permission.workspace,
-            show_thinking: show_thinking.value,
-            show_welcome: show_welcome.value,
-            status_line: status_line.value,
-            theme,
+            show_thinking: tui.show_thinking.value,
+            show_welcome: tui.show_welcome.value,
+            status_line: tui.status_line.value,
+            theme: tui.theme,
             provenance,
         })
     }
@@ -504,57 +491,32 @@ fn resolve_base_url(base_url: Sourced<String>) -> Result<Sourced<BaseUrl>> {
 /// one, the source is the default, since [`Config::resolve_auth`] falls back to a stored login, and
 /// the header check covers the OAuth header that a stored login or `/login` sends.
 fn resolve_explicit_auth(
-    file_api_key: Option<String>,
     file_auth: Option<ClientAuth>,
     origins: &Origins,
-    gateway: &GatewayCompat,
+    gateway: &ResolvedGateway,
 ) -> Result<(Sourced<Option<Auth>>, Option<PendingAuth>)> {
-    let mut explicit = auth::explicit_credentials(file_api_key).into_iter();
-    let mut auth = auth::first_explicit(explicit.by_ref().take(2));
-    let mut pending = None;
-    if auth.is_none() {
-        if let Some(file_auth) = file_auth {
-            (auth, pending) = auth::configured_auth(file_auth)?;
-        }
-        if auth.is_none() && pending.is_none() {
-            auth = auth::first_explicit(explicit);
-        }
-    }
-    let source = auth
-        .as_ref()
-        .map(Auth::source)
-        .or_else(|| pending.as_ref().map(|pending| pending.source))
-        .unwrap_or(AuthSource::OxLogin);
-    let header_setting = if env::string(gateway::CUSTOM_HEADERS_VAR).is_some() {
-        gateway::CUSTOM_HEADERS_VAR
-    } else {
-        "client.headers"
+    let config = match file_auth {
+        Some(file_auth) => auth::configured_auth(file_auth)?,
+        None => None,
     };
-    gateway.check_credential_header_from(source, header_setting)?;
+    let explicit = auth::first_explicit(config)?;
+    let source = explicit
+        .as_ref()
+        .map_or(AuthSource::OxLogin, auth::ExplicitAuth::source);
+    gateway.check_credential_header(source)?;
 
     let source = match source {
-        AuthSource::ApiKeyFile => origins.source("client.api_key"),
         AuthSource::ClientBearer | AuthSource::ClientApiKey | AuthSource::ClientOAuth => {
             origins.source("client.auth")
         }
         source => source.env_var().map_or(Source::Default, Source::Env),
     };
+    let (auth, pending) = match explicit {
+        Some(auth::ExplicitAuth::Inline(auth)) => (Some(auth), None),
+        Some(auth::ExplicitAuth::File(pending)) => (None, Some(pending)),
+        None => (None, None),
+    };
     Ok((Sourced::new(auth, source), pending))
-}
-
-fn gateway_sources(origins: &Origins) -> [Source; 3] {
-    [
-        (gateway::CUSTOM_HEADERS_VAR, "client.headers"),
-        ("CLAUDE_CODE_ATTRIBUTION_HEADER", "client.attribution"),
-        (
-            "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
-            "client.structured_outputs",
-        ),
-    ]
-    .map(|(var, key)| match Source::env_if_set(var) {
-        Source::Default => origins.source(key),
-        source => source,
-    })
 }
 
 /// The effort the model takes. A pick the model ignores leaves the source at the default.
@@ -569,6 +531,63 @@ fn resolve_effort(
         Some(pick) if effort.is_some() => Sourced::new(effort, pick.source),
         _ => Sourced::fallback(effort),
     })
+}
+
+/// The TUI settings with the source of each.
+struct ResolvedTui {
+    show_thinking: Sourced<bool>,
+    show_welcome: Sourced<bool>,
+    status_line: Sourced<Vec<StatusLineSegment>>,
+    theme: ThemeConfig,
+    theme_overrides: Vec<Source>,
+}
+
+/// Reads `tui.*`, letting each environment variable replace the file value.
+fn resolve_tui(tui: TuiTable, origins: &Origins) -> Result<ResolvedTui> {
+    let (theme, theme_overrides) = resolve_theme(tui.theme, origins);
+    Ok(ResolvedTui {
+        show_thinking: resolve_flag(
+            "OX_SHOW_THINKING",
+            origins.sourced("tui.show_thinking", tui.show_thinking),
+            false,
+        )?,
+        show_welcome: resolve_flag(
+            "OX_SHOW_WELCOME",
+            origins.sourced("tui.show_welcome", tui.show_welcome),
+            true,
+        )?,
+        status_line: resolve_status_line(origins.sourced("tui.status_line", tui.status_line))?,
+        theme,
+        theme_overrides,
+    })
+}
+
+/// The resolved theme and the layers that set any override slot.
+fn resolve_theme(theme: ThemeTable, origins: &Origins) -> (ThemeConfig, Vec<Source>) {
+    let base = ThemeConfig {
+        base: theme.base.unwrap_or_else(|| DEFAULT_THEME.to_owned()),
+        base_source: origins.source("tui.theme.base"),
+        overrides: theme.overrides,
+    };
+    (base, origins.sources_under("tui.theme.overrides"))
+}
+
+/// `var` > `file` > `None`, a whole-number cap.
+fn resolve_max(var: &'static str, file: Option<Sourced<u32>>) -> Result<Sourced<Option<u32>>> {
+    Ok(Sourced::from_option(
+        env_number(var, 1..=u32::MAX)?.or(file),
+    ))
+}
+
+/// `var` > `file` > `default`, a boolean setting.
+fn resolve_flag(
+    var: &'static str,
+    file: Option<Sourced<bool>>,
+    default: bool,
+) -> Result<Sourced<bool>> {
+    Ok(env_bool(var)?
+        .or(file)
+        .unwrap_or_else(|| Sourced::fallback(default)))
 }
 
 /// `OX_STATUS_LINE` > `tui.status_line` > the default roster.
@@ -774,7 +793,7 @@ mod tests {
             },
             ..test_config(
                 "https://api.example.test",
-                Auth::new(AuthSource::ClaudeCodeLogin, "token-must-not-leak"),
+                Auth::test(AuthSource::ClaudeCodeLogin, "token-must-not-leak"),
                 "claude-test-1-0",
             )
         }
@@ -1252,15 +1271,32 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn boolean_env_errors_name_the_variable_and_values() {
+            for var in ["OX_SHOW_THINKING", "OX_SHOW_WELCOME"] {
+                let dir = tempfile::tempdir().unwrap();
+
+                let err = load_with(&dir, &[(var, "maybe")])
+                    .await
+                    .expect_err("an invalid flag must fail config load");
+
+                assert_eq!(
+                    format!("{err:#}"),
+                    format!(
+                        "invalid {var} \"maybe\": expected one of 1, true, yes, on, 0, false, no, off"
+                    ),
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn propagates_invalid_config_file() {
             let dir = tempfile::tempdir().unwrap();
             let user = write_user_config(
                 dir.path(),
-                indoc! {r#"
+                indoc! {"
                     [client]
-                    api_key = "sk-from-file"
                     show_thinking = true
-                "#},
+                "},
             );
 
             let err = load_with(&dir, &[("ANTHROPIC_API_KEY", "")])
@@ -1270,8 +1306,8 @@ mod tests {
             assert_eq!(
                 format!("{err:#}"),
                 format!(
-                    "invalid config at {}: line 3, column 1, in `client`: \
-                     unknown field `show_thinking`, expected one of `api_key`, `auth`, `base_url`, \
+                    "invalid config at {}: line 2, column 1, in `client`: \
+                     unknown field `show_thinking`, expected one of `auth`, `base_url`, \
                      `extra_ca_certs`, `headers`, `attribution`, `structured_outputs`, `model`, \
                      `effort`, `max_tokens`, `max_tool_rounds`, \
                      `prompt_cache_ttl`, `compaction`",
@@ -1490,7 +1526,7 @@ mod tests {
                 dir.path(),
                 indoc! {r#"
                     [client]
-                    api_key = "sk-from-file"
+                    auth = { type = "api-key", value = "sk-from-file" }
                 "#},
             );
             let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "sk-from-env")])
@@ -1506,11 +1542,11 @@ mod tests {
                 dir.path(),
                 indoc! {r#"
                     [client]
-                    api_key = "sk-from-file"
+                    auth = { type = "api-key", value = "sk-from-file" }
                 "#},
             );
             let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "")]).await.unwrap();
-            assert_auth(&config, AuthSource::ApiKeyFile, "sk-from-file");
+            assert_auth(&config, AuthSource::ClientApiKey, "sk-from-file");
             assert_eq!(config.provenance.auth, Source::File(user));
         }
 
@@ -1680,7 +1716,7 @@ mod tests {
                     AuthSource::AuthTokenEnv,
                     "gateway-token",
                 ),
-                (None, true, AuthSource::ApiKeyFile, "sk-from-file"),
+                (None, true, AuthSource::ClientApiKey, "sk-from-file"),
                 (None, false, AuthSource::OAuthTokenEnv, "oauth-token"),
             ] {
                 let dir = tempfile::tempdir().unwrap();
@@ -1689,7 +1725,7 @@ mod tests {
                         dir.path(),
                         indoc! {r#"
                             [client]
-                            api_key = "sk-from-file"
+                            auth = { type = "api-key", value = "sk-from-file" }
                         "#},
                     );
                 }
@@ -1785,7 +1821,7 @@ mod tests {
                 format!("{err:#}"),
                 "no credentials for https://gateway.example.com. \
                  Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
-                 or add `api_key` to ~/ox/config.toml. \
+                 or add a credential under `[client.auth]` in ~/ox/config.toml. \
                  Stored logins are sent only to the Anthropic API.",
             );
         }

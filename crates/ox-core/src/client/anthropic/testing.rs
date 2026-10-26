@@ -57,5 +57,5 @@ pub(crate) fn sse_body(frames: &[serde_json::Value]) -> String {
 }
 
 pub(crate) fn api_key() -> Auth {
-    Auth::new(AuthSource::ApiKeyEnv, "k")
+    Auth::test(AuthSource::ApiKeyEnv, "k")
 }

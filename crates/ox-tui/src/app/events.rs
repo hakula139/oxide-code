@@ -352,10 +352,6 @@ impl App {
             AuthSource::OxLogin | AuthSource::ClaudeCodeLogin => {
                 format!("Signed in. Requests now use {auth}.")
             }
-            AuthSource::ApiKeyFile => format!(
-                "Signed in. {auth} takes precedence, so requests keep using it. \
-                 Remove `client.api_key` and restart ox to use the new login."
-            ),
             AuthSource::ClientBearer | AuthSource::ClientApiKey | AuthSource::ClientOAuth => {
                 format!(
                     "Signed in. {auth} takes precedence, so requests keep using it. \
@@ -1903,12 +1899,6 @@ mod tests {
                     "Signed in. \
                      API key (ANTHROPIC_API_KEY) takes precedence, so requests keep using it. \
                      Unset it and restart ox to use the new login.",
-                ),
-                (
-                    AuthSource::ApiKeyFile,
-                    "Signed in. \
-                     API key (client.api_key) takes precedence, so requests keep using it. \
-                     Remove `client.api_key` and restart ox to use the new login.",
                 ),
                 (
                     AuthSource::ClientBearer,

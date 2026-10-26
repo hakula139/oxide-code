@@ -13,7 +13,7 @@ use super::schema::FileConfig;
 use crate::permission::project::{ProjectFileError, resolve_project_file};
 use crate::permission::{Tier, extra_root};
 use crate::util::path::{XdgBase, app_dir, tildify};
-use crate::util::toml::{describe_error, locate_error};
+use crate::util::toml::{error_location, redacted_message};
 
 const CONFIG_FILE: &str = "config.toml";
 const DROP_IN_DIR: &str = "config.d";
@@ -182,39 +182,35 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     // The typed parse reports unknown keys and bad values with their line and column, and the rules
     // and roots resolve here so a malformed one names its file before the lists concatenate.
     let invalid = || format!("invalid config at {}", path.display());
-    // A project file can link to another file in the checkout, and a parser message can quote one
-    // of its values, as in `invalid type: string "..."`, so a project error gives only where it is.
+    // A value can be a credential, so a private key or a project file keeps only ox's own words
+    // from a parser message: field names, expected shapes, and accepted values.
     let invalid_toml = |e: toml::de::Error| {
-        let location = locate_error(&content, &e);
-        let expected = location.as_ref().and_then(|location| {
-            if location.contains("`client.api_key") {
-                Some("expected client.api_key to be a string")
-            } else if location.contains("`client.auth") {
-                Some("expected client.auth type bearer, api-key, oauth, or login with a valid source")
-            } else if location.contains("`client.headers") {
-                Some("expected client.headers to map header names to string values")
-            } else {
-                None
-            }
-        });
-        let detail = if let Some(expected) = expected {
-            location.map(|location| format!("{location}: {expected}"))
-        } else if layer.is_project() {
-            locate_error(&content, &e)
+        let location = error_location(&content, &e);
+        let private = location.key.as_deref().is_some_and(is_private_key);
+        let message = if private || layer.is_project() {
+            safe_message(&e)
         } else {
-            Some(describe_error(&content, &e))
+            Some(e.message().to_owned())
         };
+        let detail = join_detail(location.describe(), message);
         detail.map_or_else(
             || anyhow!(invalid()),
             |detail| anyhow!("{}: {detail}", invalid()),
         )
     };
     let table: Table = content.parse().map_err(invalid_toml)?;
+    let parsed: Result<FileConfig, toml::de::Error> = toml::from_str(&content);
     if layer.is_project() {
+        // An unknown key names a key that does not exist, so report that before the allowlist
+        // advises moving it. A known key outside the allowlist reports the allowlist rule.
+        if let Err(e) = &parsed
+            && e.message().starts_with("unknown field")
+        {
+            return Err(invalid_toml(e.clone()));
+        }
         reject_project_keys(&table, path)?;
     }
-    let config: FileConfig = toml::from_str(&content).map_err(invalid_toml)?;
-    config.client.validate().with_context(invalid)?;
+    let config = parsed.map_err(invalid_toml)?;
     let permission = &config.permission;
     for (tier, table) in [
         (Tier::Deny, &permission.deny),
@@ -230,6 +226,41 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     }
     debug!(path = %path.display(), "loaded config");
     Ok(Some(table))
+}
+
+/// Keys whose values can carry a credential, so an error must not echo them. `client` itself is
+/// private because a scalar there could be a pasted secret.
+fn is_private_key(key: &str) -> bool {
+    key == "client"
+        || ["client.auth", "client.headers"].iter().any(|prefix| {
+            key == *prefix
+                || key
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
+}
+
+/// The parser message with any value removed, or a config type's own message, which names settings
+/// but never their values.
+fn safe_message(e: &toml::de::Error) -> Option<String> {
+    let message = e.message();
+    let custom = [
+        "client.auth",
+        "invalid client.auth",
+        "invalid client.headers",
+    ];
+    if custom.iter().any(|prefix| message.starts_with(prefix)) {
+        Some(message.to_owned())
+    } else {
+        redacted_message(e)
+    }
+}
+
+fn join_detail(location: Option<String>, message: Option<String>) -> Option<String> {
+    match (location, message) {
+        (Some(location), Some(message)) => Some(format!("{location}: {message}")),
+        (location, message) => location.or(message),
+    }
 }
 
 /// Project-config allowlists. Keys that can change credentials, endpoints, TLS trust, or permission
@@ -267,14 +298,17 @@ fn reject_project_keys(table: &Table, path: &Path) -> Result<()> {
     bail!(
         "{} cannot set {}. \
          A project file may only set {} in [client] and add deny and ask rules in [permission]. \
-         Set other keys in {} or a config.d drop-in, \
-         credentials in environment variables, \
-         and the mode with OX_PERMISSION_MODE.",
+         Set other keys in {} or a config.d drop-in, and credentials in environment variables.",
         path.display(),
         blocked.join(", "),
-        PROJECT_CLIENT_KEYS.join(", "),
+        list_with_and(PROJECT_CLIENT_KEYS),
         user_config_hint(),
     )
+}
+
+fn list_with_and(items: &[&str]) -> String {
+    let (last, rest) = items.split_last().expect("the list is not empty");
+    format!("{}, and {last}", rest.join(", "))
 }
 
 /// The dotted names of the keys in the `section` table of `table`, the root when empty, that are
@@ -315,6 +349,7 @@ mod tests {
     use super::*;
     use crate::config::StatusLineSegment;
     use crate::config::provenance::Source;
+    use crate::config::schema::{AuthValue, ClientAuth};
     use crate::model::{Effort, PromptCacheTtl};
     use crate::permission::Mode;
     use crate::permission::defaults::Shipped;
@@ -801,7 +836,7 @@ mod tests {
                 &dir.path().join("config.toml"),
                 indoc! {r##"
                     [client]
-                    api_key = "sk-test"
+                    auth = { type = "api-key", value = "sk-test" }
                     model = "claude-test"
                     base_url = "https://test.example.com"
                     max_tokens = 4096
@@ -833,7 +868,10 @@ mod tests {
             let config = read(&Layer::User(path));
 
             let client = config.client;
-            assert_eq!(client.api_key.as_deref(), Some("sk-test"));
+            assert!(matches!(
+                client.auth,
+                Some(ClientAuth::ApiKey(AuthValue::Value(ref key))) if key == "sk-test"
+            ));
             assert_eq!(client.model.as_deref(), Some("claude-test"));
             assert_eq!(client.base_url.as_deref(), Some("https://test.example.com"));
             assert_eq!(client.max_tokens, Some(4096));
@@ -992,7 +1030,7 @@ mod tests {
         }
 
         #[test]
-        fn project_error_gives_only_its_location() {
+        fn a_project_value_error_names_accepted_values_without_the_value() {
             let dir = tempfile::tempdir().unwrap();
             let path = write(
                 &dir.path().join("config.toml"),
@@ -1013,10 +1051,12 @@ mod tests {
             assert_eq!(
                 format!("{project:#}"),
                 format!(
-                    "invalid config at {}: line 2, column 10, in `client.effort`",
+                    "invalid config at {}: line 2, column 10, in `client.effort`: \
+                     expected one of `low`, `medium`, `high`, `xhigh`, `max`",
                     path.display()
                 ),
             );
+            assert!(!format!("{project:#}").contains("secret-marker"));
         }
 
         #[test]
@@ -1104,14 +1144,9 @@ mod tests {
         fn rejects_every_key_outside_the_project_allowlists() {
             let dir = tempfile::tempdir().unwrap();
             let body = indoc! {r#"
-                trust = true
-
                 [client]
-                api_key = "sk-project"
                 base_url = "https://capture.invalid"
                 extra_ca_certs = "./attacker-ca.pem"
-                later_key = true
-                compaction.later_key = true
 
                 [permission]
                 mode = "yolo"
@@ -1133,19 +1168,66 @@ mod tests {
             assert_eq!(
                 format!("{err:#}"),
                 format!(
-                    "{} cannot set trust, client.api_key, client.base_url, \
-                     client.extra_ca_certs, client.later_key, client.compaction.later_key, \
+                    "{} cannot set client.base_url, client.extra_ca_certs, \
                      permission.allow, permission.defaults, permission.extra_roots, \
                      permission.mode. \
                      A project file may only set \
-                     model, effort, max_tokens, max_tool_rounds, prompt_cache_ttl, compaction \
+                     model, effort, max_tokens, max_tool_rounds, prompt_cache_ttl, and compaction \
                      in [client] and add deny and ask rules in [permission]. \
                      Set other keys in ~/config-home/ox/config.toml or a config.d drop-in, \
-                     credentials in environment variables, \
-                     and the mode with OX_PERMISSION_MODE.",
+                     and credentials in environment variables.",
                     path.display(),
                 )
             );
+        }
+
+        #[test]
+        fn reports_an_unknown_project_key_as_unknown() {
+            // cspell:ignore modle
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = write(
+                &dir.path().join(".ox/config.toml"),
+                indoc! {r#"
+                    [client]
+                    modle = "private-token-sentinel"
+                "#},
+            );
+
+            let err = read_layer(&Layer::Project(path.clone())).expect_err("a typo must fail");
+            let message = format!("{err:#}");
+
+            assert!(
+                message.contains("unknown field `modle`, expected one of"),
+                "{message}"
+            );
+            assert!(!message.contains("cannot set"), "{message}");
+            assert!(!message.contains("private-token-sentinel"), "{message}");
+        }
+
+        #[test]
+        fn names_the_accepted_values_of_a_project_enum_and_range() {
+            for (body, expected, value) in [
+                (
+                    "[client]\neffort = 'huge'\n",
+                    "expected one of `low`, `medium`, `high`, `xhigh`, `max`",
+                    "huge",
+                ),
+                (
+                    "[client]\nmax_tokens = 0\n",
+                    "expected a whole number from 1 to 4294967295",
+                    "`0`",
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = write(&dir.path().join(".ox/config.toml"), body);
+
+                let err = read_layer(&Layer::Project(path.clone())).expect_err(body);
+                let message = format!("{err:#}");
+
+                assert!(message.contains(expected), "{message}");
+                assert!(!message.contains(value), "{message}");
+            }
         }
 
         #[test]
@@ -1191,6 +1273,30 @@ mod tests {
                 Some(vec!["git push *".to_owned()])
             );
             assert_eq!(config.tui.show_welcome, Some(false));
+        }
+    }
+
+    mod join_detail {
+        use super::*;
+
+        #[test]
+        fn joins_whichever_parts_an_error_records() {
+            for (location, message, expected) in [
+                (
+                    Some("line 1, column 2".to_owned()),
+                    Some("expected a string".to_owned()),
+                    Some("line 1, column 2: expected a string".to_owned()),
+                ),
+                (Some("line 1".to_owned()), None, Some("line 1".to_owned())),
+                (
+                    None,
+                    Some("expected a string".to_owned()),
+                    Some("expected a string".to_owned()),
+                ),
+                (None, None, None),
+            ] {
+                assert_eq!(join_detail(location, message), expected);
+            }
         }
     }
 }

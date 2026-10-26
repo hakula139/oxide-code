@@ -509,39 +509,42 @@ mod tests {
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
                 let data = tempfile::tempdir().unwrap();
-                temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
-                    let mut engine =
-                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                    engine.client.set_auth(None);
-                    engine.oauth_token_url = format!("{}/token", server.uri());
-                    let mut handle = engine.spawn();
+                Box::pin(temp_env::async_with_vars(
+                    [("XDG_DATA_HOME", Some(data.path()))],
+                    async {
+                        let mut engine =
+                            engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                        engine.client.set_auth(None);
+                        engine.oauth_token_url = format!("{}/token", server.uri());
+                        let mut handle = engine.spawn();
 
-                    handle.ops.send(Op::Login).await.unwrap();
-                    let (url, _) = login_urls(&mut handle.events).await;
-                    let reply = return_from_browser(&url, "code=auth-code").await;
-                    let signed_in = handle.events.recv().await;
-                    let turn = submit(&mut handle, "hi").await;
-                    handle.shutdown().await.unwrap();
+                        handle.ops.send(Op::Login).await.unwrap();
+                        let (url, _) = login_urls(&mut handle.events).await;
+                        let reply = return_from_browser(&url, "code=auth-code").await;
+                        let signed_in = handle.events.recv().await;
+                        let turn = submit(&mut handle, "hi").await;
+                        handle.shutdown().await.unwrap();
 
-                    assert!(reply.starts_with("HTTP/1.1 302 Found\r\n"), "{reply}");
-                    assert!(
-                        matches!(
-                            signed_in,
-                            Some(Event::SignedIn {
-                                auth: AuthSource::OxLogin
-                            })
-                        ),
-                        "{signed_in:?}"
-                    );
-                    assert!(matches!(turn.last(), Some(Event::TurnComplete)), "{turn:?}");
-                    let requests = server.received_requests().await.unwrap();
-                    let prompt = requests
-                        .iter()
-                        .find(|request| request.url.path() == "/v1/messages")
-                        .expect("the prompt reaches the API");
-                    assert_eq!(prompt.headers["authorization"], "Bearer fresh-access");
-                    assert!(data.path().join("ox").join("credentials.json").exists());
-                })
+                        assert!(reply.starts_with("HTTP/1.1 302 Found\r\n"), "{reply}");
+                        assert!(
+                            matches!(
+                                signed_in,
+                                Some(Event::SignedIn {
+                                    auth: AuthSource::OxLogin
+                                })
+                            ),
+                            "{signed_in:?}"
+                        );
+                        assert!(matches!(turn.last(), Some(Event::TurnComplete)), "{turn:?}");
+                        let requests = server.received_requests().await.unwrap();
+                        let prompt = requests
+                            .iter()
+                            .find(|request| request.url.path() == "/v1/messages")
+                            .expect("the prompt reaches the API");
+                        assert_eq!(prompt.headers["authorization"], "Bearer fresh-access");
+                        assert!(data.path().join("ox").join("credentials.json").exists());
+                    },
+                ))
                 .await;
             })
             .await;
@@ -675,13 +678,13 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let sink = CapturingSink::default();
-                let ox_login = || Auth::new(AuthSource::OxLogin, "ox-token");
+                let ox_login = || Auth::test(AuthSource::OxLogin, "ox-token");
 
                 engine.adopt_login(&sink, ox_login());
                 assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
                 for before in [
                     None,
-                    Some(Auth::new(AuthSource::ClaudeCodeLogin, "claude-code-token")),
+                    Some(Auth::test(AuthSource::ClaudeCodeLogin, "claude-code-token")),
                 ] {
                     engine.client.set_auth(before);
                     engine.retry_login = true;
@@ -762,7 +765,7 @@ mod tests {
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                     engine
                         .client
-                        .set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                        .set_auth(Some(Auth::test(AuthSource::OxLogin, "ox-token")));
                     let sink = CapturingSink::default();
                     let claude_code_file = std::env::home_dir()
                         .unwrap()
@@ -863,7 +866,7 @@ mod tests {
                     .await;
                     engine
                         .client
-                        .set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                        .set_auth(Some(Auth::test(AuthSource::OxLogin, "ox-token")));
                     let sink = CapturingSink::default();
 
                     engine.logout(&sink).await;
