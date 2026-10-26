@@ -16,7 +16,7 @@ use anyhow::{Result, anyhow, bail};
 use ox_core::util::git::{output_async, output_async_capped};
 
 use super::context::SlashContext;
-use super::registry::{BackgroundOutput, SlashCommand, SlashOutcome};
+use super::registry::{SlashCommand, SlashOutcome};
 
 // ── DiffCmd ──
 
@@ -38,9 +38,9 @@ impl SlashCommand for DiffCmd {
                 .await
                 .map_err(|e| format!("Failed to collect working-tree changes: {e:#}"))?;
             Ok(if diff.is_empty() {
-                BackgroundOutput::SystemMessage("Working tree clean".to_owned())
+                SlashOutcome::SystemMessage("Working tree clean".to_owned())
             } else {
-                BackgroundOutput::GitDiff(diff)
+                SlashOutcome::GitDiff(diff)
             })
         })))
     }
@@ -247,7 +247,7 @@ mod tests {
     mod execute {
         use super::*;
 
-        async fn execute_at(project_root: &Path) -> Result<BackgroundOutput, String> {
+        async fn execute_at(project_root: &Path) -> Result<SlashOutcome, String> {
             let mut info = test_session_info();
             info.project_root = project_root.to_owned();
             let task = DiffCmd
@@ -264,7 +264,7 @@ mod tests {
             let output = execute_at(&repo).await.expect("clean repo is Ok");
 
             assert!(
-                matches!(&output, BackgroundOutput::SystemMessage(text) if text == "Working tree clean"),
+                matches!(&output, SlashOutcome::SystemMessage(text) if text == "Working tree clean"),
                 "{output:?}",
             );
         }
@@ -286,7 +286,7 @@ mod tests {
                 .expect("dirty repo is Ok");
 
             assert!(
-                matches!(&output, BackgroundOutput::GitDiff(diff)
+                matches!(&output, SlashOutcome::GitDiff(diff)
                     if diff.rows[0] == DiffRow::File("top.txt".to_owned())
                         && diff.untracked == ["outside.txt", "sub/here.txt"]),
                 "{output:?}",

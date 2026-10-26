@@ -15,7 +15,7 @@ use ox_core::util::time::now_local;
 
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
-use super::registry::{BackgroundOutput, SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{
     CLEAR_THEN_DELETE_HINT, format_metadata_line, open_store, resolve_error_message,
 };
@@ -63,7 +63,7 @@ impl SlashCommand for DeleteCmd {
                 .map_err(|e| resolve_error_message(&e, Some(CLEAR_THEN_DELETE_HINT)))?;
             let title = display_title(&info).to_owned();
             let metadata = metadata_line(&info, now_local());
-            Ok(BackgroundOutput::Modal(Box::new(
+            Ok(SlashOutcome::Modal(Box::new(
                 ConfirmDeleteSessionModal::new(
                     info.path,
                     info.session_id,
@@ -142,7 +142,7 @@ mod tests {
         use super::*;
 
         /// Runs `/delete` and awaits the background lookup behind its confirm modal.
-        async fn run_execute(args: &str) -> Result<BackgroundOutput, String> {
+        async fn run_execute(args: &str) -> Result<SlashOutcome, String> {
             run_background(&DeleteCmd, args).await
         }
 

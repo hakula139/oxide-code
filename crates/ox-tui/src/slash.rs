@@ -30,7 +30,7 @@ mod theme;
 pub(crate) use self::context::SlashContext;
 pub(crate) use self::diff::{DiffRow, WorkingTreeDiff};
 pub(crate) use self::matcher::MatchedCommand;
-pub(crate) use self::registry::{ArgCompletion, BackgroundOutput, SlashKind, SlashOutcome};
+pub(crate) use self::registry::{ArgCompletion, SlashKind, SlashOutcome};
 pub use self::resume::ResumePicker;
 
 use futures::TryFutureExt as _;
@@ -68,7 +68,8 @@ pub(crate) fn echoes_input(parsed: &Parsed) -> bool {
 }
 
 /// Resolves and runs `parsed` against the built-in registry. `Err` carries the chat-ready message
-/// for an unknown or failed command, as does a failed [`SlashOutcome::Background`] task.
+/// for an unknown or failed command, as does a failed [`SlashOutcome::Background`] task. The task
+/// resolves to the outcome to apply, so `Background` never nests.
 pub(crate) fn dispatch(parsed: &Parsed, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
     dispatch_with(registry::BUILT_INS, parsed, ctx)
 }

@@ -18,12 +18,11 @@ use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::{capitalize_first, plural};
 
 use super::queue::FailedTurn;
-use super::{App, CopyNotice};
+use super::{App, CopyNotice, SlashTask};
 use crate::clipboard::{CopyReport, Delivery};
 use crate::components::status::Status;
 use crate::git_probes::GitUpdate;
 use crate::modal::approval::ApprovalModal;
-use crate::slash::BackgroundOutput;
 use crate::{NOTICE_DURATION, now};
 
 impl App {
@@ -480,18 +479,19 @@ impl App {
             .is_some()
     }
 
-    /// Prints what a background slash command resolved to. A panicked task only logs, since the
-    /// panic hook already reports the panic.
-    pub(super) fn apply_slash_task(
-        &mut self,
-        finished: Result<Result<BackgroundOutput, String>, JoinError>,
-    ) {
+    /// Applies what a background slash command resolved to through the same path as a typed one,
+    /// after re-checking the idle gate the command passed at submit. A panicked task only logs,
+    /// since the panic hook already reports the panic.
+    pub(super) fn apply_slash_task(&mut self, finished: Result<SlashTask, JoinError>) {
         match finished {
-            Ok(Ok(BackgroundOutput::SystemMessage(text))) => self.chat.push_system_message(text),
-            Ok(Ok(BackgroundOutput::GitDiff(diff))) => self.chat.push_git_diff(diff),
-            Ok(Ok(BackgroundOutput::Forward(action))) => self.dispatch_action(action),
-            Ok(Ok(BackgroundOutput::Modal(modal))) => self.modals.push(modal),
-            Ok(Err(msg)) => self.chat.push_error(&msg),
+            Ok(task) if self.allows_mutating(&task.name, task.kind) => {
+                if let Some(action) =
+                    self.apply_slash_outcome(task.outcome, &task.name, task.kind, &task.line)
+                {
+                    self.dispatch_action(action);
+                }
+            }
+            Ok(_) => {}
             Err(e) => warn!(error = %e, "background slash command failed"),
         }
         self.dirty = true;
@@ -533,7 +533,7 @@ mod tests {
     use crate::glyphs::INTERRUPTED_MARKER;
     use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
-    use crate::slash::{ResumePicker, WorkingTreeDiff};
+    use crate::slash::{ResumePicker, SlashOutcome, WorkingTreeDiff};
     use crate::theme::builtin;
 
     fn bash_call_start(id: &str, command: &str) -> Event {
@@ -1392,9 +1392,14 @@ mod tests {
         async fn session_rolled_drops_the_old_session_slash_tasks() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.slash_tasks.spawn(async {
-                Ok(BackgroundOutput::SystemMessage(
-                    "old session's output".to_owned(),
-                ))
+                SlashTask {
+                    name: "diff".to_owned(),
+                    kind: None,
+                    line: "/diff".to_owned(),
+                    outcome: Ok(SlashOutcome::SystemMessage(
+                        "old session's output".to_owned(),
+                    )),
+                }
             });
 
             app.handle_engine_event(Event::SessionRolled {
@@ -2453,28 +2458,32 @@ mod tests {
     mod apply_slash_task {
         use super::*;
 
-        async fn finish(
-            output: Result<BackgroundOutput, String>,
-        ) -> Result<Result<BackgroundOutput, String>, JoinError> {
-            tokio::spawn(async { output }).await
+        async fn finish(outcome: Result<SlashOutcome, String>) -> Result<SlashTask, JoinError> {
+            tokio::spawn(async move {
+                SlashTask {
+                    name: "diff".to_owned(),
+                    kind: None,
+                    line: "/diff".to_owned(),
+                    outcome,
+                }
+            })
+            .await
         }
 
         #[tokio::test]
-        async fn prints_the_message_diff_or_error_the_task_resolved_to() {
+        async fn applies_the_message_diff_or_error_the_task_resolved_to() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let diff = WorkingTreeDiff {
                 untracked: vec!["new.txt".to_owned()],
                 ..WorkingTreeDiff::default()
             };
 
-            app.apply_slash_task(
-                finish(Ok(BackgroundOutput::SystemMessage("clean".to_owned()))).await,
-            );
+            app.apply_slash_task(finish(Ok(SlashOutcome::SystemMessage("clean".to_owned()))).await);
 
             assert_eq!(app.chat.last_system_text(), Some("clean"));
 
             app.dirty = false;
-            app.apply_slash_task(finish(Ok(BackgroundOutput::GitDiff(diff))).await);
+            app.apply_slash_task(finish(Ok(SlashOutcome::GitDiff(diff))).await);
 
             assert!(app.dirty);
             assert!(rendered_text(&mut app, 60, 24).contains("  new.txt"));
@@ -2487,7 +2496,7 @@ mod tests {
         #[tokio::test]
         async fn a_panicked_task_prints_nothing() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            let mut tasks = JoinSet::<Result<BackgroundOutput, String>>::new();
+            let mut tasks = JoinSet::<SlashTask>::new();
             tasks.spawn(async { panic!("task bug") });
             let finished = tasks.join_next().await.expect("one task spawned");
 

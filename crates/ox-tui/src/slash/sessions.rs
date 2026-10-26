@@ -1,7 +1,6 @@
 //! Store access, error messages, and metadata lines for the commands that act on saved sessions.
 
 use std::fmt::Write as _;
-use std::path::Path;
 
 use time::OffsetDateTime;
 
@@ -17,12 +16,8 @@ use crate::session_info::LiveSessionInfo;
 
 /// Opens the store scoped to the session's project.
 pub(super) fn open_store(info: &LiveSessionInfo) -> Result<SessionStore, String> {
-    open_store_at(&info.cwd, &info.project_root)
-}
-
-/// Variant of [`open_store`] that takes explicit paths, suitable for a background task.
-pub(super) fn open_store_at(cwd: &Path, project_root: &Path) -> Result<SessionStore, String> {
-    SessionStore::open(cwd, project_root).map_err(|e| format!("Session store unavailable: {e:#}"))
+    SessionStore::open(&info.cwd, &info.project_root)
+        .map_err(|e| format!("Session store unavailable: {e:#}"))
 }
 
 // ── Error Messages ──

@@ -9,7 +9,7 @@ use ox_core::session::entry::{ArchiveState, SessionInfo};
 use ox_core::session::resolver::{ResolveError, resolve_saved_prefix_blocking};
 
 use super::context::SlashContext;
-use super::registry::{BackgroundOutput, SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{BARE_ARCHIVE_HINT, open_store, resolve_error_message};
 use crate::action::Action;
 
@@ -92,7 +92,7 @@ impl SlashCommand for UnarchiveCmd {
         Ok(SlashOutcome::Background(Box::pin(async move {
             match resolve_saved_prefix_blocking(store, prefix, live_id).await {
                 Ok(info) => Ok(apply_archived(&info, ArchiveState::Active)),
-                Err(ResolveError::Live { .. }) => Ok(BackgroundOutput::SystemMessage(
+                Err(ResolveError::Live { .. }) => Ok(SlashOutcome::SystemMessage(
                     "The live session is not archived".to_owned(),
                 )),
                 Err(e) => Err(resolve_error_message(&e, None)),
@@ -103,18 +103,18 @@ impl SlashCommand for UnarchiveCmd {
 
 // ── Helpers ──
 
-fn apply_archived(info: &SessionInfo, target: ArchiveState) -> BackgroundOutput {
+fn apply_archived(info: &SessionInfo, target: ArchiveState) -> SlashOutcome {
     if info.archive_state == target {
         let state = match target {
             ArchiveState::Active => "not archived",
             ArchiveState::Archived => "already archived",
         };
-        return BackgroundOutput::SystemMessage(format!(
+        return SlashOutcome::SystemMessage(format!(
             "Session {} is {state}",
             id_prefix(&info.session_id),
         ));
     }
-    BackgroundOutput::Forward(Action::Op(Op::SetArchive {
+    SlashOutcome::Forward(Action::Op(Op::SetArchive {
         path: info.path.clone(),
         session_id: info.session_id.clone(),
         state: target,
@@ -140,12 +140,12 @@ mod tests {
 
     /// Runs `cmd`, applies the archive write the engine would, and returns what the command
     /// reports, so a test reads the same outcome the App applies.
-    async fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<BackgroundOutput, String> {
+    async fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
         let outcome = match crate::slash::registry::testing::run_execute(cmd, args)? {
             SlashOutcome::Background(task) => task.await?,
-            outcome => return Ok(BackgroundOutput::Forward(outcome.into_forward())),
+            outcome => return Ok(outcome),
         };
-        let BackgroundOutput::Forward(Action::Op(Op::SetArchive {
+        let SlashOutcome::Forward(Action::Op(Op::SetArchive {
             path,
             session_id,
             state,
@@ -155,7 +155,7 @@ mod tests {
         };
         saved::set_archived(&path, &session_id, state, &test_session_info().session_id)
             .map_err(|error| saved_error_message(&error, Some(BARE_ARCHIVE_HINT)))?;
-        Ok(BackgroundOutput::SystemMessage(archive_notice(
+        Ok(SlashOutcome::SystemMessage(archive_notice(
             &session_id,
             state,
         )))

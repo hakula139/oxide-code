@@ -35,7 +35,7 @@ use crate::git_probes::GitProbes;
 use crate::modal::{Modal, ModalStack};
 use crate::now;
 use crate::session_info::LiveSessionInfo;
-use crate::slash::BackgroundOutput;
+use crate::slash::{SlashKind, SlashOutcome};
 use crate::terminal::{Tui, TuiBackend};
 use crate::theme::{Theme, ThemeOverrides};
 
@@ -75,7 +75,7 @@ pub(crate) struct App {
     pending_clipboard: Option<String>,
     copy_notice: Option<CopyNotice>,
     /// Background slash commands still running for the live session.
-    slash_tasks: JoinSet<Result<BackgroundOutput, String>>,
+    slash_tasks: JoinSet<SlashTask>,
     queue: PromptQueue,
     should_quit: bool,
     dirty: bool,
@@ -86,6 +86,15 @@ struct CopyNotice {
     text: String,
     failed: bool,
     until: Instant,
+}
+
+/// A slash command running off the event loop. It carries the command's name and kind so its
+/// result faces the idle gate again, and the typed line that heads a forwarded prompt.
+struct SlashTask {
+    name: String,
+    kind: Option<SlashKind>,
+    line: String,
+    outcome: Result<SlashOutcome, String>,
 }
 
 pub(crate) struct AppHistory {

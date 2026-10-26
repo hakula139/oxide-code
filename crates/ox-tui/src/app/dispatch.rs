@@ -15,7 +15,7 @@ use ox_core::command::{self, Parsed};
 use ox_core::protocol::{Op, SignInCode};
 
 use super::queue::QueuedPrompt;
-use super::{App, EXIT_WINDOW};
+use super::{App, EXIT_WINDOW, SlashTask};
 use crate::action::{APP_KEYMAP, Action, AppAction, next_mode};
 use crate::components::input::InputOutcome;
 use crate::components::status::Status;
@@ -403,14 +403,11 @@ impl App {
         if echoes {
             self.chat.push_user_message(text.to_owned());
         }
-        if !idle && slash::classify(&parsed) == Some(SlashKind::Mutating) {
-            self.chat.push_system_message(format!(
-                "/{} runs only when idle. Try again after the turn finishes.",
-                parsed.name,
-            ));
+        let kind = slash::classify(&parsed);
+        if !self.allows_mutating(&parsed.name, kind) {
             return;
         }
-        if let Some(action) = self.run_slash(&parsed, text) {
+        if let Some(action) = self.run_slash(&parsed, text, kind) {
             self.dispatch_action(action);
         }
     }
@@ -485,21 +482,44 @@ impl App {
 
     /// Runs `parsed`, the command the user typed as `line`, and applies its outcome, returning the
     /// action it asks the caller to route.
-    fn run_slash(&mut self, parsed: &Parsed, line: &str) -> Option<Action> {
+    fn run_slash(
+        &mut self,
+        parsed: &Parsed,
+        line: &str,
+        kind: Option<SlashKind>,
+    ) -> Option<Action> {
         let ctx = SlashContext::new(&self.session_info, self.status_bar.title());
         let outcome = slash::dispatch(parsed, &ctx);
-        self.apply_slash_outcome(outcome, line)
+        self.apply_slash_outcome(outcome, &parsed.name, kind, line)
     }
 
-    /// Shows a slash command's chat output or modal, or starts its background task. Returns a
-    /// forwarded action, or the [`Action::SlashPrompt`] that runs a built prompt under the typed
-    /// `line`, unapplied. Must run inside a tokio runtime.
-    fn apply_slash_outcome(
+    /// Refuses a `Mutating` command while the App is busy, naming it in a chat notice. Both the
+    /// submit-time check and a background task's result pass through here, since a task can finish
+    /// after a turn or another session operation starts. Returns whether the command may run.
+    pub(super) fn allows_mutating(&mut self, name: &str, kind: Option<SlashKind>) -> bool {
+        if self.status.is_idle() || kind != Some(SlashKind::Mutating) {
+            return true;
+        }
+        self.chat.push_system_message(format!(
+            "/{name} runs only when idle. Try again after the turn finishes.",
+        ));
+        false
+    }
+
+    /// Applies a slash command's outcome: shows its chat output or modal, starts its background
+    /// task, or hands back the action it forwards or the [`Action::SlashPrompt`] that runs a built
+    /// prompt under the typed `line`, unapplied. `name` and `kind` ride along so a task's result
+    /// faces the idle gate again. Must run inside a tokio runtime.
+    pub(super) fn apply_slash_outcome(
         &mut self,
         outcome: Result<SlashOutcome, String>,
+        name: &str,
+        kind: Option<SlashKind>,
         line: &str,
     ) -> Option<Action> {
         match outcome {
+            Ok(SlashOutcome::SystemMessage(text)) => self.chat.push_system_message(text),
+            Ok(SlashOutcome::GitDiff(diff)) => self.chat.push_git_diff(diff),
             Ok(SlashOutcome::Forward(action)) => return Some(action),
             Ok(SlashOutcome::Prompt(prompt)) => {
                 return Some(Action::SlashPrompt {
@@ -508,7 +528,18 @@ impl App {
                 });
             }
             Ok(SlashOutcome::Modal(modal)) => self.modals.push(modal),
-            Ok(SlashOutcome::Background(task)) => _ = self.slash_tasks.spawn(task),
+            Ok(SlashOutcome::Background(task)) => {
+                let name = name.to_owned();
+                let line = line.to_owned();
+                _ = self.slash_tasks.spawn(async move {
+                    SlashTask {
+                        name,
+                        kind,
+                        line,
+                        outcome: task.await,
+                    }
+                });
+            }
             Err(msg) => self.chat.push_error(&msg),
         }
         None
@@ -557,7 +588,6 @@ mod tests {
     };
     use crate::components::status::StatusHyperlink;
     use crate::modal::testing::ScriptedModal;
-    use crate::slash::BackgroundOutput;
     use crate::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};
     use crate::testing::{key_event, mouse_event, mouse_event_at};
     use crate::theme::{ThemeOverrides, builtin, resolve_theme};
@@ -2714,24 +2744,44 @@ mod tests {
                     app.handle_engine_event(Event::StreamToken("partial".to_owned()));
                 }
 
-                let handed_back = app.apply_slash_outcome(Err("/diff: boom".to_owned()), "/diff");
+                let handed_back = app.apply_slash_outcome(
+                    Err("/diff: boom".to_owned()),
+                    "diff",
+                    Some(SlashKind::ReadOnly),
+                    "/diff",
+                );
 
                 assert_eq!(handed_back, None);
                 assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
 
                 let modal = SlashOutcome::Modal(Box::new(FakeModal::new("picker")));
-                let handed_back = app.apply_slash_outcome(Ok(modal), "/theme");
+                let handed_back = app.apply_slash_outcome(
+                    Ok(modal),
+                    "theme",
+                    Some(SlashKind::ReadOnly),
+                    "/theme",
+                );
 
                 assert_eq!(handed_back, None);
                 assert!(app.modals.is_active());
 
                 let forward = SlashOutcome::Forward(Action::Op(Op::Clear));
-                let handed_back = app.apply_slash_outcome(Ok(forward), "/clear");
+                let handed_back = app.apply_slash_outcome(
+                    Ok(forward),
+                    "clear",
+                    Some(SlashKind::Mutating),
+                    "/clear",
+                );
 
                 assert_eq!(handed_back, Some(Action::Op(Op::Clear)));
 
                 let prompt = SlashOutcome::Prompt("Create AGENTS.md".to_owned());
-                let handed_back = app.apply_slash_outcome(Ok(prompt), "/init AGENTS.md");
+                let handed_back = app.apply_slash_outcome(
+                    Ok(prompt),
+                    "init",
+                    Some(SlashKind::Mutating),
+                    "/init AGENTS.md",
+                );
 
                 assert_eq!(
                     handed_back,
@@ -2753,10 +2803,11 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             let (tx, rx) = tokio::sync::oneshot::channel::<String>();
             let task = SlashOutcome::Background(Box::pin(async move {
-                Ok(BackgroundOutput::SystemMessage(rx.await.unwrap()))
+                Ok(SlashOutcome::SystemMessage(rx.await.unwrap()))
             }));
 
-            let handed_back = app.apply_slash_outcome(Ok(task), "/diff");
+            let handed_back =
+                app.apply_slash_outcome(Ok(task), "diff", Some(SlashKind::ReadOnly), "/diff");
 
             assert_eq!(handed_back, None);
             assert_eq!(app.chat.entry_count(), 0);
@@ -2766,6 +2817,86 @@ mod tests {
             app.apply_slash_task(finished);
 
             assert_eq!(app.chat.last_system_text(), Some("done"));
+        }
+    }
+
+    mod mutating_gate {
+        use super::*;
+
+        /// Seeds a saved session, submits `/{cmd}` for its prefix, then starts a turn before the
+        /// command's background task finishes.
+        fn seed_and_start_turn(app: &mut App, id: &str, cmd: &str) {
+            let store = ox_core::session::store::SessionStore::open(
+                &app.session_info.cwd,
+                &app.session_info.project_root,
+            )
+            .unwrap();
+            seed_test_session(
+                &store,
+                id,
+                Some("Saved"),
+                Some(1),
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+
+            app.handle_submit_prompt(&format!("/{cmd} {}", &id[..8]));
+            app.handle_submit_prompt("run the suite");
+
+            assert_eq!(app.status, Status::Streaming);
+        }
+
+        #[tokio::test]
+        async fn a_mid_turn_archive_result_is_dropped() {
+            with_isolated_xdg_async(|_| async {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                let id = stamped_id(0xab);
+                seed_and_start_turn(&mut app, &id, "archive");
+                while rx.try_recv().is_ok() {}
+
+                let finished = app.slash_tasks.join_next().await.expect("the lookup runs");
+                app.apply_slash_task(finished);
+
+                assert_eq!(
+                    app.status,
+                    Status::Streaming,
+                    "the mid-turn result leaves the turn alone",
+                );
+                assert_eq!(
+                    rx.try_recv(),
+                    Err(TryRecvError::Empty),
+                    "no SetArchive goes out mid-turn",
+                );
+                assert_eq!(
+                    app.chat.last_system_text(),
+                    Some("/archive runs only when idle. Try again after the turn finishes."),
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn a_mid_turn_delete_result_opens_no_modal() {
+            with_isolated_xdg_async(|_| async {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                let id = stamped_id(0xab);
+                seed_and_start_turn(&mut app, &id, "delete");
+                while rx.try_recv().is_ok() {}
+
+                let finished = app.slash_tasks.join_next().await.expect("the lookup runs");
+                app.apply_slash_task(finished);
+
+                assert_eq!(app.status, Status::Streaming);
+                assert!(
+                    !app.modals.is_active(),
+                    "no confirm modal opens over a running turn",
+                );
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+                assert_eq!(
+                    app.chat.last_system_text(),
+                    Some("/delete runs only when idle. Try again after the turn finishes."),
+                );
+            })
+            .await;
         }
     }
 }

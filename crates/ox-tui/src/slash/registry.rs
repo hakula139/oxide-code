@@ -27,71 +27,32 @@ use super::theme::ThemeCmd;
 use crate::action::Action;
 use crate::modal::Modal;
 
-/// What a command hands back for the App to apply.
+/// What a command hands back for the App to apply, at submit or once its background task finishes.
 pub(crate) enum SlashOutcome {
+    /// Shows a system line in chat and stays idle.
+    SystemMessage(String),
+    /// Replaces the diff panel with `diff`.
+    GitDiff(WorkingTreeDiff),
     /// Dispatches a state-mutating action, applied locally or sent to the engine as an op.
     Forward(Action),
     /// Starts a turn with a prompt the command built, headed by the line the user typed.
     Prompt(String),
     /// Opens a modal over the input. The modal is the command's whole response.
     Modal(Box<dyn Modal>),
-    /// Runs off the event loop so slow I/O does not stall input or rendering, then prints its
-    /// result into chat. A session switch drops it unfinished.
-    Background(BoxFuture<'static, Result<BackgroundOutput, String>>),
-}
-
-/// What a [`SlashOutcome::Background`] command resolves to, applied once it finishes.
-pub(crate) enum BackgroundOutput {
-    SystemMessage(String),
-    GitDiff(WorkingTreeDiff),
-    /// An [`Action`] the App dispatches through the same path as a typed one.
-    Forward(Action),
-    /// A modal the App opens.
-    Modal(Box<dyn Modal>),
-}
-
-impl std::fmt::Debug for BackgroundOutput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SystemMessage(text) => f.debug_tuple("SystemMessage").field(text).finish(),
-            Self::GitDiff(diff) => f.debug_tuple("GitDiff").field(diff).finish(),
-            Self::Forward(action) => f.debug_tuple("Forward").field(action).finish(),
-            Self::Modal(_) => f.write_str("Modal(<modal>)"),
-        }
-    }
+    /// Runs off the event loop so slow I/O does not stall input or rendering, then applies the
+    /// outcome it resolves to, never a nested `Background`. A session switch drops it unfinished.
+    Background(BoxFuture<'static, Result<SlashOutcome, String>>),
 }
 
 impl std::fmt::Debug for SlashOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SystemMessage(text) => f.debug_tuple("SystemMessage").field(text).finish(),
+            Self::GitDiff(diff) => f.debug_tuple("GitDiff").field(diff).finish(),
             Self::Forward(action) => f.debug_tuple("Forward").field(action).finish(),
             Self::Prompt(prompt) => f.debug_tuple("Prompt").field(prompt).finish(),
             Self::Modal(_) => f.write_str("Modal(<modal>)"),
             Self::Background(_) => f.write_str("Background(<task>)"),
-        }
-    }
-}
-
-#[cfg(test)]
-impl BackgroundOutput {
-    pub(super) fn into_forward(self) -> Action {
-        match self {
-            Self::Forward(action) => action,
-            other => panic!("expected Forward, got {other:?}"),
-        }
-    }
-
-    pub(super) fn into_modal(self) -> Box<dyn Modal> {
-        match self {
-            Self::Modal(modal) => modal,
-            other => panic!("expected Modal, got {other:?}"),
-        }
-    }
-
-    pub(super) fn into_system_message(self) -> String {
-        match self {
-            Self::SystemMessage(text) => text,
-            other => panic!("expected SystemMessage, got {other:?}"),
         }
     }
 }
@@ -112,7 +73,14 @@ impl SlashOutcome {
         }
     }
 
-    pub(super) fn into_background(self) -> BoxFuture<'static, Result<BackgroundOutput, String>> {
+    pub(super) fn into_system_message(self) -> String {
+        match self {
+            Self::SystemMessage(text) => text,
+            other => panic!("expected SystemMessage, got {other:?}"),
+        }
+    }
+
+    pub(super) fn into_background(self) -> BoxFuture<'static, Result<SlashOutcome, String>> {
         match self {
             Self::Background(task) => task,
             other => panic!("expected Background, got {other:?}"),
@@ -210,7 +178,7 @@ pub(super) fn lookup_in<'a>(
 
 #[cfg(test)]
 pub(super) mod testing {
-    use super::{BackgroundOutput, SlashCommand, SlashContext, SlashOutcome};
+    use super::{SlashCommand, SlashContext, SlashOutcome};
     use crate::session_info::testing::test_session_info;
 
     /// Runs `cmd` with `args` against [`test_session_info`] and no session title.
@@ -222,7 +190,7 @@ pub(super) mod testing {
     pub(crate) async fn run_background(
         cmd: &dyn SlashCommand,
         args: &str,
-    ) -> Result<BackgroundOutput, String> {
+    ) -> Result<SlashOutcome, String> {
         match run_execute(cmd, args)? {
             SlashOutcome::Background(task) => task.await,
             other => panic!("expected a background outcome, got {other:?}"),
@@ -290,6 +258,14 @@ mod tests {
         #[test]
         fn debug_names_each_variant() {
             let modal = SlashOutcome::Modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            assert_eq!(
+                format!("{:?}", SlashOutcome::SystemMessage("clean".to_owned())),
+                r#"SystemMessage("clean")"#
+            );
+            assert!(
+                format!("{:?}", SlashOutcome::GitDiff(WorkingTreeDiff::default()))
+                    .starts_with("GitDiff("),
+            );
             assert_eq!(
                 format!("{:?}", SlashOutcome::Forward(Action::Op(Op::Clear))),
                 "Forward(Op(Clear))"
