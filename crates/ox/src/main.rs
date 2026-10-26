@@ -324,17 +324,20 @@ enum ConfigAction {
 }
 
 fn main() -> ExitCode {
-    try_main().unwrap_or_else(|e| {
-        _ = writeln!(
-            io::stderr(),
-            "Error: {}",
-            util::text::escape_controls(&format!("{e:#}"))
-        );
-        ExitCode::FAILURE
-    })
+    match try_main() {
+        Ok(exit) => exit.code(),
+        Err(e) => {
+            _ = writeln!(
+                io::stderr(),
+                "Error: {}",
+                util::text::escape_controls(&format!("{e:#}"))
+            );
+            ExitCode::FAILURE
+        }
+    }
 }
 
-fn try_main() -> Result<ExitCode> {
+fn try_main() -> Result<Exit> {
     let offset_error = util::time::init_local_offset().err();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -350,7 +353,7 @@ fn try_main() -> Result<ExitCode> {
         // tokio's stdin reader can stay blocked in `read`, and a regular drop waits for it.
         runtime.shutdown_background();
     }
-    Ok(exit.code())
+    Ok(exit)
 }
 
 async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {

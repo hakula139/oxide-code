@@ -7,6 +7,14 @@ mod stdio;
 
 use std::process::ExitCode;
 
+// ── Input ──
+
+/// Decodes text read from stdin, replacing each invalid sequence with U+FFFD, so one stray byte
+/// does not end the run, as `process.stdin.setEncoding` does in Claude Code.
+pub(crate) fn decode_input(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 // ── Exit Status ──
 
 /// How a driver ended, mapped to the process exit status by [`Exit::code`].
@@ -18,11 +26,13 @@ pub(crate) enum Exit {
 }
 
 impl Exit {
+    /// The process exit status. A signal ends the process by that signal on Unix, so a shell
+    /// waiting on `ox` stops as it does for git.
     pub(crate) fn code(self) -> ExitCode {
         match self {
             Self::Success => ExitCode::SUCCESS,
             Self::Failure => ExitCode::FAILURE,
-            Self::Signal(signal) => ExitCode::from(signal.exit_status()),
+            Self::Signal(signal) => signal.code(),
         }
     }
 }
@@ -40,7 +50,28 @@ pub(crate) enum Shutdown {
 }
 
 impl Shutdown {
-    /// 128 plus the signal number, following the shell convention.
+    /// The process exit status. On Unix, restoring the default disposition and raising the signal
+    /// makes the process die by it, as git does after its cleanup, so `xargs` and shells that tell
+    /// a signaled child from `exit(130)` stop their loop.
+    fn code(self) -> ExitCode {
+        #[cfg(unix)]
+        {
+            // Aborts when it cannot restore or raise the signal, so it does not return.
+            _ = signal_hook::low_level::emulate_default_handler(self.number());
+        }
+        ExitCode::from(self.exit_status())
+    }
+
+    #[cfg(unix)]
+    const fn number(self) -> i32 {
+        match self {
+            Self::Hangup => signal_hook::consts::SIGHUP,
+            Self::Interrupt => signal_hook::consts::SIGINT,
+            Self::Terminate => signal_hook::consts::SIGTERM,
+        }
+    }
+
+    /// 128 plus the signal number, which Windows and the Unix fallback report.
     const fn exit_status(self) -> u8 {
         match self {
             #[cfg(unix)]

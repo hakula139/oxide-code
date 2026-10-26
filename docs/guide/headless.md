@@ -10,7 +10,7 @@ ox -p "Fix the failing test" --output stream-json   # Stream every event as a JS
 ox -c -p "Run the tests again"                      # Continue the latest session
 ```
 
-- **Input**: When stdin is not a terminal, `ox -p` reads it to the end and attaches it after the prompt in a `<stdin>` block, so the model can tell your instruction from the data. Piped stdin without a prompt, as in `ox -p < task.md`, is the prompt itself, and a run with neither fails with status `2`. A script or program that runs `ox` with an open stdin it never closes, such as a pipe it never writes to, leaves `ox` waiting, and after 3 seconds `ox` says so on stderr. Redirect stdin from `/dev/null` to keep it away from `ox`.
+- **Input**: When stdin is not a terminal, `ox -p` reads it to the end and attaches it after the prompt in a `<stdin>` block, so the model can tell your instruction from the data. Piped stdin without a prompt, as in `ox -p < task.md`, is the prompt itself, and a run with neither fails with status `2`. Bytes that are not valid UTF-8 are replaced with U+FFFD, so a stray byte in a diff or log does not end the run. A script or program that runs `ox` with an open stdin it never closes, such as a pipe it never writes to, leaves `ox` waiting, and after 3 seconds `ox` says so on stderr. Redirect stdin from `/dev/null` to keep it away from `ox`.
 - **Sessions**: Each run starts and saves a new session, unless `-c` continues the latest one or `-r <id-prefix>` names one. Resume a run's session later with `ox -r <id-prefix>`, in the TUI or with another `-p`.
 - **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial names the user config change that would permit the call when one would, such as an allow pattern, turning off a built-in rule, or both, and otherwise the rule that made it ask. Add `allow` patterns for the calls your script needs, as described in [Rules](permissions.md#rules). Pass `--mode plan` to keep a run read-only, or `--mode yolo` to run every tool call that no deny rule or ask rule of yours holds. In `manual`, a `bash` command that uses shell syntax `ox` cannot analyze is denied, and its denial names the construct and asks the model to rewrite it as plain commands. Since `yolo` runs whatever an `exec` pattern misses, run untrusted work inside a sandbox or container, as [Modes](permissions.md#modes) explains.
 
@@ -34,7 +34,7 @@ Every format also writes tool calls, the task list, retries, notices, and errors
 | `1`                 | The turn failed, output could not be written, or `ox` could not start the turn |
 | `2`                 | The command line was invalid, such as an unknown `--output`, or gave no prompt |
 | `101`               | `ox` crashed, and the JSON formats still print a `failed` result               |
-| `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM stopped the run                                     |
+| `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM ended the run, which then dies by that signal       |
 
 If `ox` cannot start a run, for example because of a configuration or credential error, it prints the error to stderr and emits no result.
 
@@ -150,8 +150,8 @@ Display text can change in any release. This includes a tool call's `icon`, `lab
 
 `ox --no-tui` reads prompts from stdin and keeps them in one session. It prints each reply to stdout in the `text` format, while its `>` prompt and all other output go to stderr. Use it when the TUI cannot run or to pipe a series of prompts into one session.
 
-- **Input**: Each line is a prompt, except while an approval waits for its answer, so pasting several lines starts one turn per line. A prompt argument, as in `ox --no-tui "Explain this repo"`, runs before the first line. Blank lines are skipped. The end of input or `/exit` exits the program, as does **Ctrl+D** in a terminal. Lines after `/exit` are not read.
+- **Input**: Each line is a prompt, except while an approval waits for its answer, so pasting several lines starts one turn per line. A prompt argument, as in `ox --no-tui "Explain this repo"`, runs before the first line. Blank lines are skipped. Bytes that are not valid UTF-8 are replaced with U+FFFD. The end of input or `/exit` exits the program, as does **Ctrl+D** in a terminal. Lines after `/exit` are not read.
 - **Commands**: A subset of the slash commands runs, as listed in [When Commands Run](slash-commands.md#when-commands-run).
 - **Approvals**: In a terminal, a call that needs approval prints its command or diff, and the rule that made it ask when one did, then waits for a letter: `y` approves, `a` allows matching calls for the rest of the session when the call offers that, `n` denies, `f` denies with feedback for the model, and `x` aborts the turn. With piped input, no approval is requested, and those calls are denied as in a `-p` run.
 - **Interrupting**: In a terminal, **Ctrl+C** during a turn stops it and returns to the prompt, and at the prompt it discards the line, as in a shell. With piped input, **Ctrl+C** ends the run.
-- **Exit status**: The end of input or `/exit` exits with `1` if a prompt failed, a command was rejected, or output could not be written, and with `0` otherwise. A signal that ends the run exits with the status listed in the [table](#exit-status).
+- **Exit status**: The end of input or `/exit` exits with `1` if a prompt failed, a command was rejected, or output could not be written, and with `0` otherwise. A signal that ends the run makes `ox` die by that signal, which a shell reports as the status in the [table](#exit-status).

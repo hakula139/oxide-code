@@ -58,14 +58,15 @@ pub(crate) async fn read_prompt(prompt: Option<&str>) -> Result<Option<String>> 
 }
 
 /// Reads `input` to its end. If `input` stays open past `delay`, as a pipe that a parent program
-/// never closes does, it writes one notice to `notice` and keeps reading.
+/// never closes does, it writes one notice to `notice` and keeps reading. Bytes that are not valid
+/// UTF-8 are replaced, so one stray byte in a diff or log does not end the run.
 async fn read_input(
     mut input: impl AsyncRead + Unpin,
     notice: &mut impl Write,
     delay: Duration,
 ) -> io::Result<String> {
-    let mut text = String::new();
-    let mut read = pin!(input.read_to_string(&mut text));
+    let mut bytes = Vec::new();
+    let mut read = pin!(input.read_to_end(&mut bytes));
     tokio::select! {
         read = &mut read => read?,
         () = tokio::time::sleep(delay) => {
@@ -77,7 +78,7 @@ async fn read_input(
             read.await?
         }
     };
-    Ok(text)
+    Ok(super::decode_input(&bytes))
 }
 
 /// The prompt a headless run sends: `prompt` followed by `stdin` in a `<stdin>` block, or whichever
@@ -368,6 +369,19 @@ mod tests {
             assert_eq!(
                 (text.unwrap().as_str(), notice.as_slice()),
                 ("+fix\n", &b""[..])
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn replaces_invalid_utf8_and_keeps_the_text() {
+            let input: &[u8] = b"caf\xe9 log line\n";
+            let mut notice = Vec::new();
+
+            let text = read_input(input, &mut notice, Duration::from_secs(3)).await;
+
+            assert_eq!(
+                (text.unwrap().as_str(), notice.as_slice()),
+                ("caf\u{FFFD} log line\n", &b""[..])
             );
         }
     }

@@ -24,6 +24,9 @@ tokio.workspace = true
 tracing.workspace = true
 unicode-width.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+signal-hook.workspace = true
+
 [dev-dependencies]
 fastrand.workspace = true
 insta.workspace = true
