@@ -17,7 +17,7 @@ use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::text::escape_hidden;
 
 use super::stdio::{Approver, Renderer, StdioSink, render_op, render_queued};
-use super::{Exit, Shutdown, shutdown_signal};
+use super::{Exit, Shutdown, decode_input, shutdown_signal};
 
 /// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session.
 /// EOF after an operation failed, a command was rejected, or output failed exits with failure. An
@@ -248,7 +248,7 @@ impl<R: AsyncBufRead + Unpin, W: Write> Prompter<R, W> {
         if self.input.read_until(b'\n', &mut line).await? == 0 {
             return Ok(None);
         }
-        let text = super::decode_input(&line);
+        let text = decode_input(line);
         Ok(Some(text.trim_end_matches(['\r', '\n']).to_owned()))
     }
 
@@ -317,9 +317,12 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
 
     use indoc::{formatdoc, indoc};
+    use tokio::io::ReadBuf;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -438,36 +441,6 @@ mod tests {
                 assert_eq!(requests.len(), 1, "blank lines never reach the model");
                 let last = requests[0]["messages"].as_array().unwrap().last().unwrap();
                 assert_eq!(last["content"][0]["text"], "hello");
-            })
-            .await;
-        }
-
-        #[tokio::test]
-        async fn replaces_an_invalid_stdin_byte_and_keeps_reading() {
-            with_pinned_home(async {
-                let server = MockServer::start().await;
-                mount_reply(&server, "reply").await;
-                let dir = tempfile::tempdir().unwrap();
-                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let input: &[u8] = b"hello\xff\n/exit\n";
-
-                let exit = Box::pin(drive(
-                    engine.spawn(),
-                    dir.path(),
-                    &CapturingSink::default(),
-                    None,
-                    Prompter::new(input, io::sink()),
-                    true,
-                    no_signal,
-                ))
-                .await
-                .unwrap();
-
-                assert_eq!(exit, Exit::Success);
-                let requests = request_bodies(&server).await;
-                assert_eq!(requests.len(), 1, "the run continues to /exit");
-                let last = requests[0]["messages"].as_array().unwrap().last().unwrap();
-                assert_eq!(last["content"][0]["text"], "hello\u{FFFD}");
             })
             .await;
         }
@@ -1241,23 +1214,12 @@ mod tests {
 
         impl tokio::io::AsyncRead for FailingInput {
             fn poll_read(
-                self: std::pin::Pin<&mut Self>,
-                _: &mut std::task::Context<'_>,
-                _: &mut tokio::io::ReadBuf<'_>,
-            ) -> std::task::Poll<io::Result<()>> {
-                std::task::Poll::Ready(Err(io::Error::other("input failed")))
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Ready(Err(io::Error::other("input failed")))
             }
-        }
-
-        impl tokio::io::AsyncBufRead for FailingInput {
-            fn poll_fill_buf(
-                self: std::pin::Pin<&mut Self>,
-                _: &mut std::task::Context<'_>,
-            ) -> std::task::Poll<io::Result<&[u8]>> {
-                std::task::Poll::Ready(Err(io::Error::other("input failed")))
-            }
-
-            fn consume(self: std::pin::Pin<&mut Self>, _: usize) {}
         }
 
         mod decide {
@@ -1367,7 +1329,7 @@ mod tests {
 
             #[tokio::test]
             async fn aborts_saying_why_when_the_input_cannot_be_read() {
-                let mut prompter = Prompter::new(FailingInput, Vec::new());
+                let mut prompter = Prompter::new(BufReader::new(FailingInput), Vec::new());
 
                 let decision = prompter
                     .decide(&bash_preview("ls"), &Basis::Mode(Mode::Manual), None)
@@ -1448,23 +1410,45 @@ mod tests {
             }
         }
 
+        mod next_line {
+            use super::*;
+
+            #[tokio::test]
+            async fn replaces_an_invalid_byte_and_trims_crlf() {
+                let mut prompter = Prompter::new(&b"hello\xff\r\n"[..], io::sink());
+
+                assert_eq!(
+                    prompter.next_line().await.unwrap().as_deref(),
+                    Some("hello\u{FFFD}"),
+                );
+                assert_eq!(prompter.next_line().await.unwrap(), None);
+            }
+        }
+
         mod ask {
             use super::*;
 
             #[tokio::test]
             async fn reports_output_failure_when_an_input_diagnostic_cannot_be_written() {
-                let mut ended = Prompter::new(&b""[..], FailingOutput::new(Failure::Write("\n")));
-                let diagnostic = ended.ask("Answer: ").await.unwrap_err();
+                let cases: [(Box<dyn AsyncBufRead + Unpin>, Failure); 2] = [
+                    (Box::new(&b""[..]), Failure::Write("\n")),
+                    (
+                        Box::new(BufReader::new(FailingInput)),
+                        Failure::Write("Could not read"),
+                    ),
+                ];
 
-                assert_eq!(diagnostic.to_string(), "lost prompt write");
+                for (input, failure) in cases {
+                    let mut prompter = Prompter::new(input, FailingOutput::new(failure));
 
-                let mut unreadable = Prompter::new(
-                    FailingInput,
-                    FailingOutput::new(Failure::Write("Could not read")),
-                );
-                let diagnostic = unreadable.ask("Answer: ").await.unwrap_err();
+                    let result = prompter.ask("Answer: ").await;
 
-                assert_eq!(diagnostic.to_string(), "lost prompt write");
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        failure.message(),
+                        "{failure:?}"
+                    );
+                }
             }
         }
     }

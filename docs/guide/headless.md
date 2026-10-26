@@ -28,13 +28,13 @@ Every format also writes tool calls, the task list, retries, notices, and errors
 
 ## Exit Status
 
-| Status              | Meaning                                                                        |
-| ------------------- | ------------------------------------------------------------------------------ |
-| `0`                 | The turn completed                                                             |
-| `1`                 | The turn failed, output could not be written, or `ox` could not start the turn |
-| `2`                 | The command line was invalid, such as an unknown `--output`, or gave no prompt |
-| `101`               | `ox` crashed, and the JSON formats still print a `failed` result               |
-| `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM ended the run, which then dies by that signal       |
+| Status              | Meaning                                                                                                              |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `0`                 | The turn completed                                                                                                   |
+| `1`                 | The turn failed, output could not be written, or `ox` could not start the turn                                       |
+| `2`                 | The command line was invalid, such as an unknown `--output`, or gave no prompt                                       |
+| `101`               | `ox` crashed, and the JSON formats still print a `failed` result                                                     |
+| `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM stopped the run, and `ox` died by that signal, which shells report as 128 plus its number |
 
 If `ox` cannot start a run, for example because of a configuration or credential error, it prints the error to stderr and emits no result.
 

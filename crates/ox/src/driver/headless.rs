@@ -18,7 +18,7 @@ use ox_core::protocol::{Event, EventSink, Op, UsageSnapshot};
 use ox_core::util::sync::lock_or_recover;
 
 use super::stdio::{Renderer, StdioSink, Unattended, render_op};
-use super::{Exit, shutdown_signal};
+use super::{Exit, decode_input, shutdown_signal};
 
 /// How long [`read_prompt`] waits on an open stdin before saying what it waits for.
 const STDIN_NOTICE_DELAY: Duration = Duration::from_secs(3);
@@ -58,8 +58,7 @@ pub(crate) async fn read_prompt(prompt: Option<&str>) -> Result<Option<String>> 
 }
 
 /// Reads `input` to its end. If `input` stays open past `delay`, as a pipe that a parent program
-/// never closes does, it writes one notice to `notice` and keeps reading. Bytes that are not valid
-/// UTF-8 are replaced, so one stray byte in a diff or log does not end the run.
+/// never closes does, it writes one notice to `notice` and keeps reading.
 async fn read_input(
     mut input: impl AsyncRead + Unpin,
     notice: &mut impl Write,
@@ -78,7 +77,7 @@ async fn read_input(
             read.await?
         }
     };
-    Ok(super::decode_input(&bytes))
+    Ok(decode_input(bytes))
 }
 
 /// The prompt a headless run sends: `prompt` followed by `stdin` in a `<stdin>` block, or whichever
