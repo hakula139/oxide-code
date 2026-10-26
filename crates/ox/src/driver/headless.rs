@@ -17,9 +17,8 @@ use tokio::sync::mpsc;
 
 use ox_core::command;
 use ox_core::engine::{Engine, EngineHandle, EnginePanic};
-use ox_core::protocol::TurnEnd;
 use ox_core::protocol::notice::ENGINE_STOPPED;
-use ox_core::protocol::{Event, EventSink, Op, UsageSnapshot};
+use ox_core::protocol::{Event, EventSink, Op, TurnEnd, UsageSnapshot};
 use ox_core::util::sync::lock_or_recover;
 
 use super::stdio::{Renderer, StdioSink, Unattended, render_op};
