@@ -213,9 +213,12 @@
           # git-hooks.nix sets a hooks path relative to the main checkout, which linked worktrees
           # cannot resolve (cachix/git-hooks.nix#688). Unset it to use the shared hooks directory.
           # The lock prevents concurrent loads from setting the path during `pre-commit install`,
-          # which rejects it.
+          # which rejects it. Install only when the current repository is this project, since
+          # `nix develop` can borrow this toolchain from a sibling repository.
           shellHook = ''
-            if common=$(${git} rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+            if common=$(${git} rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+              top=$(${git} rev-parse --show-toplevel 2>/dev/null) &&
+              [ -f "$top/crates/ox/Cargo.toml" ]; then
               (
                 ${flock} 9
                 ${preCommit.config.installationScript}
