@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use strum::{IntoStaticStr, VariantArray};
+use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 
 use crate::message::{ContentBlock, Message};
@@ -80,7 +80,8 @@ pub(crate) struct Response {
 /// Why the model stopped. Variants follow Anthropic's `stop_reason` values, which its wire
 /// deserializes directly. `Unknown` keeps a future value from failing the whole `message_delta`
 /// frame, which would also drop its usage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, IntoStaticStr, VariantArray)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, IntoStaticStr)]
+#[cfg_attr(test, derive(strum::VariantArray))]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum StopReason {
@@ -166,6 +167,8 @@ mod tests {
         use super::*;
 
         mod as_str {
+            use strum::VariantArray as _;
+
             use super::*;
 
             #[test]
