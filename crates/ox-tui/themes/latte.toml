@@ -21,6 +21,13 @@ success = "#40a02b"
 warning = "#df8e1d"
 error = "#d20f39"
 
+# Effort gradient
+effort_low = "blue"
+effort_medium = "cyan"
+effort_high = "green"
+effort_xhigh = "magenta"
+effort_max = "red"
+
 # Code
 code = "#179299"
 inline_code = "#e64553"

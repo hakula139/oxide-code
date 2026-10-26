@@ -184,10 +184,7 @@ mod tests {
             let lines = block.render(&RenderCtx::new(80, &theme));
 
             let number_bgs: Vec<_> = lines.iter().map(|line| line.spans[1].style.bg).collect();
-            assert_eq!(
-                number_bgs,
-                [theme.diff_del_row().bg, theme.diff_add_row().bg]
-            );
+            assert_eq!(number_bgs, [theme.diff_del().bg, theme.diff_add().bg]);
         }
 
         #[test]
