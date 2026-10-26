@@ -4,7 +4,7 @@ mod driver;
 mod session_list;
 
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal as _, Write as _};
 use std::path::Path;
 use std::process::ExitCode;
@@ -38,6 +38,10 @@ use ox_tui::theme::resolve_theme;
 
 use self::driver::Exit;
 use self::driver::headless::OutputFormat;
+
+/// The flags that name or continue a session, none of which `--list`, `--archived`, or `--limit`
+/// can be combined with.
+const SESSION_ARGS: &[&str] = &["continue", "print", "prompt", "resume"];
 
 #[derive(Parser)]
 #[command(
@@ -91,7 +95,7 @@ struct Cli {
     #[arg(
         long,
         requires = "list",
-        conflicts_with_all = ["continue", "print", "prompt", "resume"]
+        conflicts_with_all = SESSION_ARGS
     )]
     archived: bool,
 
@@ -104,7 +108,7 @@ struct Cli {
         long,
         value_name = "N",
         requires = "list",
-        conflicts_with_all = ["continue", "print", "prompt", "resume"],
+        conflicts_with_all = SESSION_ARGS,
         value_parser = limit,
         allow_negative_numbers = true,
         default_value_t = DEFAULT_SESSION_LIST_LIMIT
@@ -115,7 +119,7 @@ struct Cli {
     #[arg(
         short,
         long,
-        conflicts_with_all = ["continue", "print", "prompt", "resume"]
+        conflicts_with_all = SESSION_ARGS
     )]
     list: bool,
 
@@ -156,19 +160,26 @@ impl Cli {
     /// Parses the command line, exiting with a usage error as clap does for a combination clap
     /// cannot express.
     fn parse_valid() -> Self {
-        let cli = Self::try_parse()
-            .map_err(unexpected_word)
-            .unwrap_or_else(|e| e.exit());
-        if let Err(e) = cli.validate() {
-            e.exit();
-        }
-        cli
+        Self::parse_valid_from(env::args_os()).unwrap_or_else(|e| e.exit())
+    }
+
+    /// Parses `args` and validates the combinations clap cannot express, returning any usage error
+    /// to the caller.
+    fn parse_valid_from<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString>,
+    {
+        let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+        let cli = Self::try_parse_from(&args).map_err(unexpected_word)?;
+        cli.validate(prompt_after_separator(&args, cli.prompt.as_deref()))?;
+        Ok(cli)
     }
 
     /// Rejects a lone prompt that names a slash command, and the session picker beside a flag that
-    /// skips the TUI or a first prompt.
-    fn validate(&self) -> Result<(), clap::Error> {
-        self.reject_slash_word()?;
+    /// skips the TUI or a first prompt. A prompt after `--` is never a slash-command word.
+    fn validate(&self, prompt_escaped: bool) -> Result<(), clap::Error> {
+        self.reject_slash_word(prompt_escaped)?;
         if !self.opens_picker() {
             return Ok(());
         }
@@ -192,11 +203,11 @@ impl Cli {
 
     /// Rejects a lone prompt such as `ox login`, which users of `git`, `cargo`, and `gh` type
     /// expecting a subcommand. `--` still sends the word as a prompt.
-    fn reject_slash_word(&self) -> Result<(), clap::Error> {
+    fn reject_slash_word(&self, prompt_escaped: bool) -> Result<(), clap::Error> {
         let Some(word) = self.prompt.as_deref() else {
             return Ok(());
         };
-        if !is_built_in(word) {
+        if prompt_escaped || !is_built_in(word) {
             return Ok(());
         }
         Err(Self::command().error(
@@ -293,6 +304,19 @@ fn unexpected_word(error: clap::Error) -> clap::Error {
         ErrorKind::UnknownArgument,
         format!("unexpected argument '{word}' found. Quote a prompt that has spaces."),
     )
+}
+
+/// Returns whether the prompt came after a `--`, which makes a slash-command word a prompt.
+fn prompt_after_separator(args: &[OsString], prompt: Option<&str>) -> bool {
+    let Some(prompt) = prompt else {
+        return false;
+    };
+    let Some(separator) = args.iter().position(|arg| arg == OsStr::new("--")) else {
+        return false;
+    };
+    args[separator + 1..]
+        .iter()
+        .any(|arg| arg.as_os_str() == OsStr::new(prompt))
 }
 
 /// Parses `--limit`, a count of sessions where `0` removes the cap.
@@ -725,11 +749,9 @@ mod tests {
                 (&["ox", "new"], "new"),
                 (&["ox", "-p", "diff"], "diff"),
             ] {
-                let cli = Cli::try_parse_from(args).unwrap();
-
-                let error = cli
-                    .validate()
-                    .expect_err("a slash-command word must not become a prompt");
+                let Err(error) = Cli::parse_valid_from(args.iter().copied()) else {
+                    panic!("a slash-command word must not become a prompt");
+                };
 
                 assert_eq!(error.kind(), ErrorKind::ValueValidation, "{args:?}");
                 assert!(
@@ -748,10 +770,25 @@ mod tests {
                 let cli = Cli::try_parse_from(["ox", prompt]).unwrap();
 
                 assert_eq!(
-                    cli.validate().err().map(|error| error.kind()),
+                    cli.validate(false).err().map(|error| error.kind()),
                     None,
                     "{prompt}",
                 );
+            }
+        }
+
+        #[test]
+        fn a_double_dash_escapes_a_slash_command_word() {
+            for args in [
+                &["ox", "--", "login"][..],
+                &["ox", "--", "config"],
+                &["ox", "--", "help"],
+                &["ox", "-p", "--", "diff"],
+            ] {
+                let cli = Cli::parse_valid_from(args.iter().copied())
+                    .expect("a word after `--` is a prompt");
+
+                assert!(cli.prompt.is_some(), "{args:?}");
             }
         }
 
@@ -831,7 +868,7 @@ mod tests {
                 ] {
                     let cli = Cli::try_parse_from(args).unwrap();
 
-                    let validated = cli.validate();
+                    let validated = cli.validate(false);
 
                     assert!(cli.print, "{args:?}");
                     assert_eq!(validated.err().map(|error| error.kind()), None, "{args:?}");
@@ -847,7 +884,9 @@ mod tests {
                 ] {
                     let cli = Cli::try_parse_from(args).unwrap();
 
-                    let error = cli.validate().expect_err("the picker needs the TUI alone");
+                    let error = cli
+                        .validate(false)
+                        .expect_err("the picker needs the TUI alone");
 
                     assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{args:?}");
                     assert!(
