@@ -71,6 +71,10 @@ Keep each `tracing` message a constant phrase and pass variable data as fields, 
 - Write `use` declarations, re-exports included, with `self::` for a module's children and `super::` for its parent and siblings, following `config/*`. Use `crate::` for more distant modules and test modules, which already glob-import their parent.
 - Import a trait as `Trait as _` when its methods are the only things used, as with `std::fmt::Write as _` and `PermissionsExt as _`. Import it by name only when code refers to the trait itself, such as in a bound. Clippy's `unused_trait_names` lint enforces this.
 
+## Serde
+
+- Omit `#[serde(default)]` on an `Option` field. Derived `Deserialize` already reads a missing key as `None` unless the field sets `deserialize_with`, so pair `Option` fields with `skip_serializing_if = "Option::is_none"` alone.
+
 ## Strings
 
 - Use a raw string (`r"..."`) only when a literal contains characters that would otherwise need escaping, and only when it fits on one line or forms a multiline `indoc!` or `formatdoc!` body. A raw string cannot continue with `\`, so prose that would run past 100 columns, such as a message, a tool description, or the text a test expects, becomes an escaped `\`-continued literal. A single-line machine-format fixture, such as compact JSON or a regex, stays raw at any length.
