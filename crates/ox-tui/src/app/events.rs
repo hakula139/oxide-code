@@ -184,10 +184,7 @@ impl App {
         }
     }
 
-    /// Ends a failed operation. A turn whose automatic compaction failed goes idle with the queue
-    /// held. A turn that never reached the model, or that the engine rolled back, does the same and
-    /// hands its prompts back, one into the empty input for another try. A slash command handed
-    /// back that way gets a note that Enter runs it again.
+    /// Shows `msg` as an error, then settles the turn.
     fn apply_turn_failed(&mut self, msg: &str) {
         self.chat.push_error(msg);
         self.settle_failed_turn();
