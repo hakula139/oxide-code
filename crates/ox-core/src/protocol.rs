@@ -582,6 +582,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::client::testing::five_hour_limit;
+    use crate::config::compaction::CompactionConfig;
+    use crate::permission::testing::exec_grant;
+    use crate::permission::{PermissionClass, Tier};
+    use crate::tool::bash::background::testing::shells_in_each_state;
+    use crate::tool::tasks::testing::plan;
+    use crate::tool::testing::bash_preview;
+    use crate::tool::view::{
+        ApprovalBody, DiffChunk, EditDiff, GrepFileGroup, GrepMatchLine, NumberedLine,
+    };
 
     mod op {
         use super::*;
@@ -610,6 +620,178 @@ mod tests {
             let tags = serde_json::to_value(triggers).unwrap();
 
             assert_eq!(tags, json!(["manual", "auto", "mid_turn"]));
+        }
+    }
+
+    mod turn_end {
+        use super::*;
+
+        mod of {
+            use super::*;
+
+            #[test]
+            fn saved_archive_ends_on_its_completion_result() {
+                let op = Op::SetArchive {
+                    path: "/repo/saved.jsonl".into(),
+                    session_id: "saved".to_owned(),
+                    state: ArchiveState::Archived,
+                };
+
+                for (result, expected) in [
+                    (Ok(ArchiveState::Archived), TurnEnd::Completed),
+                    (Err("Archive failed".to_owned()), TurnEnd::Failed),
+                ] {
+                    assert_eq!(
+                        TurnEnd::of(
+                            &op,
+                            &Event::ArchiveUpdated {
+                                id: "saved".to_owned(),
+                                result
+                            }
+                        ),
+                        Some(expected)
+                    );
+                }
+            }
+
+            #[test]
+            fn reads_only_the_terminal_events_of_the_op_in_flight() {
+                let prompt = Op::prompt("hi");
+                let compact = Op::Compact { instructions: None };
+                let resume = Op::Resume {
+                    target: ResumeTarget::Prefix("1a2b".to_owned()),
+                };
+                let rename = Op::Rename {
+                    title: "Fix login".to_owned(),
+                };
+                let set_model = Op::SetModel(ConfigPick::Effort(Effort::Low));
+                let set_mode = Op::SetMode(Mode::Plan);
+                let compacted = |trigger| Event::SessionCompacted {
+                    summary: "summary".to_owned(),
+                    pre_count: 4,
+                    instructions: None,
+                    trigger,
+                };
+                let rolled = Event::SessionRolled {
+                    id: "new".to_owned(),
+                    old_session: ArchiveState::Active,
+                };
+                let notice = Event::Error("Session write failed".to_owned());
+                let failed = Event::TurnFailed("failure".to_owned());
+
+                for (op, event, end) in [
+                    (&prompt, Event::TurnComplete, Some(TurnEnd::Completed)),
+                    (&prompt, Event::Cancelled, Some(TurnEnd::Cancelled)),
+                    (&prompt, failed.clone(), Some(TurnEnd::Failed)),
+                    (&prompt, compacted(CompactTrigger::Auto), None),
+                    (&prompt, notice.clone(), None),
+                    (&compact, compacted(CompactTrigger::Manual), None),
+                    (&compact, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (&compact, Event::Cancelled, Some(TurnEnd::Cancelled)),
+                    (&compact, Event::TurnComplete, None),
+                    (
+                        &resume,
+                        Event::SessionResumed {
+                            id: "1a2b".to_owned(),
+                            title: None,
+                            prior: ArchiveState::Active,
+                            history: Vec::new(),
+                        },
+                        None,
+                    ),
+                    (&resume, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (&resume, failed.clone(), Some(TurnEnd::Failed)),
+                    (&Op::Clear, notice.clone(), None),
+                    (&Op::Clear, rolled.clone(), None),
+                    (&Op::Clear, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (
+                        &rename,
+                        Event::SessionTitleUpdated {
+                            id: "live".to_owned(),
+                            title: "Fix login".to_owned(),
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&rename, notice.clone(), None),
+                    (
+                        &rename,
+                        Event::RenameFailed("Session write failed".to_owned()),
+                        Some(TurnEnd::Failed),
+                    ),
+                    (
+                        &set_model,
+                        Event::ConfigChanged {
+                            model: ModelSpec::resolve("claude-opus-5-5"),
+                            effort: Some(Effort::Low),
+                            requested: ConfigPick::Effort(Effort::Low),
+                            auto_compaction: CompactionConfig::with_threshold(50_000).auto,
+                            notice: String::new(),
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (
+                        &set_model,
+                        Event::ConfigChanged {
+                            model: ModelSpec::resolve("custom-model"),
+                            effort: None,
+                            requested: ConfigPick::Effort(Effort::Low),
+                            auto_compaction: CompactionConfig::with_threshold(50_000).auto,
+                            notice: String::new(),
+                        },
+                        Some(TurnEnd::Failed),
+                    ),
+                    (&set_model, failed.clone(), None),
+                    (
+                        &set_mode,
+                        Event::ModeChanged(Mode::Plan),
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&set_mode, notice.clone(), None),
+                    (&Op::Archive, rolled, None),
+                    (&Op::Archive, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (&Op::Archive, failed, Some(TurnEnd::Failed)),
+                ] {
+                    assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
+                }
+            }
+
+            #[test]
+            fn reads_the_sign_in_terminal_events() {
+                let failed = Event::TurnFailed("failure".to_owned());
+
+                for (op, event, end) in [
+                    (
+                        &Op::Login,
+                        Event::LoginStarted {
+                            url: "https://example.com/login".to_owned(),
+                            manual_url: "https://example.com/login?manual".to_owned(),
+                        },
+                        None,
+                    ),
+                    (
+                        &Op::Login,
+                        Event::SignedIn {
+                            auth: AuthSource::ApiKeyEnv,
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&Op::Login, Event::Cancelled, Some(TurnEnd::Cancelled)),
+                    (&Op::Login, failed.clone(), Some(TurnEnd::Failed)),
+                    (
+                        &Op::Logout,
+                        Event::SignedOut {
+                            removed: true,
+                            auth: None,
+                            fallback_error: None,
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&Op::Logout, Event::Cancelled, None),
+                    (&Op::Logout, failed, Some(TurnEnd::Failed)),
+                ] {
+                    assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
+                }
+            }
         }
     }
 

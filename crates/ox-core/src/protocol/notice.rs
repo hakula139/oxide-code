@@ -383,13 +383,9 @@ mod tests {
                 format!(
                     "Switched to custom-model (custom-model). \
                      Effort unchanged (model has no effort levels, asked for max). \
-<<<<<<< HEAD
-                     Auto-compaction at {} tokens.",
-                    compact_count(WINDOW_1M_THRESHOLD),
-=======
-                     Auto-compaction at {WINDOW_1M_THRESHOLD} tokens. \
+                     Auto-compaction at {} tokens. \
                      {CUSTOM_NOTICE}",
->>>>>>> 29e79041 (fix(model): warn about every off-catalog model swap)
+                    compact_count(WINDOW_1M_THRESHOLD),
                 ),
             );
         }
