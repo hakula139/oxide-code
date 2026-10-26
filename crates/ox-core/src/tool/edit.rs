@@ -45,17 +45,6 @@ impl Tool for EditTool {
         "✎"
     }
 
-    fn result_view(
-        &self,
-        input: &serde_json::Value,
-        _content: &str,
-        _cwd: &Path,
-    ) -> Option<ToolResultView> {
-        let old = input.get("old_string")?.as_str()?;
-        let new = input.get("new_string")?.as_str()?;
-        Some(ToolResultView::Diff(synthesize_diff(old, new)))
-    }
-
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
@@ -310,6 +299,16 @@ fn region_eol(text: &str) -> Option<&'static str> {
 
 // ── Diff Production ──
 
+/// The boundary-trimmed hunk of replacing `old` with `new`, numbered from line 1 on both sides.
+pub(super) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
+    let mut chunk = DiffChunk {
+        old: split_into_diff_lines(old, 1),
+        new: split_into_diff_lines(new, 1),
+    };
+    trim_chunk(&mut chunk);
+    chunk
+}
+
 /// The diff of replacing every range in `ranges` of `original` with `new_string`, and the
 /// new-content lines each replacement writes. Old-side numbers count lines of `original`, and
 /// new-side numbers count lines of the edited text.
@@ -357,7 +356,7 @@ fn build_diff(
 
 /// The first removed line, or first added line for an insertion, offset from the hunk's 1-based
 /// numbering by `old_line` or `new_line`. `None` for an empty hunk.
-fn anchor_line(hunk: &DiffChunk, old_line: usize, new_line: usize) -> Option<usize> {
+pub(super) fn anchor_line(hunk: &DiffChunk, old_line: usize, new_line: usize) -> Option<usize> {
     let old = hunk.old.first().map(|line| line.number + old_line - 1);
     old.or_else(|| hunk.new.first().map(|line| line.number + new_line - 1))
 }
@@ -430,25 +429,6 @@ fn apply_eol(content: String, eol: &str) -> String {
     }
 }
 
-// ── Result View ──
-
-/// The diff of replacing `old` with `new`, numbered from line 1, for a call that recorded none.
-pub(super) fn synthesize_diff(old: &str, new: &str) -> EditDiff {
-    let chunk = synthesize_chunk(old, new);
-    let locations = anchor_line(&chunk, 1, 1).into_iter().collect();
-    EditDiff { chunk, locations }
-}
-
-/// The boundary-trimmed hunk of replacing `old` with `new`, numbered from line 1 on both sides.
-pub(super) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
-    let mut chunk = DiffChunk {
-        old: split_into_diff_lines(old, 1),
-        new: split_into_diff_lines(new, 1),
-    };
-    trim_chunk(&mut chunk);
-    chunk
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -471,49 +451,6 @@ mod tests {
         NumberedLine {
             number,
             text: text.to_owned(),
-        }
-    }
-
-    mod result_view {
-        use super::*;
-
-        #[test]
-        fn synthesizes_a_diff_from_the_input() {
-            let input = serde_json::json!({
-                "file_path": "/tmp/f.rs",
-                "old_string": "fn foo()",
-                "new_string": "fn bar()",
-            });
-
-            let view =
-                EditTool.result_view(&input, "Successfully edited /tmp/f.rs.", Path::new("/repo"));
-
-            assert_eq!(
-                view,
-                Some(ToolResultView::Diff(EditDiff {
-                    chunk: DiffChunk {
-                        old: vec![line(1, "fn foo()")],
-                        new: vec![line(1, "fn bar()")],
-                    },
-                    locations: vec![1],
-                })),
-            );
-        }
-
-        #[test]
-        fn missing_or_mistyped_required_inputs_uses_plain_output() {
-            for input in [
-                serde_json::json!({"old_string": "x"}),
-                serde_json::json!({"file_path": "/tmp/x"}),
-                serde_json::json!({"file_path": "/tmp/x", "old_string": 42, "new_string": "b"}),
-                serde_json::json!({"file_path": "/tmp/x", "old_string": "a", "new_string": 42}),
-            ] {
-                assert_eq!(
-                    EditTool.result_view(&input, "edited", Path::new("/repo")),
-                    None,
-                    "{input}",
-                );
-            }
         }
     }
 

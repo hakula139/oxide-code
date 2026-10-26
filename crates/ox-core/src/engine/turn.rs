@@ -708,7 +708,7 @@ mod tests {
                     path: input["file_path"].as_str().unwrap_or_default().to_owned(),
                     lines: vec![NumberedLine {
                         number: 1,
-                        text: input["file_path"].as_str().unwrap_or_default().to_owned(),
+                        text: "viewed".to_owned(),
                     }],
                     total_lines: 1,
                 })
@@ -1098,7 +1098,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn resolves_result_views_from_the_unpinned_input_and_tool_metadata() {
+        async fn resolves_result_views_from_the_unpinned_input() {
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());
             let cwd = canonical_tempdir();
@@ -1142,7 +1142,7 @@ mod tests {
                             path: "notes.txt".to_owned(),
                             lines: vec![NumberedLine {
                                 number: 1,
-                                text: "notes.txt".to_owned(),
+                                text: "viewed".to_owned(),
                             }],
                             total_lines: 1,
                         },

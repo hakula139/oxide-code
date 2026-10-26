@@ -170,7 +170,7 @@ pub struct ToolMetadata {
     /// A one-line summary of the call, which the UI shows on its result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
-    /// `None` when the tool derives its view from the result text on every render.
+    /// `None` when the tool derives its view from the call's input and result on each render.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) result_view: Option<StoredView>,
 }
@@ -245,8 +245,8 @@ pub trait Tool: Send + Sync {
     }
 
     /// Returns the structured shape of a successful tool result for richer UI rendering, with paths
-    /// shown relative to `cwd`, or `None` to fall back to [`ToolResultView::Text`]. Errors
-    /// short-circuit to text in the registry.
+    /// shown relative to `cwd`, or `None` to fall back to [`ToolResultView::Text`]. The registry
+    /// calls it only for a result that stored no view, and short-circuits errors to text.
     fn result_view(
         &self,
         _input: &serde_json::Value,
@@ -650,7 +650,7 @@ pub mod testing {
     use std::sync::Arc;
 
     use super::bash::BashTool;
-    use super::edit::synthesize_diff;
+    use super::edit::{anchor_line, synthesize_chunk};
     use super::{ApprovalBody, ApprovalPreview, Tool, ToolRegistry};
     use crate::tool::view::EditDiff;
 
@@ -668,9 +668,11 @@ pub mod testing {
         ToolRegistry::new(tools)
     }
 
-    /// The diff the `edit` tool shows for replacing `old` with `new`, numbered from line 1.
+    /// An edit diff replacing `old` with `new` at line 1, as the TUI tests render it.
     pub fn edit_diff(old: &str, new: &str) -> EditDiff {
-        synthesize_diff(old, new)
+        let chunk = synthesize_chunk(old, new);
+        let locations = anchor_line(&chunk, 1, 1).into_iter().collect();
+        EditDiff { chunk, locations }
     }
 }
 
@@ -680,7 +682,7 @@ mod tests {
 
     use super::local_testing::{ctx, deny_reads, temp_ctx};
     use super::testing::bash_registry;
-    use super::view::{DiffChunk, EditDiff, NumberedLine};
+    use super::view::NumberedLine;
     use super::*;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
@@ -1308,47 +1310,42 @@ mod tests {
 
             #[test]
             fn delegates_to_tool_for_structured_output() {
-                let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
-                let input = serde_json::json!({
-                    "file_path": "/tmp/f.rs",
-                    "old_string": "a",
-                    "new_string": "b",
-                });
+                let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+                let input = serde_json::json!({"file_path": "/tmp/f.rs"});
                 let metadata = ToolMetadata::default();
+
                 let view = registry.result_view(
-                    "edit",
+                    "read",
                     &input,
-                    "Successfully edited /tmp/f.rs.",
+                    "1\ta\n2\tb",
                     &metadata,
                     false,
                     Path::new("/repo"),
                 );
+
                 assert_eq!(
                     view,
-                    ToolResultView::Diff(EditDiff {
-                        chunk: DiffChunk {
-                            old: vec![NumberedLine {
+                    ToolResultView::ReadExcerpt {
+                        path: "/tmp/f.rs".to_owned(),
+                        lines: vec![
+                            NumberedLine {
                                 number: 1,
                                 text: "a".to_owned()
-                            }],
-                            new: vec![NumberedLine {
-                                number: 1,
+                            },
+                            NumberedLine {
+                                number: 2,
                                 text: "b".to_owned()
-                            }],
-                        },
-                        locations: vec![1],
-                    }),
+                            },
+                        ],
+                        total_lines: 2,
+                    },
                 );
             }
 
             #[test]
             fn short_circuits_errors_to_text() {
-                let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
-                let input = serde_json::json!({
-                    "file_path": "/tmp/f.rs",
-                    "old_string": "a",
-                    "new_string": "b",
-                });
+                let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+                let input = serde_json::json!({"file_path": "/tmp/f.rs"});
                 let metadata = ToolMetadata {
                     result_view: Some(StoredView::View(ToolResultView::GlobFiles {
                         pattern: "*.rs".to_owned(),
@@ -1357,18 +1354,20 @@ mod tests {
                     })),
                     ..ToolMetadata::default()
                 };
+
                 let view = registry.result_view(
-                    "edit",
+                    "read",
                     &input,
-                    "old_string not found",
+                    "File not found: /tmp/f.rs",
                     &metadata,
                     true,
                     Path::new("/repo"),
                 );
+
                 assert_eq!(
                     view,
                     ToolResultView::Text {
-                        content: "old_string not found".to_owned(),
+                        content: "File not found: /tmp/f.rs".to_owned(),
                     },
                 );
             }

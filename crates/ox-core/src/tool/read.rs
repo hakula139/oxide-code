@@ -362,7 +362,7 @@ mod tests {
             let input = serde_json::json!({"file_path": "/tmp/example.rs"});
             assert!(
                 ReadTool
-                    .result_view(&input, "not line-numbered", Path::new("/repo"),)
+                    .result_view(&input, "not line-numbered", Path::new("/repo"))
                     .is_none()
             );
         }
@@ -372,7 +372,7 @@ mod tests {
             let input = serde_json::json!({});
             assert!(
                 ReadTool
-                    .result_view(&input, "1\tline", Path::new("/repo"),)
+                    .result_view(&input, "1\tline", Path::new("/repo"))
                     .is_none()
             );
         }

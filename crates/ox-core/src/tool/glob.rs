@@ -14,8 +14,6 @@ use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extra
 use crate::permission::{PermissionClass, ReadFilter};
 use crate::util::text::plural;
 
-const SHOWING_PREFIX: &str = "(Showing ";
-
 const MAX_RESULTS: usize = 100;
 
 /// Withholds each path a `read` deny or ask rule matches from the results.
@@ -193,7 +191,7 @@ fn glob_files(
     if truncated {
         _ = write!(
             content,
-            "\n\n{SHOWING_PREFIX}{MAX_RESULTS} of {total} matches. Use a more specific pattern.)"
+            "\n\n(Showing {MAX_RESULTS} of {total} matches. Use a more specific pattern.)"
         );
     }
     super::search::push_unreadable_note(&mut content, &unreadable, cwd);
