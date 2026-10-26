@@ -517,7 +517,7 @@ pub(crate) mod local_testing {
         }
 
         pub(crate) fn assert_unchanged(&self) {
-            if let Some((_original, metadata, bytes)) = &self.original {
+            if let Some((original, metadata, bytes)) = &self.original {
                 let current = File::open(&self.path).unwrap();
                 assert_eq!(fs::read(&self.path).unwrap(), *bytes);
                 assert_eq!(
@@ -529,20 +529,21 @@ pub(crate) mod local_testing {
                     use std::os::unix::fs::MetadataExt as _;
 
                     let current = current.metadata().unwrap();
+                    let original = original.metadata().unwrap();
                     assert_eq!(
                         (current.dev(), current.ino(), current.uid(), current.gid()),
                         (
-                            metadata.dev(),
-                            metadata.ino(),
-                            metadata.uid(),
-                            metadata.gid()
+                            original.dev(),
+                            original.ino(),
+                            original.uid(),
+                            original.gid()
                         )
                     );
                 }
                 #[cfg(windows)]
                 assert_eq!(
                     crate::util::fs::file_id(&current).unwrap(),
-                    crate::util::fs::file_id(_original).unwrap()
+                    crate::util::fs::file_id(original).unwrap()
                 );
             } else {
                 assert!(!self.path.exists());
