@@ -176,8 +176,10 @@ Listings sort rows and render them as follows:
 - `crates/ox-core/src/session/display.rs`: the session ID and title formatting that listings use.
 - `crates/ox-core/src/session/entry.rs`: the JSONL entry schema and its header `version`.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle`, the public API that sends each write to the actor and surfaces the first write failure of each kind.
+- `crates/ox-core/src/message.rs`: the message and content-block types that the entry schema stores.
 - `crates/ox-core/src/session/history.rs`: the resumed transcript, whose tool results take their views from `ToolRegistry::result_view`.
 - `crates/ox-core/src/session/path.rs`: the sanitized per-project subdirectory names.
+- `crates/ox-core/src/session/post_compact.rs`: the synthetic post-compact root and the origin restore on resume.
 - `crates/ox-core/src/session/resolver.rs`: the `--continue` argument and session-ID prefix resolution.
 - `crates/ox-core/src/session/sanitize.rs`: resume-time transcript repair.
 - `crates/ox-core/src/session/saved.rs`: archiving and deleting saved sessions.

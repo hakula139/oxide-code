@@ -17,5 +17,6 @@ Research on session storage patterns. Based on [Claude Code](https://github.com/
 - SQLite index for fast metadata queries.
 - `RolloutItem` replay model.
 - Ephemeral flag to skip persistence for testing.
-- Bounded `mpsc` channel + `tokio::spawn`-ed `RolloutWriterTask`. Cmds: `AddItems`, `Persist`, `Flush`, `Shutdown`. Each carries a `oneshot::Sender<io::Result<()>>` ack.
-- Receive-and-drain inside the writer loop: `recv().await` for the first cmd, then `try_recv()` non-blocking to coalesce queued cmds into a single batch flush.
+- Bounded `mpsc` channel to a spawned writer, with `RolloutWriterTask` as a state struct rather than the task. Cmds: `AddItems`, `Discard`, `Persist`, `Flush`, `Shutdown`, and only some carry a `oneshot::Sender<io::Result<()>>` ack, which `AddItems` does not.
+- The writer handles one `recv().await` at a time, with no `try_recv()` coalescing of queued cmds.
+- Checked 2026-10-26 at codex-rs `2351d9e1b6`, in `codex-rs/rollout/src/recorder.rs`.
