@@ -161,14 +161,14 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use strum::VariantArray as _;
+
     use super::*;
 
     mod stop_reason {
         use super::*;
 
         mod as_str {
-            use strum::VariantArray as _;
-
             use super::*;
 
             #[test]
