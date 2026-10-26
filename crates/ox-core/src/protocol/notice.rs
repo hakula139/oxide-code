@@ -6,7 +6,7 @@ use super::ConfigPick;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{Effort, ModelSpec};
 use crate::permission::Mode;
-use crate::util::text::plural;
+use crate::util::text::{join_sentences, plural};
 
 /// The error a frontend reports when the engine ends before the op it waits on.
 pub const ENGINE_STOPPED: &str = "ox stopped unexpectedly";
@@ -40,7 +40,8 @@ pub(crate) struct ConfigSettings {
 }
 
 /// Confirms an [`Event::ConfigChanged`](super::Event::ConfigChanged), surfacing an effort or
-/// compaction threshold the change shifted without being asked.
+/// compaction threshold the change shifted without being asked, and the warning for a model ID
+/// that narrowly misses a catalog row.
 pub(crate) fn config_changed(
     before: &ConfigSettings,
     after: &ConfigSettings,
@@ -73,13 +74,19 @@ pub(crate) fn config_changed(
         (_, _, Some(eff)) => (format!("{named} · effort {eff}"), None),
     };
     let compaction = (before.auto_compaction != after.auto_compaction)
-        .then(|| format!("Auto compaction {}", after.auto_compaction.abbreviated()));
-    match (effort, compaction) {
+        .then(|| format!("Auto-compaction {}", after.auto_compaction.abbreviated()));
+    let notice = match (effort, compaction) {
         (None, None) => head,
         (Some(effort), None) => format!("{head}. {effort}."),
         (None, Some(compaction)) => format!("{head}. {compaction}."),
         (Some(effort), Some(compaction)) => format!("{head}. {effort}. {compaction}."),
+    };
+    if model.is_near_miss()
+        && let Some(unsupported) = model.unsupported_notice()
+    {
+        return join_sentences(&notice, &unsupported);
     }
+    notice
 }
 
 /// Notes that the model has no effort levels, so the `requested` effort did not apply.
@@ -275,6 +282,44 @@ mod tests {
         }
 
         #[test]
+        fn model_swap_appends_the_near_miss_hint() {
+            let opus = ModelSpec::resolve("claude-opus-5-5");
+            let typo = ModelSpec::resolve("claude-opus-5-5-20261001");
+
+            let s = config_changed(
+                &settings(&opus, Some(Effort::High)),
+                &settings(&typo, Some(Effort::High)),
+                &model_pick(&typo, None),
+            );
+
+            assert_eq!(
+                s,
+                "Switched to claude-opus-5-5-20261001 (claude-opus-5-5-20261001) · effort high. \
+                 `claude-opus-5-5-20261001` is not a supported model, \
+                 so requests go without thinking, effort, and context management, \
+                 and cost tracking stays off. \
+                 Auto-compaction requires an explicit token threshold. \
+                 Did you mean `claude-opus-5-5` (Claude Opus 5.5)?",
+            );
+        }
+
+        #[test]
+        fn effort_pick_skips_the_model_warning() {
+            let typo = ModelSpec::resolve("claude-opus-5-5-20261001");
+
+            let s = config_changed(
+                &settings(&typo, None),
+                &settings(&typo, None),
+                &ConfigPick::Effort(Effort::High),
+            );
+
+            assert_eq!(
+                s,
+                "Effort unchanged (model has no effort levels, asked for high)"
+            );
+        }
+
+        #[test]
         fn model_swap_mentions_compaction_threshold_change() {
             let opus = ModelSpec::resolve("claude-opus-5-5");
             let sonnet = ModelSpec::resolve("claude-sonnet-5-5");
@@ -296,7 +341,7 @@ mod tests {
                 s,
                 format!(
                     "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high. \
-                     Auto compaction at {} tokens.",
+                     Auto-compaction at {} tokens.",
                     compact_count(WINDOW_1M_THRESHOLD),
                 ),
             );
@@ -325,7 +370,7 @@ mod tests {
                 format!(
                     "Switched to custom-model (custom-model). \
                      Effort unchanged (model has no effort levels, asked for max). \
-                     Auto compaction at {} tokens.",
+                     Auto-compaction at {} tokens.",
                     compact_count(WINDOW_1M_THRESHOLD),
                 ),
             );

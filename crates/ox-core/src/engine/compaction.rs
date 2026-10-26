@@ -450,7 +450,7 @@ async fn request_summary(
         Some(StopReason::Refusal) => bail!("the model declined to summarize the conversation"),
         Some(StopReason::ToolUse) => bail!("the model called a tool before finishing the summary"),
         Some(reason @ (StopReason::PauseTurn | StopReason::Unknown)) => {
-            bail!("the summary stopped early ({reason:?})")
+            bail!("the summary stopped early ({})", reason.as_str())
         }
     }
 
@@ -2215,7 +2215,7 @@ mod tests {
                     true,
                     "the model called a tool before finishing the summary",
                 ),
-                ("pause_turn", true, "the summary stopped early (PauseTurn)"),
+                ("pause_turn", true, "the summary stopped early (pause_turn)"),
                 (
                     "end_turn",
                     false,

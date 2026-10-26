@@ -951,7 +951,7 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let sink = CapturingSink::default();
                 let input: &[u8] = indoc! {b"
-                    /model gpt-4
+                    /effort turbo
                     /model
                     /theme
                 "};
@@ -980,7 +980,7 @@ mod tests {
                     .collect();
                 assert_eq!(reports.len(), 3, "{reports:?}");
                 assert!(
-                    reports[0].starts_with("/model: Unknown model: `gpt-4`."),
+                    reports[0].starts_with("/effort: Unknown effort: `turbo`."),
                     "{reports:?}"
                 );
                 assert_eq!(

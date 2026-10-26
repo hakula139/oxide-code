@@ -411,9 +411,11 @@ impl Engine {
         let result = loop {
             let TurnOutcome { mut report, result } =
                 self.run_turn(sink, ops, &mut inbox, rounds_run).await;
-            if let Err(TurnAbort::Refused(_)) = result {
-                self.roll_back(sink, start, checkpoint, &report).await;
-                break result;
+            if let Err(TurnAbort::Refused(notice)) = result {
+                let notice = self
+                    .roll_back(sink, start, checkpoint, &report, notice)
+                    .await;
+                break Err(TurnAbort::Refused(notice));
             }
             self.account_usage(sink, &report).await;
             if let Some(tasks) = report.tasks.take() {
@@ -497,16 +499,21 @@ impl Engine {
     }
 
     /// Returns the engine and the session to `start` and `checkpoint` after the model refused the
-    /// turn `report` describes. Keeps the context usage from before the turn, since the transcript
-    /// its requests measured is gone.
+    /// turn `report` describes, noting in `notice` any tool calls the removed segment ran. Keeps
+    /// context usage from before the turn, as the transcript its requests measured is gone.
     async fn roll_back(
         &mut self,
         sink: &dyn EventSink,
         start: TurnStart,
         checkpoint: Option<Checkpoint>,
         report: &TurnReport,
-    ) {
-        settle_file_writes(&self.file_tracker).await;
+        notice: String,
+    ) -> String {
+        let notice = match turn::refusal_side_effects(&self.messages[start.transcript_len..]) {
+            Some(effects) => format!("{notice} {effects}"),
+            None => notice,
+        };
+        self.file_tracker.drain_writes().await;
         self.bill(sink, &report.billable_rounds).await;
         self.messages.truncate(start.transcript_len);
         self.prompt.seen = start.seen;
@@ -521,6 +528,7 @@ impl Engine {
         }
         self.emit_usage_update(sink);
         sink.emit(Event::TurnRolledBack, "turn-rolled-back");
+        notice
     }
 
     /// Reads the user context afresh with [`Self::show_instruction_warnings`].
@@ -2729,7 +2737,8 @@ mod tests {
                     Event::TurnFailed(
                         "The model declined this request. \
                          The request was removed from the conversation, \
-                         so rephrase it to try again."
+                         so rephrase it to try again. \
+                         Its 2 tool calls already ran, so the changes they made remain."
                             .to_owned()
                     ),
                 );
@@ -3363,7 +3372,9 @@ mod tests {
                 let release = blocked_write(&tracker, &path, b"committed", "toolu_write").await;
                 let sink = CapturingSink::default();
                 let report = TurnReport::default();
-                let mut rollback = std::pin::pin!(engine.roll_back(&sink, start, None, &report));
+                let decline = "The model declined this request.".to_owned();
+                let mut rollback =
+                    std::pin::pin!(engine.roll_back(&sink, start, None, &report, decline));
 
                 assert!(futures::poll!(rollback.as_mut()).is_pending());
                 assert_writes_draining(&tracker);
@@ -3432,11 +3443,11 @@ mod tests {
                     [
                         "Switched to custom-model (custom-model). \
                          Effort cleared (model has no effort levels). \
-                         Auto compaction off (no threshold)."
+                         Auto-compaction off (no threshold)."
                             .to_owned(),
                         "Switched to Claude Opus 5.5 (claude-opus-5-5) · \
                          effort medium (model default). \
-                         Auto compaction at 986k tokens."
+                         Auto-compaction at 986k tokens."
                             .to_owned(),
                     ],
                 );

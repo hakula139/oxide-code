@@ -94,6 +94,22 @@ pub(crate) enum StopReason {
     Unknown,
 }
 
+impl StopReason {
+    /// The wire's own name for this reason, with `unknown` for one it does not name.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::EndTurn => "end_turn",
+            Self::MaxTokens => "max_tokens",
+            Self::StopSequence => "stop_sequence",
+            Self::ToolUse => "tool_use",
+            Self::PauseTurn => "pause_turn",
+            Self::Refusal => "refusal",
+            Self::ModelContextWindowExceeded => "model_context_window_exceeded",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Structured refusal detail. Both fields are informational and may be absent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub(crate) struct StopDetails {
@@ -145,6 +161,36 @@ pub(crate) mod testing {
                 resets_at: 4_102_444_800,
             }),
             seven_day: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StopReason;
+
+    mod as_str {
+        use super::*;
+
+        #[test]
+        fn names_each_variant_the_way_its_wire_value_does() {
+            for reason in [
+                StopReason::EndTurn,
+                StopReason::MaxTokens,
+                StopReason::StopSequence,
+                StopReason::ToolUse,
+                StopReason::PauseTurn,
+                StopReason::Refusal,
+                StopReason::ModelContextWindowExceeded,
+                StopReason::Unknown,
+            ] {
+                let wire = format!("\"{}\"", reason.as_str());
+                assert_eq!(
+                    serde_json::from_str::<StopReason>(&wire).unwrap(),
+                    reason,
+                    "{reason:?}",
+                );
+            }
         }
     }
 }

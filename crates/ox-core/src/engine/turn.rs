@@ -18,7 +18,7 @@ use crate::protocol::{Event, EventSink, Op};
 use crate::session::handle::SessionHandle;
 use crate::tool::tasks::Task;
 use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry};
-use crate::util::text::join_sentences;
+use crate::util::text::{join_sentences, plural};
 
 // ── Agent Turn ──
 
@@ -364,6 +364,25 @@ fn refusal_message(details: Option<&StopDetails>, compacted: bool) -> String {
         ),
         None => format!("The model declined this request{category}. {next}"),
     }
+}
+
+/// The note that the tool calls in `removed` already ran, so their changes stay despite the
+/// rollback. `None` when the removed messages hold no tool results.
+pub(super) fn refusal_side_effects(removed: &[Message]) -> Option<String> {
+    let calls = removed
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        .count();
+    (calls > 0).then(|| {
+        let calls_text = plural(calls, "tool call", "tool calls");
+        let effects = if calls == 1 {
+            "the change it made remains"
+        } else {
+            "the changes they made remain"
+        };
+        format!("Its {calls} {calls_text} already ran, so {effects}.")
+    })
 }
 
 /// Error for a reply cut off by the output cap or the context window, naming the tool call it cut.
@@ -2804,6 +2823,54 @@ mod tests {
                  but the summary still holds the request, \
                  so run `/clear` if the model keeps declining.",
             );
+        }
+    }
+
+    mod refusal_side_effects {
+        use super::*;
+
+        fn result(id: &str) -> ContentBlock {
+            ContentBlock::ToolResult {
+                tool_use_id: id.to_owned(),
+                content: "ok".to_owned(),
+                is_error: false,
+            }
+        }
+
+        #[test]
+        fn counts_the_tool_results_the_rollback_removes() {
+            let removed = |count: usize| {
+                let mut messages = vec![Message::user("prompt"), Message::assistant("working")];
+                messages.extend((0..count).map(|n| Message {
+                    role: Role::User,
+                    content: vec![result(&format!("tool_{n}"))],
+                }));
+                messages
+            };
+
+            for (count, expected) in [
+                (
+                    1,
+                    "Its 1 tool call already ran, so the change it made remains.",
+                ),
+                (
+                    2,
+                    "Its 2 tool calls already ran, so the changes they made remain.",
+                ),
+            ] {
+                assert_eq!(
+                    refusal_side_effects(&removed(count)).as_deref(),
+                    Some(expected),
+                    "{count} tool results",
+                );
+            }
+        }
+
+        #[test]
+        fn says_nothing_when_no_tool_result_was_removed() {
+            let removed = [Message::user("prompt"), Message::assistant("declined")];
+
+            assert_eq!(refusal_side_effects(&removed), None);
         }
     }
 
