@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use strum::{IntoStaticStr, VariantArray};
 use tokio::sync::mpsc;
 
 use crate::message::{ContentBlock, Message};
@@ -79,8 +80,9 @@ pub(crate) struct Response {
 /// Why the model stopped. Variants follow Anthropic's `stop_reason` values, which its wire
 /// deserializes directly. `Unknown` keeps a future value from failing the whole `message_delta`
 /// frame, which would also drop its usage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, IntoStaticStr, VariantArray)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum StopReason {
     EndTurn,
     MaxTokens,
@@ -95,18 +97,9 @@ pub(crate) enum StopReason {
 }
 
 impl StopReason {
-    /// The wire's own name for this reason, with `unknown` for one it does not name.
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::EndTurn => "end_turn",
-            Self::MaxTokens => "max_tokens",
-            Self::StopSequence => "stop_sequence",
-            Self::ToolUse => "tool_use",
-            Self::PauseTurn => "pause_turn",
-            Self::Refusal => "refusal",
-            Self::ModelContextWindowExceeded => "model_context_window_exceeded",
-            Self::Unknown => "unknown",
-        }
+    /// The wire's own name for this reason.
+    pub(crate) fn as_str(self) -> &'static str {
+        self.into()
     }
 }
 
@@ -167,29 +160,27 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::StopReason;
+    use super::*;
 
-    mod as_str {
+    mod stop_reason {
         use super::*;
 
-        #[test]
-        fn names_each_variant_the_way_its_wire_value_does() {
-            for reason in [
-                StopReason::EndTurn,
-                StopReason::MaxTokens,
-                StopReason::StopSequence,
-                StopReason::ToolUse,
-                StopReason::PauseTurn,
-                StopReason::Refusal,
-                StopReason::ModelContextWindowExceeded,
-                StopReason::Unknown,
-            ] {
-                let wire = format!("\"{}\"", reason.as_str());
-                assert_eq!(
-                    serde_json::from_str::<StopReason>(&wire).unwrap(),
-                    reason,
-                    "{reason:?}",
-                );
+        mod as_str {
+            use super::*;
+
+            #[test]
+            fn names_each_variant_the_way_its_wire_value_does() {
+                for &reason in StopReason::VARIANTS {
+                    if reason == StopReason::Unknown {
+                        continue;
+                    }
+                    let wire = format!("\"{}\"", reason.as_str());
+                    assert_eq!(
+                        serde_json::from_str::<StopReason>(&wire).unwrap(),
+                        reason,
+                        "{reason:?}",
+                    );
+                }
             }
         }
     }
