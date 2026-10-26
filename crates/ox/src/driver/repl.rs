@@ -162,9 +162,12 @@ where
     Ok(if failed { Exit::Failure } else { Exit::Success })
 }
 
-/// The command list `/help` prints in the REPL.
-fn repl_help() -> String {
-    let commands = command::NAMES
+/// `/name (aliases)` for every command the REPL runs, comma-separated.
+fn repl_command_list() -> String {
+    let mut names = command::NAMES.to_vec();
+    names.push("help");
+    names.sort_unstable();
+    names
         .iter()
         .map(|name| {
             let aliases = command::aliases(name);
@@ -175,24 +178,27 @@ fn repl_help() -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join(", ");
-    format!("Commands: {commands}. Use `//text` to send a literal slash.")
+        .join(", ")
+}
+
+/// The command list `/help` prints in the REPL.
+fn repl_help() -> String {
+    format!(
+        "Commands: {}. Use `//text` to send a literal slash.",
+        repl_command_list()
+    )
 }
 
 /// The op a slash command runs in the REPL at `project_root`, or the message saying why it cannot
 /// run here.
 fn command_op(parsed: &Parsed, project_root: &Path) -> Result<Op, String> {
     command::typed_op(parsed, project_root).unwrap_or_else(|| {
-        let names: Vec<String> = command::NAMES
-            .iter()
-            .map(|name| format!("/{name}"))
-            .collect();
         Err(format!(
             "`/{name}` is not a REPL command. \
              Available: {names}. \
              Use `//{name}` to send the literal text.",
             name = parsed.name,
-            names = names.join(", "),
+            names = repl_command_list(),
         ))
     })
 }
@@ -946,13 +952,13 @@ mod tests {
                 );
                 assert_eq!(
                     reports[1],
-                    "/model: missing model ID. Usage: `/model <id>`."
+                    "/model: Missing model ID. Usage: `/model <id>`."
                 );
                 assert_eq!(
                     reports[2],
                     "`/theme` is not a REPL command. \
-                     Available: /clear, /compact, /effort, /exit, /init, /mode, /model, /rename, \
-                     /resume. \
+                     Available: /clear (new, reset), /compact, /effort, /exit (quit), /help, \
+                     /init, /mode, /model, /rename, /resume (continue). \
                      Use `//theme` to send the literal text.",
                 );
             })
@@ -984,8 +990,8 @@ mod tests {
                 assert_eq!(
                     sink.events(),
                     [Event::Notice(
-                        "Commands: /clear (new, reset), /compact, /effort, /exit (quit), /init, \
-                         /mode, /model, /rename, /resume (continue). \
+                        "Commands: /clear (new, reset), /compact, /effort, /exit (quit), /help, \
+                         /init, /mode, /model, /rename, /resume (continue). \
                          Use `//text` to send a literal slash."
                             .to_owned()
                     )],

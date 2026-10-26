@@ -148,7 +148,7 @@ mod tests {
             let err = run_execute(&DeleteCmd, "").unwrap_err();
             assert_eq!(
                 err,
-                "missing session ID. \
+                "Missing session ID. \
                  Usage: `/delete <id-prefix>`, or press Ctrl+D in the `/resume` picker.",
             );
         }

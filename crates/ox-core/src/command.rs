@@ -81,7 +81,8 @@ pub fn compact(args: &str) -> Op {
 
 /// `/effort <level>`, case-insensitive.
 pub fn effort(arg: &str) -> Result<Op, String> {
-    let arg = required(arg, "level", "/effort <low|medium|high|xhigh|max>")?;
+    let usage = format!("/effort <{}>", variant::names_joined::<Effort>("|"));
+    let arg = required(arg, "level", &usage)?;
     let pick = arg.to_ascii_lowercase().parse().map_err(|_| {
         format!(
             "Unknown effort: `{arg}`. Valid: {}.",
@@ -93,7 +94,8 @@ pub fn effort(arg: &str) -> Result<Op, String> {
 
 /// `/mode <mode>`, case-insensitive.
 pub fn mode(arg: &str) -> Result<Op, String> {
-    let arg = required(arg, "mode", "/mode <manual|yolo|plan>")?;
+    let usage = format!("/mode <{}>", variant::names_joined::<Mode>("|"));
+    let arg = required(arg, "mode", &usage)?;
     let mode = arg.to_ascii_lowercase().parse::<Mode>().map_err(|_| {
         format!(
             "Unknown mode: `{arg}`. Valid: {}.",
@@ -177,7 +179,7 @@ pub fn missing(what: &str, usage: &str, alternative: Option<&str>) -> String {
     let alternative = alternative
         .map(|alt| format!(", or {alt}"))
         .unwrap_or_default();
-    format!("missing {what}. Usage: `{usage}`{alternative}.")
+    format!("Missing {what}. Usage: `{usage}`{alternative}.")
 }
 
 /// Markdown bullet list pairing each model's ID with its display name.
@@ -254,7 +256,7 @@ mod tests {
             assert_eq!(
                 typed("/continue"),
                 Some(Err(
-                    "/continue: missing session ID. Usage: `/resume <id-prefix>`.".to_owned()
+                    "/continue: Missing session ID. Usage: `/resume <id-prefix>`.".to_owned()
                 )),
             );
         }
@@ -342,14 +344,14 @@ mod tests {
             for (name, usage) in [
                 (
                     "effort",
-                    "missing level. Usage: `/effort <low|medium|high|xhigh|max>`.",
+                    "Missing level. Usage: `/effort <low|medium|high|xhigh|max>`.",
                 ),
-                ("mode", "missing mode. Usage: `/mode <manual|yolo|plan>`."),
-                ("model", "missing model ID. Usage: `/model <id>`."),
-                ("rename", "missing title. Usage: `/rename <title>`."),
+                ("mode", "Missing mode. Usage: `/mode <manual|yolo|plan>`."),
+                ("model", "Missing model ID. Usage: `/model <id>`."),
+                ("rename", "Missing title. Usage: `/rename <title>`."),
                 (
                     "resume",
-                    "missing session ID. Usage: `/resume <id-prefix>`.",
+                    "Missing session ID. Usage: `/resume <id-prefix>`.",
                 ),
             ] {
                 assert_eq!(

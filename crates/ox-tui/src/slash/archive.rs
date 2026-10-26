@@ -277,7 +277,7 @@ mod tests {
                 let err = run_execute(&UnarchiveCmd, "").unwrap_err();
                 assert_eq!(
                     err,
-                    "missing session ID. \
+                    "Missing session ID. \
                      Usage: `/unarchive <id-prefix>`, or press Ctrl+A in the `/resume` picker \
                      to list archived sessions and Ctrl+X to unarchive one.",
                 );
