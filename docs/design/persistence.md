@@ -30,7 +30,7 @@ Every session is a single append-only `.jsonl` file with one JSON object per lin
 
 ## Compatibility
 
-Session files follow the [stability surface](../../../RELEASING.md#stability-surface): within a minor version, each stable release can resume session files written by earlier stable releases of that minor version. Before 0.1.0, a release may stop reading files from earlier versions, and an earlier prerelease binary may skip lines in a newer file without a header `version` bump. The loader treats a line in a shape it no longer reads as malformed and skips it. Since a skipped message breaks the chain that resume follows back from its newest leaf, the session resumes with only the messages after the last skipped one.
+Session files follow the [stability surface](../../RELEASING.md#stability-surface): within a minor version, each stable release can resume session files written by earlier stable releases of that minor version. Before 0.1.0, a release may stop reading files from earlier versions, and an earlier prerelease binary may skip lines in a newer file without a header `version` bump. The loader treats a line in a shape it no longer reads as malformed and skips it. Since a skipped message breaks the chain that resume follows back from its newest leaf, the session resumes with only the messages after the last skipped one.
 
 Within the stability surface, a newer binary can read an older file as long as every format change is one of the following:
 
@@ -40,7 +40,7 @@ Within the stability surface, a newer binary can read an older file as long as e
 
 An older binary reading a newer file skips entry types it does not know as malformed lines and ignores unknown fields. Bump the header's `version` only when an older binary would misread a newer file, since an older binary refuses any file whose `version` is newer than it supports. A prerelease binary that predates `rewind` entries skips them, so until a newer message follows a rewind it resumes the abandoned branch. Binaries through 0.1.0-alpha.5 require a `source` field on `title` entries, so they skip the titles later binaries write and list those sessions as untitled.
 
-A reasoning block stores the `wire` and `model` that produced it alongside a `payload` that only that wire can read, such as the `signature` of an Anthropic `thinking` block or the `data` of a `redacted_thinking` block. The Anthropic wire sends every Anthropic block back unchanged whichever model produced it, as Anthropic's guide to [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks, so the recorded `model` changes no request. Which blocks a model reads depends on the platform, and the API drops or ignores the rest, as the [research note](../../research/api/extended-thinking.md#constraints) details.
+A reasoning block stores the `wire` and `model` that produced it alongside a `payload` that only that wire can read, such as the `signature` of an Anthropic `thinking` block or the `data` of a `redacted_thinking` block. The Anthropic wire sends every Anthropic block back unchanged whichever model produced it, as Anthropic's guide to [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks, so the recorded `model` changes no request. Which blocks a model reads depends on the platform, and the API drops or ignores the rest, as the [research note](../research/api/extended-thinking.md#constraints) details.
 
 A server tool's result, such as a `web_search_tool_result`, is stored as a `server_tool_result` block that keeps the API's block type in `kind` and every other field unchanged, so the Anthropic wire sends it back as the API returned it.
 
@@ -50,7 +50,7 @@ An unknown `wire`, content block `type`, or text `origin` value fails to parse i
 
 Tests in `session/handle.rs` enforce this guarantee for stable releases, using one fixture per release starting with `v0.1.0`. Each fixture lives in `crates/ox-core/src/session/fixtures/` and is named after its tag:
 
-- **Fixture source.** One test writes a session containing every entry type and content block, then adds messages, prompt contexts, and sidecars after compaction so a resume reads them. It snapshots the file after masking its per-run UUIDs, timestamps, and working directory. For each stable tag, the release PR copies that snapshot as the fixture for the new release, as described in [Prepare a Release](../../../RELEASING.md#prepare-a-release).
+- **Fixture source.** One test writes a session containing every entry type and content block, then adds messages, prompt contexts, and sidecars after compaction so a resume reads them. It snapshots the file after masking its per-run UUIDs, timestamps, and working directory. For each stable tag, the release PR copies that snapshot as the fixture for the new release, as described in [Prepare a Release](../../RELEASING.md#prepare-a-release).
 - **Resume check.** Another test fills each fixture's masks with fixed values, then lists and resumes it. It snapshots what the listing and the resume recovered: the title, branch, archive state, compaction, prompt context, transcript, sidecars, and recorded usage. It then appends a message and checks that the message continues the resumed chain. The same check runs on the session this build writes, so a pull request that changes the format also shows how its files will resume.
 - **Changed behavior.** If a change alters how an old file resumes, that fixture's snapshot will fail. Fixtures capture frozen release output, so never edit them. Accept a changed fixture snapshot only when the change is allowed by this section.
 
@@ -62,7 +62,7 @@ Distinct paths can share a name, such as `/work/a b` and `/work/a-b`, so the hea
 
 File naming: `{unix_timestamp}-{session_id}.jsonl`. Timestamp prefix gives chronological listings, while lookup by session ID uses the suffix.
 
-A session's artifacts, such as [spilled tool output](../tools/truncation.md#spill-files), are stored in a `{session_id}/` directory beside its file wherever the file lives, so a session resumed from a file outside the store keeps them there. Named by `store::artifact_dir`, the directory is created by the first artifact and removed with the file by `delete_at`. Listings skip it because they read only `.jsonl` files.
+A session's artifacts, such as [spilled tool output](truncation.md#spill-files), are stored in a `{session_id}/` directory beside its file wherever the file lives, so a session resumed from a file outside the store keeps them there. Named by `store::artifact_dir`, the directory is created by the first artifact and removed with the file by `delete_at`. Listings skip it because they read only `.jsonl` files.
 
 On Unix, session files are created with mode `0600`.
 
@@ -109,7 +109,7 @@ A session records its prompt context: the environment section, the first message
 
 ### Task List
 
-The session's [task list](../tools/tasks.md) needs no entry of its own. On resume, the loader takes it from the last successful `tasks` call on the resolved chain, or else from the `tasks` field of the last `compact` entry, which records the list the summarized transcript left. The field is omitted when the list was empty.
+The session's [task list](tasks.md) needs no entry of its own. On resume, the loader takes it from the last successful `tasks` call on the resolved chain, or else from the `tasks` field of the last `compact` entry, which records the list the summarized transcript left. The field is omitted when the list was empty.
 
 ### Archiving
 

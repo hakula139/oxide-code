@@ -10,7 +10,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/clear`**: Rolls the session UUID and clears the chat and the file tracker. Send-first ordering: `ClearCmd` forwards `Op::Clear`, and the App drops chat history only when `SessionRolled` confirms the roll. `Event::SessionTitleUpdated` carries the originating session ID so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
 
-- **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary and a synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [compact.md](compact.md).
+- **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary and a synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [compact.md](compaction.md).
 
 - **`/config`**: Opens a [`KvOverview`](modals.md) of the resolved config, with the layer that set each value, and the config files loaded at startup. The values start from that load. A `/model`, `/effort`, `/mode`, or `/theme` switch, or Tab or Shift+Tab, credits the model, effort, mode, or theme it sets to the session, while an effort the new model derives on its own shows as `default`. Values derived from the model, such as Max Tokens and Auto-Compaction, and the Auth value after `/login` or `/logout` keep their loaded source.
 
@@ -28,7 +28,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/login`** / **`/logout`**: Forward `Op::Login` and `Op::Logout`. The engine runs the browser sign-in and swaps the client's credential, and the TUI opens the browser and reports the credential requests use afterward. Both are `Mutating`. Full design: [login.md](login.md).
 
-- **`/mode`**: Switches the permission mode. Bare opens a list picker of the three permission modes ([modals.md](modals.md)), and `/mode <mode>` forwards `Op::SetMode` directly. Bare is `ReadOnly`, so its picker opens mid-turn and submits the op as a modal action. Typed is `Steering`, so the dispatcher forwards its op mid-turn. Either switch applies from the turn's next gated call. Tab and Shift+Tab send the same op. [permissions.md](../tools/permissions.md#switching-modes) covers how the engine applies it.
+- **`/mode`**: Switches the permission mode. Bare opens a list picker of the three permission modes ([modals.md](modals.md)), and `/mode <mode>` forwards `Op::SetMode` directly. Bare is `ReadOnly`, so its picker opens mid-turn and submits the op as a modal action. Typed is `Steering`, so the dispatcher forwards its op mid-turn. Either switch applies from the turn's next gated call. Tab and Shift+Tab send the same op. [permissions.md](permissions.md#switching-modes) covers how the engine applies it.
 
 - **`/model`**: Swaps the active model mid-session through `Engine::set_model`. Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalog ID first, then a unique substring, so `fable`, `opus`, `sonnet`, and `haiku` act as aliases, and sends any other argument verbatim for a gateway that serves it, with the engine warning when the ID nearly matches one. Both forms are mutating and idle-gated because they can emit `Op::SetModel`, which re-resolves the current effort against the new model.
 

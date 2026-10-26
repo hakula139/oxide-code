@@ -2,6 +2,8 @@
 
 Research on tool output bounding across reference codebases. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
+Verified 2026-10-26 against Claude Code 2.1.87 (`4b9d30f79532`), Codex `2351d9e1b608`, and opencode `v1.4.11-1713-g7d5e91b80`.
+
 ## Claude Code (TypeScript)
 
 Tiered caps applied at the dispatcher (after `Tool::run`, before message build):
@@ -37,4 +39,3 @@ When either limit trips: take head or tail slice, write full output to temp file
 | Claude Code | dispatcher   | 50,000 chars | 100 K toks | tail-cut + spill  | yes (file path)   | yes               |
 | Codex       | tool output  | none         | per model  | head-tail         | no                | exec, lower only  |
 | opencode    | dispatcher   | 50 KB        | none       | head/tail + spill | yes (file + hint) | no                |
-| oxide-code  | dispatcher   | per-tool     | 128 KiB    | head-tail + spill | yes (file path)   | yes               |

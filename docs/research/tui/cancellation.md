@@ -2,6 +2,8 @@
 
 Research on TUI cancellation, exit, and input queueing across reference projects. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
+Verified 2026-10-26 against Claude Code 2.1.87 (`4b9d30f79532`), Codex `2351d9e1b608`, and opencode `v1.4.11-1713-g7d5e91b80`.
+
 ## Claude Code (TypeScript)
 
 Cancellation rides an `AbortController`. Esc cancels, Ctrl+C is overloaded for cancel-then-exit.
@@ -40,9 +42,8 @@ Server-side state machine (`idle | busy | retry`). Each session owns a `Runner` 
 
 ## Comparison
 
-| Repo        | Cancel keys                         | Cancel transport        | Tombstone                         | Queue drain timing                                                                         | Pop / edit queued | Dual-press exit          | Busy hint                                          |
-| ----------- | ----------------------------------- | ----------------------- | --------------------------------- | ------------------------------------------------------------------------------------------ | ----------------- | ------------------------ | -------------------------------------------------- |
-| Claude Code | Esc, Ctrl+C overloaded              | `AbortController`       | `"Interrupted by user"` synthetic | mid-turn between tool waves (`next`), `later` = turn-end                                   | Esc / Up pop      | 800 ms (Ctrl+C / Ctrl+D) | spinner only                                       |
-| Codex       | Esc (steer-only), Ctrl+C            | `Op::Interrupt` message | none, queued restored to composer | mid-turn at sampling boundary (Enter) + Tab at turn-end                                    | Alt+Up pops       | 1 s, currently disabled  | spinner + elapsed + tool name + "Esc to interrupt" |
-| opencode    | dual-press Esc within 5 s           | `session.abort(id)`     | none                              | mid-turn via persisted user row + transcript reload (steer default), turn-end (queue mode) | n/a               | none (single-press exit) | spinner only                                       |
-| oxide-code  | Esc / Ctrl+C cancel, Ctrl+C x2 exit | drop-the-future         | `(interrupted)` marker            | mid-turn at round boundary (turn-end fallback for tool-less turns)                         | Esc pops          | 1 s (Ctrl+C / Ctrl+D)    | spinner + label + "Esc to interrupt"               |
+| Repo        | Cancel keys               | Cancel transport        | Tombstone                         | Queue drain timing                                                                         | Pop / edit queued | Dual-press exit          | Busy hint                                          |
+| ----------- | ------------------------- | ----------------------- | --------------------------------- | ------------------------------------------------------------------------------------------ | ----------------- | ------------------------ | -------------------------------------------------- |
+| Claude Code | Esc, Ctrl+C overloaded    | `AbortController`       | `"Interrupted by user"` synthetic | mid-turn between tool waves (`next`), `later` = turn-end                                   | Esc / Up pop      | 800 ms (Ctrl+C / Ctrl+D) | spinner only                                       |
+| Codex       | Esc (steer-only), Ctrl+C  | `Op::Interrupt` message | none, queued restored to composer | mid-turn at sampling boundary (Enter) + Tab at turn-end                                    | Alt+Up pops       | 1 s, currently disabled  | spinner + elapsed + tool name + "Esc to interrupt" |
+| opencode    | dual-press Esc within 5 s | `session.abort(id)`     | none                              | mid-turn via persisted user row + transcript reload (steer default), turn-end (queue mode) | n/a               | none (single-press exit) | spinner only                                       |

@@ -2,17 +2,9 @@
 
 Focus-grabbing UI overlays opened by slash commands, by the App in response to engine events requesting tool approval, and at startup with `ox --resume`. Lives in the band between the chat scroll and the input area, the same row range the slash autocomplete popup uses, but wider.
 
-Companion: [commands.md](commands.md) covers the slash-command surface that opens modals.
+Companion docs: [commands.md](slash-commands.md) covers the slash-command surface that opens modals.
 
-## Goals
-
-A modal is a self-contained UI that takes keyboard focus, owns its render, emits a typed result, and dismisses. Chat blocks are persistent transcript artifacts, while modals are ephemeral overlays.
-
-Three things drove the abstraction:
-
-1. **Live preview.** `/theme` swaps palettes as the user arrows through choices and snaps back on Esc.
-2. **Multi-step interaction.** The combined `/model + /effort` picker and the confirm-delete modal nested in `/resume`.
-3. **Agent-driven prompts.** When a tool call needs approval, the agent emits `Event::ApprovalRequested` and blocks until the user's decision comes back. The App pushes an `ApprovalModal`, which routes the decision back as `Op::Resolve`.
+A modal is a self-contained UI that takes keyboard focus, owns its render, emits a typed result, and dismisses. Chat blocks are persistent transcript artifacts, while modals are ephemeral overlays. Three needs drove the abstraction: `/theme` swaps palettes as the user arrows through choices and snaps back on Esc, the combined `/model + /effort` picker and the confirm-delete modal nested in `/resume` need several steps, and a tool call that needs approval emits `Event::ApprovalRequested` and blocks until the App pushes an `ApprovalModal` and routes the decision back as `Op::Resolve`.
 
 ## Trait Shape
 
@@ -38,7 +30,7 @@ Only a plain Esc cancels. The stack drops every other key held with Ctrl, Alt, o
 
 `on_cancel` returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`. `ApprovalModal` overrides it to emit an abort decision so the blocked agent always gets an answer. The `ox --resume` picker overrides it to emit `Op::Shutdown` because dismissing the picker quits `ox`.
 
-## Implementation
+## Shared Primitives
 
 The modal implementation uses these shared components:
 
@@ -68,7 +60,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **Confirm-delete modal**: `ConfirmDeleteSessionModal` shows the session's title above its `format_metadata_line` row, which leads with the ID prefix. Y runs `session::saved::delete` on the session's file synchronously once the target is visible and the shared type-ahead guard expires. Enter does nothing, and repeated Y events restart the guard. Success submits `ModalAction::SystemMessage("Deleted session {id}: {title}")`, so the chat records the deletion. A failure shows an inline error that stays until a retry replaces it or the modal closes, so a stray key can't wipe the diagnostic. N cancels. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D.
 
-- **Approval modal**: `ApprovalModal` is the approve-or-deny gate the App pushes when the agent asks to run a gated tool call. It holds the tool-use ID and renders the call summary as its title above the body: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. The body shows at most 16 rows and scrolls when the call runs longer or the band is shorter. Y submits `Op::Resolve` with `Approve` while the first body row is visible and the type-ahead guard has expired, while Enter does nothing. [permissions.md](../tools/permissions.md) covers the guard. When the call offers a session grant, A opens a rule editor prefilled with the suggested rule, and Enter submits `AllowForSession` with the edited rule while the whole editor is visible and armed. N submits `Deny`. F opens a feedback editor whose Enter submits `DenyWithFeedback` with the typed text. Esc from the choice, Ctrl+C, and clearing the stack all resolve through `on_cancel` to `Abort`, which ends the turn.
+- **Approval modal**: `ApprovalModal` is the approve-or-deny gate the App pushes when the agent asks to run a gated tool call. It holds the tool-use ID and renders the call summary as its title above the body: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. The body shows at most 16 rows and scrolls when the call runs longer or the band is shorter. Y submits `Op::Resolve` with `Approve` while the first body row is visible and the type-ahead guard has expired, while Enter does nothing. [permissions.md](permissions.md) covers the guard. When the call offers a session grant, A opens a rule editor prefilled with the suggested rule, and Enter submits `AllowForSession` with the edited rule while the whole editor is visible and armed. N submits `Deny`. F opens a feedback editor whose Enter submits `DenyWithFeedback` with the typed text. Esc from the choice, Ctrl+C, and clearing the stack all resolve through `on_cancel` to `Abort`, which ends the turn.
 
 - **`/status` overview**: `KvOverview` of session descriptors (model, effort, permission mode, cwd, session ID, auth, version, cache TTL, auto compaction, show-thinking, show-welcome), plus a Session Rules section listing the session allow rules once any is granted and a Background Shells section listing each open shell with its state and the first line of its command. Constructed in `slash/status`.
 
@@ -104,7 +96,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **Persistent modals in chat scroll.** Modals are ephemeral. `/diff` stays a chat-pushed printer because a diff needs scrollback, which a modal would crop.
 
-- **Mouse interaction.** The TUI captures the mouse ([mouse interactions](../tui/mouse-interactions.md)), but a modal receives only the wheel, as Up / Down keys. It ignores clicks and stays keyboard-driven.
+- **Mouse interaction.** The TUI captures the mouse ([mouse interactions](mouse.md)), but a modal receives only the wheel, as Up / Down keys. It ignores clicks and stays keyboard-driven.
 
 - **Concurrent modals on different layers** (e.g. toast over modal). The chat error-block path already covers what toasts would.
 

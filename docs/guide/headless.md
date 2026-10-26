@@ -81,7 +81,7 @@ A turn reports usage when it ends and before each automatic compaction inside it
 
 ## Events
 
-Each `stream-json` line is an object with a `type` and, for most types, a `data` payload. Headless runs emit the following types:
+Each `stream-json` line is an object with a `type` and, for most types, a `data` payload. The schema below is the compatibility surface scripts depend on. [Engine](../design/engine.md) describes the operation and event contract behind it, including which event ends each operation. Headless runs emit the following types:
 
 | `type`                      | `data`                                                                                             |
 | --------------------------- | -------------------------------------------------------------------------------------------------- |

@@ -1,16 +1,8 @@
 # Welcome Screen
 
-The welcome screen paints in the chat region while the chat has no blocks, showing the app's identity, the session environment, and a short list of starter slash commands.
+The welcome screen paints in the chat region while the chat has no blocks, showing the app's identity, the session environment, and a short list of starter slash commands. It answers three questions: what is running, with the name, version, active model and effort, and auth source, where the session runs, and what to do next, with three sampled starter commands plus a randomized tip.
 
-## Goals
-
-The welcome answers three questions:
-
-1. **What am I running?** Name, version, active model + effort, auth source.
-2. **Where am I?** Working directory.
-3. **What can I do?** Three sampled starter commands plus a randomized tip.
-
-## Implementation
+## Rendering
 
 `ox_tui::components::welcome` is a stateless renderer, `paint`, that reads `&LiveSessionInfo`. `App::draw_frame` paints it into the chat region when:
 

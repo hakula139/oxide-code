@@ -70,6 +70,14 @@ Mouse capture hands plain clicks to `ox`, and some terminals, such as kitty and 
 
 URLs are sanitized: every control char is filtered out before the envelope is written, so a malformed value can't break out of the OSC 8 sequence.
 
+## Design Decisions
+
+1. **Capture the mouse and select text in the app.** Wheel scrolling has to work under tmux, which forwards a wheel event to a pane only when the pane reports the mouse, and capture then takes drags from the terminal. Selecting and copying in the app keeps one behavior across terminals, and the bypass modifier still gives the terminal's own selection.
+2. **Anchor both ends to content slots.** A screen-row range would drift when blocks stream in below it or another agent inserts output above it. Content anchors plus a column resolve against every frame's slot tops, so the highlight stays on the same text.
+3. **Copy on release, once.** Copying on each drag update would drive the clipboard worker on every motion event and raise a notice per update. The release copies what the final selection shows.
+4. **Pause tail-follow while dragging.** Followed output would move text out from under the pointer, so a drag pauses it and the release resumes it.
+5. **Offer both an OSC 8 link and a click target.** Terminals disagree on the modifier that opens a link, and some do not support OSC 8 at all, so a status-bar segment carries the hyperlink and a plain press also opens the page.
+
 ## Out of Scope
 
 - OSC 8 hyperlinks inside markdown body text (would require threading URLs through the markdown renderer).
