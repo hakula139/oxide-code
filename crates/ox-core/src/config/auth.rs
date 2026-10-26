@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::task::TaskTracker;
 use tracing::warn;
 
+use super::BaseUrl;
 use super::gateway::CUSTOM_HEADERS_VAR;
 use super::load::user_config_hint;
 use super::oauth::{ClaudeCodeKeychain, Login, LoginError, SessionLogin, login_stores};
@@ -370,7 +371,7 @@ pub(super) enum CredentialError {
 }
 
 impl CredentialError {
-    fn gateway(base_url: &super::BaseUrl) -> Self {
+    fn gateway(base_url: &BaseUrl) -> Self {
         let message = format!(
             "no credentials for {base_url}. \
              Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
@@ -471,7 +472,7 @@ pub(super) fn first_explicit(
 /// only when `base_url` is first-party, so a personal subscription token never reaches a gateway
 /// the user did not hand it to.
 pub(super) async fn fallback(
-    base_url: &super::BaseUrl,
+    base_url: &BaseUrl,
     stored: impl Future<Output = Result<Auth, LoginError>>,
 ) -> Result<Auth, CredentialError> {
     if !base_url.is_first_party() {
@@ -903,13 +904,10 @@ mod tests {
 
     mod fallback {
         use super::*;
+        use crate::config::testing::base_url;
 
         const FIRST_PARTY: &str = "https://api.anthropic.com";
         const GATEWAY: &str = "https://gateway.example.com/anthropic";
-
-        fn base_url(raw: &str) -> crate::config::BaseUrl {
-            crate::config::BaseUrl::parse(raw.to_owned()).unwrap()
-        }
 
         fn unreachable_store() -> impl Future<Output = Result<Auth, LoginError>> {
             std::future::poll_fn(|_| panic!("stored credentials must not be read"))

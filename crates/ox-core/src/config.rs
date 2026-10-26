@@ -5,6 +5,7 @@
 //! [`auth::AuthSource`] order.
 
 pub mod auth;
+mod base_url;
 pub mod compaction;
 pub mod gateway;
 pub mod load;
@@ -21,12 +22,13 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr, VariantArray};
 use tracing::warn;
 
 use self::auth::{Auth, AuthSource, CredentialError, LoginUnavailable, PendingAuth};
+pub(crate) use self::base_url::BaseUrl;
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
@@ -484,6 +486,20 @@ fn resolve_extra_ca_certs(
     }
 }
 
+/// Validates `base_url`, naming the setting that supplied it in an error.
+fn resolve_base_url(base_url: Sourced<String>) -> Result<Sourced<BaseUrl>> {
+    let value = BaseUrl::parse(&base_url.value).with_context(|| {
+        let raw = base_url::redacted(&base_url.value);
+        let setting = match &base_url.source {
+            Source::Env(var) => format!("{var} {raw:?}"),
+            Source::File(layer) => format!("client.base_url {raw:?} in {}", tildify(layer.path())),
+            _ => format!("base URL {raw:?}"),
+        };
+        format!("invalid {setting}")
+    })?;
+    Ok(Sourced::new(value, base_url.source))
+}
+
 /// The explicit credential and its source, rejecting a custom header that would replace it. Without
 /// one, the source is the default, since [`Config::resolve_auth`] falls back to a stored login, and
 /// the header check covers the OAuth header that a stored login or `/login` sends.
@@ -702,119 +718,6 @@ where
     T: fmt::Display + FromStr + PartialOrd,
 {
     Ok(env::number(var, range)?.map(|value| Sourced::new(value, Source::Env(var))))
-}
-
-// ── Base URL ──
-
-/// A validated API base URL, parsed once at startup. `Debug` and `Display` show the URL as
-/// configured, which carries no userinfo.
-#[derive(Clone)]
-pub(crate) struct BaseUrl {
-    /// The URL as configured, so `/config` and errors show what the user wrote.
-    raw: String,
-    url: reqwest::Url,
-    first_party: bool,
-}
-
-impl BaseUrl {
-    pub(crate) fn parse(raw: String) -> Result<Self> {
-        let url = reqwest::Url::parse(&raw).map_err(|e| anyhow!("{e}"))?;
-        ensure!(
-            url.username().is_empty() && url.password().is_none(),
-            "a base URL cannot carry a username or password. \
-             Remove them, and put a gateway credential in ANTHROPIC_CUSTOM_HEADERS, \
-             client.headers, or [client.auth]."
-        );
-        ensure!(
-            url.query().is_none() && url.fragment().is_none(),
-            "query strings and fragments are not supported. Remove them from the base URL."
-        );
-        match url.scheme() {
-            "https" => {}
-            "http" if is_loopback_url(&url) => {}
-            "http" => bail!("http is allowed only for localhost"),
-            scheme => bail!("expected http or https, got {scheme:?}"),
-        }
-        // `Url` lowercases the host of an `http` or `https` URL.
-        let first_party = matches!(
-            url.host_str(),
-            Some("api.anthropic.com" | "api-staging.anthropic.com")
-        );
-        Ok(Self {
-            raw,
-            url,
-            first_party,
-        })
-    }
-
-    /// Returns whether the URL points at Anthropic's production or staging host. Gates the
-    /// stored-login fallback, body-side `cache_control.scope = "global"`, and the billing `cch` hash.
-    pub(crate) const fn is_first_party(&self) -> bool {
-        self.first_party
-    }
-
-    /// The `/v1/messages` endpoint under this base URL, dropping a trailing slash as the Anthropic
-    /// SDKs do, since routers that keep empty path segments answer `//v1/messages` with a 404.
-    pub(crate) fn messages_url(&self) -> String {
-        let mut url = self.url.clone();
-        {
-            let mut segments = url
-                .path_segments_mut()
-                .expect("an http base URL has path segments");
-            segments.pop_if_empty().push("v1").push("messages");
-        }
-        url.set_query(Some("beta=true"));
-        url.into()
-    }
-}
-
-impl fmt::Debug for BaseUrl {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("BaseUrl").field(&self.raw).finish()
-    }
-}
-
-impl fmt::Display for BaseUrl {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.raw)
-    }
-}
-
-/// `base_url` with any userinfo removed, for an error that rejects it without echoing the password.
-fn redacted_base_url(raw: &str) -> String {
-    let Ok(mut url) = reqwest::Url::parse(raw) else {
-        return raw.to_owned();
-    };
-    if url.username().is_empty() && url.password().is_none() {
-        return raw.to_owned();
-    }
-    _ = url.set_username("");
-    _ = url.set_password(None);
-    url.into()
-}
-
-/// Validates `base_url`, naming the setting that supplied it in an error.
-fn resolve_base_url(base_url: Sourced<String>) -> Result<Sourced<BaseUrl>> {
-    let setting = match &base_url.source {
-        Source::Env(var) => format!("{var} {:?}", redacted_base_url(&base_url.value)),
-        Source::File(layer) => format!(
-            "client.base_url {:?} in {}",
-            redacted_base_url(&base_url.value),
-            tildify(layer.path())
-        ),
-        _ => format!("base URL {:?}", redacted_base_url(&base_url.value)),
-    };
-    let value = BaseUrl::parse(base_url.value).map_err(|e| anyhow!("invalid {setting}: {e}"))?;
-    Ok(Sourced::new(value, base_url.source))
-}
-
-fn is_loopback_url(url: &reqwest::Url) -> bool {
-    match url.host() {
-        Some(url::Host::Domain("localhost")) => true,
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(url::Host::Domain(_)) | None => false,
-    }
 }
 
 #[cfg(test)]
@@ -1431,9 +1334,30 @@ mod tests {
 
         #[tokio::test]
         async fn rejects_a_base_url_with_userinfo_and_redacts_the_password() {
-            for raw in [
-                "https://user:secret@gw.example/anthropic",
-                "https://user@gw.example/anthropic",
+            let advice = "a base URL cannot carry a username or password. \
+                          Remove them, and set the credential with ANTHROPIC_AUTH_TOKEN, \
+                          ANTHROPIC_API_KEY, or [client.auth].";
+            for (raw, redacted, reason) in [
+                (
+                    "https://user:secret@gw.example/anthropic",
+                    "https://gw.example/anthropic",
+                    advice,
+                ),
+                (
+                    "https://user@gw.example/anthropic",
+                    "https://gw.example/anthropic",
+                    advice,
+                ),
+                (
+                    "https://:secret@gw.example/anthropic",
+                    "https://gw.example/anthropic",
+                    advice,
+                ),
+                (
+                    "https://user:secret@gw.example:99999/anthropic",
+                    "https://gw.example:99999/anthropic",
+                    "invalid port number",
+                ),
             ] {
                 let dir = tempfile::tempdir().unwrap();
 
@@ -1444,12 +1368,8 @@ mod tests {
 
                 assert_eq!(
                     message,
-                    "invalid ANTHROPIC_BASE_URL \"https://gw.example/anthropic\": \
-                     a base URL cannot carry a username or password. \
-                     Remove them, and put a gateway credential in ANTHROPIC_CUSTOM_HEADERS, \
-                     client.headers, or [client.auth].",
+                    format!("invalid ANTHROPIC_BASE_URL {redacted:?}: {reason}"),
                 );
-                assert!(!message.contains("secret"), "{message}");
             }
         }
 
@@ -2755,84 +2675,6 @@ mod tests {
             );
             assert_eq!(snap.theme_name, "macchiato");
             assert_eq!(snap.provenance, cfg.provenance);
-        }
-    }
-
-    mod base_url {
-        use super::*;
-
-        fn parse(raw: &str) -> BaseUrl {
-            BaseUrl::parse(raw.to_owned()).unwrap()
-        }
-
-        mod is_first_party {
-            use super::*;
-
-            #[test]
-            fn accepts_official_hosts() {
-                assert!(parse("https://api.anthropic.com").is_first_party());
-                assert!(parse("https://api.anthropic.com/").is_first_party());
-                assert!(parse("https://api-staging.anthropic.com").is_first_party());
-                assert!(parse("https://API.ANTHROPIC.COM").is_first_party());
-            }
-
-            #[test]
-            fn rejects_proxies_and_loopback_hosts() {
-                assert!(!parse("https://api.openai.com").is_first_party());
-                assert!(!parse("https://proxy.example.com").is_first_party());
-                assert!(!parse("https://anthropic.com.evil.io").is_first_party());
-                assert!(!parse("http://127.0.0.1:8080").is_first_party());
-            }
-        }
-
-        mod messages_url {
-            use super::*;
-
-            #[test]
-            fn joins_the_messages_path_under_a_path_prefix_and_trailing_slash() {
-                for (raw, expected) in [
-                    (
-                        "https://example.com",
-                        "https://example.com/v1/messages?beta=true",
-                    ),
-                    (
-                        "https://example.com/",
-                        "https://example.com/v1/messages?beta=true",
-                    ),
-                    (
-                        "https://example.com/anthropic",
-                        "https://example.com/anthropic/v1/messages?beta=true",
-                    ),
-                    (
-                        "https://example.com/anthropic/",
-                        "https://example.com/anthropic/v1/messages?beta=true",
-                    ),
-                    (
-                        "http://127.0.0.1:8080",
-                        "http://127.0.0.1:8080/v1/messages?beta=true",
-                    ),
-                ] {
-                    assert_eq!(parse(raw).messages_url(), expected, "{raw}");
-                }
-            }
-        }
-
-        mod parse {
-            use super::*;
-
-            #[test]
-            fn rejects_userinfo_without_echoing_the_password() {
-                for raw in [
-                    "https://user:secret@gw.example/anthropic",
-                    "https://user@gw.example/anthropic",
-                    "https://:secret@gw.example/anthropic",
-                ] {
-                    let err = BaseUrl::parse(raw.to_owned()).unwrap_err().to_string();
-
-                    assert!(err.contains("cannot carry a username or password"), "{err}");
-                    assert!(!err.contains("secret"), "{err}");
-                }
-            }
         }
     }
 

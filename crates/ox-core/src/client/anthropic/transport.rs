@@ -44,7 +44,7 @@ const TRANSIENT_ADVICE: &str = "Retry in a few seconds.";
 
 /// One `/v1/messages` call, replayable across retry attempts.
 pub(super) struct MessagesRequest {
-    pub(super) url: String,
+    pub(super) url: reqwest::Url,
     pub(super) betas: String,
     pub(super) session_id: String,
     pub(super) body: Bytes,
@@ -117,7 +117,7 @@ async fn send(
     retry: u32,
 ) -> Result<reqwest::Response, AttemptError> {
     let (name, value) = credential.header();
-    http.post(&request.url)
+    http.post(request.url.clone())
         .header("anthropic-beta", &request.betas)
         .header("x-claude-code-session-id", &request.session_id)
         .header("x-stainless-retry-count", retry)
@@ -579,15 +579,6 @@ mod tests {
                 format!("{error:#}").starts_with("Anthropic API connection failed: "),
                 "{error:#}"
             );
-        }
-
-        #[tokio::test]
-        async fn malformed_url_is_fatal() {
-            let req = messages_request("not a url");
-            let err = post_messages(&plain_http(), &req, 0)
-                .await
-                .expect_err("the request cannot be built");
-            assert!(matches!(err, AttemptError::Fatal(_)), "{err:?}");
         }
 
         #[tokio::test]

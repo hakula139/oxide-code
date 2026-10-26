@@ -46,7 +46,10 @@ pub(super) fn plain_http() -> reqwest::Client {
 /// A `/v1/messages` call to `url` with an empty body and an API key.
 pub(super) fn messages_request(url: impl Into<String>) -> MessagesRequest {
     MessagesRequest {
-        url: url.into(),
+        url: url
+            .into()
+            .parse()
+            .expect("a test messages URL must be a URL"),
         betas: String::new(),
         session_id: "sid".to_owned(),
         body: Bytes::from_static(b"{}"),

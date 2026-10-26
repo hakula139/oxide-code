@@ -70,7 +70,7 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 pub(crate) struct Client {
     http: reqwest::Client,
     /// The `/v1/messages` endpoint under the configured base URL.
-    messages_url: String,
+    messages_url: reqwest::Url,
     /// Whether the client talks to the Anthropic API, which alone gets `scope: "global"` and `cch`,
     /// as in Claude Code.
     is_first_party: bool,
@@ -532,13 +532,11 @@ mod tests {
     use super::local_testing::{
         client_for, completion_body, oauth, request_count, serve, test_client,
     };
-    use super::testing::{
-        DEVICE_ID, api_key, messages_url, sse_body, sse_response, text_stream_body,
-    };
+    use super::testing::{DEVICE_ID, api_key, sse_body, sse_response, text_stream_body};
     use super::*;
     use crate::client::{Response, StopReason};
     use crate::config::oauth::testing::{HeldRefresh, ok_refresh_body, ox_login_in, write_creds};
-    use crate::config::testing::test_config;
+    use crate::config::testing::{base_url, test_config};
     use crate::model::TokenUsage;
     use crate::util::tls::PlatformTrust;
     use crate::util::tls::testing::{NoRoots, TEST_CA_PATH};
@@ -580,7 +578,7 @@ mod tests {
             user_context: Option<&str>,
         ) -> Request {
             let server = serve(vec![sse_response(text_stream_body("", "Hi"))]).await;
-            client.messages_url = messages_url(server.uri());
+            client.messages_url = base_url(server.uri()).messages_url();
             collect_events(
                 client
                     .stream_message(messages, system, user_context, &[])

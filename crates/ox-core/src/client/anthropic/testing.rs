@@ -59,11 +59,3 @@ pub(crate) fn sse_body(frames: &[serde_json::Value]) -> String {
 pub(crate) fn api_key() -> Auth {
     Auth::new(AuthSource::ApiKeyEnv, "k")
 }
-
-/// The `/v1/messages` endpoint a client on `base` requests.
-#[cfg(test)]
-pub(crate) fn messages_url(base: impl Into<String>) -> String {
-    crate::config::BaseUrl::parse(base.into())
-        .expect("test base URL must be valid")
-        .messages_url()
-}
