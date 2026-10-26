@@ -14,7 +14,7 @@ use self::sections::{
     CAUTION, INTRO, OUTPUT_EFFICIENCY, STYLE, SYSTEM_SECTION, TASK_GUIDANCE, TOOL_GUIDANCE,
 };
 use crate::model::ModelSpec;
-use crate::util::git::{project_root, repo_root};
+use crate::util::git::repo_root;
 
 /// Output of [`build_prompt`] or [`restore_prompt`], held for a whole session so every request
 /// shares a byte-identical prefix.
@@ -91,7 +91,7 @@ impl UserContext {
     /// Reads the instruction files that apply in `cwd`, plus today's date and `model`'s identity.
     /// Also returns a warning for each instruction file that exists but cannot or may not be read.
     pub(crate) async fn load(cwd: &Path, model: &ModelSpec) -> (Self, Vec<String>) {
-        let (instructions, warnings) = instructions::load(cwd, &project_root(cwd)).await;
+        let (instructions, warnings) = instructions::load(cwd).await;
         let context = Self {
             instructions,
             date: environment::current_date(),
