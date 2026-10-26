@@ -110,7 +110,7 @@ During TUI auto-compaction, the status bar shows the `Compacting` state, and the
 
 8. **A failed attempt fails its prompt.** Sending the prompt against the unchanged transcript would put a request over the threshold on the wire, and the context would keep growing until it overflowed the window, which is the case auto-compaction exists for. Failing the prompt reports the failure before anything is sent, and the user can still continue during the pause without compaction. The TUI hands the unsent prompt back and holds the queue, so the prompts queued behind it do not each start another summary request on their own. A failed mid-turn attempt ends its turn for the same reason, since the turn's next request would cross the threshold, and the TUI holds the queue there too.
 
-## Related Issues
+## Out of Scope
 
 A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-code/issues/168).
 
