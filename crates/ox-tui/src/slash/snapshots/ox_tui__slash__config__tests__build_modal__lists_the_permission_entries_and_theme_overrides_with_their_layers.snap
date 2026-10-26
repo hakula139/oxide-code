@@ -19,7 +19,7 @@ expression: "render_rows(&modal, 80, modal.height(80, u16::MAX))"
     "Max Tokens          64000                        default                        ",
     "Max Tool Rounds     unbounded                    default                        ",
     "Prompt Cache TTL    1h                           default                        ",
-    "Auto Compaction     at 155000 tokens             default                        ",
+    "Auto Compaction     at 155k tokens               default                        ",
     "Permission Mode     manual                       default                        ",
     "Show Thinking       off                          default                        ",
     "Show Welcome        off                          user                           ",

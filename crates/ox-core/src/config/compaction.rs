@@ -13,6 +13,7 @@ use super::schema::CompactionTable;
 use super::{env_bool, env_number};
 use crate::model::ModelSpec;
 use crate::util::path::tildify;
+use crate::util::text::compact_count;
 
 const AUTO_COMPACTION_OUTPUT_RESERVE_CAP: u32 = 20_000;
 const AUTO_COMPACTION_BUFFER_TOKENS: u32 = 13_000;
@@ -65,7 +66,7 @@ impl AutoCompactionConfig {
 impl fmt::Display for AutoCompactionConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (self.enabled, self.threshold_tokens) {
-            (true, Some(threshold)) => write!(f, "at {threshold} tokens"),
+            (true, Some(threshold)) => write!(f, "at {} tokens", compact_count(threshold)),
             (true, None) => f.write_str("off (no threshold)"),
             _ => f.write_str("off"),
         }
@@ -308,7 +309,7 @@ mod tests {
                 threshold_tokens: Some(400_000),
             };
 
-            assert_eq!(windowed.to_string(), "at 400000 tokens");
+            assert_eq!(windowed.to_string(), "at 400k tokens");
             assert_eq!(windowless.to_string(), "off (no threshold)");
             assert_eq!(AutoCompactionConfig::disabled().to_string(), "off");
         }

@@ -32,7 +32,7 @@ use ox_core::util;
 use ox_core::util::path::tildify;
 use ox_core::util::tls::PlatformTrust;
 use ox_tui::Startup;
-use ox_tui::slash::ResumePicker;
+use ox_tui::slash::{ResumePicker, is_built_in};
 use ox_tui::terminal;
 use ox_tui::theme::resolve_theme;
 
@@ -44,7 +44,6 @@ use self::driver::headless::OutputFormat;
     name = "ox",
     version,
     args_conflicts_with_subcommands = true,
-    disable_help_subcommand = true,
     about = "A terminal-based AI coding assistant",
     long_about = indoc! {"
         A terminal-based AI coding assistant.
@@ -60,17 +59,16 @@ use self::driver::headless::OutputFormat;
           git diff | ox -p \"Review this diff\"   Answer once, with the diff attached from stdin
           ox config check                       Validate the config files and exit
 
+        Setup:
+          Sign in   Set ANTHROPIC_API_KEY, or run /login inside ox
+          Config    ~/.config/ox/config.toml, checked by `ox config check`
+
         Guides: https://github.com/hakula139/oxide-code/tree/main/docs/guide"
     }
 )]
 #[command(group(
     ArgGroup::new("scope")
         .args(["list", "continue", "resume"])
-        .multiple(true),
-))]
-#[command(group(
-    ArgGroup::new("session")
-        .args(["continue", "print", "prompt", "resume"])
         .multiple(true),
 ))]
 #[expect(
@@ -90,7 +88,11 @@ struct Cli {
     all: bool,
 
     /// With `--list`, show only archived sessions.
-    #[arg(long, requires = "list", conflicts_with = "session")]
+    #[arg(
+        long,
+        requires = "list",
+        conflicts_with_all = ["continue", "print", "prompt", "resume"]
+    )]
     archived: bool,
 
     /// Continue the most recent session in this project.
@@ -102,13 +104,19 @@ struct Cli {
         long,
         value_name = "N",
         requires = "list",
-        conflicts_with = "session",
+        conflicts_with_all = ["continue", "print", "prompt", "resume"],
+        value_parser = limit,
+        allow_negative_numbers = true,
         default_value_t = DEFAULT_SESSION_LIST_LIMIT
     )]
     limit: usize,
 
     /// List recent sessions and exit.
-    #[arg(short, long, conflicts_with = "session")]
+    #[arg(
+        short,
+        long,
+        conflicts_with_all = ["continue", "print", "prompt", "resume"]
+    )]
     list: bool,
 
     /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
@@ -157,8 +165,10 @@ impl Cli {
         cli
     }
 
-    /// Rejects the session picker beside a flag that skips the TUI or a first prompt.
+    /// Rejects a lone prompt that names a slash command, and the session picker beside a flag that
+    /// skips the TUI or a first prompt.
     fn validate(&self) -> Result<(), clap::Error> {
+        self.reject_slash_word()?;
         if !self.opens_picker() {
             return Ok(());
         }
@@ -176,6 +186,24 @@ impl Cli {
             format!(
                 "`--resume` without a session opens the picker, which cannot be used with \
                  `{other}`. Pass the session's ID prefix to resume it directly."
+            ),
+        ))
+    }
+
+    /// Rejects a lone prompt such as `ox login`, which users of `git`, `cargo`, and `gh` type
+    /// expecting a subcommand. `--` still sends the word as a prompt.
+    fn reject_slash_word(&self) -> Result<(), clap::Error> {
+        let Some(word) = self.prompt.as_deref() else {
+            return Ok(());
+        };
+        if !is_built_in(word) {
+            return Ok(());
+        }
+        Err(Self::command().error(
+            ErrorKind::ValueValidation,
+            format!(
+                "`{word}` is a slash command inside `ox`. Run `ox` and type `/{word}`, or pass \
+                 `--` before the word to send it as a prompt."
             ),
         ))
     }
@@ -265,6 +293,13 @@ fn unexpected_word(error: clap::Error) -> clap::Error {
         ErrorKind::UnknownArgument,
         format!("unexpected argument '{word}' found. Quote a prompt that has spaces."),
     )
+}
+
+/// Parses `--limit`, a count of sessions where `0` removes the cap.
+fn limit(value: &str) -> Result<usize, &'static str> {
+    value
+        .parse()
+        .map_err(|_| "expected a whole number, or 0 for no cap")
 }
 
 /// Parses a prompt or session, which must hold more than whitespace.
@@ -473,7 +508,7 @@ fn check_config() -> Result<Exit> {
     }
     let mut stdout = io::stdout().lock();
     for file in &check.files {
-        writeln!(stdout, "Read {}", tildify(file))?;
+        writeln!(stdout, "Loaded {}", tildify(file))?;
     }
     writeln!(stdout, "Config is valid")?;
     Ok(Exit::Success)
@@ -645,6 +680,82 @@ mod tests {
         }
 
         #[test]
+        fn list_conflict_names_only_the_flag_the_user_passed() {
+            let error = Cli::try_parse_from(["ox", "-l", "-c"])
+                .err()
+                .expect("`--list` rejects a session flag");
+
+            let message = error.to_string();
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+            assert!(
+                message.contains("the argument '--list' cannot be used with '--continue'"),
+                "{message}"
+            );
+            assert!(!message.contains("'--print'"), "{message}");
+            assert!(!message.contains("'--resume'"), "{message}");
+        }
+
+        #[test]
+        fn limit_takes_a_whole_number_including_zero() {
+            let capped = Cli::try_parse_from(["ox", "--list", "--limit", "5"]).unwrap();
+            let unbounded = Cli::try_parse_from(["ox", "--list", "--limit", "0"]).unwrap();
+
+            assert_eq!((capped.limit, unbounded.limit), (5, 0));
+            for bad in ["abc", "-1"] {
+                let error = Cli::try_parse_from(["ox", "--list", "--limit", bad])
+                    .err()
+                    .expect("a non-number fails");
+
+                assert_eq!(error.kind(), ErrorKind::ValueValidation, "{bad}");
+                assert!(
+                    error.to_string().contains(&format!(
+                        "invalid value '{bad}' for '--limit <N>': expected a whole number, \
+                         or 0 for no cap"
+                    )),
+                    "{error}",
+                );
+            }
+        }
+
+        #[test]
+        fn a_lone_prompt_that_names_a_slash_command_is_rejected() {
+            for (args, word) in [
+                (&["ox", "login"][..], "login"),
+                (&["ox", "status"], "status"),
+                (&["ox", "new"], "new"),
+                (&["ox", "-p", "diff"], "diff"),
+            ] {
+                let cli = Cli::try_parse_from(args).unwrap();
+
+                let error = cli
+                    .validate()
+                    .expect_err("a slash-command word must not become a prompt");
+
+                assert_eq!(error.kind(), ErrorKind::ValueValidation, "{args:?}");
+                assert!(
+                    error.to_string().contains(&format!(
+                        "`{word}` is a slash command inside `ox`. Run `ox` and type `/{word}`, \
+                         or pass `--` before the word to send it as a prompt."
+                    )),
+                    "{error}",
+                );
+            }
+        }
+
+        #[test]
+        fn a_prompt_that_embeds_a_slash_command_word_still_runs() {
+            for prompt in ["login now", "status report", "LOGIN"] {
+                let cli = Cli::try_parse_from(["ox", prompt]).unwrap();
+
+                assert_eq!(
+                    cli.validate().err().map(|error| error.kind()),
+                    None,
+                    "{prompt}",
+                );
+            }
+        }
+
+        #[test]
         fn continue_and_resume_pick_the_session() {
             let latest = Cli::try_parse_from(["ox", "-c"]).unwrap();
             let named = Cli::try_parse_from(["ox", "-r", "a1b2"]).unwrap();
@@ -681,11 +792,15 @@ mod tests {
             );
 
             let escaped = Cli::try_parse_from(["ox", "--", "config"]).unwrap();
-            let help = Cli::try_parse_from(["ox", "help"]).unwrap();
+            let escaped_help = Cli::try_parse_from(["ox", "--", "help"]).unwrap();
+            let help = Cli::try_parse_from(["ox", "help"])
+                .err()
+                .expect("`help` is the built-in help subcommand");
 
             assert_eq!(escaped.prompt.as_deref(), Some("config"));
             assert!(escaped.command.is_none());
-            assert_eq!(help.prompt.as_deref(), Some("help"));
+            assert_eq!(escaped_help.prompt.as_deref(), Some("help"));
+            assert_eq!(help.kind(), ErrorKind::DisplayHelp);
         }
 
         #[test]

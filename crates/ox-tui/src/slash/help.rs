@@ -37,7 +37,25 @@ fn build_modal() -> KvOverview {
         .iter()
         .map(|cmd| (display_label(*cmd), cmd.description().to_owned()))
         .collect();
-    KvOverview::new("Help", vec![KvSection::new(rows)])
+    KvOverview::new(
+        "Help",
+        vec![
+            KvSection::new(rows).with_heading("Commands"),
+            KvSection::new(
+                [
+                    ("Tab / Shift+Tab", "Switch the permission mode"),
+                    ("Esc", "Stop the running turn"),
+                    ("Ctrl+O", "Expand or collapse long output"),
+                    ("Ctrl+C twice", "Exit, even with a draft"),
+                    ("Ctrl+D", "Exit with an empty input"),
+                    ("//", "Send text that starts with a slash"),
+                ]
+                .map(|(key, action)| (key.to_owned(), action.to_owned()))
+                .to_vec(),
+            )
+            .with_heading("Keys"),
+        ],
+    )
 }
 
 /// `/name (aliases) <usage>`, where the aliases and usage are optional.

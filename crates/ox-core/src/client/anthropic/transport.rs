@@ -39,6 +39,9 @@ const OVERLOADED: &str = "Anthropic API overloaded";
 const SERVER_ERROR: &str = "Anthropic API server error";
 /// Advice for an overload or a server failure, both of which usually pass.
 const TRANSIENT_ADVICE: &str = "Retry in a few seconds.";
+/// Advice for a transport failure, which a wrong base URL or proxy often causes.
+const CONNECTION_ADVICE: &str =
+    "Check the network connection, `ANTHROPIC_BASE_URL`, and proxy settings.";
 
 // ── Request ──
 
@@ -137,7 +140,11 @@ async fn send(
             } else {
                 AttemptError::retryable(
                     "Anthropic API connection failed",
-                    anyhow::Error::new(e).context("Anthropic API connection failed"),
+                    anyhow!(with_details(
+                        "Anthropic API connection failed",
+                        Some(&e.to_string()),
+                        Some(CONNECTION_ADVICE),
+                    )),
                 )
             }
         })
@@ -609,9 +616,16 @@ mod tests {
             };
 
             assert_eq!(cause, "Anthropic API connection failed");
+            let message = format!("{error:#}");
             assert!(
-                format!("{error:#}").starts_with("Anthropic API connection failed: "),
-                "{error:#}"
+                message.starts_with("Anthropic API connection failed: "),
+                "{message}"
+            );
+            assert!(
+                message.ends_with(
+                    "Check the network connection, `ANTHROPIC_BASE_URL`, and proxy settings."
+                ),
+                "{message}"
             );
         }
 

@@ -101,6 +101,10 @@ where
                 continue;
             }
             let op = match command::parse_slash(input) {
+                Some(parsed) if parsed.name == "help" => {
+                    renderer.render(Event::Notice(repl_help()));
+                    continue;
+                }
                 Some(parsed) => match command_op(&parsed, project_root) {
                     Ok(op) => op,
                     Err(message) => {
@@ -156,6 +160,23 @@ where
     }
     renderer.finish().context("failed to print output")?;
     Ok(if failed { Exit::Failure } else { Exit::Success })
+}
+
+/// The command list `/help` prints in the REPL.
+fn repl_help() -> String {
+    let commands = command::NAMES
+        .iter()
+        .map(|name| {
+            let aliases = command::aliases(name);
+            if aliases.is_empty() {
+                format!("/{name}")
+            } else {
+                format!("/{name} ({})", aliases.join(", "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Commands: {commands}. Use `//text` to send a literal slash.")
 }
 
 /// The op a slash command runs in the REPL at `project_root`, or the message saying why it cannot
@@ -893,7 +914,7 @@ mod tests {
                 let input: &[u8] = indoc! {b"
                     /model gpt-4
                     /model
-                    /help
+                    /theme
                 "};
 
                 let exit = Box::pin(drive(
@@ -925,14 +946,49 @@ mod tests {
                 );
                 assert_eq!(
                     reports[1],
-                    "/model: Missing model ID. Usage: `/model <id>`."
+                    "/model: missing model ID. Usage: `/model <id>`."
                 );
                 assert_eq!(
                     reports[2],
-                    "`/help` is not a REPL command. \
+                    "`/theme` is not a REPL command. \
                      Available: /clear, /compact, /effort, /exit, /init, /mode, /model, /rename, \
                      /resume. \
-                     Use `//help` to send the literal text.",
+                     Use `//theme` to send the literal text.",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn help_prints_the_command_list_and_keeps_reading() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &sink,
+                    None,
+                    Prompter::new(&b"/help\n"[..], io::sink()),
+                    true,
+                    no_signal,
+                ))
+                .await
+                .unwrap();
+
+                assert_eq!(exit, Exit::Success);
+                assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
+                assert_eq!(
+                    sink.events(),
+                    [Event::Notice(
+                        "Commands: /clear (new, reset), /compact, /effort, /exit (quit), /init, \
+                         /mode, /model, /rename, /resume (continue). \
+                         Use `//text` to send a literal slash."
+                            .to_owned()
+                    )],
                 );
             })
             .await;

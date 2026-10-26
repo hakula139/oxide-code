@@ -24,7 +24,7 @@ const CREDENTIAL_VARS: [&str; 3] = [
 const MIN_SECRET_HEADER_LEN: usize = 8;
 
 #[test]
-#[ignore = "sends live API requests: run with OX_LIVE=1"]
+#[ignore = "sends live API requests: run with `OX_LIVE=1 cargo live`"]
 fn headless_reply_streams_the_text_the_session_records() {
     let Some(live) = Live::start() else { return };
 
@@ -51,7 +51,7 @@ fn headless_reply_streams_the_text_the_session_records() {
 }
 
 #[test]
-#[ignore = "sends live API requests: run with OX_LIVE=1"]
+#[ignore = "sends live API requests: run with `OX_LIVE=1 cargo live`"]
 fn tool_round_trip_reads_the_first_request_from_the_prompt_cache() {
     let Some(live) = Live::start() else { return };
     let code = format!("falcon-{}", fastrand::u32(..));
@@ -82,7 +82,7 @@ fn tool_round_trip_reads_the_first_request_from_the_prompt_cache() {
 }
 
 #[test]
-#[ignore = "sends live API requests: run with OX_LIVE=1"]
+#[ignore = "sends live API requests: run with `OX_LIVE=1 cargo live`"]
 fn thinking_after_tool_results_is_replayed_across_three_turns() {
     let Some(live) = Live::start() else { return };
     fs::write(live.cwd().join("data.txt"), "91\n97\n221\n43\n87\n").unwrap();
@@ -120,7 +120,7 @@ fn thinking_after_tool_results_is_replayed_across_three_turns() {
 }
 
 #[test]
-#[ignore = "sends live API requests: run with OX_LIVE=1"]
+#[ignore = "sends live API requests: run with `OX_LIVE=1 cargo live`"]
 fn auto_compaction_summarizes_from_the_cached_conversation() {
     let Some(live) = Live::start() else { return };
     fs::write(live.cwd().join("log-a.txt"), log_text(1, "copper-otter")).unwrap();
@@ -157,7 +157,7 @@ fn auto_compaction_summarizes_from_the_cached_conversation() {
 }
 
 #[test]
-#[ignore = "sends live API requests: run with OX_LIVE=1"]
+#[ignore = "sends live API requests: run with `OX_LIVE=1 cargo live`"]
 fn continue_answers_from_the_resumed_transcript_and_cache() {
     let Some(live) = Live::start() else { return };
     let code = format!("heron-{}", fastrand::u32(..));

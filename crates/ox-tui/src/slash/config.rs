@@ -287,7 +287,7 @@ mod tests {
             let rendered = rendered_text(&m, 80);
 
             assert!(rendered.contains("Auto Compaction"), "{rendered}");
-            assert!(rendered.contains("at 155000 tokens"), "{rendered}");
+            assert!(rendered.contains("at 155k tokens"), "{rendered}");
         }
 
         #[test]
