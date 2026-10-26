@@ -1,15 +1,14 @@
 //! Store access, error messages, and metadata lines for the commands that act on saved sessions.
 
-pub(super) use ox_core::session::saved::{BARE_ARCHIVE_HINT, saved_error_message};
-
 use std::fmt::Write as _;
 
 use time::OffsetDateTime;
 
 use ox_core::session::display::id_prefix;
 use ox_core::session::resolver::ResolveError;
+use ox_core::session::saved::SavedError;
 use ox_core::session::store::SessionStore;
-use ox_core::util::text::plural;
+use ox_core::util::text::{capitalize_first, plural};
 
 use crate::session_info::LiveSessionInfo;
 
@@ -25,25 +24,23 @@ pub(super) fn open_store(info: &LiveSessionInfo) -> Result<SessionStore, String>
 
 pub(super) const CLEAR_THEN_DELETE_HINT: &str = "Run `/clear` to start a new one, then delete it.";
 
+pub(super) const BARE_ARCHIVE_HINT: &str = "Use bare `/archive` to archive it and start a new one.";
+
 /// Phrases `error` as a sentence, ending a live-session match with `live_recovery` when given.
 pub(super) fn resolve_error_message(error: ResolveError, live_recovery: Option<&str>) -> String {
-    match error {
-        ResolveError::NoMatch { prefix } => format!("No session matching `{prefix}`"),
-        ResolveError::Live { prefix } => {
-            let live = format!("Session prefix `{prefix}` matches the live session");
-            match live_recovery {
-                Some(recovery) => format!("{live}. {recovery}"),
-                None => live,
-            }
-        }
-        ResolveError::Ambiguous {
-            prefix,
-            count,
-            preview,
-        } => format!("Ambiguous prefix `{prefix}` matches {count} sessions: {preview}"),
-        ResolveError::List { scope, cause } => {
-            format!("Failed to list sessions in {scope}: {cause:#}")
-        }
+    let sentence = capitalize_first(&error.to_string());
+    match (error, live_recovery) {
+        (ResolveError::Live { .. }, Some(recovery)) => format!("{sentence}. {recovery}"),
+        _ => sentence,
+    }
+}
+
+/// Phrases `error` as a sentence, ending a live-session refusal with `live_recovery` when given.
+pub(super) fn saved_error_message(error: SavedError, live_recovery: Option<&str>) -> String {
+    let sentence = capitalize_first(&error.to_string());
+    match (error, live_recovery) {
+        (SavedError::Live { .. }, Some(recovery)) => format!("{sentence}. {recovery}"),
+        _ => sentence,
     }
 }
 

@@ -13,7 +13,7 @@ use crate::session::display::id_prefix;
 use crate::session::entry::ArchiveState;
 use crate::session::handle::{LoadedTranscript, RollIntoOutcome};
 use crate::session::resolver::resolve_saved_prefix;
-use crate::session::saved::{self, BARE_ARCHIVE_HINT, saved_error_message};
+use crate::session::saved::{self, SavedError};
 use crate::util::git::current_branch;
 use crate::util::text::plural;
 
@@ -54,17 +54,10 @@ impl Engine {
         let id = session_id.clone();
         let live_id = self.transcript.session().session_id().to_owned();
         let result = tokio::task::spawn_blocking(move || {
-            saved::set_archived(&path, &session_id, state, &live_id)
-                .map_err(|error| {
-                    saved_error_message(
-                        error,
-                        (state == ArchiveState::Archived).then_some(BARE_ARCHIVE_HINT),
-                    )
-                })
-                .map(|()| state)
+            saved::set_archived(&path, &session_id, state, &live_id).map(|()| state)
         })
         .await
-        .unwrap_or_else(|error| Err(format!("Session archive task failed: {error}")));
+        .unwrap_or_else(|error| Err(SavedError::Task(error.to_string())));
         sink.emit(Event::ArchiveUpdated { id, result }, "archive-updated");
     }
 
@@ -800,11 +793,9 @@ mod tests {
                 let live_id = engine.transcript.session().session_id().to_owned();
                 let path = dir.path().join("missing.jsonl");
                 let sink = CapturingSink::default();
-                let expected = saved_error_message(
+                let expected =
                     saved::set_archived(&path, "saved", ArchiveState::Archived, &live_id)
-                        .unwrap_err(),
-                    Some(BARE_ARCHIVE_HINT),
-                );
+                        .unwrap_err();
 
                 engine
                     .set_archive(&sink, path, "saved".to_owned(), ArchiveState::Archived)

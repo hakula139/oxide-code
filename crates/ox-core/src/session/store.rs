@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use super::chain::{Chain, ChainBuilder};
 use super::entry::{
-    CURRENT_VERSION, CompactInfo, Entry, Header, TitleInfo, UsageRecord, keep_newer,
+    ArchiveState, CURRENT_VERSION, CompactInfo, Entry, Header, TitleInfo, UsageRecord, keep_newer,
 };
 use super::path::project_dir_name;
 use super::post_compact::restore_post_compact_origin;
@@ -289,7 +289,7 @@ pub(crate) struct SessionData {
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<TitleInfo>,
     pub(crate) first_user_prompt_seen: bool,
-    pub(crate) archived: bool,
+    pub(crate) archive_state: ArchiveState,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     /// Every billed request in the file, on any branch and across compactions.
     pub(crate) usage: Vec<UsageRecord>,
@@ -315,7 +315,7 @@ struct SessionDataBuilder {
     pending_compact: Option<CompactInfo>,
     latest_title: Option<TitleInfo>,
     first_user_prompt_seen: Option<bool>,
-    archived: bool,
+    archive_state: ArchiveState,
     /// Set once a compaction takes effect.
     compact_tail: Option<CompactTail>,
     tool_result_metadata: HashMap<String, ToolMetadata>,
@@ -349,7 +349,7 @@ impl SessionDataBuilder {
                 keep_newer(&mut self.latest_title, title);
                 self.first_user_prompt_seen = Some(true);
             }
-            Entry::Archive { archived, .. } => self.archived = archived,
+            Entry::Archive { archived, .. } => self.archive_state = archived.into(),
             Entry::ToolResultMetadata {
                 tool_use_id,
                 metadata,
@@ -366,15 +366,11 @@ impl SessionDataBuilder {
             Entry::Compact {
                 summary,
                 pre_message_count,
-                instructions,
-                tasks,
                 ..
             } => {
                 self.pending_compact = Some(CompactInfo {
                     summary,
                     pre_message_count,
-                    instructions,
-                    tasks,
                 });
             }
             _ => {}
@@ -488,7 +484,7 @@ impl SessionDataBuilder {
             compact: self.compact,
             title: self.latest_title,
             first_user_prompt_seen,
-            archived: self.archived,
+            archive_state: self.archive_state,
             tool_result_metadata: self.tool_result_metadata,
             usage: self.usage,
             file_snapshots: self.file_snapshots,
@@ -706,6 +702,7 @@ mod tests {
     use crate::message::{ContentBlock, Role};
     use crate::model::PromptCacheTtl;
     use crate::prompt::PromptParts;
+    use crate::session::entry::CompactSummary;
     use crate::tool::tasks::testing::plan;
     use crate::util::path::testing::HOME_VAR;
 
@@ -1022,10 +1019,12 @@ mod tests {
         /// A boundary compacting one message, with no focus instructions or tasks.
         fn sample_compact(timestamp: OffsetDateTime) -> Entry {
             Entry::Compact {
-                summary: "summary".to_owned(),
+                summary: CompactSummary {
+                    summary: "summary".to_owned(),
+                    instructions: None,
+                    tasks: Vec::new(),
+                },
                 pre_message_count: 1,
-                instructions: None,
-                tasks: Vec::new(),
                 timestamp,
             }
         }
@@ -1061,10 +1060,12 @@ mod tests {
             };
             let records = [
                 Entry::Compact {
-                    summary: "historical summary".to_owned(),
+                    summary: CompactSummary {
+                        summary: "historical summary".to_owned(),
+                        instructions: None,
+                        tasks: Vec::new(),
+                    },
                     pre_message_count: 2,
-                    instructions: None,
-                    tasks: Vec::new(),
                     timestamp: now,
                 },
                 Entry::Message {
@@ -1458,10 +1459,12 @@ mod tests {
                 .unwrap();
             writer
                 .append(&[Entry::Compact {
-                    summary: "summary".to_owned(),
+                    summary: CompactSummary {
+                        summary: "summary".to_owned(),
+                        instructions: Some("focus".to_owned()),
+                        tasks: plan(),
+                    },
                     pre_message_count: 1,
-                    instructions: Some("focus".to_owned()),
-                    tasks: plan(),
                     timestamp: datetime!(2026-04-16 12:00:02 UTC),
                 }])
                 .unwrap();
@@ -1495,10 +1498,12 @@ mod tests {
             assert_eq!(
                 data.compact,
                 Some(CompactInfo {
-                    summary: "summary".to_owned(),
+                    summary: CompactSummary {
+                        summary: "summary".to_owned(),
+                        instructions: Some("focus".to_owned()),
+                        tasks: plan(),
+                    },
                     pre_message_count: 1,
-                    instructions: Some("focus".to_owned()),
-                    tasks: plan(),
                 })
             );
         }
@@ -2042,7 +2047,7 @@ mod tests {
             archive.join().unwrap();
 
             let data = load_session_data_from_path(&path).unwrap();
-            assert!(data.archived);
+            assert_eq!(data.archive_state, ArchiveState::Archived);
             assert_eq!(data.messages, [Message::user("activity")]);
             assert_eq!(file.metadata().unwrap().modified().unwrap(), active);
 
@@ -2068,16 +2073,22 @@ mod tests {
                 .set_modified(last_active)
                 .unwrap();
             let modified = || fs::metadata(&path).unwrap().modified().unwrap();
-            assert!(!load_session_data_from_path(&path).unwrap().archived);
+            assert_eq!(
+                load_session_data_from_path(&path).unwrap().archive_state,
+                ArchiveState::Active,
+            );
 
             set_archived_at(&path, true).unwrap();
             let data = load_session_data_from_path(&path).unwrap();
-            assert!(data.archived);
+            assert_eq!(data.archive_state, ArchiveState::Archived);
             assert_eq!(data.messages, [Message::user("hello")]);
             assert_eq!(modified(), last_active, "archiving is not activity");
 
             set_archived_at(&path, false).unwrap();
-            assert!(!load_session_data_from_path(&path).unwrap().archived);
+            assert_eq!(
+                load_session_data_from_path(&path).unwrap().archive_state,
+                ArchiveState::Active,
+            );
             assert_eq!(modified(), last_active, "unarchiving is not activity");
         }
 

@@ -2197,13 +2197,17 @@ mod tests {
             app.modals.clear();
             app.handle_engine_event(Event::ArchiveUpdated {
                 id: "saved".to_owned(),
-                result: Err("Archive failed: disk full".to_owned()),
+                result: Err(ox_core::session::saved::SavedError::Failed {
+                    action: "archive".to_owned(),
+                    id: "saved".to_owned(),
+                    cause: "disk full".to_owned(),
+                }),
             });
 
             assert_eq!(app.status, Status::Idle);
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("Archive failed: disk full")
+                Some("Failed to archive session saved: disk full")
             );
             assert_eq!(
                 *observed.lock().unwrap(),

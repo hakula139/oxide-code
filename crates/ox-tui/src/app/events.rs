@@ -13,8 +13,9 @@ use ox_core::permission::{Basis, Mode, SessionGrant};
 use ox_core::protocol::{CompactTrigger, Event, Interaction, notice};
 use ox_core::session::display::archive_notice;
 use ox_core::session::entry::ArchiveState;
+use ox_core::session::saved::SavedError;
 use ox_core::tool::view::ApprovalPreview;
-use ox_core::util::text::plural;
+use ox_core::util::text::{capitalize_first, plural};
 
 use super::queue::FailedTurn;
 use super::{App, CopyNotice};
@@ -161,11 +162,11 @@ impl App {
     }
 
     /// Leaves held prompts queued, since a retained picker can submit another idle-only operation.
-    fn apply_archive_updated(&mut self, id: &str, result: &Result<ArchiveState, String>) {
+    fn apply_archive_updated(&mut self, id: &str, result: &Result<ArchiveState, SavedError>) {
         self.modals.archive_updated(id, result);
         match result {
             Ok(state) => self.chat.push_system_message(archive_notice(id, *state)),
-            Err(message) => self.chat.push_error(message),
+            Err(error) => self.chat.push_error(&capitalize_first(&error.to_string())),
         }
         self.enter_idle();
     }
@@ -2304,7 +2305,14 @@ mod tests {
             for (status, result) in [
                 (Status::Archiving, Ok(ArchiveState::Archived)),
                 (Status::Cancelling, Ok(ArchiveState::Archived)),
-                (Status::Archiving, Err("Archive failed".to_owned())),
+                (
+                    Status::Archiving,
+                    Err(SavedError::Failed {
+                        action: "archive".to_owned(),
+                        id: "saved".to_owned(),
+                        cause: "disk full".to_owned(),
+                    }),
+                ),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 app.queue.push("next prompt".to_owned());

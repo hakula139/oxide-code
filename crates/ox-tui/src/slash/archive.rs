@@ -95,7 +95,7 @@ impl SlashCommand for UnarchiveCmd {
 // ── Helpers ──
 
 fn apply_archived(info: &SessionInfo, target: ArchiveState) -> SlashOutcome {
-    if info.archive_state() == target {
+    if info.archive_state == target {
         let state = match target {
             ArchiveState::Active => "not archived",
             ArchiveState::Archived => "already archived",
@@ -117,7 +117,9 @@ mod tests {
     use time::macros::datetime;
 
     use ox_core::session::display::archive_notice;
-    use ox_core::session::saved::{self, saved_error_message};
+    use ox_core::session::saved;
+
+    use crate::slash::sessions::saved_error_message;
     use ox_core::session::store::SessionStore;
     use ox_core::session::store::testing::{
         WriterBarrier, archive_test_session, isolated_store, listed_ids, seed_test_session,

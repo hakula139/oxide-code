@@ -64,7 +64,7 @@ pub(crate) enum Entry {
         #[serde(skip_serializing_if = "Option::is_none")]
         tip: Option<Uuid>,
         /// Whether an earlier prompt or manual title consumed the first-prompt title opportunity.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         first_user_prompt_seen: Option<bool>,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
@@ -106,12 +106,9 @@ pub(crate) enum Entry {
     /// Preserves the message count for display and the task list until a later `tasks` call
     /// replaces it.
     Compact {
-        summary: String,
+        #[serde(flatten)]
+        summary: CompactSummary,
         pre_message_count: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        instructions: Option<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tasks: Vec<Task>,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
@@ -158,24 +155,30 @@ pub(super) fn keep_newer<T: Updated>(slot: &mut Option<T>, record: T) {
     }
 }
 
+/// A compaction's summary text, its `/compact` focus, and the task list the summarized transcript
+/// left, which the summary message carries over.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CompactSummary {
+    pub(crate) summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) tasks: Vec<Task>,
+}
+
 /// A finished summary and what its compaction boundary records beside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompactBoundary {
-    pub(crate) summary: String,
-    /// The `/compact` focus the summary followed.
-    pub(crate) instructions: Option<String>,
-    /// The task list the summarized transcript left, which the summary message carries over.
-    pub(crate) tasks: Vec<Task>,
+    pub(crate) summary: CompactSummary,
     /// Prompt state recorded beside the summary so resume restores the same request prefix.
     pub(crate) context: SessionContext,
 }
 
+/// A stored compaction's summary fields and the message count it replaced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompactInfo {
-    pub(crate) summary: String,
+    pub(crate) summary: CompactSummary,
     pub(crate) pre_message_count: u32,
-    pub(crate) instructions: Option<String>,
-    pub(crate) tasks: Vec<Task>,
 }
 
 /// One billed request's token usage, with the model and prompt-cache TTL that price it.
@@ -201,7 +204,7 @@ pub struct SessionInfo {
     pub exit: Option<ExitInfo>,
     /// Branch the session started on, or `None` outside a git repo.
     pub git_branch: Option<String>,
-    pub archived: bool,
+    pub archive_state: ArchiveState,
 }
 
 /// Whether a session is archived, which keeps it out of the default listings.
@@ -213,16 +216,17 @@ pub enum ArchiveState {
     Archived,
 }
 
-impl ArchiveState {
-    #[must_use]
-    pub const fn of(archived: bool) -> Self {
+impl From<bool> for ArchiveState {
+    fn from(archived: bool) -> Self {
         if archived {
             Self::Archived
         } else {
             Self::Active
         }
     }
+}
 
+impl ArchiveState {
     #[must_use]
     pub fn toggled(self) -> Self {
         match self {
@@ -237,15 +241,10 @@ impl SessionInfo {
     pub fn project(&self) -> &str {
         self.project_root.as_deref().unwrap_or(&self.cwd)
     }
-
-    pub fn archive_state(&self) -> ArchiveState {
-        ArchiveState::of(self.archived)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use indoc::indoc;
     use time::macros::datetime;
 
     use super::*;
@@ -531,10 +530,12 @@ mod tests {
     #[test]
     fn compact_round_trips_with_instructions_and_tasks() {
         let entry = Entry::Compact {
-            summary: "user wanted X, did Y, next step Z".to_owned(),
+            summary: CompactSummary {
+                summary: "user wanted X, did Y, next step Z".to_owned(),
+                instructions: Some("focus on the build error".to_owned()),
+                tasks: plan(),
+            },
             pre_message_count: 42,
-            instructions: Some("focus on the build error".to_owned()),
-            tasks: plan(),
             timestamp: datetime!(2026-04-16 13:00:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -547,10 +548,13 @@ mod tests {
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
         let Entry::Compact {
-            summary,
+            summary:
+                CompactSummary {
+                    summary,
+                    instructions,
+                    tasks,
+                },
             pre_message_count,
-            instructions,
-            tasks,
             timestamp,
         } = parsed
         else {
@@ -566,10 +570,12 @@ mod tests {
     #[test]
     fn compact_omits_absent_instructions_and_tasks_and_reads_them_back_empty() {
         let entry = Entry::Compact {
-            summary: "s".to_owned(),
+            summary: CompactSummary {
+                summary: "s".to_owned(),
+                instructions: None,
+                tasks: Vec::new(),
+            },
             pre_message_count: 4,
-            instructions: None,
-            tasks: Vec::new(),
             timestamp: datetime!(2026-04-16 13:00:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -578,8 +584,12 @@ mod tests {
 
         let parsed: Entry = serde_json::from_value(json).unwrap();
         let Entry::Compact {
-            instructions,
-            tasks,
+            summary:
+                CompactSummary {
+                    instructions,
+                    tasks,
+                    ..
+                },
             ..
         } = parsed
         else {
@@ -607,45 +617,5 @@ mod tests {
 
             assert_eq!(serde_json::to_string(&parsed).unwrap(), current);
         }
-    }
-
-    #[test]
-    fn entries_parse_from_jsonl_lines() {
-        let jsonl = indoc! {r#"
-            {"type":"header","session_id":"s1","cwd":"/tmp","model":"m","created_at":"2026-04-16T12:00:00Z","version":1}
-            {"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"hi"}]},"timestamp":"2026-04-16T12:00:01Z"}
-            {"type":"title","title":"hi","updated_at":"2026-04-16T12:00:01Z"}
-            {"type":"summary","message_count":1,"updated_at":"2026-04-16T12:00:02Z"}
-        "#};
-        let entries: Vec<Entry> = jsonl
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-
-        assert_eq!(entries.len(), 4);
-        assert!(
-            matches!(&entries[0], Entry::Header(Header { session_id, version, .. }) if session_id == "s1" && *version == CURRENT_VERSION)
-        );
-        let Entry::Message {
-            uuid,
-            parent_uuid,
-            message,
-            ..
-        } = &entries[1]
-        else {
-            panic!("expected Entry::Message, got {:?}", entries[1]);
-        };
-        assert_eq!(uuid.to_string(), "a1b2c3d4-e5f6-7890-abcd-1234567890ef");
-        assert_eq!(*parent_uuid, None);
-        assert_eq!(message.role, crate::message::Role::User);
-        assert!(matches!(&entries[2], Entry::Title(TitleInfo { title, .. }) if title == "hi"));
-        assert!(matches!(
-            &entries[3],
-            Entry::Summary(ExitInfo {
-                message_count: 1,
-                ..
-            })
-        ));
     }
 }

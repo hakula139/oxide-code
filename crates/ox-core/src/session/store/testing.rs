@@ -159,7 +159,7 @@ pub fn listed_session(session_id: &str) -> SessionInfo {
         title: None,
         exit: None,
         git_branch: None,
-        archived: false,
+        archive_state: ArchiveState::Active,
     }
 }
 

@@ -87,7 +87,7 @@ impl SharedState {
         self.manual_title_set.load(Ordering::Acquire)
     }
 
-    fn last_flush_failure(&self) -> Option<String> {
+    pub(super) fn last_flush_failure(&self) -> Option<String> {
         lock_or_recover(&self.last_flush_failure, "last_flush_failure").clone()
     }
 }
@@ -499,12 +499,16 @@ fn resume_loaded(
         bail!("session {session_id} has no messages left after repair");
     }
     retain_visible_file_snapshots(&mut data.file_snapshots, &data.messages);
-    if data.archived {
+    if data.archive_state == ArchiveState::Archived {
         writer.set_archived(false)?;
     }
 
     let tasks = tasks::latest(&data.messages)
-        .or_else(|| data.compact.as_ref().map(|compact| compact.tasks.clone()))
+        .or_else(|| {
+            data.compact
+                .as_ref()
+                .map(|compact| compact.summary.tasks.clone())
+        })
         .unwrap_or_default();
     let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);
     let title = data.title.map(|t| t.title);
@@ -530,7 +534,7 @@ fn resume_loaded(
             file_snapshots: data.file_snapshots,
         },
         title,
-        prior: ArchiveState::of(data.archived),
+        prior: data.archive_state,
     })
 }
 
@@ -566,7 +570,7 @@ mod tests {
     };
     use crate::message::{ContentBlock, Replay, Role, TextOrigin};
     use crate::prompt::PromptParts;
-    use crate::session::entry::{Entry, ExitInfo, SessionInfo};
+    use crate::session::entry::{CompactSummary, Entry, ExitInfo, SessionInfo};
     use crate::session::handle::testing::record_write_call;
     use crate::session::store::encode_lines;
     use crate::session::store::listing::ProjectScope;
@@ -1092,7 +1096,10 @@ mod tests {
             let outcome = handle
                 .compact(
                     CompactBoundary {
-                        instructions: Some("focus".to_owned()),
+                        summary: CompactSummary {
+                            instructions: Some("focus".to_owned()),
+                            ..testing::boundary("synth summary").summary
+                        },
                         ..testing::boundary("synth summary")
                     },
                     Message::user("post"),
@@ -1152,13 +1159,19 @@ mod tests {
             let outcome = original.archive().await;
             assert!(outcome.failure.is_none());
             original.shutdown().await;
-            assert!(store.load_session_data(&session_id).unwrap().archived);
+            assert_eq!(
+                store.load_session_data(&session_id).unwrap().archive_state,
+                ArchiveState::Archived,
+            );
 
             let resumed = resume_id(&store, &session_id).unwrap();
             assert_eq!(resumed.prior, ArchiveState::Archived);
             assert_eq!(resumed.transcript.messages, [Message::user("hello")]);
             resumed.handle.shutdown().await;
-            assert!(!store.load_session_data(&session_id).unwrap().archived);
+            assert_eq!(
+                store.load_session_data(&session_id).unwrap().archive_state,
+                ArchiveState::Active,
+            );
 
             let again = resume_id(&store, &session_id).unwrap();
             assert_eq!(again.prior, ArchiveState::Active);
@@ -1840,10 +1853,12 @@ mod tests {
                 let now = datetime!(2026-01-01 00:00:00 UTC);
                 let records = [
                     Entry::Compact {
-                        summary: "legacy summary".to_owned(),
+                        summary: CompactSummary {
+                            summary: "legacy summary".to_owned(),
+                            instructions: None,
+                            tasks: Vec::new(),
+                        },
                         pre_message_count: 4,
-                        instructions: None,
-                        tasks: Vec::new(),
                         timestamp: now,
                     },
                     Entry::Message {
@@ -2375,9 +2390,11 @@ mod tests {
             session
                 .compact(
                     CompactBoundary {
-                        summary: "Asked to edit f.rs.".to_owned(),
-                        instructions: Some("focus on f.rs".to_owned()),
-                        tasks: plan(),
+                        summary: CompactSummary {
+                            summary: "Asked to edit f.rs.".to_owned(),
+                            instructions: Some("focus on f.rs".to_owned()),
+                            tasks: plan(),
+                        },
                         context: prompt.session_context(),
                     },
                     crate::session::post_compact::synthesize_post_compact_message(
@@ -2649,15 +2666,15 @@ mod tests {
                     "title": listed.title.map(|title| title.title),
                     "git_branch": listed.git_branch,
                     "message_count": listed.exit.map(|exit| exit.message_count),
-                    "archived": listed.archived,
+                    "archive_state": listed.archive_state,
                 },
                 "title": resumed.title,
                 "prior": resumed.prior,
                 "compact": transcript.compact.as_ref().map(|compact| serde_json::json!({
-                    "summary": compact.summary,
+                    "summary": compact.summary.summary,
                     "pre_message_count": compact.pre_message_count,
-                    "instructions": compact.instructions,
-                    "tasks": compact.tasks,
+                    "instructions": compact.summary.instructions,
+                    "tasks": compact.summary.tasks,
                 })),
                 "context": transcript.context,
                 "messages": transcript.messages,

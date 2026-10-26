@@ -65,7 +65,7 @@ expression: recovered
     }
   ],
   "listed": {
-    "archived": true,
+    "archive_state": "archived",
     "git_branch": "main",
     "message_count": 7,
     "title": "Fix f.rs"

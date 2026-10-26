@@ -22,6 +22,7 @@ use ox_core::command;
 use ox_core::protocol::{Op, ResumeTarget};
 use ox_core::session::display::{ID_PREFIX_WIDTH, display_title, id_prefix};
 use ox_core::session::entry::{ArchiveState, SessionInfo};
+use ox_core::session::saved::SavedError;
 use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{ListScope, ProjectScope, SessionWalk};
 use ox_core::util::path::tildify;
@@ -35,7 +36,8 @@ use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{
-    SHORT_RELATIVE_TIME_WIDTH, format_metadata_line, format_short_relative_time, open_store,
+    BARE_ARCHIVE_HINT, SHORT_RELATIVE_TIME_WIDTH, format_metadata_line, format_short_relative_time,
+    open_store, saved_error_message,
 };
 use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
@@ -759,7 +761,7 @@ impl Modal for ResumePicker {
         }
     }
 
-    fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, String>) {
+    fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, SavedError>) {
         let Some(pending) = self.archive.take_if(|pending| pending.session_id == id) else {
             return;
         };
@@ -779,7 +781,10 @@ impl Modal for ResumePicker {
                     false,
                 )
             }
-            Err(error) => (error.clone(), true),
+            Err(error) => (
+                saved_error_message(error.clone(), Some(BARE_ARCHIVE_HINT)),
+                true,
+            ),
         };
         self.notice = Some(Notice {
             text,
@@ -867,7 +872,9 @@ mod tests {
 
     use ox_core::session::display::UNTITLED_MARKER;
     use ox_core::session::entry::{ExitInfo, TitleInfo};
-    use ox_core::session::saved::{self, BARE_ARCHIVE_HINT, saved_error_message};
+    use ox_core::session::saved;
+
+    use crate::slash::sessions::BARE_ARCHIVE_HINT;
     use ox_core::session::store::testing::{
         WriterBarrier, archive_test_session, isolated_store, listed_ids, listed_session,
         seed_test_session, stamped_id, test_project_dir, test_store, with_isolated_xdg,
@@ -893,13 +900,7 @@ mod tests {
         {
             picker.archive_started(session_id);
             let result = saved::set_archived(path, session_id, *state, &picker.live_session_id)
-                .map(|()| *state)
-                .map_err(|error| {
-                    saved_error_message(
-                        error,
-                        (*state == ArchiveState::Archived).then_some(BARE_ARCHIVE_HINT),
-                    )
-                });
+                .map(|()| *state);
             picker.archive_updated(session_id, &result);
         }
         outcome

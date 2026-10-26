@@ -1498,7 +1498,10 @@ mod tests {
                     .await;
                 assert_ne!(fresh_id, archived_id);
                 assert_eq!(old_session, ArchiveState::Archived);
-                assert!(store.load_session_data(&archived_id).unwrap().archived);
+                assert_eq!(
+                    store.load_session_data(&archived_id).unwrap().archive_state,
+                    ArchiveState::Archived,
+                );
 
                 let target = ResumeTarget::Path(store.find_session_path(&archived_id).unwrap());
                 handle.ops.send(Op::Resume { target }).await.unwrap();
@@ -1510,7 +1513,10 @@ mod tests {
                 handle.shutdown().await.unwrap();
 
                 assert_eq!(resumed, (archived_id.clone(), ArchiveState::Archived));
-                assert!(!store.load_session_data(&archived_id).unwrap().archived);
+                assert_eq!(
+                    store.load_session_data(&archived_id).unwrap().archive_state,
+                    ArchiveState::Active,
+                );
             })
             .await;
         }
@@ -1552,7 +1558,10 @@ mod tests {
                 let independent = tokio::spawn(async { "runtime event" });
 
                 assert_eq!(independent.await.unwrap(), "runtime event");
-                assert!(!store.load_session_data("saved").unwrap().archived);
+                assert_eq!(
+                    store.load_session_data("saved").unwrap().archive_state,
+                    ArchiveState::Active,
+                );
                 barrier.release();
                 let archived = next_matching(&mut handle.events, |event| {
                     matches!(
@@ -1577,7 +1586,10 @@ mod tests {
                 handle.shutdown().await.unwrap();
 
                 assert_eq!(resumed, ("saved".to_owned(), ArchiveState::Archived));
-                assert!(!store.load_session_data("saved").unwrap().archived);
+                assert_eq!(
+                    store.load_session_data("saved").unwrap().archive_state,
+                    ArchiveState::Active,
+                );
             })
             .await;
         }

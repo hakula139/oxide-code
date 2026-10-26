@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::entry::CompactInfo;
-use super::post_compact::strip_post_compact_summary;
-use crate::message::{ContentBlock, Message, Role, TextOrigin, progress_update_before};
+use crate::message::{ContentBlock, Message, Role, TextOrigin, progress_note};
+use crate::model::lacks_progress_updates;
 use crate::protocol::{Interaction, ToolCall, ToolResult};
 use crate::tool::view::ToolResultView;
 use crate::tool::{ToolMetadata, ToolRegistry};
@@ -24,42 +24,27 @@ pub(crate) fn interactions(
     cwd: &Path,
 ) -> Vec<Interaction> {
     let Some(info) = compact else {
-        return walk_transcript(messages, tool_metadata, tools, cwd);
+        return walk_transcript(messages, tool_metadata, tools, cwd, false);
     };
     let mut out = vec![Interaction::Compacted {
-        summary: info.summary.clone(),
+        summary: info.summary.summary.clone(),
         pre_count: info.pre_message_count,
-        instructions: info.instructions.clone(),
+        instructions: info.summary.instructions.clone(),
     }];
-    out.extend(walk_transcript(
-        &post_compact_messages(messages),
-        tool_metadata,
-        tools,
-        cwd,
-    ));
+    out.extend(walk_transcript(messages, tool_metadata, tools, cwd, true));
     out
-}
-
-/// Drops the summary a compaction prepended to the first message, which the boundary shows.
-fn post_compact_messages(messages: &[Message]) -> Vec<Message> {
-    let mut messages = messages.to_vec();
-    if let Some(first) = messages.first_mut()
-        && strip_post_compact_summary(first)
-        && first.content.is_empty()
-    {
-        messages.remove(0);
-    }
-    messages
 }
 
 /// Walks a transcript in display order. Tool calls are paired inline with their `tool_use_id`
 /// results, and generated interruptions become [`Interaction::Interrupted`]. Whitespace-only text
-/// and generated reminders in user messages are dropped.
+/// and generated reminders in user messages are dropped, as is the compaction summary when
+/// `skip_compaction_summary` is set because the boundary shows it.
 fn walk_transcript(
     messages: &[Message],
     tool_metadata: &HashMap<String, ToolMetadata>,
     tools: &ToolRegistry,
     cwd: &Path,
+    skip_compaction_summary: bool,
 ) -> Vec<Interaction> {
     let pairs: HashMap<&str, (&str, bool)> = messages
         .iter()
@@ -79,6 +64,7 @@ fn walk_transcript(
         cwd,
         tool_metadata,
         pairs,
+        skip_compaction_summary,
         out: Vec::new(),
     };
     for message in messages {
@@ -92,6 +78,7 @@ struct TranscriptWalker<'a> {
     cwd: &'a Path,
     tool_metadata: &'a HashMap<String, ToolMetadata>,
     pairs: HashMap<&'a str, (&'a str, bool)>,
+    skip_compaction_summary: bool,
     out: Vec<Interaction>,
 }
 
@@ -111,6 +98,10 @@ impl TranscriptWalker<'_> {
                     self.flush_text(&mut text_buf, msg.role);
                     self.out.push(Interaction::Interrupted);
                 }
+                ContentBlock::Text {
+                    origin: Some(TextOrigin::CompactionSummary),
+                    ..
+                } if self.skip_compaction_summary && msg.role == Role::User => {}
                 ContentBlock::Text { text, .. } if !text.trim().is_empty() => {
                     if !text_buf.is_empty() {
                         text_buf.push('\n');
@@ -196,6 +187,17 @@ impl TranscriptWalker<'_> {
     }
 }
 
+/// The progress note introducing the tool use at `blocks[index]`. See [`progress_note`]. Reasoning
+/// from a catalog model that writes no progress updates counts as empty.
+fn progress_update_before(blocks: &[ContentBlock], index: usize) -> Option<&str> {
+    progress_note(blocks[..index].iter().map(|block| match block {
+        ContentBlock::Thinking { replay, .. } if lacks_progress_updates(&replay.model) => Some(""),
+        ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+        ContentBlock::RedactedThinking { .. } => Some(""),
+        _ => None,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
@@ -203,6 +205,7 @@ mod tests {
     use super::*;
     use crate::message::{INTERRUPTION_MARKER, Replay};
     use crate::protocol::{CompactTrigger, testing};
+    use crate::session::entry::CompactSummary;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::DEFAULT_TOOL_ICON;
     use crate::tool::StoredView;
@@ -220,10 +223,12 @@ mod tests {
 
         fn compact_info() -> CompactInfo {
             CompactInfo {
-                summary: "Kept the important decisions.".to_owned(),
+                summary: CompactSummary {
+                    summary: "Kept the important decisions.".to_owned(),
+                    instructions: Some("focus on auth".to_owned()),
+                    tasks: plan(),
+                },
                 pre_message_count: 4,
-                instructions: Some("focus on auth".to_owned()),
-                tasks: plan(),
             }
         }
 
@@ -313,7 +318,13 @@ mod tests {
         const MODEL: &str = "claude-opus-5-5";
 
         fn walk(messages: &[Message]) -> Vec<Interaction> {
-            walk_transcript(messages, &HashMap::new(), &tools(), Path::new("/repo"))
+            walk_transcript(
+                messages,
+                &HashMap::new(),
+                &tools(),
+                Path::new("/repo"),
+                false,
+            )
         }
 
         fn call(
@@ -550,7 +561,7 @@ mod tests {
                 },
             )]);
 
-            let out = walk_transcript(&messages, &metadata, &tools(), Path::new("/repo"));
+            let out = walk_transcript(&messages, &metadata, &tools(), Path::new("/repo"), false);
 
             assert_eq!(
                 out[1],
@@ -609,7 +620,7 @@ mod tests {
                 },
             )]);
 
-            let out = walk_transcript(&messages, &metadata, &tools(), Path::new("/repo"));
+            let out = walk_transcript(&messages, &metadata, &tools(), Path::new("/repo"), false);
 
             assert_eq!(
                 out,

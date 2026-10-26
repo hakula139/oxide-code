@@ -19,7 +19,7 @@ use crate::message::{ContentBlock, Message, Role};
 const MAX_UNWRITTEN_MIB: usize = 8;
 pub(super) const MAX_UNWRITTEN_BYTES: usize = MAX_UNWRITTEN_MIB << 20;
 
-fn persistence_stopped() -> String {
+fn stop_message() -> String {
     format!(
         "session persistence stopped \
          after more than {MAX_UNWRITTEN_MIB} MiB of entries failed to write"
@@ -189,19 +189,12 @@ impl SessionState {
         synthetic_message: Message,
         now: OffsetDateTime,
     ) -> (Vec<Entry>, Uuid) {
-        let CompactBoundary {
-            summary,
-            instructions,
-            tasks,
-            context,
-        } = boundary;
+        let CompactBoundary { summary, context } = boundary;
         let synthetic_uuid = Uuid::new_v4();
         let entries = vec![
             Entry::Compact {
                 summary,
                 pre_message_count: self.message_count,
-                instructions,
-                tasks,
                 timestamp: now,
             },
             Entry::Context {
@@ -287,7 +280,10 @@ impl SessionState {
     /// with more than [`MAX_UNWRITTEN_BYTES`] to write drops the queue and stops persistence.
     pub(super) fn flush_entries(&mut self, entries: Vec<Entry>) -> Result<()> {
         if self.persistence_stopped {
-            bail!("{}", persistence_stopped());
+            if entries.is_empty() {
+                return Ok(());
+            }
+            bail!("{}", stop_message());
         }
         self.unwritten.extend(entries);
         if self.unwritten.is_empty() {
@@ -317,7 +313,7 @@ impl SessionState {
             if lines.len() > MAX_UNWRITTEN_BYTES {
                 self.persistence_stopped = true;
                 self.unwritten = Vec::new();
-                return Err(e.context(persistence_stopped()));
+                return Err(e.context(stop_message()));
             }
             return Err(e);
         }
@@ -365,6 +361,7 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::file_tracker::{FileTracker, LastView};
+    use crate::session::entry::CompactSummary;
     use crate::session::handle::testing::boundary;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{isolated_store, test_project_dir, test_store};
@@ -573,9 +570,11 @@ mod tests {
 
             let (entries, synthetic_uuid) = state.compact_entries(
                 CompactBoundary {
-                    summary: "summary body".to_owned(),
-                    instructions: Some("focus on auth".to_owned()),
-                    tasks: plan(),
+                    summary: CompactSummary {
+                        summary: "summary body".to_owned(),
+                        instructions: Some("focus on auth".to_owned()),
+                        tasks: plan(),
+                    },
                     context: SessionContext::default(),
                 },
                 Message::user("post-compact"),
@@ -587,10 +586,13 @@ mod tests {
                 matches!(
                     &entries[0],
                     Entry::Compact {
-                        summary,
+                        summary:
+                            CompactSummary {
+                                summary,
+                                instructions: Some(i),
+                                tasks,
+                            },
                         pre_message_count: 2,
-                        instructions: Some(i),
-                        tasks,
                         ..
                     } if summary == "summary body" && i == "focus on auth" && *tasks == plan()
                 ),
@@ -638,7 +640,10 @@ mod tests {
             assert!(matches!(
                 &entries[0],
                 Entry::Compact {
-                    instructions: None,
+                    summary: CompactSummary {
+                        instructions: None,
+                        ..
+                    },
                     ..
                 }
             ));
@@ -901,6 +906,25 @@ mod tests {
         }
 
         #[test]
+        fn an_empty_batch_succeeds_after_persistence_stops() {
+            let (_dir, store) = isolated_store();
+            let mut state = SessionState::fresh(store, "m", None);
+            state.persistence_stopped = true;
+
+            assert!(state.flush_entries(Vec::new()).is_ok());
+
+            let entry = Entry::Rewind {
+                tip: None,
+                first_user_prompt_seen: None,
+                timestamp: OffsetDateTime::now_utc(),
+            };
+            assert_eq!(
+                state.flush_entries(vec![entry]).unwrap_err().to_string(),
+                stop_message(),
+            );
+        }
+
+        #[test]
         fn failure_over_the_cap_stops_persistence_for_good() {
             let dir = tempfile::tempdir().unwrap();
             let now = OffsetDateTime::now_utc();
@@ -927,17 +951,14 @@ mod tests {
             let huge = Message::user("x".repeat(MAX_UNWRITTEN_BYTES));
             let (entries, _) = state.queue_message_entries(&huge, None, now, false);
             let err = state.flush_entries(entries).unwrap_err();
-            assert!(
-                format!("{err:#}").contains(&persistence_stopped()),
-                "got: {err:#}"
-            );
+            assert!(format!("{err:#}").contains(&stop_message()), "got: {err:#}");
             std::fs::remove_dir(&path).unwrap();
             std::fs::rename(&saved, &path).unwrap();
             let (entries, _) =
                 state.queue_message_entries(&Message::assistant("after"), None, now, false);
             let err = state.flush_entries(entries).unwrap_err();
 
-            assert_eq!(err.to_string(), persistence_stopped());
+            assert_eq!(err.to_string(), stop_message());
             assert!(state.persistence_stopped());
             assert_eq!(
                 std::fs::read(&path).unwrap(),
