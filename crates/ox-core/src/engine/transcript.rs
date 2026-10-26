@@ -1,0 +1,172 @@
+//! The live session and the transcript it records, which change together.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::file_tracker::{FileSnapshot, FileTracker};
+use crate::message::Message;
+use crate::model::ModelSpec;
+use crate::prompt::{self, PromptParts, SessionContext, UserContext};
+use crate::session::entry::{CompactBoundary, CompactInfo, UsageRecord};
+use crate::session::handle::{
+    CompactOutcome, LoadedTranscript, Outcome, RecordOutcome, SessionHandle,
+};
+use crate::tool::ToolMetadata;
+use crate::tool::tasks::Task;
+
+/// The live session and the transcript it holds. Methods that append write the session and the
+/// in-memory messages together, so a resumed session reads what the turn showed.
+pub(super) struct LiveTranscript {
+    pub(super) session: SessionHandle,
+    pub(super) messages: Vec<Message>,
+    /// Compaction boundary the transcript loaded with, until the engine projects it as history.
+    pub(super) compact: Option<CompactInfo>,
+    /// Metadata the loaded transcript's tool results persisted, until the engine projects it.
+    pub(super) tool_metadata: HashMap<String, ToolMetadata>,
+    /// The task list the model keeps with the `tasks` tool, which a compaction carries over.
+    pub(super) tasks: Vec<Task>,
+    pub(super) prompt: PromptParts,
+    /// Whether `prompt` changed since the session last recorded it, so the next user message
+    /// records it.
+    pub(super) prompt_unrecorded: bool,
+    pub(super) file_tracker: Arc<FileTracker>,
+    /// The tracked files the loaded session read that changed on disk since, until
+    /// [`Engine::emit_session_start`](super::Engine::emit_session_start) reports them.
+    pub(super) drifted: Vec<PathBuf>,
+}
+
+/// The transcript state before a turn's prompt: its length, what the model had seen of the user
+/// context and whether the prompt context awaits recording, and the tracked files.
+pub(super) struct TranscriptStart {
+    len: usize,
+    seen: UserContext,
+    prompt_unrecorded: bool,
+    files: Vec<FileSnapshot>,
+}
+
+impl LiveTranscript {
+    /// Installs `transcript` as the live transcript on `session`, restoring the file tracker and
+    /// building the prompt. Also returns the loaded session's usage, which seeds its cost, and the
+    /// warnings about instruction files a fresh prompt could not read.
+    pub(super) async fn load(
+        session: SessionHandle,
+        transcript: LoadedTranscript,
+        model: &ModelSpec,
+        cwd: &Path,
+    ) -> (Self, Vec<UsageRecord>, Vec<String>) {
+        let LoadedTranscript {
+            messages,
+            context,
+            compact,
+            tool_metadata,
+            usage,
+            tasks,
+            file_snapshots,
+        } = transcript;
+        let (file_tracker, drifted) = FileTracker::restored(file_snapshots);
+        let prompt_unrecorded = context.is_none();
+        let (prompt, warnings) = session_prompt(context, model, cwd).await;
+        let live = Self {
+            session,
+            messages,
+            compact,
+            tool_metadata,
+            tasks,
+            prompt,
+            prompt_unrecorded,
+            file_tracker: Arc::new(file_tracker),
+            drifted,
+        };
+        (live, usage, warnings)
+    }
+
+    /// The state [`Self::truncate_to`] returns to before a turn's prompt.
+    pub(super) fn start_of_turn(&self) -> TranscriptStart {
+        TranscriptStart {
+            len: self.messages.len(),
+            seen: self.prompt.seen.clone(),
+            prompt_unrecorded: self.prompt_unrecorded,
+            files: self.file_tracker.snapshot_all(),
+        }
+    }
+
+    /// Drops what the turn after `start` added, restoring what the model had seen of the prompt and
+    /// the files it had read.
+    pub(super) fn truncate_to(&mut self, start: TranscriptStart) {
+        self.messages.truncate(start.len);
+        self.prompt.seen = start.seen;
+        self.prompt_unrecorded = start.prompt_unrecorded;
+        self.file_tracker.reset_to(start.files);
+    }
+
+    /// Records `msg` with the prompt context it may carry, then appends it.
+    pub(super) async fn record_prompt(
+        &mut self,
+        msg: Message,
+        title: Option<String>,
+    ) -> RecordOutcome {
+        let context =
+            std::mem::take(&mut self.prompt_unrecorded).then(|| self.prompt.session_context());
+        let outcome = self
+            .session
+            .record_prompt(msg.clone(), context, title)
+            .await;
+        self.messages.push(msg);
+        outcome
+    }
+
+    /// Records `msg`, then appends it.
+    pub(super) async fn record_message(&mut self, msg: Message) -> RecordOutcome {
+        let outcome = self.session.record_message(msg.clone()).await;
+        self.messages.push(msg);
+        outcome
+    }
+
+    /// Records one tool round, then appends the assistant message and the results answering it.
+    pub(super) async fn record_round(
+        &mut self,
+        assistant: Message,
+        tool_results: Message,
+        metadata: Vec<(String, ToolMetadata)>,
+    ) -> Outcome {
+        let outcome = self
+            .session
+            .record_round(assistant.clone(), tool_results.clone(), metadata)
+            .await;
+        self.messages.push(assistant);
+        self.messages.push(tool_results);
+        outcome
+    }
+
+    /// Saves `boundary` and swaps the transcript to `synthetic`, which adopts the boundary's
+    /// prompt context. Clears the tracked files with the transcript.
+    pub(super) async fn compact(
+        &mut self,
+        boundary: CompactBoundary,
+        synthetic: Message,
+    ) -> CompactOutcome {
+        let context = boundary.context.clone();
+        let outcome = self.session.compact(boundary, synthetic.clone()).await;
+        if outcome.checkpoint.is_some() {
+            self.messages = vec![synthetic];
+            self.prompt.adopt(context);
+            self.prompt_unrecorded = false;
+            self.file_tracker.clear();
+        }
+        outcome
+    }
+}
+
+/// Replays the prompt a session recorded, or builds a fresh one for a session without one. Also
+/// returns the warnings about instruction files a fresh build could not read.
+async fn session_prompt(
+    context: Option<SessionContext>,
+    model: &ModelSpec,
+    cwd: &Path,
+) -> (PromptParts, Vec<String>) {
+    match context {
+        Some(context) => (prompt::restore_prompt(context, cwd).await, Vec::new()),
+        None => prompt::build_prompt(model, cwd).await,
+    }
+}

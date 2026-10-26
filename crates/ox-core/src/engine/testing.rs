@@ -44,7 +44,7 @@ pub async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engin
     let mut engine = Engine::new(&config, NoRoots, DEVICE_ID.to_owned(), session, false)
         .await
         .expect("the test engine builds");
-    SESSION_CONTEXT.clone_into(&mut engine.prompt.user_context);
+    SESSION_CONTEXT.clone_into(&mut engine.transcript.prompt.user_context);
     "http://127.0.0.1:9/token".clone_into(&mut engine.oauth_token_url);
     engine.claude_code_keychain = ClaudeCodeKeychain::NONE;
     engine.with_tools(ToolRegistry::new(Vec::new()))

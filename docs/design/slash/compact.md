@@ -94,6 +94,7 @@ The stdio driver's `StdioSink` prints the same header on stderr, which `protocol
 - `crates/ox-core/src/client/anthropic/transport.rs`: `prompt_too_long_message`, which types an HTTP 400 `prompt is too long` as `PromptTooLong`.
 - `crates/ox-core/src/engine/abort.rs`: `await_unless_aborted`, which races the summarization against cancel and quit.
 - `crates/ox-core/src/engine/compaction.rs`: `Engine::compact`, `Engine::run_compaction` and `Engine::replace_with_summary`, shared by manual and automatic compaction, the `request_summary` driver, the `SummaryStream` sink, the context-window retries (`drop_oldest_rounds`, `retry_request`), and the `SUMMARIZATION_USER_RUBRIC` constant.
+- `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::compact`, which saves the boundary and swaps the transcript to the synthetic continuation.
 - `crates/ox-core/src/engine/turn.rs`: `collect_response`, which reads the summary the way it reads a turn's reply.
 - `crates/ox-core/src/engine/usage.rs`: session-cost accounting.
 - `crates/ox-core/src/protocol.rs`: `Op::Compact`, `Event::SummaryToken`, `Event::SummaryDiscarded`, `Event::SessionCompacted`.

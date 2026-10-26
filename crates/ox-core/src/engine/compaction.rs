@@ -180,7 +180,7 @@ impl Engine {
         if !auto_compaction_due(
             self.auto_compaction(),
             self.context_estimate,
-            &self.messages,
+            &self.transcript.messages,
         ) {
             return Ok(());
         }
@@ -204,7 +204,7 @@ impl Engine {
             .run_auto_compaction(sink, ops, inbox, AutoPoint::MidTurn)
             .await;
         if let Err(TurnAbort::Cancelled | TurnAbort::Shutdown) = compacted {
-            record_interruption(&self.session, sink, &mut self.messages).await;
+            record_interruption(&mut self.transcript, sink).await;
         }
         compacted
     }
@@ -281,9 +281,9 @@ impl Engine {
         let summary = await_unless_aborted(
             request_summary(
                 &self.client,
-                &self.prompt,
+                &self.transcript.prompt,
                 &tools,
-                &self.messages,
+                &self.transcript.messages,
                 instructions.as_deref(),
                 sink,
                 &mut spent,
@@ -299,8 +299,8 @@ impl Engine {
                 let boundary = CompactBoundary {
                     summary,
                     instructions,
-                    tasks: self.tasks.clone(),
-                    context: self.prompt.refreshed(fresh),
+                    tasks: self.transcript.tasks.clone(),
+                    context: self.transcript.prompt.refreshed(fresh),
                 };
                 let compacted = self.replace_with_summary(sink, boundary, trigger).await;
                 if compacted.is_some() {
@@ -334,7 +334,7 @@ impl Engine {
         boundary: CompactBoundary,
         trigger: CompactTrigger,
     ) -> Option<Checkpoint> {
-        self.file_tracker.drain_writes().await;
+        self.transcript.file_tracker.drain_writes().await;
         let synthetic = synthesize_post_compact_message(
             &boundary.summary,
             &boundary.tasks,
@@ -343,18 +343,13 @@ impl Engine {
         );
         let summary = boundary.summary.clone();
         let instructions = boundary.instructions.clone();
-        let context = boundary.context.clone();
-        let outcome = self.session.compact(boundary, synthetic.clone()).await;
+        let outcome = self.transcript.compact(boundary, synthetic).await;
         let Some(checkpoint) = outcome.checkpoint else {
             sink.emit(Event::SummaryDiscarded, "summary-discarded");
             sink.session_write_error(outcome.failure.as_deref());
             return None;
         };
 
-        self.file_tracker.clear();
-        self.messages = vec![synthetic];
-        self.prompt.adopt(context);
-        self.prompt_unrecorded = false;
         sink.emit(
             Event::SessionCompacted {
                 summary,
@@ -869,7 +864,7 @@ mod tests {
             let mut engine = engine(server.uri(), &test_store(dir), dir).await;
             engine.compaction = CompactionConfig::with_threshold(50_000);
             engine.context_estimate = context_estimate;
-            engine.messages = transcript;
+            engine.transcript.messages = transcript;
             engine
         }
 
@@ -894,7 +889,7 @@ mod tests {
                         .await;
 
                     assert!(compacted.is_ok(), "{compacted:?}");
-                    assert_eq!(engine.messages, transcript);
+                    assert_eq!(engine.transcript.messages, transcript);
                     assert_eq!(sink.events(), []);
                 }
                 assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
@@ -929,7 +924,7 @@ mod tests {
                     "the next prompt goes out without compaction: {fourth:?}"
                 );
                 assert_eq!(request_bodies(&server).await.len(), 1);
-                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
                 let events = sink.events();
                 assert!(
                     matches!(
@@ -957,7 +952,7 @@ mod tests {
                 let usage = 50_000;
                 let mut engine =
                     auto_engine(&server, dir.path(), usage, tool_heavy_transcript()).await;
-                engine.session = dead_test_session();
+                engine.transcript.session = dead_test_session();
                 let sink = CapturingSink::default();
 
                 let e = engine
@@ -972,7 +967,7 @@ mod tests {
                      The prompt was not sent, so send it again to retry.",
                 );
                 assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(1));
-                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
                 assert_eq!(
                     engine.context_estimate, usage,
                     "the transcript the usage measured stays"
@@ -1007,7 +1002,7 @@ mod tests {
                 let usage = 50_000;
                 let mut engine =
                     auto_engine(&server, dir.path(), usage, tool_heavy_transcript()).await;
-                engine.tasks = plan();
+                engine.transcript.tasks = plan();
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
                 ops_tx
@@ -1020,7 +1015,7 @@ mod tests {
                 assert!(compacted.is_ok(), "{compacted:?}");
                 assert_eq!(inbox.prompts, ["queued after summary"]);
                 assert_eq!(
-                    engine.messages,
+                    engine.transcript.messages,
                     [synthesize_post_compact_message(
                         "auto summary",
                         &plan(),
@@ -1082,7 +1077,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.messages = tool_heavy_transcript();
+                engine.transcript.messages = tool_heavy_transcript();
                 engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
                 engine.total_estimated_cost_usd = 1.23;
                 engine.auto_compaction_failures = AutoCompactFailures::new(3);
@@ -1095,7 +1090,7 @@ mod tests {
 
                 assert_eq!(end, TurnEnd::Completed);
                 assert_eq!(
-                    engine.messages,
+                    engine.transcript.messages,
                     [synthesize_post_compact_message(
                         "manual summary",
                         &[],
@@ -1110,15 +1105,18 @@ mod tests {
                     engine.total_estimated_cost_usd,
                 );
                 assert_ne!(
-                    engine.prompt.user_context, SESSION_CONTEXT,
+                    engine.transcript.prompt.user_context, SESSION_CONTEXT,
                     "the compacted transcript starts from a fresh user context"
                 );
                 assert!(
-                    !engine.prompt_unrecorded,
+                    !engine.transcript.prompt_unrecorded,
                     "the boundary records the fresh prompt"
                 );
                 let data = store.load_session_data(engine.session_id()).unwrap();
-                assert_eq!(data.context, Some(engine.prompt.session_context()));
+                assert_eq!(
+                    data.context,
+                    Some(engine.transcript.prompt.session_context())
+                );
                 assert_eq!(
                     engine.auto_compaction_failures,
                     AutoCompactFailures::default()
@@ -1157,8 +1155,8 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
-                engine.messages = tool_heavy_transcript();
-                engine.tasks = plan();
+                engine.transcript.messages = tool_heavy_transcript();
+                engine.transcript.tasks = plan();
                 let mut ops = inert_ops();
 
                 let end = engine
@@ -1167,7 +1165,7 @@ mod tests {
 
                 assert_eq!(end, TurnEnd::Completed);
                 assert_eq!(
-                    engine.messages,
+                    engine.transcript.messages,
                     [synthesize_post_compact_message(
                         "manual summary",
                         &plan(),
@@ -1175,7 +1173,7 @@ mod tests {
                         CompactTrigger::Manual
                     )]
                 );
-                assert_eq!(engine.tasks, plan());
+                assert_eq!(engine.transcript.tasks, plan());
 
                 engine.clear(&CapturingSink::default()).await;
                 let compacted = store.find_session_path(&session_id).unwrap();
@@ -1184,7 +1182,7 @@ mod tests {
                     .await;
 
                 assert_eq!(engine.session_id(), session_id);
-                assert_eq!(engine.tasks, plan());
+                assert_eq!(engine.transcript.tasks, plan());
             })
             .await;
         }
@@ -1197,7 +1195,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.messages = tool_heavy_transcript();
+                engine.transcript.messages = tool_heavy_transcript();
                 start_shell(&engine.shells, "sleep 30");
                 let mut ops = inert_ops();
 
@@ -1207,7 +1205,7 @@ mod tests {
 
                 assert_eq!(end, TurnEnd::Completed);
                 assert_eq!(
-                    engine.messages,
+                    engine.transcript.messages,
                     [synthesize_post_compact_message(
                         "manual summary",
                         &[],
@@ -1231,25 +1229,25 @@ mod tests {
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
 
-                engine.messages = vec![Message::user("too short")];
+                engine.transcript.messages = vec![Message::user("too short")];
                 let end = engine.compact(&sink, &mut ops, None).await;
                 assert_eq!(end, TurnEnd::Failed);
-                assert_eq!(engine.messages, [Message::user("too short")]);
+                assert_eq!(engine.transcript.messages, [Message::user("too short")]);
 
-                engine.messages = tool_heavy_transcript();
+                engine.transcript.messages = tool_heavy_transcript();
                 ops_tx.send(Op::Interrupt).await.unwrap();
                 let end = engine.compact(&sink, &mut ops, None).await;
                 assert_eq!(end, TurnEnd::Cancelled);
-                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
 
-                engine.session = dead_test_session();
+                engine.transcript.session = dead_test_session();
                 let end = engine.compact(&sink, &mut ops, None).await;
                 assert_eq!(
                     end,
                     TurnEnd::Failed,
                     "an unwritten boundary is a failed compaction"
                 );
-                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
 
                 let events = sink.events();
                 assert!(
@@ -1300,7 +1298,7 @@ mod tests {
                     .await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.messages = tool_heavy_transcript();
+                engine.transcript.messages = tool_heavy_transcript();
                 engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
                 engine.total_estimated_cost_usd = 1.23;
                 let sink = CapturingSink::default();
@@ -1337,14 +1335,14 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.client.set_auth(None);
-                engine.messages = tool_heavy_transcript();
+                engine.transcript.messages = tool_heavy_transcript();
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
                 let end = engine.compact(&sink, &mut ops, None).await;
 
                 assert_eq!(end, TurnEnd::Failed);
-                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
                 assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
                 let events = sink.events();
                 assert!(
@@ -1364,7 +1362,7 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.messages = tool_heavy_transcript();
+                engine.transcript.messages = tool_heavy_transcript();
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(2);
                 ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
@@ -1384,7 +1382,7 @@ mod tests {
                 let base_url = serve_stalled_summary("partial").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(base_url, &test_store(dir.path()), dir.path()).await;
-                engine.messages = tool_heavy_transcript();
+                engine.transcript.messages = tool_heavy_transcript();
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
                 let interrupt_once_streaming = async {
@@ -1400,7 +1398,7 @@ mod tests {
                 );
 
                 assert_eq!(end, TurnEnd::Cancelled);
-                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
                 let events = sink.events();
                 assert!(
                     matches!(
@@ -1431,7 +1429,7 @@ mod tests {
                     .await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.messages = tool_heavy_transcript();
+                engine.transcript.messages = tool_heavy_transcript();
                 engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
                 engine.total_estimated_cost_usd = 1.23;
                 let sink = CapturingSink::default();
@@ -1440,7 +1438,7 @@ mod tests {
                 let end = engine.compact(&sink, &mut ops, None).await;
 
                 assert_eq!(end, TurnEnd::Failed);
-                assert_eq!(engine.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
                 assert_eq!(engine.displayed_usage, Some(TokenUsage::new(50_000, 1)));
                 let expected = 1.23 + 0.006;
                 assert!(
@@ -1494,12 +1492,12 @@ mod tests {
                     let store = test_store(dir.path());
                     let mut engine = engine(server.uri(), &store, dir.path()).await;
                     let session_id = engine.session_id().to_owned();
-                    engine.messages = tool_heavy_transcript();
+                    engine.transcript.messages = tool_heavy_transcript();
                     let read = dir.path().join("read.txt");
                     std::fs::write(&read, "read").unwrap();
-                    seed_full_read(&engine.file_tracker, &read);
+                    seed_full_read(&engine.transcript.file_tracker, &read);
                     let sink = CapturingSink::default();
-                    let tracker = std::sync::Arc::clone(&engine.file_tracker);
+                    let tracker = std::sync::Arc::clone(&engine.transcript.file_tracker);
                     let previous = tracker.snapshot_all();
                     let release = blocked_write(&tracker, &read, b"committed", "toolu_write").await;
 
@@ -1520,10 +1518,14 @@ mod tests {
 
                     assert!(compacted.is_some(), "{trigger:?}");
                     assert_eq!(std::fs::read(&read).unwrap(), b"committed", "{trigger:?}");
-                    assert_eq!(engine.file_tracker.snapshot_all(), [], "{trigger:?}");
+                    assert_eq!(
+                        engine.transcript.file_tracker.snapshot_all(),
+                        [],
+                        "{trigger:?}"
+                    );
                     let summary =
                         synthesize_post_compact_message("fixed login bug", &plan(), &[], trigger);
-                    assert_eq!(engine.messages, [summary], "{trigger:?}");
+                    assert_eq!(engine.transcript.messages, [summary], "{trigger:?}");
                     assert!(
                         matches!(
                             sink.events().as_slice(),
@@ -1536,14 +1538,14 @@ mod tests {
                         "{trigger:?}: {:?}",
                         sink.events(),
                     );
-                    engine.session.shutdown().await;
+                    engine.transcript.session.shutdown().await;
                     let saved = store.load_session_data(&session_id).unwrap();
                     assert_eq!(
                         saved.compact.map(|compact| compact.tasks),
                         Some(plan()),
                         "{trigger:?}"
                     );
-                    assert_eq!(saved.messages, engine.messages, "{trigger:?}");
+                    assert_eq!(saved.messages, engine.transcript.messages, "{trigger:?}");
                 }
             })
             .await;
@@ -1555,12 +1557,12 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.session = dead_test_session();
-                engine.messages = tool_heavy_transcript();
+                engine.transcript.session = dead_test_session();
+                engine.transcript.messages = tool_heavy_transcript();
                 let read = dir.path().join("read.txt");
                 std::fs::write(&read, "read").unwrap();
-                seed_full_read(&engine.file_tracker, &read);
-                let tracked = engine.file_tracker.snapshot_all();
+                seed_full_read(&engine.transcript.file_tracker, &read);
+                let tracked = engine.transcript.file_tracker.snapshot_all();
                 let sink = CapturingSink::default();
 
                 let compacted = engine
@@ -1568,8 +1570,8 @@ mod tests {
                     .await;
 
                 assert!(compacted.is_none());
-                assert_eq!(engine.messages, tool_heavy_transcript());
-                assert_eq!(engine.file_tracker.snapshot_all(), tracked);
+                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.file_tracker.snapshot_all(), tracked);
                 let events = sink.events();
                 assert!(
                     matches!(
@@ -1593,11 +1595,12 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
                 let unsaved = engine
+                    .transcript
                     .session
                     .record_message(Message::user("x".repeat(5 << 20)))
                     .await;
                 assert!(unsaved.failure.is_some());
-                engine.messages = tool_heavy_transcript();
+                engine.transcript.messages = tool_heavy_transcript();
                 let summary = "s".repeat(2 << 20);
                 let mut large = boundary(Vec::new());
                 large.summary.clone_from(&summary);
@@ -1609,7 +1612,7 @@ mod tests {
 
                 assert!(compacted.is_some());
                 assert_eq!(
-                    engine.messages,
+                    engine.transcript.messages,
                     [synthesize_post_compact_message(
                         &summary,
                         &[],
@@ -1630,7 +1633,7 @@ mod tests {
                     ),
                     "expected the compaction, then the stop: {events:?}",
                 );
-                engine.session.shutdown().await;
+                engine.transcript.session.shutdown().await;
             })
             .await;
         }
