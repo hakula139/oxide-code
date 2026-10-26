@@ -206,9 +206,43 @@ jobs:
 
           gh release create "$GITHUB_REF_NAME" release-assets/* "${options[@]}"
 
+  formula:
+    name: Check Homebrew Formula (${{ matrix.runner }})
+    if: github.ref_type == 'tag'
+    needs: publish
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-latest
+          - ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: oxide-code-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Render formula
+        run: ./scripts/update-homebrew-formula.sh "$GITHUB_REF_NAME" release-assets
+
+      - name: Install and test formula
+        run: |
+          brew install --formula ./Formula/oxide-code.rb
+          brew test oxide-code
+
   homebrew:
     name: Update Homebrew Formula
-    needs: publish
+    needs: [publish, formula]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
