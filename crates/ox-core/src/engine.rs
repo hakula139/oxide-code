@@ -753,7 +753,7 @@ mod tests {
     use crate::model::{Effort, PromptCacheTtl, ResolvedModelId};
     use crate::permission::PermissionClass;
     use crate::permission::rule::Rule;
-    use crate::protocol::testing::CapturingSink;
+    use crate::protocol::testing::{CapturingSink, event_type};
     use crate::protocol::{CompactTrigger, ResumeTarget, UsageSnapshot};
     use crate::session::entry::ArchiveState;
     use crate::session::handle;
@@ -2366,16 +2366,8 @@ mod tests {
             )
         }
 
-        fn event_types(events: &[Event]) -> Vec<String> {
-            events
-                .iter()
-                .map(|event| {
-                    serde_json::to_value(event).unwrap()["type"]
-                        .as_str()
-                        .unwrap()
-                        .to_owned()
-                })
-                .collect()
+        fn event_types(events: &[Event]) -> Vec<&'static str> {
+            events.iter().map(event_type).collect()
         }
 
         #[tokio::test]
