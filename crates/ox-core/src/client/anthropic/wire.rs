@@ -382,7 +382,13 @@ pub(super) struct MessageResponse {
     pub(super) usage: Option<TokenUsage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, strum::EnumDiscriminants)]
+#[strum_discriminants(
+    name(ContentBlockKind),
+    vis(),
+    derive(strum::EnumString),
+    strum(serialize_all = "snake_case")
+)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum ContentBlockInfo {
     Text {
@@ -413,6 +419,7 @@ pub(super) enum ContentBlockInfo {
     /// A server tool's result, such as `web_search_tool_result`, which streams no deltas. Any other
     /// block type carrying a `tool_use_id` reads as one.
     #[serde(untagged)]
+    #[strum_discriminants(strum(disabled))]
     ServerToolResult {
         #[serde(deserialize_with = "unknown_block_type")]
         r#type: String,
@@ -421,6 +428,7 @@ pub(super) enum ContentBlockInfo {
         fields: serde_json::Map<String, serde_json::Value>,
     },
     #[serde(untagged)]
+    #[strum_discriminants(strum(disabled))]
     Unknown {
         #[serde(deserialize_with = "unknown_block_type")]
         r#type: String,
@@ -437,11 +445,10 @@ where
     D: serde::Deserializer<'de>,
 {
     let kind = String::deserialize(deserializer)?;
-    match kind.as_str() {
-        "text" | "tool_use" | "server_tool_use" | "thinking" | "redacted_thinking"
-        | "mcp_tool_result" => Err(serde::de::Error::custom("malformed known content block")),
-        _ => Ok(kind),
+    if kind.parse::<ContentBlockKind>().is_ok() {
+        return Err(serde::de::Error::custom("malformed known content block"));
     }
+    Ok(kind)
 }
 
 #[expect(

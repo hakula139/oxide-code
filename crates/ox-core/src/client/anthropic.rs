@@ -191,8 +191,8 @@ impl Client {
     }
 
     /// Swaps the credential for later requests, `None` to sign out. Callers install a stored login
-    /// only in place of another stored login or none, which `Config::load` allows only for a
-    /// first-party base URL.
+    /// only in place of another stored login or none, and the stored-login fallback accepts one only
+    /// for a first-party base URL.
     pub(crate) fn set_auth(&mut self, auth: Option<Auth>) {
         self.auth = auth;
     }

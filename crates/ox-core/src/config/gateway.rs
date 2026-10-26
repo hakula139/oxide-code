@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize as _;
 use serde::de::{self, Deserializer};
 
@@ -39,20 +39,22 @@ pub(super) struct ResolvedGateway {
 }
 
 impl ResolvedGateway {
-    /// Rejects a custom header that would replace the header carrying the active credential.
-    pub(super) fn check_credential_header(&self, auth: AuthSource) -> Result<()> {
+    /// Rejects a custom header that would replace the header carrying the credential. `auth` is
+    /// `None` when no explicit credential is set, so only a stored login or `/login` could send it.
+    pub(super) fn check_credential_header(&self, auth: Option<AuthSource>) -> Result<()> {
         let setting = match self.custom_headers.source {
             Source::Env(_) => CUSTOM_HEADERS_VAR,
             _ => "client.headers",
         };
-        let name = auth.kind().header_name();
-        if self.custom_headers.value.contains_key(&name) {
-            bail!(
-                "invalid {setting}: \
-                 {name} carries the {auth} credential and cannot be overridden"
-            );
+        let name = auth.map_or(AUTHORIZATION, |auth| auth.kind().header_name());
+        if !self.custom_headers.value.contains_key(&name) {
+            return Ok(());
         }
-        Ok(())
+        let holder = auth.map_or_else(
+            || "a stored login".to_owned(),
+            |auth| format!("the {auth} credential"),
+        );
+        bail!("invalid {setting}: {name} carries {holder} and cannot be overridden");
     }
 }
 
@@ -360,11 +362,11 @@ mod tests {
             )])
             .unwrap();
             gateway
-                .check_credential_header(AuthSource::ApiKeyEnv)
+                .check_credential_header(Some(AuthSource::ApiKeyEnv))
                 .expect("x-api-key carries the credential, so a custom Authorization is free");
 
             let err = gateway
-                .check_credential_header(AuthSource::OAuthTokenEnv)
+                .check_credential_header(Some(AuthSource::OAuthTokenEnv))
                 .unwrap_err();
             assert_eq!(
                 err.to_string(),
@@ -384,7 +386,7 @@ mod tests {
             .unwrap();
 
             let err = gateway
-                .check_credential_header(AuthSource::ApiKeyEnv)
+                .check_credential_header(Some(AuthSource::ApiKeyEnv))
                 .unwrap_err();
 
             assert_eq!(
@@ -392,6 +394,20 @@ mod tests {
                 "invalid client.headers: \
                  x-api-key carries the API key (ANTHROPIC_API_KEY) credential \
                  and cannot be overridden",
+            );
+        }
+
+        #[test]
+        fn names_a_stored_login_when_no_explicit_credential_is_set() {
+            let gateway =
+                load_with(&[(CUSTOM_HEADERS_VAR, "Authorization: Bearer gateway-jwt")]).unwrap();
+
+            let err = gateway.check_credential_header(None).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "invalid ANTHROPIC_CUSTOM_HEADERS: \
+                 authorization carries a stored login and cannot be overridden",
             );
         }
     }

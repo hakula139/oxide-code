@@ -2963,12 +2963,6 @@ mod tests {
             assert!(lock_path.exists());
         }
 
-        #[test]
-        fn matches_proper_lockfiles_defaults() {
-            assert_eq!(LOCK_STALE_THRESHOLD, Duration::from_secs(10));
-            assert_eq!(LOCK_UPDATE_INTERVAL, Duration::from_secs(5));
-        }
-
         #[tokio::test(start_paused = true)]
         async fn reports_a_lock_held_past_the_wait() {
             let dir = tempfile::tempdir().unwrap();
@@ -2994,6 +2988,24 @@ mod tests {
                 .expect("missing parent must fail");
             let msg = format!("{err:#}");
             assert!(msg.contains("failed to create lock"), "{msg}");
+        }
+    }
+
+    mod lock_stale_threshold {
+        use super::*;
+
+        #[test]
+        fn matches_proper_lockfiles_defaults() {
+            assert_eq!(LOCK_STALE_THRESHOLD, Duration::from_secs(10));
+        }
+    }
+
+    mod lock_update_interval {
+        use super::*;
+
+        #[test]
+        fn matches_proper_lockfiles_defaults() {
+            assert_eq!(LOCK_UPDATE_INTERVAL, Duration::from_secs(5));
         }
     }
 }

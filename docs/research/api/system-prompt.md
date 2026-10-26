@@ -153,23 +153,23 @@ Claude Code transforms its flat sections array into the block layout actually se
 
 **First-party base URL** (`api.anthropic.com`), global cache active:
 
-| #   | Content                          | `cache_control`                          |
-| --- | -------------------------------- | ---------------------------------------- |
-| 0   | Billing / attribution header     | -                                        |
-| 1   | Identity prefix                  | -                                        |
-| 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral", scope: "global" }` |
-| 3   | Dynamic sections joined (`\n\n`) | -                                        |
+| #   | Content                          | `cache_control`                                     |
+| --- | -------------------------------- | --------------------------------------------------- |
+| 0   | Billing / attribution header     | -                                                   |
+| 1   | Identity prefix                  | -                                                   |
+| 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral", scope: "global", ttl: "1h" }` |
+| 3   | Dynamic sections joined (`\n\n`) | -                                                   |
 
 **Third-party base URL** (gateway, self-hosted, anything else), default scope:
 
-| #   | Content                          | `cache_control`         |
-| --- | -------------------------------- | ----------------------- |
-| 0   | Billing / attribution header     | -                       |
-| 1   | Identity prefix                  | -                       |
-| 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral" }` |
-| 3   | Dynamic sections joined (`\n\n`) | -                       |
+| #   | Content                          | `cache_control`                    |
+| --- | -------------------------------- | ---------------------------------- |
+| 0   | Billing / attribution header     | -                                  |
+| 1   | Identity prefix                  | -                                  |
+| 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral", ttl: "1h" }` |
+| 3   | Dynamic sections joined (`\n\n`) | -                                  |
 
-Omitting the `scope` field is deliberate: org is the absent-field default, and the resulting wire shape is what the Anthropic SDK ships for non-global ephemeral caches.
+Omitting the `scope` field is deliberate: org is the absent-field default, and the resulting wire shape is what the Anthropic SDK ships for non-global ephemeral caches. `ttl` follows `prompt_cache_ttl`: `"1h"` is shown, and with `"5m"` the field is omitted because that is the server default.
 
 Static sections (before boundary): intro, system, doing tasks, actions, tools, tone / style, output efficiency. Dynamic sections (after boundary): session guidance, environment, language, MCP instructions, etc.
 
