@@ -31,8 +31,7 @@ pub(super) enum HeadlessEvent<'a> {
     SessionCompacted {
         summary: &'a str,
         pre_count: u32,
-        /// Owned because serde's derive would borrow an `Option<&str>` as `&Option<&str>`.
-        instructions: Option<String>,
+        instructions: &'a Option<String>,
         trigger: &'a CompactTrigger,
     },
     Notice(&'a str),
@@ -68,7 +67,7 @@ pub(super) fn wire(event: &Event) -> Option<HeadlessEvent<'_>> {
         } => HeadlessEvent::SessionCompacted {
             summary,
             pre_count: *pre_count,
-            instructions: instructions.clone(),
+            instructions,
             trigger,
         },
         Event::Notice(text) => HeadlessEvent::Notice(text),
@@ -77,7 +76,24 @@ pub(super) fn wire(event: &Event) -> Option<HeadlessEvent<'_>> {
         Event::PromptUnsent => HeadlessEvent::PromptUnsent,
         Event::TurnRolledBack => HeadlessEvent::TurnRolledBack,
         Event::TurnFailed(text) => HeadlessEvent::TurnFailed(text),
-        _ => return None,
+        Event::PromptDrained(_)
+        | Event::Cancelled
+        | Event::AutoCompactionPaused { .. }
+        | Event::AutoCompactionResumed
+        | Event::SessionTitleUpdated { .. }
+        | Event::RenameFailed(_)
+        | Event::ArchiveUpdated { .. }
+        | Event::SessionRolled { .. }
+        | Event::SessionResumed { .. }
+        | Event::SessionReady
+        | Event::ConfigChanged { .. }
+        | Event::ModeChanged(_)
+        | Event::LoginStarted { .. }
+        | Event::SignedIn { .. }
+        | Event::LoginRestored { .. }
+        | Event::SignedOut { .. }
+        | Event::ApprovalRequested { .. }
+        | Event::SessionRulesUpdated(_) => return None,
     })
 }
 
