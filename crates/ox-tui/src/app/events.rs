@@ -484,14 +484,14 @@ impl App {
     /// since the panic hook already reports the panic.
     pub(super) fn apply_slash_task(&mut self, finished: Result<SlashTask, JoinError>) {
         match finished {
-            Ok(task) if self.allows_mutating(&task.name, task.kind) => {
-                if let Some(action) =
-                    self.apply_slash_outcome(task.outcome, &task.name, task.kind, &task.line)
+            Ok(task) => {
+                if self.allows_mutating(&task.name, task.kind)
+                    && let Some(action) =
+                        self.apply_slash_outcome(task.outcome, &task.name, task.kind, &task.line)
                 {
                     self.dispatch_action(action);
                 }
             }
-            Ok(_) => {}
             Err(e) => warn!(error = %e, "background slash command failed"),
         }
         self.dirty = true;

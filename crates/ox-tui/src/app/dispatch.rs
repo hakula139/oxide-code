@@ -508,8 +508,7 @@ impl App {
 
     /// Applies a slash command's outcome: shows its chat output or modal, starts its background
     /// task, or hands back the action it forwards or the [`Action::SlashPrompt`] that runs a built
-    /// prompt under the typed `line`, unapplied. `name` and `kind` ride along so a task's result
-    /// faces the idle gate again. Must run inside a tokio runtime.
+    /// prompt under the typed `line`, unapplied. Must run inside a tokio runtime.
     pub(super) fn apply_slash_outcome(
         &mut self,
         outcome: Result<SlashOutcome, String>,
@@ -2823,9 +2822,9 @@ mod tests {
     mod mutating_gate {
         use super::*;
 
-        /// Seeds a saved session, submits `/{cmd}` for its prefix, then starts a turn before the
-        /// command's background task finishes.
-        fn seed_and_start_turn(app: &mut App, id: &str, cmd: &str) {
+        /// Seeds a saved session and submits `/{cmd}` for its prefix, leaving the command's
+        /// background lookup running.
+        fn seed_and_submit(app: &mut App, id: &str, cmd: &str) {
             let store = ox_core::session::store::SessionStore::open(
                 &app.session_info.cwd,
                 &app.session_info.project_root,
@@ -2840,61 +2839,63 @@ mod tests {
             );
 
             app.handle_submit_prompt(&format!("/{cmd} {}", &id[..8]));
-            app.handle_submit_prompt("run the suite");
-
-            assert_eq!(app.status, Status::Streaming);
         }
 
         #[tokio::test]
-        async fn a_mid_turn_archive_result_is_dropped() {
+        async fn a_mutating_result_arriving_busy_is_dropped_with_the_submit_notice() {
+            for cmd in ["archive", "delete"] {
+                with_isolated_xdg_async(|_| async {
+                    let (mut app, mut rx, _event_tx) = test_app(None);
+                    let id = stamped_id(0xab);
+                    seed_and_submit(&mut app, &id, cmd);
+                    app.handle_submit_prompt("run the suite");
+                    assert_eq!(app.status, Status::Streaming);
+                    while rx.try_recv().is_ok() {}
+
+                    let finished = app.slash_tasks.join_next().await.expect("the lookup runs");
+                    app.apply_slash_task(finished);
+
+                    let notice =
+                        format!("/{cmd} runs only when idle. Try again after the turn finishes.");
+                    assert_eq!(
+                        app.status,
+                        Status::Streaming,
+                        "{cmd}: the turn keeps running"
+                    );
+                    assert_eq!(
+                        rx.try_recv(),
+                        Err(TryRecvError::Empty),
+                        "{cmd}: no op goes out"
+                    );
+                    assert!(
+                        !app.modals.is_active(),
+                        "{cmd}: no modal opens over the turn"
+                    );
+                    assert_eq!(app.chat.last_system_text(), Some(notice.as_str()), "{cmd}");
+                })
+                .await;
+            }
+        }
+
+        #[tokio::test]
+        async fn an_idle_archive_result_forwards_the_archive_op() {
             with_isolated_xdg_async(|_| async {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 let id = stamped_id(0xab);
-                seed_and_start_turn(&mut app, &id, "archive");
-                while rx.try_recv().is_ok() {}
+                seed_and_submit(&mut app, &id, "archive");
 
                 let finished = app.slash_tasks.join_next().await.expect("the lookup runs");
                 app.apply_slash_task(finished);
 
-                assert_eq!(
-                    app.status,
-                    Status::Streaming,
-                    "the mid-turn result leaves the turn alone",
-                );
-                assert_eq!(
-                    rx.try_recv(),
-                    Err(TryRecvError::Empty),
-                    "no SetArchive goes out mid-turn",
-                );
-                assert_eq!(
-                    app.chat.last_system_text(),
-                    Some("/archive runs only when idle. Try again after the turn finishes."),
-                );
-            })
-            .await;
-        }
-
-        #[tokio::test]
-        async fn a_mid_turn_delete_result_opens_no_modal() {
-            with_isolated_xdg_async(|_| async {
-                let (mut app, mut rx, _event_tx) = test_app(None);
-                let id = stamped_id(0xab);
-                seed_and_start_turn(&mut app, &id, "delete");
-                while rx.try_recv().is_ok() {}
-
-                let finished = app.slash_tasks.join_next().await.expect("the lookup runs");
-                app.apply_slash_task(finished);
-
-                assert_eq!(app.status, Status::Streaming);
-                assert!(
-                    !app.modals.is_active(),
-                    "no confirm modal opens over a running turn",
-                );
-                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
-                assert_eq!(
-                    app.chat.last_system_text(),
-                    Some("/delete runs only when idle. Try again after the turn finishes."),
-                );
+                assert_eq!(app.status, Status::Archiving);
+                let Ok(Op::SetArchive {
+                    session_id, state, ..
+                }) = rx.try_recv()
+                else {
+                    panic!("the idle result must forward SetArchive");
+                };
+                assert_eq!(session_id, id);
+                assert_eq!(state, ArchiveState::Archived);
             })
             .await;
         }

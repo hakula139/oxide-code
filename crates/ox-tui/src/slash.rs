@@ -68,8 +68,7 @@ pub(crate) fn echoes_input(parsed: &Parsed) -> bool {
 }
 
 /// Resolves and runs `parsed` against the built-in registry. `Err` carries the chat-ready message
-/// for an unknown or failed command, as does a failed [`SlashOutcome::Background`] task. The task
-/// resolves to the outcome to apply, so `Background` never nests.
+/// for an unknown or failed command, as does a failed [`SlashOutcome::Background`] task.
 pub(crate) fn dispatch(parsed: &Parsed, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
     dispatch_with(registry::BUILT_INS, parsed, ctx)
 }

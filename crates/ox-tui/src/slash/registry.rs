@@ -29,9 +29,9 @@ use crate::modal::Modal;
 
 /// What a command hands back for the App to apply, at submit or once its background task finishes.
 pub(crate) enum SlashOutcome {
-    /// Shows a system line in chat and stays idle.
+    /// Prints a system message into chat.
     SystemMessage(String),
-    /// Replaces the diff panel with `diff`.
+    /// Appends a git diff block to chat.
     GitDiff(WorkingTreeDiff),
     /// Dispatches a state-mutating action, applied locally or sent to the engine as an op.
     Forward(Action),
@@ -191,10 +191,7 @@ pub(super) mod testing {
         cmd: &dyn SlashCommand,
         args: &str,
     ) -> Result<SlashOutcome, String> {
-        match run_execute(cmd, args)? {
-            SlashOutcome::Background(task) => task.await,
-            other => panic!("expected a background outcome, got {other:?}"),
-        }
+        run_execute(cmd, args)?.into_background().await
     }
 
     /// A command that fails with `error`, answering to the aliases the shared table gives `name`.

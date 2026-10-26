@@ -88,8 +88,8 @@ struct CopyNotice {
     until: Instant,
 }
 
-/// A slash command running off the event loop. It carries the command's name and kind so its
-/// result faces the idle gate again, and the typed line that heads a forwarded prompt.
+/// What a background slash command yields, with the name and kind its result re-checks the idle
+/// gate against and the typed line a resolved prompt runs under.
 struct SlashTask {
     name: String,
     kind: Option<SlashKind>,
