@@ -1466,6 +1466,7 @@ mod tests {
                 let tools = ToolRegistry::new(vec![]);
                 let sink = CapturingSink::default();
                 let mut messages = vec![Message::user("hi")];
+                let mut inbox = Inbox::default();
                 let (tx, mut rx) = mpsc::channel::<Op>(1);
                 tx.try_send(op.clone()).unwrap();
 
@@ -1473,13 +1474,20 @@ mod tests {
                     turn_context(&client, &tools, &sink, &session),
                     &mut messages,
                     &mut rx,
-                    &mut Inbox::default(),
+                    &mut inbox,
                     &mut yolo_dispatch(),
                 )
                 .await;
-                assert!(outcome.result.is_ok(), "turn must complete despite {op:?}");
 
-                assert_eq!(messages.len(), 2, "assistant message recorded for {op:?}");
+                assert!(outcome.result.is_ok(), "turn must complete despite {op:?}");
+                assert_eq!(
+                    messages,
+                    [Message::user("hi"), Message::assistant("Hello!")],
+                    "the turn records only its own reply after {op:?}",
+                );
+                assert_eq!(inbox.prompts, [] as [String; 0], "{op:?}");
+                assert_eq!(inbox.mode, None, "{op:?}");
+                assert_eq!(sink.events(), [Event::StreamToken("Hello!".to_owned())]);
                 drop(tx);
             }
         }
