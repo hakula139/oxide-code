@@ -6,10 +6,10 @@ use ox_core::command;
 use ox_core::protocol::Op;
 use ox_core::session::display::id_prefix;
 use ox_core::session::entry::{ArchiveState, SessionInfo};
-use ox_core::session::resolver::{ResolveError, resolve_saved_prefix};
+use ox_core::session::resolver::{ResolveError, resolve_saved_prefix_blocking};
 
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{BackgroundOutput, SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{BARE_ARCHIVE_HINT, open_store, resolve_error_message};
 use crate::action::Action;
 
@@ -39,9 +39,14 @@ impl SlashCommand for ArchiveCmd {
             return Ok(SlashOutcome::Forward(Action::Op(Op::Archive)));
         }
         let store = open_store(ctx.info)?;
-        let info = resolve_saved_prefix(&store, prefix, &ctx.info.session_id)
-            .map_err(|e| resolve_error_message(e, Some(BARE_ARCHIVE_HINT)))?;
-        Ok(apply_archived(&info, ArchiveState::Archived))
+        let live_id = ctx.info.session_id.clone();
+        let prefix = prefix.to_owned();
+        Ok(SlashOutcome::Background(Box::pin(async move {
+            let info = resolve_saved_prefix_blocking(store, prefix, live_id)
+                .await
+                .map_err(|e| resolve_error_message(e, Some(BARE_ARCHIVE_HINT)))?;
+            Ok(apply_archived(&info, ArchiveState::Archived))
+        })))
     }
 }
 
@@ -82,30 +87,34 @@ impl SlashCommand for UnarchiveCmd {
             ));
         }
         let store = open_store(ctx.info)?;
-        match resolve_saved_prefix(&store, prefix, &ctx.info.session_id) {
-            Ok(info) => Ok(apply_archived(&info, ArchiveState::Active)),
-            Err(ResolveError::Live { .. }) => Ok(SlashOutcome::SystemMessage(
-                "The live session is not archived".to_owned(),
-            )),
-            Err(e) => Err(resolve_error_message(e, None)),
-        }
+        let live_id = ctx.info.session_id.clone();
+        let prefix = prefix.to_owned();
+        Ok(SlashOutcome::Background(Box::pin(async move {
+            match resolve_saved_prefix_blocking(store, prefix, live_id).await {
+                Ok(info) => Ok(apply_archived(&info, ArchiveState::Active)),
+                Err(ResolveError::Live { .. }) => Ok(BackgroundOutput::SystemMessage(
+                    "The live session is not archived".to_owned(),
+                )),
+                Err(e) => Err(resolve_error_message(e, None)),
+            }
+        })))
     }
 }
 
 // ── Helpers ──
 
-fn apply_archived(info: &SessionInfo, target: ArchiveState) -> SlashOutcome {
+fn apply_archived(info: &SessionInfo, target: ArchiveState) -> BackgroundOutput {
     if info.archive_state == target {
         let state = match target {
             ArchiveState::Active => "not archived",
             ArchiveState::Archived => "already archived",
         };
-        return SlashOutcome::SystemMessage(format!(
+        return BackgroundOutput::SystemMessage(format!(
             "Session {} is {state}",
             id_prefix(&info.session_id),
         ));
     }
-    SlashOutcome::Forward(Action::Op(Op::SetArchive {
+    BackgroundOutput::Forward(Action::Op(Op::SetArchive {
         path: info.path.clone(),
         session_id: info.session_id.clone(),
         state: target,
@@ -118,21 +127,25 @@ mod tests {
 
     use ox_core::session::display::archive_notice;
     use ox_core::session::saved;
-
-    use crate::slash::sessions::saved_error_message;
     use ox_core::session::store::SessionStore;
     use ox_core::session::store::testing::{
         WriterBarrier, archive_test_session, isolated_store, listed_ids, seed_test_session,
-        stamped_id, with_isolated_xdg,
+        stamped_id, with_isolated_xdg_async,
     };
 
     use super::*;
     use crate::session_info::testing::test_session_info;
+    use crate::slash::sessions::saved_error_message;
     use crate::slash::testing::make_read_only;
 
-    fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
-        let outcome = crate::slash::registry::testing::run_execute(cmd, args)?;
-        let SlashOutcome::Forward(Action::Op(Op::SetArchive {
+    /// Runs `cmd`, applies the archive write the engine would, and returns what the command
+    /// reports, so a test reads the same outcome the App applies.
+    async fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<BackgroundOutput, String> {
+        let outcome = match crate::slash::registry::testing::run_execute(cmd, args)? {
+            SlashOutcome::Background(task) => task.await?,
+            outcome => return Ok(BackgroundOutput::Forward(outcome.into_forward())),
+        };
+        let BackgroundOutput::Forward(Action::Op(Op::SetArchive {
             path,
             session_id,
             state,
@@ -142,7 +155,7 @@ mod tests {
         };
         saved::set_archived(&path, &session_id, state, &test_session_info().session_id)
             .map_err(|error| saved_error_message(error, Some(BARE_ARCHIVE_HINT)))?;
-        Ok(SlashOutcome::SystemMessage(archive_notice(
+        Ok(BackgroundOutput::SystemMessage(archive_notice(
             &session_id,
             state,
         )))
@@ -171,61 +184,64 @@ mod tests {
     mod execute {
         use super::*;
 
-        #[test]
-        fn bare_forwards_the_archive_action() {
-            let outcome = run_execute(&ArchiveCmd, "").unwrap();
+        #[tokio::test]
+        async fn bare_forwards_the_archive_action() {
+            let outcome = run_execute(&ArchiveCmd, "").await.unwrap();
             assert_eq!(outcome.into_forward(), Action::Op(Op::Archive));
         }
 
-        #[test]
-        fn prefix_hides_a_saved_session_from_listings_once() {
-            with_isolated_xdg(|_| {
+        #[tokio::test]
+        async fn prefix_hides_a_saved_session_from_listings_once() {
+            with_isolated_xdg_async(|_| async {
                 let store = open_store(&test_session_info()).unwrap();
                 let target_id = stamped_id(0xab);
                 seed_saved(&store, &target_id);
 
-                let note = run_execute(&ArchiveCmd, &target_id[..4]).unwrap();
+                let note = run_execute(&ArchiveCmd, &target_id[..4]).await.unwrap();
                 assert_eq!(
                     note.into_system_message(),
                     archive_notice(&target_id, ArchiveState::Archived)
                 );
                 assert_eq!(listed_ids(&store, ArchiveState::Active), [] as [String; 0]);
 
-                let again = run_execute(&ArchiveCmd, &target_id[..4]).unwrap();
+                let again = run_execute(&ArchiveCmd, &target_id[..4]).await.unwrap();
                 assert_eq!(
                     again.into_system_message(),
                     "Session abababab is already archived"
                 );
-            });
+            })
+            .await;
         }
 
-        #[test]
-        fn prefix_matching_only_the_live_session_points_to_bare_archive() {
-            with_isolated_xdg(|_| {
+        #[tokio::test]
+        async fn prefix_matching_only_the_live_session_points_to_bare_archive() {
+            with_isolated_xdg_async(|_| async {
                 let store = open_store(&test_session_info()).unwrap();
                 seed_saved(&store, "test-session");
 
-                let err = run_execute(&ArchiveCmd, "test-").unwrap_err();
+                let err = run_execute(&ArchiveCmd, "test-").await.unwrap_err();
                 assert_eq!(
                     err,
                     "Session prefix `test-` matches the live session. \
                      Use bare `/archive` to archive it and start a new one.",
                 );
                 assert_eq!(listed_ids(&store, ArchiveState::Active), ["test-session"]);
-            });
+            })
+            .await;
         }
 
-        #[test]
-        fn unknown_prefix_reports_no_match() {
-            with_isolated_xdg(|_| {
-                let err = run_execute(&ArchiveCmd, "zzzz").unwrap_err();
+        #[tokio::test]
+        async fn unknown_prefix_reports_no_match() {
+            with_isolated_xdg_async(|_| async {
+                let err = run_execute(&ArchiveCmd, "zzzz").await.unwrap_err();
                 assert_eq!(err, "No session matching `zzzz`");
-            });
+            })
+            .await;
         }
 
-        #[test]
-        fn prefix_reports_a_failed_write() {
-            with_isolated_xdg(|_| {
+        #[tokio::test]
+        async fn prefix_reports_a_failed_write() {
+            with_isolated_xdg_async(|_| async {
                 let store = open_store(&test_session_info()).unwrap();
                 let target_id = stamped_id(0xab);
                 seed_saved(&store, &target_id);
@@ -236,7 +252,7 @@ mod tests {
                     .open(&path)
                     .unwrap_err();
 
-                let err = run_execute(&ArchiveCmd, &target_id[..4]).unwrap_err();
+                let err = run_execute(&ArchiveCmd, &target_id[..4]).await.unwrap_err();
 
                 assert_eq!(
                     err,
@@ -245,21 +261,13 @@ mod tests {
                         path.display()
                     ),
                 );
-            });
+            })
+            .await;
         }
     }
 
     mod unarchive_cmd {
         use super::*;
-
-        mod classify {
-            use super::*;
-
-            #[test]
-            fn is_mutating() {
-                assert_eq!(UnarchiveCmd.classify("ab"), SlashKind::Mutating);
-            }
-        }
 
         mod echoes_input {
             use super::*;
@@ -271,12 +279,21 @@ mod tests {
             }
         }
 
-        mod execute {
+        mod classify {
             use super::*;
 
             #[test]
-            fn bare_points_to_the_archived_picker() {
-                let err = run_execute(&UnarchiveCmd, "").unwrap_err();
+            fn is_mutating() {
+                assert_eq!(UnarchiveCmd.classify("ab"), SlashKind::Mutating);
+            }
+        }
+
+        mod execute {
+            use super::*;
+
+            #[tokio::test]
+            async fn bare_points_to_the_archived_picker() {
+                let err = run_execute(&UnarchiveCmd, "").await.unwrap_err();
                 assert_eq!(
                     err,
                     "Missing session ID. \
@@ -285,15 +302,15 @@ mod tests {
                 );
             }
 
-            #[test]
-            fn prefix_lists_an_archived_session_again_once() {
-                with_isolated_xdg(|_| {
+            #[tokio::test]
+            async fn prefix_lists_an_archived_session_again_once() {
+                with_isolated_xdg_async(|_| async {
                     let store = open_store(&test_session_info()).unwrap();
                     let target_id = stamped_id(0xab);
                     seed_saved(&store, &target_id);
                     archive_test_session(&store, &target_id);
 
-                    let note = run_execute(&UnarchiveCmd, &target_id[..4]).unwrap();
+                    let note = run_execute(&UnarchiveCmd, &target_id[..4]).await.unwrap();
                     assert_eq!(
                         note.into_system_message(),
                         archive_notice(&target_id, ArchiveState::Active)
@@ -303,31 +320,34 @@ mod tests {
                         [target_id.as_str()]
                     );
 
-                    let again = run_execute(&UnarchiveCmd, &target_id[..4]).unwrap();
+                    let again = run_execute(&UnarchiveCmd, &target_id[..4]).await.unwrap();
                     assert_eq!(
                         again.into_system_message(),
                         "Session abababab is not archived"
                     );
-                });
+                })
+                .await;
             }
 
-            #[test]
-            fn live_session_prefix_is_a_no_op_note() {
-                with_isolated_xdg(|_| {
-                    let note = run_execute(&UnarchiveCmd, "test-").unwrap();
+            #[tokio::test]
+            async fn live_session_prefix_is_a_no_op_note() {
+                with_isolated_xdg_async(|_| async {
+                    let note = run_execute(&UnarchiveCmd, "test-").await.unwrap();
                     assert_eq!(
                         note.into_system_message(),
                         "The live session is not archived"
                     );
-                });
+                })
+                .await;
             }
 
-            #[test]
-            fn unknown_prefix_reports_no_match() {
-                with_isolated_xdg(|_| {
-                    let err = run_execute(&UnarchiveCmd, "zzzz").unwrap_err();
+            #[tokio::test]
+            async fn unknown_prefix_reports_no_match() {
+                with_isolated_xdg_async(|_| async {
+                    let err = run_execute(&UnarchiveCmd, "zzzz").await.unwrap_err();
                     assert_eq!(err, "No session matching `zzzz`");
-                });
+                })
+                .await;
             }
         }
     }

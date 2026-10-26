@@ -35,18 +35,30 @@ pub(crate) enum SlashOutcome {
     Prompt(String),
     /// Opens a modal over the input. The modal is the command's whole response.
     Modal(Box<dyn Modal>),
-    /// Prints a system message into chat.
-    SystemMessage(String),
     /// Runs off the event loop so slow I/O does not stall input or rendering, then prints its
     /// result into chat. A session switch drops it unfinished.
-    Background(BoxFuture<'static, Result<ChatOutput, String>>),
+    Background(BoxFuture<'static, Result<BackgroundOutput, String>>),
 }
 
-/// What a [`SlashOutcome::Background`] command prints when it finishes.
-#[derive(Debug)]
-pub(crate) enum ChatOutput {
+/// What a [`SlashOutcome::Background`] command resolves to, applied once it finishes.
+pub(crate) enum BackgroundOutput {
     SystemMessage(String),
     GitDiff(WorkingTreeDiff),
+    /// An [`Action`] the App dispatches through the same path as a typed one.
+    Forward(Action),
+    /// A modal the App opens.
+    Modal(Box<dyn Modal>),
+}
+
+impl std::fmt::Debug for BackgroundOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SystemMessage(text) => f.debug_tuple("SystemMessage").field(text).finish(),
+            Self::GitDiff(diff) => f.debug_tuple("GitDiff").field(diff).finish(),
+            Self::Forward(action) => f.debug_tuple("Forward").field(action).finish(),
+            Self::Modal(_) => f.write_str("Modal(<modal>)"),
+        }
+    }
 }
 
 impl std::fmt::Debug for SlashOutcome {
@@ -55,14 +67,13 @@ impl std::fmt::Debug for SlashOutcome {
             Self::Forward(action) => f.debug_tuple("Forward").field(action).finish(),
             Self::Prompt(prompt) => f.debug_tuple("Prompt").field(prompt).finish(),
             Self::Modal(_) => f.write_str("Modal(<modal>)"),
-            Self::SystemMessage(text) => f.debug_tuple("SystemMessage").field(text).finish(),
             Self::Background(_) => f.write_str("Background(<task>)"),
         }
     }
 }
 
 #[cfg(test)]
-impl SlashOutcome {
+impl BackgroundOutput {
     pub(super) fn into_forward(self) -> Action {
         match self {
             Self::Forward(action) => action,
@@ -83,8 +94,25 @@ impl SlashOutcome {
             other => panic!("expected SystemMessage, got {other:?}"),
         }
     }
+}
 
-    pub(super) fn into_background(self) -> BoxFuture<'static, Result<ChatOutput, String>> {
+#[cfg(test)]
+impl SlashOutcome {
+    pub(super) fn into_forward(self) -> Action {
+        match self {
+            Self::Forward(action) => action,
+            other => panic!("expected Forward, got {other:?}"),
+        }
+    }
+
+    pub(super) fn into_modal(self) -> Box<dyn Modal> {
+        match self {
+            Self::Modal(modal) => modal,
+            other => panic!("expected Modal, got {other:?}"),
+        }
+    }
+
+    pub(super) fn into_background(self) -> BoxFuture<'static, Result<BackgroundOutput, String>> {
         match self {
             Self::Background(task) => task,
             other => panic!("expected Background, got {other:?}"),
@@ -182,12 +210,23 @@ pub(super) fn lookup_in<'a>(
 
 #[cfg(test)]
 pub(super) mod testing {
-    use super::{SlashCommand, SlashContext, SlashOutcome};
+    use super::{BackgroundOutput, SlashCommand, SlashContext, SlashOutcome};
     use crate::session_info::testing::test_session_info;
 
     /// Runs `cmd` with `args` against [`test_session_info`] and no session title.
     pub(crate) fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
         cmd.execute(args, &SlashContext::new(&test_session_info(), None))
+    }
+
+    /// [`run_execute`] awaiting the background task a saved-session command returns.
+    pub(crate) async fn run_background(
+        cmd: &dyn SlashCommand,
+        args: &str,
+    ) -> Result<BackgroundOutput, String> {
+        match run_execute(cmd, args)? {
+            SlashOutcome::Background(task) => task.await,
+            other => panic!("expected a background outcome, got {other:?}"),
+        }
     }
 
     /// A command that fails with `error`, answering to the aliases the shared table gives `name`.
@@ -244,10 +283,6 @@ mod tests {
     mod slash_outcome {
         use super::*;
 
-        fn done() -> SlashOutcome {
-            SlashOutcome::SystemMessage("done".to_owned())
-        }
-
         fn background() -> SlashOutcome {
             SlashOutcome::Background(Box::pin(async { Err("never run".to_owned()) }))
         }
@@ -264,7 +299,6 @@ mod tests {
                 r#"Prompt("Create AGENTS.md")"#
             );
             assert_eq!(format!("{modal:?}"), "Modal(<modal>)");
-            assert_eq!(format!("{:?}", done()), r#"SystemMessage("done")"#);
             assert_eq!(format!("{:?}", background()), "Background(<task>)");
         }
 
@@ -272,9 +306,9 @@ mod tests {
             use super::*;
 
             #[test]
-            #[should_panic(expected = r#"expected Forward, got SystemMessage("done")"#)]
+            #[should_panic(expected = r#"expected Forward, got Prompt("Create AGENTS.md")"#)]
             fn names_the_variant_it_got() {
-                done().into_forward();
+                SlashOutcome::Prompt("Create AGENTS.md".to_owned()).into_forward();
             }
         }
 
@@ -288,23 +322,13 @@ mod tests {
             }
         }
 
-        mod into_system_message {
-            use super::*;
-
-            #[test]
-            #[should_panic(expected = "expected SystemMessage, got Forward(Op(Clear))")]
-            fn names_the_variant_it_got() {
-                SlashOutcome::Forward(Action::Op(Op::Clear)).into_system_message();
-            }
-        }
-
         mod into_background {
             use super::*;
 
             #[test]
-            #[should_panic(expected = r#"expected Background, got SystemMessage("done")"#)]
+            #[should_panic(expected = r#"expected Background, got Prompt("Create AGENTS.md")"#)]
             fn names_the_variant_it_got() {
-                _ = done().into_background();
+                _ = SlashOutcome::Prompt("Create AGENTS.md".to_owned()).into_background();
             }
         }
     }

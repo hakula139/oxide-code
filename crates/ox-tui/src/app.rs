@@ -35,7 +35,7 @@ use crate::git_probes::GitProbes;
 use crate::modal::{Modal, ModalStack};
 use crate::now;
 use crate::session_info::LiveSessionInfo;
-use crate::slash::ChatOutput;
+use crate::slash::BackgroundOutput;
 use crate::terminal::{Tui, TuiBackend};
 use crate::theme::{Theme, ThemeOverrides};
 
@@ -75,7 +75,7 @@ pub(crate) struct App {
     pending_clipboard: Option<String>,
     copy_notice: Option<CopyNotice>,
     /// Background slash commands still running for the live session.
-    slash_tasks: JoinSet<Result<ChatOutput, String>>,
+    slash_tasks: JoinSet<Result<BackgroundOutput, String>>,
     queue: PromptQueue,
     should_quit: bool,
     dirty: bool,

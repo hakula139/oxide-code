@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use super::actor::{self, Record, SessionCmd};
 use super::entry::{ArchiveState, CompactBoundary, CompactInfo, UsageRecord};
+use super::resolver::resolve_saved_prefix;
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
 use super::state::SessionState;
@@ -24,6 +25,7 @@ use super::store::{SessionData, SessionStore, load_session_data_from_path, open_
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
+use crate::protocol::ResumeTarget;
 use crate::tool::ToolMetadata;
 use crate::tool::tasks::{self, Task};
 use crate::util::sync::lock_or_recover;
@@ -439,17 +441,16 @@ pub(crate) struct RollIntoOutcome {
     pub(crate) finalize_failure: Option<String>,
 }
 
-/// Loads and sanitizes the session at `target`, swaps it in, then finalizes the old one with
-/// `snapshots`, its file tracker state. Fails without swapping when `target` is the live session,
-/// whose append writer is in flight, or cannot be loaded.
+/// Resolves `target`, loads and sanitizes the session it names, swaps it in, then finalizes the old
+/// one with `snapshots`, its file tracker state. Fails without swapping when `target` is the live
+/// session, whose append writer is in flight, or cannot be loaded.
 pub(crate) async fn roll_into(
     session: &mut SessionHandle,
     store: &SessionStore,
     snapshots: Vec<FileSnapshot>,
-    target: &Path,
+    target: ResumeTarget,
 ) -> Result<RollIntoOutcome> {
     let store = store.clone();
-    let target = target.to_owned();
     let live_id = session.session_id().to_owned();
     let ResumedSession {
         handle: target_handle,
@@ -457,11 +458,15 @@ pub(crate) async fn roll_into(
         title,
         prior,
     } = tokio::task::spawn_blocking(move || {
-        let data = load_session_data_from_path(&target)?;
+        let path = match target {
+            ResumeTarget::Path(path) => path,
+            ResumeTarget::Prefix(prefix) => resolve_saved_prefix(&store, &prefix, &live_id)?.path,
+        };
+        let data = load_session_data_from_path(&path)?;
         if data.session_id == live_id {
             return Err(SavedError::live(&live_id).into());
         }
-        resume_loaded(&store, &target, data)
+        resume_loaded(&store, &path, data)
     })
     .await
     .context("session resume task failed")??;
@@ -1587,9 +1592,14 @@ mod tests {
             let mut session = start(&store, "m", None);
 
             let resume = tokio::spawn(async move {
-                let outcome = roll_into(&mut session, &store, Vec::new(), &target)
-                    .await
-                    .unwrap();
+                let outcome = roll_into(
+                    &mut session,
+                    &store,
+                    Vec::new(),
+                    ResumeTarget::Path(target.clone()),
+                )
+                .await
+                .unwrap();
                 session.shutdown().await;
                 outcome
             });
@@ -1620,9 +1630,14 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let target = test_session_file(dir.path(), &target_id);
-            let outcome = roll_into(&mut session, &store, Vec::new(), &target)
-                .await
-                .expect("roll_into must succeed for healthy target");
+            let outcome = roll_into(
+                &mut session,
+                &store,
+                Vec::new(),
+                ResumeTarget::Path(target.clone()),
+            )
+            .await
+            .expect("roll_into must succeed for healthy target");
 
             assert_eq!(
                 session.session_id(),
@@ -1664,9 +1679,14 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let missing = dir.path().join("missing-target.jsonl");
-            let err = roll_into(&mut session, &store, Vec::new(), &missing)
-                .await
-                .unwrap_err();
+            let err = roll_into(
+                &mut session,
+                &store,
+                Vec::new(),
+                ResumeTarget::Path(missing.clone()),
+            )
+            .await
+            .unwrap_err();
 
             assert_eq!(
                 err.to_string(),
@@ -1688,9 +1708,14 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let live_path = test_session_file(dir.path(), &live_id);
-            let err = roll_into(&mut session, &store, Vec::new(), &live_path)
-                .await
-                .expect_err("self-resume must be rejected");
+            let err = roll_into(
+                &mut session,
+                &store,
+                Vec::new(),
+                ResumeTarget::Path(live_path.clone()),
+            )
+            .await
+            .expect_err("self-resume must be rejected");
             assert_eq!(
                 err.to_string(),
                 format!("session {} is the live session", &live_id[..8])
@@ -1722,9 +1747,14 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let target = test_session_file(dir.path(), &target_id);
-            let outcome = roll_into(&mut session, &store, tracker.snapshot_all(), &target)
-                .await
-                .expect("roll_into must succeed");
+            let outcome = roll_into(
+                &mut session,
+                &store,
+                tracker.snapshot_all(),
+                ResumeTarget::Path(target.clone()),
+            )
+            .await
+            .expect("roll_into must succeed");
 
             assert_eq!(
                 saved_snapshot_paths(&saved_entries(dir.path(), &original_id)),

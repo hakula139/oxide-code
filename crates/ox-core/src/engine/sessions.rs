@@ -12,7 +12,6 @@ use crate::protocol::{Event, EventSink, ResumeTarget};
 use crate::session::display::id_prefix;
 use crate::session::entry::ArchiveState;
 use crate::session::handle::{LoadedTranscript, RollIntoOutcome};
-use crate::session::resolver::resolve_saved_prefix;
 use crate::session::saved::{self, SavedError};
 use crate::util::git::current_branch;
 use crate::util::text::plural;
@@ -115,14 +114,7 @@ impl Engine {
     /// saved session other than the live one.
     async fn roll_into(&mut self, target: ResumeTarget) -> Result<RollIntoOutcome> {
         self.transcript.file_tracker.drain_writes().await;
-        let path = match target {
-            ResumeTarget::Path(path) => path,
-            ResumeTarget::Prefix(prefix) => {
-                resolve_saved_prefix(&self.store, &prefix, self.transcript.session().session_id())?
-                    .path
-            }
-        };
-        self.transcript.roll_into(&self.store, &path).await
+        self.transcript.roll_into(&self.store, target).await
     }
 
     async fn adopt_session(&mut self, sink: &dyn EventSink, transcript: LoadedTranscript) {

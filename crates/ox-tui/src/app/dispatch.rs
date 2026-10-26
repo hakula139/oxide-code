@@ -508,7 +508,6 @@ impl App {
                 });
             }
             Ok(SlashOutcome::Modal(modal)) => self.modals.push(modal),
-            Ok(SlashOutcome::SystemMessage(text)) => self.chat.push_system_message(text),
             Ok(SlashOutcome::Background(task)) => _ = self.slash_tasks.spawn(task),
             Err(msg) => self.chat.push_error(&msg),
         }
@@ -545,7 +544,9 @@ mod tests {
     use ox_core::protocol::testing::text_result;
     use ox_core::protocol::{ApprovalDecision, CompactTrigger, ConfigPick, Event, ResumeTarget};
     use ox_core::session::entry::ArchiveState;
-    use ox_core::session::store::testing::{seed_test_session, stamped_id, with_isolated_xdg};
+    use ox_core::session::store::testing::{
+        seed_test_session, stamped_id, with_isolated_xdg_async,
+    };
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
     use super::*;
@@ -555,7 +556,7 @@ mod tests {
     };
     use crate::components::status::StatusHyperlink;
     use crate::modal::testing::ScriptedModal;
-    use crate::slash::ChatOutput;
+    use crate::slash::BackgroundOutput;
     use crate::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};
     use crate::testing::{key_event, mouse_event, mouse_event_at};
     use crate::theme::{ThemeOverrides, builtin, resolve_theme};
@@ -595,11 +596,11 @@ mod tests {
     mod handle_crossterm_event {
         use super::*;
 
-        #[test]
-        fn buffered_confirmation_keys_leave_the_saved_session_untouched() {
+        #[tokio::test]
+        async fn buffered_confirmation_keys_leave_the_saved_session_untouched() {
             for code in [KeyCode::Enter, KeyCode::Char('y')] {
                 for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
-                    with_isolated_xdg(|_| {
+                    with_isolated_xdg_async(|_| async {
                         let (mut app, _rx, _event_tx) = test_app(None);
                         let store = ox_core::session::store::SessionStore::open(
                             &app.session_info.cwd,
@@ -617,6 +618,8 @@ mod tests {
                         let path = store.find_session_path(&id).unwrap();
                         app.input.set_text(&format!("/delete {}", &id[..8]));
                         app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+                        let lookup = app.slash_tasks.join_next().await.expect("the lookup runs");
+                        app.apply_slash_task(lookup);
                         assert!(app.modals.is_active());
 
                         app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::new_with_kind(
@@ -627,7 +630,8 @@ mod tests {
 
                         assert!(path.exists(), "{code:?} {kind:?} deleted an unseen target");
                         assert!(app.modals.is_active(), "{code:?} {kind:?}");
-                    });
+                    })
+                    .await;
                 }
             }
         }
@@ -2702,18 +2706,12 @@ mod tests {
         use super::*;
 
         #[test]
-        fn shows_output_and_hands_back_forwards_and_prompts_whether_idle_or_busy() {
+        fn hands_back_forwards_and_prompts_and_opens_modals_whether_idle_or_busy() {
             for busy in [false, true] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 if busy {
                     app.handle_engine_event(Event::StreamToken("partial".to_owned()));
                 }
-
-                let clean = SlashOutcome::SystemMessage("Working tree clean".to_owned());
-                let handed_back = app.apply_slash_outcome(Ok(clean), "/diff");
-
-                assert_eq!(handed_back, None);
-                assert_eq!(app.chat.last_system_text(), Some("Working tree clean"));
 
                 let handed_back = app.apply_slash_outcome(Err("/diff: boom".to_owned()), "/diff");
 
@@ -2754,7 +2752,7 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             let (tx, rx) = tokio::sync::oneshot::channel::<String>();
             let task = SlashOutcome::Background(Box::pin(async move {
-                Ok(ChatOutput::SystemMessage(rx.await.unwrap()))
+                Ok(BackgroundOutput::SystemMessage(rx.await.unwrap()))
             }));
 
             let handed_back = app.apply_slash_outcome(Ok(task), "/diff");

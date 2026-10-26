@@ -9,13 +9,13 @@ use time::OffsetDateTime;
 use ox_core::command;
 use ox_core::session::display::display_title;
 use ox_core::session::entry::SessionInfo;
-use ox_core::session::resolver::resolve_saved_prefix;
+use ox_core::session::resolver::resolve_saved_prefix_blocking;
 use ox_core::util::path::tildify;
 use ox_core::util::time::now_local;
 
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{BackgroundOutput, SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{
     CLEAR_THEN_DELETE_HINT, format_metadata_line, open_store, resolve_error_message,
 };
@@ -55,20 +55,24 @@ impl SlashCommand for DeleteCmd {
             ));
         }
         let store = open_store(ctx.info)?;
-        let live_id = ctx.info.session_id.as_str();
-        let info = resolve_saved_prefix(&store, arg, live_id)
-            .map_err(|e| resolve_error_message(e, Some(CLEAR_THEN_DELETE_HINT)))?;
-        let title = display_title(&info).to_owned();
-        let metadata = metadata_line(&info, now_local());
-        Ok(SlashOutcome::Modal(Box::new(
-            ConfirmDeleteSessionModal::new(
-                info.path,
-                info.session_id,
-                title,
-                metadata,
-                live_id.to_owned(),
-            ),
-        )))
+        let live_id = ctx.info.session_id.clone();
+        let arg = arg.to_owned();
+        Ok(SlashOutcome::Background(Box::pin(async move {
+            let info = resolve_saved_prefix_blocking(store, arg, live_id.clone())
+                .await
+                .map_err(|e| resolve_error_message(e, Some(CLEAR_THEN_DELETE_HINT)))?;
+            let title = display_title(&info).to_owned();
+            let metadata = metadata_line(&info, now_local());
+            Ok(BackgroundOutput::Modal(Box::new(
+                ConfirmDeleteSessionModal::new(
+                    info.path,
+                    info.session_id,
+                    title,
+                    metadata,
+                    live_id,
+                ),
+            )))
+        })))
     }
 }
 
@@ -95,7 +99,7 @@ mod tests {
     use ox_core::session::entry::ExitInfo;
     use ox_core::session::store::SessionStore;
     use ox_core::session::store::testing::{
-        listed_session, seed_test_session, stamped_id, with_isolated_xdg,
+        listed_session, seed_test_session, stamped_id, with_isolated_xdg_async,
     };
     use ox_core::util::path::testing::HOME_VAR;
 
@@ -103,7 +107,7 @@ mod tests {
     use crate::modal::Modal;
     use crate::modal::testing::render_rows;
     use crate::session_info::testing::test_session_info;
-    use crate::slash::registry::testing::run_execute;
+    use crate::slash::registry::testing::run_background;
 
     #[test]
     fn name_and_metadata_match_built_ins_contract() {
@@ -137,15 +141,20 @@ mod tests {
     mod execute {
         use super::*;
 
+        /// Runs `/delete` and awaits the background lookup behind its confirm modal.
+        async fn run_execute(args: &str) -> Result<BackgroundOutput, String> {
+            run_background(&DeleteCmd, args).await
+        }
+
         /// The title and metadata rows the confirm modal shows for the session it will delete.
         fn target_rows(modal: &dyn Modal) -> [String; 2] {
             let rows = render_rows(modal, 80, modal.height(80, u16::MAX));
             [rows[2].trim_end().to_owned(), rows[3].trim_end().to_owned()]
         }
 
-        #[test]
-        fn bare_points_to_the_picker_and_typed_form() {
-            let err = run_execute(&DeleteCmd, "").unwrap_err();
+        #[tokio::test]
+        async fn bare_points_to_the_picker_and_typed_form() {
+            let err = run_execute("").await.unwrap_err();
             assert_eq!(
                 err,
                 "Missing session ID. \
@@ -153,17 +162,18 @@ mod tests {
             );
         }
 
-        #[test]
-        fn unknown_prefix_reports_no_match() {
-            with_isolated_xdg(|_| {
-                let err = run_execute(&DeleteCmd, "zzz1234").unwrap_err();
+        #[tokio::test]
+        async fn unknown_prefix_reports_no_match() {
+            with_isolated_xdg_async(|_| async {
+                let err = run_execute("zzz1234").await.unwrap_err();
                 assert_eq!(err, "No session matching `zzz1234`");
-            });
+            })
+            .await;
         }
 
-        #[test]
-        fn typed_arg_unique_match_pushes_confirm_modal() {
-            with_isolated_xdg(|_| {
+        #[tokio::test]
+        async fn typed_arg_unique_match_pushes_confirm_modal() {
+            with_isolated_xdg_async(|_| async {
                 let store = open_store(&test_session_info()).unwrap();
                 let target_id = stamped_id(0xab);
                 seed_test_session(
@@ -174,39 +184,39 @@ mod tests {
                     datetime!(2026-04-18 09:00:00 UTC),
                 );
 
-                let modal = run_execute(&DeleteCmd, &target_id[..4])
-                    .unwrap()
-                    .into_modal();
+                let modal = run_execute(&target_id[..4]).await.unwrap().into_modal();
 
                 let [title, metadata] = target_rows(&*modal);
                 assert_eq!(title, "Doomed session");
                 assert!(metadata.starts_with("abababab · "), "{metadata}");
-            });
+            })
+            .await;
         }
 
-        #[test]
-        fn widens_to_other_projects_when_current_project_misses() {
-            with_isolated_xdg(|dir| {
+        #[tokio::test]
+        async fn widens_to_other_projects_when_current_project_misses() {
+            with_isolated_xdg_async(|dir| {
                 let sessions_dir = dir.join("ox").join("sessions");
-                std::fs::create_dir_all(&sessions_dir).unwrap();
-                let other = SessionStore::open_at(sessions_dir, "other-project").unwrap();
-                let target_id = stamped_id(0xab);
-                seed_test_session(
-                    &other,
-                    &target_id,
-                    Some("Foreign"),
-                    Some(1),
-                    datetime!(2026-04-18 09:00:00 UTC),
-                );
+                async move {
+                    std::fs::create_dir_all(&sessions_dir).unwrap();
+                    let other = SessionStore::open_at(sessions_dir, "other-project").unwrap();
+                    let target_id = stamped_id(0xab);
+                    seed_test_session(
+                        &other,
+                        &target_id,
+                        Some("Foreign"),
+                        Some(1),
+                        datetime!(2026-04-18 09:00:00 UTC),
+                    );
 
-                let modal = run_execute(&DeleteCmd, &target_id[..4])
-                    .unwrap()
-                    .into_modal();
+                    let modal = run_execute(&target_id[..4]).await.unwrap().into_modal();
 
-                let [title, metadata] = target_rows(&*modal);
-                assert_eq!(title, "Foreign");
-                assert!(metadata.starts_with("abababab · "), "{metadata}");
-            });
+                    let [title, metadata] = target_rows(&*modal);
+                    assert_eq!(title, "Foreign");
+                    assert!(metadata.starts_with("abababab · "), "{metadata}");
+                }
+            })
+            .await;
         }
 
         #[tokio::test(start_paused = true)]
@@ -214,8 +224,9 @@ mod tests {
             // A renamed file keeps its header ID, so deleting by that ID would unlink whichever
             // file is named after it.
             let dir = tempfile::tempdir().unwrap();
-            let (mut modal, renamed, bystander) =
-                temp_env::with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
+            let (mut modal, renamed, bystander) = temp_env::async_with_vars(
+                [("XDG_DATA_HOME", Some(dir.path().as_os_str()))],
+                async {
                     let store = open_store(&test_session_info()).unwrap();
                     let header_id = stamped_id(0xab);
                     seed_test_session(
@@ -237,9 +248,11 @@ mod tests {
                     );
                     let bystander = store.find_session_path(&header_id).unwrap();
 
-                    let modal = run_execute(&DeleteCmd, "renamed").unwrap().into_modal();
+                    let modal = run_execute("renamed").await.unwrap().into_modal();
                     (modal, renamed, bystander)
-                });
+                },
+            )
+            .await;
             target_rows(&*modal);
             tokio::time::advance(crate::modal::acceptance::TYPE_AHEAD_GUARD).await;
 
@@ -259,11 +272,11 @@ mod tests {
             );
         }
 
-        #[test]
-        fn with_live_id_prefix_explains_the_live_session() {
+        #[tokio::test]
+        async fn with_live_id_prefix_explains_the_live_session() {
             // The resolver drops the live ID from its matches, so a prefix that matches only the
             // live session gets its own explanation.
-            with_isolated_xdg(|_| {
+            with_isolated_xdg_async(|_| async {
                 let store = open_store(&test_session_info()).unwrap();
                 let live_id = "test-session";
                 seed_test_session(
@@ -274,18 +287,19 @@ mod tests {
                     datetime!(2026-04-18 09:00:00 UTC),
                 );
 
-                let err = run_execute(&DeleteCmd, live_id).unwrap_err();
+                let err = run_execute(live_id).await.unwrap_err();
                 assert_eq!(
                     err,
                     "Session prefix `test-session` matches the live session. \
                      Run `/clear` to start a new one, then delete it.",
                 );
-            });
+            })
+            .await;
         }
 
-        #[test]
-        fn with_live_id_prefix_targets_the_other_match() {
-            with_isolated_xdg(|_| {
+        #[tokio::test]
+        async fn with_live_id_prefix_targets_the_other_match() {
+            with_isolated_xdg_async(|_| async {
                 let store = open_store(&test_session_info()).unwrap();
                 let live_id = "test-session";
                 seed_test_session(
@@ -304,17 +318,18 @@ mod tests {
                     datetime!(2026-04-18 09:01:00 UTC),
                 );
 
-                let modal = run_execute(&DeleteCmd, "test-").unwrap().into_modal();
+                let modal = run_execute("test-").await.unwrap().into_modal();
 
                 let [title, metadata] = target_rows(&*modal);
                 assert_eq!(title, "Other");
                 assert!(metadata.starts_with("test-oth · "), "{metadata}");
-            });
+            })
+            .await;
         }
 
-        #[test]
-        fn ambiguous_prefix_lists_short_ids_and_counts_the_rest() {
-            with_isolated_xdg(|_| {
+        #[tokio::test]
+        async fn ambiguous_prefix_lists_short_ids_and_counts_the_rest() {
+            with_isolated_xdg_async(|_| async {
                 let store = open_store(&test_session_info()).unwrap();
                 for byte in 0xa0..=0xa5 {
                     seed_test_session(
@@ -327,13 +342,14 @@ mod tests {
                     );
                 }
 
-                let err = run_execute(&DeleteCmd, "aaaa").unwrap_err();
+                let err = run_execute("aaaa").await.unwrap_err();
                 assert_eq!(
                     err,
                     "Ambiguous prefix `aaaa` matches 6 sessions: \
                      aaaaa5a5, aaaaa4a4, aaaaa3a3, aaaaa2a2, aaaaa1a1, and 1 more",
                 );
-            });
+            })
+            .await;
         }
     }
 

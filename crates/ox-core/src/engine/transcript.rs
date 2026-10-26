@@ -11,6 +11,7 @@ use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::Message;
 use crate::model::ModelSpec;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
+use crate::protocol::ResumeTarget;
 use crate::session::entry::{CompactBoundary, CompactInfo, UsageRecord};
 use crate::session::handle::{
     self, Checkpoint, CompactOutcome, LoadedTranscript, RecordOutcome, RollIntoOutcome,
@@ -246,12 +247,12 @@ impl LiveTranscript {
         .await
     }
 
-    /// Finalizes the session with the files the transcript read and swaps in the saved session at
-    /// `target` without swapping when it cannot be loaded.
+    /// Finalizes the session with the files the transcript read and swaps in the saved session
+    /// `target` names, without swapping when it cannot be resolved or loaded.
     pub(super) async fn roll_into(
         &mut self,
         store: &SessionStore,
-        target: &Path,
+        target: ResumeTarget,
     ) -> Result<RollIntoOutcome> {
         handle::roll_into(
             &mut self.session,

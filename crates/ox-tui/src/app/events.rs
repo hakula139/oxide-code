@@ -23,7 +23,7 @@ use crate::clipboard::{CopyReport, Delivery};
 use crate::components::status::Status;
 use crate::git_probes::GitUpdate;
 use crate::modal::approval::ApprovalModal;
-use crate::slash::ChatOutput;
+use crate::slash::BackgroundOutput;
 use crate::{NOTICE_DURATION, now};
 
 impl App {
@@ -484,11 +484,13 @@ impl App {
     /// panic hook already reports the panic.
     pub(super) fn apply_slash_task(
         &mut self,
-        finished: Result<Result<ChatOutput, String>, JoinError>,
+        finished: Result<Result<BackgroundOutput, String>, JoinError>,
     ) {
         match finished {
-            Ok(Ok(ChatOutput::SystemMessage(text))) => self.chat.push_system_message(text),
-            Ok(Ok(ChatOutput::GitDiff(diff))) => self.chat.push_git_diff(diff),
+            Ok(Ok(BackgroundOutput::SystemMessage(text))) => self.chat.push_system_message(text),
+            Ok(Ok(BackgroundOutput::GitDiff(diff))) => self.chat.push_git_diff(diff),
+            Ok(Ok(BackgroundOutput::Forward(action))) => self.dispatch_action(action),
+            Ok(Ok(BackgroundOutput::Modal(modal))) => self.modals.push(modal),
             Ok(Err(msg)) => self.chat.push_error(&msg),
             Err(e) => warn!(error = %e, "background slash command failed"),
         }
@@ -1388,8 +1390,11 @@ mod tests {
         #[tokio::test]
         async fn session_rolled_drops_the_old_session_slash_tasks() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.slash_tasks
-                .spawn(async { Ok(ChatOutput::SystemMessage("old session's output".to_owned())) });
+            app.slash_tasks.spawn(async {
+                Ok(BackgroundOutput::SystemMessage(
+                    "old session's output".to_owned(),
+                ))
+            });
 
             app.handle_engine_event(Event::SessionRolled {
                 id: "rolled-session".to_owned(),
@@ -2448,8 +2453,8 @@ mod tests {
         use super::*;
 
         async fn finish(
-            output: Result<ChatOutput, String>,
-        ) -> Result<Result<ChatOutput, String>, JoinError> {
+            output: Result<BackgroundOutput, String>,
+        ) -> Result<Result<BackgroundOutput, String>, JoinError> {
             tokio::spawn(async { output }).await
         }
 
@@ -2461,12 +2466,14 @@ mod tests {
                 ..WorkingTreeDiff::default()
             };
 
-            app.apply_slash_task(finish(Ok(ChatOutput::SystemMessage("clean".to_owned()))).await);
+            app.apply_slash_task(
+                finish(Ok(BackgroundOutput::SystemMessage("clean".to_owned()))).await,
+            );
 
             assert_eq!(app.chat.last_system_text(), Some("clean"));
 
             app.dirty = false;
-            app.apply_slash_task(finish(Ok(ChatOutput::GitDiff(diff))).await);
+            app.apply_slash_task(finish(Ok(BackgroundOutput::GitDiff(diff))).await);
 
             assert!(app.dirty);
             assert!(rendered_text(&mut app, 60, 24).contains("  new.txt"));
@@ -2479,7 +2486,7 @@ mod tests {
         #[tokio::test]
         async fn a_panicked_task_prints_nothing() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            let mut tasks = JoinSet::<Result<ChatOutput, String>>::new();
+            let mut tasks = JoinSet::<Result<BackgroundOutput, String>>::new();
             tasks.spawn(async { panic!("task bug") });
             let finished = tasks.join_next().await.expect("one task spawned");
 
