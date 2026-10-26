@@ -309,6 +309,7 @@ mod tests {
     }
 
     mod write_file {
+        #[cfg(unix)]
         use super::*;
 
         #[cfg(unix)]
