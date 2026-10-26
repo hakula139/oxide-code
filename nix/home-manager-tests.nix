@@ -34,7 +34,6 @@ let
   evalRawHome =
     options:
     lib.evalModules {
-      class = "homeManager";
       modules = [
         homeModule
         {
@@ -44,15 +43,7 @@ let
           };
         }
         { _module.check = false; }
-        {
-          home = {
-            homeDirectory = "/home/ox-test";
-            username = "ox-test";
-            stateVersion = "26.05";
-          };
-
-          programs.oxide-code = options;
-        }
+        { programs.oxide-code = options; }
       ];
     };
 
