@@ -207,38 +207,12 @@ jobs:
           gh release create "$GITHUB_REF_NAME" release-assets/* "${options[@]}"
 
   formula:
-    name: Check Homebrew Formula (${{ matrix.runner }})
+    name: Check Homebrew Formula
     if: github.ref_type == 'tag'
     needs: publish
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: '1'
-      HOMEBREW_NO_INSTALL_CLEANUP: '1'
-    strategy:
-      fail-fast: false
-      matrix:
-        runner:
-          - macos-latest
-          - ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Download archives
-        uses: actions/download-artifact@v8
-        with:
-          pattern: oxide-code-*
-          path: release-assets
-          merge-multiple: true
-
-      - name: Render formula
-        run: ./scripts/update-homebrew-formula.sh "$GITHUB_REF_NAME" release-assets
-
-      - name: Install and test formula
-        run: |
-          brew install --formula ./Formula/oxide-code.rb
-          brew test oxide-code
+    uses: ./.github/workflows/formula.yml
+    with:
+      tag: ${{ github.ref_name }}
 
   homebrew:
     name: Update Homebrew Formula
@@ -256,12 +230,11 @@ jobs:
         with:
           ref: main
 
-      - name: Download archives
+      - name: Download formula
         uses: actions/download-artifact@v8
         with:
-          pattern: oxide-code-*
-          path: release-assets
-          merge-multiple: true
+          name: formula
+          path: Formula
 
       - name: Open formula PR
         env:
@@ -302,7 +275,6 @@ jobs:
           branch="chore/homebrew-$GITHUB_REF_NAME"
           title="chore(release): refresh Homebrew formula for $GITHUB_REF_NAME"
           git switch -c "$branch"
-          ./scripts/update-homebrew-formula.sh "$GITHUB_REF_NAME" release-assets
           if git diff --quiet; then
             echo "The formula on main already points at $GITHUB_REF_NAME."
             exit 0
