@@ -425,14 +425,10 @@ async fn commit_round(
         role: Role::User,
         content: results,
     };
-    let assistant_fut = session.record_message(assistant_msg.clone());
-    let tool_result_fut = session.record_message(tool_result_msg.clone());
-    let metadata_fut = session.record_tool_metadata_batch(sidecars);
-    let (assistant_outcome, tool_result_outcome, metadata_outcome) =
-        tokio::join!(assistant_fut, tool_result_fut, metadata_fut);
-    sink.session_write_error(assistant_outcome.failure.as_deref());
-    sink.session_write_error(tool_result_outcome.failure.as_deref());
-    sink.session_write_error(metadata_outcome.failure.as_deref());
+    let outcome = session
+        .record_round(assistant_msg.clone(), tool_result_msg.clone(), sidecars)
+        .await;
+    sink.session_write_error(outcome.failure.as_deref());
     messages.push(assistant_msg);
     messages.push(tool_result_msg);
 }
@@ -920,10 +916,8 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn metadata_batch_failure_after_healthy_messages_surfaces_error() {
-            // Acks the assistant and tool-result writes, then drops the third, the metadata batch.
-            let session =
-                crate::session::handle::testing::acks_then_drops("metadata-batch-fails", 2);
+        async fn dropped_round_write_surfaces_one_error_and_the_turn_continues() {
+            let session = crate::session::handle::testing::acks_then_drops("round-write-fails", 0);
             let client = FakeClient::new(vec![
                 tool_use_turn("tool_1", "echo", r#"{"v":1}"#),
                 text_turn("Done"),
@@ -2680,6 +2674,58 @@ mod tests {
                 content.starts_with("The write call was denied by the user."),
                 "{content}"
             );
+        }
+    }
+
+    mod commit_round {
+        use super::*;
+
+        #[tokio::test]
+        async fn writes_the_round_in_order_when_the_coop_budget_runs_out() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let session = handle::start(&store, "claude-sonnet-5-5", None);
+            let sid = session.session_id().to_owned();
+            session.record_message(Message::user("prompt")).await;
+            let sink = CapturingSink::default();
+            let mut messages = vec![Message::user("prompt")];
+            // Leaves the task with no cooperative budget, so the first await that needs a permit
+            // yields before the command lands.
+            while tokio::task::coop::has_budget_remaining() {
+                tokio::task::coop::consume_budget().await;
+            }
+
+            commit_round(
+                &session,
+                &sink,
+                &mut messages,
+                Message::assistant("answer"),
+                vec![ContentBlock::tool_result("tool_1", "ok", false)],
+                vec![(
+                    "tool_1".to_owned(),
+                    ToolMetadata {
+                        title: Some("Edited a.rs".to_owned()),
+                        ..ToolMetadata::default()
+                    },
+                )],
+            )
+            .await;
+            session.finalize(Vec::new()).await;
+
+            let data = store.load_session_data(&sid).unwrap();
+            assert_eq!(
+                data.messages,
+                [
+                    Message::user("prompt"),
+                    Message::assistant("answer"),
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::tool_result("tool_1", "ok", false)],
+                    },
+                ],
+                "a resumed session reads the assistant turn before its results",
+            );
+            assert_eq!(data.tool_result_metadata.len(), 1);
         }
     }
 

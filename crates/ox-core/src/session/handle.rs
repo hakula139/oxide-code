@@ -195,14 +195,22 @@ impl SessionHandle {
             .await
     }
 
-    /// Records sidecar metadata for a tool round in one cmd. Default-metadata items are skipped.
-    pub(crate) async fn record_tool_metadata_batch(
+    /// Records one tool round in one cmd: the assistant message, the tool results answering it, and
+    /// their sidecars, in that order. Default-metadata sidecars are skipped.
+    pub(crate) async fn record_round(
         &self,
-        items: Vec<(String, ToolMetadata)>,
+        assistant: Message,
+        tool_results: Message,
+        metadata: Vec<(String, ToolMetadata)>,
     ) -> Outcome {
         let (ack, rx) = oneshot::channel();
-        self.dispatch_outcome(SessionCmd::ToolMetadata { items, ack }, rx)
-            .await
+        let cmd = SessionCmd::RecordRound {
+            assistant,
+            tool_results,
+            metadata,
+            ack,
+        };
+        self.dispatch_outcome(cmd, rx).await
     }
 
     /// Records the token usage of billed requests, one entry each.
@@ -715,40 +723,53 @@ mod tests {
         }
     }
 
-    mod record_tool_metadata_batch {
+    mod record_round {
         use super::*;
 
         #[tokio::test]
-        async fn writes_all_non_default_in_one_cmd() {
+        async fn writes_all_non_default_sidecars() {
             let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let sid = handle.session_id().to_owned();
             handle.record_message(Message::user("trigger")).await;
 
             let outcome = handle
-                .record_tool_metadata_batch(vec![
-                    (
-                        "t1".to_owned(),
-                        ToolMetadata {
-                            title: Some("Edited a.rs".to_owned()),
-                            ..ToolMetadata::default()
-                        },
-                    ),
-                    ("t2".to_owned(), ToolMetadata::default()),
-                    (
-                        "t3".to_owned(),
-                        ToolMetadata {
-                            truncated_total: Some(2),
-                            ..ToolMetadata::default()
-                        },
-                    ),
-                ])
+                .record_round(
+                    Message::assistant("round"),
+                    Message::user("result"),
+                    vec![
+                        (
+                            "t1".to_owned(),
+                            ToolMetadata {
+                                title: Some("Edited a.rs".to_owned()),
+                                ..ToolMetadata::default()
+                            },
+                        ),
+                        ("t2".to_owned(), ToolMetadata::default()),
+                        (
+                            "t3".to_owned(),
+                            ToolMetadata {
+                                truncated_total: Some(2),
+                                ..ToolMetadata::default()
+                            },
+                        ),
+                    ],
+                )
                 .await;
             handle.finish(Vec::new()).await;
             drop(handle);
 
             assert!(outcome.failure.is_none());
             let data = store.load_session_data(&sid).unwrap();
+            assert_eq!(
+                data.messages,
+                [
+                    Message::user("trigger"),
+                    Message::assistant("round"),
+                    Message::user("result"),
+                ],
+                "the round lands in order",
+            );
             assert_eq!(
                 data.tool_result_metadata.len(),
                 2,
@@ -777,16 +798,22 @@ mod tests {
             let manual = handle.set_manual_title("manual".to_owned()).await;
             let finish = handle.finish(Vec::new()).await;
             let usage = handle.record_usage(Vec::new()).await;
-            let batch_ok = handle
-                .record_tool_metadata_batch(vec![(
-                    "t1".to_owned(),
-                    ToolMetadata {
-                        title: Some("f.rs".to_owned()),
-                        ..ToolMetadata::default()
-                    },
-                )])
+            let round_ok = handle
+                .record_round(
+                    Message::assistant("a"),
+                    Message::user("b"),
+                    vec![(
+                        "t1".to_owned(),
+                        ToolMetadata {
+                            title: Some("f.rs".to_owned()),
+                            ..ToolMetadata::default()
+                        },
+                    )],
+                )
                 .await;
-            let batch_dropped = handle.record_tool_metadata_batch(vec![]).await;
+            let round_dropped = handle
+                .record_round(Message::assistant("c"), Message::user("d"), vec![])
+                .await;
 
             assert!(title.failure.is_none(), "AppendAiTitle is acked healthily");
             assert!(
@@ -795,12 +822,9 @@ mod tests {
             );
             assert!(finish.failure.is_none(), "Finish is acked healthily");
             assert!(usage.failure.is_none(), "Usage is acked healthily");
-            assert!(
-                batch_ok.failure.is_none(),
-                "ToolMetadata is acked healthily"
-            );
+            assert!(round_ok.failure.is_none(), "RecordRound is acked healthily");
             assert_eq!(
-                batch_dropped.failure.as_deref(),
+                round_dropped.failure.as_deref(),
                 Some(STOPPED),
                 "dropped ack surfaces actor-gone",
             );
@@ -2425,84 +2449,82 @@ mod tests {
         }
 
         async fn record_tool_turns(session: &SessionHandle) {
-            session.record_message(assistant_with_every_block()).await;
             session
-                .record_message(Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("t1", "Edited f.rs.", false)],
-                })
+                .record_round(
+                    assistant_with_every_block(),
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::tool_result("t1", "Edited f.rs.", false)],
+                    },
+                    vec![("t1".to_owned(), edit_metadata())],
+                )
                 .await;
             session
-                .record_tool_metadata_batch(vec![("t1".to_owned(), edit_metadata())])
-                .await;
-            session
-                .record_message(Message {
-                    role: Role::Assistant,
-                    content: vec![
-                        ContentBlock::tool_use(
-                            "t2",
-                            "read",
-                            serde_json::json!({ "file_path": "g.rs", "limit": 20 }),
-                        ),
-                        ContentBlock::tool_use(
-                            "t3",
-                            "glob",
-                            serde_json::json!({ "pattern": "*.rs" }),
-                        ),
-                        ContentBlock::tool_use(
-                            "t4",
-                            "bash",
-                            serde_json::json!({ "command": "cargo test" }),
-                        ),
-                        ContentBlock::tool_use(
-                            "t5",
-                            "tasks",
-                            serde_json::json!({ "tasks": [
+                .record_round(
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![
+                            ContentBlock::tool_use(
+                                "t2",
+                                "read",
+                                serde_json::json!({ "file_path": "g.rs", "limit": 20 }),
+                            ),
+                            ContentBlock::tool_use(
+                                "t3",
+                                "glob",
+                                serde_json::json!({ "pattern": "*.rs" }),
+                            ),
+                            ContentBlock::tool_use(
+                                "t4",
+                                "bash",
+                                serde_json::json!({ "command": "cargo test" }),
+                            ),
+                            ContentBlock::tool_use(
+                                "t5",
+                                "tasks",
+                                serde_json::json!({ "tasks": [
                                 { "content": "Rename main", "status": "completed" },
                                 { "content": "Fix the failing test", "status": "in_progress" },
                             ] }),
+                            ),
+                        ],
+                    },
+                    Message {
+                        role: Role::User,
+                        content: vec![
+                            ContentBlock::tool_result("t2", "fn main() {}", false),
+                            ContentBlock::tool_result("t3", "g.rs", false),
+                            ContentBlock::tool_result("t4", "test result: FAILED", true),
+                            ContentBlock::tool_result(
+                                "t5",
+                                "Updated the task list: 1 of 2 completed.",
+                                false,
+                            ),
+                        ],
+                    },
+                    vec![
+                        (
+                            "t2".to_owned(),
+                            ToolMetadata {
+                                title: Some("Read g.rs".to_owned()),
+                                ..ToolMetadata::default()
+                            },
+                        ),
+                        (
+                            "t3".to_owned(),
+                            ToolMetadata {
+                                title: Some("Found 100 files".to_owned()),
+                                truncated_total: Some(250),
+                                result_view: Some(ToolResultView::GlobFiles {
+                                    pattern: "*.rs".to_owned(),
+                                    files: vec!["g.rs".to_owned()],
+                                    total: 250,
+                                }),
+                                ..ToolMetadata::default()
+                            },
                         ),
                     ],
-                })
-                .await;
-            session
-                .record_message(Message {
-                    role: Role::User,
-                    content: vec![
-                        ContentBlock::tool_result("t2", "fn main() {}", false),
-                        ContentBlock::tool_result("t3", "g.rs", false),
-                        ContentBlock::tool_result("t4", "test result: FAILED", true),
-                        ContentBlock::tool_result(
-                            "t5",
-                            "Updated the task list: 1 of 2 completed.",
-                            false,
-                        ),
-                    ],
-                })
-                .await;
-            session
-                .record_tool_metadata_batch(vec![
-                    (
-                        "t2".to_owned(),
-                        ToolMetadata {
-                            title: Some("Read g.rs".to_owned()),
-                            ..ToolMetadata::default()
-                        },
-                    ),
-                    (
-                        "t3".to_owned(),
-                        ToolMetadata {
-                            title: Some("Found 100 files".to_owned()),
-                            truncated_total: Some(250),
-                            result_view: Some(ToolResultView::GlobFiles {
-                                pattern: "*.rs".to_owned(),
-                                files: vec!["g.rs".to_owned()],
-                                total: 250,
-                            }),
-                            ..ToolMetadata::default()
-                        },
-                    ),
-                ])
+                )
                 .await;
         }
 
