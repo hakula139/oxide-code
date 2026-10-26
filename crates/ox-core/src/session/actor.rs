@@ -393,7 +393,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::session::entry::{ArchiveState, CompactSummary, ExitInfo};
+    use crate::session::entry::{ArchiveState, CompactInfo, CompactRecord, ExitInfo};
     use crate::session::handle::testing::boundary;
     use crate::session::state::MAX_UNWRITTEN_BYTES;
     use crate::session::store::local_testing::{saved_entries, saved_titles, test_session_file};
@@ -801,9 +801,9 @@ mod tests {
             let (compact_ack, _compact_rx) = oneshot::channel();
             let compact_cmd = SessionCmd::Compact {
                 boundary: CompactBoundary {
-                    summary: CompactSummary {
+                    record: CompactRecord {
                         instructions: Some("focus on auth".to_owned()),
-                        ..boundary("synth summary").summary
+                        ..boundary("synth summary").record
                     },
                     ..boundary("synth summary")
                 },
@@ -818,10 +818,14 @@ mod tests {
                 .iter()
                 .filter_map(|entry| match entry {
                     Entry::Compact {
-                        summary:
-                            CompactSummary {
-                                summary,
-                                instructions,
+                        info:
+                            CompactInfo {
+                                record:
+                                    CompactRecord {
+                                        summary,
+                                        instructions,
+                                        ..
+                                    },
                                 ..
                             },
                         ..

@@ -363,16 +363,7 @@ impl SessionDataBuilder {
             Entry::FileSnapshot { snapshot } if self.accepts_sidecar() => {
                 self.file_snapshots.push(snapshot);
             }
-            Entry::Compact {
-                summary,
-                pre_message_count,
-                ..
-            } => {
-                self.pending_compact = Some(CompactInfo {
-                    summary,
-                    pre_message_count,
-                });
-            }
+            Entry::Compact { info, .. } => self.pending_compact = Some(info),
             _ => {}
         }
     }
@@ -702,7 +693,7 @@ mod tests {
     use crate::message::{ContentBlock, Role};
     use crate::model::PromptCacheTtl;
     use crate::prompt::PromptParts;
-    use crate::session::entry::CompactSummary;
+    use crate::session::entry::CompactRecord;
     use crate::tool::tasks::testing::plan;
     use crate::util::path::testing::HOME_VAR;
 
@@ -1019,12 +1010,14 @@ mod tests {
         /// A boundary compacting one message, with no focus instructions or tasks.
         fn sample_compact(timestamp: OffsetDateTime) -> Entry {
             Entry::Compact {
-                summary: CompactSummary {
-                    summary: "summary".to_owned(),
-                    instructions: None,
-                    tasks: Vec::new(),
+                info: CompactInfo {
+                    record: CompactRecord {
+                        summary: "summary".to_owned(),
+                        instructions: None,
+                        tasks: Vec::new(),
+                    },
+                    pre_message_count: 1,
                 },
-                pre_message_count: 1,
                 timestamp,
             }
         }
@@ -1060,12 +1053,14 @@ mod tests {
             };
             let records = [
                 Entry::Compact {
-                    summary: CompactSummary {
-                        summary: "historical summary".to_owned(),
-                        instructions: None,
-                        tasks: Vec::new(),
+                    info: CompactInfo {
+                        record: CompactRecord {
+                            summary: "historical summary".to_owned(),
+                            instructions: None,
+                            tasks: Vec::new(),
+                        },
+                        pre_message_count: 2,
                     },
-                    pre_message_count: 2,
                     timestamp: now,
                 },
                 Entry::Message {
@@ -1459,12 +1454,14 @@ mod tests {
                 .unwrap();
             writer
                 .append(&[Entry::Compact {
-                    summary: CompactSummary {
-                        summary: "summary".to_owned(),
-                        instructions: Some("focus".to_owned()),
-                        tasks: plan(),
+                    info: CompactInfo {
+                        record: CompactRecord {
+                            summary: "summary".to_owned(),
+                            instructions: Some("focus".to_owned()),
+                            tasks: plan(),
+                        },
+                        pre_message_count: 1,
                     },
-                    pre_message_count: 1,
                     timestamp: datetime!(2026-04-16 12:00:02 UTC),
                 }])
                 .unwrap();
@@ -1498,7 +1495,7 @@ mod tests {
             assert_eq!(
                 data.compact,
                 Some(CompactInfo {
-                    summary: CompactSummary {
+                    record: CompactRecord {
                         summary: "summary".to_owned(),
                         instructions: Some("focus".to_owned()),
                         tasks: plan(),

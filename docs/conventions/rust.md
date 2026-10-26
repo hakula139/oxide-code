@@ -73,7 +73,7 @@ Keep each `tracing` message a constant phrase and pass variable data as fields, 
 
 ## Serde
 
-- Omit `#[serde(default)]` on an `Option` field. Derived `Deserialize` already reads a missing key as `None` unless the field sets `deserialize_with`, so pair `Option` fields with `skip_serializing_if = "Option::is_none"` alone.
+- Omit `#[serde(default)]` on an `Option` field, since derived `Deserialize` reads a missing key as `None` unless the field sets `with` or `deserialize_with`.
 
 ## Strings
 

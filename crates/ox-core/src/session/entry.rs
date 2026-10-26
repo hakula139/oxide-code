@@ -107,8 +107,7 @@ pub(crate) enum Entry {
     /// replaces it.
     Compact {
         #[serde(flatten)]
-        summary: CompactSummary,
-        pre_message_count: u32,
+        info: CompactInfo,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
@@ -157,8 +156,8 @@ pub(super) fn keep_newer<T: Updated>(slot: &mut Option<T>, record: T) {
 
 /// A compaction's summary text, its `/compact` focus, and the task list the summarized transcript
 /// left, which the summary message carries over.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CompactSummary {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CompactRecord {
     pub(crate) summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) instructions: Option<String>,
@@ -169,15 +168,16 @@ pub(crate) struct CompactSummary {
 /// A finished summary and what its compaction boundary records beside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompactBoundary {
-    pub(crate) summary: CompactSummary,
+    pub(crate) record: CompactRecord,
     /// Prompt state recorded beside the summary so resume restores the same request prefix.
     pub(crate) context: SessionContext,
 }
 
-/// A stored compaction's summary fields and the message count it replaced.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The compaction record a file's boundary entry stores, with the message count it replaced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CompactInfo {
-    pub(crate) summary: CompactSummary,
+    #[serde(flatten)]
+    pub(crate) record: CompactRecord,
     pub(crate) pre_message_count: u32,
 }
 
@@ -530,12 +530,14 @@ mod tests {
     #[test]
     fn compact_round_trips_with_instructions_and_tasks() {
         let entry = Entry::Compact {
-            summary: CompactSummary {
-                summary: "user wanted X, did Y, next step Z".to_owned(),
-                instructions: Some("focus on the build error".to_owned()),
-                tasks: plan(),
+            info: CompactInfo {
+                record: CompactRecord {
+                    summary: "user wanted X, did Y, next step Z".to_owned(),
+                    instructions: Some("focus on the build error".to_owned()),
+                    tasks: plan(),
+                },
+                pre_message_count: 42,
             },
-            pre_message_count: 42,
             timestamp: datetime!(2026-04-16 13:00:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -548,13 +550,16 @@ mod tests {
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
         let Entry::Compact {
-            summary:
-                CompactSummary {
-                    summary,
-                    instructions,
-                    tasks,
+            info:
+                CompactInfo {
+                    record:
+                        CompactRecord {
+                            summary,
+                            instructions,
+                            tasks,
+                        },
+                    pre_message_count,
                 },
-            pre_message_count,
             timestamp,
         } = parsed
         else {
@@ -570,12 +575,14 @@ mod tests {
     #[test]
     fn compact_omits_absent_instructions_and_tasks_and_reads_them_back_empty() {
         let entry = Entry::Compact {
-            summary: CompactSummary {
-                summary: "s".to_owned(),
-                instructions: None,
-                tasks: Vec::new(),
+            info: CompactInfo {
+                record: CompactRecord {
+                    summary: "s".to_owned(),
+                    instructions: None,
+                    tasks: Vec::new(),
+                },
+                pre_message_count: 4,
             },
-            pre_message_count: 4,
             timestamp: datetime!(2026-04-16 13:00:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -584,10 +591,14 @@ mod tests {
 
         let parsed: Entry = serde_json::from_value(json).unwrap();
         let Entry::Compact {
-            summary:
-                CompactSummary {
-                    instructions,
-                    tasks,
+            info:
+                CompactInfo {
+                    record:
+                        CompactRecord {
+                            instructions,
+                            tasks,
+                            ..
+                        },
                     ..
                 },
             ..

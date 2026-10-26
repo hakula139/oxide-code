@@ -18,16 +18,26 @@ pub enum SavedError {
     /// The target is the live session, which only a roll to a new session can leave.
     #[error("session {id} is the live session")]
     Live { id: String },
-    /// The `action` (`archive`, `unarchive`, or `delete`) failed on the session's file.
+    /// The action failed on the session's file.
     #[error("failed to {action} session {id}: {cause}")]
     Failed {
-        action: String,
+        action: SavedAction,
         id: String,
         cause: String,
     },
     /// The blocking task that performs a saved-session operation failed.
     #[error("session operation task failed: {0}")]
     Task(String),
+}
+
+/// The saved-session write that can fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum SavedAction {
+    Archive,
+    Unarchive,
+    Delete,
 }
 
 impl SavedError {
@@ -37,11 +47,16 @@ impl SavedError {
         }
     }
 
-    fn failed(action: &'static str, session_id: &str, cause: &anyhow::Error) -> Self {
+    fn failed(action: SavedAction, session_id: &str, cause: &anyhow::Error) -> Self {
         let cause = format!("{cause:#}");
-        warn!(action, session_id, error = %cause, "session operation failed");
+        warn!(
+            action = %action,
+            session_id,
+            error = %cause,
+            "session operation failed"
+        );
         Self::Failed {
-            action: action.to_owned(),
+            action,
             id: id_prefix(session_id).to_owned(),
             cause,
         }
@@ -61,8 +76,8 @@ pub fn set_archived(
         ArchiveState::Archived if session_id == live_id => {
             return Err(SavedError::live(session_id));
         }
-        ArchiveState::Archived => ("archive", true),
-        ArchiveState::Active => ("unarchive", false),
+        ArchiveState::Archived => (SavedAction::Archive, true),
+        ArchiveState::Active => (SavedAction::Unarchive, false),
     };
     set_archived_at(path, archived).map_err(|e| SavedError::failed(action, session_id, &e))
 }
@@ -74,7 +89,7 @@ pub fn delete(path: &Path, session_id: &str, live_id: &str) -> Result<(), SavedE
     if session_id == live_id {
         return Err(SavedError::live(session_id));
     }
-    delete_at(path).map_err(|e| SavedError::failed("delete", session_id, &e))
+    delete_at(path).map_err(|e| SavedError::failed(SavedAction::Delete, session_id, &e))
 }
 
 #[cfg(test)]

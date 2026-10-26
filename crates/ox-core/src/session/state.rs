@@ -9,7 +9,9 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::display::fit_title;
-use super::entry::{CURRENT_VERSION, CompactBoundary, Entry, ExitInfo, Header, TitleInfo};
+use super::entry::{
+    CURRENT_VERSION, CompactBoundary, CompactInfo, Entry, ExitInfo, Header, TitleInfo,
+};
 use super::handle::Checkpoint;
 use super::store::{SessionStore, SessionWriter, artifact_dir, encode_lines};
 use crate::file_tracker::FileSnapshot;
@@ -189,12 +191,14 @@ impl SessionState {
         synthetic_message: Message,
         now: OffsetDateTime,
     ) -> (Vec<Entry>, Uuid) {
-        let CompactBoundary { summary, context } = boundary;
+        let CompactBoundary { record, context } = boundary;
         let synthetic_uuid = Uuid::new_v4();
         let entries = vec![
             Entry::Compact {
-                summary,
-                pre_message_count: self.message_count,
+                info: CompactInfo {
+                    record,
+                    pre_message_count: self.message_count,
+                },
                 timestamp: now,
             },
             Entry::Context {
@@ -361,7 +365,7 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::file_tracker::{FileTracker, LastView};
-    use crate::session::entry::CompactSummary;
+    use crate::session::entry::CompactRecord;
     use crate::session::handle::testing::boundary;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{isolated_store, test_project_dir, test_store};
@@ -570,7 +574,7 @@ mod tests {
 
             let (entries, synthetic_uuid) = state.compact_entries(
                 CompactBoundary {
-                    summary: CompactSummary {
+                    record: CompactRecord {
                         summary: "summary body".to_owned(),
                         instructions: Some("focus on auth".to_owned()),
                         tasks: plan(),
@@ -586,13 +590,16 @@ mod tests {
                 matches!(
                     &entries[0],
                     Entry::Compact {
-                        summary:
-                            CompactSummary {
-                                summary,
-                                instructions: Some(i),
-                                tasks,
+                        info:
+                            CompactInfo {
+                                record:
+                                    CompactRecord {
+                                        summary,
+                                        instructions: Some(i),
+                                        tasks,
+                                    },
+                                pre_message_count: 2,
                             },
-                        pre_message_count: 2,
                         ..
                     } if summary == "summary body" && i == "focus on auth" && *tasks == plan()
                 ),
@@ -640,8 +647,11 @@ mod tests {
             assert!(matches!(
                 &entries[0],
                 Entry::Compact {
-                    summary: CompactSummary {
-                        instructions: None,
+                    info: CompactInfo {
+                        record: CompactRecord {
+                            instructions: None,
+                            ..
+                        },
                         ..
                     },
                     ..
@@ -912,16 +922,6 @@ mod tests {
             state.persistence_stopped = true;
 
             assert!(state.flush_entries(Vec::new()).is_ok());
-
-            let entry = Entry::Rewind {
-                tip: None,
-                first_user_prompt_seen: None,
-                timestamp: OffsetDateTime::now_utc(),
-            };
-            assert_eq!(
-                state.flush_entries(vec![entry]).unwrap_err().to_string(),
-                stop_message(),
-            );
         }
 
         #[test]

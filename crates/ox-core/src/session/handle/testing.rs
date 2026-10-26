@@ -13,12 +13,12 @@ use crate::file_tracker::testing::record_tracked_file;
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SessionContext;
 use crate::session::actor::{Record, SessionCmd};
-use crate::session::entry::{CompactBoundary, CompactSummary};
+use crate::session::entry::{CompactBoundary, CompactRecord};
 
 /// A `/compact` boundary for `summary` with no focus or task list.
 pub(crate) fn boundary(summary: &str) -> CompactBoundary {
     CompactBoundary {
-        summary: CompactSummary {
+        record: CompactRecord {
             summary: summary.to_owned(),
             instructions: None,
             tasks: Vec::new(),

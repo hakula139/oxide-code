@@ -517,6 +517,7 @@ mod tests {
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::text_result;
     use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
+    use ox_core::session::saved::SavedAction;
     use ox_core::session::store::testing::{isolated_store, seed_test_session};
     use ox_core::tool::bash::background::ShellState;
     use ox_core::tool::bash::background::testing::{shell, shells_in_each_state};
@@ -2313,7 +2314,7 @@ mod tests {
                 (
                     Status::Archiving,
                     Err(SavedError::Failed {
-                        action: "archive".to_owned(),
+                        action: SavedAction::Archive,
                         id: "saved".to_owned(),
                         cause: "disk full".to_owned(),
                     }),

@@ -781,10 +781,7 @@ impl Modal for ResumePicker {
                     false,
                 )
             }
-            Err(error) => (
-                saved_error_message(error.clone(), Some(BARE_ARCHIVE_HINT)),
-                true,
-            ),
+            Err(error) => (saved_error_message(error, Some(BARE_ARCHIVE_HINT)), true),
         };
         self.notice = Some(Notice {
             text,
@@ -873,8 +870,6 @@ mod tests {
     use ox_core::session::display::UNTITLED_MARKER;
     use ox_core::session::entry::{ExitInfo, TitleInfo};
     use ox_core::session::saved;
-
-    use crate::slash::sessions::BARE_ARCHIVE_HINT;
     use ox_core::session::store::testing::{
         WriterBarrier, archive_test_session, isolated_store, listed_ids, listed_session,
         seed_test_session, stamped_id, test_project_dir, test_store, with_isolated_xdg,
@@ -2208,7 +2203,7 @@ mod tests {
             let path = store.find_session_path(&id).unwrap();
             make_read_only(&path);
             let failure = saved_error_message(
-                saved::set_archived(&path, &id, ArchiveState::Archived, "live-session-id")
+                &saved::set_archived(&path, &id, ArchiveState::Archived, "live-session-id")
                     .unwrap_err(),
                 Some(BARE_ARCHIVE_HINT),
             );

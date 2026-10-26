@@ -544,6 +544,7 @@ mod tests {
     use ox_core::protocol::testing::text_result;
     use ox_core::protocol::{ApprovalDecision, CompactTrigger, ConfigPick, Event, ResumeTarget};
     use ox_core::session::entry::ArchiveState;
+    use ox_core::session::saved::{SavedAction, SavedError};
     use ox_core::session::store::testing::{
         seed_test_session, stamped_id, with_isolated_xdg_async,
     };
@@ -2201,8 +2202,8 @@ mod tests {
             app.modals.clear();
             app.handle_engine_event(Event::ArchiveUpdated {
                 id: "saved".to_owned(),
-                result: Err(ox_core::session::saved::SavedError::Failed {
-                    action: "archive".to_owned(),
+                result: Err(SavedError::Failed {
+                    action: SavedAction::Archive,
                     id: "saved".to_owned(),
                     cause: "disk full".to_owned(),
                 }),

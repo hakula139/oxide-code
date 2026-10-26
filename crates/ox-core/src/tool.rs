@@ -35,7 +35,7 @@ use self::write::WriteTool;
 use crate::file_tracker::FileTracker;
 use crate::permission::{Access, PermissionClass, ReadFilter, Workspace};
 use crate::util::path::{expand_user, slash_separated};
-use crate::util::text::ELLIPSIS;
+use crate::util::text::{ELLIPSIS, capitalize_first};
 
 // ── Tool Spec ──
 
@@ -290,15 +290,7 @@ fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'
 
 /// Renders a tool name as the label the UI shows, `bash_output` as `BashOutput`.
 fn pascal_case(name: &str) -> String {
-    let mut label = String::with_capacity(name.len());
-    for word in name.split('_') {
-        let mut chars = word.chars();
-        if let Some(first) = chars.next() {
-            label.extend(first.to_uppercase());
-            label.push_str(chars.as_str());
-        }
-    }
-    label
+    name.split('_').map(capitalize_first).collect()
 }
 
 // ── Tool Registry ──

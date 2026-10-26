@@ -456,6 +456,7 @@ mod tests {
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::{CapturingSink, FailingSink, ls_call, text_result};
     use ox_core::protocol::{CompactTrigger, ConfigPick};
+    use ox_core::session::saved::{SavedAction, SavedError};
     use ox_core::session::store::testing::test_store;
     use ox_core::tool::bash::background::testing::shells_in_each_state;
     use ox_core::tool::tasks::TaskStatus;
@@ -1232,8 +1233,8 @@ mod tests {
                 for (result, expected) in [
                     (Ok(ArchiveState::Active), "Unarchived session saved\n"),
                     (
-                        Err(ox_core::session::saved::SavedError::Failed {
-                            action: "archive".to_owned(),
+                        Err(SavedError::Failed {
+                            action: SavedAction::Archive,
                             id: "saved".to_owned(),
                             cause: "disk unavailable".to_owned(),
                         }),

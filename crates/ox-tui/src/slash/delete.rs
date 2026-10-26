@@ -60,7 +60,7 @@ impl SlashCommand for DeleteCmd {
         Ok(SlashOutcome::Background(Box::pin(async move {
             let info = resolve_saved_prefix_blocking(store, arg, live_id.clone())
                 .await
-                .map_err(|e| resolve_error_message(e, Some(CLEAR_THEN_DELETE_HINT)))?;
+                .map_err(|e| resolve_error_message(&e, Some(CLEAR_THEN_DELETE_HINT)))?;
             let title = display_title(&info).to_owned();
             let metadata = metadata_line(&info, now_local());
             Ok(BackgroundOutput::Modal(Box::new(

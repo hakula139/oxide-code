@@ -44,7 +44,7 @@ impl SlashCommand for ArchiveCmd {
         Ok(SlashOutcome::Background(Box::pin(async move {
             let info = resolve_saved_prefix_blocking(store, prefix, live_id)
                 .await
-                .map_err(|e| resolve_error_message(e, Some(BARE_ARCHIVE_HINT)))?;
+                .map_err(|e| resolve_error_message(&e, Some(BARE_ARCHIVE_HINT)))?;
             Ok(apply_archived(&info, ArchiveState::Archived))
         })))
     }
@@ -95,7 +95,7 @@ impl SlashCommand for UnarchiveCmd {
                 Err(ResolveError::Live { .. }) => Ok(BackgroundOutput::SystemMessage(
                     "The live session is not archived".to_owned(),
                 )),
-                Err(e) => Err(resolve_error_message(e, None)),
+                Err(e) => Err(resolve_error_message(&e, None)),
             }
         })))
     }
@@ -154,7 +154,7 @@ mod tests {
             return Ok(outcome);
         };
         saved::set_archived(&path, &session_id, state, &test_session_info().session_id)
-            .map_err(|error| saved_error_message(error, Some(BARE_ARCHIVE_HINT)))?;
+            .map_err(|error| saved_error_message(&error, Some(BARE_ARCHIVE_HINT)))?;
         Ok(BackgroundOutput::SystemMessage(archive_notice(
             &session_id,
             state,

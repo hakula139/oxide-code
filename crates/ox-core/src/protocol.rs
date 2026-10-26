@@ -584,6 +584,7 @@ mod tests {
 
     use super::*;
     use crate::config::compaction::CompactionConfig;
+    use crate::session::saved::SavedAction;
 
     mod op {
         use super::*;
@@ -633,7 +634,7 @@ mod tests {
                     (Ok(ArchiveState::Archived), TurnEnd::Completed),
                     (
                         Err(SavedError::Failed {
-                            action: "archive".to_owned(),
+                            action: SavedAction::Archive,
                             id: "saved".to_owned(),
                             cause: "disk full".to_owned(),
                         }),

@@ -19,7 +19,7 @@ use crate::message::{ContentBlock, Message, Role, TextOrigin};
 use crate::model::TokenUsage;
 use crate::prompt::{PromptParts, UserContext};
 use crate::protocol::{CompactTrigger, Event, EventSink, Op};
-use crate::session::entry::{CompactBoundary, CompactSummary};
+use crate::session::entry::{CompactBoundary, CompactRecord};
 use crate::session::handle::Checkpoint;
 use crate::session::post_compact::synthesize_post_compact_message;
 use crate::tool::ToolDefinition;
@@ -298,7 +298,7 @@ impl Engine {
             Ok(Ok(summary)) => {
                 let (fresh, warnings) = UserContext::load(self.cwd(), self.client.model()).await;
                 let boundary = CompactBoundary {
-                    summary: CompactSummary {
+                    record: CompactRecord {
                         summary,
                         instructions,
                         tasks: self.transcript.tasks.clone(),
@@ -339,13 +339,13 @@ impl Engine {
     ) -> Option<Checkpoint> {
         self.transcript.file_tracker.drain_writes().await;
         let synthetic = synthesize_post_compact_message(
-            &boundary.summary.summary,
-            &boundary.summary.tasks,
+            &boundary.record.summary,
+            &boundary.record.tasks,
             &self.shells.list(),
             trigger,
         );
-        let summary = boundary.summary.summary.clone();
-        let instructions = boundary.summary.instructions.clone();
+        let summary = boundary.record.summary.clone();
+        let instructions = boundary.record.instructions.clone();
         let outcome = self.transcript.compact(boundary, synthetic).await;
         let Some(checkpoint) = outcome.checkpoint else {
             sink.emit(Event::SummaryDiscarded, "summary-discarded");
@@ -1488,7 +1488,7 @@ mod tests {
 
         fn boundary(tasks: Vec<Task>) -> CompactBoundary {
             CompactBoundary {
-                summary: CompactSummary {
+                record: CompactRecord {
                     summary: "fixed login bug".to_owned(),
                     instructions: None,
                     tasks,
@@ -1555,7 +1555,7 @@ mod tests {
                     engine.transcript.session().clone().shutdown().await;
                     let saved = store.load_session_data(&session_id).unwrap();
                     assert_eq!(
-                        saved.compact.map(|compact| compact.summary.tasks),
+                        saved.compact.map(|compact| compact.record.tasks),
                         Some(plan()),
                         "{trigger:?}"
                     );
@@ -1617,7 +1617,7 @@ mod tests {
                 engine.transcript.set_messages(tool_heavy_transcript());
                 let summary = "s".repeat(2 << 20);
                 let mut large = boundary(Vec::new());
-                large.summary.summary.clone_from(&summary);
+                large.record.summary.clone_from(&summary);
                 let sink = CapturingSink::default();
 
                 let compacted = engine

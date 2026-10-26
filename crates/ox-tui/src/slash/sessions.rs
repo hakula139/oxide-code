@@ -32,19 +32,27 @@ pub(super) const CLEAR_THEN_DELETE_HINT: &str = "Run `/clear` to start a new one
 pub(super) const BARE_ARCHIVE_HINT: &str = "Use bare `/archive` to archive it and start a new one.";
 
 /// Phrases `error` as a sentence, ending a live-session match with `live_recovery` when given.
-pub(super) fn resolve_error_message(error: ResolveError, live_recovery: Option<&str>) -> String {
-    let sentence = capitalize_first(&error.to_string());
-    match (error, live_recovery) {
-        (ResolveError::Live { .. }, Some(recovery)) => format!("{sentence}. {recovery}"),
-        _ => sentence,
-    }
+pub(super) fn resolve_error_message(error: &ResolveError, live_recovery: Option<&str>) -> String {
+    phrase(
+        &error.to_string(),
+        matches!(error, ResolveError::Live { .. }),
+        live_recovery,
+    )
 }
 
 /// Phrases `error` as a sentence, ending a live-session refusal with `live_recovery` when given.
-pub(super) fn saved_error_message(error: SavedError, live_recovery: Option<&str>) -> String {
-    let sentence = capitalize_first(&error.to_string());
-    match (error, live_recovery) {
-        (SavedError::Live { .. }, Some(recovery)) => format!("{sentence}. {recovery}"),
+pub(super) fn saved_error_message(error: &SavedError, live_recovery: Option<&str>) -> String {
+    phrase(
+        &error.to_string(),
+        matches!(error, SavedError::Live { .. }),
+        live_recovery,
+    )
+}
+
+fn phrase(sentence: &str, live: bool, live_recovery: Option<&str>) -> String {
+    let sentence = capitalize_first(sentence);
+    match (live, live_recovery) {
+        (true, Some(recovery)) => format!("{sentence}. {recovery}"),
         _ => sentence,
     }
 }
@@ -164,7 +172,7 @@ mod tests {
                 prefix: "zz".to_owned(),
             };
             assert_eq!(
-                resolve_error_message(no_match, None),
+                resolve_error_message(&no_match, None),
                 "No session matching `zz`"
             );
 
@@ -172,12 +180,12 @@ mod tests {
                 prefix: "test-".to_owned(),
             };
             assert_eq!(
-                resolve_error_message(live(), Some(BARE_ARCHIVE_HINT)),
+                resolve_error_message(&live(), Some(BARE_ARCHIVE_HINT)),
                 "Session prefix `test-` matches the live session. \
                  Use bare `/archive` to archive it and start a new one.",
             );
             assert_eq!(
-                resolve_error_message(live(), None),
+                resolve_error_message(&live(), None),
                 "Session prefix `test-` matches the live session",
             );
 
@@ -187,7 +195,7 @@ mod tests {
                 preview: "ab1, ab2, ab3, ab4, ab5, and 2 more".to_owned(),
             };
             assert_eq!(
-                resolve_error_message(ambiguous, None),
+                resolve_error_message(&ambiguous, None),
                 "Ambiguous prefix `ab` matches 7 sessions: ab1, ab2, ab3, ab4, ab5, and 2 more",
             );
 
@@ -196,7 +204,7 @@ mod tests {
                 cause: anyhow::anyhow!("disk unavailable"),
             };
             assert_eq!(
-                resolve_error_message(list, None),
+                resolve_error_message(&list, None),
                 "Failed to list sessions in all projects: disk unavailable",
             );
         }

@@ -27,9 +27,9 @@ pub(crate) fn interactions(
         return walk_transcript(messages, tool_metadata, tools, cwd, false);
     };
     let mut out = vec![Interaction::Compacted {
-        summary: info.summary.summary.clone(),
+        summary: info.record.summary.clone(),
         pre_count: info.pre_message_count,
-        instructions: info.summary.instructions.clone(),
+        instructions: info.record.instructions.clone(),
     }];
     out.extend(walk_transcript(messages, tool_metadata, tools, cwd, true));
     out
@@ -205,7 +205,7 @@ mod tests {
     use super::*;
     use crate::message::{INTERRUPTION_MARKER, Replay};
     use crate::protocol::{CompactTrigger, testing};
-    use crate::session::entry::CompactSummary;
+    use crate::session::entry::{CompactInfo, CompactRecord};
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::DEFAULT_TOOL_ICON;
     use crate::tool::StoredView;
@@ -223,7 +223,7 @@ mod tests {
 
         fn compact_info() -> CompactInfo {
             CompactInfo {
-                summary: CompactSummary {
+                record: CompactRecord {
                     summary: "Kept the important decisions.".to_owned(),
                     instructions: Some("focus on auth".to_owned()),
                     tasks: plan(),
@@ -795,6 +795,63 @@ mod tests {
                     Interaction::ProgressUpdate("Running the suite.".to_owned()),
                     bash_call("t1", "cargo test"),
                 ]
+            );
+        }
+
+        #[test]
+        fn keeps_a_progress_note_before_redacted_thinking() {
+            let messages = [Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "Running the suite.".to_owned(),
+                        replay: Replay::with_model(MODEL, "sig"),
+                    },
+                    ContentBlock::RedactedThinking {
+                        replay: Replay::with_model(MODEL, "opaque"),
+                    },
+                    ContentBlock::tool_use(
+                        "t1",
+                        "bash",
+                        serde_json::json!({"command": "cargo test"}),
+                    ),
+                ],
+            }];
+
+            assert!(
+                walk(&messages).contains(&Interaction::ProgressUpdate(
+                    "Running the suite.".to_owned()
+                )),
+                "redacted thinking must not hide the note before it",
+            );
+        }
+
+        #[test]
+        fn keeps_a_progress_note_before_thinking_without_progress_updates() {
+            let messages = [Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "Running the suite.".to_owned(),
+                        replay: Replay::with_model(MODEL, "sig"),
+                    },
+                    ContentBlock::Thinking {
+                        thinking: "Hidden reasoning.".to_owned(),
+                        replay: Replay::with_model("claude-haiku-5-5", "sig"),
+                    },
+                    ContentBlock::tool_use(
+                        "t1",
+                        "bash",
+                        serde_json::json!({"command": "cargo test"}),
+                    ),
+                ],
+            }];
+
+            assert!(
+                walk(&messages).contains(&Interaction::ProgressUpdate(
+                    "Running the suite.".to_owned()
+                )),
+                "thinking from a model without progress updates must not hide the note before it",
             );
         }
 

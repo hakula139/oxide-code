@@ -512,7 +512,7 @@ fn resume_loaded(
         .or_else(|| {
             data.compact
                 .as_ref()
-                .map(|compact| compact.summary.tasks.clone())
+                .map(|compact| compact.record.tasks.clone())
         })
         .unwrap_or_default();
     let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);
@@ -575,7 +575,7 @@ mod tests {
     };
     use crate::message::{ContentBlock, Replay, Role, TextOrigin};
     use crate::prompt::PromptParts;
-    use crate::session::entry::{CompactSummary, Entry, ExitInfo, SessionInfo};
+    use crate::session::entry::{CompactInfo, CompactRecord, Entry, ExitInfo, SessionInfo};
     use crate::session::handle::testing::record_write_call;
     use crate::session::store::encode_lines;
     use crate::session::store::listing::ProjectScope;
@@ -1101,9 +1101,9 @@ mod tests {
             let outcome = handle
                 .compact(
                     CompactBoundary {
-                        summary: CompactSummary {
+                        record: CompactRecord {
                             instructions: Some("focus".to_owned()),
-                            ..testing::boundary("synth summary").summary
+                            ..testing::boundary("synth summary").record
                         },
                         ..testing::boundary("synth summary")
                     },
@@ -1883,12 +1883,14 @@ mod tests {
                 let now = datetime!(2026-01-01 00:00:00 UTC);
                 let records = [
                     Entry::Compact {
-                        summary: CompactSummary {
-                            summary: "legacy summary".to_owned(),
-                            instructions: None,
-                            tasks: Vec::new(),
+                        info: CompactInfo {
+                            record: CompactRecord {
+                                summary: "legacy summary".to_owned(),
+                                instructions: None,
+                                tasks: Vec::new(),
+                            },
+                            pre_message_count: 4,
                         },
-                        pre_message_count: 4,
                         timestamp: now,
                     },
                     Entry::Message {
@@ -2420,7 +2422,7 @@ mod tests {
             session
                 .compact(
                     CompactBoundary {
-                        summary: CompactSummary {
+                        record: CompactRecord {
                             summary: "Asked to edit f.rs.".to_owned(),
                             instructions: Some("focus on f.rs".to_owned()),
                             tasks: plan(),
@@ -2701,10 +2703,10 @@ mod tests {
                 "title": resumed.title,
                 "prior": resumed.prior,
                 "compact": transcript.compact.as_ref().map(|compact| serde_json::json!({
-                    "summary": compact.summary.summary,
+                    "summary": compact.record.summary,
                     "pre_message_count": compact.pre_message_count,
-                    "instructions": compact.summary.instructions,
-                    "tasks": compact.summary.tasks,
+                    "instructions": compact.record.instructions,
+                    "tasks": compact.record.tasks,
                 })),
                 "context": transcript.context,
                 "messages": transcript.messages,
