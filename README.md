@@ -20,16 +20,16 @@ Early development. What works today:
 - **[Terminal UI](docs/guide/terminal-ui.md)**: streaming Markdown, syntax-highlighted code blocks, mouse-wheel scrolling and drag-to-copy selection, a [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in [themes](docs/guide/theming.md) with custom TOML overrides
 - **[Headless mode](docs/guide/headless.md)**: one-shot `-p` runs for scripts and pipelines, with output as text, a JSON result, or a JSON event stream, plus a [bare REPL](docs/guide/headless.md#bare-repl) (`--no-tui`)
 - **[Models](docs/guide/configuration.md#model-supported-models)**: Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window, adjustable effort, and adaptive thinking
-- **Tools**: `read`, `write`, `edit`, `glob`, `grep`, and `bash`, which can also keep dev servers, watchers, and long builds running in the background
+- **Tools**: `read`, `write`, `edit`, `glob`, `grep`, and `bash`, plus `bash_output` and `bash_stop` to read and stop background shells
 - **Task list**: the model tracks multi-step work in a list shown live and carried through resume and compaction
-- **[Tool permissions](docs/guide/permissions.md)**: `manual` (default), read-only `plan`, and `yolo` modes you can switch mid-session, deny / ask / allow patterns for each tool class and each command in a `bash` command line, built-in rules that guard protected config paths, SSH keys, and credentials, and an approval prompt that names the rule that made the call ask and can allow matching calls for the session
+- **[Tool permissions](docs/guide/permissions.md)**: `manual` (default), read-only `plan`, and `yolo` modes, switchable mid-session, with deny / ask / allow patterns and an approval prompt
 - **Turn control**: interrupt with **Esc** or **Ctrl+C**, queue follow-up prompts that join the running turn between tool calls, and confirm exit with a second **Ctrl+C**
 - **[Slash commands](docs/guide/slash-commands.md)**: commands for sessions, models and effort, permission modes, compaction, sign-in, themes, `/init`, and status and config views, with autocomplete
 - **Context compaction**: manual `/compact` and default-on auto-compaction
 - **[Instruction files](docs/guide/instructions.md)**: `AGENTS.md` / `CLAUDE.md` discovery
 - **[Sessions](docs/guide/sessions.md)**: JSONL logs with AI-generated titles, listing, archiving, and resume
 - **File-change tracking**: a Read-before-Edit gate and on-disk drift detection
-- **[Authentication](docs/guide/configuration.md#authentication)**: an Anthropic API key, browser sign-in with `/login`, the Claude Code login or a long-lived OAuth token, or an LLM gateway bearer token with custom headers
+- **[Authentication](docs/guide/authentication.md)**: an Anthropic API key, browser sign-in with `/login`, the Claude Code login or a long-lived OAuth token, or an LLM gateway bearer token with custom headers
 - **[Configuration](docs/guide/configuration.md)**: layered TOML from user, drop-in, and project files, with environment variable overrides, checked by `ox config check`, and a [Home Manager module](docs/guide/install.md#home-manager) that writes the user config and instructions
 
 ## Scope
@@ -44,7 +44,7 @@ Planned work lives in the [open enhancement issues](https://github.com/hakula139
 
 Out of scope for now:
 
-- Editor-specific extensions and a GUI. Editors will be able to connect as ACP clients once [#150](https://github.com/hakula139/oxide-code/issues/150) ships.
+- Editor-specific extensions and a GUI. ACP support for editors is tracked in [#150](https://github.com/hakula139/oxide-code/issues/150).
 - In-process plugin runtimes, such as WASM modules, dynamic libraries, or embedded scripting.
 - Compatibility with Claude Code settings files, hook formats, or permission rule syntax. oxide-code reads `CLAUDE.md` instructions and Claude Code OAuth credentials, and its own configuration may diverge where its design calls for it.
 - Feature parity with Claude Code. Focus on the core workflow first.
@@ -53,24 +53,14 @@ Releases follow the [versioning policy](RELEASING.md#versioning), and stable rel
 
 ## Installation
 
-[Installation](docs/guide/install.md) covers every platform and method, plus updating and uninstalling. The most common commands:
+On Apple Silicon macOS and x86_64 Linux, install with Homebrew:
 
 ```bash
-# macOS aarch64 (Apple Silicon). Set VERSION to the newest tag on the Releases page.
-VERSION=v0.1.0-alpha.9
-curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
-sudo mv ox /usr/local/bin/
-
-# Homebrew (Apple Silicon macOS, x86_64 Linux)
 brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
 brew install oxide-code
-
-# From source (any Rust-supported platform)
-cargo install --git https://github.com/hakula139/oxide-code --locked
-
-# Nix
-nix profile install github:hakula139/oxide-code
 ```
+
+[Installation](docs/guide/install.md) covers the prebuilt binary, Cargo, Nix, Windows, the Home Manager module, and updating and uninstalling.
 
 ## Usage
 
@@ -81,7 +71,7 @@ ox
 
 ## Documentation
 
-The [user guide](docs/guide/) covers installation, a quickstart, the terminal UI, configuration, permissions, slash commands, instruction files, sessions, headless mode, and theming.
+The [user guide](docs/guide/) covers installation, a quickstart, authentication, the terminal UI, configuration, permissions, slash commands, instruction files, sessions, headless mode, and theming.
 
 ## Development
 
