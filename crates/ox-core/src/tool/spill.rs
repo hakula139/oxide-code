@@ -32,7 +32,7 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
     let spill = ctx.spills().file(".txt");
     match run_blocking(move || Ok(cap_output(&content, spill))).await {
         Ok(capped) => {
-            output = output.with_raw_text();
+            output = output.with_text_view();
             output.content = capped;
         }
         Err(e) => return ToolOutput::error(e),

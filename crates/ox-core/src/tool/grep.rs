@@ -12,10 +12,9 @@ use strum::VariantArray;
 use tokio_util::sync::CancellationToken;
 
 use super::search::{NO_FILES_FOUND, SearchRoot, SearchRow, SearchRows, Unreadable};
-use super::view::{GrepFileGroup, GrepMatchLine, ToolResultView};
+use super::view::{GrepMatchLine, ToolResultView};
 use super::{
-    Prepared, StoredView, Tool, ToolCtx, ToolDefinition, ToolMetadata, ToolOutput, ToolSpec,
-    extract_input_field,
+    Prepared, StoredView, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field,
 };
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
@@ -66,24 +65,6 @@ impl Tool for GrepTool {
 
     fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
         extract_input_field(input, "pattern")
-    }
-
-    fn result_view(
-        &self,
-        input: &serde_json::Value,
-        content: &str,
-        _metadata: &ToolMetadata,
-        _cwd: &Path,
-    ) -> Option<ToolResultView> {
-        // Only content mode produces line-numbered rows, so the other modes fall through and keep
-        // their summary header visible.
-        let mode = input
-            .get("output_mode")
-            .map_or(Ok(OutputMode::default()), OutputMode::deserialize);
-        if !matches!(mode, Ok(OutputMode::Content)) {
-            return None;
-        }
-        parse_content_view(content)
     }
 
     fn run<'a>(
@@ -650,81 +631,6 @@ fn format_count<'a>(
     GrepOutput::text(content, title)
 }
 
-// ── Result View ──
-
-/// Reconstructs the match rows of a content-mode result that stored no view, as sidecars from
-/// older releases do, falling back to text for unrecognized lines.
-fn parse_content_view(content: &str) -> Option<ToolResultView> {
-    let trimmed = content.trim_end();
-    if trimmed == NO_MATCHES_FOUND {
-        return Some(ToolResultView::GrepMatches {
-            groups: Vec::new(),
-            truncated: false,
-        });
-    }
-
-    let mut groups: Vec<GrepFileGroup> = Vec::new();
-    let mut truncated = false;
-
-    for line in trimmed.lines() {
-        if line.is_empty() || line == "--" {
-            continue;
-        }
-        if line.starts_with(RESULTS_LIMIT_PREFIX) && line.ends_with(')') {
-            truncated = true;
-            continue;
-        }
-        let (path, match_line) = parse_match_line(line)?;
-        match groups.last_mut() {
-            Some(g) if g.path == path => g.lines.push(match_line),
-            _ => groups.push(GrepFileGroup {
-                path: path.to_owned(),
-                lines: vec![match_line],
-            }),
-        }
-    }
-
-    Some(ToolResultView::GrepMatches { groups, truncated })
-}
-
-/// Parses one row: `path:NUM:text` (match) or `path:NUM-text` (context).
-///
-/// Legacy output has no path boundary, so the first digit column retains its historical meaning.
-fn parse_match_line(line: &str) -> Option<(&str, GrepMatchLine)> {
-    let mut search_start = 0;
-    while let Some(off) = line[search_start..].find(':') {
-        let colon = search_start + off;
-        let after = &line[colon + 1..];
-        let digit_end = after
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(after.len());
-        if digit_end == 0 {
-            search_start = colon + 1;
-            continue;
-        }
-        let is_match = match after.as_bytes().get(digit_end) {
-            Some(b':') => true,
-            Some(b'-') => false,
-            _ => {
-                search_start = colon + 1;
-                continue;
-            }
-        };
-        let number = after[..digit_end].parse::<usize>().ok()?;
-        let text = after[digit_end + 1..].to_owned();
-        let path = &line[..colon];
-        return Some((
-            path,
-            GrepMatchLine {
-                number,
-                text,
-                is_match,
-            },
-        ));
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -736,6 +642,7 @@ mod tests {
     use crate::permission::Access;
     use crate::tool::ToolRegistry;
     use crate::tool::local_testing::{self, ctx, deny_reads, search_root, temp_ctx};
+    use crate::tool::view::GrepFileGroup;
     use crate::util::fs::testing::{deny_read_access, symlink_file};
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::slash_separated;
@@ -784,58 +691,11 @@ mod tests {
         }
     }
 
-    mod result_view {
-        use super::*;
-
-        #[test]
-        fn content_mode_groups_by_file() {
-            let expected = ToolResultView::GrepMatches {
-                groups: vec![GrepFileGroup {
-                    path: "src/main.rs".to_owned(),
-                    lines: vec![GrepMatchLine {
-                        number: 10,
-                        text: "fn main()".to_owned(),
-                        is_match: true,
-                    }],
-                }],
-                truncated: false,
-            };
-
-            for input in [
-                serde_json::json!({"pattern": "fn"}),
-                serde_json::json!({"pattern": "fn", "output_mode": "content"}),
-            ] {
-                let view = grep_tool().result_view(
-                    &input,
-                    "src/main.rs:10:fn main()",
-                    &ToolMetadata::default(),
-                    Path::new("/repo"),
-                );
-
-                assert_eq!(view.as_ref(), Some(&expected), "{input}");
-            }
-        }
-
-        #[test]
-        fn non_content_mode_falls_back_to_text() {
-            for mode in ["files_with_matches", "count"] {
-                let input = serde_json::json!({"pattern": "fn", "output_mode": mode});
-                let view = grep_tool().result_view(
-                    &input,
-                    "irrelevant",
-                    &ToolMetadata::default(),
-                    Path::new("/repo"),
-                );
-                assert!(view.is_none(), "mode {mode}: expected None to fall back");
-            }
-        }
-    }
-
     mod run {
         use super::*;
 
         #[tokio::test]
-        async fn marks_notes_as_raw_text() {
+        async fn marks_notes_as_text() {
             let dir = canonical_tempdir();
             fs::write(dir.path().join("public.rs"), "hit\n").unwrap();
             fs::write(dir.path().join("secret.rs"), "hit\n").unwrap();
@@ -866,6 +726,38 @@ mod tests {
                     Some(StoredView::Text),
                     "{mode}"
                 );
+                assert_eq!(
+                    registry.result_view(
+                        "grep",
+                        &input,
+                        &output.content,
+                        &output.metadata,
+                        output.is_error,
+                        dir.path()
+                    ),
+                    ToolResultView::Text {
+                        content: output.content.clone(),
+                    },
+                    "{mode}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn non_content_modes_store_no_view() {
+            let dir = canonical_tempdir();
+            fs::write(dir.path().join("a.rs"), "hit\n").unwrap();
+            let registry = ToolRegistry::new(vec![Box::new(grep_tool())]);
+
+            for mode in ["files_with_matches", "count"] {
+                let input = serde_json::json!({"pattern": "hit", "output_mode": mode});
+
+                let output = registry
+                    .run_input("grep", input.clone(), &ctx(dir.path()))
+                    .await;
+
+                assert!(!output.is_error, "{mode}: {}", output.content);
+                assert_eq!(output.metadata.result_view, None, "{mode}");
                 assert_eq!(
                     registry.result_view(
                         "grep",
@@ -927,6 +819,8 @@ mod tests {
         #[cfg(unix)]
         #[tokio::test]
         async fn preserves_native_paths_and_context_after_metadata_round_trip() {
+            use crate::tool::ToolMetadata;
+
             for name in ["name:12:part.rs", "name:12-part.rs", "line\nname.rs"] {
                 let dir = canonical_tempdir();
                 fs::write(dir.path().join(name), "before\nhit\nafter\n").unwrap();
@@ -1379,13 +1273,6 @@ mod tests {
                 }
             );
             assert_eq!(title, "1 match");
-            let view = grep_tool().result_view(
-                &serde_json::json!({"pattern": "hit"}),
-                &result,
-                &ToolMetadata::default(),
-                Path::new("/repo"),
-            );
-            assert_eq!(view, None);
         }
 
         #[test]
@@ -1463,15 +1350,6 @@ mod tests {
                 }
             );
             assert_eq!(title, "No matches found");
-            // The structured view would drop the note, so the text view shows it.
-            let input = serde_json::json!({"pattern": "secret"});
-            let view = grep_tool().result_view(
-                &input,
-                &result,
-                &ToolMetadata::default(),
-                Path::new("/repo"),
-            );
-            assert_eq!(view, None);
         }
 
         #[test]
@@ -2096,152 +1974,6 @@ mod tests {
                     (Results limited to 1 files)"
                 },
             );
-        }
-    }
-
-    mod parse_content_view {
-        use super::*;
-
-        #[test]
-        fn no_matches_is_empty() {
-            assert_eq!(
-                parse_content_view("No matches found"),
-                Some(ToolResultView::GrepMatches {
-                    groups: Vec::new(),
-                    truncated: false,
-                }),
-            );
-        }
-
-        #[test]
-        fn groups_consecutive_lines_with_context_and_separator() {
-            let content = indoc! {r#"
-                src/main.rs:10:fn main() {
-                src/main.rs:11-    println!("hi");
-                --
-                src/main.rs:20:    helper();
-                src/lib.rs:5:fn other()
-            "#};
-            assert_eq!(
-                parse_content_view(content),
-                Some(ToolResultView::GrepMatches {
-                    groups: vec![
-                        GrepFileGroup {
-                            path: "src/main.rs".to_owned(),
-                            lines: vec![
-                                GrepMatchLine {
-                                    number: 10,
-                                    text: "fn main() {".to_owned(),
-                                    is_match: true,
-                                },
-                                GrepMatchLine {
-                                    number: 11,
-                                    text: r#"    println!("hi");"#.to_owned(),
-                                    is_match: false,
-                                },
-                                GrepMatchLine {
-                                    number: 20,
-                                    text: "    helper();".to_owned(),
-                                    is_match: true,
-                                },
-                            ],
-                        },
-                        GrepFileGroup {
-                            path: "src/lib.rs".to_owned(),
-                            lines: vec![GrepMatchLine {
-                                number: 5,
-                                text: "fn other()".to_owned(),
-                                is_match: true,
-                            }],
-                        },
-                    ],
-                    truncated: false,
-                }),
-            );
-        }
-
-        #[test]
-        fn truncation_footer_sets_truncated_flag() {
-            let content = indoc! {"
-                src/main.rs:1:hit
-
-                (Results limited to 1 lines)"
-            };
-            assert_eq!(
-                parse_content_view(content),
-                Some(ToolResultView::GrepMatches {
-                    groups: vec![GrepFileGroup {
-                        path: "src/main.rs".to_owned(),
-                        lines: vec![GrepMatchLine {
-                            number: 1,
-                            text: "hit".to_owned(),
-                            is_match: true,
-                        }],
-                    }],
-                    truncated: true,
-                }),
-            );
-        }
-
-        #[test]
-        fn falls_back_when_skipped_warnings_present() {
-            // GrepMatches can't hold the skipped-file warning, so the view falls back to show it.
-            for content in [
-                indoc! {"
-                    src/main.rs:1:hit
-
-                    Skipped (exceeds 1 MiB size limit):
-                      big.txt (5 MiB)"
-                },
-                indoc! {"
-                    No matches found
-
-                    Skipped (exceeds 1 MiB size limit):
-                      big.txt (5 MiB)"
-                },
-            ] {
-                assert_eq!(parse_content_view(content), None, "{content}");
-            }
-        }
-
-        #[test]
-        fn falls_back_on_invalid_line() {
-            assert!(parse_content_view("src/main.rs:1:hit\nunexpected line").is_none());
-        }
-    }
-
-    mod parse_match_line {
-        use super::*;
-
-        #[test]
-        fn distinguishes_match_from_context_separator() {
-            let (path, m) = parse_match_line("src/main.rs:10:body").unwrap();
-            assert_eq!(path, "src/main.rs");
-            assert_eq!(m.number, 10);
-            assert_eq!(m.text, "body");
-            assert!(m.is_match);
-
-            let (path, c) = parse_match_line("src/main.rs:11-context").unwrap();
-            assert_eq!(path, "src/main.rs");
-            assert_eq!(c.number, 11);
-            assert_eq!(c.text, "context");
-            assert!(!c.is_match);
-        }
-
-        #[test]
-        fn skips_path_internal_colons_without_digit_separator() {
-            let (path, m) = parse_match_line("C:foo:42:body").unwrap();
-            assert_eq!(path, "C:foo");
-            assert_eq!(m.number, 42);
-            assert_eq!(m.text, "body");
-            assert!(m.is_match);
-        }
-
-        #[test]
-        fn rejects_a_line_of_another_shape() {
-            assert!(parse_match_line("not a match line").is_none());
-            assert!(parse_match_line("path:non_digits:text").is_none());
-            assert!(parse_match_line("path:42").is_none());
         }
     }
 }

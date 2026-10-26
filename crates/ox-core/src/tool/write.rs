@@ -572,13 +572,26 @@ mod tests {
             fs::write(&path, "old\n").unwrap();
             let ctx = ctx(&cwd);
             seed_full_read(&ctx.tracker, &path);
+            let input = serde_json::json!({"file_path": "notes.txt", "content": "new\n"});
 
-            let output = local_testing::run(
-                &WriteTool,
-                serde_json::json!({"file_path": "notes.txt", "content": "new\n"}),
-                &ctx,
-            )
-            .await;
+            let prepared = WriteTool.prepare(input.clone(), &ctx);
+            let preview = WriteTool.approval_preview("write", &prepared, &cwd).await;
+
+            assert_eq!(
+                preview.body,
+                ApprovalBody::Diff(DiffChunk {
+                    old: vec![NumberedLine {
+                        number: 1,
+                        text: "old".to_owned(),
+                    }],
+                    new: vec![NumberedLine {
+                        number: 1,
+                        text: "new".to_owned(),
+                    }],
+                }),
+            );
+
+            let output = local_testing::run(&WriteTool, input, &ctx).await;
 
             assert!(!output.is_error, "{}", output.content);
             assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");

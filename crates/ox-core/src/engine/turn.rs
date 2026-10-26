@@ -514,8 +514,7 @@ mod tests {
     use crate::session::store::testing::test_store;
     use crate::tool::view::{NumberedLine, ToolResultView};
     use crate::tool::{
-        DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry,
-        ToolSpec,
+        DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec,
     };
     use crate::util::path::local_testing::canonical_tempdir;
 
@@ -664,7 +663,7 @@ mod tests {
             events
         }
 
-        /// Path tool whose result view shows the input and metadata it was resolved from.
+        /// Path tool whose result view shows the input it was resolved from.
         struct PathViewTool;
 
         impl Tool for PathViewTool {
@@ -703,14 +702,13 @@ mod tests {
                 &self,
                 input: &serde_json::Value,
                 _content: &str,
-                metadata: &ToolMetadata,
                 _cwd: &Path,
             ) -> Option<ToolResultView> {
                 Some(ToolResultView::ReadExcerpt {
                     path: input["file_path"].as_str().unwrap_or_default().to_owned(),
                     lines: vec![NumberedLine {
                         number: 1,
-                        text: metadata.title.clone().unwrap_or_default(),
+                        text: input["file_path"].as_str().unwrap_or_default().to_owned(),
                     }],
                     total_lines: 1,
                 })
@@ -1144,7 +1142,7 @@ mod tests {
                             path: "notes.txt".to_owned(),
                             lines: vec![NumberedLine {
                                 number: 1,
-                                text: "Viewed notes".to_owned(),
+                                text: "notes.txt".to_owned(),
                             }],
                             total_lines: 1,
                         },

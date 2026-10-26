@@ -10,10 +10,7 @@ use super::file::FileVerb;
 use super::view::{
     ApprovalBody, ApprovalPreview, DiffChunk, EditDiff, NumberedLine, ToolResultView,
 };
-use super::{
-    Prepared, Tool, ToolCtx, ToolDefinition, ToolMetadata, ToolOutput, ToolSpec,
-    extract_input_field,
-};
+use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::{GatePurpose, LastView};
 use crate::permission::PermissionClass;
 
@@ -52,7 +49,6 @@ impl Tool for EditTool {
         &self,
         input: &serde_json::Value,
         _content: &str,
-        _metadata: &ToolMetadata,
         _cwd: &Path,
     ) -> Option<ToolResultView> {
         let old = input.get("old_string")?.as_str()?;
@@ -232,7 +228,7 @@ impl Replacement {
 
         let old_string = normalize_eol(&self.old_string);
         let new_string = normalize_eol(&self.new_string);
-        let ranges = match_ranges(content, &old_string);
+        let ranges = match_ranges(content, &old_string)?;
         let replacements = ranges.len();
         if replacements == 0 {
             return Err(format!(
@@ -257,25 +253,29 @@ impl Replacement {
 }
 
 /// The byte ranges in `content` that match `old`, whose line breaks match either `\n` or `\r\n`.
-/// A match never overlaps the one before it.
-fn match_ranges(content: &str, old: &str) -> Vec<(usize, usize)> {
+/// A match never overlaps the one before it. Reports the error the model reads when `old` is too
+/// large to compile.
+fn match_ranges(content: &str, old: &str) -> Result<Vec<(usize, usize)>, String> {
     let pattern = old
         .split('\n')
         .map(regex::escape)
         .collect::<Vec<_>>()
         .join("\r?\n");
-    regex::RegexBuilder::new(&pattern)
+    let regex = regex::RegexBuilder::new(&pattern)
         .size_limit(MATCH_SIZE_LIMIT)
         .dfa_size_limit(MATCH_SIZE_LIMIT)
         .build()
-        .expect("an escaped literal is a valid pattern")
+        .map_err(|_| {
+            "old_string is too large to match. Split the edit into smaller replacements.".to_owned()
+        })?;
+    Ok(regex
         .find_iter(content)
         .map(|found| (found.start(), found.end()))
-        .collect()
+        .collect())
 }
 
-/// The compiled size a match pattern may take. An edit reads at most 10 MiB, and escaping can
-/// double each byte, so this covers a pattern built from any `old_string`.
+/// The compiled size a match pattern may take. Each literal byte emits about 32 bytes of NFA
+/// state, so an `old_string` over roughly 1 MiB that spans lines exceeds this.
 const MATCH_SIZE_LIMIT: usize = 32 * 1024 * 1024;
 
 /// `content` with each range in `ranges` replaced by `new_string`, converting its line breaks to
@@ -485,12 +485,8 @@ mod tests {
                 "new_string": "fn bar()",
             });
 
-            let view = EditTool.result_view(
-                &input,
-                "Successfully edited /tmp/f.rs.",
-                &ToolMetadata::default(),
-                Path::new("/repo"),
-            );
+            let view =
+                EditTool.result_view(&input, "Successfully edited /tmp/f.rs.", Path::new("/repo"));
 
             assert_eq!(
                 view,
@@ -513,12 +509,7 @@ mod tests {
                 serde_json::json!({"file_path": "/tmp/x", "old_string": "a", "new_string": 42}),
             ] {
                 assert_eq!(
-                    EditTool.result_view(
-                        &input,
-                        "edited",
-                        &ToolMetadata::default(),
-                        Path::new("/repo")
-                    ),
+                    EditTool.result_view(&input, "edited", Path::new("/repo")),
                     None,
                     "{input}",
                 );
@@ -1224,8 +1215,21 @@ mod tests {
                     vec![(4, 7)],
                 ),
             ] {
-                assert_eq!(match_ranges(content, old), expected, "{case}");
+                assert_eq!(match_ranges(content, old).unwrap(), expected, "{case}");
             }
+        }
+
+        #[test]
+        fn reports_an_old_string_too_large_to_match() {
+            let old = format!("{}\n{}", "a".repeat(700_000), "b".repeat(700_000));
+
+            assert_eq!(
+                match_ranges("", &old),
+                Err(
+                    "old_string is too large to match. Split the edit into smaller replacements."
+                        .to_owned()
+                ),
+            );
         }
     }
 
@@ -1233,7 +1237,7 @@ mod tests {
         use super::*;
 
         fn diff_of(original: &str, old: &str, new: &str) -> EditDiff {
-            build_diff(original, old, new, &match_ranges(original, old)).0
+            build_diff(original, old, new, &match_ranges(original, old).unwrap()).0
         }
 
         #[test]
@@ -1336,7 +1340,8 @@ mod tests {
                 ("deleted text", "a\nb\na\n", "a\n", "", vec![]),
                 ("crlf", "a\r\nb\r\na\r\n", "a", "x", vec![(1, 1), (3, 3)]),
             ] {
-                let (_, written) = build_diff(content, old, new, &match_ranges(content, old));
+                let (_, written) =
+                    build_diff(content, old, new, &match_ranges(content, old).unwrap());
 
                 assert_eq!(written, expected, "{case}");
             }

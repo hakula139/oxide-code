@@ -307,11 +307,10 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     mod write_file {
-        #[cfg(unix)]
         use super::*;
 
-        #[cfg(unix)]
         #[tokio::test]
         async fn overwrite_refuses_a_fifo_without_blocking() {
             let dir = tempfile::tempdir().unwrap();

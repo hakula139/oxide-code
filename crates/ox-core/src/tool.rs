@@ -149,7 +149,7 @@ impl ToolOutput {
     }
 
     /// Marks the content as the whole result body, so it renders as text.
-    fn with_raw_text(self) -> Self {
+    fn with_text_view(self) -> Self {
         self.with_stored_view(StoredView::Text)
     }
 
@@ -168,10 +168,10 @@ impl ToolOutput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolMetadata {
     /// A one-line summary of the call, which the UI shows on its result.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
-    /// What the result stores for replay beyond its text.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `None` when the tool derives its view from the result text on every render.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) result_view: Option<StoredView>,
 }
 
@@ -251,7 +251,6 @@ pub trait Tool: Send + Sync {
         &self,
         _input: &serde_json::Value,
         _content: &str,
-        _metadata: &ToolMetadata,
         _cwd: &Path,
     ) -> Option<ToolResultView> {
         None
@@ -384,7 +383,7 @@ impl ToolRegistry {
             },
             None => self
                 .get(name)
-                .and_then(|(_, tool)| tool.result_view(input, content, metadata, cwd))
+                .and_then(|(_, tool)| tool.result_view(input, content, cwd))
                 .unwrap_or_else(|| ToolResultView::Text {
                     content: content.to_owned(),
                 }),

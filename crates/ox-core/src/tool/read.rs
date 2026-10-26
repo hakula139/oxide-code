@@ -9,7 +9,7 @@ use serde::Deserialize;
 use super::file::FileVerb;
 use super::view::{NumberedLine, ToolResultView};
 use super::{
-    Prepared, Tool, ToolCtx, ToolDefinition, ToolMetadata, ToolOutput, ToolSpec, display_path,
+    Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, display_path,
     extract_input_field, tool_path,
 };
 use crate::file_tracker::{CACHE_HIT_STUB, LastView, RecordRead};
@@ -49,7 +49,6 @@ impl Tool for ReadTool {
         &self,
         input: &serde_json::Value,
         content: &str,
-        _metadata: &ToolMetadata,
         cwd: &Path,
     ) -> Option<ToolResultView> {
         let path = display_path(&tool_path(extract_input_field(input, "file_path")?), cwd);
@@ -270,12 +269,7 @@ mod tests {
         fn builds_read_excerpt() {
             let input = serde_json::json!({"file_path": "/repo/example.rs"});
             let view = ReadTool
-                .result_view(
-                    &input,
-                    "10\tfn main() {}\n11\t}",
-                    &ToolMetadata::default(),
-                    Path::new("/repo"),
-                )
+                .result_view(&input, "10\tfn main() {}\n11\t}", Path::new("/repo"))
                 .unwrap();
 
             assert_eq!(
@@ -302,12 +296,7 @@ mod tests {
             let input = serde_json::json!({"file_path": "~/example.rs"});
 
             let view = temp_env::with_var(HOME_VAR, Some("/home/u"), || {
-                ReadTool.result_view(
-                    &input,
-                    "1\tfn main() {}",
-                    &ToolMetadata::default(),
-                    Path::new("/repo"),
-                )
+                ReadTool.result_view(&input, "1\tfn main() {}", Path::new("/repo"))
             });
 
             let Some(ToolResultView::ReadExcerpt { path, .. }) = view else {
@@ -328,7 +317,6 @@ mod tests {
 
                         (Showing lines 2–3 of 5 total)"
                     },
-                    &ToolMetadata::default(),
                     Path::new("/repo"),
                 )
                 .unwrap();
@@ -356,12 +344,7 @@ mod tests {
         fn handles_empty_file() {
             let input = serde_json::json!({"file_path": "/tmp/empty.rs"});
             let view = ReadTool
-                .result_view(
-                    &input,
-                    "(empty file)",
-                    &ToolMetadata::default(),
-                    Path::new("/repo"),
-                )
+                .result_view(&input, "(empty file)", Path::new("/repo"))
                 .unwrap();
 
             assert_eq!(
@@ -379,12 +362,7 @@ mod tests {
             let input = serde_json::json!({"file_path": "/tmp/example.rs"});
             assert!(
                 ReadTool
-                    .result_view(
-                        &input,
-                        "not line-numbered",
-                        &ToolMetadata::default(),
-                        Path::new("/repo"),
-                    )
+                    .result_view(&input, "not line-numbered", Path::new("/repo"),)
                     .is_none()
             );
         }
@@ -394,12 +372,7 @@ mod tests {
             let input = serde_json::json!({});
             assert!(
                 ReadTool
-                    .result_view(
-                        &input,
-                        "1\tline",
-                        &ToolMetadata::default(),
-                        Path::new("/repo"),
-                    )
+                    .result_view(&input, "1\tline", Path::new("/repo"),)
                     .is_none()
             );
         }

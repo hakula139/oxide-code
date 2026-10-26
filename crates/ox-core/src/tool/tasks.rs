@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, VariantArray};
 
 use super::view::ToolResultView;
-use super::{
-    Prepared, Tool, ToolCtx, ToolDefinition, ToolMetadata, ToolOutput, ToolSpec, invalid_input,
-};
+use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, invalid_input};
 use crate::message::{ContentBlock, Message};
 use crate::permission::PermissionClass;
 use crate::util::text::plural;
@@ -108,7 +106,6 @@ impl Tool for TasksTool {
         &self,
         input: &serde_json::Value,
         _content: &str,
-        _metadata: &ToolMetadata,
         _cwd: &Path,
     ) -> Option<ToolResultView> {
         let tasks = requested(input).ok()?;
@@ -340,12 +337,7 @@ mod tests {
         fn shows_the_list_as_sent_even_when_it_cleared() {
             let done = [task("Fix the parser", TaskStatus::Completed)];
 
-            let view = TasksTool.result_view(
-                &input(&done),
-                "",
-                &ToolMetadata::default(),
-                Path::new("/repo"),
-            );
+            let view = TasksTool.result_view(&input(&done), "", Path::new("/repo"));
 
             assert_eq!(
                 view,
