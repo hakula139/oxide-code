@@ -10,6 +10,7 @@ use ratatui::{Frame, Terminal};
 use ox_core::util::text::{center_truncate_to_width, truncate_to_width};
 
 use super::App;
+use crate::action::next_mode;
 use crate::components::overflow_count;
 use crate::components::status::StatusBar;
 use crate::components::welcome;
@@ -17,6 +18,7 @@ use crate::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH}
 use crate::saturating_u16;
 use crate::terminal::{TuiBackend, synchronized_update, write_status_hyperlinks};
 use crate::theme::Theme;
+use crate::viewport::Direction;
 
 /// Chat rows that stay visible however tall the bands below the chat grow.
 const MIN_CHAT_HEIGHT: u16 = 1;
@@ -79,7 +81,10 @@ impl App {
         let spare = modal_max.saturating_sub(modal_height + popup_height + input_height);
         let preview_height = self.preview_height().min(spare);
         let tasks_height = self.tasks.height().min(spare - preview_height);
-        let footer_line = self.input.footer(area.width, self.status.is_busy());
+        let next_mode = next_mode(self.requested_mode, Direction::Forward);
+        let footer_line = self
+            .input
+            .footer(area.width, self.status.is_busy(), next_mode);
         let chat_height = MIN_CHAT_HEIGHT + spare - preview_height - tasks_height;
         let footer_height = u16::from(
             !modal_active && !footer_line.spans.is_empty() && chat_height > FOOTER_MIN_CHAT_HEIGHT,
@@ -618,11 +623,10 @@ mod tests {
             for (width, footer) in [
                 (
                     80,
-                    "  Tab / Shift+Tab mode · Enter send · Shift+Enter newline · / commands",
+                    "  Tab → plan · Enter send · Shift+Enter newline · / commands",
                 ),
-                (40, "  Tab / Shift+Tab mode · Enter send"),
-                (22, "  Tab / Shift+Tab mode"),
-                (21, "─────────────────────"),
+                (40, "  Tab → plan · Enter send"),
+                (22, "  Tab → plan"),
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);
                 app.chat.push_system_message("Chat stays visible");
@@ -637,14 +641,55 @@ mod tests {
                     rows.iter().any(|row| row.contains("Chat stays visible")),
                     "{rows:?}",
                 );
-                if width >= 22 {
-                    assert_eq!(
-                        backend.buffer()[(2, 9)].fg,
-                        app.theme.dim().fg.unwrap(),
-                        "width={width}",
-                    );
-                }
+                assert_eq!(
+                    backend.buffer()[(2, 9)].fg,
+                    app.theme.dim().fg.unwrap(),
+                    "width={width}",
+                );
             }
+        }
+
+        #[test]
+        fn input_footer_names_the_mode_after_an_unconfirmed_tab_press() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.chat.push_system_message("Chat stays visible");
+            app.input.set_text("draft");
+
+            app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
+
+            let backend = render_app(&mut app, 80, 10);
+            let rows = buffer_rows(backend.buffer());
+            assert_eq!(
+                rows.last().unwrap().trim_end(),
+                "  Tab → yolo · Enter send · Shift+Enter newline · / commands",
+            );
+        }
+
+        #[test]
+        fn input_footer_names_manual_from_yolo() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Op(Op::SetMode(Mode::Yolo)));
+            app.chat.push_system_message("Chat stays visible");
+            app.input.set_text("draft");
+
+            let backend = render_app(&mut app, 80, 10);
+            let rows = buffer_rows(backend.buffer());
+            assert_eq!(
+                rows.last().unwrap().trim_end(),
+                "  Tab → manual · Enter send · Shift+Enter newline · / commands",
+            );
+        }
+
+        #[test]
+        fn input_footer_yields_its_row_when_the_first_hint_does_not_fit() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.chat.push_system_message("Chat stays visible");
+            app.input.set_text("draft");
+
+            let backend = render_app(&mut app, 11, 10);
+
+            let rows = buffer_rows(backend.buffer());
+            assert_eq!(rows.last().unwrap().trim_end(), "─".repeat(11));
         }
 
         #[test]
@@ -666,7 +711,7 @@ mod tests {
             assert_eq!(rows[7], "─".repeat(80));
             assert_eq!(
                 rows[8],
-                "  Tab / Shift+Tab mode · Enter queue · Shift+Enter newline · / commands",
+                "  Tab → plan · Enter queue · Shift+Enter newline · / commands",
             );
         }
 
@@ -689,7 +734,7 @@ mod tests {
             let text = rendered_text(&mut app, 80, 18);
             assert_eq!(
                 text.lines().last().unwrap().trim_end(),
-                "  Tab / Shift+Tab mode · Enter send · Shift+Enter newline · / commands",
+                "  Tab → plan · Enter send · Shift+Enter newline · / commands",
             );
             assert_eq!(app.input.lines(), ["/mo"]);
         }
@@ -718,7 +763,7 @@ mod tests {
                     if show_footer {
                         assert_eq!(
                             *rows.last().unwrap(),
-                            "  Tab / Shift+Tab mode · Enter send · Shift+Enter newline · / commands",
+                            "  Tab → plan · Enter send · Shift+Enter newline · / commands",
                             "{draft:?} at {height}",
                         );
                     } else {
@@ -727,7 +772,7 @@ mod tests {
                             "─".repeat(80),
                             "{draft:?} at {height}"
                         );
-                        assert!(!text.contains("Tab / Shift+Tab mode"), "{text}");
+                        assert!(!text.contains("Tab → plan"), "{text}");
                     }
                 }
             }
@@ -744,7 +789,7 @@ mod tests {
 
             assert!(modal.contains("Chat stays visible"), "{modal}");
             assert_eq!(modal.lines().last().unwrap().trim_end(), "Modal controls");
-            assert!(!modal.contains("Tab / Shift+Tab mode"), "{modal}");
+            assert!(!modal.contains("Tab → plan"), "{modal}");
             assert!(!modal.contains("❯ draft"), "{modal}");
         }
 
@@ -767,7 +812,7 @@ mod tests {
             assert!(text.contains("queued prompt"), "{text}");
             assert!(text.contains("draft"), "{text}");
             assert_eq!(text.lines().last().unwrap(), "─".repeat(80));
-            assert!(!text.contains("Tab / Shift+Tab mode"), "{text}");
+            assert!(!text.contains("Tab → plan"), "{text}");
         }
 
         #[test]
@@ -1040,7 +1085,13 @@ mod tests {
             let rule = "─".repeat(14);
             assert_eq!(
                 rows[7..],
-                [&*rule, "❯ aaaaaaaaaaaa", "  aaaaaaaaaaaa", "  a", &rule]
+                [
+                    "❯ aaaaaaaaaaaa",
+                    "  aaaaaaaaaaaa",
+                    "  a",
+                    &*rule,
+                    "  Tab → plan",
+                ]
             );
         }
 
