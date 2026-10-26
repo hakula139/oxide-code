@@ -4,7 +4,7 @@
 use tokio::sync::oneshot::error::TryRecvError;
 
 use super::Engine;
-use super::compaction::request_tokens;
+use super::compaction::{context_estimate, request_tokens};
 use super::turn::TurnReport;
 use crate::model::{self, TokenUsage};
 use crate::protocol::{Event, EventSink, UsageSnapshot};
@@ -12,10 +12,12 @@ use crate::session::entry::UsageRecord;
 
 impl Engine {
     pub(super) async fn account_usage(&mut self, sink: &dyn EventSink, report: &TurnReport) {
-        self.context_estimate =
-            Some(report.context_estimate(&self.messages).unwrap_or_else(|| {
-                request_tokens(&self.prompt, &self.tools.definitions(), &self.messages)
-            }));
+        self.context_estimate = context_estimate(
+            report.context_estimate(&self.messages),
+            &self.prompt,
+            &self.tools.definitions(),
+            &self.messages,
+        );
         let Some(usage) = report.usage() else {
             return;
         };
@@ -46,11 +48,8 @@ impl Engine {
     /// The context estimate comes from the parts of the next request until a turn reports usage.
     pub(super) fn reset_context_usage(&mut self, sink: &dyn EventSink) {
         self.auto_compaction_failures.reset(sink);
-        self.context_estimate = Some(request_tokens(
-            &self.prompt,
-            &self.tools.definitions(),
-            &self.messages,
-        ));
+        self.context_estimate =
+            request_tokens(&self.prompt, &self.tools.definitions(), &self.messages);
         self.displayed_usage = None;
     }
 

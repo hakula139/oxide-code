@@ -369,6 +369,58 @@ pub enum CompactTrigger {
     MidTurn,
 }
 
+/// How an operation ended, after the sink has already shown it. A headless run reports it as its
+/// stop reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnEnd {
+    Completed,
+    Cancelled,
+    Failed,
+    Shutdown,
+}
+
+impl TurnEnd {
+    /// How `op` ended, if `event` is one of the terminal events [`Event`] lists for it.
+    pub fn of(op: &Op, event: &Event) -> Option<Self> {
+        match (op, event) {
+            (Op::SetArchive { .. }, Event::ArchiveUpdated { result, .. }) => Some(if result.is_ok() {
+                Self::Completed
+            } else {
+                Self::Failed
+            }),
+            (
+                Op::Prompt { .. }
+                | Op::Compact { .. }
+                | Op::Archive
+                | Op::Resume { .. }
+                | Op::Login
+                | Op::Logout,
+                Event::TurnFailed(_),
+            )
+            | (Op::Rename { .. }, Event::RenameFailed(_))
+            // The model has no level for the effort, so the pick changed nothing.
+            | (Op::SetModel(ConfigPick::Effort(_)), Event::ConfigChanged { effort: None, .. }) => {
+                Some(Self::Failed)
+            }
+            (Op::Prompt { .. }, Event::TurnComplete)
+            | (
+                Op::Compact { .. } | Op::Clear | Op::Archive | Op::Resume { .. },
+                Event::SessionReady,
+            )
+            | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
+            | (Op::Login, Event::SignedIn { .. })
+            | (Op::Logout, Event::SignedOut { .. })
+            | (Op::SetModel(_), Event::ConfigChanged { .. })
+            | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
+            (Op::Prompt { .. } | Op::Compact { .. } | Op::Login, Event::Cancelled) => {
+                Some(Self::Cancelled)
+            }
+            _ => None,
+        }
+    }
+}
+
 // ── Tool Calls ──
 
 /// A tool call as the row a frontend shows for it, live in [`Event::ToolCallStart`] and resumed in

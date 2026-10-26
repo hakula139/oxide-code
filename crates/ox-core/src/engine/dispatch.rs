@@ -151,12 +151,17 @@ struct Dispatcher<'r, 'd> {
     dispatch_ctx: &'r mut DispatchContext<'d>,
 }
 
-/// A call of a batch that passed the gate, and the slot its output fills.
-struct Ready<'r> {
-    slot: usize,
+/// A call that passed the gate, ready to run.
+struct Call<'r> {
     tool: &'r dyn Tool,
     prepared: Prepared,
     ctx: ToolCtx,
+}
+
+/// A call of a batch that passed the gate, and the slot its output fills.
+struct Ready<'r> {
+    slot: usize,
+    call: Call<'r>,
 }
 
 /// A call of a batch the round started, with its output once it has one.
@@ -165,17 +170,6 @@ struct Started {
     name: String,
     input: serde_json::Value,
     output: Option<ToolOutput>,
-}
-
-/// How the gate settled one call.
-enum Gate<'r> {
-    Ready {
-        tool: &'r dyn Tool,
-        prepared: Prepared,
-        ctx: ToolCtx,
-    },
-    /// Not run, since the input failed to parse, the tool is unknown, or the gate denied the call.
-    Settled(ToolOutput),
 }
 
 impl<'r> Dispatcher<'r, '_> {
@@ -205,20 +199,14 @@ impl<'r> Dispatcher<'r, '_> {
                 "tool-call-start",
             );
             let output = match self.gate(&id, &name, input.clone()).await {
-                Ok(Gate::Ready {
-                    tool,
-                    prepared,
-                    ctx,
-                }) => {
+                Ok(Ok(call)) => {
                     ready.push(Ready {
                         slot: started.len(),
-                        tool,
-                        prepared,
-                        ctx,
+                        call,
                     });
                     None
                 }
-                Ok(Gate::Settled(output)) => Some(output),
+                Ok(Err(output)) => Some(output),
                 Err(stop) => {
                     abort = Some(stop);
                     None
@@ -277,13 +265,22 @@ impl<'r> Dispatcher<'r, '_> {
         ready: Vec<Ready<'_>>,
         started: &mut [Started],
     ) -> Option<TurnAbort> {
-        let cancels: Vec<CancellationToken> =
-            ready.iter().map(|call| call.ctx.cancel.clone()).collect();
+        let cancels: Vec<CancellationToken> = ready
+            .iter()
+            .map(|ready| ready.call.ctx.cancel.clone())
+            .collect();
         let mut runs: FuturesUnordered<_> = ready
             .into_iter()
-            .map(|call| async move {
-                let output = run_capped(call.tool, call.prepared, &call.ctx).await;
-                (call.slot, output)
+            .map(|ready| {
+                let Call {
+                    tool,
+                    prepared,
+                    ctx,
+                } = ready.call;
+                async move {
+                    let output = run_capped(tool, prepared, &ctx).await;
+                    (ready.slot, output)
+                }
             })
             .collect();
         while !runs.is_empty() {
@@ -296,7 +293,7 @@ impl<'r> Dispatcher<'r, '_> {
                     for cancel in &cancels {
                         cancel.cancel();
                     }
-                    super::settle_file_writes(&self.dispatch_ctx.tracker).await;
+                    self.dispatch_ctx.tracker.drain_writes().await;
                     for call in started.iter_mut().filter(|call| call.output.is_none()) {
                         call.output = Some(ToolOutput::error(INTERRUPTED));
                     }
@@ -315,28 +312,26 @@ impl<'r> Dispatcher<'r, '_> {
         id: &str,
         name: &str,
         input: serde_json::Value,
-    ) -> AbortResult<Gate<'r>> {
+    ) -> AbortResult<Result<Call<'r>, ToolOutput>> {
         if let Some(err) = self.parse_errors.get(id) {
-            return Ok(Gate::Settled(ToolOutput::error(format!(
+            return Ok(Err(ToolOutput::error(format!(
                 "Tool input JSON failed to parse: {err}. Retry with a valid JSON object."
             ))));
         }
         let Some((spec, tool)) = self.tools.get(name) else {
-            return Ok(Gate::Settled(ToolOutput::error(format!(
-                "Unknown tool: {name}"
-            ))));
+            return Ok(Err(ToolOutput::error(format!("Unknown tool: {name}"))));
         };
 
         let ctx = self.dispatch_ctx.tool_ctx(id);
         let prepared = tool.prepare(input, &ctx);
         Ok(
             match self.check_permission(spec, tool, id, &prepared).await? {
-                None => Gate::Ready {
+                None => Ok(Call {
                     tool,
                     prepared,
                     ctx,
-                },
-                Some(denial) => Gate::Settled(denial),
+                }),
+                Some(denial) => Err(denial),
             },
         )
     }
@@ -904,29 +899,8 @@ mod tests {
         mod gate {
             use super::*;
 
-            /// How [`gate_call`] settled a call, without the tool a ready call borrows.
-            enum Gated {
-                Ready(Prepared),
-                Settled(ToolOutput),
-            }
-
-            impl Gated {
-                fn prepared(self) -> Prepared {
-                    match self {
-                        Self::Ready(prepared) => prepared,
-                        Self::Settled(output) => panic!("the call was settled: {}", output.content),
-                    }
-                }
-
-                fn output(self) -> ToolOutput {
-                    match self {
-                        Self::Settled(output) => output,
-                        Self::Ready(prepared) => panic!("the call is ready to run: {prepared:?}"),
-                    }
-                }
-            }
-
-            /// Gates the call `id` to `name` the way a round does.
+            /// Gates the call `id` to `name` the way a round does, keeping the prepared call for a
+            /// ready one and the synthetic output for a settled one.
             async fn gate_call(
                 tools: &ToolRegistry,
                 id: &str,
@@ -935,7 +909,7 @@ mod tests {
                 sink: &dyn EventSink,
                 ops: &mut mpsc::Receiver<Op>,
                 dispatch_ctx: &mut DispatchContext<'_>,
-            ) -> AbortResult<Gated> {
+            ) -> AbortResult<Result<Prepared, ToolOutput>> {
                 let parse_errors = HashMap::new();
                 let mut inbox = Inbox::default();
                 let mut dispatcher = Dispatcher {
@@ -946,10 +920,26 @@ mod tests {
                     inbox: &mut inbox,
                     dispatch_ctx,
                 };
-                Ok(match dispatcher.gate(id, name, input).await? {
-                    Gate::Ready { prepared, .. } => Gated::Ready(prepared),
-                    Gate::Settled(output) => Gated::Settled(output),
-                })
+                Ok(dispatcher
+                    .gate(id, name, input)
+                    .await?
+                    .map(|call| call.prepared))
+            }
+
+            /// The prepared call `gate_call` readied, panicking if it settled the call instead.
+            fn expect_ready(result: Result<Prepared, ToolOutput>) -> Prepared {
+                match result {
+                    Ok(prepared) => prepared,
+                    Err(output) => panic!("the call was settled: {}", output.content),
+                }
+            }
+
+            /// The synthetic output `gate_call` settled the call with, panicking if it readied it.
+            fn expect_settled(result: Result<Prepared, ToolOutput>) -> ToolOutput {
+                match result {
+                    Err(output) => output,
+                    Ok(prepared) => panic!("the call is ready to run: {prepared:?}"),
+                }
             }
 
             #[tokio::test]
@@ -971,7 +961,7 @@ mod tests {
                 .await
                 .expect("allow must not abort");
 
-                assert_eq!(gate.prepared().input, json!({"v": 1}));
+                assert_eq!(expect_ready(gate).input, json!({"v": 1}));
                 assert_eq!(approval_ids(&sink), [] as [&str; 0]);
             }
 
@@ -991,8 +981,8 @@ mod tests {
                     &mut dispatch_ctx,
                 )
                 .await
-                .expect("deny resolves without abort")
-                .output();
+                .expect("deny resolves without abort");
+                let denial = expect_settled(denial);
 
                 assert!(denial.is_error);
                 assert_eq!(
@@ -1032,7 +1022,7 @@ mod tests {
                 .await
                 .expect("approve resolves without abort");
 
-                assert_eq!(gate.prepared().input, json!({}));
+                assert_eq!(expect_ready(gate).input, json!({}));
                 assert!(
                     matches!(
                         sink.events().as_slice(),
@@ -1076,7 +1066,7 @@ mod tests {
                     )
                     .await
                     .expect("the granted rule settles the second call without waiting");
-                    assert_eq!(gate.prepared().input, json!({ "command": command }));
+                    assert_eq!(expect_ready(gate).input, json!({ "command": command }));
                 }
 
                 let events = sink.events();
@@ -1147,8 +1137,8 @@ mod tests {
                         &mut dispatch_ctx,
                     )
                     .await
-                    .expect("a refused rule resolves without abort")
-                    .output();
+                    .expect("a refused rule resolves without abort");
+                    let denial = expect_settled(denial);
 
                     assert_eq!(
                         denial.content,
@@ -1194,8 +1184,8 @@ mod tests {
                     &mut dispatch_ctx,
                 )
                 .await
-                .expect("an undeliverable approval resolves without abort")
-                .output();
+                .expect("an undeliverable approval resolves without abort");
+                let denial = expect_settled(denial);
 
                 assert_eq!(
                     denial.content,
@@ -1228,8 +1218,8 @@ mod tests {
                     &mut dispatch_ctx,
                 )
                 .await
-                .expect("deny decision resolves without abort")
-                .output();
+                .expect("deny decision resolves without abort");
+                let denial = expect_settled(denial);
 
                 assert!(denial.is_error);
                 assert_eq!(
@@ -1281,8 +1271,8 @@ mod tests {
                         &mut dispatch_ctx,
                     )
                     .await
-                    .expect("a denial resolves without abort")
-                    .output();
+                    .expect("a denial resolves without abort");
+                    let denial = expect_settled(denial);
 
                     assert_eq!(
                         denial.content,
@@ -1314,8 +1304,8 @@ mod tests {
                     &mut dispatch_ctx,
                 )
                 .await
-                .expect("unknown tool resolves without abort")
-                .output();
+                .expect("unknown tool resolves without abort");
+                let output = expect_settled(output);
 
                 assert_eq!(
                     (output.content.as_str(), output.is_error),
@@ -1347,7 +1337,7 @@ mod tests {
                 .expect("a read resolves without abort");
 
                 assert_eq!(
-                    gate.prepared().input,
+                    expect_ready(gate).input,
                     json!({"file_path": cwd.join("real.txt")}),
                 );
             }
@@ -1407,7 +1397,7 @@ mod tests {
                         if asks { vec![id] } else { vec![] },
                         "{id}"
                     );
-                    assert_eq!(matches!(gate, Gated::Ready(_)), !asks, "{id}");
+                    assert_eq!(gate.is_ok(), !asks, "{id}");
                 }
             }
         }

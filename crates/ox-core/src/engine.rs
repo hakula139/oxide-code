@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
@@ -36,7 +35,7 @@ use crate::model::{ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::notice::{self, ConfigSettings};
-use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op};
+use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, TurnEnd};
 use crate::session::entry::{CompactInfo, UsageRecord};
 use crate::session::handle::{Checkpoint, LoadedTranscript, SessionHandle};
 use crate::session::store::SessionStore;
@@ -155,7 +154,7 @@ pub struct Engine {
     auto_compaction_failures: AutoCompactFailures,
     /// [`TurnReport::context_estimate`] of the latest turn the transcript keeps, or an estimate
     /// from the parts of the next request when that turn reported no usage.
-    context_estimate: Option<u32>,
+    context_estimate: u32,
     /// The latest usage any turn the transcript keeps reported, which the status line shows.
     displayed_usage: Option<TokenUsage>,
     total_estimated_cost_usd: f64,
@@ -231,7 +230,7 @@ impl Engine {
             workspace,
             generates_titles,
             auto_compaction_failures: AutoCompactFailures::default(),
-            context_estimate: Some(context_estimate),
+            context_estimate,
             displayed_usage: None,
             total_estimated_cost_usd: estimate_cost_usd(&usage),
             title_usage: None,
@@ -601,7 +600,7 @@ impl Engine {
     /// for stored-login reloads still in flight so exiting cannot cancel their write-back.
     /// Returns the session's write failure, if any.
     async fn finalize(self) -> Option<String> {
-        settle_file_writes(&self.file_tracker).await;
+        self.file_tracker.drain_writes().await;
         self.shells.stop_all().await;
         let failure = self
             .session
@@ -610,10 +609,6 @@ impl Engine {
         self.client.finish_reloads().await;
         failure
     }
-}
-
-async fn settle_file_writes(tracker: &FileTracker) {
-    tracker.drain_writes().await;
 }
 
 /// The engine state before a turn's prompt: the transcript length, what the model had seen of the
@@ -639,58 +634,6 @@ async fn session_prompt(
 }
 
 // ── Reporting ──
-
-/// How an operation ended, after the sink has already shown it. A headless run reports it as its
-/// stop reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnEnd {
-    Completed,
-    Cancelled,
-    Failed,
-    Shutdown,
-}
-
-impl TurnEnd {
-    /// How `op` ended, if `event` is one of the terminal events [`Event`] lists for it.
-    pub fn of(op: &Op, event: &Event) -> Option<Self> {
-        match (op, event) {
-            (Op::SetArchive { .. }, Event::ArchiveUpdated { result, .. }) => Some(if result.is_ok() {
-                Self::Completed
-            } else {
-                Self::Failed
-            }),
-            (
-                Op::Prompt { .. }
-                | Op::Compact { .. }
-                | Op::Archive
-                | Op::Resume { .. }
-                | Op::Login
-                | Op::Logout,
-                Event::TurnFailed(_),
-            )
-            | (Op::Rename { .. }, Event::RenameFailed(_))
-            // The model has no level for the effort, so the pick changed nothing.
-            | (Op::SetModel(ConfigPick::Effort(_)), Event::ConfigChanged { effort: None, .. }) => {
-                Some(Self::Failed)
-            }
-            (Op::Prompt { .. }, Event::TurnComplete)
-            | (
-                Op::Compact { .. } | Op::Clear | Op::Archive | Op::Resume { .. },
-                Event::SessionReady,
-            )
-            | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
-            | (Op::Login, Event::SignedIn { .. })
-            | (Op::Logout, Event::SignedOut { .. })
-            | (Op::SetModel(_), Event::ConfigChanged { .. })
-            | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
-            (Op::Prompt { .. } | Op::Compact { .. } | Op::Login, Event::Cancelled) => {
-                Some(Self::Cancelled)
-            }
-            _ => None,
-        }
-    }
-}
 
 /// Shows `abort` on `sink` as the operation's one terminal event, logging `label` if a failure
 /// event is dropped. `Shutdown` stays silent. [`Event`] lists each op's terminal events.
@@ -741,8 +684,8 @@ mod tests {
     };
     use super::sessions::format_drift_warning;
     use super::testing::{
-        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_tool_call_once, panic_message,
-        request_bodies, with_pinned_home,
+        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_stalled_reply_once,
+        mount_tool_call_once, panic_message, request_bodies, until_requested, with_pinned_home,
     };
     use super::*;
     use crate::client::anthropic::local_testing::{COMPLETION_USAGE, client_for};
@@ -788,26 +731,6 @@ mod tests {
         model::cost_rates(model)
             .unwrap()
             .estimate_usd(tokens, PromptCacheTtl::OneHour)
-    }
-
-    /// Answers the next Messages request only after a minute, so it stays in flight until the test
-    /// cancels or quits it. Mount it before the reply that should follow.
-    async fn mount_stalled_reply_once(server: &MockServer) {
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                sse_response(text_stream_body("", "too late")).set_delay(Duration::from_secs(60)),
-            )
-            .up_to_n_times(1)
-            .mount(server)
-            .await;
-    }
-
-    /// Waits until `server` has received `count` requests, so the engine is mid-request.
-    async fn until_requested(server: &MockServer, count: usize) {
-        while server.received_requests().await.unwrap().len() < count {
-            tokio::task::yield_now().await;
-        }
     }
 
     mod engine_handle {
@@ -1915,7 +1838,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.context_estimate = Some(50_000);
+                engine.context_estimate = 50_000;
                 let mut handle = engine.spawn();
 
                 handle.ops.send(Op::prompt("five")).await.unwrap();
@@ -2878,7 +2801,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.context_estimate = Some(50_000);
+                engine.context_estimate = 50_000;
                 engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
                 engine.total_estimated_cost_usd = 1.23;
                 engine.auto_compaction_failures = AutoCompactFailures::new(2);
@@ -2915,7 +2838,7 @@ mod tests {
                 assert_eq!(engine.messages.len(), 3);
                 assert_eq!(
                     engine.context_estimate,
-                    Some(1_000 + compaction::transcript_tokens(&engine.messages[2..])),
+                    1_000 + compaction::transcript_tokens(&engine.messages[2..]),
                     "the turn's input plus its reply",
                 );
                 assert!(
@@ -2980,7 +2903,7 @@ mod tests {
                 assert_eq!(first, TurnEnd::Completed);
                 assert_eq!(
                     engine.context_estimate,
-                    Some(1_000 + compaction::transcript_tokens(&engine.messages[1..]))
+                    1_000 + compaction::transcript_tokens(&engine.messages[1..])
                 );
                 let rejected = engine
                     .submit_prompt(&oversized, None, &sink, &mut ops)
@@ -3040,7 +2963,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.context_estimate = Some(50_000);
+                engine.context_estimate = 50_000;
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
@@ -3087,7 +3010,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.context_estimate = Some(50_000);
+                engine.context_estimate = 50_000;
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
                 ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
@@ -3661,7 +3584,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.auto_compaction_failures = AutoCompactFailures::new(3);
-                engine.context_estimate = Some(100_000);
+                engine.context_estimate = 100_000;
                 engine.total_estimated_cost_usd = 1.23;
                 let sink = CapturingSink::default();
 
@@ -3671,7 +3594,7 @@ mod tests {
                     engine.auto_compaction_failures,
                     AutoCompactFailures::default()
                 );
-                assert_eq!(engine.context_estimate, Some(100_000));
+                assert_eq!(engine.context_estimate, 100_000);
                 assert!(
                     (engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,
                     "session cost must accumulate across swaps: {}",

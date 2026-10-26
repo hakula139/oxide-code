@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
-use super::compaction::{auto_compaction_due, transcript_tokens};
+use super::compaction::{auto_compaction_due, context_estimate, transcript_tokens};
 use super::dispatch::{self, DispatchContext};
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::config::compaction::AutoCompactionConfig;
@@ -225,7 +225,7 @@ pub(super) async fn agent_turn(
         record_drained_prompts(inbox.prompts.drain(..), messages, session, sink).await;
 
         let ran = round_index + 1;
-        let estimate = report.context_estimate(messages);
+        let estimate = next_context_estimate(&report, prompt, &tool_defs, messages);
         if ran < cap && auto_compaction_due(auto_compaction, estimate, messages) {
             return TurnOutcome::stopped(report, TurnStop::Compact { rounds_run: ran });
         }
@@ -238,6 +238,16 @@ pub(super) async fn agent_turn(
              Raise or unset `client.max_tool_rounds` (`OX_MAX_TOOL_ROUNDS`) to allow longer turns."
         )),
     )
+}
+
+/// The next request's context size, from the turn's latest usage or the request's parts.
+fn next_context_estimate(
+    report: &TurnReport,
+    prompt: &PromptParts,
+    tools: &[ToolDefinition],
+    messages: &[Message],
+) -> u32 {
+    context_estimate(report.context_estimate(messages), prompt, tools, messages)
 }
 
 /// How the round loop continues after [`settle_stop_reason`].
