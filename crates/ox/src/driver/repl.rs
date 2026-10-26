@@ -5,7 +5,7 @@ use std::path::Path;
 use std::pin::pin;
 
 use anyhow::{Context as _, Result, bail};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader, Lines};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader};
 
 use ox_core::command::{self, Parsed};
 use ox_core::engine::{Engine, EngineHandle, TurnEnd};
@@ -17,7 +17,7 @@ use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::text::escape_hidden;
 
 use super::stdio::{Approver, Renderer, StdioSink, render_op, render_queued};
-use super::{Exit, Shutdown, shutdown_signal};
+use super::{Exit, Shutdown, decode_input, shutdown_signal};
 
 /// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session.
 /// EOF after an operation failed, a command was rejected, or output failed exits with failure. An
@@ -80,7 +80,7 @@ where
             } else {
                 renderer.output(prompter.prompt("> ").map_err(Into::into));
                 let line = tokio::select! {
-                    line = prompter.lines.next_line() => line?,
+                    line = prompter.next_line() => line?,
                     (caught, output) = signal() => {
                         renderer.output(output);
                         if attended && caught == Shutdown::Interrupt {
@@ -185,7 +185,7 @@ const GRANT_CHOICES: &str =
 /// Answers approvals with lines read from the REPL's input, writing the call and its choices to
 /// `out`. The input ending aborts the turn.
 struct Prompter<R, W> {
-    lines: Lines<R>,
+    input: R,
     out: W,
 }
 
@@ -234,10 +234,7 @@ impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<R, W> {
 
 impl<R: AsyncBufRead + Unpin, W: Write> Prompter<R, W> {
     fn new(input: R, out: W) -> Self {
-        Self {
-            lines: input.lines(),
-            out,
-        }
+        Self { input, out }
     }
 
     fn prompt(&mut self, prompt: &str) -> io::Result<()> {
@@ -245,11 +242,21 @@ impl<R: AsyncBufRead + Unpin, W: Write> Prompter<R, W> {
         self.out.flush()
     }
 
+    /// Reads one line without its terminator, decoded lossily, or `None` at the input's end.
+    async fn next_line(&mut self) -> io::Result<Option<String>> {
+        let mut line = Vec::new();
+        if self.input.read_until(b'\n', &mut line).await? == 0 {
+            return Ok(None);
+        }
+        let text = decode_input(line);
+        Ok(Some(text.trim_end_matches(['\r', '\n']).to_owned()))
+    }
+
     /// Writes `prompt` before reading the trimmed answer, or `None` once the input ends or fails.
     /// An output error leaves the answer unread.
     async fn ask(&mut self, prompt: &str) -> Result<Option<String>> {
         self.prompt(prompt)?;
-        match self.lines.next_line().await {
+        match self.next_line().await {
             Ok(Some(line)) => Ok(Some(line.trim().to_owned())),
             Ok(None) => {
                 writeln!(self.out)?;
@@ -310,9 +317,12 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
 
     use indoc::{formatdoc, indoc};
+    use tokio::io::ReadBuf;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1199,6 +1209,19 @@ mod tests {
     mod prompter {
         use super::*;
 
+        /// Input whose reads always fail.
+        struct FailingInput;
+
+        impl tokio::io::AsyncRead for FailingInput {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Ready(Err(io::Error::other("input failed")))
+            }
+        }
+
         mod decide {
             use super::*;
 
@@ -1306,7 +1329,7 @@ mod tests {
 
             #[tokio::test]
             async fn aborts_saying_why_when_the_input_cannot_be_read() {
-                let mut prompter = Prompter::new(&b"\xff\n"[..], Vec::new());
+                let mut prompter = Prompter::new(BufReader::new(FailingInput), Vec::new());
 
                 let decision = prompter
                     .decide(&bash_preview("ls"), &Basis::Mode(Mode::Manual), None)
@@ -1315,7 +1338,10 @@ mod tests {
 
                 assert_eq!(decision, ApprovalDecision::Abort);
                 let out = String::from_utf8(prompter.out).unwrap();
-                assert!(out.contains("Could not read the answer: "), "{out}");
+                assert!(
+                    out.contains("Could not read the answer: input failed"),
+                    "{out}"
+                );
             }
 
             #[tokio::test]
@@ -1344,7 +1370,7 @@ mod tests {
                             "{failure:?}, {input:?}"
                         );
                         assert_eq!(
-                            prompter.lines.next_line().await.unwrap(),
+                            prompter.next_line().await.unwrap(),
                             Some(input.trim().to_owned())
                         );
                     }
@@ -1376,11 +1402,26 @@ mod tests {
                     );
 
                     assert_eq!(
-                        prompter.lines.next_line().await.unwrap().as_deref(),
+                        prompter.next_line().await.unwrap().as_deref(),
                         Some(unread),
                         "{failure:?}",
                     );
                 }
+            }
+        }
+
+        mod next_line {
+            use super::*;
+
+            #[tokio::test]
+            async fn replaces_an_invalid_byte_and_trims_crlf() {
+                let mut prompter = Prompter::new(&b"hello\xff\r\n"[..], io::sink());
+
+                assert_eq!(
+                    prompter.next_line().await.unwrap().as_deref(),
+                    Some("hello\u{FFFD}"),
+                );
+                assert_eq!(prompter.next_line().await.unwrap(), None);
             }
         }
 
@@ -1389,10 +1430,15 @@ mod tests {
 
             #[tokio::test]
             async fn reports_output_failure_when_an_input_diagnostic_cannot_be_written() {
-                for (input, failure) in [
-                    (&b""[..], Failure::Write("\n")),
-                    (&b"\xff\n"[..], Failure::Write("Could not read")),
-                ] {
+                let cases: [(Box<dyn AsyncBufRead + Unpin>, Failure); 2] = [
+                    (Box::new(&b""[..]), Failure::Write("\n")),
+                    (
+                        Box::new(BufReader::new(FailingInput)),
+                        Failure::Write("Could not read"),
+                    ),
+                ];
+
+                for (input, failure) in cases {
                     let mut prompter = Prompter::new(input, FailingOutput::new(failure));
 
                     let result = prompter.ask("Answer: ").await;

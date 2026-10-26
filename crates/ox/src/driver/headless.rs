@@ -18,7 +18,7 @@ use ox_core::protocol::{Event, EventSink, Op, UsageSnapshot};
 use ox_core::util::sync::lock_or_recover;
 
 use super::stdio::{Renderer, StdioSink, Unattended, render_op};
-use super::{Exit, shutdown_signal};
+use super::{Exit, decode_input, shutdown_signal};
 
 /// How long [`read_prompt`] waits on an open stdin before saying what it waits for.
 const STDIN_NOTICE_DELAY: Duration = Duration::from_secs(3);
@@ -64,8 +64,8 @@ async fn read_input(
     notice: &mut impl Write,
     delay: Duration,
 ) -> io::Result<String> {
-    let mut text = String::new();
-    let mut read = pin!(input.read_to_string(&mut text));
+    let mut bytes = Vec::new();
+    let mut read = pin!(input.read_to_end(&mut bytes));
     tokio::select! {
         read = &mut read => read?,
         () = tokio::time::sleep(delay) => {
@@ -77,7 +77,7 @@ async fn read_input(
             read.await?
         }
     };
-    Ok(text)
+    Ok(decode_input(bytes))
 }
 
 /// The prompt a headless run sends: `prompt` followed by `stdin` in a `<stdin>` block, or whichever
@@ -368,6 +368,19 @@ mod tests {
             assert_eq!(
                 (text.unwrap().as_str(), notice.as_slice()),
                 ("+fix\n", &b""[..])
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn replaces_invalid_utf8_and_keeps_the_text() {
+            let input: &[u8] = b"caf\xe9 log line\n";
+            let mut notice = Vec::new();
+
+            let text = read_input(input, &mut notice, Duration::from_secs(3)).await;
+
+            assert_eq!(
+                (text.unwrap().as_str(), notice.as_slice()),
+                ("caf\u{FFFD} log line\n", &b""[..])
             );
         }
     }
