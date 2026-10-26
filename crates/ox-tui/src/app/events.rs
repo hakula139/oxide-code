@@ -1391,16 +1391,15 @@ mod tests {
         #[tokio::test]
         async fn session_rolled_drops_the_old_session_slash_tasks() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.slash_tasks.spawn(async {
-                SlashTask {
-                    name: "diff".to_owned(),
-                    kind: None,
-                    line: "/diff".to_owned(),
-                    outcome: Ok(SlashOutcome::SystemMessage(
-                        "old session's output".to_owned(),
-                    )),
-                }
-            });
+            let task = SlashTask {
+                name: "diff".to_owned(),
+                kind: None,
+                line: "/diff".to_owned(),
+                outcome: Ok(SlashOutcome::SystemMessage(
+                    "old session's output".to_owned(),
+                )),
+            };
+            app.slash_tasks.spawn(async move { task });
 
             app.handle_engine_event(Event::SessionRolled {
                 id: "rolled-session".to_owned(),
