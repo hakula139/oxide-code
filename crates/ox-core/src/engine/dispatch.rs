@@ -158,6 +158,13 @@ struct Call<'r> {
     ctx: ToolCtx,
 }
 
+impl Call<'_> {
+    /// Runs the call under the time cap and returns its output.
+    async fn run(self) -> ToolOutput {
+        run_capped(self.tool, self.prepared, &self.ctx).await
+    }
+}
+
 /// A call of a batch that passed the gate, and the slot its output fills.
 struct Ready<'r> {
     slot: usize,
@@ -271,17 +278,7 @@ impl<'r> Dispatcher<'r, '_> {
             .collect();
         let mut runs: FuturesUnordered<_> = ready
             .into_iter()
-            .map(|ready| {
-                let Call {
-                    tool,
-                    prepared,
-                    ctx,
-                } = ready.call;
-                async move {
-                    let output = run_capped(tool, prepared, &ctx).await;
-                    (ready.slot, output)
-                }
-            })
+            .map(|ready| async move { (ready.slot, ready.call.run().await) })
             .collect();
         while !runs.is_empty() {
             match await_unless_aborted(runs.select_next_some(), self.ops, self.inbox, self.sink)
@@ -928,18 +925,12 @@ mod tests {
 
             /// The prepared call `gate_call` readied, panicking if it settled the call instead.
             fn expect_ready(result: Result<Prepared, ToolOutput>) -> Prepared {
-                match result {
-                    Ok(prepared) => prepared,
-                    Err(output) => panic!("the call was settled: {}", output.content),
-                }
+                result.expect("the call was settled")
             }
 
             /// The synthetic output `gate_call` settled the call with, panicking if it readied it.
             fn expect_settled(result: Result<Prepared, ToolOutput>) -> ToolOutput {
-                match result {
-                    Err(output) => output,
-                    Ok(prepared) => panic!("the call is ready to run: {prepared:?}"),
-                }
+                result.expect_err("the call is ready to run")
             }
 
             #[tokio::test]
