@@ -20,11 +20,11 @@ use crate::util::variant;
 struct Command {
     name: &'static str,
     aliases: &'static [&'static str],
+    /// The typed form of the command line. `/init` reads instructions at `project_root`.
     parse: fn(&str, &Path) -> Result<Op, String>,
 }
 
-/// The slash commands [`typed_op`] parses, in completion order. `/init` reads instructions at the
-/// project root.
+/// The slash commands [`typed_op`] parses, in the order completion offers them.
 const COMMANDS: [Command; 9] = [
     Command {
         name: "clear",
@@ -81,7 +81,7 @@ pub fn names() -> impl Iterator<Item = &'static str> {
 /// Resolves aliases and parses `parsed` into an op at `project_root`. Errors use the typed command
 /// name, and prompts use the command line as their title. `None` without a typed form.
 pub fn typed_op(parsed: &Parsed, project_root: &Path) -> Option<Result<Op, String>> {
-    let command = find(canonical(&parsed.name))?;
+    let command = find(&parsed.name)?;
     let mut op = (command.parse)(&parsed.args, project_root);
     if let Ok(Op::Prompt { title, .. }) = &mut op {
         *title = Some(parsed.line());
@@ -94,11 +94,6 @@ fn find(name: &str) -> Option<&'static Command> {
     COMMANDS
         .iter()
         .find(|command| command.name == name || command.aliases.contains(&name))
-}
-
-/// The canonical name `name` stands for: the command it is an alias of, or `name` itself.
-fn canonical(name: &str) -> &str {
-    find(name).map_or(name, |command| command.name)
 }
 
 /// The aliases of the command whose canonical name is `name`.
@@ -276,7 +271,13 @@ mod tests {
 
         #[test]
         fn routes_an_alias_to_its_command() {
-            assert_eq!(typed("/new"), Some(Ok(Op::Clear)));
+            for (line, expected) in [
+                ("/new", Op::Clear),
+                ("/reset", Op::Clear),
+                ("/quit", Op::Shutdown),
+            ] {
+                assert_eq!(typed(line), Some(Ok(expected)), "{line}");
+            }
             assert_eq!(
                 typed("/continue ab12"),
                 Some(Ok(Op::Resume {
@@ -370,29 +371,6 @@ mod tests {
                     Some(Err(format!("/{name}: {usage}"))),
                     "{name}",
                 );
-            }
-        }
-    }
-
-    mod canonical {
-        use super::*;
-
-        #[test]
-        fn resolves_each_alias_to_its_command() {
-            for (alias, name) in [
-                ("new", "clear"),
-                ("reset", "clear"),
-                ("quit", "exit"),
-                ("continue", "resume"),
-            ] {
-                assert_eq!(canonical(alias), name, "{alias}");
-            }
-        }
-
-        #[test]
-        fn keeps_a_canonical_or_unknown_name() {
-            for name in ["clear", "resume", "help", "no-such-thing"] {
-                assert_eq!(canonical(name), name);
             }
         }
     }
