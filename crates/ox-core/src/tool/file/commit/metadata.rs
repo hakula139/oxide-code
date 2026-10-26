@@ -132,7 +132,7 @@ fn attributes(file: &File) -> io::Result<BTreeMap<OsString, Vec<u8>>> {
     }
     #[cfg(target_os = "linux")]
     {
-        if let Some(value) = file.get_xattr("system.posix_acl_access")? {
+        if let Some(value) = supported_attribute(file, "system.posix_acl_access")? {
             attributes.insert("system.posix_acl_access".into(), value);
         }
         if let Some(value) = supported_attribute(file, "security.selinux")? {
@@ -182,71 +182,62 @@ mod tests {
         use super::*;
 
         #[test]
-        fn restores_available_attributes_and_refuses_unavailable_storage() {
+        fn restores_available_attributes_and_ignores_unavailable_storage() {
             use super::super::super::{Phase, native, write_with};
 
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("source");
             std::fs::write(&path, b"original").unwrap();
             let source = File::open(&path).unwrap();
-            match source.set_xattr("user.ox.value", b"\x00\xff") {
+            let attributes_supported = match source.set_xattr("user.ox.value", b"\x00\xff") {
                 Ok(()) => {
                     source.set_xattr("user.ox.empty", b"").unwrap();
-                    let snapshot = Snapshot::capture(&source).unwrap();
-                    let staged = File::create(dir.path().join("staged")).unwrap();
-                    staged.set_xattr("user.ox.value", b"incorrect").unwrap();
-                    staged.set_xattr("user.ox.extra", b"extra").unwrap();
-
-                    snapshot.apply(&staged).unwrap();
-
-                    snapshot.verify(&staged).unwrap();
-                    assert_eq!(
-                        staged.get_xattr("user.ox.value").unwrap(),
-                        Some(b"\x00\xff".to_vec())
-                    );
-                    assert_eq!(staged.get_xattr("user.ox.empty").unwrap(), Some(Vec::new()));
-                    assert_eq!(staged.get_xattr("user.ox.extra").unwrap(), None);
+                    true
                 }
                 Err(error) => {
                     assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
-                    let attempt = WorkspaceWrite::new(&path);
-                    let original = Snapshot::capture(&source);
-                    let identity = native::identity(&source).unwrap();
-                    let mut visited = Vec::new();
-
-                    let error = write_with(&path, b"changed", Some(b"original"), |phase, file| {
-                        visited.push(phase);
-                        if phase == Phase::Prepared {
-                            let mut required = original.as_ref().unwrap().clone();
-                            required
-                                .attributes
-                                .insert("user.ox.value".into(), b"\x00\xff".to_vec());
-                            required.apply(file)?;
-                        }
-                        Ok(())
-                    })
-                    .unwrap_err();
-
-                    assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
-                    let current = File::open(&path).unwrap();
-                    assert_eq!(native::identity(&current).unwrap(), identity);
-                    if attempt.acl_available {
-                        let original = original.unwrap();
-                        assert_eq!(original.attributes, BTreeMap::new());
-                        original.verify(&current).unwrap();
-                        assert_eq!(visited, [Phase::Prepared]);
-                    } else {
-                        attempt.assert_native_refusal(&original.unwrap_err());
-                        attempt.assert_native_refusal(&error);
-                        assert_eq!(visited, []);
-                    }
-                    assert_eq!(std::fs::read(&path).unwrap(), b"original");
-                    let entries: Vec<_> = std::fs::read_dir(dir.path())
-                        .unwrap()
-                        .map(|entry| entry.unwrap().file_name())
-                        .collect();
-                    assert_eq!(entries, [OsString::from("source")]);
+                    false
                 }
+            };
+            let snapshot = Snapshot::capture(&source).unwrap();
+            let identity = native::identity(&source).unwrap();
+            let mut visited = Vec::new();
+
+            write_with(&path, b"changed", Some(b"original"), |phase, file| {
+                visited.push(phase);
+                if phase == Phase::Prepared && attributes_supported {
+                    file.set_xattr("user.ox.value", b"incorrect")?;
+                    file.set_xattr("user.ox.extra", b"extra")?;
+                    snapshot.apply(file)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+            assert_eq!(
+                visited,
+                [
+                    Phase::Prepared,
+                    Phase::Written,
+                    Phase::Metadata,
+                    Phase::Synced,
+                    Phase::Validated,
+                ]
+            );
+            let current = File::open(&path).unwrap();
+            assert_ne!(native::identity(&current).unwrap(), identity);
+            snapshot.verify(&current).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"changed");
+            if attributes_supported {
+                assert_eq!(
+                    current.get_xattr("user.ox.value").unwrap(),
+                    Some(b"\x00\xff".to_vec())
+                );
+                assert_eq!(
+                    current.get_xattr("user.ox.empty").unwrap(),
+                    Some(Vec::new())
+                );
+                assert_eq!(current.get_xattr("user.ox.extra").unwrap(), None);
             }
         }
 
@@ -257,7 +248,7 @@ mod tests {
             std::fs::write(&path, b"original").unwrap();
             let file = File::open(&path).unwrap();
             let attempt = WorkspaceWrite::new(&path);
-            let original = Snapshot::capture(&file);
+            let original = Snapshot::capture(&file).unwrap();
             let metadata = file.metadata().unwrap();
             let desired = Snapshot {
                 owner: (metadata.uid() + 1, metadata.gid()),
@@ -275,11 +266,7 @@ mod tests {
                 error.raw_os_error(),
                 Some(nix::libc::EPERM | nix::libc::EINVAL)
             ));
-            if attempt.acl_available {
-                original.unwrap().verify(&file).unwrap();
-            } else {
-                attempt.assert_native_refusal(&original.unwrap_err());
-            }
+            original.verify(&file).unwrap();
             attempt.assert_unchanged();
         }
     }

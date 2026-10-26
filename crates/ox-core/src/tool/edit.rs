@@ -11,7 +11,7 @@ use super::view::{
     ApprovalBody, ApprovalPreview, DiffChunk, EditDiff, NumberedLine, ToolResultView,
 };
 use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
-use crate::file_tracker::GatePurpose;
+use crate::file_tracker::{GatePurpose, WrittenView};
 use crate::permission::PermissionClass;
 
 pub(crate) struct EditTool;
@@ -134,7 +134,9 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
     )
     .await
     {
-        Ok(Edited { replacements, diff }) => {
+        Ok(Edited {
+            replacements, diff, ..
+        }) => {
             let content = match replacements {
                 1 => format!("Successfully edited {path}."),
                 n => format!("Replaced {n} occurrences in {path}."),
@@ -187,9 +189,11 @@ async fn edit_file(
     })
     .await?;
 
+    let written = edited.written.clone();
     ctx.tracker
         .write_and_record(
             &ctx.tool_use_id,
+            written,
             super::file::write_file(
                 file_path,
                 path.to_owned(),
@@ -207,6 +211,8 @@ async fn edit_file(
 struct Edited {
     replacements: usize,
     diff: EditDiff,
+    /// The new content lines the replacement wrote, which the tracker records.
+    written: WrittenView,
 }
 
 /// One edit call's replacement, which runs on the blocking pool since a `replace_all` over a large
@@ -249,8 +255,40 @@ impl Replacement {
 
         let diff = build_diff(&content, &old_string, &new_string);
         let updated = content.replace(old_string.as_ref(), new_string.as_ref());
-        Ok((apply_eol(updated, eol), Edited { replacements, diff }))
+        let written = WrittenView::Edited {
+            ranges: written_ranges(&content, &old_string, &new_string),
+            total_lines: updated.lines().count(),
+        };
+        Ok((
+            apply_eol(updated, eol),
+            Edited {
+                replacements,
+                diff,
+                written,
+            },
+        ))
     }
+}
+
+/// The 1-indexed new-content lines each occurrence's replacement text holds, in order, leaving out
+/// a replacement that wrote nothing.
+fn written_ranges(content: &str, old_string: &str, new_string: &str) -> Vec<(usize, usize)> {
+    if new_string.is_empty() {
+        return Vec::new();
+    }
+    let new_breaks = new_string.matches('\n').count();
+    let old_breaks = old_string.matches('\n').count();
+    let ends_break = usize::from(new_string.ends_with('\n'));
+    let mut shift: isize = 0;
+    content
+        .match_indices(old_string)
+        .map(|(pos, _)| {
+            let line = 1 + content[..pos].matches('\n').count();
+            let start = (line.cast_signed() + shift).cast_unsigned();
+            shift += new_breaks.cast_signed() - old_breaks.cast_signed();
+            (start, start + new_breaks - ends_break)
+        })
+        .collect()
 }
 
 // ── Diff Production ──
@@ -387,10 +425,11 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::file_tracker::testing::tracker_seeded;
-    use crate::file_tracker::{LastView, MAX_TRACKED_FILE_SIZE};
-    use crate::tool::local_testing::{self, WorkspaceWrite, ctx_with, temp_ctx};
+    use crate::file_tracker::testing::{tracker, tracker_seeded};
+    use crate::file_tracker::{CACHE_HIT_STUB, LastView, MAX_TRACKED_FILE_SIZE};
+    use crate::tool::local_testing::{self, ctx_with, temp_ctx};
     use crate::tool::read::ReadTool;
+    use crate::tool::write::WriteTool;
     use crate::util::path::local_testing::canonical_tempdir;
 
     fn seeded_ctx(path: &Path) -> ToolCtx {
@@ -530,30 +569,20 @@ mod tests {
                 "new_string": "goodbye"
             });
             let ctx = seeded_ctx(&path);
-            let before = ctx.tracker.snapshot_all();
-            let attempt = WorkspaceWrite::new(&path);
 
             let output = local_testing::run(&EditTool, input, &ctx).await;
 
-            if attempt.acl_available {
-                assert!(!output.is_error);
-                assert_eq!(
-                    output.content,
-                    format!("Successfully edited {}.", path.display())
-                );
-                assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
-                assert_eq!(
-                    output.metadata.title.as_deref(),
-                    Some("Edited test.txt"),
-                    "success path attaches the Edited title",
-                );
-            } else {
-                assert!(output.is_error);
-                attempt.assert_refusal(&output.content, path.to_str().unwrap());
-                assert_eq!(output.metadata.title, None);
-                assert_eq!(output.metadata.diff, None);
-                assert_eq!(ctx.tracker.snapshot_all(), before);
-            }
+            assert!(!output.is_error);
+            assert_eq!(
+                output.content,
+                format!("Successfully edited {}.", path.display())
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
+            assert_eq!(
+                output.metadata.title.as_deref(),
+                Some("Edited test.txt"),
+                "success path attaches the Edited title",
+            );
         }
 
         #[tokio::test]
@@ -568,25 +597,15 @@ mod tests {
                 "replace_all": true,
             });
             let ctx = seeded_ctx(&path);
-            let before = ctx.tracker.snapshot_all();
-            let attempt = WorkspaceWrite::new(&path);
 
             let output = run(input, &ctx).await;
 
-            if attempt.acl_available {
-                assert!(!output.is_error);
-                assert_eq!(
-                    output.content,
-                    format!("Replaced 2 occurrences in {}.", path.display())
-                );
-                assert_eq!(fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
-            } else {
-                assert!(output.is_error);
-                attempt.assert_refusal(&output.content, path.to_str().unwrap());
-                assert_eq!(output.metadata.title, None);
-                assert_eq!(output.metadata.diff, None);
-                assert_eq!(ctx.tracker.snapshot_all(), before);
-            }
+            assert!(!output.is_error);
+            assert_eq!(
+                output.content,
+                format!("Replaced 2 occurrences in {}.", path.display())
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
         }
 
         #[tokio::test]
@@ -601,25 +620,15 @@ mod tests {
                 "replace_all": true,
             });
             let ctx = seeded_ctx(&path);
-            let before = ctx.tracker.snapshot_all();
-            let attempt = WorkspaceWrite::new(&path);
 
             let output = run(input, &ctx).await;
 
-            if attempt.acl_available {
-                assert!(!output.is_error);
-                assert_eq!(
-                    output.content,
-                    format!("Successfully edited {}.", path.display())
-                );
-                assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
-            } else {
-                assert!(output.is_error);
-                attempt.assert_refusal(&output.content, path.to_str().unwrap());
-                assert_eq!(output.metadata.title, None);
-                assert_eq!(output.metadata.diff, None);
-                assert_eq!(ctx.tracker.snapshot_all(), before);
-            }
+            assert!(!output.is_error);
+            assert_eq!(
+                output.content,
+                format!("Successfully edited {}.", path.display())
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
         }
 
         #[tokio::test]
@@ -697,18 +706,11 @@ mod tests {
             assert!(!read.is_error, "{}", read.content);
 
             let detour = dir.path().join("sub").join("..").join("test.txt");
-            let attempt = WorkspaceWrite::new(&path);
-            let before = ctx.tracker.snapshot_all();
 
             let result = edit_file(detour.to_str().unwrap(), "hello", "goodbye", false, &ctx).await;
 
-            if attempt.acl_available {
-                result.unwrap();
-                assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
-            } else {
-                attempt.assert_refusal(&result.unwrap_err(), detour.to_str().unwrap());
-                assert_eq!(ctx.tracker.snapshot_all(), before);
-            }
+            result.unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
         }
 
         #[tokio::test]
@@ -720,21 +722,103 @@ mod tests {
             let ctx = temp_ctx();
             ctx.tracker
                 .record_read(&path, &bytes, LastView::lines(1, 1, 2), "toolu_test");
-            let attempt = WorkspaceWrite::new(&path);
-            let before = ctx.tracker.snapshot_all();
 
             let result = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx).await;
 
-            if attempt.acl_available {
-                result.unwrap();
-                assert_eq!(
-                    fs::read_to_string(&path).unwrap(),
-                    "goodbye world\nsecond line\n",
-                );
-            } else {
-                attempt.assert_refusal(&result.unwrap_err(), path.to_str().unwrap());
-                assert_eq!(ctx.tracker.snapshot_all(), before);
+            result.unwrap();
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "goodbye world\nsecond line\n",
+            );
+        }
+
+        #[tokio::test]
+        async fn an_edit_after_a_partial_read_keeps_a_full_read_from_cache_hitting() {
+            use std::fmt::Write as _;
+
+            let dir = canonical_tempdir();
+            let path = dir.path().join("long.txt");
+            let mut content = String::new();
+            for n in 1..=2_000 {
+                _ = writeln!(content, "line {n}");
             }
+            fs::write(&path, &content).unwrap();
+            let ctx = ctx_with(dir.path(), tracker());
+
+            let window = local_testing::run(
+                &ReadTool,
+                serde_json::json!({"file_path": path, "offset": 100, "limit": 51}),
+                &ctx,
+            )
+            .await;
+            assert!(!window.is_error, "{}", window.content);
+            let edit = local_testing::run(
+                &EditTool,
+                serde_json::json!({
+                    "file_path": path,
+                    "old_string": "line 120\nline 121",
+                    "new_string": "line 120\nline 121 changed",
+                }),
+                &ctx,
+            )
+            .await;
+            assert!(!edit.is_error, "{}", edit.content);
+
+            let full =
+                local_testing::run(&ReadTool, serde_json::json!({"file_path": path}), &ctx).await;
+
+            assert!(!full.is_error, "{}", full.content);
+            assert_ne!(
+                full.content, CACHE_HIT_STUB,
+                "the edit changed the lines the earlier read showed",
+            );
+            assert!(full.content.contains("line 2000"), "{}", full.content);
+        }
+
+        #[tokio::test]
+        async fn an_edit_after_a_partial_read_still_needs_the_rest_for_a_write() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("notes.txt");
+            fs::write(&path, "one\ntwo\nthree\n").unwrap();
+            let ctx = ctx_with(dir.path(), tracker());
+
+            let read = local_testing::run(
+                &ReadTool,
+                serde_json::json!({"file_path": path, "limit": 1}),
+                &ctx,
+            )
+            .await;
+            assert!(!read.is_error, "{}", read.content);
+            let edit = local_testing::run(
+                &EditTool,
+                serde_json::json!({
+                    "file_path": path,
+                    "old_string": "one",
+                    "new_string": "uno",
+                }),
+                &ctx,
+            )
+            .await;
+            assert!(!edit.is_error, "{}", edit.content);
+
+            let write = local_testing::run(
+                &WriteTool,
+                serde_json::json!({"file_path": path, "content": "whole"}),
+                &ctx,
+            )
+            .await;
+
+            assert!(write.is_error);
+            assert_eq!(
+                write.content,
+                format!(
+                    "File {} has only been read in part. \
+                     Read the remaining lines, paging with `offset` and `limit` if needed, \
+                     before writing to it.",
+                    path.display(),
+                ),
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), "uno\ntwo\nthree\n");
         }
 
         #[tokio::test]
@@ -957,18 +1041,11 @@ mod tests {
                 local_testing::run(&ReadTool, serde_json::json!({"file_path": via_link}), &ctx)
                     .await;
             assert!(!read.is_error, "{}", read.content);
-            let attempt = WorkspaceWrite::new(&path);
-            let before = ctx.tracker.snapshot_all();
 
             let result = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx).await;
 
-            if attempt.acl_available {
-                result.unwrap();
-                assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
-            } else {
-                attempt.assert_refusal(&result.unwrap_err(), path.to_str().unwrap());
-                assert_eq!(ctx.tracker.snapshot_all(), before);
-            }
+            result.unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
         }
 
         #[cfg(unix)]

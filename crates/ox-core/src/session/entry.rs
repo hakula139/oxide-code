@@ -249,7 +249,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::file_tracker::{FileState, LastView};
+    use crate::file_tracker::{FileSource, FileState, LastView};
     use crate::message::{ContentBlock, Role};
     use crate::tool::tasks::testing::plan;
 
@@ -467,6 +467,7 @@ mod tests {
             state: FileState {
                 content_hash: 0xDEAD_BEEF,
                 last_view: LastView::Full,
+                source: FileSource::Read,
                 recorded_at: datetime!(2026-04-29 12:34:56 UTC),
                 tool_use_id: "toolu_1".to_owned(),
             },
@@ -519,6 +520,7 @@ mod tests {
                 state: FileState {
                     content_hash: 1,
                     last_view: LastView::Full,
+                    source: FileSource::Read,
                     recorded_at: datetime!(2026-04-29 12:00:00 UTC),
                     tool_use_id: "toolu_1".to_owned(),
                 },

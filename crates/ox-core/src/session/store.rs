@@ -702,7 +702,7 @@ mod tests {
     };
     use super::testing::{TEST_PROJECT, WriterBarrier, isolated_store, test_store};
     use super::*;
-    use crate::file_tracker::{FileState, LastView};
+    use crate::file_tracker::{FileSource, FileState, LastView};
     use crate::message::{ContentBlock, Role};
     use crate::model::PromptCacheTtl;
     use crate::prompt::PromptParts;
@@ -1011,6 +1011,7 @@ mod tests {
                     state: FileState {
                         content_hash: 42,
                         last_view: LastView::Full,
+                        source: FileSource::Read,
                         recorded_at: datetime!(2026-04-16 12:00:01 UTC),
                         tool_use_id: "toolu_1".to_owned(),
                     },

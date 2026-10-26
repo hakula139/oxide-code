@@ -18,9 +18,10 @@ The `FileTracker` is shared across a session's tool calls. Read populates its mu
 
 5. **Edit needs any Read, and Write needs every line.** The gate reflects how each tool uses the file:
 
-   - Edit anchors on an exact `old_string`, and the content hash already rules out staleness, so any Read of the current content clears it, as in Claude Code.
+   - Edit anchors on an exact `old_string`, and the content hash already rules out staleness, so any Read of the current content clears it, as in Claude Code. The state it records credits the new content lines the replacement wrote, or the whole content when an earlier Read knew every line, so a later Write still needs the rest read.
    - Write replaces the whole file, so it needs every line of the current content read. Coverage is the union of the line windows shown under one content hash, so paging through a long file in several Reads counts, and changed content starts over.
    - Read emits complete rows within its output budget and reports the lines it showed, so omitted content never counts as full. A line larger than the entire budget returns an explicit error when requested and cannot earn full coverage through line pagination.
+   - A full re-Read of unchanged content returns a cache stub that names the earlier Read only when a Read recorded the state. A Write or Edit supplies content through its tool input, so deduplicating a Read against it would point the model at pre-edit text.
 
 6. **`Arc<Mutex<HashMap>>` for tracker state.** The tracker mutates on every Read / Write / Edit. Routing each update through an actor message would force ten-plus round-trips per turn, while lock contention on a small struct with no I/O costs microseconds. The resume rehash reads files, so it runs while the new tracker is built, before any tool can take its lock.
 

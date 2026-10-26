@@ -138,7 +138,7 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::*;
-    use crate::file_tracker::{FileState, LastView};
+    use crate::file_tracker::{FileSource, FileState, LastView};
 
     fn unresolved_tool_use(id: &str) -> ContentBlock {
         ContentBlock::tool_use(id, "bash", serde_json::Value::Null)
@@ -387,6 +387,7 @@ mod tests {
                 state: FileState {
                     content_hash: 1,
                     last_view: LastView::Full,
+                    source: FileSource::Read,
                     recorded_at: OffsetDateTime::UNIX_EPOCH,
                     tool_use_id: tool_use_id.to_owned(),
                 },
