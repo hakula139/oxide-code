@@ -243,6 +243,7 @@ mod tests {
         #[tokio::test]
         async fn reads_project_instructions_at_the_root() {
             let (home, dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            std::fs::create_dir(dir.path().join(".git")).unwrap();
             std::fs::write(dir.path().join("CLAUDE.md"), "Root rules.").unwrap();
 
             let (result, warnings) =
@@ -263,6 +264,7 @@ mod tests {
         #[tokio::test]
         async fn loads_the_user_file_once_in_the_home_directory() {
             let home = tempfile::tempdir().unwrap();
+            std::fs::create_dir(home.path().join(".git")).unwrap();
             let claude_dir = home.path().join(".claude");
             std::fs::create_dir(&claude_dir).unwrap();
             std::fs::write(claude_dir.join("CLAUDE.md"), "Global rules.").unwrap();
@@ -345,6 +347,7 @@ mod tests {
         #[tokio::test]
         async fn skips_a_project_link_to_a_file_that_is_not_markdown() {
             let (home, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            std::fs::create_dir(project.path().join(".git")).unwrap();
             std::fs::write(project.path().join(".env"), "TOKEN=secret-marker").unwrap();
             symlink_file(
                 &project.path().join(".env"),
@@ -397,6 +400,7 @@ mod tests {
         #[tokio::test]
         async fn follows_user_file_links_anywhere() {
             let (home, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            std::fs::create_dir(home.path().join(".git")).unwrap();
             std::fs::write(outside.path().join("rules.txt"), "Linked global rules.").unwrap();
             let claude_dir = home.path().join(".claude");
             std::fs::create_dir(&claude_dir).unwrap();
