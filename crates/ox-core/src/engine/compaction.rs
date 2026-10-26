@@ -636,17 +636,6 @@ fn without_thinking(message: &Message) -> Option<Message> {
     })
 }
 
-/// The next request's context size: the estimate the latest request's usage supports, or one from
-/// the request's parts when no request in the segment reported usage.
-pub(super) fn context_estimate(
-    reported: Option<u32>,
-    prompt: &PromptParts,
-    tools: &[ToolDefinition],
-    transcript: &[Message],
-) -> u32 {
-    reported.unwrap_or_else(|| request_tokens(prompt, tools, transcript))
-}
-
 /// Estimates the tokens of a whole request from its parts, for a transcript no request has reported
 /// usage on.
 pub(super) fn request_tokens(

@@ -771,9 +771,9 @@ mod tests {
                 "the round lands in order",
             );
             assert_eq!(
-                data.tool_result_metadata.len(),
-                2,
-                "default-only sidecars are skipped, so only t1 and t3 land",
+                data.tool_result_metadata.get("t2"),
+                None,
+                "a default-only sidecar is skipped",
             );
             assert_eq!(
                 data.tool_result_metadata

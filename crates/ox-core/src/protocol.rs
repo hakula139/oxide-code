@@ -231,10 +231,9 @@ pub enum Event {
     /// prompts to the user, then [`Self::TurnFailed`] ends the operation. After
     /// [`CompactTrigger::MidTurn`], only content after the summary is removed.
     TurnRolledBack,
-    /// The prompt was not recorded, because a failure or a cancel stopped the operation before it
-    /// reached the model: automatic compaction failed, or sign-in failed or was interrupted. The
-    /// frontend returns the prompt to the user, then [`Self::TurnFailed`] or [`Self::Cancelled`]
-    /// ends the operation.
+    /// The engine did not record the prompt, because a failure or a cancel stopped the operation
+    /// first: automatic compaction failed, or sign-in failed or was interrupted. The frontend
+    /// returns the prompt to the user, then the operation's terminal event follows.
     PromptUnsent,
     /// The in-flight prompt, compaction, resume, archive, sign-in, or sign-out failed. Like
     /// [`Self::TurnComplete`] and [`Self::Cancelled`], it ends the operation.
@@ -243,8 +242,9 @@ pub enum Event {
     UsageUpdated(UsageSnapshot),
     /// The account's subscription usage limits, which a request just reported.
     RateLimitsUpdated(RateLimits),
-    /// The user cancelled a turn, compaction, or sign-in with [`Op::Interrupt`]. The in-flight
-    /// reply is truncated, and frontends mark where it stopped.
+    /// The user cancelled a turn, compaction, or sign-in with [`Op::Interrupt`]. A turn that had
+    /// recorded the prompt truncates the reply, and frontends mark where it stopped. One that had
+    /// not emits [`Self::PromptUnsent`] first.
     Cancelled,
     /// Automatic compaction started, ahead of the submitted prompt or at a round boundary of the
     /// turn in flight. The frontend shows compacting status while the summarizer request streams.
