@@ -276,7 +276,7 @@ mod tests {
                 temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
                     let mut engine =
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                    engine.transcript.messages = tool_heavy_transcript();
+                    engine.transcript.set_messages(tool_heavy_transcript());
                     engine.client.set_auth(None);
                     engine.retry_login = true;
                     let sink = CapturingSink::default();

@@ -1,26 +1,57 @@
-//! Usage accounting: what each request bills, and the context usage and session cost the
-//! engine shows.
+//! Usage accounting: what each request bills, the context usage and session cost the engine
+//! shows, and the auto-compaction failures that pause it.
 
+use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 
 use super::Engine;
-use super::compaction::request_tokens;
+use super::compaction::{AutoCompactFailures, request_tokens};
 use super::turn::TurnReport;
 use crate::model::{self, TokenUsage};
 use crate::protocol::{Event, EventSink, UsageSnapshot};
 use crate::session::entry::UsageRecord;
 
+/// The live session's billing, its context usage, and the failures that pause auto compaction. The
+/// engine replaces it whole when it adopts another session's transcript.
+pub(super) struct UsageLedger {
+    /// [`TurnReport::context_estimate`] of the latest turn the transcript keeps, or an estimate
+    /// from the parts of the next request when that turn reported no usage.
+    pub(super) context_estimate: u32,
+    /// The latest usage any turn the transcript keeps reported, which the status line shows.
+    pub(super) displayed_usage: Option<TokenUsage>,
+    pub(super) total_estimated_cost_usd: f64,
+    /// Delivers the usage of the live session's title request, which joins the session total once
+    /// it lands.
+    pub(super) title_usage: Option<oneshot::Receiver<UsageRecord>>,
+    /// Automatic compaction failures in a row, which pause it once they reach the limit.
+    pub(super) auto_compaction_failures: AutoCompactFailures,
+}
+
+impl UsageLedger {
+    /// The ledger of a session whose transcript recorded `usage`, seeded with the next request's
+    /// context `estimate` and no title request in flight.
+    pub(super) fn for_session(usage: &[UsageRecord], estimate: u32) -> Self {
+        Self {
+            context_estimate: estimate,
+            displayed_usage: None,
+            total_estimated_cost_usd: estimate_cost_usd(usage),
+            title_usage: None,
+            auto_compaction_failures: AutoCompactFailures::default(),
+        }
+    }
+}
+
 impl Engine {
     pub(super) async fn account_usage(&mut self, sink: &dyn EventSink, report: &TurnReport) {
-        self.context_estimate = report.context_estimate(
+        self.usage.context_estimate = report.context_estimate(
             &self.transcript.prompt,
             &self.tools.definitions(),
-            &self.transcript.messages,
+            self.transcript.messages(),
         );
         let Some(usage) = report.usage() else {
             return;
         };
-        self.displayed_usage = Some(usage);
+        self.usage.displayed_usage = Some(usage);
         self.bill(sink, &report.billable_rounds).await;
         self.emit_usage_update(sink);
     }
@@ -38,35 +69,40 @@ impl Engine {
                 tokens,
             })
             .collect();
-        self.total_estimated_cost_usd += estimate_cost_usd(&records);
-        let outcome = self.transcript.session.record_usage(records).await;
+        self.usage.total_estimated_cost_usd += estimate_cost_usd(&records);
+        let outcome = self.transcript.record_usage(records).await;
         sink.session_write_error(outcome.failure.as_deref());
     }
 
     /// Forgets the usage and auto-compaction failures of a transcript the session no longer sends.
     /// The context estimate comes from the parts of the next request until a turn reports usage.
     pub(super) fn reset_context_usage(&mut self, sink: &dyn EventSink) {
-        self.auto_compaction_failures.reset(sink);
-        self.context_estimate = request_tokens(
+        self.usage.auto_compaction_failures.reset(sink);
+        self.usage.context_estimate = self.request_estimate();
+        self.usage.displayed_usage = None;
+    }
+
+    /// The context the parts of the next request fill, which stands in until a turn reports usage.
+    pub(super) fn request_estimate(&self) -> u32 {
+        request_tokens(
             &self.transcript.prompt,
             &self.tools.definitions(),
-            &self.transcript.messages,
-        );
-        self.displayed_usage = None;
+            self.transcript.messages(),
+        )
     }
 
     /// Shows the context usage and session cost, first adding the title request's cost once its
     /// usage lands.
     pub(super) fn emit_usage_update(&mut self, sink: &dyn EventSink) {
         self.absorb_title_usage();
-        let estimated_cost_usd =
-            (self.total_estimated_cost_usd > 0.0).then_some(self.total_estimated_cost_usd);
-        if self.displayed_usage.is_none() && estimated_cost_usd.is_none() {
+        let estimated_cost_usd = (self.usage.total_estimated_cost_usd > 0.0)
+            .then_some(self.usage.total_estimated_cost_usd);
+        if self.usage.displayed_usage.is_none() && estimated_cost_usd.is_none() {
             return;
         }
         sink.emit(
             Event::UsageUpdated(UsageSnapshot {
-                context_tokens: self.displayed_usage.map(TokenUsage::context_tokens),
+                context_tokens: self.usage.displayed_usage.map(TokenUsage::context_tokens),
                 context_window: self.client.model().context_window(),
                 estimated_cost_usd,
             }),
@@ -77,7 +113,7 @@ impl Engine {
     /// Adds the title request's cost to the session total once its usage lands, and stops waiting
     /// once the request has ended, with or without usage.
     fn absorb_title_usage(&mut self) {
-        let Some(pending) = &mut self.title_usage else {
+        let Some(pending) = &mut self.usage.title_usage else {
             return;
         };
         let record = match pending.try_recv() {
@@ -90,11 +126,11 @@ impl Engine {
 
     /// Consumes the title result and returns whether it reported usage.
     pub(super) fn account_title_usage(&mut self, record: Option<UsageRecord>) -> bool {
-        self.title_usage = None;
+        self.usage.title_usage = None;
         let Some(record) = record else {
             return false;
         };
-        self.total_estimated_cost_usd += estimate_cost_usd(&[record]);
+        self.usage.total_estimated_cost_usd += estimate_cost_usd(&[record]);
         true
     }
 }

@@ -153,7 +153,7 @@ pub(super) async fn agent_turn(
     let cap = max_tool_rounds.unwrap_or(u32::MAX);
 
     for round_index in rounds_run..cap {
-        let sent_messages = transcript.messages.len();
+        let sent_messages = transcript.messages().len();
         let mut round_usage = None;
         let stream = await_unless_aborted(
             stream_response(client, transcript, &tool_defs, sink, &mut round_usage),
@@ -188,7 +188,7 @@ pub(super) async fn agent_turn(
         if tool_uses.is_empty() {
             // Queued prompts drain on the TUI side at idle.
             commit_assistant_message(transcript, sink, blocks).await;
-            notify_if_interrupted(&transcript.messages, sink);
+            notify_if_interrupted(transcript.messages(), sink);
             return TurnOutcome::stopped(report, TurnStop::Replied);
         }
         let assistant_msg = Message {
@@ -226,8 +226,8 @@ pub(super) async fn agent_turn(
 
         let ran = round_index + 1;
         let estimate =
-            report.context_estimate(&transcript.prompt, &tool_defs, &transcript.messages);
-        if ran < cap && auto_compaction_due(auto_compaction, estimate, &transcript.messages) {
+            report.context_estimate(&transcript.prompt, &tool_defs, transcript.messages());
+        if ran < cap && auto_compaction_due(auto_compaction, estimate, transcript.messages()) {
             return TurnOutcome::stopped(report, TurnStop::Compact { rounds_run: ran });
         }
     }
@@ -449,7 +449,7 @@ async fn stream_response(
 ) -> Result<Response> {
     let prompt = &transcript.prompt;
     let rx = client.stream_message(
-        &transcript.messages,
+        transcript.messages(),
         &prompt.system,
         Some(&prompt.user_context),
         tools,
@@ -483,7 +483,7 @@ pub(super) async fn collect_response(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::VecDeque;
     use std::path::Path;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
@@ -504,10 +504,9 @@ mod tests {
         tool_heavy_transcript,
     };
     use crate::engine::testing::MODEL;
-    use crate::file_tracker::FileTracker;
     use crate::message::{Replay, Role};
     use crate::model::{Effort, ResolvedModelId};
-    use crate::prompt::{PromptParts, SystemPrompt};
+    use crate::prompt::SystemPrompt;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{ApprovalDecision, ConfigPick, ResumeTarget, ToolCall, ToolResult};
     use crate::session::handle;
@@ -522,21 +521,6 @@ mod tests {
 
     fn text_block(text: &str) -> ContentBlock {
         ContentBlock::text(text)
-    }
-
-    /// A live transcript holding `messages`, with no compaction state behind them.
-    fn live_transcript(session: &SessionHandle, messages: Vec<Message>) -> LiveTranscript {
-        LiveTranscript {
-            session: session.clone(),
-            messages,
-            compact: None,
-            tool_metadata: HashMap::new(),
-            tasks: Vec::new(),
-            prompt: PromptParts::default(),
-            prompt_unrecorded: false,
-            file_tracker: Arc::new(FileTracker::default()),
-            drifted: Vec::new(),
-        }
     }
 
     mod agent_turn {
@@ -810,7 +794,7 @@ mod tests {
 
         /// Runs [`super::agent_turn`] on a live transcript seeded with `messages`, writing the
         /// transcript's messages back into `messages` on return.
-        async fn agent_turn(
+        async fn run_on_messages(
             turn: TurnContext<'_>,
             session: &SessionHandle,
             messages: &mut Vec<Message>,
@@ -818,9 +802,9 @@ mod tests {
             inbox: &mut Inbox,
             dispatch_ctx: &mut DispatchContext<'_>,
         ) -> TurnOutcome {
-            let mut transcript = live_transcript(session, std::mem::take(messages));
+            let mut transcript = LiveTranscript::with_messages(session, std::mem::take(messages));
             let outcome = super::agent_turn(turn, &mut transcript, ops, inbox, dispatch_ctx).await;
-            *messages = transcript.messages;
+            *messages = transcript.messages().to_vec();
             outcome
         }
 
@@ -887,7 +871,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            let outcome = agent_turn(
+            let outcome = run_on_messages(
                 turn_context(&client, tools, &sink),
                 &session,
                 &mut messages,
@@ -907,7 +891,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![crate::message::Message::user("hi")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -942,7 +926,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -986,7 +970,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1023,7 +1007,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            let report = agent_turn(
+            let report = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1050,7 +1034,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1129,7 +1113,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("view notes")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1190,7 +1174,7 @@ mod tests {
                 Message::user("continue"),
             ];
 
-            let report = agent_turn(
+            let report = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1226,7 +1210,7 @@ mod tests {
             // Hold the sender so `recv()` stays pending after the queued submit.
             tx.send(Op::Queue("follow up".to_owned())).await.unwrap();
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1281,7 +1265,7 @@ mod tests {
             tx.send(Op::Queue("first".to_owned())).await.unwrap();
             tx.send(Op::Queue("second".to_owned())).await.unwrap();
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1329,7 +1313,7 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             tx.try_send(Op::Interrupt).unwrap();
 
-            let abort = agent_turn(
+            let abort = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1359,7 +1343,7 @@ mod tests {
             let mut inbox = Inbox::default();
 
             let (outcome, ()) = tokio::join!(
-                agent_turn(
+                run_on_messages(
                     turn_context(&client, &tools, &sink),
                     &session,
                     &mut messages,
@@ -1400,7 +1384,7 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             tx.try_send(Op::Shutdown).unwrap();
 
-            let abort = agent_turn(
+            let abort = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1428,7 +1412,7 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             drop(tx);
 
-            let abort = agent_turn(
+            let abort = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1480,7 +1464,7 @@ mod tests {
                 let (tx, mut rx) = mpsc::channel::<Op>(1);
                 tx.try_send(op.clone()).unwrap();
 
-                let outcome = agent_turn(
+                let outcome = run_on_messages(
                     turn_context(&client, &tools, &sink),
                     &session,
                     &mut messages,
@@ -1527,7 +1511,7 @@ mod tests {
             let mut inbox = Inbox::default();
 
             let (turn_result, ()) = tokio::join!(
-                agent_turn(
+                run_on_messages(
                     turn_context(&client, &tools, &sink),
                     &session,
                     &mut messages,
@@ -1617,7 +1601,7 @@ mod tests {
             let mut inbox = Inbox::default();
 
             let (outcome, ()) = tokio::join!(
-                agent_turn(
+                run_on_messages(
                     turn_context(&client, &tools, &sink),
                     &session,
                     &mut messages,
@@ -1657,7 +1641,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1696,7 +1680,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1747,7 +1731,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("loop forever")];
 
-            let err = agent_turn(
+            let err = run_on_messages(
                 TurnContext {
                     max_tool_rounds: Some(CAP),
                     ..turn_context(&client, &tools, &sink)
@@ -1782,7 +1766,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("loop forever")];
 
-            let outcome = agent_turn(
+            let outcome = run_on_messages(
                 TurnContext {
                     max_tool_rounds: Some(CAP),
                     ..turn_context(&client, &tools, &sink)
@@ -1830,7 +1814,7 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut messages = tool_heavy_transcript();
 
-                let outcome = agent_turn(
+                let outcome = run_on_messages(
                     TurnContext {
                         auto_compaction: CompactionConfig::with_threshold(50_000).auto,
                         ..turn_context(&client, &tools, &sink)
@@ -1867,7 +1851,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = tool_heavy_transcript();
 
-            let outcome = agent_turn(
+            let outcome = run_on_messages(
                 TurnContext {
                     auto_compaction: CompactionConfig::with_threshold(1_000).auto,
                     ..turn_context(&client, &tools, &sink)
@@ -1900,7 +1884,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = tool_heavy_transcript();
 
-            let err = agent_turn(
+            let err = run_on_messages(
                 TurnContext {
                     max_tool_rounds: Some(1),
                     auto_compaction: CompactionConfig::with_threshold(50_000).auto,
@@ -1936,7 +1920,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("keep going")];
 
-            let err = agent_turn(
+            let err = run_on_messages(
                 TurnContext {
                     max_tool_rounds: Some(3),
                     rounds_run: 2,
@@ -1974,7 +1958,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("loop a while then stop")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -1999,7 +1983,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            let err = agent_turn(
+            let err = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -2030,7 +2014,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            let outcome = agent_turn(
+            let outcome = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -2068,7 +2052,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -2102,7 +2086,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -2134,7 +2118,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("look it up")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -2184,7 +2168,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("write the file")];
 
-            let abort = agent_turn(
+            let abort = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -2228,7 +2212,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -2254,7 +2238,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            let abort = agent_turn(
+            let abort = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -2539,7 +2523,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -2596,7 +2580,7 @@ mod tests {
             let mut inbox = Inbox::default();
             let mut dispatch_ctx = yolo_dispatch();
 
-            let outcome = agent_turn(
+            let outcome = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -2661,7 +2645,7 @@ mod tests {
                 };
                 let mut messages = vec![Message::user("run echo")];
 
-                let outcome = agent_turn(
+                let outcome = run_on_messages(
                     turn_context(&client, &tools, &sink),
                     &session,
                     &mut messages,
@@ -2738,7 +2722,7 @@ mod tests {
                 decision: ApprovalDecision::Deny,
             };
 
-            agent_turn(
+            run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
@@ -2949,7 +2933,8 @@ mod tests {
             let sid = session.session_id().to_owned();
             session.record_message(Message::user("prompt")).await;
             let sink = CapturingSink::default();
-            let mut transcript = live_transcript(&session, vec![Message::user("prompt")]);
+            let mut transcript =
+                LiveTranscript::with_messages(&session, vec![Message::user("prompt")]);
             // Leaves the task with no cooperative budget, so the first await that needs a permit
             // yields before the command lands.
             while tokio::task::coop::has_budget_remaining() {

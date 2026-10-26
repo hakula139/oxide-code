@@ -4,22 +4,27 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Result;
+
 use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::Message;
 use crate::model::ModelSpec;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::session::entry::{CompactBoundary, CompactInfo, UsageRecord};
 use crate::session::handle::{
-    CompactOutcome, LoadedTranscript, Outcome, RecordOutcome, SessionHandle,
+    self, Checkpoint, CompactOutcome, LoadedTranscript, Outcome, RecordOutcome, RollIntoOutcome,
+    RollOutcome, SessionHandle,
 };
+use crate::session::store::SessionStore;
 use crate::tool::ToolMetadata;
 use crate::tool::tasks::Task;
 
-/// The live session and the transcript it holds. Methods that append write the session and the
-/// in-memory messages together, so a resumed session reads what the turn showed.
+/// The live session and the transcript it holds. Only its methods write either one, so the
+/// in-memory messages always match what the session recorded, and a resumed session reads what the
+/// turn showed.
 pub(super) struct LiveTranscript {
-    pub(super) session: SessionHandle,
-    pub(super) messages: Vec<Message>,
+    session: SessionHandle,
+    messages: Vec<Message>,
     /// Compaction boundary the transcript loaded with, until the engine projects it as history.
     pub(super) compact: Option<CompactInfo>,
     /// Metadata the loaded transcript's tool results persisted, until the engine projects it.
@@ -46,7 +51,7 @@ pub(super) struct TranscriptStart {
 }
 
 impl LiveTranscript {
-    /// Installs `transcript` as the live transcript on `session`, restoring the file tracker and
+    /// Builds the live transcript of `transcript` on `session`, restoring the file tracker and
     /// building the prompt. Also returns the loaded session's usage, which seeds its cost, and the
     /// warnings about instruction files a fresh prompt could not read.
     pub(super) async fn load(
@@ -81,7 +86,29 @@ impl LiveTranscript {
         (live, usage, warnings)
     }
 
-    /// The state [`Self::truncate_to`] returns to before a turn's prompt.
+    /// Continues the same session with `transcript`, replacing what this one held. Also returns the
+    /// loaded session's usage, which seeds its cost, and the instruction-file warnings.
+    pub(super) async fn adopt(
+        &mut self,
+        transcript: LoadedTranscript,
+        model: &ModelSpec,
+        cwd: &Path,
+    ) -> (Vec<UsageRecord>, Vec<String>) {
+        let (live, usage, warnings) =
+            Self::load(self.session.clone(), transcript, model, cwd).await;
+        *self = live;
+        (usage, warnings)
+    }
+
+    pub(super) fn session(&self) -> &SessionHandle {
+        &self.session
+    }
+
+    pub(super) fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// The state [`Self::roll_back`] returns to before a turn's prompt.
     pub(super) fn start_of_turn(&self) -> TranscriptStart {
         TranscriptStart {
             len: self.messages.len(),
@@ -91,13 +118,31 @@ impl LiveTranscript {
         }
     }
 
-    /// Drops what the turn after `start` added, restoring what the model had seen of the prompt and
-    /// the files it had read.
-    pub(super) fn truncate_to(&mut self, start: TranscriptStart) {
+    /// Returns the transcript and the session to `start` and `checkpoint`, dropping what the turn
+    /// after them added. Returns the session's write failure.
+    pub(super) async fn roll_back(
+        &mut self,
+        start: TranscriptStart,
+        checkpoint: Option<Checkpoint>,
+    ) -> Option<String> {
         self.messages.truncate(start.len);
         self.prompt.seen = start.seen;
         self.prompt_unrecorded = start.prompt_unrecorded;
         self.file_tracker.reset_to(start.files);
+        match checkpoint {
+            Some(checkpoint) => self.session.rewind(checkpoint).await.failure,
+            None => None,
+        }
+    }
+
+    /// Moves the prompt to `fresh`, returning the reminder that explains the change to the model.
+    /// The next user message records the prompt again.
+    pub(super) fn catch_up(&mut self, fresh: UserContext) -> Option<String> {
+        let reminder = self.prompt.catch_up(fresh);
+        if reminder.is_some() {
+            self.prompt_unrecorded = true;
+        }
+        reminder
     }
 
     /// Records `msg` with the prompt context it may carry, then appends it.
@@ -139,6 +184,21 @@ impl LiveTranscript {
         outcome
     }
 
+    /// Records `records` against the session without changing the messages.
+    pub(super) async fn record_usage(&self, records: Vec<UsageRecord>) -> Outcome {
+        self.session.record_usage(records).await
+    }
+
+    /// Renames the session, returning its write failure.
+    pub(super) async fn set_manual_title(&self, title: String) -> Option<String> {
+        self.session.set_manual_title(title).await.failure
+    }
+
+    /// Archives the session, returning its write failure.
+    pub(super) async fn archive(&self) -> Option<String> {
+        self.session.archive().await.failure
+    }
+
     /// Saves `boundary` and swaps the transcript to `synthetic`, which adopts the boundary's
     /// prompt context. Clears the tracked files with the transcript.
     pub(super) async fn compact(
@@ -155,6 +215,75 @@ impl LiveTranscript {
             self.file_tracker.clear();
         }
         outcome
+    }
+
+    /// Finalizes the session with the read files and continues in a fresh one on `git_branch`.
+    pub(super) async fn roll(
+        &mut self,
+        store: &SessionStore,
+        model: &str,
+        git_branch: Option<String>,
+    ) -> RollOutcome {
+        handle::roll(
+            &mut self.session,
+            store,
+            self.file_tracker.snapshot_all(),
+            model,
+            git_branch,
+        )
+        .await
+    }
+
+    /// Finalizes the session with the files the transcript read and swaps in the saved session at
+    /// `target` without swapping when it cannot be loaded.
+    pub(super) async fn roll_into(
+        &mut self,
+        store: &SessionStore,
+        target: &Path,
+    ) -> Result<RollIntoOutcome> {
+        handle::roll_into(
+            &mut self.session,
+            store,
+            self.file_tracker.snapshot_all(),
+            target,
+        )
+        .await
+    }
+
+    /// Closes the session with a snapshot of the files the transcript read, after the caller drains
+    /// the pending writes. Returns the session's write failure.
+    pub(super) async fn finalize(self) -> Option<String> {
+        self.session
+            .finalize(self.file_tracker.snapshot_all())
+            .await
+    }
+}
+
+#[cfg(test)]
+impl LiveTranscript {
+    /// A transcript holding `messages`, with no compaction state, prompt, or tracked files.
+    pub(super) fn with_messages(session: &SessionHandle, messages: Vec<Message>) -> Self {
+        Self {
+            session: session.clone(),
+            messages,
+            compact: None,
+            tool_metadata: HashMap::new(),
+            tasks: Vec::new(),
+            prompt: PromptParts::default(),
+            prompt_unrecorded: false,
+            file_tracker: Arc::new(FileTracker::default()),
+            drifted: Vec::new(),
+        }
+    }
+
+    /// Replaces the messages without writing the session.
+    pub(super) fn set_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+    }
+
+    /// Replaces the session without finalizing the one the transcript holds.
+    pub(super) fn set_session(&mut self, session: SessionHandle) {
+        self.session = session;
     }
 }
 

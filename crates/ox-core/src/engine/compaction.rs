@@ -161,7 +161,7 @@ enum CompactFailure {
 impl Engine {
     /// The auto-compaction config in force, disabled while [`AutoCompactFailures`] has paused it.
     pub(super) fn auto_compaction(&self) -> AutoCompactionConfig {
-        if self.auto_compaction_failures.is_paused() {
+        if self.usage.auto_compaction_failures.is_paused() {
             AutoCompactionConfig::disabled()
         } else {
             self.compaction.auto
@@ -179,8 +179,8 @@ impl Engine {
     ) -> AbortResult<()> {
         if !auto_compaction_due(
             self.auto_compaction(),
-            self.context_estimate,
-            &self.transcript.messages,
+            self.usage.context_estimate,
+            self.transcript.messages(),
         ) {
             return Ok(());
         }
@@ -231,6 +231,7 @@ impl Engine {
             Err(CompactFailure::NotSaved) => None,
         };
         Err(self
+            .usage
             .auto_compaction_failures
             .fail(sink, cause.as_ref(), point))
     }
@@ -283,7 +284,7 @@ impl Engine {
                 &self.client,
                 &self.transcript.prompt,
                 &tools,
-                &self.transcript.messages,
+                self.transcript.messages(),
                 instructions.as_deref(),
                 sink,
                 &mut spent,
@@ -863,8 +864,8 @@ mod tests {
         ) -> Engine {
             let mut engine = engine(server.uri(), &test_store(dir), dir).await;
             engine.compaction = CompactionConfig::with_threshold(50_000);
-            engine.context_estimate = context_estimate;
-            engine.transcript.messages = transcript;
+            engine.usage.context_estimate = context_estimate;
+            engine.transcript.set_messages(transcript);
             engine
         }
 
@@ -889,7 +890,7 @@ mod tests {
                         .await;
 
                     assert!(compacted.is_ok(), "{compacted:?}");
-                    assert_eq!(engine.transcript.messages, transcript);
+                    assert_eq!(engine.transcript.messages(), transcript);
                     assert_eq!(sink.events(), []);
                 }
                 assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
@@ -906,7 +907,7 @@ mod tests {
                 let usage = 50_000;
                 let mut engine =
                     auto_engine(&server, dir.path(), usage, tool_heavy_transcript()).await;
-                engine.auto_compaction_failures =
+                engine.usage.auto_compaction_failures =
                     AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
@@ -924,7 +925,7 @@ mod tests {
                     "the next prompt goes out without compaction: {fourth:?}"
                 );
                 assert_eq!(request_bodies(&server).await.len(), 1);
-                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
                 let events = sink.events();
                 assert!(
                     matches!(
@@ -952,7 +953,7 @@ mod tests {
                 let usage = 50_000;
                 let mut engine =
                     auto_engine(&server, dir.path(), usage, tool_heavy_transcript()).await;
-                engine.transcript.session = dead_test_session();
+                engine.transcript.set_session(dead_test_session());
                 let sink = CapturingSink::default();
 
                 let e = engine
@@ -966,10 +967,13 @@ mod tests {
                     "Auto-compaction was not saved. \
                      The prompt was not sent, so send it again to retry.",
                 );
-                assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(1));
-                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
                 assert_eq!(
-                    engine.context_estimate, usage,
+                    engine.usage.auto_compaction_failures,
+                    AutoCompactFailures::new(1)
+                );
+                assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
+                assert_eq!(
+                    engine.usage.context_estimate, usage,
                     "the transcript the usage measured stays"
                 );
                 let events = sink.events();
@@ -1015,7 +1019,7 @@ mod tests {
                 assert!(compacted.is_ok(), "{compacted:?}");
                 assert_eq!(inbox.prompts, ["queued after summary"]);
                 assert_eq!(
-                    engine.transcript.messages,
+                    engine.transcript.messages(),
                     [synthesize_post_compact_message(
                         "auto summary",
                         &plan(),
@@ -1077,10 +1081,10 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.transcript.messages = tool_heavy_transcript();
-                engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
-                engine.total_estimated_cost_usd = 1.23;
-                engine.auto_compaction_failures = AutoCompactFailures::new(3);
+                engine.transcript.set_messages(tool_heavy_transcript());
+                engine.usage.displayed_usage = Some(TokenUsage::new(90_000, 9));
+                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.auto_compaction_failures = AutoCompactFailures::new(3);
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
@@ -1090,7 +1094,7 @@ mod tests {
 
                 assert_eq!(end, TurnEnd::Completed);
                 assert_eq!(
-                    engine.transcript.messages,
+                    engine.transcript.messages(),
                     [synthesize_post_compact_message(
                         "manual summary",
                         &[],
@@ -1098,11 +1102,11 @@ mod tests {
                         CompactTrigger::Manual
                     )]
                 );
-                assert_eq!(engine.displayed_usage, None);
+                assert_eq!(engine.usage.displayed_usage, None);
                 assert!(
-                    (engine.total_estimated_cost_usd - (1.23 + 0.006)).abs() < 1e-12,
+                    (engine.usage.total_estimated_cost_usd - (1.23 + 0.006)).abs() < 1e-12,
                     "the session cost keeps earlier turns and adds the summary: {}",
-                    engine.total_estimated_cost_usd,
+                    engine.usage.total_estimated_cost_usd,
                 );
                 assert_ne!(
                     engine.transcript.prompt.user_context, SESSION_CONTEXT,
@@ -1118,7 +1122,7 @@ mod tests {
                     Some(engine.transcript.prompt.session_context())
                 );
                 assert_eq!(
-                    engine.auto_compaction_failures,
+                    engine.usage.auto_compaction_failures,
                     AutoCompactFailures::default()
                 );
                 let events = sink.events();
@@ -1155,7 +1159,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id().to_owned();
-                engine.transcript.messages = tool_heavy_transcript();
+                engine.transcript.set_messages(tool_heavy_transcript());
                 engine.transcript.tasks = plan();
                 let mut ops = inert_ops();
 
@@ -1165,7 +1169,7 @@ mod tests {
 
                 assert_eq!(end, TurnEnd::Completed);
                 assert_eq!(
-                    engine.transcript.messages,
+                    engine.transcript.messages(),
                     [synthesize_post_compact_message(
                         "manual summary",
                         &plan(),
@@ -1195,7 +1199,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.transcript.messages = tool_heavy_transcript();
+                engine.transcript.set_messages(tool_heavy_transcript());
                 start_shell(&engine.shells, "sleep 30");
                 let mut ops = inert_ops();
 
@@ -1205,7 +1209,7 @@ mod tests {
 
                 assert_eq!(end, TurnEnd::Completed);
                 assert_eq!(
-                    engine.transcript.messages,
+                    engine.transcript.messages(),
                     [synthesize_post_compact_message(
                         "manual summary",
                         &[],
@@ -1225,29 +1229,31 @@ mod tests {
                 mount_reply(&server, "summary").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.total_estimated_cost_usd = 1.23;
+                engine.usage.total_estimated_cost_usd = 1.23;
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
 
-                engine.transcript.messages = vec![Message::user("too short")];
+                engine
+                    .transcript
+                    .set_messages(vec![Message::user("too short")]);
                 let end = engine.compact(&sink, &mut ops, None).await;
                 assert_eq!(end, TurnEnd::Failed);
-                assert_eq!(engine.transcript.messages, [Message::user("too short")]);
+                assert_eq!(engine.transcript.messages(), [Message::user("too short")]);
 
-                engine.transcript.messages = tool_heavy_transcript();
+                engine.transcript.set_messages(tool_heavy_transcript());
                 ops_tx.send(Op::Interrupt).await.unwrap();
                 let end = engine.compact(&sink, &mut ops, None).await;
                 assert_eq!(end, TurnEnd::Cancelled);
-                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
 
-                engine.transcript.session = dead_test_session();
+                engine.transcript.set_session(dead_test_session());
                 let end = engine.compact(&sink, &mut ops, None).await;
                 assert_eq!(
                     end,
                     TurnEnd::Failed,
                     "an unwritten boundary is a failed compaction"
                 );
-                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
 
                 let events = sink.events();
                 assert!(
@@ -1298,9 +1304,9 @@ mod tests {
                     .await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.transcript.messages = tool_heavy_transcript();
-                engine.displayed_usage = Some(TokenUsage::new(90_000, 9));
-                engine.total_estimated_cost_usd = 1.23;
+                engine.transcript.set_messages(tool_heavy_transcript());
+                engine.usage.displayed_usage = Some(TokenUsage::new(90_000, 9));
+                engine.usage.total_estimated_cost_usd = 1.23;
                 let sink = CapturingSink::default();
 
                 let end = engine.compact(&sink, &mut inert_ops(), None).await;
@@ -1335,14 +1341,14 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.client.set_auth(None);
-                engine.transcript.messages = tool_heavy_transcript();
+                engine.transcript.set_messages(tool_heavy_transcript());
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
                 let end = engine.compact(&sink, &mut ops, None).await;
 
                 assert_eq!(end, TurnEnd::Failed);
-                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
                 assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
                 let events = sink.events();
                 assert!(
@@ -1362,7 +1368,7 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.transcript.messages = tool_heavy_transcript();
+                engine.transcript.set_messages(tool_heavy_transcript());
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(2);
                 ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
@@ -1382,7 +1388,7 @@ mod tests {
                 let base_url = serve_stalled_summary("partial").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(base_url, &test_store(dir.path()), dir.path()).await;
-                engine.transcript.messages = tool_heavy_transcript();
+                engine.transcript.set_messages(tool_heavy_transcript());
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
                 let interrupt_once_streaming = async {
@@ -1398,7 +1404,7 @@ mod tests {
                 );
 
                 assert_eq!(end, TurnEnd::Cancelled);
-                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
                 let events = sink.events();
                 assert!(
                     matches!(
@@ -1429,22 +1435,25 @@ mod tests {
                     .await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.transcript.messages = tool_heavy_transcript();
-                engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
-                engine.total_estimated_cost_usd = 1.23;
+                engine.transcript.set_messages(tool_heavy_transcript());
+                engine.usage.displayed_usage = Some(TokenUsage::new(50_000, 1));
+                engine.usage.total_estimated_cost_usd = 1.23;
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
                 let end = engine.compact(&sink, &mut ops, None).await;
 
                 assert_eq!(end, TurnEnd::Failed);
-                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
-                assert_eq!(engine.displayed_usage, Some(TokenUsage::new(50_000, 1)));
+                assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
+                assert_eq!(
+                    engine.usage.displayed_usage,
+                    Some(TokenUsage::new(50_000, 1))
+                );
                 let expected = 1.23 + 0.006;
                 assert!(
-                    (engine.total_estimated_cost_usd - expected).abs() < 1e-12,
+                    (engine.usage.total_estimated_cost_usd - expected).abs() < 1e-12,
                     "a rejected summary is still billed: {}",
-                    engine.total_estimated_cost_usd,
+                    engine.usage.total_estimated_cost_usd,
                 );
                 let events = sink.events();
                 let [
@@ -1492,7 +1501,7 @@ mod tests {
                     let store = test_store(dir.path());
                     let mut engine = engine(server.uri(), &store, dir.path()).await;
                     let session_id = engine.session_id().to_owned();
-                    engine.transcript.messages = tool_heavy_transcript();
+                    engine.transcript.set_messages(tool_heavy_transcript());
                     let read = dir.path().join("read.txt");
                     std::fs::write(&read, "read").unwrap();
                     seed_full_read(&engine.transcript.file_tracker, &read);
@@ -1525,7 +1534,7 @@ mod tests {
                     );
                     let summary =
                         synthesize_post_compact_message("fixed login bug", &plan(), &[], trigger);
-                    assert_eq!(engine.transcript.messages, [summary], "{trigger:?}");
+                    assert_eq!(engine.transcript.messages(), [summary], "{trigger:?}");
                     assert!(
                         matches!(
                             sink.events().as_slice(),
@@ -1538,14 +1547,14 @@ mod tests {
                         "{trigger:?}: {:?}",
                         sink.events(),
                     );
-                    engine.transcript.session.shutdown().await;
+                    engine.transcript.session().clone().shutdown().await;
                     let saved = store.load_session_data(&session_id).unwrap();
                     assert_eq!(
                         saved.compact.map(|compact| compact.tasks),
                         Some(plan()),
                         "{trigger:?}"
                     );
-                    assert_eq!(saved.messages, engine.transcript.messages, "{trigger:?}");
+                    assert_eq!(saved.messages, engine.transcript.messages(), "{trigger:?}");
                 }
             })
             .await;
@@ -1557,8 +1566,8 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.transcript.session = dead_test_session();
-                engine.transcript.messages = tool_heavy_transcript();
+                engine.transcript.set_session(dead_test_session());
+                engine.transcript.set_messages(tool_heavy_transcript());
                 let read = dir.path().join("read.txt");
                 std::fs::write(&read, "read").unwrap();
                 seed_full_read(&engine.transcript.file_tracker, &read);
@@ -1570,7 +1579,7 @@ mod tests {
                     .await;
 
                 assert!(compacted.is_none());
-                assert_eq!(engine.transcript.messages, tool_heavy_transcript());
+                assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
                 assert_eq!(engine.transcript.file_tracker.snapshot_all(), tracked);
                 let events = sink.events();
                 assert!(
@@ -1596,11 +1605,11 @@ mod tests {
                 std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
                 let unsaved = engine
                     .transcript
-                    .session
+                    .session()
                     .record_message(Message::user("x".repeat(5 << 20)))
                     .await;
                 assert!(unsaved.failure.is_some());
-                engine.transcript.messages = tool_heavy_transcript();
+                engine.transcript.set_messages(tool_heavy_transcript());
                 let summary = "s".repeat(2 << 20);
                 let mut large = boundary(Vec::new());
                 large.summary.clone_from(&summary);
@@ -1612,7 +1621,7 @@ mod tests {
 
                 assert!(compacted.is_some());
                 assert_eq!(
-                    engine.transcript.messages,
+                    engine.transcript.messages(),
                     [synthesize_post_compact_message(
                         &summary,
                         &[],
@@ -1633,7 +1642,7 @@ mod tests {
                     ),
                     "expected the compaction, then the stop: {events:?}",
                 );
-                engine.transcript.session.shutdown().await;
+                engine.transcript.session().clone().shutdown().await;
             })
             .await;
         }

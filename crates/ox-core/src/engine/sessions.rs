@@ -5,14 +5,13 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use super::transcript::LiveTranscript;
-use super::usage::estimate_cost_usd;
+use super::usage::UsageLedger;
 use super::{Engine, turn};
 use crate::protocol::notice::session_write_failed;
 use crate::protocol::{Event, EventSink, ResumeTarget};
 use crate::session::display::id_prefix;
 use crate::session::entry::ArchiveState;
-use crate::session::handle::{self, LoadedTranscript, RollIntoOutcome};
+use crate::session::handle::{LoadedTranscript, RollIntoOutcome};
 use crate::session::resolver::resolve_saved_prefix;
 use crate::session::saved::{self, BARE_ARCHIVE_HINT, saved_error_message};
 use crate::util::git::current_branch;
@@ -26,7 +25,7 @@ impl Engine {
 
     /// Archives the live session, then rolls like [`Self::clear`].
     pub(super) async fn archive(&mut self, sink: &dyn EventSink) {
-        if self.transcript.messages.is_empty() {
+        if self.transcript.messages().is_empty() {
             sink.emit(
                 Event::TurnFailed(
                     "Nothing to archive: this session has no messages yet".to_owned(),
@@ -35,7 +34,7 @@ impl Engine {
             );
             return;
         }
-        if let Some(failure) = self.transcript.session.archive().await.failure {
+        if let Some(failure) = self.transcript.archive().await {
             sink.emit(
                 Event::TurnFailed(format!("Archive failed: {failure}")),
                 "archive-failed",
@@ -53,7 +52,7 @@ impl Engine {
         state: ArchiveState,
     ) {
         let id = session_id.clone();
-        let live_id = self.transcript.session.session_id().to_owned();
+        let live_id = self.transcript.session().session_id().to_owned();
         let result = tokio::task::spawn_blocking(move || {
             saved::set_archived(&path, &session_id, state, &live_id)
                 .map_err(|error| {
@@ -72,14 +71,10 @@ impl Engine {
     async fn roll_session(&mut self, sink: &dyn EventSink, old_session: ArchiveState) {
         self.transcript.file_tracker.drain_writes().await;
         let git_branch = current_branch(self.cwd()).await;
-        let outcome = handle::roll(
-            &mut self.transcript.session,
-            &self.store,
-            self.transcript.file_tracker.snapshot_all(),
-            self.client.model().id(),
-            git_branch,
-        )
-        .await;
+        let outcome = self
+            .transcript
+            .roll(&self.store, self.client.model().id(), git_branch)
+            .await;
         self.adopt_session(sink, LoadedTranscript::default()).await;
         sink.emit(
             Event::SessionRolled {
@@ -101,7 +96,7 @@ impl Engine {
                 sink.emit(
                     Event::TurnFailed(format!(
                         "Resume failed (still on session {}): {e:#}",
-                        id_prefix(self.transcript.session.session_id()),
+                        id_prefix(self.transcript.session().session_id()),
                     )),
                     "resume-failed",
                 );
@@ -111,7 +106,7 @@ impl Engine {
         self.adopt_session(sink, outcome.transcript).await;
         sink.emit(
             Event::SessionResumed {
-                id: self.transcript.session.session_id().to_owned(),
+                id: self.transcript.session().session_id().to_owned(),
                 title: outcome.title,
                 prior: outcome.prior,
                 history: self.take_history(),
@@ -130,40 +125,29 @@ impl Engine {
         let path = match target {
             ResumeTarget::Path(path) => path,
             ResumeTarget::Prefix(prefix) => {
-                resolve_saved_prefix(&self.store, &prefix, self.transcript.session.session_id())?
+                resolve_saved_prefix(&self.store, &prefix, self.transcript.session().session_id())?
                     .path
             }
         };
-        let snapshots = self.transcript.file_tracker.snapshot_all();
-        handle::roll_into(&mut self.transcript.session, &self.store, snapshots, &path).await
+        self.transcript.roll_into(&self.store, &path).await
     }
 
     async fn adopt_session(&mut self, sink: &dyn EventSink, transcript: LoadedTranscript) {
         self.shells.stop_all().await;
-        let (transcript, usage, warnings) = LiveTranscript::load(
-            self.transcript.session.clone(),
-            transcript,
-            self.client.model(),
-            self.workspace.cwd(),
-        )
-        .await;
+        let (usage, warnings) = self
+            .transcript
+            .adopt(transcript, self.client.model(), self.workspace.cwd())
+            .await;
         self.client
-            .set_session_id(transcript.session.session_id().to_owned());
-        self.transcript = transcript;
+            .set_session_id(self.transcript.session().session_id().to_owned());
         self.instruction_warnings = warnings;
         self.policy.clear_session_allow();
-        self.reset_context_usage(sink);
-        self.total_estimated_cost_usd = estimate_cost_usd(&usage);
-        self.title_usage = None;
+        self.usage.auto_compaction_failures.reset(sink);
+        self.usage = UsageLedger::for_session(&usage, self.request_estimate());
     }
 
     pub(super) async fn rename(&self, sink: &dyn EventSink, title: String) {
-        let outcome = self
-            .transcript
-            .session
-            .set_manual_title(title.clone())
-            .await;
-        if let Some(failure) = outcome.failure {
+        if let Some(failure) = self.transcript.set_manual_title(title.clone()).await {
             sink.emit(
                 Event::RenameFailed(session_write_failed(&failure)),
                 "rename-failed",
@@ -172,7 +156,7 @@ impl Engine {
         }
         sink.emit(
             Event::SessionTitleUpdated {
-                id: self.transcript.session.session_id().to_owned(),
+                id: self.transcript.session().session_id().to_owned(),
                 title,
             },
             "session-title-updated",
@@ -189,7 +173,7 @@ impl Engine {
             sink.emit(Event::Notice(warning.clone()), "instruction-warning");
         }
         report_drift(sink, &std::mem::take(&mut self.transcript.drifted));
-        turn::notify_if_interrupted(&self.transcript.messages, sink);
+        turn::notify_if_interrupted(self.transcript.messages(), sink);
     }
 
     /// Shows the task list a loaded session restored. An empty one needs no event, since the
@@ -276,6 +260,7 @@ mod tests {
     use crate::permission::{Mode, PermissionClass};
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{Interaction, Op};
+    use crate::session::handle;
     use crate::session::handle::testing::record_write_call;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{test_project_dir, test_store};
@@ -293,12 +278,12 @@ mod tests {
     async fn header_branch(engine: &Engine, dir: &Path) -> Option<String> {
         engine
             .transcript
-            .session
+            .session()
             .record_message(Message::user("first"))
             .await;
         let jsonl = std::fs::read_to_string(test_session_file(
             dir,
-            engine.transcript.session.session_id(),
+            engine.transcript.session().session_id(),
         ))
         .unwrap();
         let header: serde_json::Value =
@@ -341,7 +326,7 @@ mod tests {
                 let target = store.find_session_path(&target_id).unwrap();
                 let path = dir.path().join("notes.txt");
                 record_write_call(
-                    &engine.transcript.session,
+                    engine.transcript.session(),
                     &engine.transcript.file_tracker,
                     "toolu_write",
                     &path,
@@ -412,12 +397,14 @@ mod tests {
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             let sink = CapturingSink::default();
             let target_id = finished_session(&store).await;
-            engine.transcript.messages = vec![Message::user("before clear")];
+            engine
+                .transcript
+                .set_messages(vec![Message::user("before clear")]);
             let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
             engine.policy.allow_for_session(rule.clone());
 
             engine.clear(&sink).await;
-            assert_eq!(engine.transcript.messages, []);
+            assert_eq!(engine.transcript.messages(), []);
             assert_eq!(engine.policy.session_allow(), []);
             assert_ne!(engine.transcript.prompt.user_context, SESSION_CONTEXT);
             assert!(
@@ -429,21 +416,21 @@ mod tests {
             );
             assert_eq!(
                 engine.client.session_id(),
-                engine.transcript.session.session_id()
+                engine.transcript.session().session_id()
             );
 
             SESSION_CONTEXT.clone_into(&mut engine.transcript.prompt.user_context);
-            engine.total_estimated_cost_usd = 1.23;
+            engine.usage.total_estimated_cost_usd = 1.23;
             engine.policy.allow_for_session(rule);
             let target_path = store.find_session_path(&target_id).unwrap();
             engine.resume(&sink, ResumeTarget::Path(target_path)).await;
             assert_eq!(engine.policy.session_allow(), []);
-            assert_eq!(engine.transcript.session.session_id(), target_id);
+            assert_eq!(engine.transcript.session().session_id(), target_id);
             assert_eq!(engine.client.session_id(), target_id);
-            assert_eq!(engine.transcript.messages.len(), 2);
+            assert_eq!(engine.transcript.messages().len(), 2);
             assert_ne!(engine.transcript.prompt.user_context, SESSION_CONTEXT);
             assert!(
-                engine.total_estimated_cost_usd.abs() < f64::EPSILON,
+                engine.usage.total_estimated_cost_usd.abs() < f64::EPSILON,
                 "a session that recorded no usage resumes at zero"
             );
         })
@@ -461,7 +448,9 @@ mod tests {
 
             engine.clear(&sink).await;
             let cleared = header_branch(&engine, dir.path()).await;
-            engine.transcript.messages = vec![Message::user("archive me")];
+            engine
+                .transcript
+                .set_messages(vec![Message::user("archive me")]);
             engine.archive(&sink).await;
             let archived = header_branch(&engine, dir.path()).await;
 
@@ -483,17 +472,17 @@ mod tests {
             let clear_sink = CapturingSink::default();
             let resume_sink = CapturingSink::default();
 
-            engine.auto_compaction_failures = AutoCompactFailures::new(3);
+            engine.usage.auto_compaction_failures = AutoCompactFailures::new(3);
             engine.clear(&clear_sink).await;
-            let after_clear = engine.auto_compaction_failures;
-            engine.auto_compaction_failures = AutoCompactFailures::new(3);
+            let after_clear = engine.usage.auto_compaction_failures;
+            engine.usage.auto_compaction_failures = AutoCompactFailures::new(3);
             engine
                 .resume(&resume_sink, ResumeTarget::Path(target_path))
                 .await;
 
             assert_eq!(after_clear, AutoCompactFailures::default());
             assert_eq!(
-                engine.auto_compaction_failures,
+                engine.usage.auto_compaction_failures,
                 AutoCompactFailures::default()
             );
             let cleared = clear_sink.events();
@@ -659,16 +648,16 @@ mod tests {
                 })
                 .await;
                 assert!(
-                    engine.total_estimated_cost_usd.abs() < f64::EPSILON,
+                    engine.usage.total_estimated_cost_usd.abs() < f64::EPSILON,
                     "a turn without usage emits nothing, so the title cost is still pending"
                 );
 
                 engine.clear(&sink).await;
 
                 assert!(
-                    engine.total_estimated_cost_usd.abs() < f64::EPSILON,
+                    engine.usage.total_estimated_cost_usd.abs() < f64::EPSILON,
                     "the new session starts at zero: {}",
-                    engine.total_estimated_cost_usd,
+                    engine.usage.total_estimated_cost_usd,
                 );
             })
             .await;
@@ -680,7 +669,7 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.transcript.session = dead_test_session();
+                engine.transcript.set_session(dead_test_session());
                 let warning = write_unreadable_instructions(dir.path());
                 let sink = CapturingSink::default();
 
@@ -759,16 +748,21 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let live_id = engine.transcript.session.session_id().to_owned();
+                let live_id = engine.transcript.session().session_id().to_owned();
                 let sink = CapturingSink::default();
 
                 engine.archive(&sink).await;
-                assert_eq!(engine.transcript.session.session_id(), live_id);
-                engine.transcript.messages = vec![Message::user("unsaved")];
-                engine.transcript.session = dead_test_session();
+                assert_eq!(engine.transcript.session().session_id(), live_id);
+                engine
+                    .transcript
+                    .set_messages(vec![Message::user("unsaved")]);
+                engine.transcript.set_session(dead_test_session());
                 engine.archive(&sink).await;
                 engine.archive(&sink).await;
-                assert_eq!(engine.transcript.session.session_id(), "dead-test-session");
+                assert_eq!(
+                    engine.transcript.session().session_id(),
+                    "dead-test-session"
+                );
 
                 let events = sink.events();
                 assert!(
@@ -800,7 +794,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let live_id = engine.transcript.session.session_id().to_owned();
+                let live_id = engine.transcript.session().session_id().to_owned();
                 let path = dir.path().join("missing.jsonl");
                 let sink = CapturingSink::default();
                 let expected = saved_error_message(
@@ -820,7 +814,7 @@ mod tests {
                         result: Err(expected)
                     }]
                 );
-                assert_eq!(engine.transcript.session.session_id(), live_id);
+                assert_eq!(engine.transcript.session().session_id(), live_id);
             })
             .await;
         }
@@ -850,13 +844,13 @@ mod tests {
                     .await;
 
                 assert_eq!(
-                    engine.context_estimate,
-                    request_tokens(&engine.transcript.prompt, &[], &engine.transcript.messages)
+                    engine.usage.context_estimate,
+                    request_tokens(&engine.transcript.prompt, &[], engine.transcript.messages())
                 );
                 assert!(auto_compaction_due(
                     engine.auto_compaction(),
-                    engine.context_estimate,
-                    &engine.transcript.messages
+                    engine.usage.context_estimate,
+                    engine.transcript.messages()
                 ));
             })
             .await;
@@ -881,7 +875,7 @@ mod tests {
                 let live_id = engine.session_id().to_owned();
                 engine
                     .transcript
-                    .session
+                    .session()
                     .record_message(Message::user("live"))
                     .await;
                 let live = dir.path().join("live.txt");
@@ -910,7 +904,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let recorded_id = engine.transcript.session.session_id().to_owned();
+                let recorded_id = engine.transcript.session().session_id().to_owned();
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
                 engine.submit_prompt("first", None, &sink, &mut ops).await;
@@ -1019,7 +1013,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let target_id = finished_session(&store).await;
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.transcript.session = dead_test_session();
+                engine.transcript.set_session(dead_test_session());
                 let sink = CapturingSink::default();
 
                 let target_path = store.find_session_path(&target_id).unwrap();
@@ -1051,14 +1045,16 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let original_id = engine.transcript.session.session_id().to_owned();
+                let original_id = engine.transcript.session().session_id().to_owned();
                 let context_estimate = 100_000;
                 let displayed_usage = TokenUsage::new(90_000, 9);
-                engine.transcript.messages = vec![Message::user("still here")];
-                engine.auto_compaction_failures = AutoCompactFailures::new(2);
-                engine.context_estimate = context_estimate;
-                engine.displayed_usage = Some(displayed_usage);
-                engine.total_estimated_cost_usd = 1.23;
+                engine
+                    .transcript
+                    .set_messages(vec![Message::user("still here")]);
+                engine.usage.auto_compaction_failures = AutoCompactFailures::new(2);
+                engine.usage.context_estimate = context_estimate;
+                engine.usage.displayed_usage = Some(displayed_usage);
+                engine.usage.total_estimated_cost_usd = 1.23;
                 let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
                 engine.policy.allow_for_session(rule.clone());
                 start_shell(&engine.shells, "sleep 30");
@@ -1071,12 +1067,15 @@ mod tests {
                     .resume(&sink, ResumeTarget::Path("missing-target.jsonl".into()))
                     .await;
 
-                assert_eq!(engine.transcript.session.session_id(), original_id);
-                assert_eq!(engine.transcript.messages.len(), 1);
-                assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(2));
-                assert_eq!(engine.context_estimate, context_estimate);
-                assert_eq!(engine.displayed_usage, Some(displayed_usage));
-                assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
+                assert_eq!(engine.transcript.session().session_id(), original_id);
+                assert_eq!(engine.transcript.messages().len(), 1);
+                assert_eq!(
+                    engine.usage.auto_compaction_failures,
+                    AutoCompactFailures::new(2)
+                );
+                assert_eq!(engine.usage.context_estimate, context_estimate);
+                assert_eq!(engine.usage.displayed_usage, Some(displayed_usage));
+                assert!((engine.usage.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
                 assert_eq!(engine.policy.session_allow(), [rule]);
                 assert_eq!(tracked_paths(&engine), [read]);
                 assert_eq!(
@@ -1107,12 +1106,12 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let live_id = engine.transcript.session.session_id().to_owned();
+                let live_id = engine.transcript.session().session_id().to_owned();
                 let sink = CapturingSink::default();
 
                 engine.rename(&sink, "Fix login".to_owned()).await;
-                assert!(engine.transcript.session.manual_title_set());
-                engine.transcript.session = dead_test_session();
+                assert!(engine.transcript.session().manual_title_set());
+                engine.transcript.set_session(dead_test_session());
                 engine.rename(&sink, "Lost".to_owned()).await;
 
                 let events = sink.events();
