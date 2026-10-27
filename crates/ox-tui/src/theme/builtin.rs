@@ -177,9 +177,46 @@ mod tests {
         }
 
         #[test]
+        fn every_builtin_keeps_the_effort_gradient() {
+            for (name, theme, _) in palettes() {
+                for (slot_name, slot, color) in [
+                    ("effort_low", theme.effort_low, Color::Blue),
+                    ("effort_medium", theme.effort_medium, Color::Cyan),
+                    ("effort_high", theme.effort_high, Color::Green),
+                    ("effort_xhigh", theme.effort_xhigh, Color::Magenta),
+                    ("effort_max", theme.effort_max, Color::Red),
+                ] {
+                    assert_eq!(slot.fg, Some(color), "{name} {slot_name}");
+                }
+            }
+        }
+
+        #[test]
         fn inline_code_differs_from_user() {
             for (name, theme, _) in palettes() {
                 assert_ne!(theme.inline_code.fg, theme.user.fg, "{name}");
+            }
+        }
+
+        #[test]
+        fn distinct_slots_keep_distinct_colors() {
+            for (name, theme, _) in palettes() {
+                for (left_name, left, right_name, right) in [
+                    ("text", theme.text, "muted", theme.muted),
+                    ("muted", theme.muted, "dim", theme.dim),
+                    ("accent", theme.accent, "assistant", theme.assistant),
+                    ("user", theme.user, "assistant", theme.assistant),
+                    ("success", theme.success, "error", theme.error),
+                ] {
+                    assert_ne!(
+                        left.fg, right.fg,
+                        "{name}: {left_name} and {right_name} share a foreground"
+                    );
+                }
+                assert_ne!(
+                    theme.diff_add.bg, theme.diff_del.bg,
+                    "{name}: diff_add and diff_del share a background"
+                );
             }
         }
 
