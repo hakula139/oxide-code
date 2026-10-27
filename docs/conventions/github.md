@@ -46,5 +46,5 @@ Conventions for commits, branches, pull requests, and issues.
 - Label open design questions `design`, and close them once the decision is documented in `docs/design/`.
 - Close out-of-scope requests as not planned, pointing to the Scope section of `README.md`.
 - Close an issue as completed when its PR merges, and tick each acceptance criterion the merged work satisfies. Leave an unmet criterion unchecked, and track it in a follow-up issue.
-- Before starting new feature work, audit open issues and their epics for unmet acceptance criteria and unfinished sub-issues, and resolve those first.
+- Before starting new feature work, audit open issues and their epics for unmet acceptance criteria and unfinished sub-issues, and resolve those first. Likewise, read the open issues before a project-wide review, and report only findings they do not already track.
 - The `v0.1.0` milestone includes all work that must land before the first stable release. Add an issue when it concerns a bug in shipped behavior or the maintainer accepts it into the release. Otherwise, leave it out of any milestone.
