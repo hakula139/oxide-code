@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - .gitattributes
+      - .github/workflows/ci.yml
       - .github/workflows/release.yml
       - about.hbs
       - about.toml

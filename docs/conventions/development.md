@@ -76,7 +76,7 @@ CI runs on pushes to `main`, pull requests, and manual dispatch, and the release
 | MSRV                         | `cargo hack check --rust-version` against `rust-version`                                                                                                                               |
 | Nix (Linux, macOS)           | The package build, which runs the tests, `ox --version`, and installed license notice checks                                                                                           |
 
-Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result reads every job of the current run attempt from the Actions API and fails when any job of the CI workflow, including each matrix leg, concludes anything other than success or skipped. That catches a leg cancelled before a runner picks it up, which the `needs` results of a matrix job omit. CI Result runs once the jobs in its `needs` finish and counts any job still running as a failure, so list each new job there.
+Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result reads every job of the current run attempt from the Actions API and fails when any job of the CI workflow, including each matrix leg, concludes anything other than success or skipped. That catches a leg cancelled before a runner picks it up, which the `needs` results of a matrix job omit. CI Result runs once the jobs in its `needs` finish and counts any unfinished job as a failure, so list each new job there.
 
 A push to a pull request cancels the CI it supersedes, while every push to `main` gets its own run, which a later push never cancels.
 
