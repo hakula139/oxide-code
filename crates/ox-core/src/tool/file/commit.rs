@@ -257,8 +257,6 @@ impl Drop for TemporaryFile {
 mod tests {
     use super::*;
 
-    use crate::tool::local_testing::WorkspaceWrite;
-
     mod write {
         use super::*;
 
@@ -290,7 +288,6 @@ mod tests {
                         None
                     };
                     let before = entries(dir.path());
-                    let attempt = WorkspaceWrite::new(&path);
                     let mut visited = Vec::new();
 
                     let error = write_with(
@@ -310,15 +307,8 @@ mod tests {
                     )
                     .unwrap_err();
 
-                    let outcome = if attempt.acl_available {
-                        assert!(error.to_string().contains("injected"), "{phase:?}");
-                        assert_eq!(visited.last(), Some(&phase));
-                        "injected-error"
-                    } else {
-                        attempt.assert_native_refusal(&error);
-                        assert_eq!(visited, []);
-                        "refused"
-                    };
+                    assert!(error.to_string().contains("injected"), "{phase:?}");
+                    assert_eq!(visited.last(), Some(&phase));
                     assert_eq!(entries(dir.path()), before, "{phase:?}");
                     if let Some(original) = original {
                         assert_eq!(fs::read(&path).unwrap(), b"original", "{phase:?}");
@@ -330,10 +320,6 @@ mod tests {
                     } else {
                         assert!(!path.exists(), "{phase:?}");
                     }
-                    println!(
-                        "workspace-write-checkpoint existing={existing} requested={phase:?} visited={visited:?} outcome={outcome} errno={:?}",
-                        error.raw_os_error()
-                    );
                 }
             }
         }
@@ -344,27 +330,21 @@ mod tests {
             let path = dir.path().join("target");
             fs::write(&path, b"original").unwrap();
             let mut original = File::open(&path).unwrap();
-            let snapshot = Snapshot::capture(&original);
-            let attempt = WorkspaceWrite::new(&path);
+            let snapshot = Snapshot::capture(&original).unwrap();
 
             let result = write(&path, b"new", Some(b"original"));
 
             let mut bytes = Vec::new();
             original.read_to_end(&mut bytes).unwrap();
             assert_eq!(bytes, b"original");
-            if attempt.acl_available {
-                result.unwrap();
-                let replacement = File::open(&path).unwrap();
-                assert_ne!(
-                    native::identity(&replacement).unwrap(),
-                    native::identity(&original).unwrap()
-                );
-                snapshot.unwrap().verify(&replacement).unwrap();
-                assert_eq!(fs::read(&path).unwrap(), b"new");
-            } else {
-                attempt.assert_native_refusal(&snapshot.unwrap_err());
-                attempt.assert_native_refusal(&result.unwrap_err());
-            }
+            result.unwrap();
+            let replacement = File::open(&path).unwrap();
+            assert_ne!(
+                native::identity(&replacement).unwrap(),
+                native::identity(&original).unwrap()
+            );
+            snapshot.verify(&replacement).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"new");
             assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
         }
 
@@ -376,17 +356,12 @@ mod tests {
                 if existing {
                     fs::write(&path, b"original").unwrap();
                 }
-                let attempt = WorkspaceWrite::new(&path);
 
                 let result = write(&path, bytes, existing.then_some(b"original".as_slice()));
 
-                if attempt.acl_available {
-                    result.unwrap();
-                    assert_eq!(fs::read(&path).unwrap(), bytes);
-                    assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-                } else {
-                    attempt.assert_native_refusal(&result.unwrap_err());
-                }
+                result.unwrap();
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+                assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
             }
         }
 
@@ -399,16 +374,11 @@ mod tests {
                 if existing {
                     fs::write(&path, b"original").unwrap();
                 }
-                let attempt = WorkspaceWrite::new(&path);
 
                 let result = write(&path, &bytes, existing.then_some(b"original".as_slice()));
 
-                if attempt.acl_available {
-                    result.unwrap();
-                    assert_eq!(fs::read(&path).unwrap(), bytes, "existing={existing}");
-                } else {
-                    attempt.assert_native_refusal(&result.unwrap_err());
-                }
+                result.unwrap();
+                assert_eq!(fs::read(&path).unwrap(), bytes, "existing={existing}");
             }
         }
 
@@ -442,7 +412,6 @@ mod tests {
                         fs::write(&path, b"original").unwrap();
                     }
                     let before = entries(dir.path());
-                    let attempt = WorkspaceWrite::new(&path);
                     let mut visited = Vec::new();
 
                     let error = write_with(
@@ -461,16 +430,11 @@ mod tests {
                     )
                     .unwrap_err();
 
-                    if attempt.acl_available {
-                        assert!(
-                            error.to_string().contains("prepared file changed"),
-                            "{error}"
-                        );
-                        assert_eq!(visited.last(), Some(&Phase::Validated));
-                    } else {
-                        attempt.assert_native_refusal(&error);
-                        assert_eq!(visited, []);
-                    }
+                    assert!(
+                        error.to_string().contains("prepared file changed"),
+                        "{error}"
+                    );
+                    assert_eq!(visited.last(), Some(&Phase::Validated));
                     assert_eq!(entries(dir.path()), before);
                     if existing {
                         assert_eq!(fs::read(&path).unwrap(), b"original");
@@ -489,6 +453,7 @@ mod tests {
                 atomic::{AtomicUsize, Ordering},
             };
 
+            use crate::file_tracker::LastView;
             use crate::file_tracker::testing::{seed_full_read, tracker};
             use crate::util::fs::testing::symlink_file;
 
@@ -508,14 +473,13 @@ mod tests {
                     };
                     let before = tracker.snapshot_all();
                     let names = entries(dir.path());
-                    let attempt = WorkspaceWrite::new(&path);
                     let checkpoints = Arc::new(AtomicUsize::new(0));
                     let observed = Arc::clone(&checkpoints);
                     let destination = path.clone();
                     let target = victim.clone();
 
                     let error = tracker
-                        .write_and_record("toolu_replace", async move {
+                        .write_and_record("toolu_replace", LastView::Full, async move {
                             write_with(
                                 &destination,
                                 b"ours",
@@ -545,13 +509,8 @@ mod tests {
                         .await
                         .unwrap_err();
 
-                    if attempt.acl_available {
-                        assert!(error.to_string().contains("pathname changed"), "{error}");
-                        assert_eq!(checkpoints.load(Ordering::Relaxed), 5);
-                    } else {
-                        attempt.assert_native_refusal(error.downcast_ref::<io::Error>().unwrap());
-                        assert_eq!(checkpoints.load(Ordering::Relaxed), 0);
-                    }
+                    assert!(error.to_string().contains("pathname changed"), "{error}");
+                    assert_eq!(checkpoints.load(Ordering::Relaxed), 5);
                     assert_eq!(tracker.snapshot_all(), before);
                     assert_eq!(entries(dir.path()), names);
                     assert_eq!(fs::read(&victim).unwrap(), b"victim");
@@ -598,7 +557,6 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("target");
                 fs::write(&path, b"original").unwrap();
-                let attempt = WorkspaceWrite::new(&path);
                 let mut visited = Vec::new();
 
                 let result = write_with(&path, b"ours", Some(b"original"), |phase, _| {
@@ -615,23 +573,18 @@ mod tests {
                     Ok(())
                 });
 
-                if attempt.acl_available {
-                    assert_eq!(
-                        result.unwrap_err().to_string(),
-                        if replace {
-                            "the file was replaced while preparing the write"
-                        } else {
-                            "the file changed while preparing the write. Read it again."
-                        }
-                    );
-                    assert_eq!(visited.last(), Some(&Phase::Synced));
-                } else {
-                    attempt.assert_native_refusal(&result.unwrap_err());
-                    assert_eq!(visited, []);
-                }
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    if replace {
+                        "the file was replaced while preparing the write"
+                    } else {
+                        "the file changed while preparing the write. Read it again."
+                    }
+                );
+                assert_eq!(visited.last(), Some(&Phase::Synced));
                 assert_eq!(
                     fs::read(&path).unwrap(),
-                    if replace || !attempt.acl_available {
+                    if replace {
                         b"original".as_slice()
                     } else {
                         b"theirs"
@@ -645,7 +598,6 @@ mod tests {
         fn concurrent_create_is_never_replaced() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("target");
-            let attempt = WorkspaceWrite::new(&path);
             let mut visited = Vec::new();
 
             let result = write_with(&path, b"ours", None, |phase, _| {
@@ -656,15 +608,10 @@ mod tests {
                 Ok(())
             });
 
-            if attempt.acl_available {
-                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
-                assert_eq!(visited.last(), Some(&Phase::Validated));
-                assert_eq!(fs::read(&path).unwrap(), b"theirs");
-                assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-            } else {
-                attempt.assert_native_refusal(&result.unwrap_err());
-                assert_eq!(visited, []);
-            }
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(visited.last(), Some(&Phase::Validated));
+            assert_eq!(fs::read(&path).unwrap(), b"theirs");
+            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
         }
 
         #[cfg(unix)]
@@ -695,41 +642,29 @@ mod tests {
                     false
                 }
             };
-            let snapshot = Snapshot::capture(&file);
-            let attempt = WorkspaceWrite::new(&path);
+            let snapshot = Snapshot::capture(&file).unwrap();
 
-            let result = write(&path, b"new", Some(b"original"));
+            write(&path, b"new", Some(b"original")).unwrap();
 
-            let errno = result.as_ref().err().and_then(io::Error::raw_os_error);
-            let (outcome, xattrs) = if attempt.acl_available {
-                result.unwrap();
-                let current = File::open(&path).unwrap();
-                snapshot.unwrap().verify(&current).unwrap();
-                assert_eq!(fs::read(&path).unwrap(), b"new");
-                if attributes_supported {
-                    assert_eq!(
-                        current.get_xattr("user.ox.binary").unwrap(),
-                        Some(b"\x00\xff".to_vec())
-                    );
-                    assert_eq!(
-                        current.get_xattr("user.ox.empty").unwrap(),
-                        Some(Vec::new())
-                    );
-                    ("preserved", "verified")
-                } else {
-                    assert_eq!(
-                        current.list_xattr().unwrap_err().raw_os_error(),
-                        Some(nix::libc::EOPNOTSUPP)
-                    );
-                    ("preserved", "unsupported")
-                }
+            let current = File::open(&path).unwrap();
+            snapshot.verify(&current).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"new");
+            if attributes_supported {
+                assert_eq!(
+                    current.get_xattr("user.ox.binary").unwrap(),
+                    Some(b"\x00\xff".to_vec())
+                );
+                assert_eq!(
+                    current.get_xattr("user.ox.empty").unwrap(),
+                    Some(Vec::new())
+                );
             } else {
-                attempt.assert_native_refusal(&snapshot.unwrap_err());
-                attempt.assert_native_refusal(&result.unwrap_err());
-                ("refused", "not-reached")
-            };
+                assert_eq!(
+                    current.list_xattr().unwrap_err().raw_os_error(),
+                    Some(nix::libc::EOPNOTSUPP)
+                );
+            }
             assert_eq!(entries(dir.path()), [path.file_name().unwrap()]);
-            println!("workspace-write-metadata outcome={outcome} xattrs={xattrs} errno={errno:?}");
         }
 
         #[cfg(unix)]
@@ -742,7 +677,6 @@ mod tests {
                 let path = dir.path().join("target");
                 fs::write(&path, b"original").unwrap();
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-                let attempt = WorkspaceWrite::new(&path);
                 let mut visited = Vec::new();
 
                 let result = write_with(&path, b"ours", Some(b"original"), |phase, staged| {
@@ -755,24 +689,19 @@ mod tests {
                     Ok(())
                 });
 
-                if attempt.acl_available {
-                    assert_eq!(
-                        result.unwrap_err().to_string(),
-                        "the file's access policy or metadata could not be preserved",
-                        "source={source}"
-                    );
-                    assert_eq!(
-                        visited.last(),
-                        Some(&if source {
-                            Phase::Synced
-                        } else {
-                            Phase::Validated
-                        })
-                    );
-                } else {
-                    attempt.assert_native_refusal(&result.unwrap_err());
-                    assert_eq!(visited, []);
-                }
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "the file's access policy or metadata could not be preserved",
+                    "source={source}"
+                );
+                assert_eq!(
+                    visited.last(),
+                    Some(&if source {
+                        Phase::Synced
+                    } else {
+                        Phase::Validated
+                    })
+                );
                 assert_eq!(fs::read(&path).unwrap(), b"original");
                 assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
             }
@@ -785,17 +714,12 @@ mod tests {
             let path = dir.path().join("target");
             fs::write(&path, b"original").unwrap();
             let identity = native::identity(&File::open(&path).unwrap()).unwrap();
-            let attempt = WorkspaceWrite::new(&path);
             let denied = crate::util::fs::testing::deny_subdir_creation(dir.path());
 
             let error = write(&path, b"new", Some(b"original")).unwrap_err();
             drop(denied);
 
-            if attempt.acl_available {
-                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-            } else {
-                attempt.assert_native_refusal(&error);
-            }
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
             assert_eq!(
                 native::identity(&File::open(&path).unwrap()).unwrap(),
                 identity
@@ -813,19 +737,13 @@ mod tests {
             let ordinary = dir.path().join("ordinary");
             let atomic = dir.path().join("atomic");
             fs::write(&ordinary, b"").unwrap();
-            let attempt = WorkspaceWrite::new(&atomic);
 
-            let result = write(&atomic, b"content", None);
+            write(&atomic, b"content", None).unwrap();
 
-            if attempt.acl_available {
-                result.unwrap();
-                assert_eq!(
-                    fs::metadata(&atomic).unwrap().permissions().mode(),
-                    fs::metadata(&ordinary).unwrap().permissions().mode()
-                );
-            } else {
-                attempt.assert_native_refusal(&result.unwrap_err());
-            }
+            assert_eq!(
+                fs::metadata(&atomic).unwrap().permissions().mode(),
+                fs::metadata(&ordinary).unwrap().permissions().mode()
+            );
         }
 
         #[cfg(target_os = "macos")]
@@ -915,8 +833,7 @@ mod tests {
                     false
                 }
             };
-            let snapshot = Snapshot::capture(&file);
-            let attempt = WorkspaceWrite::new(&path);
+            let snapshot = Snapshot::capture(&file).unwrap();
             if attributes_supported {
                 File::open(dir.path())
                     .unwrap()
@@ -924,43 +841,35 @@ mod tests {
                     .unwrap();
             }
 
-            let result = write(&path, b"new", Some(b"original"));
+            write(&path, b"new", Some(b"original")).unwrap();
 
-            let errno = result.as_ref().err().and_then(io::Error::raw_os_error);
-            let (outcome, named_acl) = if attempt.acl_available {
-                result.unwrap();
-                snapshot
-                    .unwrap()
-                    .verify(&File::open(&path).unwrap())
-                    .unwrap();
-                assert_eq!(fs::read(&path).unwrap(), b"new");
+            snapshot.verify(&File::open(&path).unwrap()).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"new");
+            let current = File::open(&path).unwrap();
+            if attributes_supported {
+                assert_eq!(
+                    current.get_xattr("system.posix_acl_access").unwrap(),
+                    Some(acl(6))
+                );
+                current.remove_xattr("system.posix_acl_access").unwrap();
+                let without_acl = Snapshot::capture(&current).unwrap();
+
+                write(&path, b"again", Some(b"new")).unwrap();
+
                 let current = File::open(&path).unwrap();
-                if attributes_supported {
-                    assert_eq!(
-                        current.get_xattr("system.posix_acl_access").unwrap(),
-                        Some(acl(6))
-                    );
-                    current.remove_xattr("system.posix_acl_access").unwrap();
-                    let without_acl = Snapshot::capture(&current).unwrap();
-
-                    write(&path, b"again", Some(b"new")).unwrap();
-
-                    let current = File::open(&path).unwrap();
-                    without_acl.verify(&current).unwrap();
-                    assert_eq!(current.get_xattr("system.posix_acl_access").unwrap(), None);
-                    assert_eq!(fs::read(&path).unwrap(), b"again");
-                    ("preserved", "verified")
-                } else {
-                    assert_eq!(current.get_xattr("system.posix_acl_access").unwrap(), None);
-                    ("preserved", "unsupported")
-                }
+                without_acl.verify(&current).unwrap();
+                assert_eq!(current.get_xattr("system.posix_acl_access").unwrap(), None);
+                assert_eq!(fs::read(&path).unwrap(), b"again");
             } else {
-                attempt.assert_native_refusal(&snapshot.unwrap_err());
-                attempt.assert_native_refusal(&result.unwrap_err());
-                ("refused", "not-reached")
-            };
+                assert_eq!(
+                    current
+                        .get_xattr("system.posix_acl_access")
+                        .unwrap_err()
+                        .raw_os_error(),
+                    Some(nix::libc::EOPNOTSUPP)
+                );
+            }
             assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-            println!("workspace-write-acl outcome={outcome} named_acl={named_acl} errno={errno:?}");
         }
     }
 }
