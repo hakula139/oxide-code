@@ -111,6 +111,7 @@ pub struct Prepared {
 // ── Tool Output ──
 
 /// Result returned from a tool execution to the agent loop.
+#[derive(Debug)]
 pub struct ToolOutput {
     pub(crate) content: String,
     pub(crate) is_error: bool,

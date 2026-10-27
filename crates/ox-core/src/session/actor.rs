@@ -28,9 +28,12 @@ pub(super) enum SessionCmd {
         checkpoint: Checkpoint,
         ack: oneshot::Sender<Outcome>,
     },
-    /// Tool-result sidecars from one agent turn.
-    ToolMetadata {
-        items: Vec<(String, ToolMetadata)>,
+    /// One tool round's assistant message, the tool results answering it, and their sidecars, all
+    /// written in that order.
+    RecordRound {
+        assistant: Message,
+        tool_results: Message,
+        metadata: Vec<(String, ToolMetadata)>,
         ack: oneshot::Sender<Outcome>,
     },
     Usage {
@@ -170,8 +173,20 @@ impl Batch {
                 self.acks.push(PendingAck::Outcome(ack));
                 BatchFlow::Continue
             }
-            SessionCmd::ToolMetadata { items, ack } => {
-                self.absorb_tool_metadata(items, ack, now);
+            SessionCmd::RecordRound {
+                assistant,
+                tool_results,
+                metadata,
+                ack,
+            } => {
+                let manual_title_set = shared.manual_title_set();
+                for message in [&assistant, &tool_results] {
+                    let (entries, _) =
+                        state.queue_message_entries(message, None, now, manual_title_set);
+                    self.entries.extend(entries);
+                }
+                self.queue_tool_metadata(metadata, now);
+                self.acks.push(PendingAck::Outcome(ack));
                 BatchFlow::Continue
             }
             SessionCmd::Usage { records, ack } => {
@@ -277,15 +292,8 @@ impl Batch {
         });
     }
 
-    /// Queues one sidecar per item, skipping default metadata since it adds no display fields. Acks
-    /// at once when nothing needs a flush.
-    fn absorb_tool_metadata(
-        &mut self,
-        items: Vec<(String, ToolMetadata)>,
-        ack: oneshot::Sender<Outcome>,
-        now: OffsetDateTime,
-    ) {
-        let queued = self.entries.len();
+    /// Queues one sidecar per item, skipping default metadata since it adds no display fields.
+    fn queue_tool_metadata(&mut self, items: Vec<(String, ToolMetadata)>, now: OffsetDateTime) {
         self.entries.extend(
             items
                 .into_iter()
@@ -296,11 +304,6 @@ impl Batch {
                     timestamp: now,
                 }),
         );
-        if self.entries.len() > queued {
-            self.acks.push(PendingAck::Outcome(ack));
-        } else {
-            _ = ack.send(Outcome { failure: None });
-        }
     }
 }
 
@@ -538,21 +541,23 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn tool_metadata_with_default_short_circuits_without_writing() {
+        async fn round_with_default_sidecars_writes_messages_without_metadata() {
             let dir = tempdir().unwrap();
             let store = test_store(dir.path());
             let state = SessionState::fresh(store.clone(), "m", None);
             let session_id = state.session_id.to_string();
             let (rec, _rec_rx) = record_cmd("trigger");
-            let (meta_ack, meta_rx) = oneshot::channel();
-            let meta_cmd = SessionCmd::ToolMetadata {
-                items: vec![("t1".to_owned(), ToolMetadata::default())],
-                ack: meta_ack,
+            let (round_ack, round_rx) = oneshot::channel();
+            let round_cmd = SessionCmd::RecordRound {
+                assistant: Message::assistant("answer"),
+                tool_results: Message::user("result"),
+                metadata: vec![("t1".to_owned(), ToolMetadata::default())],
+                ack: round_ack,
             };
 
-            drive(state, vec![rec, meta_cmd]).await;
+            drive(state, vec![rec, round_cmd]).await;
 
-            let outcome = meta_rx.await.unwrap();
+            let outcome = round_rx.await.unwrap();
             assert!(outcome.failure.is_none());
             let entries = saved_entries(dir.path(), &session_id);
             assert!(
@@ -560,6 +565,15 @@ mod tests {
                     .iter()
                     .any(|entry| matches!(entry, Entry::ToolResultMetadata { .. })),
                 "default metadata must not be written: {entries:?}",
+            );
+            let data = store.load_session_data(&session_id).unwrap();
+            assert_eq!(
+                data.messages,
+                [
+                    Message::user("trigger"),
+                    Message::assistant("answer"),
+                    Message::user("result"),
+                ],
             );
         }
 

@@ -127,10 +127,13 @@ mod tests {
         }
 
         #[test]
-        fn unknown_id_reports_the_shared_parse_error() {
+        fn unknown_id_forwards_verbatim() {
             assert_eq!(
-                run_execute(&ModelCmd, "gpt-4").unwrap_err(),
-                command::model("gpt-4").unwrap_err(),
+                run_execute(&ModelCmd, "gpt-4").unwrap().into_forward(),
+                Action::Op(Op::SetModel(ConfigPick::Model {
+                    id: ResolvedModelId::new("gpt-4"),
+                    effort: None,
+                })),
             );
         }
     }

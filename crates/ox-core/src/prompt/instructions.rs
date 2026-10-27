@@ -7,6 +7,7 @@ use std::{fs, io, iter};
 use indoc::{formatdoc, indoc};
 
 use crate::permission::project::{ProjectFileError, resolve_project_file};
+use crate::util::git::project_root;
 use crate::util::path::{XdgBase, app_dir, claude_dir};
 
 /// The cross-agent instruction file, which takes precedence wherever it is read.
@@ -42,14 +43,15 @@ pub(crate) struct Found {
     content: String,
 }
 
-/// Loads global instructions, then project instructions from `project_root` through `cwd`,
+/// Loads global instructions, then project instructions from `cwd`'s project root through `cwd`,
 /// collecting warnings for skipped files. Each location uses its first readable, nonblank
 /// candidate, and resolved files load once.
-pub(super) async fn load(cwd: &Path, project_root: &Path) -> (String, Vec<String>) {
-    let slots = candidate_slots(cwd, project_root);
-    let (files, warnings) = tokio::task::spawn_blocking(|| load_files(slots))
-        .await
-        .expect("loading instruction files never panics");
+pub(super) async fn load(cwd: &Path) -> (String, Vec<String>) {
+    let cwd = cwd.to_owned();
+    let (files, warnings) =
+        tokio::task::spawn_blocking(move || load_files(candidate_slots(&cwd, &project_root(&cwd))))
+            .await
+            .expect("loading instruction files never panics");
 
     if files.is_empty() {
         return (String::new(), warnings);
@@ -241,11 +243,11 @@ mod tests {
         #[tokio::test]
         async fn reads_project_instructions_at_the_root() {
             let (home, dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            std::fs::create_dir(dir.path().join(".git")).unwrap();
             std::fs::write(dir.path().join("CLAUDE.md"), "Root rules.").unwrap();
 
             let (result, warnings) =
-                temp_env::async_with_vars(pinned_home(home.path()), load(dir.path(), dir.path()))
-                    .await;
+                temp_env::async_with_vars(pinned_home(home.path()), load(dir.path())).await;
 
             let path = dir.path().join("CLAUDE.md");
             assert_eq!(
@@ -262,13 +264,13 @@ mod tests {
         #[tokio::test]
         async fn loads_the_user_file_once_in_the_home_directory() {
             let home = tempfile::tempdir().unwrap();
+            std::fs::create_dir(home.path().join(".git")).unwrap();
             let claude_dir = home.path().join(".claude");
             std::fs::create_dir(&claude_dir).unwrap();
             std::fs::write(claude_dir.join("CLAUDE.md"), "Global rules.").unwrap();
 
             let (result, _) =
-                temp_env::async_with_vars(pinned_home(home.path()), load(home.path(), home.path()))
-                    .await;
+                temp_env::async_with_vars(pinned_home(home.path()), load(home.path())).await;
 
             assert_eq!(
                 result,
@@ -287,6 +289,7 @@ mod tests {
 
             let (home, root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let root = root.path();
+            std::fs::create_dir(root.join(".git")).unwrap();
             std::fs::write(root.join("AGENTS.md"), "Shared rules.").unwrap();
             symlink("AGENTS.md", root.join("CLAUDE.md")).unwrap();
             let sub = root.join("crates");
@@ -294,8 +297,7 @@ mod tests {
             symlink("../AGENTS.md", sub.join("AGENTS.md")).unwrap();
             std::fs::write(sub.join(".claude/CLAUDE.md"), "Shadowed rules.").unwrap();
 
-            let (result, _) =
-                temp_env::async_with_vars(pinned_home(home.path()), load(&sub, root)).await;
+            let (result, _) = temp_env::async_with_vars(pinned_home(home.path()), load(&sub)).await;
 
             assert_eq!(
                 result,
@@ -314,6 +316,7 @@ mod tests {
             std::fs::write(&secret, "OUTSIDE-FILE-MARKER").unwrap();
             std::fs::write(outside.path().join("CLAUDE.md"), "OUTSIDE-DIR-MARKER").unwrap();
             let project = tempfile::tempdir().unwrap();
+            std::fs::create_dir(project.path().join(".git")).unwrap();
             let sub = project.path().join("sub");
             std::fs::create_dir(&sub).unwrap();
             symlink_file(&secret, &project.path().join("AGENTS.md"));
@@ -321,8 +324,7 @@ mod tests {
             symlink_dir(outside.path(), &sub.join(".claude"));
 
             let (result, warnings) =
-                temp_env::async_with_vars(pinned_home(home.path()), load(&sub, project.path()))
-                    .await;
+                temp_env::async_with_vars(pinned_home(home.path()), load(&sub)).await;
 
             assert_eq!(
                 result,
@@ -345,17 +347,15 @@ mod tests {
         #[tokio::test]
         async fn skips_a_project_link_to_a_file_that_is_not_markdown() {
             let (home, project) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            std::fs::create_dir(project.path().join(".git")).unwrap();
             std::fs::write(project.path().join(".env"), "TOKEN=secret-marker").unwrap();
             symlink_file(
                 &project.path().join(".env"),
                 &project.path().join("AGENTS.md"),
             );
 
-            let (result, warnings) = temp_env::async_with_vars(
-                pinned_home(home.path()),
-                load(project.path(), project.path()),
-            )
-            .await;
+            let (result, warnings) =
+                temp_env::async_with_vars(pinned_home(home.path()), load(project.path())).await;
 
             assert_eq!(result, "");
             assert_eq!(
@@ -370,6 +370,7 @@ mod tests {
         #[tokio::test]
         async fn skips_any_project_link_when_the_root_contains_home() {
             let home = tempfile::tempdir().unwrap();
+            std::fs::create_dir(home.path().join(".git")).unwrap();
             let project = home.path().join("project");
             std::fs::create_dir(&project).unwrap();
             std::fs::write(project.join("notes.md"), "Linked rules.").unwrap();
@@ -377,8 +378,7 @@ mod tests {
             std::fs::write(project.join("CLAUDE.md"), "Plain rules.").unwrap();
 
             let (result, warnings) =
-                temp_env::async_with_vars(pinned_home(home.path()), load(&project, home.path()))
-                    .await;
+                temp_env::async_with_vars(pinned_home(home.path()), load(&project)).await;
 
             assert_eq!(
                 result,
@@ -400,6 +400,7 @@ mod tests {
         #[tokio::test]
         async fn follows_user_file_links_anywhere() {
             let (home, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            std::fs::create_dir(home.path().join(".git")).unwrap();
             std::fs::write(outside.path().join("rules.txt"), "Linked global rules.").unwrap();
             let claude_dir = home.path().join(".claude");
             std::fs::create_dir(&claude_dir).unwrap();
@@ -409,8 +410,7 @@ mod tests {
             );
 
             let (result, warnings) =
-                temp_env::async_with_vars(pinned_home(home.path()), load(home.path(), home.path()))
-                    .await;
+                temp_env::async_with_vars(pinned_home(home.path()), load(home.path())).await;
 
             assert_eq!(
                 result,

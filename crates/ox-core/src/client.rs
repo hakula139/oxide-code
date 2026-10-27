@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 
 use crate::message::{ContentBlock, Message};
@@ -79,8 +80,10 @@ pub(crate) struct Response {
 /// Why the model stopped. Variants follow Anthropic's `stop_reason` values, which its wire
 /// deserializes directly. `Unknown` keeps a future value from failing the whole `message_delta`
 /// frame, which would also drop its usage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, IntoStaticStr)]
+#[cfg_attr(test, derive(strum::VariantArray))]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum StopReason {
     EndTurn,
     MaxTokens,
@@ -92,6 +95,13 @@ pub(crate) enum StopReason {
     ModelContextWindowExceeded,
     #[serde(other)]
     Unknown,
+}
+
+impl StopReason {
+    /// The wire's own name for this reason.
+    pub(crate) fn as_str(self) -> &'static str {
+        self.into()
+    }
 }
 
 /// Structured refusal detail. Both fields are informational and may be absent.
@@ -145,6 +155,36 @@ pub(crate) mod testing {
                 resets_at: 4_102_444_800,
             }),
             seven_day: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use strum::VariantArray as _;
+
+    use super::*;
+
+    mod stop_reason {
+        use super::*;
+
+        mod as_str {
+            use super::*;
+
+            #[test]
+            fn names_each_variant_the_way_its_wire_value_does() {
+                for &reason in StopReason::VARIANTS {
+                    if reason == StopReason::Unknown {
+                        continue;
+                    }
+                    let wire = format!("\"{}\"", reason.as_str());
+                    assert_eq!(
+                        serde_json::from_str::<StopReason>(&wire).unwrap(),
+                        reason,
+                        "{reason:?}",
+                    );
+                }
+            }
         }
     }
 }

@@ -11,9 +11,10 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use ox_core::engine::TurnEnd;
 use ox_core::permission::{Basis, SessionGrant};
-use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult, notice};
+use ox_core::protocol::{
+    ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult, TurnEnd, notice,
+};
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use ox_core::session::entry::ArchiveState;
 use ox_core::tool::tasks::{Progress, Task};

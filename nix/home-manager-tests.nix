@@ -29,6 +29,24 @@ let
       ];
     };
 
+  # Home Manager throws on a failed assertion before exposing `config`, so evaluate the module
+  # without its surrounding modules to read its own entries.
+  evalRawHome =
+    options:
+    lib.evalModules {
+      modules = [
+        homeModule
+        {
+          options.assertions = lib.mkOption {
+            type = lib.types.listOf lib.types.unspecified;
+            default = [ ];
+          };
+        }
+        { _module.check = false; }
+        { programs.oxide-code = options; }
+      ];
+    };
+
   oxTargets = hm: builtins.filter (lib.hasPrefix "ox/") (builtins.attrNames hm.xdg.configFile);
 
   stub = pkgs.writeShellScriptBin "ox" ''
@@ -181,15 +199,15 @@ let
     };
 
     testCheckingRequiresAPackage = {
-      expr =
-        (builtins.tryEval
-          (evalHome {
+      expr = map (assertion: assertion.message) (
+        builtins.filter (assertion: !assertion.assertion)
+          (evalRawHome {
             enable = true;
             package = null;
             checkConfig = true;
-          }).activationPackage.drvPath
-        ).success;
-      expected = false;
+          }).config.assertions
+      );
+      expected = [ "programs.oxide-code.checkConfig requires a package." ];
     };
   };
 in

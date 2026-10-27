@@ -71,7 +71,7 @@ impl Engine {
     }
 
     async fn roll_session(&mut self, sink: &dyn EventSink, old_session: ArchiveState) {
-        super::settle_file_writes(&self.file_tracker).await;
+        self.file_tracker.drain_writes().await;
         let git_branch = current_branch(self.cwd()).await;
         let outcome = handle::roll(
             &mut self.session,
@@ -127,7 +127,7 @@ impl Engine {
     /// Finalizes the live session and swaps to the one `target` names. A prefix must match one
     /// saved session other than the live one.
     async fn roll_into(&mut self, target: ResumeTarget) -> Result<RollIntoOutcome> {
-        super::settle_file_writes(&self.file_tracker).await;
+        self.file_tracker.drain_writes().await;
         let path = match target {
             ResumeTarget::Path(path) => path,
             ResumeTarget::Prefix(prefix) => {
@@ -139,7 +139,6 @@ impl Engine {
     }
 
     async fn adopt_session(&mut self, sink: &dyn EventSink, transcript: LoadedTranscript) {
-        super::settle_file_writes(&self.file_tracker).await;
         self.shells.stop_all().await;
         let LoadedTranscript {
             messages,
@@ -838,7 +837,7 @@ mod tests {
 
                 assert_eq!(
                     engine.context_estimate,
-                    Some(request_tokens(&engine.prompt, &[], &engine.messages))
+                    request_tokens(&engine.prompt, &[], &engine.messages)
                 );
                 assert!(auto_compaction_due(
                     engine.auto_compaction(),
@@ -1039,7 +1038,7 @@ mod tests {
                 let displayed_usage = TokenUsage::new(90_000, 9);
                 engine.messages = vec![Message::user("still here")];
                 engine.auto_compaction_failures = AutoCompactFailures::new(2);
-                engine.context_estimate = Some(context_estimate);
+                engine.context_estimate = context_estimate;
                 engine.displayed_usage = Some(displayed_usage);
                 engine.total_estimated_cost_usd = 1.23;
                 let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
@@ -1057,7 +1056,7 @@ mod tests {
                 assert_eq!(engine.session.session_id(), original_id);
                 assert_eq!(engine.messages.len(), 1);
                 assert_eq!(engine.auto_compaction_failures, AutoCompactFailures::new(2));
-                assert_eq!(engine.context_estimate, Some(context_estimate));
+                assert_eq!(engine.context_estimate, context_estimate);
                 assert_eq!(engine.displayed_usage, Some(displayed_usage));
                 assert!((engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
                 assert_eq!(engine.policy.session_allow(), [rule]);

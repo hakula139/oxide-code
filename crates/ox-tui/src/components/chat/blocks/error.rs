@@ -68,16 +68,16 @@ mod tests {
 
         #[test]
         fn multi_line_message_keeps_each_line_on_its_own_row() {
-            // Slash-command errors emit markdown bullets (`/model gpt-4` → "Unknown model: ...").
-            // Joining them at render time would collapse the bullets into one wrapped line.
+            // Slash-command errors emit markdown bullets (an ambiguous `/model` lists the rows
+            // it matches). Joining them at render time would collapse the bullets onto one line.
             let theme = Theme::default();
             let block = ErrorBlock::new(indoc! {"
-                Unknown model: `gpt-4`. Valid:
+                Model `o` is ambiguous. Pick one or use a short alias (`fable`, `opus`, `sonnet`, `haiku`):
 
                 - `claude-opus-5-5` — Claude Opus 5.5
-                - `claude-haiku-5-5` — Claude Haiku 5.5"
+                - `claude-sonnet-5-5` — Claude Sonnet 5.5"
             });
-            let lines = block.render(&RenderCtx::new(80, &theme));
+            let lines = block.render(&RenderCtx::new(120, &theme));
             let bodies: Vec<&str> = lines
                 .iter()
                 .map(|l| l.spans.last().expect("non-empty").content.as_ref())
@@ -85,10 +85,10 @@ mod tests {
             assert_eq!(
                 bodies,
                 vec![
-                    "Unknown model: `gpt-4`. Valid:",
+                    "Model `o` is ambiguous. Pick one or use a short alias (`fable`, `opus`, `sonnet`, `haiku`):",
                     "",
                     "- `claude-opus-5-5` — Claude Opus 5.5",
-                    "- `claude-haiku-5-5` — Claude Haiku 5.5",
+                    "- `claude-sonnet-5-5` — Claude Sonnet 5.5",
                 ],
             );
         }
