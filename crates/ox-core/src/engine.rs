@@ -715,7 +715,6 @@ fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> 
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
-    use std::process::Command;
     use std::time::Duration;
 
     use anyhow::anyhow;
@@ -763,7 +762,7 @@ mod tests {
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
     use crate::tool::bash::background::testing::shell;
-    use crate::tool::local_testing::{WorkspaceWrite, ctx};
+    use crate::tool::local_testing::ctx;
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
@@ -1031,7 +1030,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let (snapshots, kept, drifted) = tracked_files(dir.path());
-                let mut config = test_config("http://127.0.0.1:9".to_owned(), api_key(), MODEL);
+                let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
                 config.workspace = Workspace::new(dir.path());
 
                 let engine = Engine::new(
@@ -2069,25 +2068,15 @@ mod tests {
             release: Arc<Notify>,
         }
 
-        fn assert_workspace_write(
-            attempt: &WorkspaceWrite,
-            path: &Path,
-            tracker: &FileTracker,
-            expected: &[u8],
-        ) {
-            if attempt.acl_available {
-                assert_eq!(std::fs::read(path).unwrap(), expected);
-                assert_eq!(
-                    tracker.verify_current_content(path, expected, GatePurpose::Write),
-                    Ok(())
-                );
-            } else {
-                attempt.assert_unchanged();
-                assert_eq!(tracker.snapshot_all(), []);
-            }
+        fn assert_workspace_write(path: &Path, tracker: &FileTracker, expected: &[u8]) {
+            assert_eq!(std::fs::read(path).unwrap(), expected);
+            assert_eq!(
+                tracker.verify_current_content(path, expected, GatePurpose::Write),
+                Ok(())
+            );
         }
 
-        fn assert_resumed_write(attempt: &WorkspaceWrite, sink: &CapturingSink, path: &Path) {
+        fn assert_resumed_write(sink: &CapturingSink) {
             let events = sink.events();
             let result = events
                 .iter()
@@ -2096,12 +2085,8 @@ mod tests {
                     _ => None,
                 })
                 .unwrap();
-            if attempt.acl_available {
-                assert!(!result.is_error, "{}", result.content);
-            } else {
-                assert!(result.is_error);
-                attempt.assert_refusal(&result.content, path.to_str().unwrap());
-            }
+
+            assert!(!result.is_error, "{}", result.content);
         }
 
         impl Tool for BlockedWriteTool {
@@ -2141,12 +2126,7 @@ mod tests {
             }
         }
 
-        async fn assert_workspace_writes_drained(
-            log_path: &Path,
-            name: &str,
-            op: Op,
-            expected: TurnEnd,
-        ) {
+        async fn assert_workspace_writes_drained(name: &str, op: Op, expected: TurnEnd) {
             let server = MockServer::start().await;
             mount_tool_call_once(
                 &server,
@@ -2161,7 +2141,6 @@ mod tests {
             let session_id = engine.session_id().to_owned();
             let parent = dir.path().join("nested");
             let path = parent.join("notes.txt");
-            let attempt = WorkspaceWrite::new(&path);
             let tracker = Arc::clone(&engine.file_tracker);
             let (started, mut started_rx) = mpsc::unbounded_channel();
             let release = Arc::new(Notify::new());
@@ -2197,11 +2176,7 @@ mod tests {
             };
             assert_eq!(ended, expected, "{name}");
 
-            assert_workspace_write(&attempt, &path, &tracker, b"committed");
-            if !attempt.acl_available {
-                let log = std::fs::read_to_string(log_path).unwrap();
-                attempt.assert_logged_refusal(&log, "toolu_write");
-            }
+            assert_workspace_write(&path, &tracker, b"committed");
             assert_eq!(
                 sink.events()
                     .iter()
@@ -2227,11 +2202,11 @@ mod tests {
                     end = next.as_mut() => panic!("next turn ended before its write started: {end:?}"),
                 };
                 assert!(!token.is_cancelled(), "{name}");
-                assert_workspace_write(&attempt, &path, &tracker, b"committed");
+                assert_workspace_write(&path, &tracker, b"committed");
                 release.notify_one();
                 assert_eq!(next.await, TurnEnd::Completed, "{name}");
-                assert_resumed_write(&attempt, &sink, &path);
-                assert_workspace_write(&attempt, &path, &tracker, b"later");
+                assert_resumed_write(&sink);
+                assert_workspace_write(&path, &tracker, b"later");
             }
             assert_eq!(engine.finalize().await, None, "{name}");
             assert_eq!(
@@ -2243,42 +2218,12 @@ mod tests {
 
         #[tokio::test]
         async fn interrupt_and_shutdown_wait_for_workspace_writes_before_ending() {
-            // Tracing caches callsite interest process-wide, including other test threads.
-            const CHILD: &str = "WORKSPACE_WRITE_DRAIN_TEST_CHILD";
-            if std::env::var_os(CHILD).is_none() {
-                let thread = std::thread::current();
-                let name = thread.name().unwrap();
-                let output = Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", name])
-                    .env(CHILD, "1")
-                    .output()
-                    .unwrap();
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                assert!(output.status.success(), "{stdout}{stderr}");
-                assert!(stdout.contains(&format!("test {name} ... ok")), "{stdout}");
-                return;
-            }
-
-            let dir = canonical_tempdir();
-            let log_path = dir.path().join("events.log");
-            let subscriber = tracing_subscriber::fmt()
-                .without_time()
-                .with_ansi(false)
-                .with_writer(std::fs::File::create(&log_path).unwrap())
-                .finish();
-            tracing::subscriber::set_global_default(subscriber).unwrap();
-
             with_pinned_home(async {
                 for (name, op, expected) in [
                     ("interrupt", Op::Interrupt, TurnEnd::Cancelled),
                     ("shutdown", Op::Shutdown, TurnEnd::Shutdown),
                 ] {
-                    Box::pin(assert_workspace_writes_drained(
-                        &log_path, name, op, expected,
-                    ))
-                    .await;
+                    Box::pin(assert_workspace_writes_drained(name, op, expected)).await;
                 }
             })
             .await;
@@ -2366,16 +2311,52 @@ mod tests {
             )
         }
 
-        fn event_types(events: &[Event]) -> Vec<String> {
-            events
-                .iter()
-                .map(|event| {
-                    serde_json::to_value(event).unwrap()["type"]
-                        .as_str()
-                        .unwrap()
-                        .to_owned()
-                })
-                .collect()
+        /// Each event variant's `snake_case` name, so a test can compare a sequence by name.
+        fn event_type(event: &Event) -> &'static str {
+            match event {
+                Event::StreamToken(_) => "stream_token",
+                Event::ThinkingToken(_) => "thinking_token",
+                Event::ProgressUpdate(_) => "progress_update",
+                Event::Retrying(_) => "retrying",
+                Event::ToolCallStart(_) => "tool_call_start",
+                Event::ToolCallEnd(_) => "tool_call_end",
+                Event::PromptDrained(_) => "prompt_drained",
+                Event::TurnComplete => "turn_complete",
+                Event::TurnRolledBack => "turn_rolled_back",
+                Event::PromptUnsent => "prompt_unsent",
+                Event::TurnFailed(_) => "turn_failed",
+                Event::UsageUpdated(_) => "usage_updated",
+                Event::RateLimitsUpdated(_) => "rate_limits_updated",
+                Event::Cancelled => "cancelled",
+                Event::AutoCompactionStarted => "auto_compaction_started",
+                Event::AutoCompactionPaused { .. } => "auto_compaction_paused",
+                Event::AutoCompactionResumed => "auto_compaction_resumed",
+                Event::SummaryToken(_) => "summary_token",
+                Event::SummaryDiscarded => "summary_discarded",
+                Event::SessionTitleUpdated { .. } => "session_title_updated",
+                Event::RenameFailed(_) => "rename_failed",
+                Event::ArchiveUpdated { .. } => "archive_updated",
+                Event::SessionRolled { .. } => "session_rolled",
+                Event::SessionResumed { .. } => "session_resumed",
+                Event::SessionCompacted { .. } => "session_compacted",
+                Event::SessionReady => "session_ready",
+                Event::ConfigChanged { .. } => "config_changed",
+                Event::ModeChanged(_) => "mode_changed",
+                Event::LoginStarted { .. } => "login_started",
+                Event::SignedIn { .. } => "signed_in",
+                Event::LoginRestored { .. } => "login_restored",
+                Event::SignedOut { .. } => "signed_out",
+                Event::Notice(_) => "notice",
+                Event::Error(_) => "error",
+                Event::ApprovalRequested { .. } => "approval_requested",
+                Event::SessionRulesUpdated(_) => "session_rules_updated",
+                Event::TasksUpdated(_) => "tasks_updated",
+                Event::BackgroundShellsUpdated(_) => "background_shells_updated",
+            }
+        }
+
+        fn event_types(events: &[Event]) -> Vec<&'static str> {
+            events.iter().map(event_type).collect()
         }
 
         #[tokio::test]
@@ -3493,7 +3474,6 @@ mod tests {
                 let opus = ModelSpec::resolve(MODEL);
                 engine.compaction =
                     CompactionConfig::with_default_policy(&opus, engine.client.max_tokens());
-                let opus_compaction = engine.compaction.auto;
                 let sink = CapturingSink::default();
 
                 for id in ["custom-model", MODEL] {
@@ -3516,11 +3496,10 @@ mod tests {
                          Effort cleared (model has no effort levels). \
                          Auto compaction off (no threshold)."
                             .to_owned(),
-                        format!(
-                            "Switched to Claude Opus 5.5 (claude-opus-5-5) · \
-                             effort medium (model default). \
-                             Auto compaction {opus_compaction}.",
-                        ),
+                        "Switched to Claude Opus 5.5 (claude-opus-5-5) · \
+                         effort medium (model default). \
+                         Auto compaction at 986k tokens."
+                            .to_owned(),
                     ],
                 );
             })

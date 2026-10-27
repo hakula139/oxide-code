@@ -430,6 +430,8 @@ fn format_cost(cost: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use ox_core::util::git::testing::pull_request;
+
     use super::*;
 
     mod render {
@@ -471,7 +473,7 @@ mod tests {
         }
 
         fn render_text(segments: Vec<StatusLineSegment>, width: u16) -> String {
-            let pr = pr_state(86);
+            let pr = pull_request(86);
             let rendered = StatusLine::new(segments).render(
                 &Theme::default(),
                 &StatusLineState {
@@ -490,15 +492,6 @@ mod tests {
                 width,
             );
             text_of(&rendered)
-        }
-
-        fn pr_state(number: u64) -> PullRequest {
-            PullRequest {
-                number,
-                url: format!("https://github.com/o/r/pull/{number}"),
-                checks: None,
-                review: None,
-            }
         }
 
         #[test]
@@ -521,7 +514,7 @@ mod tests {
 
         #[test]
         fn pull_request_reports_hyperlink_range() {
-            let pr = pr_state(86);
+            let pr = pull_request(86);
             let rendered = render(
                 vec![StatusLineSegment::PullRequest],
                 &StatusLineState {
@@ -556,7 +549,7 @@ mod tests {
             ] {
                 let pr = PullRequest {
                     checks: Some(checks),
-                    ..pr_state(86)
+                    ..pull_request(86)
                 };
                 let rendered = render(
                     vec![StatusLineSegment::PullRequestChecks],
@@ -597,7 +590,7 @@ mod tests {
             ] {
                 let pr = PullRequest {
                     review: Some(review),
-                    ..pr_state(86)
+                    ..pull_request(86)
                 };
                 let rendered = render(
                     vec![StatusLineSegment::PullRequestReview],
@@ -618,7 +611,7 @@ mod tests {
 
         #[test]
         fn pull_request_metadata_hides_without_checks_or_review() {
-            let pr = pr_state(86);
+            let pr = pull_request(86);
             let rendered = render(
                 vec![
                     StatusLineSegment::PullRequestChecks,
@@ -887,7 +880,7 @@ mod tests {
             let pr = PullRequest {
                 checks: Some(Checks::Passing),
                 review: Some(ReviewDecision::Approved),
-                ..pr_state(86)
+                ..pull_request(86)
             };
             let state = StatusLineState {
                 effort: Some(Effort::High),

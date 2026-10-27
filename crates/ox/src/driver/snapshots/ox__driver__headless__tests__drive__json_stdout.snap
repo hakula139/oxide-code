@@ -2,4 +2,4 @@
 source: crates/ox/src/driver/headless.rs
 expression: stdout
 ---
-{"type":"result","data":{"stop_reason":"completed","error":null,"message":"Done.","usage":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018000000000000002},"session_id":"session-1"}}
+{"type":"result","data":{"stop_reason":"completed","error":null,"session_write_error":null,"message":"Done.","usage":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018000000000000002},"session_id":"session-1"}}

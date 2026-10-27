@@ -241,7 +241,7 @@ mod tests {
                 "diff --git a/x b/x\n@@ -0,0 +1,6000 @@\n{}",
                 "+added line\n".repeat(6000),
             );
-            let diff = WorkingTreeDiff::new(&[&diff], "", "`git diff HEAD`");
+            let diff = WorkingTreeDiff::new(&[&diff], "", "`git diff HEAD`", false);
             let note = diff
                 .truncation
                 .as_ref()

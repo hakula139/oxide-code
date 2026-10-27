@@ -8,18 +8,23 @@ use super::auth::{Auth, AuthSource};
 use super::compaction::CompactionConfig;
 use super::gateway::GatewayCompat;
 use super::provenance::{Provenance, Source};
-use super::{Config, ConfigSnapshot, DEFAULT_THEME, StatusLineSegment, ThemeConfig};
+use super::{BaseUrl, Config, ConfigSnapshot, DEFAULT_THEME, StatusLineSegment, ThemeConfig};
 use crate::model::{ModelSpec, PromptCacheTtl};
 use crate::permission::{Policy, Workspace};
 
-/// Minimal [`Config`] signed in with `auth` against `base_url`: no effort, compaction off, a
-/// 128-token output cap, and the default permission policy in `/repo`.
-pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
+/// A [`BaseUrl`] parsed from `raw`, for fixtures that supply a valid URL.
+pub(crate) fn base_url(raw: impl AsRef<str>) -> BaseUrl {
+    BaseUrl::parse(raw.as_ref()).expect("test base URL must be valid")
+}
+
+/// Minimal [`Config`] signed in with `auth` against `url`: no effort, compaction off, a 128-token
+/// output cap, and the default permission policy in `/repo`.
+pub(crate) fn test_config(url: impl AsRef<str>, auth: Auth, model: &str) -> Config {
     Config {
         auth: Some(auth),
         pending_auth: None,
         signed_out: None,
-        base_url: base_url.into(),
+        base_url: base_url(url),
         extra_ca_certs: None,
         gateway: GatewayCompat {
             custom_headers: HeaderMap::new(),

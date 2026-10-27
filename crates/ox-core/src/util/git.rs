@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
 use serde::Deserialize;
+use tokio::io::AsyncReadExt as _;
 use tracing::debug;
 
 use super::text::truncate_to_width;
@@ -224,6 +225,54 @@ fn summarize_checks(mut checks: Vec<CheckView>) -> Option<Checks> {
 /// without ox's [`secret_env_vars`], killing the child if the caller drops the future. Git runs
 /// commands a repository's own config names, so it must not hand them ox's credentials.
 pub async fn output_async(program: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+    command(program, args, cwd).output().await
+}
+
+/// Runs `program` as [`output_async`] does, but reads at most `limit` bytes of stdout and then
+/// kills the child, so a runaway output is bounded before the caller buffers it. Returns the
+/// output with the stdout prefix and whether the process wrote more. Stderr is read to the end,
+/// since a program on this path writes little there.
+pub async fn output_async_capped(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    limit: usize,
+) -> io::Result<(Output, bool)> {
+    let mut child = command(program, args, cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout_pipe = child.stdout.take().expect("stdout is piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr is piped");
+    let stderr = tokio::spawn(async move {
+        let mut stderr = Vec::new();
+        _ = stderr_pipe.read_to_end(&mut stderr).await;
+        stderr
+    });
+
+    let mut stdout = Vec::new();
+    let mut bounded = stdout_pipe.take((limit as u64).saturating_add(1));
+    bounded.read_to_end(&mut stdout).await?;
+    let truncated = stdout.len() > limit;
+    stdout.truncate(limit);
+    drop(bounded);
+
+    if truncated {
+        child.kill().await?;
+    }
+    let status = child.wait().await?;
+    let stderr = stderr.await.unwrap_or_default();
+    Ok((
+        Output {
+            status,
+            stdout,
+            stderr,
+        },
+        truncated,
+    ))
+}
+
+fn command(program: &str, args: &[&str], cwd: &Path) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(program);
     command
         .args(args)
@@ -233,7 +282,7 @@ pub async fn output_async(program: &str, args: &[&str], cwd: &Path) -> io::Resul
     for var in secret_env_vars() {
         command.env_remove(var);
     }
-    command.output().await
+    command
 }
 
 /// Runs `program` with `args` in `cwd` through [`output_async`] and returns the output of a
@@ -301,6 +350,8 @@ pub mod testing {
     use std::path::Path;
     use std::process::Command;
 
+    use super::PullRequest;
+
     /// Clears git's repository-local variables (`git rev-parse --local-env-vars`) and discovery
     /// ceiling, and skips the system and global configs.
     const ISOLATED_GIT_ENV: [(&str, Option<&str>); 18] = [
@@ -341,6 +392,16 @@ pub mod testing {
     /// `git rebase --exec` exports `GIT_DIR`, which would otherwise aim them at the caller's repo.
     pub async fn with_isolated_git_env_async<F: Future>(future: F) -> F::Output {
         temp_env::async_with_vars(ISOLATED_GIT_ENV, future).await
+    }
+
+    /// A pull request numbered `number` with a GitHub URL and no checks or review.
+    pub fn pull_request(number: u64) -> PullRequest {
+        PullRequest {
+            number,
+            url: format!("https://github.com/o/r/pull/{number}"),
+            checks: None,
+            review: None,
+        }
     }
 }
 

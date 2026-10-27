@@ -472,33 +472,14 @@ pub(crate) mod local_testing {
     use crate::permission::rule::Rule;
     use crate::permission::{Access, Mode, PermissionClass, Policy, ReadFilter, Workspace};
 
-    /// Native ACL availability and original-file evidence for one workspace write attempt.
+    /// Original-file evidence for one workspace write attempt.
     pub(crate) struct WorkspaceWrite {
-        pub(crate) acl_available: bool,
         path: PathBuf,
         original: Option<(File, fs::Metadata, Vec<u8>)>,
     }
 
     impl WorkspaceWrite {
         pub(crate) fn new(path: &Path) -> Self {
-            #[cfg(target_os = "linux")]
-            let acl_available = {
-                use xattr::FileExt as _;
-
-                let existing = path.ancestors().find(|path| path.exists()).unwrap();
-                match File::open(existing)
-                    .unwrap()
-                    .get_xattr("system.posix_acl_access")
-                {
-                    Ok(_) => true,
-                    Err(error) => {
-                        assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
-                        false
-                    }
-                }
-            };
-            #[cfg(not(target_os = "linux"))]
-            let acl_available = true;
             let original = match File::open(path) {
                 Ok(file) => {
                     let metadata = file.metadata().unwrap();
@@ -509,44 +490,9 @@ pub(crate) mod local_testing {
                 Err(error) => panic!("cannot inspect {}: {error}", path.display()),
             };
             Self {
-                acl_available,
                 path: path.to_owned(),
                 original,
             }
-        }
-
-        pub(crate) fn assert_native_refusal(&self, error: &io::Error) {
-            assert!(!self.acl_available);
-            assert_eq!(error.raw_os_error(), acl_unavailable_error().raw_os_error());
-            self.assert_unchanged();
-        }
-
-        pub(crate) fn assert_refusal(&self, error: &str, shown: &str) {
-            assert!(!self.acl_available);
-            assert_eq!(
-                error,
-                format!("Failed to write {shown}: {}", acl_unavailable_error())
-            );
-            self.assert_unchanged();
-        }
-
-        pub(crate) fn assert_logged_refusal(&self, log: &str, tool_use_id: &str) {
-            assert!(!self.acl_available);
-            let error = format!(
-                "error=Failed to write {}: {}",
-                self.path.display(),
-                acl_unavailable_error()
-            );
-            let call = format!("tool_use_id=\"{tool_use_id}\"");
-            assert!(
-                log.lines().any(|line| {
-                    line.contains("workspace write failed")
-                        && line.contains(&call)
-                        && line.contains(&error)
-                }),
-                "{log}"
-            );
-            self.assert_unchanged();
         }
 
         pub(crate) fn assert_unchanged(&self) {
@@ -593,17 +539,6 @@ pub(crate) mod local_testing {
                     .collect();
                 assert_eq!(temporary, [] as [std::ffi::OsString; 0]);
             }
-        }
-    }
-
-    fn acl_unavailable_error() -> io::Error {
-        #[cfg(target_os = "linux")]
-        {
-            io::Error::from_raw_os_error(nix::libc::EOPNOTSUPP)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            panic!("the required POSIX ACL query exists only on Linux")
         }
     }
 

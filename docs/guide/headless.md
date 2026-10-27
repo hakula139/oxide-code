@@ -10,7 +10,7 @@ ox -p "Fix the failing test" --output stream-json   # Stream every event as a JS
 ox -c -p "Run the tests again"                      # Continue the latest session
 ```
 
-- **Input**: When stdin is not a terminal, `ox -p` reads it to the end and attaches it after the prompt in a `<stdin>` block, so the model can tell your instruction from the data. Piped stdin without a prompt, as in `ox -p < task.md`, is the prompt itself, and a run with neither fails with status `2`. Bytes that are not valid UTF-8 are replaced with U+FFFD, so a stray byte in a diff or log does not end the run. A script or program that runs `ox` with an open stdin it never closes, such as a pipe it never writes to, leaves `ox` waiting, and after 3 seconds `ox` says so on stderr. Redirect stdin from `/dev/null` to keep it away from `ox`.
+- **Input**: When stdin is not a terminal, `ox -p` reads it to the end and attaches it after the prompt in a `<stdin>` block, so the model can tell your instruction from the data. Piped stdin without a prompt, as in `ox -p < task.md`, is the prompt itself, and a run with neither fails with status `2`. A prompt that is exactly a slash command's name also fails with status `2`, so pass `--` before the word to send it. Bytes that are not valid UTF-8 are replaced with U+FFFD, so a stray byte in a diff or log does not end the run. A script or program that runs `ox` with an open stdin it never closes, such as a pipe it never writes to, leaves `ox` waiting, and after 3 seconds `ox` says so on stderr. Redirect stdin from `/dev/null` to keep it away from `ox`.
 - **Sessions**: Each run starts and saves a new session, unless `-c` continues the latest one or `-r <id-prefix>` names one. Resume a run's session later with `ox -r <id-prefix>`, in the TUI or with another `-p`.
 - **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial names the user config change that would permit the call when one would, such as an allow pattern, turning off a built-in rule, or both, and otherwise the rule that made it ask. Add `allow` patterns for the calls your script needs, as described in [Rules](permissions.md#rules). Pass `--mode plan` to keep a run read-only, or `--mode yolo` to run every tool call that no deny rule or ask rule of yours holds. In `manual`, a `bash` command that uses shell syntax `ox` cannot analyze is denied, and its denial names the construct and asks the model to rewrite it as plain commands. Since `yolo` runs whatever an `exec` pattern misses, run untrusted work inside a sandbox or container, as [Modes](permissions.md#modes) explains.
 
@@ -26,12 +26,14 @@ ox -c -p "Run the tests again"                      # Continue the latest sessio
 
 Every format also writes tool calls, the task list, retries, notices, and errors as text to stderr, plus the model's progress notes unless a `text` run shows thinking on stdout because `tui.show_thinking` is set. When parsing JSON, read stdout alone.
 
+If the program reading stdout closes it, such as a pipe into `head -5`, a `text` or `stream-json` run stops its turn at the next safe point, as Ctrl+C does, and still saves the session. A `json` run writes nothing until the end, so it finishes the turn and then fails to print the result.
+
 ## Exit Status
 
 | Status              | Meaning                                                                                                              |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `0`                 | The turn completed                                                                                                   |
-| `1`                 | The turn failed, output could not be written, or `ox` could not start the turn                                       |
+| `1`                 | The turn failed, output could not be written, the session could not be saved, or `ox` could not start the turn       |
 | `2`                 | The command line was invalid, such as an unknown `--output`, or gave no prompt                                       |
 | `101`               | `ox` crashed, and the JSON formats still print a `failed` result                                                     |
 | `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM stopped the run, and `ox` died by that signal, which shells report as 128 plus its number |
@@ -48,6 +50,7 @@ The `json` and `stream-json` formats emit this result shape:
   "data": {
     "stop_reason": "completed",
     "error": null,
+    "session_write_error": null,
     "message": "Done.",
     "usage": {
       "context_tokens": 1000,
@@ -59,13 +62,14 @@ The `json` and `stream-json` formats emit this result shape:
 }
 ```
 
-| Field         | Description                                                                                                                          |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `stop_reason` | `completed` when the reply finished, `failed` when an error or a refusal ended the turn, or `shutdown` when a signal stopped the run |
-| `error`       | Why the turn failed, or `null`                                                                                                       |
-| `message`     | The text the model wrote after its last tool call, or `null` unless the turn completed                                               |
-| `usage`       | The latest usage, or `null` when no request reported any                                                                             |
-| `session_id`  | The run's session, which `ox -r <id-prefix>` resumes                                                                                 |
+| Field                 | Description                                                                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `stop_reason`         | `completed` when the reply finished, `failed` when an error or a refusal ended the turn, or `shutdown` when a signal stopped the run |
+| `error`               | Why the turn failed, or `null`                                                                                                       |
+| `session_write_error` | Why the session could not be saved, which leaves part of the run missing from its transcript, or `null`                              |
+| `message`             | The text the model wrote after its last tool call, or `null` unless the turn completed                                               |
+| `usage`               | The latest usage, or `null` when no request reported any                                                                             |
+| `session_id`          | The run's session, which `ox -r <id-prefix>` resumes                                                                                 |
 
 `usage` contains the following fields, each set to `null` when unknown:
 
@@ -154,4 +158,4 @@ Display text can change in any release. This includes a tool call's `icon`, `lab
 - **Commands**: A subset of the slash commands runs, as listed in [When Commands Run](slash-commands.md#when-commands-run).
 - **Approvals**: In a terminal, a call that needs approval prints its command or diff, and the rule that made it ask when one did, then waits for a letter: `y` approves, `a` allows matching calls for the rest of the session when the call offers that, `n` denies, `f` denies with feedback for the model, and `x` aborts the turn. With piped input, no approval is requested, and those calls are denied as in a `-p` run.
 - **Interrupting**: In a terminal, **Ctrl+C** during a turn stops it and returns to the prompt, and at the prompt it discards the line, as in a shell. With piped input, **Ctrl+C** ends the run.
-- **Exit status**: The end of input or `/exit` exits with `1` if a prompt failed, a command was rejected, or output could not be written, and with `0` otherwise. A signal that ends the run makes `ox` die by that signal, which a shell reports as the status in the [table](#exit-status).
+- **Exit status**: The end of input or `/exit` exits with `1` if a prompt failed, a command was rejected, output could not be written, or the session could not be saved, and with `0` otherwise. A signal that ends the run makes `ox` die by that signal, which a shell reports as the status in the [table](#exit-status).

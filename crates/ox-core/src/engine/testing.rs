@@ -17,6 +17,7 @@ use crate::client::anthropic::testing::{
 use crate::config::oauth::ClaudeCodeKeychain;
 use crate::config::testing::test_config;
 use crate::permission::Workspace;
+use crate::protocol::Event;
 use crate::session::handle::{self, LoadedTranscript};
 use crate::session::store::SessionStore;
 use crate::tool::ToolRegistry;
@@ -47,6 +48,25 @@ pub async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engin
     "http://127.0.0.1:9/token".clone_into(&mut engine.oauth_token_url);
     engine.claude_code_keychain = ClaudeCodeKeychain::NONE;
     engine.with_tools(ToolRegistry::new(Vec::new()))
+}
+
+/// An [`EngineHandle`] that ends each prompt at once and reports `failure` from shutdown, standing
+/// in for an engine whose session cannot be saved.
+pub fn unsaved_session_handle(failure: &str) -> EngineHandle {
+    let (ops, mut pending) = mpsc::channel(1);
+    let (events, received) = mpsc::unbounded_channel();
+    let failure = failure.to_owned();
+    let task = tokio::spawn(async move {
+        while pending.recv().await.is_some() {
+            _ = events.send(Event::TurnComplete);
+        }
+        Some(failure)
+    });
+    EngineHandle {
+        ops,
+        events: received,
+        task: EngineTask(task),
+    }
 }
 
 impl Engine {

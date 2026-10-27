@@ -1957,6 +1957,7 @@ dependencies = [
  "unicode-normalization",
  "unicode-segmentation",
  "unicode-width",
+ "url",
  "uuid",
  "winapi-util",
  "windows-sys 0.61.2",

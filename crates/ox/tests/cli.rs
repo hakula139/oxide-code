@@ -851,12 +851,12 @@ fn config_check_lists_each_file_read_in_load_order_and_writes_nothing() {
     assert_eq!(
         lines[..2],
         [
-            "Read ~/.config/ox/config.toml",
-            "Read ~/.config/ox/config.d/50-a.toml",
+            "Loaded ~/.config/ox/config.toml",
+            "Loaded ~/.config/ox/config.d/50-a.toml",
         ],
         "{stdout}",
     );
-    let project = lines[2].strip_prefix("Read ").expect("a third file");
+    let project = lines[2].strip_prefix("Loaded ").expect("a third file");
     assert!(
         Path::new(project).ends_with("work/.ox/config.toml"),
         "{stdout}"
