@@ -52,10 +52,7 @@ impl App {
             Event::TurnFailed(msg) => self.apply_turn_failed(&msg),
             Event::UsageUpdated(usage) => self.status_bar.set_usage(Some(usage)),
             Event::RateLimitsUpdated(limits) => self.status_bar.set_rate_limits(Some(limits)),
-            Event::Cancelled => {
-                self.chat.push_interrupted_marker();
-                self.enter_idle();
-            }
+            Event::Cancelled => self.apply_cancelled(),
             Event::AutoCompactionStarted => {
                 self.queue.mark_compacting();
                 self.set_active_status(Status::Compacting);
@@ -129,6 +126,17 @@ impl App {
         self.dirty = true;
     }
 
+    /// Ends a cancelled operation, handing back a prompt the engine never sent and otherwise
+    /// marking where the reply stopped.
+    fn apply_cancelled(&mut self) {
+        if self.queue.unsent() {
+            self.settle_failed_turn();
+        } else {
+            self.chat.push_interrupted_marker();
+            self.enter_idle();
+        }
+    }
+
     fn apply_prompt_drained(&mut self, text: String) {
         if let Some(display) = self.queue.confirm_drained(text) {
             self.chat.push_user_message(display);
@@ -176,12 +184,15 @@ impl App {
         }
     }
 
-    /// Ends a failed operation. A turn whose automatic compaction failed goes idle with the queue
-    /// held. A turn that never reached the model, or that the engine rolled back, does the same and
-    /// hands its prompts back, one into the empty input for another try. A slash command handed
-    /// back that way gets a note that Enter runs it again.
+    /// Shows `msg` as an error, then settles the turn.
     fn apply_turn_failed(&mut self, msg: &str) {
         self.chat.push_error(msg);
+        self.settle_failed_turn();
+    }
+
+    /// Settles a failed or cancelled turn by what the engine marked: an unsent prompt hands itself
+    /// back, and a rolled-back turn also hands back the prompts it drained.
+    fn settle_failed_turn(&mut self) {
         match self.queue.fail_turn(self.input.is_empty()) {
             FailedTurn::Ran => self.finish_turn(),
             FailedTurn::Held => {
@@ -964,6 +975,37 @@ mod tests {
             assert_eq!(text.matches("/init AGENTS.md").count(), 2, "{text}");
         }
 
+        #[tokio::test]
+        async fn prompt_unsent_after_a_signed_out_failure_keeps_the_queue_queued() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("active".to_owned()));
+            rx.try_recv().expect("active submit forwarded");
+            app.dispatch_action(Action::Submit("queued".to_owned()));
+            rx.try_recv().expect("queued submit forwarded");
+
+            app.handle_engine_event(Event::PromptUnsent);
+            app.handle_engine_event(Event::TurnFailed(
+                "Not signed in. Run `/login` to sign in.".to_owned(),
+            ));
+
+            assert_eq!(
+                app.chat.last_error_text(),
+                Some("Not signed in. Run `/login` to sign in.")
+            );
+            assert_eq!(app.status, Status::Idle);
+            assert!(app.input.is_empty());
+            assert_eq!(
+                *app.queue.pending(),
+                ["active", "queued"],
+                "the unsent prompt runs first, and the queued prompt waits behind it",
+            );
+            assert_eq!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty),
+                "the queued prompt must not start another signed-out turn"
+            );
+        }
+
         #[test]
         fn turn_failed_shows_the_error_and_finishes_the_turn() {
             let (mut app, _rx, _event_tx) = test_app(None);
@@ -1205,6 +1247,27 @@ mod tests {
             assert_eq!(app.chat.entry_count(), entries_before + 1);
             let text = rendered_text(&mut app, 60, 8);
             assert!(text.contains(INTERRUPTED_MARKER), "marker present: {text}");
+        }
+
+        #[tokio::test]
+        async fn cancelled_with_an_unsent_prompt_hands_it_back_without_a_marker() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("active".to_owned()));
+            rx.try_recv().expect("active submit forwarded");
+            app.dispatch_action(Action::Submit("queued".to_owned()));
+            rx.try_recv().expect("queued submit forwarded");
+            app.handle_engine_event(Event::PromptUnsent);
+
+            app.handle_engine_event(Event::Cancelled);
+
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(*app.queue.pending(), ["active", "queued"]);
+            let text = rendered_text(&mut app, 60, 12);
+            assert!(
+                !text.contains(INTERRUPTED_MARKER),
+                "nothing was sent, so no reply was interrupted: {text}"
+            );
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
         }
 
         #[tokio::test]

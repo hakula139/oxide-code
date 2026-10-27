@@ -3,18 +3,23 @@
 //! A theme document is a flat TOML body with one entry per slot plus an optional `syntax_theme`
 //! naming a bundled syntect theme for highlighted code. Each slot value is either:
 //!
-//! - a **bare color string** (`text = "#cdd6f4"`): sets `fg` only.
+//! - a **bare color string** (`text = "#cdd6f4"`): sets the slot's channel, `fg` for a foreground
+//!   slot and `bg` for a background-only one.
 //! - an **inline table** (`accent = { fg = "#89b4fa", bold = true }`): explicit `fg` / `bg` plus
-//!   modifiers (`bold`, `italic`, `underlined`, `dim`, `reversed`).
+//!   modifiers (`bold`, `italic`, `underlined`, `dim`, `reversed`). A background-only slot accepts
+//!   only `bg`.
 //!
 //! Every slot must be present. `deny_unknown_fields` catches typos. Per-slot parse errors are
 //! wrapped with the slot name.
 
+use std::fmt;
 use std::sync::LazyLock;
 
 use anyhow::{Context as _, Result, bail};
 use ratatui::style::{Color, Modifier};
-use serde::Deserialize;
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use syntect::highlighting::{Theme as SyntaxTheme, ThemeSet};
 
 use ox_core::config::ThemeConfig;
@@ -23,7 +28,7 @@ use ox_core::config::provenance::{Layer, Source};
 use ox_core::util::path::expand_user;
 use ox_core::util::toml::describe_error;
 
-use super::{Slot, Theme, builtin, color::parse_color};
+use super::{Slot, SlotKind, Theme, builtin, color::parse_color};
 
 // ── Resolution ──
 
@@ -31,8 +36,8 @@ use super::{Slot, Theme, builtin, color::parse_color};
 /// override it ignored.
 #[derive(Debug)]
 pub struct ResolvedTheme {
-    pub theme: Theme,
-    pub overrides: ThemeOverrides,
+    pub(crate) theme: Theme,
+    pub(crate) overrides: ThemeOverrides,
     pub notices: Vec<String>,
 }
 
@@ -116,24 +121,25 @@ fn load_base_body(name: &str) -> Result<String> {
 
 /// Parses one override patch. Errors on unknown slot name, a malformed patch, or a bad color.
 fn parse_override(slot_name: &str, patch: &toml::Value) -> Result<(SlotAccessor, Patch)> {
-    let slot = slot_accessor(slot_name).with_context(|| format!("unknown slot {slot_name:?}"))?;
-    let patch = SlotPatch::deserialize(patch.clone())
-        .context("expected a color string or a table of fg, bg, and modifier flags")?;
+    let (kind, slot) =
+        slot_accessor(slot_name).with_context(|| format!("unknown slot {slot_name:?}"))?;
+    let patch = SlotPatch::deserialize(patch.clone())?;
     if matches!(&patch, SlotPatch::Inline(inline) if inline.is_empty()) {
         bail!("empty patch (no fg, bg, or modifier flags)");
     }
-    Ok((slot, patch.resolve()?))
+    Ok((slot, patch.resolve(kind)?))
 }
 
 /// Borrows one slot of a [`Theme`].
 type SlotAccessor = fn(&mut Theme) -> &mut Slot;
 
-/// Generated slot lookup by name. The mapping can't drift from [`Theme`]'s fields.
+/// Generated slot lookup by name, with the channel the slot paints. The mapping can't drift from
+/// [`Theme`]'s fields.
 macro_rules! define_slot_accessor {
-    ( $( ($name:ident, $doc:literal), )* ) => {
-        fn slot_accessor(name: &str) -> Option<SlotAccessor> {
+    ( $( ($name:ident, $kind:ident, $doc:literal), )* ) => {
+        fn slot_accessor(name: &str) -> Option<(SlotKind, SlotAccessor)> {
             match name {
-                $( stringify!($name) => Some(|theme| &mut theme.$name), )*
+                $( stringify!($name) => Some((SlotKind::$kind, |theme| &mut theme.$name)), )*
                 _ => None,
             }
         }
@@ -147,7 +153,7 @@ super::for_each_slot!(define_slot_accessor);
 /// The `[tui.theme.overrides]` patches that parsed, which apply over any base theme, so a theme
 /// swap keeps them.
 #[derive(Debug, Default)]
-pub struct ThemeOverrides(Vec<(String, SlotAccessor, Patch)>);
+pub(crate) struct ThemeOverrides(Vec<(String, SlotAccessor, Patch)>);
 
 impl ThemeOverrides {
     pub(crate) fn apply(&self, theme: &mut Theme) {
@@ -166,19 +172,51 @@ impl ThemeOverrides {
 // ── SlotPatch ──
 
 /// One slot value from a theme file or `[tui.theme.overrides]`, applied over a base slot. A bare
-/// string sets `fg` only, and an inline table changes only the fields it names, so
+/// string sets the slot's own channel, and an inline table changes only the fields it names, so
 /// `accent = { bold = false }` clears bold without touching `fg`.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 enum SlotPatch {
     Bare(String),
     Inline(InlinePatch),
 }
 
+impl<'de> Deserialize<'de> for SlotPatch {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SlotPatchVisitor;
+
+        impl<'de> Visitor<'de> for SlotPatchVisitor {
+            type Value = SlotPatch;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a color string or a table of fg, bg, and modifier flags")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(SlotPatch::Bare(value.to_owned()))
+            }
+
+            fn visit_map<A>(self, map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                InlinePatch::deserialize(MapAccessDeserializer::new(map)).map(SlotPatch::Inline)
+            }
+        }
+
+        deserializer.deserialize_any(SlotPatchVisitor)
+    }
+}
+
 /// Inline TOML patch with every field optional. `Option<bool>` distinguishes "no change" / "set" /
 /// "clear". [`parse_override`] rejects an empty override (`error = {}`), so the slot warns and
-/// keeps its base value. Serde's untagged enum dispatcher would swallow a `Deserialize`-time
-/// message, so that check runs after deserialization.
+/// keeps its base value. The hand-written [`SlotPatch`] deserializer keeps `deny_unknown_fields`
+/// reporting the unknown key, which an untagged enum would replace with a generic message.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InlinePatch {
@@ -192,30 +230,44 @@ struct InlinePatch {
 }
 
 impl SlotPatch {
-    /// Parses the patch's colors. Errors on a bad color, naming the field of an inline patch.
-    fn resolve(&self) -> Result<Patch> {
-        match self {
-            Self::Bare(s) => Ok(Patch {
+    /// Parses the patch's colors. Errors on a bad color, naming the field of an inline patch, or on
+    /// a field a background-only slot cannot use.
+    fn resolve(&self, kind: SlotKind) -> Result<Patch> {
+        match (self, kind) {
+            (Self::Bare(s), SlotKind::Fg) => Ok(Patch {
                 fg: Some(parse_color(s)?),
                 ..Patch::default()
             }),
-            Self::Inline(p) => p.resolve(),
+            (Self::Bare(s), SlotKind::Bg) => Ok(Patch {
+                bg: Some(parse_color(s)?),
+                ..Patch::default()
+            }),
+            (Self::Inline(p), kind) => p.resolve(kind),
         }
     }
 }
 
 impl InlinePatch {
     fn is_empty(&self) -> bool {
-        self.fg.is_none()
-            && self.bg.is_none()
-            && self.bold.is_none()
-            && self.italic.is_none()
-            && self.underlined.is_none()
-            && self.dim.is_none()
-            && self.reversed.is_none()
+        self.fg.is_none() && self.bg.is_none() && !self.has_modifiers()
     }
 
-    fn resolve(&self) -> Result<Patch> {
+    fn has_modifiers(&self) -> bool {
+        [
+            self.bold,
+            self.italic,
+            self.underlined,
+            self.dim,
+            self.reversed,
+        ]
+        .into_iter()
+        .any(|flag| flag.is_some())
+    }
+
+    fn resolve(&self, kind: SlotKind) -> Result<Patch> {
+        if kind == SlotKind::Bg && (self.fg.is_some() || self.has_modifiers()) {
+            bail!("a background-only slot accepts only `bg`");
+        }
         let parse = |color: &Option<String>| color.as_deref().map(parse_color).transpose();
         let mut patch = Patch {
             fg: parse(&self.fg).context("fg")?,
@@ -305,7 +357,7 @@ fn mocha_line(slot: &str) -> &'static str {
 /// `ThemeFile` deserialization and its `into_theme` converter, which wraps each slot's parse error
 /// with the slot name. `deny_unknown_fields` catches typos.
 macro_rules! define_theme_file {
-    ( $( ($name:ident, $doc:literal), )* ) => {
+    ( $( ($name:ident, $kind:ident, $doc:literal), )* ) => {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct ThemeFile {
@@ -315,12 +367,13 @@ macro_rules! define_theme_file {
 
         impl ThemeFile {
             fn into_theme(self) -> Result<Theme> {
-                let parse = |patch: SlotPatch, name: &'static str| -> Result<Slot> {
-                    let patch = patch.resolve().with_context(|| format!("slot {name:?}"))?;
-                    Ok(patch.apply(Slot::default()))
-                };
+                let parse =
+                    |patch: SlotPatch, kind: SlotKind, name: &'static str| -> Result<Slot> {
+                        let patch = patch.resolve(kind).with_context(|| format!("slot {name:?}"))?;
+                        Ok(patch.apply(Slot::default()))
+                    };
                 Ok(Theme {
-                    $( $name: parse(self.$name, stringify!($name))?, )*
+                    $( $name: parse(self.$name, SlotKind::$kind, stringify!($name))?, )*
                     syntax: syntax_theme(self.syntax_theme.as_deref())?,
                 })
             }
@@ -539,6 +592,39 @@ mod tests {
         }
 
         #[test]
+        fn bare_string_override_patches_a_background_slot_bg() {
+            let t = resolved(&config("mocha", r##"selection = "#ff0000""##));
+
+            assert_eq!(t.selection.bg, Some(Color::Rgb(0xff, 0x00, 0x00)));
+            assert_eq!(t.selection.fg, None);
+        }
+
+        #[test]
+        fn background_slot_override_rejects_fg_and_modifiers_with_a_notice_each() {
+            let overrides = indoc! {r##"
+                diff_add = { fg = "#ff0000" }
+                surface = { bold = true }
+            "##};
+
+            let ResolvedTheme { theme, notices, .. } =
+                resolve_theme(&config("mocha", overrides)).unwrap();
+
+            assert_eq!(theme.diff_add.bg, Some(Color::Rgb(0x2a, 0x3a, 0x37)));
+            assert_eq!(theme.surface.bg, Some(Color::Reset));
+            assert_eq!(
+                notices,
+                [
+                    "Ignored the `diff_add` theme override: a background-only slot accepts only \
+                     `bg`"
+                        .to_owned(),
+                    "Ignored the `surface` theme override: a background-only slot accepts only \
+                     `bg`"
+                        .to_owned(),
+                ]
+            );
+        }
+
+        #[test]
         fn inline_override_clears_modifier_with_false() {
             let t = resolved(&config("mocha", "accent = { bold = false }"));
 
@@ -623,13 +709,15 @@ mod tests {
 
             assert_eq!(theme.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
             assert_eq!(theme.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
-            let reason = "expected a color string or a table of fg, bg, and modifier flags: \
-                          data did not match any variant of untagged enum SlotPatch";
             assert_eq!(
                 notices,
                 [
-                    format!("Ignored the `accent` theme override: {reason}"),
-                    format!("Ignored the `error` theme override: {reason}"),
+                    "Ignored the `accent` theme override: unknown field `glow`, expected one of \
+                     `fg`, `bg`, `bold`, `italic`, `underlined`, `dim`, `reversed`"
+                        .to_owned(),
+                    "Ignored the `error` theme override: invalid type: integer `5`, expected a \
+                     color string or a table of fg, bg, and modifier flags"
+                        .to_owned(),
                 ]
             );
         }
@@ -698,13 +786,13 @@ mod tests {
             for &target in SLOT_NAMES {
                 let mut patched = Theme::default();
                 let original = patched.clone();
-                let accessor =
+                let (_, accessor) =
                     slot_accessor(target).unwrap_or_else(|| panic!("unknown slot {target:?}"));
 
                 *accessor(&mut patched) = sentinel;
 
                 for &other in SLOT_NAMES {
-                    let other_slot = slot_accessor(other).expect("slot must exist");
+                    let (_, other_slot) = slot_accessor(other).expect("slot must exist");
                     let post = *other_slot(&mut patched.clone());
                     let pre = *other_slot(&mut original.clone());
                     if other == target {
@@ -738,7 +826,7 @@ mod tests {
                     ..InlinePatch::default()
                 });
 
-                let out = patch.resolve().unwrap().apply(base);
+                let out = patch.resolve(SlotKind::Fg).unwrap().apply(base);
 
                 assert_eq!(
                     out,
@@ -767,7 +855,7 @@ mod tests {
                     ..InlinePatch::default()
                 });
 
-                let out = patch.resolve().unwrap().apply(base);
+                let out = patch.resolve(SlotKind::Fg).unwrap().apply(base);
 
                 assert_eq!(
                     out,
@@ -790,7 +878,7 @@ mod tests {
                     ..InlinePatch::default()
                 });
 
-                let out = patch.resolve().unwrap().apply(base);
+                let out = patch.resolve(SlotKind::Fg).unwrap().apply(base);
 
                 assert_eq!(
                     out,
@@ -817,24 +905,6 @@ mod tests {
         fn parses_every_builtin() {
             for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
                 parse_theme(body).unwrap_or_else(|e| panic!("built-in {name:?} failed: {e:#}"));
-            }
-        }
-
-        /// `surface` is the bg-only panel fill, and `selection` the bg-only highlight that keeps
-        /// each selected cell's own text color. A built-in that declared either as a bare string
-        /// would set `fg` instead and repaint the text it sits under.
-        #[test]
-        fn surface_and_selection_are_bg_only_in_every_builtin() {
-            for builtin::BuiltinTheme { name, body, .. } in builtin::BUILT_IN {
-                let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
-
-                for (slot, style) in [("surface", t.surface), ("selection", t.selection)] {
-                    assert_eq!(style.fg, None, "{name}: {slot} must be bg-only, never fg");
-                    assert!(
-                        style.bg.is_some(),
-                        r#"{name}: {slot} must declare a bg (use "reset" for terminal default)"#,
-                    );
-                }
             }
         }
 
@@ -941,14 +1011,13 @@ mod tests {
 
             let err = parse_theme(&body).expect_err("unknown modifier rejected");
 
-            // The untagged enum reports a generic "did not match any variant" error, so only the
-            // position and the slot point at `sparkle`.
             let line = body.lines().position(|l| l.starts_with("accent")).unwrap() + 1;
             assert_eq!(
                 format!("{err:#}"),
                 format!(
-                    "invalid theme TOML: line {line}, column 10, in `accent`: \
-                     data did not match any variant of untagged enum SlotPatch"
+                    "invalid theme TOML: line {line}, column 28, in `accent`: \
+                     unknown field `sparkle`, expected one of \
+                     `fg`, `bg`, `bold`, `italic`, `underlined`, `dim`, `reversed`"
                 ),
             );
         }
@@ -1027,6 +1096,45 @@ mod tests {
             assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
             assert_eq!(t.accent.bg, None);
             assert!(t.accent.modifiers.contains(Modifier::BOLD));
+        }
+
+        #[test]
+        fn bare_string_sets_a_background_slot_bg() {
+            let body = mocha_with_slot_replacement(
+                r##"selection = { bg = "#393a4c" }"##,
+                r##"selection = "#393a4c""##,
+            );
+
+            let t = parse_theme(&body).unwrap();
+
+            assert_eq!(t.selection.fg, None);
+            assert_eq!(t.selection.bg, Some(Color::Rgb(0x39, 0x3a, 0x4c)));
+        }
+
+        #[test]
+        fn background_slot_rejects_fg_and_modifiers() {
+            for (from, to, slot) in [
+                (
+                    r##"selection = { bg = "#393a4c" }"##,
+                    r##"selection = { fg = "#393a4c" }"##,
+                    "selection",
+                ),
+                (
+                    r##"diff_add = { bg = "#2a3a37" }"##,
+                    r##"diff_add = { bg = "#2a3a37", bold = true }"##,
+                    "diff_add",
+                ),
+            ] {
+                let body = mocha_with_slot_replacement(from, to);
+
+                let err = parse_theme(&body).expect_err("background slot rejects fg and modifiers");
+
+                assert_eq!(
+                    format!("{err:#}"),
+                    format!("slot \"{slot}\": a background-only slot accepts only `bg`"),
+                    "{to}",
+                );
+            }
         }
 
         #[test]

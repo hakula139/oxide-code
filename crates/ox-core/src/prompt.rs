@@ -14,7 +14,7 @@ use self::sections::{
     CAUTION, INTRO, OUTPUT_EFFICIENCY, STYLE, SYSTEM_SECTION, TASK_GUIDANCE, TOOL_GUIDANCE,
 };
 use crate::model::ModelSpec;
-use crate::util::git::{project_root, repo_root};
+use crate::util::git::repo_root;
 
 /// Output of [`build_prompt`] or [`restore_prompt`], held for a whole session so every request
 /// shares a byte-identical prefix.
@@ -91,7 +91,7 @@ impl UserContext {
     /// Reads the instruction files that apply in `cwd`, plus today's date and `model`'s identity.
     /// Also returns a warning for each instruction file that exists but cannot or may not be read.
     pub(crate) async fn load(cwd: &Path, model: &ModelSpec) -> (Self, Vec<String>) {
-        let (instructions, warnings) = instructions::load(cwd, &project_root(cwd)).await;
+        let (instructions, warnings) = instructions::load(cwd).await;
         let context = Self {
             instructions,
             date: environment::current_date(),
@@ -174,7 +174,7 @@ fn system_prompt(environment: &Environment) -> SystemPrompt {
 fn render_user_context(context: &UserContext) -> String {
     let mut sections = Vec::new();
     if !context.instructions.is_empty() {
-        sections.push(render_instructions(&context.instructions));
+        sections.push(context.instructions.clone());
     }
     sections.push(render_date(&context.date));
     sections.push(render_model(&context.model));
@@ -185,8 +185,7 @@ fn render_user_context(context: &UserContext) -> String {
 
         {sections}
 
-        IMPORTANT: this context may or may not be relevant to your tasks. You should
-        not respond to this context unless it is highly relevant to your task."
+        IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task."
     })
 }
 
@@ -199,7 +198,7 @@ fn render_reminder(seen: &UserContext, fresh: &UserContext) -> String {
         } else {
             &fresh.instructions
         };
-        sections.push(render_instructions(body));
+        sections.push(body.to_owned());
     }
     if fresh.date != seen.date {
         sections.push(render_date(&fresh.date));
@@ -214,14 +213,6 @@ fn render_reminder(seen: &UserContext, fresh: &UserContext) -> String {
 
         {sections}"
     })
-}
-
-fn render_instructions(instructions: &str) -> String {
-    formatdoc! {"
-        # CLAUDE.md
-
-        {instructions}"
-    }
 }
 
 fn render_date(date: &str) -> String {
@@ -289,11 +280,11 @@ mod tests {
 
                 Today's date is 2026-04-13."
             }));
-            assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
+            assert!(!reminder.contains("# User instructions"), "{reminder}");
 
             let reminder = parts.catch_up(context("New rules.", "2026-04-13")).unwrap();
             assert!(reminder.contains(indoc! {"
-                # CLAUDE.md
+                The context from the start of this conversation has changed. Use these values from now on:
 
                 New rules."
             }));
@@ -309,7 +300,7 @@ mod tests {
 
                 You are powered by the model other-model."
             }));
-            assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
+            assert!(!reminder.contains("# User instructions"), "{reminder}");
 
             let reminder = parts.catch_up(context("", "2026-04-13")).unwrap();
             assert!(reminder.contains("The instruction files were removed"));
@@ -587,8 +578,6 @@ mod tests {
                     <system-reminder>
                     As you answer the user's questions, you can use the following context:
 
-                    # CLAUDE.md
-
                     Project rules.
 
                     # Current date
@@ -599,8 +588,7 @@ mod tests {
 
                     You are powered by the model test-model.
 
-                    IMPORTANT: this context may or may not be relevant to your tasks. You should
-                    not respond to this context unless it is highly relevant to your task.
+                    IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
                     </system-reminder>"
                 },
             );
@@ -622,8 +610,7 @@ mod tests {
 
                     You are powered by the model test-model.
 
-                    IMPORTANT: this context may or may not be relevant to your tasks. You should
-                    not respond to this context unless it is highly relevant to your task.
+                    IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
                     </system-reminder>"
                 },
             );
@@ -643,8 +630,6 @@ mod tests {
                 indoc! {"
                     <system-reminder>
                     The context from the start of this conversation has changed. Use these values from now on:
-
-                    # CLAUDE.md
 
                     Project rules.
 
@@ -670,8 +655,6 @@ mod tests {
                 indoc! {"
                     <system-reminder>
                     The context from the start of this conversation has changed. Use these values from now on:
-
-                    # CLAUDE.md
 
                     The instruction files were removed, so the earlier instructions no longer apply.
                     </system-reminder>"

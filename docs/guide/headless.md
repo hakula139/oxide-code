@@ -102,7 +102,7 @@ Each `stream-json` line is an object with a `type` and, for most types, a `data`
 | `notice`                    | A warning the run works around, such as an instruction file it cannot read                         |
 | `error`                     | A problem that does not end the turn, such as a session write failure                              |
 | `turn_complete`             | No `data`. The turn finished with a reply                                                          |
-| `prompt_unsent`             | No `data`. The compaction before the prompt failed, so the prompt was never sent                   |
+| `prompt_unsent`             | No `data`. A failure or a cancel stopped the prompt before it reached the model                    |
 | `turn_rolled_back`          | No `data`. The model refused, so the turn was removed from the session                             |
 | `turn_failed`               | Why the turn failed, including a refused request                                                   |
 

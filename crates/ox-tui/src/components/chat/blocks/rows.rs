@@ -112,7 +112,7 @@ impl<'a> NumberedRows<'a> {
             max_number,
             " - ",
             ctx.theme.error(),
-            Some(ctx.theme.diff_del_row()),
+            Some(ctx.theme.diff_del()),
         )
     }
 
@@ -124,7 +124,7 @@ impl<'a> NumberedRows<'a> {
             max_number,
             " + ",
             ctx.theme.success(),
-            Some(ctx.theme.diff_add_row()),
+            Some(ctx.theme.diff_add()),
         )
     }
 
@@ -374,16 +374,16 @@ mod tests {
                 99,
                 " + ",
                 theme.success(),
-                Some(theme.diff_add_row()),
+                Some(theme.diff_add()),
             );
             let mut out = Vec::new();
             renderer.render(&mut out, 7, "x", theme.success());
 
             let row = &out[0];
             assert_eq!(row.spans[0].style.bg, None, "bar prefix must stay clear");
-            assert_eq!(row.spans[1].style.bg, theme.diff_add_row().bg);
-            assert_eq!(row.spans[2].style.bg, theme.diff_add_row().bg);
-            assert_eq!(row.spans[3].style.bg, theme.diff_add_row().bg);
+            assert_eq!(row.spans[1].style.bg, theme.diff_add().bg);
+            assert_eq!(row.spans[2].style.bg, theme.diff_add().bg);
+            assert_eq!(row.spans[3].style.bg, theme.diff_add().bg);
         }
 
         #[test]
@@ -397,7 +397,7 @@ mod tests {
                 99,
                 " - ",
                 theme.error(),
-                Some(theme.diff_del_row()),
+                Some(theme.diff_del()),
             );
             let mut out = Vec::new();
             renderer.render(&mut out, 1, "abc", theme.error());
@@ -411,7 +411,7 @@ mod tests {
                 "trailing pad span must be spaces only, got {:?}",
                 last.content,
             );
-            assert_eq!(last.style.bg, theme.diff_del_row().bg);
+            assert_eq!(last.style.bg, theme.diff_del().bg);
         }
 
         #[test]
@@ -426,7 +426,7 @@ mod tests {
                 99,
                 " - ",
                 theme.error(),
-                Some(theme.diff_del_row()),
+                Some(theme.diff_del()),
             );
             let mut out = Vec::new();
             renderer.render(&mut out, 1, "alpha beta gamma delta", theme.error());
@@ -440,7 +440,7 @@ mod tests {
                 assert_eq!(line.width(), 20, "every wrapped row must reach ctx.width");
                 assert_eq!(
                     line.spans.last().unwrap().style.bg,
-                    theme.diff_del_row().bg,
+                    theme.diff_del().bg,
                     "trailing span on every line must carry row bg",
                 );
             }
@@ -511,7 +511,7 @@ mod tests {
                 99,
                 " - ",
                 theme.error(),
-                Some(theme.diff_del_row()),
+                Some(theme.diff_del()),
             );
             let mut out = Vec::new();
 

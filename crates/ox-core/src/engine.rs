@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
@@ -36,7 +35,7 @@ use crate::model::{ModelSpec, TokenUsage};
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::notice::{self, ConfigSettings};
-use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op};
+use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, TurnEnd};
 use crate::session::entry::{CompactInfo, UsageRecord};
 use crate::session::handle::{Checkpoint, LoadedTranscript, SessionHandle};
 use crate::session::store::SessionStore;
@@ -155,7 +154,7 @@ pub struct Engine {
     auto_compaction_failures: AutoCompactFailures,
     /// [`TurnReport::context_estimate`] of the latest turn the transcript keeps, or an estimate
     /// from the parts of the next request when that turn reported no usage.
-    context_estimate: Option<u32>,
+    context_estimate: u32,
     /// The latest usage any turn the transcript keeps reported, which the status line shows.
     displayed_usage: Option<TokenUsage>,
     total_estimated_cost_usd: f64,
@@ -231,7 +230,7 @@ impl Engine {
             workspace,
             generates_titles,
             auto_compaction_failures: AutoCompactFailures::default(),
-            context_estimate: Some(context_estimate),
+            context_estimate,
             displayed_usage: None,
             total_estimated_cost_usd: estimate_cost_usd(&usage),
             title_usage: None,
@@ -362,12 +361,12 @@ impl Engine {
         let mut inbox = Inbox::default();
         if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
             self.adopt_mode(&mut inbox);
-            return report_abort(sink, abort, "turn-failed");
+            return report_unsent(sink, abort, "turn-failed");
         }
         let compacted = self.auto_compact(sink, ops, &mut inbox).await;
         self.adopt_mode(&mut inbox);
         if let Err(abort) = compacted {
-            return report_abort(sink, abort, "auto-compact-failed");
+            return report_unsent(sink, abort, "auto-compact-failed");
         }
 
         let mut start = self.turn_start();
@@ -412,9 +411,9 @@ impl Engine {
         let result = loop {
             let TurnOutcome { mut report, result } =
                 self.run_turn(sink, ops, &mut inbox, rounds_run).await;
-            if let Err(TurnAbort::Refused(_)) = result {
+            if let Err(TurnAbort::Refused(notice)) = result {
                 self.roll_back(sink, start, checkpoint, &report).await;
-                break result;
+                break Err(TurnAbort::Refused(notice));
             }
             self.account_usage(sink, &report).await;
             if let Some(tasks) = report.tasks.take() {
@@ -498,8 +497,8 @@ impl Engine {
     }
 
     /// Returns the engine and the session to `start` and `checkpoint` after the model refused the
-    /// turn `report` describes. Keeps the context usage from before the turn, since the transcript
-    /// its requests measured is gone.
+    /// turn `report` describes. Keeps context usage from before the turn, as the transcript its
+    /// requests measured is gone.
     async fn roll_back(
         &mut self,
         sink: &dyn EventSink,
@@ -507,7 +506,7 @@ impl Engine {
         checkpoint: Option<Checkpoint>,
         report: &TurnReport,
     ) {
-        settle_file_writes(&self.file_tracker).await;
+        self.file_tracker.drain_writes().await;
         self.bill(sink, &report.billable_rounds).await;
         self.messages.truncate(start.transcript_len);
         self.prompt.seen = start.seen;
@@ -601,7 +600,7 @@ impl Engine {
     /// for stored-login reloads still in flight so exiting cannot cancel their write-back.
     /// Returns the session's write failure, if any.
     async fn finalize(self) -> Option<String> {
-        settle_file_writes(&self.file_tracker).await;
+        self.file_tracker.drain_writes().await;
         self.shells.stop_all().await;
         let failure = self
             .session
@@ -610,10 +609,6 @@ impl Engine {
         self.client.finish_reloads().await;
         failure
     }
-}
-
-async fn settle_file_writes(tracker: &FileTracker) {
-    tracker.drain_writes().await;
 }
 
 /// The engine state before a turn's prompt: the transcript length, what the model had seen of the
@@ -640,58 +635,6 @@ async fn session_prompt(
 
 // ── Reporting ──
 
-/// How an operation ended, after the sink has already shown it. A headless run reports it as its
-/// stop reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnEnd {
-    Completed,
-    Cancelled,
-    Failed,
-    Shutdown,
-}
-
-impl TurnEnd {
-    /// How `op` ended, if `event` is one of the terminal events [`Event`] lists for it.
-    pub fn of(op: &Op, event: &Event) -> Option<Self> {
-        match (op, event) {
-            (Op::SetArchive { .. }, Event::ArchiveUpdated { result, .. }) => Some(if result.is_ok() {
-                Self::Completed
-            } else {
-                Self::Failed
-            }),
-            (
-                Op::Prompt { .. }
-                | Op::Compact { .. }
-                | Op::Archive
-                | Op::Resume { .. }
-                | Op::Login
-                | Op::Logout,
-                Event::TurnFailed(_),
-            )
-            | (Op::Rename { .. }, Event::RenameFailed(_))
-            // The model has no level for the effort, so the pick changed nothing.
-            | (Op::SetModel(ConfigPick::Effort(_)), Event::ConfigChanged { effort: None, .. }) => {
-                Some(Self::Failed)
-            }
-            (Op::Prompt { .. }, Event::TurnComplete)
-            | (
-                Op::Compact { .. } | Op::Clear | Op::Archive | Op::Resume { .. },
-                Event::SessionReady,
-            )
-            | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
-            | (Op::Login, Event::SignedIn { .. })
-            | (Op::Logout, Event::SignedOut { .. })
-            | (Op::SetModel(_), Event::ConfigChanged { .. })
-            | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
-            (Op::Prompt { .. } | Op::Compact { .. } | Op::Login, Event::Cancelled) => {
-                Some(Self::Cancelled)
-            }
-            _ => None,
-        }
-    }
-}
-
 /// Shows `abort` on `sink` as the operation's one terminal event, logging `label` if a failure
 /// event is dropped. `Shutdown` stays silent. [`Event`] lists each op's terminal events.
 fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> TurnEnd {
@@ -710,6 +653,16 @@ fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> 
             TurnEnd::Failed
         }
     }
+}
+
+/// Reports an abort that stopped the operation before it recorded its prompt, handing the prompt
+/// back for any outcome but shutdown. The frontend returns it to the user, and the abort's terminal
+/// event follows.
+fn report_unsent(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> TurnEnd {
+    if !matches!(abort, TurnAbort::Shutdown) {
+        sink.emit(Event::PromptUnsent, "prompt-unsent");
+    }
+    report_abort(sink, abort, label)
 }
 
 #[cfg(test)]
@@ -731,8 +684,8 @@ mod tests {
     };
     use super::sessions::format_drift_warning;
     use super::testing::{
-        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_tool_call_once, panic_message,
-        request_bodies, with_pinned_home,
+        MODEL, SESSION_CONTEXT, engine, mount_reply, mount_stalled_reply_once,
+        mount_tool_call_once, panic_message, request_bodies, until_requested, with_pinned_home,
     };
     use super::*;
     use crate::client::anthropic::local_testing::{COMPLETION_USAGE, client_for};
@@ -778,26 +731,6 @@ mod tests {
         model::cost_rates(model)
             .unwrap()
             .estimate_usd(tokens, PromptCacheTtl::OneHour)
-    }
-
-    /// Answers the next Messages request only after a minute, so it stays in flight until the test
-    /// cancels or quits it. Mount it before the reply that should follow.
-    async fn mount_stalled_reply_once(server: &MockServer) {
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                sse_response(text_stream_body("", "too late")).set_delay(Duration::from_secs(60)),
-            )
-            .up_to_n_times(1)
-            .mount(server)
-            .await;
-    }
-
-    /// Waits until `server` has received `count` requests, so the engine is mid-request.
-    async fn until_requested(server: &MockServer, count: usize) {
-        while server.received_requests().await.unwrap().len() < count {
-            tokio::task::yield_now().await;
-        }
     }
 
     mod engine_handle {
@@ -1905,7 +1838,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.context_estimate = Some(50_000);
+                engine.context_estimate = 50_000;
                 let mut handle = engine.spawn();
 
                 handle.ops.send(Op::prompt("five")).await.unwrap();
@@ -1917,7 +1850,11 @@ mod tests {
                 assert!(
                     matches!(
                         events.as_slice(),
-                        [Event::AutoCompactionStarted, Event::Cancelled]
+                        [
+                            Event::AutoCompactionStarted,
+                            Event::PromptUnsent,
+                            Event::Cancelled
+                        ]
                     ),
                     "{events:?}"
                 );
@@ -2791,6 +2728,7 @@ mod tests {
                     *failed,
                     Event::TurnFailed(
                         "The model declined this request. \
+                         Changes from the request's tool calls remain. \
                          The request was removed from the conversation, \
                          so rephrase it to try again."
                             .to_owned()
@@ -2864,7 +2802,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.context_estimate = Some(50_000);
+                engine.context_estimate = 50_000;
                 engine.displayed_usage = Some(TokenUsage::new(50_000, 1));
                 engine.total_estimated_cost_usd = 1.23;
                 engine.auto_compaction_failures = AutoCompactFailures::new(2);
@@ -2901,7 +2839,7 @@ mod tests {
                 assert_eq!(engine.messages.len(), 3);
                 assert_eq!(
                     engine.context_estimate,
-                    Some(1_000 + compaction::transcript_tokens(&engine.messages[2..])),
+                    1_000 + compaction::transcript_tokens(&engine.messages[2..]),
                     "the turn's input plus its reply",
                 );
                 assert!(
@@ -2966,7 +2904,7 @@ mod tests {
                 assert_eq!(first, TurnEnd::Completed);
                 assert_eq!(
                     engine.context_estimate,
-                    Some(1_000 + compaction::transcript_tokens(&engine.messages[1..]))
+                    1_000 + compaction::transcript_tokens(&engine.messages[1..])
                 );
                 let rejected = engine
                     .submit_prompt(&oversized, None, &sink, &mut ops)
@@ -3026,7 +2964,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.context_estimate = Some(50_000);
+                engine.context_estimate = 50_000;
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
@@ -3073,7 +3011,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.messages = tool_heavy_transcript();
-                engine.context_estimate = Some(50_000);
+                engine.context_estimate = 50_000;
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
                 ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
@@ -3106,7 +3044,8 @@ mod tests {
                 assert!(
                     matches!(
                         events.as_slice(),
-                        [Event::TurnFailed(msg)] if msg == "Not signed in. Run `/login` to sign in."
+                        [Event::PromptUnsent, Event::TurnFailed(msg)]
+                            if msg == "Not signed in. Run `/login` to sign in."
                     ),
                     "{events:?}"
                 );
@@ -3494,11 +3433,15 @@ mod tests {
                     [
                         "Switched to custom-model (custom-model). \
                          Effort cleared (model has no effort levels). \
-                         Auto compaction off (no threshold)."
+                         Auto-compaction off (no threshold). \
+                         `custom-model` is not a supported model, \
+                         so requests go without thinking, effort, and context management, \
+                         and cost tracking stays off. \
+                         Auto-compaction requires an explicit token threshold."
                             .to_owned(),
                         "Switched to Claude Opus 5.5 (claude-opus-5-5) · \
                          effort medium (model default). \
-                         Auto compaction at 986k tokens."
+                         Auto-compaction at 986k tokens."
                             .to_owned(),
                     ],
                 );
@@ -3646,7 +3589,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.auto_compaction_failures = AutoCompactFailures::new(3);
-                engine.context_estimate = Some(100_000);
+                engine.context_estimate = 100_000;
                 engine.total_estimated_cost_usd = 1.23;
                 let sink = CapturingSink::default();
 
@@ -3656,7 +3599,7 @@ mod tests {
                     engine.auto_compaction_failures,
                     AutoCompactFailures::default()
                 );
-                assert_eq!(engine.context_estimate, Some(100_000));
+                assert_eq!(engine.context_estimate, 100_000);
                 assert!(
                     (engine.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,
                     "session cost must accumulate across swaps: {}",
@@ -3777,178 +3720,6 @@ mod tests {
         }
     }
 
-    mod turn_end {
-        use super::*;
-
-        mod of {
-            use super::*;
-
-            #[test]
-            fn saved_archive_ends_on_its_completion_result() {
-                let op = Op::SetArchive {
-                    path: "/repo/saved.jsonl".into(),
-                    session_id: "saved".to_owned(),
-                    state: ArchiveState::Archived,
-                };
-
-                for (result, expected) in [
-                    (Ok(ArchiveState::Archived), TurnEnd::Completed),
-                    (Err("Archive failed".to_owned()), TurnEnd::Failed),
-                ] {
-                    assert_eq!(
-                        TurnEnd::of(
-                            &op,
-                            &Event::ArchiveUpdated {
-                                id: "saved".to_owned(),
-                                result
-                            }
-                        ),
-                        Some(expected)
-                    );
-                }
-            }
-
-            #[test]
-            fn reads_only_the_terminal_events_of_the_op_in_flight() {
-                let prompt = Op::prompt("hi");
-                let compact = Op::Compact { instructions: None };
-                let resume = Op::Resume {
-                    target: ResumeTarget::Prefix("1a2b".to_owned()),
-                };
-                let rename = Op::Rename {
-                    title: "Fix login".to_owned(),
-                };
-                let set_model = Op::SetModel(ConfigPick::Effort(Effort::Low));
-                let set_mode = Op::SetMode(Mode::Plan);
-                let compacted = |trigger| Event::SessionCompacted {
-                    summary: "summary".to_owned(),
-                    pre_count: 4,
-                    instructions: None,
-                    trigger,
-                };
-                let rolled = Event::SessionRolled {
-                    id: "new".to_owned(),
-                    old_session: ArchiveState::Active,
-                };
-                let notice = Event::Error("Session write failed".to_owned());
-                let failed = Event::TurnFailed("failure".to_owned());
-
-                for (op, event, end) in [
-                    (&prompt, Event::TurnComplete, Some(TurnEnd::Completed)),
-                    (&prompt, Event::Cancelled, Some(TurnEnd::Cancelled)),
-                    (&prompt, failed.clone(), Some(TurnEnd::Failed)),
-                    (&prompt, compacted(CompactTrigger::Auto), None),
-                    (&prompt, notice.clone(), None),
-                    (&compact, compacted(CompactTrigger::Manual), None),
-                    (&compact, Event::SessionReady, Some(TurnEnd::Completed)),
-                    (&compact, Event::Cancelled, Some(TurnEnd::Cancelled)),
-                    (&compact, Event::TurnComplete, None),
-                    (
-                        &resume,
-                        Event::SessionResumed {
-                            id: "1a2b".to_owned(),
-                            title: None,
-                            prior: ArchiveState::Active,
-                            history: Vec::new(),
-                        },
-                        None,
-                    ),
-                    (&resume, Event::SessionReady, Some(TurnEnd::Completed)),
-                    (&resume, failed.clone(), Some(TurnEnd::Failed)),
-                    (&Op::Clear, notice.clone(), None),
-                    (&Op::Clear, rolled.clone(), None),
-                    (&Op::Clear, Event::SessionReady, Some(TurnEnd::Completed)),
-                    (
-                        &rename,
-                        Event::SessionTitleUpdated {
-                            id: "live".to_owned(),
-                            title: "Fix login".to_owned(),
-                        },
-                        Some(TurnEnd::Completed),
-                    ),
-                    (&rename, notice.clone(), None),
-                    (
-                        &rename,
-                        Event::RenameFailed("Session write failed".to_owned()),
-                        Some(TurnEnd::Failed),
-                    ),
-                    (
-                        &set_model,
-                        Event::ConfigChanged {
-                            model: ModelSpec::resolve(MODEL),
-                            effort: Some(Effort::Low),
-                            requested: ConfigPick::Effort(Effort::Low),
-                            auto_compaction: CompactionConfig::with_threshold(50_000).auto,
-                            notice: String::new(),
-                        },
-                        Some(TurnEnd::Completed),
-                    ),
-                    (
-                        &set_model,
-                        Event::ConfigChanged {
-                            model: ModelSpec::resolve("custom-model"),
-                            effort: None,
-                            requested: ConfigPick::Effort(Effort::Low),
-                            auto_compaction: CompactionConfig::with_threshold(50_000).auto,
-                            notice: String::new(),
-                        },
-                        Some(TurnEnd::Failed),
-                    ),
-                    (&set_model, failed.clone(), None),
-                    (
-                        &set_mode,
-                        Event::ModeChanged(Mode::Plan),
-                        Some(TurnEnd::Completed),
-                    ),
-                    (&set_mode, notice.clone(), None),
-                    (&Op::Archive, rolled, None),
-                    (&Op::Archive, Event::SessionReady, Some(TurnEnd::Completed)),
-                    (&Op::Archive, failed, Some(TurnEnd::Failed)),
-                ] {
-                    assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
-                }
-            }
-
-            #[test]
-            fn reads_the_sign_in_terminal_events() {
-                let failed = Event::TurnFailed("failure".to_owned());
-
-                for (op, event, end) in [
-                    (
-                        &Op::Login,
-                        Event::LoginStarted {
-                            url: "https://example.com/login".to_owned(),
-                            manual_url: "https://example.com/login?manual".to_owned(),
-                        },
-                        None,
-                    ),
-                    (
-                        &Op::Login,
-                        Event::SignedIn {
-                            auth: AuthSource::ApiKeyEnv,
-                        },
-                        Some(TurnEnd::Completed),
-                    ),
-                    (&Op::Login, Event::Cancelled, Some(TurnEnd::Cancelled)),
-                    (&Op::Login, failed.clone(), Some(TurnEnd::Failed)),
-                    (
-                        &Op::Logout,
-                        Event::SignedOut {
-                            removed: true,
-                            auth: None,
-                            fallback_error: None,
-                        },
-                        Some(TurnEnd::Completed),
-                    ),
-                    (&Op::Logout, Event::Cancelled, None),
-                    (&Op::Logout, failed, Some(TurnEnd::Failed)),
-                ] {
-                    assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
-                }
-            }
-        }
-    }
-
     mod report_abort {
         use super::*;
 
@@ -3974,6 +3745,42 @@ mod tests {
                 matches!(
                     events.as_slice(),
                     [Event::Cancelled, Event::TurnFailed(msg)] if msg == "boom"
+                ),
+                "{events:?}",
+            );
+        }
+    }
+
+    mod report_unsent {
+        use super::*;
+
+        #[test]
+        fn hands_the_prompt_back_before_the_terminal_event_but_not_on_shutdown() {
+            let sink = CapturingSink::default();
+
+            assert_eq!(
+                report_unsent(&sink, TurnAbort::Cancelled, "label"),
+                TurnEnd::Cancelled
+            );
+            assert_eq!(
+                report_unsent(&sink, TurnAbort::Shutdown, "label"),
+                TurnEnd::Shutdown
+            );
+            assert_eq!(
+                report_unsent(&sink, TurnAbort::Failed(anyhow!("boom")), "label"),
+                TurnEnd::Failed
+            );
+
+            let events = sink.events();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        Event::PromptUnsent,
+                        Event::Cancelled,
+                        Event::PromptUnsent,
+                        Event::TurnFailed(msg)
+                    ] if msg == "boom"
                 ),
                 "{events:?}",
             );

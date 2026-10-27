@@ -21,7 +21,7 @@ After `/effort`, `/init`, `/mode`, `/model`, or `/theme`, type a space to switch
 | `/login`                                    | Sign in to a Claude account in the browser and store the login for oxide-code.                                                                |
 | `/logout`                                   | Remove the oxide-code login. The Claude Code login stays in place.                                                                            |
 | `/mode [<mode>]`                            | Open the permission mode picker, or switch directly to `manual`, `plan`, or `yolo`.                                                           |
-| `/model [<id>]`                             | Open the model and effort picker, or switch directly by ID or unique substring.                                                               |
+| `/model [<id>]`                             | Open the model and effort picker, or switch directly by catalog ID, unique substring, or any other ID a gateway serves.                       |
 | `/rename [<title>]`                         | Open a single-line editor pre-filled with the current title, or set it directly.                                                              |
 | `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles, **Ctrl+X** to archive or unarchive, **Ctrl+D** to delete), or jump by ID prefix. |
 | `/status`                                   | Show the model, permission mode, auth, settings, session rules, and background shells.                                                        |

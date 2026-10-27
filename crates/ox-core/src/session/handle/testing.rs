@@ -94,7 +94,7 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                     });
                 }
                 SessionCmd::Rewind { ack, .. }
-                | SessionCmd::ToolMetadata { ack, .. }
+                | SessionCmd::RecordRound { ack, .. }
                 | SessionCmd::Usage { ack, .. }
                 | SessionCmd::AppendAiTitle { ack, .. }
                 | SessionCmd::SetManualTitle { ack, .. }

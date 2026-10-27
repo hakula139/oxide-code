@@ -90,7 +90,7 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
             &sources.prompt_cache_ttl,
         ),
         row(
-            "Auto Compaction",
+            "Auto-Compaction",
             cfg.compaction.auto.to_string(),
             &sources.compaction,
         ),
@@ -286,7 +286,7 @@ mod tests {
             let m = build_modal(&info, None);
             let rendered = rendered_text(&m, 80);
 
-            assert!(rendered.contains("Auto Compaction"), "{rendered}");
+            assert!(rendered.contains("Auto-Compaction"), "{rendered}");
             assert!(rendered.contains("at 155000 tokens"), "{rendered}");
         }
 

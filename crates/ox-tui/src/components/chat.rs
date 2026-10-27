@@ -2159,8 +2159,8 @@ mod tests {
                 assert_eq!(buffer[(0, y)].fg, error_fg, "result bar on row {y}");
             }
             assert_eq!(buffer[(2, 1)].fg, error_fg, "error indicator");
-            assert_eq!(buffer[(4, 2)].bg, theme.diff_del_row().bg.unwrap());
-            assert_eq!(buffer[(4, 3)].bg, theme.diff_add_row().bg.unwrap());
+            assert_eq!(buffer[(4, 2)].bg, theme.diff_del().bg.unwrap());
+            assert_eq!(buffer[(4, 3)].bg, theme.diff_add().bg.unwrap());
             insta::assert_snapshot!(backend);
         }
 

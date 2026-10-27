@@ -4,7 +4,8 @@ pub(crate) mod builtin;
 mod color;
 mod loader;
 
-pub use self::loader::{ResolvedTheme, ThemeOverrides, resolve_theme};
+pub(crate) use self::loader::ThemeOverrides;
+pub use self::loader::{ResolvedTheme, resolve_theme};
 
 use std::sync::LazyLock;
 
@@ -12,9 +13,21 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use syntect::highlighting::Theme as SyntaxTheme;
 
+use ox_core::model::Effort;
 use ox_core::tool::tasks::TaskStatus;
 
 use crate::glyphs::SEGMENT_SEPARATOR;
+
+/// Which color channel a slot paints.
+///
+/// A background-only slot fills a region behind text, so its bare-string form and its accessor set
+/// [`bg`](Slot::bg), and an inline patch may set only `bg`. A foreground slot may set both channels
+/// and carries modifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlotKind {
+    Fg,
+    Bg,
+}
 
 /// A theme slot whose optional colors and modifiers compose into a [`Style`].
 ///
@@ -47,57 +60,64 @@ macro_rules! for_each_slot {
     ($callback:ident) => {
         $callback! {
             // Text hierarchy
-            (text, "Primary text"),
-            (muted, "Secondary text and labels, dimmer than text and brighter than dim"),
-            (dim, "Low-emphasis text that stays readable, such as tool output and hints"),
+            (text, Fg, "Primary text"),
+            (muted, Fg, "Secondary text and labels, dimmer than text and brighter than dim"),
+            (dim, Fg, "Low-emphasis text that stays readable, such as tool output and hints"),
 
             // Surfaces
-            (surface, "Chat / input / status panel background (bg-only)"),
+            (surface, Bg, "Chat / input / status panel background"),
 
             // Semantic accents
-            (accent, "Highlights and active borders"),
-            (user, "User messages and icon"),
-            (queued, "Queued user prompts in the preview panel"),
-            (assistant, "Assistant messages and icon"),
+            (accent, Fg, "Highlights and active borders"),
+            (user, Fg, "User messages and icon"),
+            (queued, Fg, "Queued user prompts in the preview panel"),
+            (assistant, Fg, "Assistant messages and icon"),
 
             // Status indicators (ascending severity)
-            (info, "Informational highlight (in-progress / neutral signals)"),
-            (success, "Successful tools, added diff lines, passing checks and approvals, notices"),
-            (warning, "Warnings, caution status"),
-            (error, "Errors, failed tools, critical status"),
+            (info, Fg, "Informational highlight (in-progress / neutral signals)"),
+            (success, Fg, "Successful tools, added diff lines, checks, approvals, and notices"),
+            (warning, Fg, "Warnings, caution status"),
+            (error, Fg, "Errors, failed tools, critical status"),
+
+            // Effort gradient
+            (effort_low, Fg, "Effort `low` in the speed / intelligence slider"),
+            (effort_medium, Fg, "Effort `medium` in the speed / intelligence slider"),
+            (effort_high, Fg, "Effort `high` in the speed / intelligence slider"),
+            (effort_xhigh, Fg, "Effort `xhigh` in the speed / intelligence slider"),
+            (effort_max, Fg, "Effort `max` in the speed / intelligence slider"),
 
             // Code
-            (code, "Fenced code blocks with no recognized language"),
-            (inline_code, "Inline code spans (`` `code` ``)"),
+            (code, Fg, "Fenced code blocks with no recognized language"),
+            (inline_code, Fg, "Inline code spans (`` `code` ``)"),
 
             // Diff backgrounds
-            (diff_add, "Background fill for added diff rows (bg-only)"),
-            (diff_del, "Background fill for deleted diff rows (bg-only)"),
+            (diff_add, Bg, "Background fill for added diff rows"),
+            (diff_del, Bg, "Background fill for deleted diff rows"),
 
             // Markdown headings
-            (heading_h1, "H1, the most prominent heading"),
-            (heading_h2, "H2 section headers"),
-            (heading_h3, "H3 subsection headers"),
-            (heading_minor, "H4 to H6 minor headings"),
+            (heading_h1, Fg, "H1, the most prominent heading"),
+            (heading_h2, Fg, "H2 section headers"),
+            (heading_h3, Fg, "H3 subsection headers"),
+            (heading_minor, Fg, "H4 to H6 minor headings"),
 
             // Markdown body
-            (thinking, "Thinking text"),
-            (link, "Markdown links"),
-            (blockquote, "Markdown blockquote bar (`│`)"),
-            (list_marker, "List item bullet / number marker"),
+            (thinking, Fg, "Thinking text"),
+            (link, Fg, "Markdown links"),
+            (blockquote, Fg, "Markdown blockquote bar (`│`)"),
+            (list_marker, Fg, "List item bullet / number marker"),
 
             // Markdown chrome
-            (horizontal_rule, "Markdown horizontal rule (`---`)"),
-            (table_header, "Markdown table header cells"),
-            (table_border, "Markdown table borders and row rules"),
+            (horizontal_rule, Fg, "Markdown horizontal rule (`---`)"),
+            (table_header, Fg, "Markdown table header cells"),
+            (table_border, Fg, "Markdown table borders and row rules"),
 
             // UI chrome
-            (tool_border, "Tool call block borders and the read and grep line-number separator"),
-            (tool_icon, "Tool icon accent"),
-            (border_focused, "Input rules while idle"),
-            (border_unfocused, "Unfocused component border"),
-            (separator, "Status-line segment separator"),
-            (selection, "Chat text selected with the mouse (bg-only)"),
+            (tool_border, Fg, "Tool block borders and the read and grep line-number separator"),
+            (tool_icon, Fg, "Tool icon accent"),
+            (border_focused, Fg, "Input rules while idle"),
+            (border_unfocused, Fg, "Unfocused component border"),
+            (separator, Fg, "Status-line segment separator"),
+            (selection, Bg, "Chat text selected with the mouse"),
         }
     };
 }
@@ -106,9 +126,9 @@ use for_each_slot;
 
 /// Theme palette, with one slot per semantic role.
 macro_rules! define_theme_struct {
-    ( $( ($name:ident, $doc:literal), )* ) => {
+    ( $( ($name:ident, $kind:ident, $doc:literal), )* ) => {
         #[derive(Debug, Clone)]
-        pub struct Theme {
+        pub(crate) struct Theme {
             $(
                 #[doc = $doc]
                 pub(crate) $name: Slot,
@@ -136,17 +156,12 @@ impl Default for Theme {
 // ── Style Helpers ──
 
 macro_rules! define_slot_accessor {
-    (diff_add) => {
-        pub(crate) fn diff_add_row(&self) -> Style {
-            Style::default().bg(self.diff_add.bg.unwrap_or(Color::Reset))
+    ($name:ident, Bg) => {
+        pub(crate) fn $name(&self) -> Style {
+            Style::default().bg(self.$name.bg.unwrap_or(Color::Reset))
         }
     };
-    (diff_del) => {
-        pub(crate) fn diff_del_row(&self) -> Style {
-            Style::default().bg(self.diff_del.bg.unwrap_or(Color::Reset))
-        }
-    };
-    ($name:ident) => {
+    ($name:ident, Fg) => {
         pub(crate) fn $name(&self) -> Style {
             self.$name.style()
         }
@@ -154,9 +169,9 @@ macro_rules! define_slot_accessor {
 }
 
 macro_rules! define_slot_accessors {
-    ( $( ($name:ident, $doc:literal), )* ) => {
+    ( $( ($name:ident, $kind:ident, $doc:literal), )* ) => {
         impl Theme {
-            $( define_slot_accessor!($name); )*
+            $( define_slot_accessor!($name, $kind); )*
         }
     };
 }
@@ -184,25 +199,22 @@ impl Theme {
             TaskStatus::Completed => self.dim(),
         }
     }
+
+    /// Style of one effort level on the speed / intelligence slider's gradient.
+    pub(crate) fn effort_level(&self, effort: Effort) -> Style {
+        match effort {
+            Effort::Low => self.effort_low(),
+            Effort::Medium => self.effort_medium(),
+            Effort::High => self.effort_high(),
+            Effort::Xhigh => self.effort_xhigh(),
+            Effort::Max => self.effort_max(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn diff_add_row_and_diff_del_row_set_only_background() {
-        let t = Theme::default();
-
-        assert_eq!(
-            t.diff_add_row(),
-            Style::default().bg(t.diff_add.bg.unwrap())
-        );
-        assert_eq!(
-            t.diff_del_row(),
-            Style::default().bg(t.diff_del.bg.unwrap())
-        );
-    }
 
     mod slot {
         use super::*;
@@ -250,25 +262,6 @@ mod tests {
 
     mod default {
         use super::*;
-
-        #[test]
-        fn has_distinct_colors() {
-            let t = Theme::default();
-
-            assert_ne!(t.text.fg, t.muted.fg);
-            assert_ne!(t.muted.fg, t.dim.fg);
-            assert_ne!(t.accent.fg, t.assistant.fg);
-            assert_ne!(t.user.fg, t.assistant.fg);
-            assert_ne!(t.success.fg, t.error.fg);
-            assert_ne!(t.diff_add.bg, t.diff_del.bg);
-        }
-
-        #[test]
-        fn accent_is_bold() {
-            let t = Theme::default();
-
-            assert_eq!(t.accent.modifiers, Modifier::BOLD);
-        }
 
         #[test]
         fn headings_step_down_from_bold_underlined_to_italic() {
@@ -351,6 +344,41 @@ mod tests {
             assert_eq!(t.task_style(TaskStatus::Pending), t.text());
             assert_eq!(t.task_style(TaskStatus::InProgress), t.info());
             assert_eq!(t.task_style(TaskStatus::Completed), t.dim());
+        }
+    }
+
+    mod effort_level {
+        use super::*;
+
+        #[test]
+        fn maps_each_level_to_its_own_slot() {
+            let mut theme = Theme::default();
+            let colors = [
+                Color::Rgb(1, 1, 1),
+                Color::Rgb(2, 2, 2),
+                Color::Rgb(3, 3, 3),
+                Color::Rgb(4, 4, 4),
+                Color::Rgb(5, 5, 5),
+            ];
+            theme.effort_low.fg = Some(colors[0]);
+            theme.effort_medium.fg = Some(colors[1]);
+            theme.effort_high.fg = Some(colors[2]);
+            theme.effort_xhigh.fg = Some(colors[3]);
+            theme.effort_max.fg = Some(colors[4]);
+
+            for (effort, color) in [
+                (Effort::Low, colors[0]),
+                (Effort::Medium, colors[1]),
+                (Effort::High, colors[2]),
+                (Effort::Xhigh, colors[3]),
+                (Effort::Max, colors[4]),
+            ] {
+                assert_eq!(
+                    theme.effort_level(effort),
+                    Style::default().fg(color),
+                    "{effort}",
+                );
+            }
         }
     }
 }

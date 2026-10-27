@@ -12,7 +12,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary and a synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [compact.md](compact.md).
 
-- **`/config`**: Opens a [`KvOverview`](modals.md) of the resolved config, with the layer that set each value, and the config files loaded at startup. The values start from that load. A `/model`, `/effort`, `/mode`, or `/theme` switch, or Tab or Shift+Tab, credits the model, effort, mode, or theme it sets to the session, while an effort the new model derives on its own shows as `default`. Values derived from the model, such as Max Tokens and Auto Compaction, and the Auth value after `/login` or `/logout` keep their loaded source.
+- **`/config`**: Opens a [`KvOverview`](modals.md) of the resolved config, with the layer that set each value, and the config files loaded at startup. The values start from that load. A `/model`, `/effort`, `/mode`, or `/theme` switch, or Tab or Shift+Tab, credits the model, effort, mode, or theme it sets to the session, while an effort the new model derives on its own shows as `default`. Values derived from the model, such as Max Tokens and Auto-Compaction, and the Auth value after `/login` or `/logout` keep their loaded source.
 
 - **`/delete`**: Typed-arg only, and bare explains the missing argument. The picker entry is Ctrl+D inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), whose confirmation removes the session's JSONL and its artifact directory. Live-session refusal is layered across the picker filter, the resolver, and `session::saved::delete`.
 
@@ -30,7 +30,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/mode`**: Switches the permission mode. Bare opens a list picker of the three permission modes ([modals.md](modals.md)), and `/mode <mode>` forwards `Op::SetMode` directly. Bare is `ReadOnly`, so its picker opens mid-turn and submits the op as a modal action. Typed is `Steering`, so the dispatcher forwards its op mid-turn. Either switch applies from the turn's next gated call. Tab and Shift+Tab send the same op. [permissions.md](../tools/permissions.md#switching-modes) covers how the engine applies it.
 
-- **`/model`**: Swaps the active model mid-session through `Engine::set_model`. Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalog ID first, then a unique substring, so `fable`, `opus`, `sonnet`, and `haiku` act as aliases. Both forms are mutating and idle-gated because they can emit `Op::SetModel`, which re-resolves the current effort against the new model.
+- **`/model`**: Swaps the active model mid-session through `Engine::set_model`. Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves an exact catalog ID first, then a unique substring, so `fable`, `opus`, `sonnet`, and `haiku` act as aliases, and sends any other argument verbatim for a gateway that serves it, with the engine warning when the ID nearly matches one. Both forms are mutating and idle-gated because they can emit `Op::SetModel`, which re-resolves the current effort against the new model.
 
 - **`/rename`**: Bare opens a title editor ([modals.md](modals.md)), and `/rename <title>` applies directly. Both forms build their `Op::Rename` through `command::rename`, which keeps the title's first non-blank line and truncates it to the 80-column cap that first-prompt titles share. Both lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`.
 
@@ -72,11 +72,12 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Sources
 
-- `crates/ox-core/src/command.rs`: the alias table, `typed_op`, `parse`, and the typed forms of `/clear`, `/compact`, `/effort`, `/mode`, `/model`, `/rename`, and `/resume`, plus the model resolver.
+- `crates/ox-core/src/command.rs`: the command table with each command's aliases and parser, `typed_op`, and the typed forms of `/clear`, `/compact`, `/effort`, `/mode`, `/model`, `/rename`, and `/resume`, plus the model resolver.
 - `crates/ox-core/src/command/init.rs`: the typed form of `/init`, the instruction-file discovery, and the create and update prompts.
 - `crates/ox-core/src/command/parser.rs`: `parse_slash`, which parses a typed line into a command name and its arguments, `split_slash`, the borrowed split it shares with the popup, and `unescape_literal` for the `//` escape.
-- `crates/ox-core/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, `Engine::set_model`, which re-resolves the compaction threshold for the new model and words the `ConfigChanged` notice against the settings before the swap, and `TurnEnd::of`.
+- `crates/ox-core/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, and `Engine::set_model`, which re-resolves the compaction threshold for the new model and words the `ConfigChanged` notice against the settings before the swap.
 - `crates/ox-core/src/engine/sessions.rs`: `Engine::archive`, which waits for the archive entry to reach disk before rolling the session.
+- `crates/ox-core/src/protocol.rs`: `TurnEnd::of`, which maps an op and its terminal event to how the op ended.
 - `crates/ox-core/src/protocol/notice.rs`: `config_changed` and `mode_changed`, the confirmations every frontend shows.
 - `crates/ox-core/src/session/display.rs`: shared `id_prefix` and `display_title`, `archive_notice`, and the `MAX_TITLE_WIDTH` cap that `fit_title` applies to every title.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_prefix_to_info` checks the current project first, widens the search on a miss, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_saved_prefix` reports a live-only match as `ResolveError::Live` for `/archive`, `/unarchive`, `/delete`, and the engine's prefix resume.

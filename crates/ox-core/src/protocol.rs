@@ -231,8 +231,9 @@ pub enum Event {
     /// prompts to the user, then [`Self::TurnFailed`] ends the operation. After
     /// [`CompactTrigger::MidTurn`], only content after the summary is removed.
     TurnRolledBack,
-    /// Automatic compaction failed before the prompt was sent. The frontend returns the prompt to
-    /// the user, then [`Self::TurnFailed`] ends the operation.
+    /// The engine did not record the prompt, because a failure or a cancel stopped the operation
+    /// first: automatic compaction failed, or sign-in failed or was interrupted. The frontend
+    /// returns the prompt to the user, then the operation's terminal event follows.
     PromptUnsent,
     /// The in-flight prompt, compaction, resume, archive, sign-in, or sign-out failed. Like
     /// [`Self::TurnComplete`] and [`Self::Cancelled`], it ends the operation.
@@ -241,8 +242,9 @@ pub enum Event {
     UsageUpdated(UsageSnapshot),
     /// The account's subscription usage limits, which a request just reported.
     RateLimitsUpdated(RateLimits),
-    /// The user cancelled a turn, compaction, or sign-in with [`Op::Interrupt`]. The in-flight
-    /// reply is truncated, and frontends mark where it stopped.
+    /// The user cancelled a turn, compaction, or sign-in with [`Op::Interrupt`]. A turn that had
+    /// recorded the prompt truncates the reply, and frontends mark where it stopped. One that had
+    /// not emits [`Self::PromptUnsent`] first.
     Cancelled,
     /// Automatic compaction started, ahead of the submitted prompt or at a round boundary of the
     /// turn in flight. The frontend shows compacting status while the summarizer request streams.
@@ -365,6 +367,58 @@ pub enum CompactTrigger {
     /// The context reached the threshold at a round boundary inside a turn, which continues from
     /// the summary.
     MidTurn,
+}
+
+/// How an operation ended, after the sink has already shown it. A headless run reports it as its
+/// stop reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnEnd {
+    Completed,
+    Cancelled,
+    Failed,
+    Shutdown,
+}
+
+impl TurnEnd {
+    /// How `op` ended, if `event` is one of the terminal events [`Event`] lists for it.
+    pub fn of(op: &Op, event: &Event) -> Option<Self> {
+        match (op, event) {
+            (Op::SetArchive { .. }, Event::ArchiveUpdated { result, .. }) => Some(if result.is_ok() {
+                Self::Completed
+            } else {
+                Self::Failed
+            }),
+            (
+                Op::Prompt { .. }
+                | Op::Compact { .. }
+                | Op::Archive
+                | Op::Resume { .. }
+                | Op::Login
+                | Op::Logout,
+                Event::TurnFailed(_),
+            )
+            | (Op::Rename { .. }, Event::RenameFailed(_))
+            // The model has no level for the effort, so the pick changed nothing.
+            | (Op::SetModel(ConfigPick::Effort(_)), Event::ConfigChanged { effort: None, .. }) => {
+                Some(Self::Failed)
+            }
+            (Op::Prompt { .. }, Event::TurnComplete)
+            | (
+                Op::Compact { .. } | Op::Clear | Op::Archive | Op::Resume { .. },
+                Event::SessionReady,
+            )
+            | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
+            | (Op::Login, Event::SignedIn { .. })
+            | (Op::Logout, Event::SignedOut { .. })
+            | (Op::SetModel(_), Event::ConfigChanged { .. })
+            | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
+            (Op::Prompt { .. } | Op::Compact { .. } | Op::Login, Event::Cancelled) => {
+                Some(Self::Cancelled)
+            }
+            _ => None,
+        }
+    }
 }
 
 // ── Tool Calls ──
@@ -528,6 +582,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::config::compaction::CompactionConfig;
 
     mod op {
         use super::*;
@@ -556,6 +611,178 @@ mod tests {
             let tags = serde_json::to_value(triggers).unwrap();
 
             assert_eq!(tags, json!(["manual", "auto", "mid_turn"]));
+        }
+    }
+
+    mod turn_end {
+        use super::*;
+
+        mod of {
+            use super::*;
+
+            #[test]
+            fn saved_archive_ends_on_its_completion_result() {
+                let op = Op::SetArchive {
+                    path: "/repo/saved.jsonl".into(),
+                    session_id: "saved".to_owned(),
+                    state: ArchiveState::Archived,
+                };
+
+                for (result, expected) in [
+                    (Ok(ArchiveState::Archived), TurnEnd::Completed),
+                    (Err("Archive failed".to_owned()), TurnEnd::Failed),
+                ] {
+                    assert_eq!(
+                        TurnEnd::of(
+                            &op,
+                            &Event::ArchiveUpdated {
+                                id: "saved".to_owned(),
+                                result
+                            }
+                        ),
+                        Some(expected)
+                    );
+                }
+            }
+
+            #[test]
+            fn reads_only_the_terminal_events_of_the_op_in_flight() {
+                let prompt = Op::prompt("hi");
+                let compact = Op::Compact { instructions: None };
+                let resume = Op::Resume {
+                    target: ResumeTarget::Prefix("1a2b".to_owned()),
+                };
+                let rename = Op::Rename {
+                    title: "Fix login".to_owned(),
+                };
+                let set_model = Op::SetModel(ConfigPick::Effort(Effort::Low));
+                let set_mode = Op::SetMode(Mode::Plan);
+                let compacted = |trigger| Event::SessionCompacted {
+                    summary: "summary".to_owned(),
+                    pre_count: 4,
+                    instructions: None,
+                    trigger,
+                };
+                let rolled = Event::SessionRolled {
+                    id: "new".to_owned(),
+                    old_session: ArchiveState::Active,
+                };
+                let notice = Event::Error("Session write failed".to_owned());
+                let failed = Event::TurnFailed("failure".to_owned());
+
+                for (op, event, end) in [
+                    (&prompt, Event::TurnComplete, Some(TurnEnd::Completed)),
+                    (&prompt, Event::Cancelled, Some(TurnEnd::Cancelled)),
+                    (&prompt, failed.clone(), Some(TurnEnd::Failed)),
+                    (&prompt, compacted(CompactTrigger::Auto), None),
+                    (&prompt, notice.clone(), None),
+                    (&compact, compacted(CompactTrigger::Manual), None),
+                    (&compact, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (&compact, Event::Cancelled, Some(TurnEnd::Cancelled)),
+                    (&compact, Event::TurnComplete, None),
+                    (
+                        &resume,
+                        Event::SessionResumed {
+                            id: "1a2b".to_owned(),
+                            title: None,
+                            prior: ArchiveState::Active,
+                            history: Vec::new(),
+                        },
+                        None,
+                    ),
+                    (&resume, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (&resume, failed.clone(), Some(TurnEnd::Failed)),
+                    (&Op::Clear, notice.clone(), None),
+                    (&Op::Clear, rolled.clone(), None),
+                    (&Op::Clear, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (
+                        &rename,
+                        Event::SessionTitleUpdated {
+                            id: "live".to_owned(),
+                            title: "Fix login".to_owned(),
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&rename, notice.clone(), None),
+                    (
+                        &rename,
+                        Event::RenameFailed("Session write failed".to_owned()),
+                        Some(TurnEnd::Failed),
+                    ),
+                    (
+                        &set_model,
+                        Event::ConfigChanged {
+                            model: ModelSpec::resolve("claude-opus-5-5"),
+                            effort: Some(Effort::Low),
+                            requested: ConfigPick::Effort(Effort::Low),
+                            auto_compaction: CompactionConfig::with_threshold(50_000).auto,
+                            notice: String::new(),
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (
+                        &set_model,
+                        Event::ConfigChanged {
+                            model: ModelSpec::resolve("custom-model"),
+                            effort: None,
+                            requested: ConfigPick::Effort(Effort::Low),
+                            auto_compaction: CompactionConfig::with_threshold(50_000).auto,
+                            notice: String::new(),
+                        },
+                        Some(TurnEnd::Failed),
+                    ),
+                    (&set_model, failed.clone(), None),
+                    (
+                        &set_mode,
+                        Event::ModeChanged(Mode::Plan),
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&set_mode, notice.clone(), None),
+                    (&Op::Archive, rolled, None),
+                    (&Op::Archive, Event::SessionReady, Some(TurnEnd::Completed)),
+                    (&Op::Archive, failed, Some(TurnEnd::Failed)),
+                ] {
+                    assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
+                }
+            }
+
+            #[test]
+            fn reads_the_sign_in_terminal_events() {
+                let failed = Event::TurnFailed("failure".to_owned());
+
+                for (op, event, end) in [
+                    (
+                        &Op::Login,
+                        Event::LoginStarted {
+                            url: "https://example.com/login".to_owned(),
+                            manual_url: "https://example.com/login?manual".to_owned(),
+                        },
+                        None,
+                    ),
+                    (
+                        &Op::Login,
+                        Event::SignedIn {
+                            auth: AuthSource::ApiKeyEnv,
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&Op::Login, Event::Cancelled, Some(TurnEnd::Cancelled)),
+                    (&Op::Login, failed.clone(), Some(TurnEnd::Failed)),
+                    (
+                        &Op::Logout,
+                        Event::SignedOut {
+                            removed: true,
+                            auth: None,
+                            fallback_error: None,
+                        },
+                        Some(TurnEnd::Completed),
+                    ),
+                    (&Op::Logout, Event::Cancelled, None),
+                    (&Op::Logout, failed, Some(TurnEnd::Failed)),
+                ] {
+                    assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
+                }
+            }
         }
     }
 
