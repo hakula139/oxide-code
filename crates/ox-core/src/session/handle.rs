@@ -553,7 +553,7 @@ mod tests {
 
     use super::*;
     use crate::file_tracker::{
-        FileState, FileTracker, GateError, GatePurpose, LastView,
+        FileSource, FileState, FileTracker, GateError, GatePurpose, LastView,
         testing::{record_tracked_file, seed_full_read},
     };
     use crate::message::{ContentBlock, Replay, Role, TextOrigin};
@@ -2386,6 +2386,7 @@ mod tests {
                         state: FileState {
                             content_hash: 42,
                             last_view: LastView::Full,
+                            source: FileSource::Read,
                             recorded_at: datetime!(2026-01-01 00:00:01 UTC),
                             tool_use_id: "t1".to_owned(),
                         },
@@ -2398,6 +2399,7 @@ mod tests {
                                 ranges: vec![(1, 20)],
                                 total_lines: 40,
                             },
+                            source: FileSource::Read,
                             recorded_at: datetime!(2026-01-01 00:00:02 UTC),
                             tool_use_id: "t2".to_owned(),
                         },
