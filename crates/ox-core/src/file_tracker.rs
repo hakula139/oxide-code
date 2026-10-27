@@ -26,7 +26,8 @@ pub(crate) const MAX_TRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024;
 ///
 /// - **Read-before-Edit**: every Edit / Write must follow a `Read` of the same path in the session.
 /// - **Full coverage for Write**: overwriting a file needs every line of its current content read,
-///   in one Read or across several. An Edit accepts any Read of the current content.
+///   in one Read or across several. An Edit accepts any Read of the current content and credits the
+///   new lines it wrote, or the whole content when the tracked view already covered every line.
 /// - **Freshness**: mutating tools must pass the current bytes through
 ///   [`Self::verify_current_content`], and only matching xxh64 content counts as unchanged.
 ///
@@ -43,11 +44,35 @@ pub(crate) struct FileTracker {
 pub(crate) struct FileState {
     pub(crate) content_hash: u64,
     pub(crate) last_view: LastView,
+    /// Whether a Read showed this full content, so a re-Read may answer with [`CACHE_HIT_STUB`].
+    #[serde(default, skip_serializing_if = "FileSource::is_read")]
+    pub(crate) source: FileSource,
     #[serde(with = "time::serde::rfc3339")]
     pub(crate) recorded_at: OffsetDateTime,
     /// The tool call that recorded this state. Resume restores the state only while the transcript
     /// still holds that call's result.
     pub(crate) tool_use_id: String,
+}
+
+/// Whether a Read showed a tracked state whole, which decides whether a full re-Read may answer
+/// from the cache. A Write or Edit supplies content only through tool input, so deduplicating a
+/// Read against it would point at pre-edit content.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FileSource {
+    #[default]
+    Read,
+    Modify,
+}
+
+impl FileSource {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde calls skip_serializing_if with a reference"
+    )]
+    fn is_read(&self) -> bool {
+        matches!(self, Self::Read)
+    }
 }
 
 impl FileTracker {
@@ -87,9 +112,10 @@ impl FileTracker {
         (tracker, dropped)
     }
 
-    /// Returns `CacheHit` when a file already tracked as `Full` is read in full again unchanged.
-    /// Reads of unchanged content accumulate their line windows, and changed content starts over. A
-    /// read that returns content attributes the state to its tool call, `tool_use_id`.
+    /// Returns `CacheHit` when a Read already tracked the file as `Full` and a Read of the same
+    /// content in full follows unchanged. Reads of unchanged content accumulate their line windows,
+    /// and changed content starts over. A read that returns content attributes the state to its
+    /// tool call, `tool_use_id`.
     pub(crate) fn record_read(
         &self,
         path: &Path,
@@ -100,18 +126,23 @@ impl FileTracker {
         let content_hash = xxh64(bytes, HASH_SEED);
         let mut by_path = self.lock();
 
+        let full = view == LastView::Full;
         if let Some(state) = by_path.get_mut(path)
             && state.content_hash == content_hash
         {
-            let outcome = if state.last_view == LastView::Full && view == LastView::Full {
-                RecordRead::CacheHit
-            } else {
-                RecordRead::Inserted
-            };
+            let outcome =
+                if state.source == FileSource::Read && state.last_view == LastView::Full && full {
+                    RecordRead::CacheHit
+                } else {
+                    RecordRead::Inserted
+                };
             let seen = std::mem::replace(&mut state.last_view, LastView::Full);
             state.last_view = seen.union(view);
             if outcome == RecordRead::Inserted {
                 tool_use_id.clone_into(&mut state.tool_use_id);
+                if full {
+                    state.source = FileSource::Read;
+                }
             }
             return outcome;
         }
@@ -121,6 +152,7 @@ impl FileTracker {
             FileState {
                 content_hash,
                 last_view: view,
+                source: FileSource::Read,
                 recorded_at: OffsetDateTime::now_utc(),
                 tool_use_id: tool_use_id.to_owned(),
             },
@@ -159,12 +191,13 @@ impl FileTracker {
     }
 
     /// Drives `write` in a task of its own, then records the bytes it wrote under the tracker key
-    /// it returns, attributed to the tool call `tool_use_id`, so the record lands with the write
-    /// even when the caller is dropped mid-write. The owner must drain writes before resetting
-    /// state or capturing final snapshots.
+    /// it returns, with `written` saying which lines of them the model knows, attributed to the
+    /// tool call `tool_use_id`, so the record lands with the write even when the caller is dropped
+    /// mid-write. The owner must drain writes before resetting state or capturing final snapshots.
     pub(crate) async fn write_and_record<W>(
         self: &Arc<Self>,
         tool_use_id: &str,
+        view: LastView,
         write: W,
     ) -> anyhow::Result<()>
     where
@@ -177,7 +210,7 @@ impl FileTracker {
                 async move {
                     match write.await {
                         Ok((key, bytes)) => {
-                            tracker.record_modify(key, &bytes, tool_use_id);
+                            tracker.record_modify(key, &bytes, view, tool_use_id);
                             Ok(())
                         }
                         Err(error) => {
@@ -202,17 +235,26 @@ impl FileTracker {
         self.writes.reopen();
     }
 
-    /// Records bytes the agent just wrote. Always lands as [`LastView::Full`] so a subsequent Edit
-    /// passes the gate without requiring a fresh Read.
-    fn record_modify(&self, path: PathBuf, bytes: &[u8], tool_use_id: String) {
+    /// Records bytes the agent just wrote, as `view` describes them, so a subsequent Edit passes
+    /// the gate without a fresh Read.
+    fn record_modify(&self, path: PathBuf, bytes: &[u8], view: LastView, tool_use_id: String) {
         let content_hash = xxh64(bytes, HASH_SEED);
-        let now = OffsetDateTime::now_utc();
-        self.lock().insert(
+        let mut by_path = self.lock();
+        let last_view = if by_path
+            .get(&path)
+            .is_some_and(|state| state.last_view == LastView::Full)
+        {
+            LastView::Full
+        } else {
+            view
+        };
+        by_path.insert(
             path,
             FileState {
                 content_hash,
-                last_view: LastView::Full,
-                recorded_at: now,
+                last_view,
+                source: FileSource::Modify,
+                recorded_at: OffsetDateTime::now_utc(),
                 tool_use_id,
             },
         );
@@ -289,7 +331,10 @@ impl LastView {
         }
     }
 
-    fn from_ranges(mut ranges: Vec<(usize, usize)>, total_lines: usize) -> Self {
+    pub(crate) fn from_ranges(mut ranges: Vec<(usize, usize)>, total_lines: usize) -> Self {
+        if total_lines == 0 {
+            return Self::Full;
+        }
         ranges.sort_unstable();
         let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
         for (first, last) in ranges {
@@ -404,12 +449,15 @@ pub(crate) mod testing {
         let bytes = bytes.to_vec();
         let (started_tx, started_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
-        let mut caller = std::pin::pin!(tracker.write_and_record(tool_use_id, async move {
-            started_tx.send(()).unwrap();
-            release_rx.await.map_err(std::io::Error::other)?;
-            tokio::fs::write(&path, &bytes).await?;
-            Ok((path, bytes))
-        }));
+        let mut caller =
+            std::pin::pin!(
+                tracker.write_and_record(tool_use_id, LastView::Full, async move {
+                    started_tx.send(()).unwrap();
+                    release_rx.await.map_err(std::io::Error::other)?;
+                    tokio::fs::write(&path, &bytes).await?;
+                    Ok((path, bytes))
+                })
+            );
         assert!(futures::poll!(caller.as_mut()).is_pending());
         started_rx.await.unwrap();
         release_tx
@@ -438,7 +486,12 @@ pub(crate) mod testing {
         tool_use_id: &str,
     ) {
         std::fs::write(path, bytes).unwrap();
-        tracker.record_modify(path.to_path_buf(), bytes, tool_use_id.to_owned());
+        tracker.record_modify(
+            path.to_path_buf(),
+            bytes,
+            LastView::Full,
+            tool_use_id.to_owned(),
+        );
     }
 }
 
@@ -509,6 +562,28 @@ mod tests {
             let outcome = tracker.record_read(path, b"hello", view, "toolu_test");
 
             assert_eq!(outcome, RecordRead::Inserted);
+        }
+
+        #[test]
+        fn a_partial_read_does_not_lend_a_write_a_cache_hit() {
+            let tracker = FileTracker::default();
+            let path = Path::new("/tmp/a.rs");
+            tracker.record_modify(
+                path.to_path_buf(),
+                b"hello",
+                LastView::Full,
+                "toolu_write".to_owned(),
+            );
+            _ = tracker.record_read(path, b"hello", LastView::lines(1, 1, 2), "toolu_read");
+
+            let full = tracker.record_read(path, b"hello", LastView::Full, "toolu_read");
+
+            assert_eq!(full, RecordRead::Inserted);
+            assert_eq!(tracker.lock()[path].source, FileSource::Read);
+            assert_eq!(
+                tracker.record_read(path, b"hello", LastView::Full, "toolu_read"),
+                RecordRead::CacheHit,
+            );
         }
 
         #[test]
@@ -682,7 +757,7 @@ mod tests {
             _ = tracker.record_read(key, b"hello", LastView::lines(1, 1, 2), "toolu_test");
 
             tracker
-                .write_and_record("toolu_test", {
+                .write_and_record("toolu_test", LastView::Full, {
                     let path = path.clone();
                     async move {
                         tokio::fs::write(&path, b"world").await?;
@@ -696,6 +771,57 @@ mod tests {
             let stored = tracker.lock().get(key).cloned().unwrap();
             assert_eq!(stored.content_hash, xxh64(b"world", HASH_SEED));
             assert_eq!(stored.last_view, LastView::Full);
+            assert_eq!(stored.source, FileSource::Modify);
+        }
+
+        #[tokio::test]
+        async fn an_edit_after_a_full_read_keeps_the_full_view() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("a.rs");
+            let key = Path::new("/key/a.rs");
+            let tracker = tracker();
+            _ = tracker.record_read(key, b"old", LastView::Full, "toolu_read");
+
+            tracker
+                .write_and_record(
+                    "toolu_edit",
+                    LastView::from_ranges(vec![(2, 2)], 3),
+                    async move {
+                        tokio::fs::write(&path, b"new").await?;
+                        Ok((key.to_path_buf(), b"new".to_vec()))
+                    },
+                )
+                .await
+                .unwrap();
+
+            let stored = tracker.lock().get(key).cloned().unwrap();
+            assert_eq!(stored.last_view, LastView::Full);
+            assert_eq!(stored.source, FileSource::Modify);
+        }
+
+        #[tokio::test]
+        async fn an_edit_after_a_partial_read_credits_only_the_written_lines() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("a.rs");
+            let key = Path::new("/key/a.rs");
+            let tracker = tracker();
+            _ = tracker.record_read(key, b"old", LastView::lines(1, 1, 3), "toolu_read");
+
+            tracker
+                .write_and_record(
+                    "toolu_edit",
+                    LastView::from_ranges(vec![(2, 2)], 3),
+                    async move {
+                        tokio::fs::write(&path, b"new").await?;
+                        Ok((key.to_path_buf(), b"new".to_vec()))
+                    },
+                )
+                .await
+                .unwrap();
+
+            let stored = tracker.lock().get(key).cloned().unwrap();
+            assert_eq!(stored.last_view, LastView::lines(2, 2, 3));
+            assert_eq!(stored.source, FileSource::Modify);
         }
 
         #[tokio::test]
@@ -728,7 +854,11 @@ mod tests {
             _ = tracker.record_read(&path, b"hello", LastView::Full, "toolu_test");
 
             let result = tracker
-                .write_and_record("toolu_test", write_file(path.clone(), b"world"))
+                .write_and_record(
+                    "toolu_test",
+                    LastView::Full,
+                    write_file(path.clone(), b"world"),
+                )
                 .await;
 
             assert_eq!(
@@ -823,6 +953,7 @@ mod tests {
                 state: FileState {
                     content_hash: xxh64(content, HASH_SEED),
                     last_view: LastView::Full,
+                    source: FileSource::Read,
                     recorded_at,
                     tool_use_id: "toolu_1".to_owned(),
                 },
@@ -1007,6 +1138,11 @@ mod tests {
                     },
                 );
             }
+
+            #[test]
+            fn an_emptied_file_is_full() {
+                assert_eq!(LastView::from_ranges(Vec::new(), 0), LastView::Full);
+            }
         }
 
         mod union {
@@ -1057,6 +1193,7 @@ mod tests {
                         ranges: vec![(1, 2), (4, 5)],
                         total_lines: 9,
                     },
+                    source: FileSource::Modify,
                     recorded_at: time::macros::datetime!(2026-04-29 12:34:56 UTC),
                     tool_use_id: "toolu_1".to_owned(),
                 },
@@ -1071,11 +1208,27 @@ mod tests {
                     "path": "/tmp/a.rs",
                     "content_hash": 0xDEAD_BEEF_u64,
                     "last_view": {"kind": "partial", "ranges": [[1, 2], [4, 5]], "total_lines": 9},
+                    "source": "modify",
                     "recorded_at": "2026-04-29T12:34:56Z",
                     "tool_use_id": "toolu_1",
                 }),
             );
             assert_eq!(parsed, snap);
+        }
+
+        #[test]
+        fn older_snapshots_without_a_source_default_to_read() {
+            let json = serde_json::json!({
+                "path": "/tmp/a.rs",
+                "content_hash": 1_u64,
+                "last_view": {"kind": "full"},
+                "recorded_at": "2026-04-29T12:34:56Z",
+                "tool_use_id": "toolu_1",
+            });
+
+            let parsed: FileSnapshot = serde_json::from_value(json).unwrap();
+
+            assert_eq!(parsed.state.source, FileSource::Read);
         }
     }
 
@@ -1150,7 +1303,11 @@ mod tests {
             tracker.record_read(paged, b"p", LastView::lines(1, 1, 2), "toolu_page_1");
             tracker.record_read(paged, b"p", LastView::lines(2, 2, 2), "toolu_page_2");
             tracker
-                .write_and_record("toolu_write", write_file(written.clone(), b"w"))
+                .write_and_record(
+                    "toolu_write",
+                    LastView::Full,
+                    write_file(written.clone(), b"w"),
+                )
                 .await
                 .unwrap();
             let reread = tracker.record_read(read, b"r", LastView::Full, "toolu_reread");

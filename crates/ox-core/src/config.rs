@@ -5,6 +5,7 @@
 //! [`auth::AuthSource`] order.
 
 pub mod auth;
+mod base_url;
 pub mod compaction;
 pub mod gateway;
 pub mod load;
@@ -17,7 +18,6 @@ mod schema;
 pub mod testing;
 
 use std::fmt;
-use std::net::IpAddr;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -28,6 +28,7 @@ use strum::{EnumString, IntoStaticStr, VariantArray};
 use tracing::warn;
 
 use self::auth::{Auth, AuthSource, CredentialError, LoginUnavailable, PendingAuth};
+pub(crate) use self::base_url::BaseUrl;
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::gateway::{GatewayCompat, GatewaySnapshot};
 use self::load::Loaded;
@@ -216,7 +217,7 @@ pub struct Config {
     pending_auth: Option<PendingAuth>,
     /// Why the session started signed out.
     pub(crate) signed_out: Option<LoginUnavailable>,
-    pub(crate) base_url: String,
+    pub(crate) base_url: BaseUrl,
     /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the client
     /// trusts only the platform roots.
     pub extra_ca_certs: Option<PathBuf>,
@@ -274,10 +275,11 @@ impl Config {
 
         let gateway = GatewayCompat::from_client(&client)?;
 
-        let base_url = env_string("ANTHROPIC_BASE_URL")
-            .or_else(|| origins.sourced("client.base_url", client.base_url))
-            .unwrap_or_else(|| Sourced::fallback(DEFAULT_BASE_URL.to_owned()));
-        validate_base_url(&base_url)?;
+        let base_url = resolve_base_url(
+            env_string("ANTHROPIC_BASE_URL")
+                .or_else(|| origins.sourced("client.base_url", client.base_url))
+                .unwrap_or_else(|| Sourced::fallback(DEFAULT_BASE_URL.to_owned())),
+        )?;
 
         let extra_ca_certs = resolve_extra_ca_certs(
             origins.sourced("client.extra_ca_certs", client.extra_ca_certs),
@@ -437,7 +439,7 @@ impl Config {
             model: self.model.clone(),
             effort: self.effort,
             auth: self.auth.as_ref().map(Auth::source),
-            base_url: self.base_url.clone(),
+            base_url: self.base_url.to_string(),
             extra_ca_certs: self.extra_ca_certs.clone(),
             gateway: self.gateway.snapshot(),
             max_tokens: self.max_tokens,
@@ -482,6 +484,20 @@ fn resolve_extra_ca_certs(
             Ok(Sourced::fallback(None))
         }
     }
+}
+
+/// Validates `base_url`, naming the setting that supplied it in an error.
+fn resolve_base_url(base_url: Sourced<String>) -> Result<Sourced<BaseUrl>> {
+    let value = BaseUrl::parse(&base_url.value).with_context(|| {
+        let raw = base_url::redacted(&base_url.value);
+        let setting = match &base_url.source {
+            Source::Env(var) => format!("{var} {raw:?}"),
+            Source::File(layer) => format!("client.base_url {raw:?} in {}", tildify(layer.path())),
+            _ => format!("base URL {raw:?}"),
+        };
+        format!("invalid {setting}")
+    })?;
+    Ok(Sourced::new(value, base_url.source))
 }
 
 /// The explicit credential and its source, rejecting a custom header that would replace it. Without
@@ -702,55 +718,6 @@ where
     T: fmt::Display + FromStr + PartialOrd,
 {
     Ok(env::number(var, range)?.map(|value| Sourced::new(value, Source::Env(var))))
-}
-
-// ── Base URL ──
-
-fn validate_base_url(base_url: &Sourced<String>) -> Result<()> {
-    let raw = &base_url.value;
-    let reason = match reqwest::Url::parse(raw) {
-        Err(e) => e.to_string(),
-        Ok(url) if url.query().is_some() || url.fragment().is_some() => {
-            "query strings and fragments are not supported. Remove them from the base URL."
-                .to_owned()
-        }
-        Ok(url) => match url.scheme() {
-            "https" => return Ok(()),
-            "http" if is_loopback_url(&url) => return Ok(()),
-            "http" => "http is allowed only for localhost".to_owned(),
-            scheme => format!("expected http or https, got {scheme:?}"),
-        },
-    };
-    let setting = match &base_url.source {
-        Source::Env(var) => format!("{var} {raw:?}"),
-        Source::File(layer) => format!("client.base_url {raw:?} in {}", tildify(layer.path())),
-        _ => format!("base URL {raw:?}"),
-    };
-    bail!("invalid {setting}: {reason}")
-}
-
-fn is_loopback_url(url: &reqwest::Url) -> bool {
-    match url.host_str() {
-        Some("localhost") => true,
-        Some(host) => host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback()),
-        None => false,
-    }
-}
-
-/// Returns whether `base_url` points at Anthropic's production or staging host. Gates the
-/// stored-login fallback, body-side `cache_control.scope = "global"`, and the billing `cch` hash.
-pub(crate) fn is_first_party_base_url(base_url: &str) -> bool {
-    // `Url` lowercases the host of an `http` or `https` URL.
-    reqwest::Url::parse(base_url).is_ok_and(|url| {
-        matches!(
-            url.host_str(),
-            Some("api.anthropic.com" | "api-staging.anthropic.com")
-        )
-    })
 }
 
 #[cfg(test)]
@@ -1046,7 +1013,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let config = load_with(&dir, &[]).await.unwrap();
             assert_eq!(config.model.id(), "claude-opus-5-5");
-            assert_eq!(config.base_url, DEFAULT_BASE_URL);
+            assert_eq!(config.base_url.to_string(), DEFAULT_BASE_URL);
             assert_eq!(config.max_tokens, None);
             assert_eq!(config.effort, Some(Effort::Medium));
             assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
@@ -1124,7 +1091,7 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(config.model.id(), "claude-sonnet-5-5");
-            assert_eq!(config.base_url, "https://example.invalid");
+            assert_eq!(config.base_url.to_string(), "https://example.invalid");
             assert_eq!(config.max_tokens, Some(64));
             assert_eq!(config.max_tool_rounds, Some(200));
             assert!(config.compaction.auto.enabled);
@@ -1179,7 +1146,7 @@ mod tests {
             );
             let config = load_with(&dir, &[]).await.unwrap();
             assert_eq!(config.model.id(), "claude-haiku-5-5");
-            assert_eq!(config.base_url, "https://config-file.invalid");
+            assert_eq!(config.base_url.to_string(), "https://config-file.invalid");
             assert_eq!(
                 config.extra_ca_certs.as_deref(),
                 Some(Path::new(TEST_CA_PATH))
@@ -1366,6 +1333,47 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn rejects_a_base_url_with_userinfo_and_redacts_the_password() {
+            let advice = "a base URL cannot carry a username or password. \
+                          Remove them, and set the credential with ANTHROPIC_AUTH_TOKEN, \
+                          ANTHROPIC_API_KEY, or [client.auth].";
+            for (raw, redacted, reason) in [
+                (
+                    "https://user:secret@gw.example/anthropic",
+                    "https://gw.example/anthropic",
+                    advice,
+                ),
+                (
+                    "https://user@gw.example/anthropic",
+                    "https://gw.example/anthropic",
+                    advice,
+                ),
+                (
+                    "https://:secret@gw.example/anthropic",
+                    "https://gw.example/anthropic",
+                    advice,
+                ),
+                (
+                    "https://user:secret@gw.example:99999/anthropic",
+                    "https://gw.example:99999/anthropic",
+                    "invalid port number",
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+
+                let err = load_with(&dir, &[("ANTHROPIC_BASE_URL", raw)])
+                    .await
+                    .expect_err("a base URL must not carry userinfo");
+                let message = format!("{err:#}");
+
+                assert_eq!(
+                    message,
+                    format!("invalid ANTHROPIC_BASE_URL {redacted:?}: {reason}"),
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn accepts_base_urls_with_optional_path_prefix_and_trailing_slash() {
             for raw in [
                 "https://example.com",
@@ -1384,7 +1392,7 @@ mod tests {
                     .await
                     .unwrap();
 
-                assert_eq!(config.base_url, raw);
+                assert_eq!(config.base_url.to_string(), raw);
             }
         }
 
@@ -2667,28 +2675,6 @@ mod tests {
             );
             assert_eq!(snap.theme_name, "macchiato");
             assert_eq!(snap.provenance, cfg.provenance);
-        }
-    }
-
-    mod is_first_party_base_url {
-        use super::*;
-
-        #[test]
-        fn accepts_official_hosts() {
-            assert!(is_first_party_base_url("https://api.anthropic.com"));
-            assert!(is_first_party_base_url("https://api.anthropic.com/"));
-            assert!(is_first_party_base_url("https://api-staging.anthropic.com"));
-            assert!(is_first_party_base_url("https://API.ANTHROPIC.COM"));
-        }
-
-        #[test]
-        fn rejects_proxies_and_malformed_urls() {
-            assert!(!is_first_party_base_url("https://api.openai.com"));
-            assert!(!is_first_party_base_url("https://proxy.example.com"));
-            assert!(!is_first_party_base_url("https://anthropic.com.evil.io"));
-            assert!(!is_first_party_base_url("http://127.0.0.1:8080"));
-            assert!(!is_first_party_base_url(""));
-            assert!(!is_first_party_base_url("not-a-url"));
         }
     }
 

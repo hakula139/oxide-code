@@ -93,7 +93,7 @@ jobs:
       - name: Test with coverage
         id: coverage
         if: ${{ !cancelled() }}
-        run: cargo llvm-cov --locked --lcov --output-path lcov.info -- --show-output
+        run: cargo llvm-cov --locked --lcov --output-path lcov.info
 
       - name: Upload to Codecov
         if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}

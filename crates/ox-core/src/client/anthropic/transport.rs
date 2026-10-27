@@ -47,7 +47,7 @@ const CONNECTION_ADVICE: &str = "Check the network connection, the base URL \
 
 /// One `/v1/messages` call, replayable across retry attempts.
 pub(super) struct MessagesRequest {
-    pub(super) url: String,
+    pub(super) url: reqwest::Url,
     pub(super) betas: String,
     pub(super) session_id: String,
     pub(super) body: Bytes,
@@ -56,12 +56,6 @@ pub(super) struct MessagesRequest {
     pub(super) trust: Arc<dyn Trust>,
     /// Tracks a stored login's reload, which outlives a dropped request.
     pub(super) reloads: TaskTracker,
-}
-
-/// The `/v1/messages` endpoint under `base_url`, dropping a trailing slash as the Anthropic SDKs
-/// do, since routers that keep empty path segments answer `//v1/messages` with a 404.
-pub(super) fn messages_url(base_url: &str) -> String {
-    format!("{}/v1/messages?beta=true", base_url.trim_end_matches('/'))
 }
 
 impl Client {
@@ -126,7 +120,7 @@ async fn send(
     retry: u32,
 ) -> Result<reqwest::Response, AttemptError> {
     let (name, value) = credential.header();
-    http.post(&request.url)
+    http.post(request.url.clone())
         .header("anthropic-beta", &request.betas)
         .header("x-claude-code-session-id", &request.session_id)
         .header("x-stainless-retry-count", retry)
@@ -502,34 +496,6 @@ mod tests {
     };
     use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
 
-    mod messages_url {
-        use super::*;
-
-        #[test]
-        fn appends_the_messages_path_after_an_optional_prefix() {
-            for (base, expected) in [
-                (
-                    "https://example.com",
-                    "https://example.com/v1/messages?beta=true",
-                ),
-                (
-                    "https://example.com/",
-                    "https://example.com/v1/messages?beta=true",
-                ),
-                (
-                    "https://example.com/anthropic",
-                    "https://example.com/anthropic/v1/messages?beta=true",
-                ),
-                (
-                    "https://example.com/anthropic/",
-                    "https://example.com/anthropic/v1/messages?beta=true",
-                ),
-            ] {
-                assert_eq!(messages_url(base), expected, "{base}");
-            }
-        }
-    }
-
     mod post_messages {
         use super::*;
 
@@ -629,15 +595,6 @@ mod tests {
                 ),
                 "{message}"
             );
-        }
-
-        #[tokio::test]
-        async fn malformed_url_is_fatal() {
-            let req = messages_request("not a url");
-            let err = post_messages(&plain_http(), &req, 0)
-                .await
-                .expect_err("the request cannot be built");
-            assert!(matches!(err, AttemptError::Fatal(_)), "{err:?}");
         }
 
         #[tokio::test]
