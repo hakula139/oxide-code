@@ -240,16 +240,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("file.txt");
             fs::write(&path, "a much longer original").unwrap();
-            let attempt = crate::tool::local_testing::WorkspaceWrite::new(&path);
 
             let result = commit::write(&path, b"short", Some(b"a much longer original"));
 
-            if attempt.acl_available {
-                result.unwrap();
-                assert_eq!(fs::read_to_string(&path).unwrap(), "short");
-            } else {
-                attempt.assert_native_refusal(&result.unwrap_err());
-            }
+            result.unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "short");
         }
 
         #[test]
@@ -289,11 +284,7 @@ mod tests {
 
                 let error = commit::write(path, b"x", None).unwrap_err();
 
-                if attempt.acl_available {
-                    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-                } else {
-                    attempt.assert_native_refusal(&error);
-                }
+                assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
                 assert_eq!(identity(path), before);
                 attempt.assert_unchanged();
                 assert_eq!(fs::read_link(&link).unwrap(), target);

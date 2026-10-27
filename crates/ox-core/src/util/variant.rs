@@ -3,8 +3,8 @@
 use anyhow::anyhow;
 use strum::VariantArray;
 
-/// Every variant name of `T` in declaration order, comma-separated.
-pub(crate) fn names<T>() -> String
+/// Every variant name of `T` in declaration order, joined by `separator`.
+pub(crate) fn names_joined<T>(separator: &str) -> String
 where
     T: VariantArray + Copy + Into<&'static str>,
 {
@@ -12,7 +12,15 @@ where
         .iter()
         .map(|&variant| variant.into())
         .collect::<Vec<&str>>()
-        .join(", ")
+        .join(separator)
+}
+
+/// Every variant name of `T` in declaration order, comma-separated.
+pub(crate) fn names<T>() -> String
+where
+    T: VariantArray + Copy + Into<&'static str>,
+{
+    names_joined::<T>(", ")
 }
 
 /// The parse error for a string that names no variant of `T`.

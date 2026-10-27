@@ -199,10 +199,10 @@ Other servers accept the same layout. The Anthropic API accepted `scope: "global
 
 ### oxide-code Gating
 
-oxide-code ships `prompt-caching-scope-2026-01-05` on every agentic request, as Claude Code does, and gates only the body-side `cache_control.scope` on `is_first_party_base_url(&config.base_url)`:
+oxide-code ships `prompt-caching-scope-2026-01-05` on every agentic request, as Claude Code does, and gates only the body-side `cache_control.scope` on `BaseUrl::is_first_party`:
 
 - Base URL host matches `api.anthropic.com` or `api-staging.anthropic.com` → `{"type": "ephemeral", "scope": "global"}`.
-- Any other host (gateways, self-hosted, malformed URLs) → `{"type": "ephemeral"}`. The header still ships, and without the scope field it is a server-side no-op.
+- Any other host (gateways, self-hosted) → `{"type": "ephemeral"}`. The header still ships, and without the scope field it is a server-side no-op.
 
 Shape is otherwise identical in both modes. Only the body-side `scope` field toggles.
 
