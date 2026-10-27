@@ -8,11 +8,11 @@ use anyhow::{Context as _, Result, bail};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader};
 
 use ox_core::command::{self, Parsed};
-use ox_core::engine::{Engine, EngineHandle, TurnEnd};
+use ox_core::engine::{Engine, EngineHandle};
 use ox_core::permission::rule::Rule;
 use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::notice::ENGINE_STOPPED;
-use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op};
+use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op, TurnEnd};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::text::escape_hidden;
 
@@ -157,6 +157,7 @@ where
 
     let failure = handle.shutdown().await?;
     renderer.session_write_error(failure.as_deref());
+    failed |= failure.is_some();
     result?;
     if let Some(signal) = stopped {
         return Ok(Exit::Signal(signal));
@@ -167,7 +168,7 @@ where
 
 /// `/name (aliases)` for every command the REPL runs, comma-separated.
 fn repl_command_list() -> String {
-    let mut names = command::NAMES.to_vec();
+    let mut names: Vec<&str> = command::names().collect();
     names.push(HELP);
     names.sort_unstable();
     names
@@ -359,7 +360,7 @@ mod tests {
     use ox_core::engine::EnginePanic;
     use ox_core::engine::testing::{
         engine, mount_reply, mount_stalled_reply_once, mount_tool_call_once, panic_message,
-        panicked_engine, request_bodies, until_requested, with_pinned_home,
+        panicked_engine, request_bodies, unsaved_session_handle, until_requested, with_pinned_home,
     };
     use ox_core::permission::testing::exec_grant;
     use ox_core::permission::{Mode, PermissionClass, Tier};
@@ -473,6 +474,34 @@ mod tests {
                 assert_eq!(last["content"][0]["text"], "hello");
             })
             .await;
+        }
+
+        #[tokio::test]
+        async fn exits_with_failure_when_the_session_cannot_be_saved() {
+            let failure = "session writer task has stopped";
+            let sink = CapturingSink::default();
+            let input: &[u8] = b"hello\n";
+            let handle = unsaved_session_handle(failure);
+
+            let exit = Box::pin(drive(
+                handle,
+                Path::new("/repo"),
+                &sink,
+                None,
+                Prompter::new(input, io::sink()),
+                true,
+                no_signal,
+            ))
+            .await
+            .unwrap();
+
+            assert_eq!(exit, Exit::Failure);
+            assert!(
+                sink.events()
+                    .contains(&Event::Error(format!("Session write failed: {failure}"))),
+                "the failure reaches the sink: {:?}",
+                sink.events(),
+            );
         }
 
         #[tokio::test]
@@ -921,7 +950,7 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let sink = CapturingSink::default();
                 let input: &[u8] = indoc! {b"
-                    /model gpt-4
+                    /effort turbo
                     /model
                     /theme
                 "};
@@ -950,7 +979,7 @@ mod tests {
                     .collect();
                 assert_eq!(reports.len(), 3, "{reports:?}");
                 assert!(
-                    reports[0].starts_with("/model: Unknown model: `gpt-4`."),
+                    reports[0].starts_with("/effort: Unknown effort: `turbo`."),
                     "{reports:?}"
                 );
                 assert_eq!(

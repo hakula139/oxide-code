@@ -3,6 +3,13 @@
 use std::cell::Cell;
 use std::ops::Range;
 
+/// Which way a keyboard step moves through a list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Direction {
+    Forward,
+    Backward,
+}
+
 /// Index one step after `index` among `len` rows, wrapping past the last. Needs `len > 0`.
 pub(crate) fn wrap_next(index: usize, len: usize) -> usize {
     (index + 1) % len

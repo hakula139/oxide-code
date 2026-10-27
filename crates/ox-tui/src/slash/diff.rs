@@ -13,7 +13,7 @@ use std::process::Output;
 
 use anyhow::{Result, anyhow, bail};
 
-use ox_core::util::git::output_async;
+use ox_core::util::git::{output_async, output_async_capped};
 
 use super::context::SlashContext;
 use super::registry::{ChatOutput, SlashCommand, SlashOutcome};
@@ -68,9 +68,10 @@ async fn collect_diff(dir: &Path) -> Result<WorkingTreeDiff> {
     if has_head(root).await {
         let (head, untracked) = tokio::try_join!(run_git_diff_in(root, &["HEAD"]), untracked)?;
         Ok(WorkingTreeDiff::new(
-            &[&head],
+            &[&head.text],
             &untracked,
             "`git diff HEAD`",
+            head.truncated,
         ))
     } else {
         let (cached, unstaged, untracked) = tokio::try_join!(
@@ -79,11 +80,18 @@ async fn collect_diff(dir: &Path) -> Result<WorkingTreeDiff> {
             untracked,
         )?;
         Ok(WorkingTreeDiff::new(
-            &[&cached, &unstaged],
+            &[&cached.text, &unstaged.text],
             &untracked,
             "`git diff --cached` and `git diff`",
+            cached.truncated || unstaged.truncated,
         ))
     }
+}
+
+/// One `git diff` run's output and whether git wrote more than the view keeps.
+struct DiffOutput {
+    text: String,
+    truncated: bool,
 }
 
 // ── Git Helpers ──
@@ -102,8 +110,9 @@ async fn has_head(root: &Path) -> bool {
         .is_ok()
 }
 
-/// Runs `git diff` with the output shape [`WorkingTreeDiff`] parses, whatever the user config.
-async fn run_git_diff_in(root: &Path, extra: &[&str]) -> Result<String> {
+/// Runs `git diff` with the output shape [`WorkingTreeDiff`] parses, whatever the user config,
+/// keeping no more than the view's byte budget.
+async fn run_git_diff_in(root: &Path, extra: &[&str]) -> Result<DiffOutput> {
     let mut args = vec![
         "-c",
         "core.quotePath=false",
@@ -120,29 +129,66 @@ async fn run_git_diff_in(root: &Path, extra: &[&str]) -> Result<String> {
         "--submodule=short",
     ];
     args.extend_from_slice(extra);
-    run_git_in(root, &args).await
+    let (out, truncated) = git_output_capped(root, &args, view::MAX_BYTES).await?;
+    if !truncated {
+        check_status(&args, &out)?;
+    }
+    Ok(DiffOutput {
+        text: String::from_utf8_lossy(&out.stdout).into_owned(),
+        truncated,
+    })
 }
 
 async fn run_git_in(root: &Path, args: &[&str]) -> Result<String> {
     let out = git_output(root, args).await?;
+    check_status(args, &out)?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Fails with git's own message unless `out` succeeded.
+fn check_status(args: &[&str], out: &Output) -> Result<()> {
     if !out.status.success() {
         bail!("{}", git_failure_message(args, &out.stderr));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(())
 }
 
 /// Runs git through [`output_async`] without its optional locks, so a `/diff` beside the user's own
 /// git commands never writes the index. Dropping the future kills the child.
 async fn git_output(root: &Path, args: &[&str]) -> Result<Output> {
-    let args_without_locks = [&["--no-optional-locks"], args].concat();
-    output_async("git", &args_without_locks, root)
+    output_async("git", &without_optional_locks(args), root)
         .await
-        .map_err(|e| {
-            anyhow!(
-                "failed to spawn git {}: {e}. Check that git is installed and on PATH.",
-                args.join(" "),
-            )
-        })
+        .map_err(|e| git_spawn_error(args, &e))
+}
+
+/// Runs git as [`git_output`] does but stops reading its stdout at `limit` bytes and kills it. The
+/// cut often lands mid-line and sometimes inside a character, so a truncated read ends after its
+/// last newline.
+async fn git_output_capped(root: &Path, args: &[&str], limit: usize) -> Result<(Output, bool)> {
+    let (mut out, truncated) =
+        output_async_capped("git", &without_optional_locks(args), root, limit)
+            .await
+            .map_err(|e| git_spawn_error(args, &e))?;
+    if truncated {
+        let end = out
+            .stdout
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |last| last + 1);
+        out.stdout.truncate(end);
+    }
+    Ok((out, truncated))
+}
+
+fn without_optional_locks<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    [&["--no-optional-locks"], args].concat()
+}
+
+fn git_spawn_error(args: &[&str], error: &std::io::Error) -> anyhow::Error {
+    anyhow!(
+        "failed to spawn git {}: {error}. Check that git is installed and on PATH.",
+        args.join(" ")
+    )
 }
 
 /// Trimmed stderr, or `git <args> failed` when stderr is blank.
@@ -417,7 +463,8 @@ mod tests {
 
             let body = with_isolated_git_env_async(run_git_diff_in(&repo, &["HEAD"]))
                 .await
-                .unwrap();
+                .unwrap()
+                .text;
 
             assert!(body.starts_with("diff --git a/é.txt b/é.txt\n"), "{body}");
             assert!(body.contains(" first\n \n-third\n"), "{body:?}");
@@ -446,7 +493,8 @@ mod tests {
 
             let body = with_isolated_git_env_async(run_git_diff_in(&repo, &["HEAD"]))
                 .await
-                .unwrap();
+                .unwrap()
+                .text;
 
             assert!(
                 body.contains("diff --git a/b.txt b/b.txt\nnew file"),
@@ -456,6 +504,37 @@ mod tests {
             assert!(
                 body.contains("rename from old.txt\nrename to new.txt"),
                 "{body}"
+            );
+        }
+
+        #[tokio::test]
+        async fn caps_the_read_and_reports_truncation() {
+            let (_dir, repo) = fresh_repo();
+            commit_file(&repo, "big.txt", &"x\n".repeat(view::MAX_BYTES / 2 + 1));
+            std::fs::write(repo.join("big.txt"), "y\n").unwrap();
+
+            let out = with_isolated_git_env_async(run_git_diff_in(&repo, &["HEAD"]))
+                .await
+                .unwrap();
+
+            assert!(out.truncated);
+            assert!(out.text.len() <= view::MAX_BYTES);
+            assert!(out.text.ends_with('\n'), "the cut line is dropped");
+        }
+
+        #[tokio::test]
+        async fn reports_a_failed_diff_outside_a_repository() {
+            let dir = tempfile::tempdir().unwrap();
+
+            let Err(err) =
+                with_isolated_git_env_async(run_git_diff_in(dir.path(), &["HEAD"])).await
+            else {
+                panic!("git diff outside a repository must fail");
+            };
+
+            assert!(
+                format!("{err:#}").contains("Not a git repository"),
+                "{err:#}"
             );
         }
     }

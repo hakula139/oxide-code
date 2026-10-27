@@ -72,7 +72,7 @@ Explicit thresholds snap into a usable range. Token values below `50_000` rise t
 3. When the next prompt arrives, `Engine::auto_compact` checks the stored estimate before `submit_prompt` records the prompt.
 4. If the estimate crosses the threshold, it runs `Engine::run_compaction`, the same pipeline `/compact` uses. A transcript below the `/compact` size floor is skipped without counting a failure, since the system prompt, instructions, and tools then fill most of the context and a summary would not shrink the request.
 5. `Engine::run_auto_compaction` emits `AutoCompactionStarted` so the TUI can show compaction status while the summarizer runs, and the summary streams into the chat as it does for `/compact`.
-6. On success, `Engine::replace_with_summary` persists the compact boundary, clears the file tracker, replaces `messages` with the synthetic post-compact message, and emits `SessionCompacted`.
+6. On success, `Engine::replace_with_summary` builds the synthetic post-compact message, and `LiveTranscript::compact` persists the compact boundary, clears the file tracker, and replaces the messages with that continuation. The engine then emits `SessionCompacted`.
 7. On failure, the streamed summary is discarded, `AutoCompactFailures::fail` increments the failure counter, and `submit_prompt` emits `PromptUnsent`, then ends with `TurnFailed` without recording or sending the new prompt.
 
 ### Inside a Turn
@@ -110,7 +110,7 @@ During TUI auto-compaction, the status bar shows the `Compacting` state, and the
 
 8. **A failed attempt fails its prompt.** Sending the prompt against the unchanged transcript would put a request over the threshold on the wire, and the context would keep growing until it overflowed the window, which is the case auto-compaction exists for. Failing the prompt reports the failure before anything is sent, and the user can still continue during the pause without compaction. The TUI hands the unsent prompt back and holds the queue, so the prompts queued behind it do not each start another summary request on their own. A failed mid-turn attempt ends its turn for the same reason, since the turn's next request would cross the threshold, and the TUI holds the queue there too.
 
-## Related Issues
+## Out of Scope
 
 A `pre_compact` hook is tracked in [#168](https://github.com/hakula139/oxide-code/issues/168).
 

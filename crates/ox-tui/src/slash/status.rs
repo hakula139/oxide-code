@@ -54,7 +54,7 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
             "Prompt Cache TTL".to_owned(),
             info.config.prompt_cache_ttl.to_string(),
         ),
-        ("Auto Compaction".to_owned(), auto_compaction),
+        ("Auto-Compaction".to_owned(), auto_compaction),
         (
             "Show Thinking".to_owned(),
             labels::on_off(info.config.show_thinking).to_owned(),
@@ -191,11 +191,11 @@ mod tests {
 
             let row = rendered
                 .lines()
-                .find(|line| line.contains("Auto Compaction"));
+                .find(|line| line.contains("Auto-Compaction"));
             assert_eq!(
                 row.map(str::trim),
                 Some(
-                    "Auto Compaction    paused after 3 failures in a row (run `/compact` to resume)"
+                    "Auto-Compaction    paused after 3 failures in a row (run `/compact` to resume)"
                 ),
             );
         }

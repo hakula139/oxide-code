@@ -6,6 +6,7 @@ use indoc::{formatdoc, indoc};
 
 use crate::prompt::instructions::{self, AGENTS_MD, CLAUDE_MD};
 use crate::protocol::Op;
+use crate::util::text::plural;
 
 /// Each file `/init` can create, with the tools besides oxide-code that read it.
 pub const FILE_CHOICES: [(&str, &str); 2] = [
@@ -89,7 +90,7 @@ fn already_has(existing: &[PathBuf]) -> String {
         .map(|path| format!("`{}`", path.display()))
         .collect::<Vec<_>>()
         .join(" and ");
-    let them = if existing.len() == 1 { "it" } else { "them" };
+    let them = plural(existing.len(), "it", "them");
     format!("This project already has {files}. Run `/init` without a file name to update {them}.")
 }
 

@@ -24,6 +24,13 @@ success = "#a5d6a7"
 warning = "#ffe082"
 error = "#cf6679"
 
+# Effort gradient
+effort_low = "blue"
+effort_medium = "cyan"
+effort_high = "green"
+effort_xhigh = "magenta"
+effort_max = "red"
+
 # Code (M2 dark theme baseline secondary)
 code = "#03dac6"
 inline_code = "#f8bbd0"

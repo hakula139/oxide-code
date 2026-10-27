@@ -10,65 +10,98 @@ use std::path::Path;
 
 use indoc::formatdoc;
 
-use crate::model::{Effort, MODELS, ModelInfo, ResolvedModelId, replacement_for};
+use crate::model::{Effort, MODELS, ModelInfo, ResolvedModelId};
 use crate::permission::Mode;
 use crate::protocol::{ConfigPick, Op, ResumeTarget};
 use crate::session::display::fit_title;
 use crate::util::variant;
 
-/// Canonical names of the commands [`typed_op`] parses, without their leading `/`.
-pub const NAMES: [&str; 9] = [
-    "clear", "compact", "effort", "exit", "init", "mode", "model", "rename", "resume",
+/// One slash command [`typed_op`] parses: its canonical name, aliases, and parser.
+struct Command {
+    name: &'static str,
+    aliases: &'static [&'static str],
+    /// The typed form of the command line. `/init` reads instructions at `project_root`.
+    parse: fn(&str, &Path) -> Result<Op, String>,
+}
+
+/// The slash commands [`typed_op`] parses, in the order completion offers them.
+const COMMANDS: [Command; 9] = [
+    Command {
+        name: "clear",
+        aliases: &["new", "reset"],
+        parse: |_, _| Ok(Op::Clear),
+    },
+    Command {
+        name: "compact",
+        aliases: &[],
+        parse: |args, _| Ok(compact(args)),
+    },
+    Command {
+        name: "effort",
+        aliases: &[],
+        parse: |args, _| effort(args),
+    },
+    Command {
+        name: "exit",
+        aliases: &["quit"],
+        parse: |_, _| Ok(Op::Shutdown),
+    },
+    Command {
+        name: "init",
+        aliases: &[],
+        parse: init::parse,
+    },
+    Command {
+        name: "mode",
+        aliases: &[],
+        parse: |args, _| mode(args),
+    },
+    Command {
+        name: "model",
+        aliases: &[],
+        parse: |args, _| model(args),
+    },
+    Command {
+        name: "rename",
+        aliases: &[],
+        parse: |args, _| rename(args),
+    },
+    Command {
+        name: "resume",
+        aliases: &["continue"],
+        parse: |args, _| resume(args),
+    },
 ];
 
-/// Each command's aliases, keyed by its canonical name.
-const ALIASES: [(&str, &[&str]); 3] = [
-    ("clear", &["new", "reset"]),
-    ("exit", &["quit"]),
-    ("resume", &["continue"]),
-];
+/// The canonical names of the commands [`typed_op`] parses, without their leading `/`.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    COMMANDS.iter().map(|command| command.name)
+}
 
 /// Resolves aliases and parses `parsed` into an op at `project_root`. Errors use the typed command
 /// name, and prompts use the command line as their title. `None` without a typed form.
 pub fn typed_op(parsed: &Parsed, project_root: &Path) -> Option<Result<Op, String>> {
-    let mut op = parse(canonical(&parsed.name), &parsed.args, project_root)?;
+    let command = find(&parsed.name)?;
+    let mut op = (command.parse)(&parsed.args, project_root);
     if let Ok(Op::Prompt { title, .. }) = &mut op {
         *title = Some(parsed.line());
     }
     Some(op.map_err(|msg| parsed.named_error(&msg)))
 }
 
-/// The canonical name `name` stands for: the command it is an alias of, or `name` itself.
-fn canonical(name: &str) -> &str {
-    ALIASES
+/// The command `name` runs, canonically or as one of its aliases.
+fn find(name: &str) -> Option<&'static Command> {
+    COMMANDS
         .iter()
-        .find(|(_, aliases)| aliases.contains(&name))
-        .map_or(name, |&(canonical, _)| canonical)
+        .find(|command| command.name == name || command.aliases.contains(&name))
 }
 
 /// The aliases of the command whose canonical name is `name`.
 pub fn aliases(name: &str) -> &'static [&'static str] {
-    ALIASES
+    COMMANDS
         .iter()
-        .find(|(canonical, _)| *canonical == name)
-        .map_or(&[], |&(_, aliases)| aliases)
-}
-
-/// Parses a canonical command name without `/`. `/init` reads instructions at `project_root`.
-/// Returns `None` for names outside [`NAMES`] and an error for malformed or picker-only forms.
-fn parse(name: &str, args: &str, project_root: &Path) -> Option<Result<Op, String>> {
-    Some(match name {
-        "clear" => Ok(Op::Clear),
-        "compact" => Ok(compact(args)),
-        "effort" => effort(args),
-        "exit" => Ok(Op::Shutdown),
-        "init" => init::parse(args, project_root),
-        "mode" => mode(args),
-        "model" => model(args),
-        "rename" => rename(args),
-        "resume" => resume(args),
-        _ => return None,
-    })
+        .find(|command| command.name == name)
+        .map_or(&[], |command| command.aliases)
 }
 
 /// `/compact [<instructions>]`, where trailing text focuses the summary.
@@ -106,9 +139,11 @@ pub fn mode(arg: &str) -> Result<Op, String> {
 }
 
 /// `/model <id>`. Matches an exact catalog ID, then a unique substring of one, so family names such
-/// as `opus` work as aliases.
+/// as `opus` work as aliases. Any other ID is accepted verbatim, for a gateway that serves models
+/// outside the catalog, and the swap warns that the model is not a supported one.
 pub fn model(arg: &str) -> Result<Op, String> {
-    let arg = required(arg, "model ID", "/model <id>")?.to_ascii_lowercase();
+    let raw = required(arg, "model ID", "/model <id>")?;
+    let arg = raw.to_ascii_lowercase();
     let hits: Vec<&ModelInfo> = match MODELS.iter().find(|info| info.id == arg) {
         Some(exact) => vec![exact],
         None => MODELS
@@ -116,8 +151,8 @@ pub fn model(arg: &str) -> Result<Op, String> {
             .filter(|info| info.id.contains(&arg))
             .collect(),
     };
-    let info = match hits.as_slice() {
-        [info] => info,
+    let id = match hits.as_slice() {
+        [info] => info.id,
         [_, ..] => {
             let aliases = MODELS
                 .iter()
@@ -131,19 +166,10 @@ pub fn model(arg: &str) -> Result<Op, String> {
                 {models}"
             });
         }
-        [] => {
-            let hint = replacement_for(&arg)
-                .map_or_else(String::new, |info| format!(" Did you mean `{}`?", info.id));
-            let models = format_models(MODELS);
-            return Err(formatdoc! {"
-                Unknown model: `{arg}`.{hint} Valid:
-
-                {models}"
-            });
-        }
+        [] => raw,
     };
     Ok(Op::SetModel(ConfigPick::Model {
-        id: ResolvedModelId::new(info.id),
+        id: ResolvedModelId::new(id),
         effort: None,
     }))
 }
@@ -195,11 +221,14 @@ fn format_models<'a>(models: impl IntoIterator<Item = &'a ModelInfo>) -> String 
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
-    use super::ALIASES;
+    use super::COMMANDS;
 
     /// The canonical names of the commands that have aliases.
     pub fn aliased_names() -> impl Iterator<Item = &'static str> {
-        ALIASES.iter().map(|&(name, _)| name)
+        COMMANDS
+            .iter()
+            .filter(|command| !command.aliases.is_empty())
+            .map(|command| command.name)
     }
 }
 
@@ -229,9 +258,26 @@ mod tests {
             typed_op(&parse_slash(line).unwrap(), Path::new("/repo"))
         }
 
+        /// The op the canonical `name` with `args` runs at `root`.
+        fn parsed(name: &str, args: &str, root: &Path) -> Option<Result<Op, String>> {
+            typed_op(
+                &Parsed {
+                    name: name.to_owned(),
+                    args: args.to_owned(),
+                },
+                root,
+            )
+        }
+
         #[test]
         fn routes_an_alias_to_its_command() {
-            assert_eq!(typed("/new"), Some(Ok(Op::Clear)));
+            for (line, expected) in [
+                ("/new", Op::Clear),
+                ("/reset", Op::Clear),
+                ("/quit", Op::Shutdown),
+            ] {
+                assert_eq!(typed(line), Some(Ok(expected)), "{line}");
+            }
             assert_eq!(
                 typed("/continue ab12"),
                 Some(Ok(Op::Resume {
@@ -266,27 +312,65 @@ mod tests {
             assert_eq!(typed("/help"), None);
             assert_eq!(typed("/no-such-thing x"), None);
         }
-    }
-
-    mod canonical {
-        use super::*;
 
         #[test]
-        fn resolves_each_alias_to_its_command() {
-            for (alias, name) in [
-                ("new", "clear"),
-                ("reset", "clear"),
-                ("quit", "exit"),
-                ("continue", "resume"),
-            ] {
-                assert_eq!(canonical(alias), name, "{alias}");
+        fn routes_each_name_to_its_form() {
+            let root = tempfile::tempdir().unwrap();
+            let cases = [
+                ("clear", "", Op::Clear),
+                ("compact", "auth", compact("auth")),
+                ("effort", "low", set_effort(Effort::Low)),
+                ("exit", "", Op::Shutdown),
+                (
+                    "init",
+                    "AGENTS.md",
+                    Op::Prompt {
+                        text: init::create_prompt(root.path(), "AGENTS.md"),
+                        title: Some("/init AGENTS.md".to_owned()),
+                    },
+                ),
+                ("mode", "plan", Op::SetMode(Mode::Plan)),
+                ("model", "haiku", set_model("claude-haiku-5-5")),
+                ("rename", "Fix login", rename("Fix login").unwrap()),
+                ("resume", "1a2b", resume("1a2b").unwrap()),
+            ];
+
+            assert_eq!(
+                cases.each_ref().map(|(name, ..)| *name).to_vec(),
+                names().collect::<Vec<_>>()
+            );
+            for (name, args, op) in cases {
+                assert_eq!(parsed(name, args, root.path()), Some(Ok(op)), "{name}");
             }
         }
 
         #[test]
-        fn keeps_a_canonical_or_unknown_name() {
-            for name in ["clear", "resume", "help", "no-such-thing"] {
-                assert_eq!(canonical(name), name);
+        fn knows_no_other_name() {
+            for name in ["help", "theme", "compact-all", "no-such-thing"] {
+                assert_eq!(parsed(name, "x", Path::new("/repo")), None, "{name}");
+            }
+        }
+
+        #[test]
+        fn bare_forms_that_need_an_argument_name_the_usage() {
+            for (name, usage) in [
+                (
+                    "effort",
+                    "Missing level. Usage: `/effort <low|medium|high|xhigh|max>`.",
+                ),
+                ("mode", "Missing mode. Usage: `/mode <manual|plan|yolo>`."),
+                ("model", "Missing model ID. Usage: `/model <id>`."),
+                ("rename", "Missing title. Usage: `/rename <title>`."),
+                (
+                    "resume",
+                    "Missing session ID. Usage: `/resume <id-prefix>`.",
+                ),
+            ] {
+                assert_eq!(
+                    parsed(name, "  ", Path::new("/repo")),
+                    Some(Err(format!("/{name}: {usage}"))),
+                    "{name}",
+                );
             }
         }
     }
@@ -300,65 +384,6 @@ mod tests {
             assert_eq!(aliases("resume"), ["continue"]);
             for name in ["help", "new", "no-such-thing"] {
                 assert_eq!(aliases(name), [] as [&str; 0], "{name}");
-            }
-        }
-    }
-
-    mod parse {
-        use super::*;
-
-        #[test]
-        fn routes_each_name_to_its_form() {
-            let root = tempfile::tempdir().unwrap();
-            let cases = [
-                ("clear", "", Op::Clear),
-                ("compact", "auth", compact("auth")),
-                ("effort", "low", set_effort(Effort::Low)),
-                ("exit", "", Op::Shutdown),
-                (
-                    "init",
-                    "AGENTS.md",
-                    Op::prompt(init::create_prompt(root.path(), "AGENTS.md")),
-                ),
-                ("mode", "plan", Op::SetMode(Mode::Plan)),
-                ("model", "haiku", set_model("claude-haiku-5-5")),
-                ("rename", "Fix login", rename("Fix login").unwrap()),
-                ("resume", "1a2b", resume("1a2b").unwrap()),
-            ];
-
-            assert_eq!(cases.each_ref().map(|(name, ..)| *name), NAMES);
-            for (name, args, op) in cases {
-                assert_eq!(parse(name, args, root.path()), Some(Ok(op)), "{name}");
-            }
-        }
-
-        #[test]
-        fn knows_no_other_name() {
-            for name in ["help", "new", "theme", "compact-all", ""] {
-                assert_eq!(parse(name, "x", Path::new("/repo")), None, "{name}");
-            }
-        }
-
-        #[test]
-        fn bare_forms_that_need_an_argument_name_the_usage() {
-            for (name, usage) in [
-                (
-                    "effort",
-                    "Missing level. Usage: `/effort <low|medium|high|xhigh|max>`.",
-                ),
-                ("mode", "Missing mode. Usage: `/mode <manual|yolo|plan>`."),
-                ("model", "Missing model ID. Usage: `/model <id>`."),
-                ("rename", "Missing title. Usage: `/rename <title>`."),
-                (
-                    "resume",
-                    "Missing session ID. Usage: `/resume <id-prefix>`.",
-                ),
-            ] {
-                assert_eq!(
-                    parse(name, "  ", Path::new("/repo")),
-                    Some(Err(usage.to_owned())),
-                    "{name}",
-                );
             }
         }
     }
@@ -425,7 +450,7 @@ mod tests {
         fn unknown_mode_lists_the_valid_ones() {
             assert_eq!(
                 mode("Turbo"),
-                Err("Unknown mode: `Turbo`. Valid: manual, yolo, plan.".to_owned()),
+                Err("Unknown mode: `Turbo`. Valid: manual, plan, yolo.".to_owned()),
             );
         }
     }
@@ -467,44 +492,14 @@ mod tests {
         }
 
         #[test]
-        fn unknown_id_suggests_a_replacement_and_lists_the_catalog() {
-            // IDs naming a family and a `[1m]` suffix also get the matching model as a suggestion.
-            for (arg, expected) in [
-                (
-                    "gpt-4",
-                    indoc! {"
-                        Unknown model: `gpt-4`. Valid:
-
-                        - `claude-fable-5-1` — Claude Fable 5.1
-                        - `claude-opus-5-5` — Claude Opus 5.5
-                        - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                        - `claude-haiku-5-5` — Claude Haiku 5.5"
-                    },
-                ),
-                (
-                    "claude-opus-5-5-20261001",
-                    indoc! {"
-                        Unknown model: `claude-opus-5-5-20261001`. Did you mean `claude-opus-5-5`? Valid:
-
-                        - `claude-fable-5-1` — Claude Fable 5.1
-                        - `claude-opus-5-5` — Claude Opus 5.5
-                        - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                        - `claude-haiku-5-5` — Claude Haiku 5.5"
-                    },
-                ),
-                (
-                    "sonnet[1m]",
-                    indoc! {"
-                        Unknown model: `sonnet[1m]`. Did you mean `claude-sonnet-5-5`? Valid:
-
-                        - `claude-fable-5-1` — Claude Fable 5.1
-                        - `claude-opus-5-5` — Claude Opus 5.5
-                        - `claude-sonnet-5-5` — Claude Sonnet 5.5
-                        - `claude-haiku-5-5` — Claude Haiku 5.5"
-                    },
-                ),
+        fn accepts_an_id_outside_the_catalog_verbatim() {
+            for (arg, id) in [
+                ("gpt-4", "gpt-4"),
+                ("  Gateway-Model  ", "Gateway-Model"),
+                ("claude-opus-5-5-20261001", "claude-opus-5-5-20261001"),
+                ("sonnet[1m]", "sonnet[1m]"),
             ] {
-                assert_eq!(model(arg), Err(expected.to_owned()), "{arg}");
+                assert_eq!(model(arg), Ok(set_model(id)), "{arg}");
             }
         }
     }

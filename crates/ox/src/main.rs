@@ -611,7 +611,7 @@ mod tests {
             assert!(
                 invalid
                     .to_string()
-                    .contains("[possible values: manual, yolo, plan]"),
+                    .contains("[possible values: manual, plan, yolo]"),
                 "{invalid}",
             );
         }
@@ -646,7 +646,7 @@ mod tests {
                 invalid.to_string(),
                 formatdoc! {"
                     error: invalid value '{replacement}' for '--mode <MODE>'
-                      [possible values: manual, yolo, plan]
+                      [possible values: manual, plan, yolo]
 
                     For more information, try '--help'.
                 "},

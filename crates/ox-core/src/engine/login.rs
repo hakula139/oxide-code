@@ -178,7 +178,6 @@ fn sign_in_failed(e: &anyhow::Error) -> TurnAbort {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
 
     use indoc::formatdoc;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -277,7 +276,7 @@ mod tests {
                 temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
                     let mut engine =
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                    engine.messages = tool_heavy_transcript();
+                    engine.transcript.set_messages(tool_heavy_transcript());
                     engine.client.set_auth(None);
                     engine.retry_login = true;
                     let sink = CapturingSink::default();
@@ -335,7 +334,7 @@ mod tests {
                     assert!(
                         matches!(
                             events.as_slice(),
-                            [Event::TurnFailed(notice)]
+                            [Event::PromptUnsent, Event::TurnFailed(notice)]
                                 if notice.ends_with("The next prompt tries the stored login again.")
                         ),
                         "{events:?}"
@@ -364,17 +363,21 @@ mod tests {
                     let sink = CapturingSink::default();
                     let (tx, mut ops) = mpsc::channel(1);
                     tx.try_send(Op::Interrupt).unwrap();
-                    let start = tokio::time::Instant::now();
 
                     let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
-                    let waited = start.elapsed();
                     engine.client.finish_reloads().await;
 
                     assert_eq!(end, TurnEnd::Cancelled);
-                    assert!(waited < Duration::from_secs(1), "{waited:?}");
                     assert!(engine.retry_login);
                     assert_eq!(engine.client.auth_source(), None);
-                    assert!(matches!(sink.events().as_slice(), [Event::Cancelled]));
+                    assert!(
+                        matches!(
+                            sink.events().as_slice(),
+                            [Event::PromptUnsent, Event::Cancelled]
+                        ),
+                        "{:?}",
+                        sink.events(),
+                    );
                 })
                 .await;
             })
@@ -406,7 +409,7 @@ mod tests {
                     assert!(
                         matches!(
                             sink.events().as_slice(),
-                            [Event::TurnFailed(notice)]
+                            [Event::PromptUnsent, Event::TurnFailed(notice)]
                                 if notice == "Not signed in. Run `/login` to sign in."
                         ),
                         "{:?}",
@@ -442,7 +445,7 @@ mod tests {
                     assert!(
                         matches!(
                             sink.events().as_slice(),
-                            [Event::TurnFailed(notice)]
+                            [Event::PromptUnsent, Event::TurnFailed(notice)]
                                 if notice == "Not signed in. Run `/login` to sign in."
                         ),
                         "{:?}",

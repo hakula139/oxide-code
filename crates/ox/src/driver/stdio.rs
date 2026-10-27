@@ -5,16 +5,16 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use ox_core::engine::TurnEnd;
 use ox_core::permission::{Basis, SessionGrant};
-use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult, notice};
+use ox_core::protocol::{
+    ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult, TurnEnd, notice,
+};
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use ox_core::session::entry::ArchiveState;
 use ox_core::tool::tasks::{Progress, Task};
@@ -175,11 +175,19 @@ const NORMAL_INTENSITY: &str = "\x1b[22m";
 /// reply that follows shown thinking, and when the operation ends.
 pub(super) struct StdioSink {
     show_thinking: bool,
-    calls: Mutex<StartedCalls>,
+    state: Mutex<SinkState>,
+}
+
+/// What the next render needs to know about the last one.
+#[derive(Default)]
+struct SinkState {
     /// Whether the last text written to stdout left the current line open.
-    line_open: AtomicBool,
+    line_open: bool,
     /// Whether the last text written to stdout was thinking.
-    thinking: AtomicBool,
+    thinking: bool,
+    /// The started calls awaiting a result, so a result printed after another call's header can
+    /// repeat its own.
+    calls: StartedCalls,
 }
 
 /// The started calls awaiting a result, so a result printed after another call's header can repeat
@@ -194,9 +202,7 @@ impl StdioSink {
     pub(super) fn new(show_thinking: bool) -> Self {
         Self {
             show_thinking,
-            calls: Mutex::default(),
-            line_open: AtomicBool::new(false),
-            thinking: AtomicBool::new(false),
+            state: Mutex::default(),
         }
     }
 
@@ -207,18 +213,19 @@ impl StdioSink {
         stdout: &mut W1,
         stderr: &mut W2,
     ) -> Result<()> {
+        let mut state = self.state();
         match event {
             Event::StreamToken(text) => {
-                if self.thinking.swap(false, Ordering::Relaxed) {
-                    self.end_line(stdout)?;
+                if std::mem::take(&mut state.thinking) {
+                    state.end_line(stdout)?;
                 }
-                self.write_reply(stdout, &escape_controls(&text), "", "")?;
+                state.write_reply(stdout, &escape_controls(&text), "", "")?;
             }
             Event::ThinkingToken(text) => {
                 if self.show_thinking {
                     let text = escape_controls(&text);
-                    self.write_reply(stdout, &text, DIM, NORMAL_INTENSITY)?;
-                    self.thinking.store(true, Ordering::Relaxed);
+                    state.write_reply(stdout, &text, DIM, NORMAL_INTENSITY)?;
+                    state.thinking = true;
                 }
             }
             Event::ProgressUpdate(text) => {
@@ -230,13 +237,13 @@ impl StdioSink {
                 id, icon, label, ..
             }) => {
                 let header = format!("{icon} {}", escape_controls(&label));
-                self.end_reply_then(stdout, stderr, &header)?;
-                self.calls().start(id, header);
+                state.end_reply_then(stdout, stderr, &header)?;
+                state.calls.start(id, header);
             }
-            Event::ToolCallEnd(result) => self.render_result(result, stderr)?,
+            Event::ToolCallEnd(result) => state.render_result(result, stderr)?,
             Event::TasksUpdated(tasks) => write!(stderr, "{}", task_lines(&tasks))?,
             Event::AutoCompactionStarted => {
-                self.end_reply_then(stdout, stderr, notice::AUTO_COMPACTING)?;
+                state.end_reply_then(stdout, stderr, notice::AUTO_COMPACTING)?;
             }
             Event::SessionCompacted {
                 pre_count,
@@ -279,17 +286,17 @@ impl StdioSink {
             | Event::SessionRulesUpdated(_)
             | Event::BackgroundShellsUpdated(_)
             | Event::SessionReady => {}
-            Event::TurnComplete => self.end_line(stdout)?,
-            Event::Cancelled => self.end_reply_then(stdout, stderr, INTERRUPTED_MARKER)?,
+            Event::TurnComplete => state.end_line(stdout)?,
+            Event::Cancelled => state.end_reply_then(stdout, stderr, INTERRUPTED_MARKER)?,
             Event::Retrying(msg) | Event::Notice(msg) => {
                 writeln!(stderr, "{}", escape_controls(&msg))?;
             }
             Event::TurnFailed(msg) => {
                 let line = format!("Error: {}", escape_controls(&msg));
-                self.end_reply_then(stdout, stderr, &line)?;
+                state.end_reply_then(stdout, stderr, &line)?;
             }
             Event::ArchiveUpdated { id, result } => match result {
-                Ok(state) => writeln!(stderr, "{}", archive_notice(&id, state))?,
+                Ok(archive) => writeln!(stderr, "{}", archive_notice(&id, archive))?,
                 Err(message) => writeln!(stderr, "Error: {}", escape_controls(&message))?,
             },
             Event::Error(msg) | Event::RenameFailed(msg) => {
@@ -301,11 +308,7 @@ impl StdioSink {
 
     /// Ends the reply line left open on `stdout`, if any.
     pub(super) fn end_line(&self, stdout: &mut impl Write) -> io::Result<()> {
-        if self.line_open.swap(false, Ordering::Relaxed) {
-            writeln!(stdout)?;
-            stdout.flush()?;
-        }
-        Ok(())
+        self.state().end_line(stdout)
     }
 
     /// Moves to a new line after a signal, past the `^C` a terminal echoes, by ending the open
@@ -315,17 +318,33 @@ impl StdioSink {
         stdout: &mut impl Write,
         stderr: &mut impl Write,
     ) -> io::Result<()> {
-        if self.line_open.load(Ordering::Relaxed) {
-            return self.end_line(stdout);
+        let mut state = self.state();
+        if state.line_open {
+            return state.end_line(stdout);
         }
         writeln!(stderr)?;
         stderr.flush()
     }
 
+    fn state(&self) -> MutexGuard<'_, SinkState> {
+        lock_or_recover(&self.state, "stdio sink")
+    }
+}
+
+impl SinkState {
+    /// Ends the reply line left open on `stdout`, if any.
+    fn end_line(&mut self, stdout: &mut impl Write) -> io::Result<()> {
+        if !std::mem::take(&mut self.line_open) {
+            return Ok(());
+        }
+        writeln!(stdout)?;
+        stdout.flush()
+    }
+
     /// Writes reply or thinking `text` to `stdout` between `start` and `end` styles, noting whether
     /// it leaves the line open.
     fn write_reply(
-        &self,
+        &mut self,
         stdout: &mut impl Write,
         text: &str,
         start: &str,
@@ -334,8 +353,7 @@ impl StdioSink {
         write!(stdout, "{start}{text}{end}")?;
         stdout.flush()?;
         if !text.is_empty() {
-            self.line_open
-                .store(!text.ends_with('\n'), Ordering::Relaxed);
+            self.line_open = !text.ends_with('\n');
         }
         Ok(())
     }
@@ -343,7 +361,7 @@ impl StdioSink {
     /// Ends the open reply line, then writes `line` to `stderr`, which it does even when ending the
     /// reply line failed.
     fn end_reply_then(
-        &self,
+        &mut self,
         stdout: &mut impl Write,
         stderr: &mut impl Write,
         line: &str,
@@ -353,17 +371,13 @@ impl StdioSink {
         ended
     }
 
-    fn calls(&self) -> MutexGuard<'_, StartedCalls> {
-        lock_or_recover(&self.calls, "started tool calls")
-    }
-
     /// Writes a call's result under its title, after its call's header again when another call's
     /// header came after it.
-    fn render_result(&self, result: ToolResult, stderr: &mut impl Write) -> Result<()> {
+    fn render_result(&mut self, result: ToolResult, stderr: &mut impl Write) -> Result<()> {
         let ToolResult {
             id, content, title, ..
         } = result;
-        if let Some(header) = self.calls().end(&id) {
+        if let Some(header) = self.calls.end(&id) {
             writeln!(stderr, "{header}")?;
         }
         if let Some(title) = title {
@@ -1325,7 +1339,13 @@ mod tests {
                     &mut stderr,
                 );
 
-                assert!(rendered.is_err());
+                assert_eq!(
+                    rendered
+                        .unwrap_err()
+                        .downcast_ref::<io::Error>()
+                        .map(io::Error::kind),
+                    Some(io::ErrorKind::BrokenPipe),
+                );
                 assert_eq!(stderr, b"Error: boom\n");
             }
 

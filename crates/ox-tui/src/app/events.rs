@@ -52,10 +52,7 @@ impl App {
             Event::TurnFailed(msg) => self.apply_turn_failed(&msg),
             Event::UsageUpdated(usage) => self.status_bar.set_usage(Some(usage)),
             Event::RateLimitsUpdated(limits) => self.status_bar.set_rate_limits(Some(limits)),
-            Event::Cancelled => {
-                self.chat.push_interrupted_marker();
-                self.enter_idle();
-            }
+            Event::Cancelled => self.apply_cancelled(),
             Event::AutoCompactionStarted => {
                 self.queue.mark_compacting();
                 self.set_active_status(Status::Compacting);
@@ -129,6 +126,17 @@ impl App {
         self.dirty = true;
     }
 
+    /// Ends a cancelled operation, handing back a prompt the engine never sent and otherwise
+    /// marking where the reply stopped.
+    fn apply_cancelled(&mut self) {
+        if self.queue.unsent() {
+            self.settle_failed_turn();
+        } else {
+            self.chat.push_interrupted_marker();
+            self.enter_idle();
+        }
+    }
+
     fn apply_prompt_drained(&mut self, text: String) {
         if let Some(display) = self.queue.confirm_drained(text) {
             self.chat.push_user_message(display);
@@ -176,12 +184,15 @@ impl App {
         }
     }
 
-    /// Ends a failed operation. A turn whose automatic compaction failed goes idle with the queue
-    /// held. A turn that never reached the model, or that the engine rolled back, does the same and
-    /// hands its prompts back, one into the empty input for another try. A slash command handed
-    /// back that way gets a note that Enter runs it again.
+    /// Shows `msg` as an error, then settles the turn.
     fn apply_turn_failed(&mut self, msg: &str) {
         self.chat.push_error(msg);
+        self.settle_failed_turn();
+    }
+
+    /// Settles a failed or cancelled turn by what the engine marked: an unsent prompt hands itself
+    /// back, and a rolled-back turn also hands back the prompts it drained.
+    fn settle_failed_turn(&mut self) {
         match self.queue.fail_turn(self.input.is_empty()) {
             FailedTurn::Ran => self.finish_turn(),
             FailedTurn::Held => {
@@ -434,7 +445,14 @@ impl App {
 
     pub(super) fn apply_git_update(&mut self, update: GitUpdate) {
         let changed = match update {
-            GitUpdate::Branch(branch) => self.status_bar.set_git_branch(branch),
+            GitUpdate::Branch(branch) => {
+                let changed = self.status_bar.set_git_branch(branch);
+                if changed {
+                    self.status_bar.set_pull_request(None);
+                    self.git_probes.invalidate_pull_request(now());
+                }
+                changed
+            }
             GitUpdate::PullRequest(pull_request) => self.status_bar.set_pull_request(pull_request),
         };
         self.dirty |= changed;
@@ -480,12 +498,14 @@ impl App {
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
     use indoc::indoc;
     use tokio::sync::mpsc::error::TryRecvError;
 
+    use ox_core::config::StatusLineSegment;
     use ox_core::config::compaction::testing::WINDOW_1M_THRESHOLD;
     use ox_core::config::provenance::Source;
     use ox_core::model::ResolvedModelId;
@@ -500,7 +520,7 @@ mod tests {
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::{plan, task};
     use ox_core::tool::view::{ApprovalBody, ToolResultView};
-    use ox_core::util::git::PullRequest;
+    use ox_core::util::git::testing::pull_request;
 
     use super::*;
     use crate::action::Action;
@@ -951,6 +971,37 @@ mod tests {
             assert_eq!(text.matches("/init AGENTS.md").count(), 2, "{text}");
         }
 
+        #[tokio::test]
+        async fn prompt_unsent_after_a_signed_out_failure_keeps_the_queue_queued() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("active".to_owned()));
+            rx.try_recv().expect("active submit forwarded");
+            app.dispatch_action(Action::Submit("queued".to_owned()));
+            rx.try_recv().expect("queued submit forwarded");
+
+            app.handle_engine_event(Event::PromptUnsent);
+            app.handle_engine_event(Event::TurnFailed(
+                "Not signed in. Run `/login` to sign in.".to_owned(),
+            ));
+
+            assert_eq!(
+                app.chat.last_error_text(),
+                Some("Not signed in. Run `/login` to sign in.")
+            );
+            assert_eq!(app.status, Status::Idle);
+            assert!(app.input.is_empty());
+            assert_eq!(
+                *app.queue.pending(),
+                ["active", "queued"],
+                "the unsent prompt runs first, and the queued prompt waits behind it",
+            );
+            assert_eq!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty),
+                "the queued prompt must not start another signed-out turn"
+            );
+        }
+
         #[test]
         fn turn_failed_shows_the_error_and_finishes_the_turn() {
             let (mut app, _rx, _event_tx) = test_app(None);
@@ -1192,6 +1243,27 @@ mod tests {
             assert_eq!(app.chat.entry_count(), entries_before + 1);
             let text = rendered_text(&mut app, 60, 8);
             assert!(text.contains(INTERRUPTED_MARKER), "marker present: {text}");
+        }
+
+        #[tokio::test]
+        async fn cancelled_with_an_unsent_prompt_hands_it_back_without_a_marker() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("active".to_owned()));
+            rx.try_recv().expect("active submit forwarded");
+            app.dispatch_action(Action::Submit("queued".to_owned()));
+            rx.try_recv().expect("queued submit forwarded");
+            app.handle_engine_event(Event::PromptUnsent);
+
+            app.handle_engine_event(Event::Cancelled);
+
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(*app.queue.pending(), ["active", "queued"]);
+            let text = rendered_text(&mut app, 60, 12);
+            assert!(
+                !text.contains(INTERRUPTED_MARKER),
+                "nothing was sent, so no reply was interrupted: {text}"
+            );
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
         }
 
         #[tokio::test]
@@ -2274,6 +2346,18 @@ mod tests {
     mod apply_git_update {
         use super::*;
 
+        fn app_showing_pull_request_7() -> App {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.git_probes = crate::git_probes::GitProbes::new(
+                PathBuf::from("/repo"),
+                &[StatusLineSegment::PullRequest],
+                now(),
+            );
+            app.status_bar.set_git_branch(Some("main".to_owned()));
+            app.apply_git_update(GitUpdate::PullRequest(Some(pull_request(7))));
+            app
+        }
+
         #[test]
         fn marks_dirty_only_when_the_status_bar_changes() {
             let (mut app, _rx, _event_tx) = test_app(None);
@@ -2283,14 +2367,42 @@ mod tests {
 
             assert!(!app.dirty, "unchanged branch skips the repaint");
 
-            app.apply_git_update(GitUpdate::PullRequest(Some(PullRequest {
-                number: 7,
-                url: "https://example.com/pull/7".to_owned(),
-                checks: None,
-                review: None,
-            })));
+            app.apply_git_update(GitUpdate::PullRequest(Some(pull_request(7))));
 
             assert!(app.dirty, "new pull request repaints");
+        }
+
+        #[test]
+        fn a_branch_change_clears_the_pull_request_and_probes_it_again() {
+            let mut app = app_showing_pull_request_7();
+            app.dirty = false;
+
+            let before = now();
+            app.apply_git_update(GitUpdate::Branch(Some("feature".to_owned())));
+            let after = now();
+
+            assert!(app.dirty, "the branch change repaints");
+            assert_eq!(app.status_bar.git_branch(), Some("feature"));
+            assert_eq!(app.status_bar.pull_request(), None);
+            assert!(app.git_probes.pull_request_stale());
+            let due = app
+                .git_probes
+                .pull_request_due()
+                .expect("the roster reads the pull request");
+            assert!(
+                before <= due && due <= after,
+                "an idle probe is due at once"
+            );
+        }
+
+        #[test]
+        fn an_unchanged_branch_keeps_the_pull_request() {
+            let mut app = app_showing_pull_request_7();
+
+            app.apply_git_update(GitUpdate::Branch(Some("main".to_owned())));
+
+            assert_eq!(app.status_bar.pull_request().map(|pr| pr.number), Some(7));
+            assert!(!app.git_probes.pull_request_stale());
         }
     }
 
