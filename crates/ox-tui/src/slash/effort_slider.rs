@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use strum::VariantArray as _;
@@ -31,20 +31,6 @@ const TITLE: &str = "Select effort";
 
 /// Title + blank + speed / intel + track + level labels + blank + footer.
 const MODAL_HEIGHT: u16 = 7;
-
-// ── Level Colors ──
-
-/// Per-level color from Low blue to Max red. Xhigh is magenta because the gradient's yellow reads
-/// close to High's green on pastel palettes.
-pub(super) fn level_color(level: Effort) -> Color {
-    match level {
-        Effort::Low => Color::Blue,
-        Effort::Medium => Color::Cyan,
-        Effort::High => Color::Green,
-        Effort::Xhigh => Color::Magenta,
-        Effort::Max => Color::Red,
-    }
-}
 
 // ── EffortSlider ──
 
@@ -103,7 +89,7 @@ impl EffortSlider {
         Line::from(Span::styled(buf, theme.dim()))
     }
 
-    fn line_level_labels(&self) -> Line<'static> {
+    fn line_level_labels(&self, theme: &Theme) -> Line<'static> {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(Effort::VARIANTS.len() * 2);
         for (idx, level) in Effort::VARIANTS.iter().enumerate() {
             if idx > 0 {
@@ -115,7 +101,7 @@ impl EffortSlider {
             } else {
                 RADIO_UNSELECTED
             };
-            let mut style = Style::default().fg(level_color(*level));
+            let mut style = theme.effort_level(*level);
             if active {
                 style = style.add_modifier(Modifier::BOLD);
             }
@@ -145,7 +131,7 @@ impl Modal for EffortSlider {
             Line::default(),
             Self::line_speed_intel(theme),
             Self::line_track(theme),
-            self.line_level_labels(),
+            self.line_level_labels(theme),
             Line::default(),
             Self::line_footer(theme),
         ];

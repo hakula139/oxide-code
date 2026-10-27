@@ -184,10 +184,7 @@ mod tests {
             let lines = block.render(&RenderCtx::new(80, &theme));
 
             let number_bgs: Vec<_> = lines.iter().map(|line| line.spans[1].style.bg).collect();
-            assert_eq!(
-                number_bgs,
-                [theme.diff_del_row().bg, theme.diff_add_row().bg]
-            );
+            assert_eq!(number_bgs, [theme.diff_del().bg, theme.diff_add().bg]);
         }
 
         #[test]
@@ -244,7 +241,7 @@ mod tests {
                 "diff --git a/x b/x\n@@ -0,0 +1,6000 @@\n{}",
                 "+added line\n".repeat(6000),
             );
-            let diff = WorkingTreeDiff::new(&[&diff], "", "`git diff HEAD`");
+            let diff = WorkingTreeDiff::new(&[&diff], "", "`git diff HEAD`", false);
             let note = diff
                 .truncation
                 .as_ref()

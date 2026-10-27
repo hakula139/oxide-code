@@ -68,18 +68,19 @@ See the [ANSI escape code reference][ansi] for what each name maps to in your te
 
 A custom theme file must define **every slot**. A missing slot is a parse error, so typos surface immediately. For partial customization on top of a base, use `[tui.theme.overrides]` instead (see [Overrides](#overrides) below).
 
-> **Note:** the same `slot = "#hex"` line means different things in a theme file vs an override. Inside a theme file body, it's a bare-color slot definition with `fg` set and `bg` / modifiers cleared. Inside `[tui.theme.overrides]`, it's a _patch_ that updates only `fg` and preserves the base slot's `bg` and modifiers. The override semantics are detailed in [Overrides](#overrides).
+> **Note:** a theme file body defines the slot's value outright, while a `[tui.theme.overrides]` entry patches a base slot. [Overrides](#overrides) covers the patch semantics.
 
 A theme TOML is a flat document with one entry per slot plus an optional [`syntax_theme`](#code) key. Each slot takes one of two shapes:
 
-- **Bare color string**: `fg`-only, no modifiers:
+- **Bare color string**: sets the slot's own channel and no modifiers. That channel is `fg` for a foreground slot and `bg` for a background-only slot:
 
   ```toml
   user = "#fab387"
   blockquote = "#6c7086"
+  surface = "reset"
   ```
 
-- **Inline table**: explicit `fg` / `bg` and any modifier flags:
+- **Inline table**: explicit `fg` / `bg` and any modifier flags. A background-only slot accepts only `bg`:
 
   ```toml
   accent = { fg = "#89b4fa", bold = true }
@@ -109,8 +110,6 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | --------- | ----------------------------------------------------- |
 | `surface` | Chat / input / status panel background fill (bg-only) |
 
-> **Always declare `surface` as an inline table with `bg`**, e.g. `surface = { bg = "#1e1e2e" }` or `surface = { bg = "reset" }`. A bare-string `surface = "#1e1e2e"` would route to `fg` (per the slot-definition rules above) and silently repaint every panel's text in the surface color.
-
 ### Semantic Accents
 
 | Slot        | Role                                      |
@@ -128,6 +127,18 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | `success` | Successful tool results, added diff lines, passing PR checks and approvals, and success notices (e.g., after a copy) |
 | `warning` | Caution status (e.g., the **Ctrl+C** exit hint)                                                                      |
 | `error`   | Errors, failed tools, critical status                                                                                |
+
+### Effort Gradient
+
+| Slot            | Role                                        |
+| --------------- | ------------------------------------------- |
+| `effort_low`    | `low` on the speed / intelligence slider    |
+| `effort_medium` | `medium` on the speed / intelligence slider |
+| `effort_high`   | `high` on the speed / intelligence slider   |
+| `effort_xhigh`  | `xhigh` on the speed / intelligence slider  |
+| `effort_max`    | `max` on the speed / intelligence slider    |
+
+The built-ins use ANSI `blue`, `cyan`, `green`, `magenta`, and `red`, so the gradient follows your terminal palette. Override a slot with hex to pin it to the theme's own colors.
 
 ### Code
 
@@ -192,7 +203,7 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 The input box draws its rules in `border_focused` while idle and in `accent` while busy, when **Enter** queues the prompt.
 
-Declare `selection` as an inline table with `bg`, such as `selection = { bg = "#393a4c" }`, so selected text keeps its own colors. Pick a background that leaves `dim` and `thinking` text at a contrast of at least 3:1.
+Pick a `selection` background that leaves `dim` and `thinking` text at a contrast of at least 3:1.
 
 ### Status-Line Segments
 
@@ -234,13 +245,15 @@ The separator glyph itself (`│`) is fixed, and the `separator` slot controls o
 
 ```toml
 [tui.theme.overrides]
-# Bare-string form patches fg only. bg and modifiers come from the base.
+# Bare-string form patches the slot's own channel, keeping the base's other channel and modifiers.
 error = "#ff0000"
 # Inline form patches just modifiers. fg / bg come from the base.
 accent = { bold = false }
 # Inline form patches fg and adds bold.
 link = { fg = "#ff79c6", bold = true }
 ```
+
+A bare string patches `fg` on a foreground slot and `bg` on a background-only slot, so `selection = "#393a4c"` recolors the highlight without touching the text it covers. A background-only slot accepts only `bg`, so `fg` or a modifier in its patch is ignored with a notice.
 
 Modifier flags use **three-state semantics**:
 
@@ -261,7 +274,7 @@ Overrides from every [config layer](configuration.md#layers) merge by slot name,
 Theme errors fall into two severities:
 
 - **Theme selection errors** are fatal when the TUI starts. An unknown built-in name with no matching file path, a file path set in a project file, a path that is not a regular file of at most 64 KiB, a file that cannot be read, or a file with a parse error in the base body stops oxide-code at startup with a message identifying what went wrong. A parse error gives its line and column without quoting the source line. `-p` and `--no-tui` runs never load the theme, so a theme error does not stop them.
-- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, its patch is neither a color string nor a table of `fg`, `bg`, and modifier flags, or an inline patch is empty, oxide-code uses the base slot's value for that role and shows a notice in the chat. The TUI still launches.
+- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, its patch is neither a color string nor a table of `fg`, `bg`, and modifier flags, an inline patch is empty, or a background-only slot's patch sets `fg` or a modifier, oxide-code uses the base slot's value for that role and shows a notice in the chat. The TUI still launches.
 
 ## Examples
 

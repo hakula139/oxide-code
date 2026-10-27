@@ -95,149 +95,76 @@ mod tests {
         }
 
         #[test]
-        fn trims_surrounding_whitespace() {
-            assert_eq!(parse_color("  red  ").unwrap(), Color::Red);
-            assert_eq!(
-                parse_color(" #cdd6f4 ").unwrap(),
-                Color::Rgb(0xcd, 0xd6, 0xf4),
-            );
-            assert_eq!(parse_color("\tansi:5\n").unwrap(), Color::Indexed(5));
-        }
-
-        #[test]
-        fn rejects_empty_string() {
-            assert_eq!(error_text(""), "empty color value");
-        }
-
-        #[test]
-        fn hex_is_case_insensitive() {
-            assert_eq!(
-                parse_color("#cdd6f4").unwrap(),
-                Color::Rgb(0xcd, 0xd6, 0xf4)
-            );
-            assert_eq!(
-                parse_color("#CDD6F4").unwrap(),
-                Color::Rgb(0xcd, 0xd6, 0xf4)
-            );
-        }
-
-        #[test]
-        fn hex_maps_each_channel() {
-            assert_eq!(parse_color("#ff0000").unwrap(), Color::Rgb(255, 0, 0));
-            assert_eq!(parse_color("#00ff00").unwrap(), Color::Rgb(0, 255, 0));
-            assert_eq!(parse_color("#0000ff").unwrap(), Color::Rgb(0, 0, 255));
-        }
-
-        #[test]
-        fn hex_rejects_three_digit_shorthand() {
-            assert_eq!(
-                error_text("#fff"),
-                r##"invalid hex color "#fff": expected 6-digit hex (e.g., #cdd6f4)"##,
-            );
-        }
-
-        #[test]
-        fn hex_rejects_non_hex_chars() {
-            for input in ["#zzzzzz", "#+abcde"] {
-                assert_eq!(
-                    error_text(input),
-                    format!("invalid hex color {input:?}: non-hex characters in color"),
-                );
+        fn parses_every_accepted_form() {
+            for (input, expected) in [
+                ("  red  ", Color::Red),
+                (" #cdd6f4 ", Color::Rgb(0xcd, 0xd6, 0xf4)),
+                ("\tansi:5\n", Color::Indexed(5)),
+                ("#cdd6f4", Color::Rgb(0xcd, 0xd6, 0xf4)),
+                ("#CDD6F4", Color::Rgb(0xcd, 0xd6, 0xf4)),
+                ("#ff0000", Color::Rgb(255, 0, 0)),
+                ("#00ff00", Color::Rgb(0, 255, 0)),
+                ("#0000ff", Color::Rgb(0, 0, 255)),
+                ("ansi:0", Color::Indexed(0)),
+                ("ansi:174", Color::Indexed(174)),
+                ("ansi:255", Color::Indexed(255)),
+                ("ANSI:5", Color::Indexed(5)),
+                ("Ansi:174", Color::Indexed(174)),
+                ("black", Color::Black),
+                ("red", Color::Red),
+                ("green", Color::Green),
+                ("yellow", Color::Yellow),
+                ("blue", Color::Blue),
+                ("magenta", Color::Magenta),
+                ("cyan", Color::Cyan),
+                ("gray", Color::Gray),
+                ("grey", Color::Gray),
+                ("dark_gray", Color::DarkGray),
+                ("dark_grey", Color::DarkGray),
+                ("bright_red", Color::LightRed),
+                ("light_red", Color::LightRed),
+                ("bright_green", Color::LightGreen),
+                ("bright_yellow", Color::LightYellow),
+                ("bright_blue", Color::LightBlue),
+                ("light_blue", Color::LightBlue),
+                ("bright_magenta", Color::LightMagenta),
+                ("bright_cyan", Color::LightCyan),
+                ("white", Color::White),
+                ("bright_white", Color::White),
+                ("light_white", Color::White),
+                ("RED", Color::Red),
+                ("Bright_Blue", Color::LightBlue),
+                ("reset", Color::Reset),
+                ("Reset", Color::Reset),
+            ] {
+                assert_eq!(parse_color(input).unwrap(), expected, "{input:?}");
             }
         }
 
         #[test]
-        fn hex_rejects_missing_hash_prefix() {
-            assert_eq!(
-                error_text("cdd6f4"),
-                format!(r#"unknown color "cdd6f4": {COLOR_FORMATS_HINT}"#),
-            );
-        }
+        fn rejects_every_invalid_form_with_its_reason() {
+            let unknown = |input: &str| format!("unknown color {input:?}: {COLOR_FORMATS_HINT}");
+            let bad_hex =
+                |input: &str, reason: &str| format!("invalid hex color {input:?}: {reason}");
+            let bad_index = |input: &str| {
+                format!("invalid indexed color {input:?}: expected 0-255 (e.g., ansi:174)")
+            };
 
-        #[test]
-        fn indexed_accepts_the_full_range() {
-            assert_eq!(parse_color("ansi:0").unwrap(), Color::Indexed(0));
-            assert_eq!(parse_color("ansi:174").unwrap(), Color::Indexed(174));
-            assert_eq!(parse_color("ansi:255").unwrap(), Color::Indexed(255));
-        }
-
-        #[test]
-        fn indexed_rejects_out_of_range() {
-            assert_eq!(
-                error_text("ansi:256"),
-                "invalid indexed color \"ansi:256\": expected 0-255 (e.g., ansi:174)",
-            );
-        }
-
-        #[test]
-        fn indexed_rejects_non_numeric() {
-            assert_eq!(
-                error_text("ansi:abc"),
-                "invalid indexed color \"ansi:abc\": expected 0-255 (e.g., ansi:174)",
-            );
-        }
-
-        #[test]
-        fn indexed_prefix_is_case_insensitive() {
-            assert_eq!(parse_color("ANSI:5").unwrap(), Color::Indexed(5));
-            assert_eq!(parse_color("Ansi:174").unwrap(), Color::Indexed(174));
-        }
-
-        #[test]
-        fn named_maps_the_standard_eight() {
-            assert_eq!(parse_color("black").unwrap(), Color::Black);
-            assert_eq!(parse_color("red").unwrap(), Color::Red);
-            assert_eq!(parse_color("green").unwrap(), Color::Green);
-            assert_eq!(parse_color("yellow").unwrap(), Color::Yellow);
-            assert_eq!(parse_color("blue").unwrap(), Color::Blue);
-            assert_eq!(parse_color("magenta").unwrap(), Color::Magenta);
-            assert_eq!(parse_color("cyan").unwrap(), Color::Cyan);
-            assert_eq!(parse_color("gray").unwrap(), Color::Gray);
-        }
-
-        #[test]
-        fn named_maps_the_bright_eight() {
-            assert_eq!(parse_color("dark_gray").unwrap(), Color::DarkGray);
-            assert_eq!(parse_color("bright_red").unwrap(), Color::LightRed);
-            assert_eq!(parse_color("bright_green").unwrap(), Color::LightGreen);
-            assert_eq!(parse_color("bright_yellow").unwrap(), Color::LightYellow);
-            assert_eq!(parse_color("bright_blue").unwrap(), Color::LightBlue);
-            assert_eq!(parse_color("bright_magenta").unwrap(), Color::LightMagenta);
-            assert_eq!(parse_color("bright_cyan").unwrap(), Color::LightCyan);
-            assert_eq!(parse_color("white").unwrap(), Color::White);
-        }
-
-        #[test]
-        fn named_light_alias_matches_bright() {
-            assert_eq!(parse_color("light_red").unwrap(), Color::LightRed);
-            assert_eq!(parse_color("light_blue").unwrap(), Color::LightBlue);
-            assert_eq!(parse_color("light_white").unwrap(), Color::White);
-        }
-
-        #[test]
-        fn named_grey_alias_matches_gray() {
-            assert_eq!(parse_color("grey").unwrap(), Color::Gray);
-            assert_eq!(parse_color("dark_grey").unwrap(), Color::DarkGray);
-        }
-
-        #[test]
-        fn named_case_insensitive() {
-            assert_eq!(parse_color("RED").unwrap(), Color::Red);
-            assert_eq!(parse_color("Bright_Blue").unwrap(), Color::LightBlue);
-            assert_eq!(parse_color("Reset").unwrap(), Color::Reset);
-        }
-
-        #[test]
-        fn named_reset_is_terminal_default() {
-            assert_eq!(parse_color("reset").unwrap(), Color::Reset);
-        }
-
-        #[test]
-        fn named_rejects_unknown_color() {
-            assert_eq!(
-                error_text("orange"),
-                format!(r#"unknown color "orange": {COLOR_FORMATS_HINT}"#),
-            );
+            for (input, expected) in [
+                ("", "empty color value".to_owned()),
+                (
+                    "#fff",
+                    bad_hex("#fff", "expected 6-digit hex (e.g., #cdd6f4)"),
+                ),
+                ("#zzzzzz", bad_hex("#zzzzzz", "non-hex characters in color")),
+                ("#+abcde", bad_hex("#+abcde", "non-hex characters in color")),
+                ("cdd6f4", unknown("cdd6f4")),
+                ("ansi:256", bad_index("ansi:256")),
+                ("ansi:abc", bad_index("ansi:abc")),
+                ("orange", unknown("orange")),
+            ] {
+                assert_eq!(error_text(input), expected, "{input:?}");
+            }
         }
     }
 }

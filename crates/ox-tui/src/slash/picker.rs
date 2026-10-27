@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use strum::VariantArray as _;
@@ -12,7 +12,7 @@ use ox_core::config::DEFAULT_MODEL;
 use ox_core::model::{Effort, MODELS, ModelInfo, ResolvedModelId};
 use ox_core::protocol::{ConfigPick, Op};
 
-use super::effort_slider::{Direction, level_color, step_level};
+use super::effort_slider::{Direction, step_level};
 use crate::action::Action;
 use crate::glyphs::RADIO_SELECTED;
 use crate::modal::chrome::{
@@ -145,12 +145,12 @@ impl ModelEffortPicker {
         let level = self.shown_effort();
         let was_default = self.picked_effort.is_none() && self.active_effort.is_none();
         let suffix = if was_default { " (default)" } else { "" };
-        let color = level_color(level);
+        let style = theme.effort_level(level);
         Line::from(vec![
-            Span::styled(format!("{RADIO_SELECTED} "), Style::default().fg(color)),
+            Span::styled(format!("{RADIO_SELECTED} "), style),
             Span::styled(
                 format!("{level} effort{suffix}"),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
+                style.add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("  {KEY_LEFT_RIGHT} to adjust"), theme.dim()),
         ])
