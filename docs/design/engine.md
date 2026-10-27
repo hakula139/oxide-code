@@ -16,7 +16,7 @@ An `Op` is one of three kinds:
 
 Events report progress, then end an operation. `Event` carries streamed text and thinking, tool calls and their results, usage, rate limits, session and configuration changes, retrying notices, and warnings.
 
-Each attended operation ends with exactly one terminal event, unless a shutdown stops it first. A turn ends with `TurnComplete`, `TurnFailed`, or `Cancelled`, or with `TurnRolledBack` before a `TurnFailed` when the model refused. `Event`'s rustdoc in `crates/ox-core/src/protocol.rs` names the terminal event of every other op, its failure case included. `TurnEnd::of` maps an op and an event to how the op ended, counting a `ConfigChanged` that rejects an `/effort` pick as a failure. The REPL and headless drivers render until the op they sent ends, and the TUI holds input from the start of an operation until its terminal event, then runs the teardown that submits the queued prompt. A failed `/resume` or `/archive` returns to idle with the queue still held, since its prompts were meant for the session it did not reach.
+Each attended operation ends with exactly one terminal event, unless a shutdown stops it first. A turn ends with `TurnComplete`, `TurnFailed`, or `Cancelled`, or with `TurnRolledBack` before a `TurnFailed` when the model refused, or with `PromptUnsent` before a `TurnFailed` or `Cancelled` when sign-in or automatic compaction stopped it before the prompt was recorded. `Event`'s rustdoc in `crates/ox-core/src/protocol.rs` names the terminal event of every other op, its failure case included. `TurnEnd::of` maps an op and an event to how the op ended, counting a `ConfigChanged` that rejects an `/effort` pick as a failure. The REPL and headless drivers render until the op they sent ends, and the TUI holds input from the start of an operation until its terminal event, then runs the teardown that submits the queued prompt. A failed `/resume` or `/archive` returns to idle with the queue still held, since its prompts were meant for the session it did not reach.
 
 `Error` reports a failure that leaves the operation running, such as a failed session write. `Notice` warns about a condition the session works around, such as a drifted file, and `Retrying` is a dim notice for a request the client sends again.
 
@@ -36,14 +36,14 @@ A turn is a loop of rounds. Each round sends the transcript to the model, stream
 
 ## Out of Scope
 
-- **An ACP frontend for editors** ([#150](https://github.com/hakula139/oxide-code/issues/150)) would drive the same contract.
+- **An ACP frontend for editors.** It would drive the same contract ([#150](https://github.com/hakula139/oxide-code/issues/150)).
 
 ## Sources
 
-- `crates/ox-core/src/engine.rs`: `Engine`, `EngineHandle`, `TurnEnd::of`, and the op loop.
+- `crates/ox-core/src/engine.rs`: `Engine`, `EngineHandle`, and the op loop.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round` and `Dispatcher`.
 - `crates/ox-core/src/engine/turn.rs`: `agent_turn`, the round loop, and `interrupt_turn`.
-- `crates/ox-core/src/protocol.rs`: `Op`, `Event`, and the per-op terminal-event docs.
+- `crates/ox-core/src/protocol.rs`: `Op`, `Event`, the per-op terminal-event docs, and `TurnEnd::of`.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op`, which sends each frontend action as an op.
 - `crates/ox-tui/src/app/events.rs`: the TUI's event handling and operation teardown.
 - `crates/ox/src/driver/stdio.rs`: `render_op`, which renders until the op ends.

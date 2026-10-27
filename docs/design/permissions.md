@@ -72,7 +72,7 @@ Each step settles the call with a `Verdict`, which pairs the `Decision` with the
 
 The tiers apply in this order: deny rules outrank all ask and allow rules, and ask rules outrank all allow rules, session grants, and the workspace allow. Steps 4 and 5 come after the ask tier. Thus, `ask.read = ["~/.aws/**"]` makes reading those files ask, and `ask.edit = ["Cargo.lock"]` makes editing the project's lock file ask.
 
-A `bash` command is allowed at step 6 only if the analysis recognizes all of it, each of its simple commands is allowed by an `exec` rule or is a known-safe read, and every file it writes is inside the workspace or allowed by an `edit` rule. An unrecognized command can still be denied. For example, `deny.exec = ["rm -rf *"]` stops `rm -rf x; echo $((1 + 2))`, but no rule, including `*`, allows it. In `manual`, it asks, and the prompt names the first construct the analysis does not recognize (**The analysis recognizes syntax by an allowlist, and an unrecognized command asks in `manual` while `yolo` runs it**), while `yolo` runs it.
+A `bash` command is allowed at step 6 only if the analysis recognizes all of it, each of its simple commands is allowed by an `exec` rule or is a known-safe read, and every file it writes is inside the workspace or allowed by an `edit` rule. An unrecognized command can still be denied. For example, `deny.exec = ["rm -rf *"]` stops `rm -rf x; echo $((1 + 2))`, but no rule, including `*`, allows it. In `manual`, it asks, and the prompt names the first construct the analysis does not recognize (**The analysis recognizes syntax by an allowlist, and an unrecognized command asks in `manual` while `yolo` runs it**).
 
 ## Path Targets
 
@@ -271,8 +271,8 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 
 ## Out of Scope
 
-- **An OS sandbox** ([#133](https://github.com/hakula139/oxide-code/issues/133)) would make the guardrails hold for unattended runs.
-- **An `auto` mode** ([#131](https://github.com/hakula139/oxide-code/issues/131)) would decide with a classifier the calls the rules leave open.
+- **An OS sandbox.** It would make the guardrails hold for unattended runs ([#133](https://github.com/hakula139/oxide-code/issues/133)).
+- **An `auto` mode.** It would decide with a classifier the calls the rules leave open ([#131](https://github.com/hakula139/oxide-code/issues/131)).
 
 ## Sources
 

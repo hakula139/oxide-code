@@ -98,7 +98,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **Mouse interaction.** The TUI captures the mouse ([mouse interactions](mouse.md)), but a modal receives only the wheel, as Up / Down keys. It ignores clicks and stays keyboard-driven.
 
-- **Concurrent modals on different layers** (e.g. toast over modal). The chat error-block path already covers what toasts would.
+- **Concurrent modals on different layers.** A toast over a modal would need a second layer, while the chat error-block path already covers what toasts would.
 
 - **User-defined modal commands.** The trait already supports them, and user-invocable skills are tracked in [#163](https://github.com/hakula139/oxide-code/issues/163).
 
@@ -123,7 +123,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/ox-tui/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview`.
 - `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`.
 - `crates/ox-tui/src/slash/context.rs`: `SlashContext`, the read-only state each `execute` call receives.
-- `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd`, which resolves its prefix through `ox-core`'s `resolve_saved_prefix` and pushes the confirm-delete modal.
+- `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd`, which resolves its prefix through `ox-core`'s `resolve_saved_prefix_blocking` in a background task that resolves to the confirm-delete modal.
 - `crates/ox-tui/src/slash/effort_slider.rs`: `/effort` slider.
 - `crates/ox-tui/src/slash/help.rs`: `/help` row builder plus `KvOverview`.
 - `crates/ox-tui/src/slash/init.rs`: `/init` instruction-file picker (`InitPicker`).

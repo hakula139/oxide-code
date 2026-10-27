@@ -80,9 +80,9 @@ URLs are sanitized: every control char is filtered out before the envelope is wr
 
 ## Out of Scope
 
-- OSC 8 hyperlinks inside markdown body text (would require threading URLs through the markdown renderer).
-- Selecting text outside the chat, such as in the input or a modal.
-- Copying source text without gutters or soft-wrap breaks, which would require each block to map rendered rows back to its source ([#300](https://github.com/hakula139/oxide-code/issues/300)).
+- **OSC 8 links in markdown body text.** A link in body text would require threading URLs through the markdown renderer.
+- **Selecting text outside the chat.** The capture serves chat scrollback, while the input and modals stay keyboard-driven.
+- **Copying source text without gutters or soft-wrap breaks.** Each block would need to map rendered rows back to its source ([#300](https://github.com/hakula139/oxide-code/issues/300)).
 
 ## Sources
 

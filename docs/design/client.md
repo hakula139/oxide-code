@@ -41,7 +41,7 @@ The attribution block follows the same split. A first-party request carries the 
 
 ## Out of Scope
 
-- Adapting the request shape to a gateway that requires a different beta set. Configure the applicable header and endpoint instead.
+- **A different beta set for a gateway.** Configure the applicable header and endpoint instead.
 
 ## Sources
 

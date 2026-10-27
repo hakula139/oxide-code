@@ -75,12 +75,11 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 
 ## Out of Scope
 
-- **Date grouping in the picker** (`Today` / `Yesterday` / ISO date). A flat mtime list reads fine, and the relative time in each row already encodes recency.
+- **Date grouping in the picker.** `Today` / `Yesterday` / ISO date groups would not improve on a flat mtime list, whose relative times already encode recency.
 - **Numeric `1`–`9` mnemonics.** Cursor plus Enter is enough, and mnemonics conflict with type-to-search.
-- **Worktree / branch tree expansion** (Claude Code's `▼` / `▶`) and **side preview pane.** Both double layout complexity for marginal gain.
+- **Worktree or branch tree expansion.** Claude Code's `▼` / `▶` tree and a side preview pane would both double layout complexity for marginal gain.
 - **In-picker rename of other sessions.** `/rename` covers the live session's title.
-- **Fuzzy search.** Substring search covers typical session counts.
-- **Agentic AI search.** A model-backed query adds a request to each search and orders results unpredictably, while substring search covers typical session counts.
+- **Fuzzy or agentic AI search.** Substring search covers typical session counts, and a model-backed query would add a request to each search.
 - **`/sessions` listing variant.** One slash command per intent. `ox --list` already covers script-friendly listing.
 
 ## Sources
