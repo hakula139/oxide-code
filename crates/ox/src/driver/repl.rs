@@ -168,7 +168,7 @@ where
 
 /// `/name (aliases)` for every command the REPL runs, comma-separated.
 fn repl_command_list() -> String {
-    let mut names = command::NAMES.to_vec();
+    let mut names: Vec<&str> = command::names().collect();
     names.push(HELP);
     names.sort_unstable();
     names
