@@ -124,6 +124,7 @@ pub(super) fn write_unreadable_instructions(dir: &Path) -> String {
 /// Paths the engine's file tracker holds, sorted.
 pub(super) fn tracked_paths(engine: &Engine) -> Vec<PathBuf> {
     let mut paths: Vec<_> = engine
+        .transcript
         .file_tracker
         .snapshot_all()
         .into_iter()

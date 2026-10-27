@@ -31,8 +31,8 @@ The `FileTracker` is shared across a session's tool calls. Read populates its mu
 
 ## Sources
 
-- `crates/ox-core/src/engine.rs`: `Engine::new`, which restores the tracker.
-- `crates/ox-core/src/engine/sessions.rs`: `adopt_session`, which restores the tracker of the session it swaps in, and `report_drift`.
+- `crates/ox-core/src/engine/sessions.rs`: `adopt_session`, which resumes a saved session into the live transcript, and `report_drift`.
+- `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::load` and `LiveTranscript::adopt`, which restore the tracker.
 - `crates/ox-core/src/file_tracker.rs`: `FileTracker`, `FileState`, `LastView`, `FileSnapshot`, `record_read` and `write_and_record`, which attribute each record to the call ID they take, content verification, persist / restore.
 - `crates/ox-core/src/session/entry.rs`: `Entry::FileSnapshot`.
 - `crates/ox-core/src/session/sanitize.rs`: `retain_visible_file_snapshots`, the resume-time provenance filter.
