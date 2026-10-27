@@ -169,8 +169,8 @@ impl Engine {
     }
 
     /// Compacts the transcript ahead of a prompt once [`auto_compaction_due`] holds for the stored
-    /// context estimate. A failure counts toward the pause, reports [`Event::PromptUnsent`], and
-    /// fails the unsent prompt.
+    /// context estimate. A failure counts toward the pause and fails the unsent prompt, which the
+    /// caller hands back.
     pub(super) async fn auto_compact(
         &mut self,
         sink: &dyn EventSink,
@@ -185,13 +185,9 @@ impl Engine {
             return Ok(());
         }
 
-        let compacted = self
-            .run_auto_compaction(sink, ops, inbox, AutoPoint::BeforePrompt)
-            .await;
-        if let Err(TurnAbort::Failed(_)) = compacted {
-            sink.emit(Event::PromptUnsent, "prompt-unsent");
-        }
-        compacted.map(drop)
+        self.run_auto_compaction(sink, ops, inbox, AutoPoint::BeforePrompt)
+            .await
+            .map(drop)
     }
 
     /// Compacts the transcript at a round boundary of a turn whose context crossed the threshold,
@@ -338,7 +334,7 @@ impl Engine {
         boundary: CompactBoundary,
         trigger: CompactTrigger,
     ) -> Option<Checkpoint> {
-        super::settle_file_writes(&self.file_tracker).await;
+        self.file_tracker.drain_writes().await;
         let synthetic = synthesize_post_compact_message(
             &boundary.summary,
             &boundary.tasks,
@@ -379,11 +375,10 @@ impl Engine {
 /// size floor, below which the system prompt, instructions, and tools fill most of the context.
 pub(super) fn auto_compaction_due(
     config: AutoCompactionConfig,
-    context_tokens: Option<u32>,
+    context_tokens: u32,
     transcript: &[Message],
 ) -> bool {
-    context_tokens.is_some_and(|tokens| config.should_trigger(tokens))
-        && transcript_tokens(transcript) >= MIN_TOKENS_FOR_COMPACT
+    config.should_trigger(context_tokens) && transcript_tokens(transcript) >= MIN_TOKENS_FOR_COMPACT
 }
 
 // ── Summary Request ──
@@ -455,7 +450,7 @@ async fn request_summary(
         Some(StopReason::Refusal) => bail!("the model declined to summarize the conversation"),
         Some(StopReason::ToolUse) => bail!("the model called a tool before finishing the summary"),
         Some(reason @ (StopReason::PauseTurn | StopReason::Unknown)) => {
-            bail!("the summary stopped early ({reason:?})")
+            bail!("the summary stopped early ({})", reason.as_str())
         }
     }
 
@@ -868,7 +863,7 @@ mod tests {
         async fn auto_engine(
             server: &MockServer,
             dir: &Path,
-            context_estimate: Option<u32>,
+            context_estimate: u32,
             transcript: Vec<Message>,
         ) -> Engine {
             let mut engine = engine(server.uri(), &test_store(dir), dir).await;
@@ -879,17 +874,15 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn skips_without_usage_below_the_threshold_or_for_a_short_transcript() {
+        async fn skips_below_the_threshold_or_for_a_short_transcript() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let short = vec![Message::user("hi"), Message::assistant("hello")];
-                let over = Some(50_000);
-                let under = Some(20_000);
-                for (context_estimate, transcript) in [
-                    (None, tool_heavy_transcript()),
-                    (under, tool_heavy_transcript()),
-                    (over, short),
-                ] {
+                let over = 50_000;
+                let under = 20_000;
+                for (context_estimate, transcript) in
+                    [(under, tool_heavy_transcript()), (over, short)]
+                {
                     let dir = tempfile::tempdir().unwrap();
                     let mut engine =
                         auto_engine(&server, dir.path(), context_estimate, transcript.clone())
@@ -915,7 +908,7 @@ mod tests {
                 let server = MockServer::start().await;
                 mount_reply(&server, "   ").await;
                 let dir = tempfile::tempdir().unwrap();
-                let usage = Some(50_000);
+                let usage = 50_000;
                 let mut engine =
                     auto_engine(&server, dir.path(), usage, tool_heavy_transcript()).await;
                 engine.auto_compaction_failures =
@@ -947,7 +940,6 @@ mod tests {
                             Event::SummaryDiscarded,
                             Event::UsageUpdated(_),
                             Event::AutoCompactionPaused { failures: 3 },
-                            Event::PromptUnsent,
                         ]
                     ),
                     "{events:?}",
@@ -962,7 +954,7 @@ mod tests {
                 let server = MockServer::start().await;
                 mount_reply(&server, "auto summary").await;
                 let dir = tempfile::tempdir().unwrap();
-                let usage = Some(50_000);
+                let usage = 50_000;
                 let mut engine =
                     auto_engine(&server, dir.path(), usage, tool_heavy_transcript()).await;
                 engine.session = dead_test_session();
@@ -995,7 +987,6 @@ mod tests {
                             Event::SummaryDiscarded,
                             Event::Error(write),
                             Event::UsageUpdated(_),
-                            Event::PromptUnsent,
                         ] if summary == "auto summary"
                             && write == "Session write failed: \
                                          session writer task has stopped. \
@@ -1013,7 +1004,7 @@ mod tests {
                 let server = MockServer::start().await;
                 mount_reply(&server, "auto summary").await;
                 let dir = tempfile::tempdir().unwrap();
-                let usage = Some(50_000);
+                let usage = 50_000;
                 let mut engine =
                     auto_engine(&server, dir.path(), usage, tool_heavy_transcript()).await;
                 engine.tasks = plan();
@@ -2213,7 +2204,7 @@ mod tests {
                     true,
                     "the model called a tool before finishing the summary",
                 ),
-                ("pause_turn", true, "the summary stopped early (PauseTurn)"),
+                ("pause_turn", true, "the summary stopped early (pause_turn)"),
                 (
                     "end_turn",
                     false,

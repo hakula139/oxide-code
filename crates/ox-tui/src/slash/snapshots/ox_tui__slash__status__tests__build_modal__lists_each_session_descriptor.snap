@@ -13,7 +13,7 @@ expression: "render_rows(&modal, 80, modal.height(80, u16::MAX))"
     "Auth               API key (ANTHROPIC_API_KEY)                                  ",
     "Version            0.0.0-test                                                   ",
     "Prompt Cache TTL   1h                                                           ",
-    "Auto Compaction    at 155k tokens                                               ",
+    "Auto-Compaction    at 155k tokens                                               ",
     "Show Thinking      off                                                          ",
     "Show Welcome       on                                                           ",
     "                                                                                ",

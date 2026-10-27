@@ -4,6 +4,8 @@ Research on automatic context compaction. Based on [Claude Code](https://github.
 
 ## Claude Code (TypeScript)
 
+Checked 2026-10-26 against the frozen 2.1.87 source.
+
 Claude Code runs automatic compaction proactively before the model call. The query loop applies snip / microcompact / context-collapse transforms first, then calls `autoCompactIfNeeded` with the transformed messages. A successful compact replaces the message set for the rest of the same turn.
 
 Threshold math is token-buffer based:
@@ -34,6 +36,8 @@ Key files:
 
 ## OpenAI Codex (Rust)
 
+Checked 2026-10-26 against Codex `2351d9e1b608`.
+
 Codex drives auto-compaction from model metadata. `ModelInfo::auto_compact_token_limit()` defaults to 90% of the resolved context window, or to a configured limit clamped to that 90% ceiling. If no context window or explicit limit is known, the runtime uses `i64::MAX`, effectively disabling auto-compact.
 
 Triggers:
@@ -54,6 +58,8 @@ Key files:
 - `codex-rs/config/src/config_toml.rs`: config surface.
 
 ## opencode (TypeScript)
+
+Checked 2026-10-26 against opencode `v1.4.11-1713-g7d5e91b80`.
 
 opencode performs local app-level compaction through a hidden `compaction` agent. The compaction agent is tool-denied and receives prior context plus a strict Markdown summary template. It does not rely on provider-side automatic summarization.
 

@@ -8,11 +8,11 @@ use anyhow::{Context as _, Result, bail};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader};
 
 use ox_core::command::{self, Parsed};
-use ox_core::engine::{Engine, EngineHandle, TurnEnd};
+use ox_core::engine::{Engine, EngineHandle};
 use ox_core::permission::rule::Rule;
 use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::notice::ENGINE_STOPPED;
-use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op};
+use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op, TurnEnd};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::text::escape_hidden;
 
@@ -168,7 +168,7 @@ where
 
 /// `/name (aliases)` for every command the REPL runs, comma-separated.
 fn repl_command_list() -> String {
-    let mut names = command::NAMES.to_vec();
+    let mut names: Vec<&str> = command::names().collect();
     names.push(HELP);
     names.sort_unstable();
     names
@@ -950,7 +950,7 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let sink = CapturingSink::default();
                 let input: &[u8] = indoc! {b"
-                    /model gpt-4
+                    /effort turbo
                     /model
                     /theme
                 "};
@@ -979,7 +979,7 @@ mod tests {
                     .collect();
                 assert_eq!(reports.len(), 3, "{reports:?}");
                 assert!(
-                    reports[0].starts_with("/model: Unknown model: `gpt-4`."),
+                    reports[0].starts_with("/effort: Unknown effort: `turbo`."),
                     "{reports:?}"
                 );
                 assert_eq!(

@@ -147,6 +147,11 @@ impl PromptQueue {
         self.hand_back = HandBack::UnsentPrompt;
     }
 
+    /// Returns whether the engine will not send the active prompt, so a cancel hands it back.
+    pub(super) fn unsent(&self) -> bool {
+        matches!(self.hand_back, HandBack::UnsentPrompt)
+    }
+
     /// Notes that compaction cleared chat, so pending prompts need an echo and a later failure is
     /// the turn's own.
     pub(super) fn mark_compacted(&mut self) {

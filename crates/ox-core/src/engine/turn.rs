@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
-use super::compaction::{auto_compaction_due, transcript_tokens};
+use super::compaction::{auto_compaction_due, request_tokens, transcript_tokens};
 use super::dispatch::{self, DispatchContext};
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::config::compaction::AutoCompactionConfig;
@@ -43,12 +43,21 @@ impl TurnReport {
 
     /// Rough size of the next request's context, which the auto-compaction threshold checks: the
     /// input of the latest request that reported usage, plus an estimate of every message
-    /// `messages` gained after that request went out, its reply included.
-    pub(super) fn context_estimate(&self, messages: &[Message]) -> Option<u32> {
-        self.usage().map(|usage| {
-            let appended = transcript_tokens(&messages[self.sent_messages..]);
-            usage.context_tokens().saturating_add(appended)
-        })
+    /// `messages` gained after that request went out, its reply included. A turn whose requests
+    /// reported no usage is measured by the parts of the next request.
+    pub(super) fn context_estimate(
+        &self,
+        prompt: &PromptParts,
+        tools: &[ToolDefinition],
+        messages: &[Message],
+    ) -> u32 {
+        self.usage().map_or_else(
+            || request_tokens(prompt, tools, messages),
+            |usage| {
+                let appended = transcript_tokens(&messages[self.sent_messages..]);
+                usage.context_tokens().saturating_add(appended)
+            },
+        )
     }
 
     /// Adds the usage of a request that sent `sent_messages` messages, if it reported any.
@@ -144,6 +153,7 @@ pub(super) async fn agent_turn(
     } = turn;
     let tool_defs = tools.definitions();
     let mut report = TurnReport::default();
+    let mut ran_tools = false;
     let cap = max_tool_rounds.unwrap_or(u32::MAX);
 
     for round_index in rounds_run..cap {
@@ -168,19 +178,13 @@ pub(super) async fn agent_turn(
             Err(abort) => return interrupt_turn(session, sink, messages, report, abort).await,
         };
 
-        let blocks = match settle_stop_reason(
-            stop_reason,
-            stop_details.as_ref(),
-            blocks,
-            rounds_run > 0,
-            session,
-            sink,
-            messages,
-        )
-        .await
-        {
+        let blocks = match settle_stop_reason(stop_reason, blocks, session, sink, messages).await {
             StopAction::Proceed(blocks) => blocks,
             StopAction::Resume => continue,
+            StopAction::Refused => {
+                let notice = refusal_message(stop_details.as_ref(), rounds_run > 0, ran_tools);
+                return TurnOutcome::aborted(report, TurnAbort::Refused(notice));
+            }
             StopAction::Finish(abort) => return TurnOutcome::aborted(report, abort),
         };
 
@@ -219,13 +223,14 @@ pub(super) async fn agent_turn(
             round.sidecars,
         )
         .await;
+        ran_tools = true;
         if let Some(abort) = round.abort {
             return interrupt_turn(session, sink, messages, report, abort).await;
         }
         record_drained_prompts(inbox.prompts.drain(..), messages, session, sink).await;
 
         let ran = round_index + 1;
-        let estimate = report.context_estimate(messages);
+        let estimate = report.context_estimate(prompt, &tool_defs, messages);
         if ran < cap && auto_compaction_due(auto_compaction, estimate, messages) {
             return TurnOutcome::stopped(report, TurnStop::Compact { rounds_run: ran });
         }
@@ -246,26 +251,23 @@ enum StopAction {
     Proceed(Vec<ContentBlock>),
     /// `pause_turn`: the reply is committed and the next request resumes it.
     Resume,
+    /// `refusal`: the reply is dropped and the caller words the notice.
+    Refused,
     /// The turn ends here.
     Finish(TurnAbort),
 }
 
-/// Handles the stop reasons that end or pause a round before any tool runs. `compacted` says a
-/// mid-turn compaction summarized the turn's prompt.
+/// Handles the stop reasons that end or pause a round before any tool runs.
 async fn settle_stop_reason(
     stop_reason: Option<StopReason>,
-    stop_details: Option<&StopDetails>,
     blocks: Vec<ContentBlock>,
-    compacted: bool,
     session: &SessionHandle,
     sink: &dyn EventSink,
     messages: &mut Vec<Message>,
 ) -> StopAction {
     match stop_reason {
         // The API asks clients to drop refused output without running it.
-        Some(StopReason::Refusal) => {
-            StopAction::Finish(TurnAbort::Refused(refusal_message(stop_details, compacted)))
-        }
+        Some(StopReason::Refusal) => StopAction::Refused,
         // Running a cut-off call, or asking the model to retry it, would repeat the same oversized
         // output, so the round stops and keeps only the finished prose.
         Some(reason @ (StopReason::MaxTokens | StopReason::ModelContextWindowExceeded)) => {
@@ -331,9 +333,10 @@ pub(super) async fn record_interruption(
 /// User-facing notice for a `refusal` stop, naming the policy category and explanation when the API
 /// supplied them. The API keeps refusing while the turn stays in the conversation, so the notice
 /// says the engine removed it, or, once `compacted` says a mid-turn summary holds the request, that
-/// only `/clear` removes it.
-fn refusal_message(details: Option<&StopDetails>, compacted: bool) -> String {
-    let next = if compacted {
+/// only `/clear` removes it. `ran_tools` notes that the changes the turn's tool calls made stay on
+/// disk, since the rollback removes only the conversation.
+fn refusal_message(details: Option<&StopDetails>, compacted: bool, ran_tools: bool) -> String {
+    let recovery = if compacted {
         "The work since this turn's compaction was removed from the conversation, \
          but the summary still holds the request, so run `/clear` if the model keeps declining."
     } else {
@@ -347,13 +350,16 @@ fn refusal_message(details: Option<&StopDetails>, compacted: bool) -> String {
         .and_then(|d| d.explanation.as_deref())
         .map(str::trim)
         .filter(|e| !e.is_empty());
-    match explanation {
-        Some(explanation) => join_sentences(
-            &format!("The model declined this request{category}: {explanation}"),
-            next,
-        ),
-        None => format!("The model declined this request{category}. {next}"),
-    }
+    let declined = match explanation {
+        Some(explanation) => format!("The model declined this request{category}: {explanation}"),
+        None => format!("The model declined this request{category}."),
+    };
+    let notice = if ran_tools {
+        join_sentences(&declined, "Changes from the request's tool calls remain.")
+    } else {
+        declined
+    };
+    join_sentences(&notice, recovery)
 }
 
 /// Error for a reply cut off by the output cap or the context window, naming the tool call it cut.
@@ -425,14 +431,10 @@ async fn commit_round(
         role: Role::User,
         content: results,
     };
-    let assistant_fut = session.record_message(assistant_msg.clone());
-    let tool_result_fut = session.record_message(tool_result_msg.clone());
-    let metadata_fut = session.record_tool_metadata_batch(sidecars);
-    let (assistant_outcome, tool_result_outcome, metadata_outcome) =
-        tokio::join!(assistant_fut, tool_result_fut, metadata_fut);
-    sink.session_write_error(assistant_outcome.failure.as_deref());
-    sink.session_write_error(tool_result_outcome.failure.as_deref());
-    sink.session_write_error(metadata_outcome.failure.as_deref());
+    let outcome = session
+        .record_round(assistant_msg.clone(), tool_result_msg.clone(), sidecars)
+        .await;
+    sink.session_write_error(outcome.failure.as_deref());
     messages.push(assistant_msg);
     messages.push(tool_result_msg);
 }
@@ -920,10 +922,8 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn metadata_batch_failure_after_healthy_messages_surfaces_error() {
-            // Acks the assistant and tool-result writes, then drops the third, the metadata batch.
-            let session =
-                crate::session::handle::testing::acks_then_drops("metadata-batch-fails", 2);
+        async fn dropped_round_write_surfaces_one_error_and_the_turn_continues() {
+            let session = crate::session::handle::testing::acks_then_drops("round-write-fails", 0);
             let client = FakeClient::new(vec![
                 tool_use_turn("tool_1", "echo", r#"{"v":1}"#),
                 text_turn("Done"),
@@ -944,14 +944,25 @@ mod tests {
             .unwrap();
 
             let events = sink.events();
-            let error_events: Vec<_> = events
+            let error = events
                 .iter()
-                .filter(|e| matches!(e, Event::Error(m) if m.contains("Session write failed")))
-                .collect();
+                .position(|event| matches!(event, Event::Error(_)))
+                .expect("the failed round write is reported");
+            let replied = events
+                .iter()
+                .position(|event| matches!(event, Event::StreamToken(text) if text == "Done"))
+                .expect("the reply after the round streams");
+            assert!(
+                error < replied,
+                "the error follows the round's write, not the later reply: {events:?}",
+            );
             assert_eq!(
-                error_events.len(),
+                events
+                    .iter()
+                    .filter(|event| matches!(event, Event::Error(_)))
+                    .count(),
                 1,
-                "exactly one write-failure Error event (sticky once-flag): {events:?}",
+                "a repeated failure is reported once: {events:?}",
             );
         }
 
@@ -1443,6 +1454,7 @@ mod tests {
                 let tools = ToolRegistry::new(vec![]);
                 let sink = CapturingSink::default();
                 let mut messages = vec![Message::user("hi")];
+                let mut inbox = Inbox::default();
                 let (tx, mut rx) = mpsc::channel::<Op>(1);
                 tx.try_send(op.clone()).unwrap();
 
@@ -1450,13 +1462,20 @@ mod tests {
                     turn_context(&client, &tools, &sink, &session),
                     &mut messages,
                     &mut rx,
-                    &mut Inbox::default(),
+                    &mut inbox,
                     &mut yolo_dispatch(),
                 )
                 .await;
-                assert!(outcome.result.is_ok(), "turn must complete despite {op:?}");
 
-                assert_eq!(messages.len(), 2, "assistant message recorded for {op:?}");
+                assert!(outcome.result.is_ok(), "turn must complete despite {op:?}");
+                assert_eq!(
+                    messages,
+                    [Message::user("hi"), Message::assistant("Hello!")],
+                    "the turn records only its own reply after {op:?}",
+                );
+                assert_eq!(inbox.prompts, [] as [String; 0], "{op:?}");
+                assert_eq!(inbox.mode, None, "{op:?}");
+                assert_eq!(sink.events(), [Event::StreamToken("Hello!".to_owned())]);
                 drop(tx);
             }
         }
@@ -1807,6 +1826,34 @@ mod tests {
                     "the round's results are recorded before it stops: {results:?}"
                 );
             }
+        }
+
+        #[tokio::test]
+        async fn stops_for_compaction_on_the_request_estimate_when_no_request_reported_usage() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            let client = FakeClient::new(vec![tool_use_turn("tool_1", "echo", "{}")]);
+            let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+            let sink = CapturingSink::default();
+            let mut messages = tool_heavy_transcript();
+
+            let outcome = agent_turn(
+                TurnContext {
+                    auto_compaction: CompactionConfig::with_threshold(1_000).auto,
+                    ..turn_context(&client, &tools, &sink, &session)
+                },
+                &mut messages,
+                &mut inert_ops(),
+                &mut Inbox::default(),
+                &mut yolo_dispatch(),
+            )
+            .await;
+
+            assert_eq!(
+                outcome.result.expect("the turn stops cleanly"),
+                TurnStop::Compact { rounds_run: 1 },
+            );
+            assert_eq!(client.requests().len(), 1);
         }
 
         #[tokio::test]
@@ -2725,7 +2772,7 @@ mod tests {
                 ),
             ] {
                 assert_eq!(
-                    refusal_message(details.as_ref(), false),
+                    refusal_message(details.as_ref(), false, false),
                     expected,
                     "{details:?}"
                 );
@@ -2739,7 +2786,7 @@ mod tests {
                 explanation: None,
             };
 
-            let notice = refusal_message(Some(&details), true);
+            let notice = refusal_message(Some(&details), true, false);
 
             assert_eq!(
                 notice,
@@ -2748,6 +2795,38 @@ mod tests {
                  but the summary still holds the request, \
                  so run `/clear` if the model keeps declining.",
             );
+        }
+
+        #[test]
+        fn notes_that_the_changes_a_committed_round_made_stay_before_the_recovery_step() {
+            let details = StopDetails {
+                category: None,
+                explanation: None,
+            };
+
+            for (compacted, expected) in [
+                (
+                    false,
+                    "The model declined this request. \
+                     Changes from the request's tool calls remain. \
+                     The request was removed from the conversation, \
+                     so rephrase it to try again.",
+                ),
+                (
+                    true,
+                    "The model declined this request. \
+                     Changes from the request's tool calls remain. \
+                     The work since this turn's compaction was removed from the conversation, \
+                     but the summary still holds the request, \
+                     so run `/clear` if the model keeps declining.",
+                ),
+            ] {
+                assert_eq!(
+                    refusal_message(Some(&details), compacted, true),
+                    expected,
+                    "compacted: {compacted}",
+                );
+            }
         }
     }
 
@@ -2809,6 +2888,64 @@ mod tests {
             assert_eq!(
                 events(&[Message::user("hi"), Message::assistant("done")]),
                 none
+            );
+        }
+    }
+
+    mod commit_round {
+        use super::*;
+
+        #[tokio::test]
+        async fn writes_the_round_in_order_when_the_coop_budget_runs_out() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let session = handle::start(&store, "claude-sonnet-5-5", None);
+            let sid = session.session_id().to_owned();
+            session.record_message(Message::user("prompt")).await;
+            let sink = CapturingSink::default();
+            let mut messages = vec![Message::user("prompt")];
+            // Leaves the task with no cooperative budget, so the first await that needs a permit
+            // yields before the command lands.
+            while tokio::task::coop::has_budget_remaining() {
+                tokio::task::coop::consume_budget().await;
+            }
+
+            commit_round(
+                &session,
+                &sink,
+                &mut messages,
+                Message::assistant("answer"),
+                vec![ContentBlock::tool_result("tool_1", "ok", false)],
+                vec![(
+                    "tool_1".to_owned(),
+                    ToolMetadata {
+                        title: Some("Edited a.rs".to_owned()),
+                        ..ToolMetadata::default()
+                    },
+                )],
+            )
+            .await;
+            session.finalize(Vec::new()).await;
+
+            let data = store.load_session_data(&sid).unwrap();
+            assert_eq!(
+                data.messages,
+                [
+                    Message::user("prompt"),
+                    Message::assistant("answer"),
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::tool_result("tool_1", "ok", false)],
+                    },
+                ],
+                "a resumed session reads the assistant turn before its results",
+            );
+            assert_eq!(
+                data.tool_result_metadata.get("tool_1"),
+                Some(&ToolMetadata {
+                    title: Some("Edited a.rs".to_owned()),
+                    ..ToolMetadata::default()
+                }),
             );
         }
     }
