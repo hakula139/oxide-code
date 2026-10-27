@@ -271,6 +271,11 @@ impl StatusBar {
     }
 
     #[cfg(test)]
+    pub(crate) fn pull_request(&self) -> Option<&git::PullRequest> {
+        self.pull_request.as_ref()
+    }
+
+    #[cfg(test)]
     pub(crate) fn rate_limits(&self) -> Option<RateLimits> {
         self.rate_limits
     }
@@ -451,6 +456,7 @@ mod tests {
     use time::macros::{datetime, time};
 
     use ox_core::client::RateLimitWindow;
+    use ox_core::util::git::testing::pull_request;
 
     use super::testing::status_bar_init;
     use super::*;
@@ -471,15 +477,6 @@ mod tests {
             StatusLineSegment::PullRequest,
             StatusLineSegment::RunState,
         ]))
-    }
-
-    fn pr_state(number: u64) -> git::PullRequest {
-        git::PullRequest {
-            number,
-            url: format!("https://github.com/o/r/pull/{number}"),
-            checks: None,
-            review: None,
-        }
     }
 
     fn render_status(bar: &mut StatusBar, width: u16) -> TestBackend {
@@ -579,10 +576,10 @@ mod tests {
         fn reports_only_real_changes() {
             let mut bar = pr_bar();
             assert!(!bar.set_pull_request(None));
-            assert!(bar.set_pull_request(Some(pr_state(1))));
-            assert!(!bar.set_pull_request(Some(pr_state(1))));
-            assert!(bar.set_pull_request(Some(pr_state(2))));
-            assert_eq!(bar.pull_request, Some(pr_state(2)));
+            assert!(bar.set_pull_request(Some(pull_request(1))));
+            assert!(!bar.set_pull_request(Some(pull_request(1))));
+            assert!(bar.set_pull_request(Some(pull_request(2))));
+            assert_eq!(bar.pull_request, Some(pull_request(2)));
         }
     }
 
@@ -914,7 +911,7 @@ mod tests {
             let mut bar = segment_bar(StatusLineSegment::PullRequestChecks);
             bar.set_pull_request(Some(git::PullRequest {
                 checks: Some(git::Checks::Failing(2)),
-                ..pr_state(86)
+                ..pull_request(86)
             }));
             insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
         }
@@ -924,7 +921,7 @@ mod tests {
             let mut bar = segment_bar(StatusLineSegment::PullRequestReview);
             bar.set_pull_request(Some(git::PullRequest {
                 review: Some(git::ReviewDecision::ChangesRequested),
-                ..pr_state(86)
+                ..pull_request(86)
             }));
             insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
         }
@@ -1103,7 +1100,7 @@ mod tests {
         #[test]
         fn records_pull_request_hyperlink_rect_for_post_flush_emission() {
             let mut bar = pr_bar();
-            bar.pull_request = Some(pr_state(86));
+            bar.pull_request = Some(pull_request(86));
             render_status(&mut bar, 40);
             let links = bar.take_pending_hyperlinks();
             assert_eq!(
@@ -1129,7 +1126,7 @@ mod tests {
         #[test]
         fn drops_the_hyperlink_when_the_bar_is_too_narrow_for_its_segment() {
             let mut bar = pr_bar();
-            bar.pull_request = Some(pr_state(86));
+            bar.pull_request = Some(pull_request(86));
             render_status(&mut bar, 10);
             assert!(bar.take_pending_hyperlinks().is_empty());
         }
@@ -1141,7 +1138,7 @@ mod tests {
         #[test]
         fn drains_after_first_call() {
             let mut bar = pr_bar();
-            bar.pull_request = Some(pr_state(86));
+            bar.pull_request = Some(pull_request(86));
             render_status(&mut bar, 40);
             assert_eq!(bar.take_pending_hyperlinks().len(), 1);
             assert!(
