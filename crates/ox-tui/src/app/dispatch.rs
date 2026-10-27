@@ -7,18 +7,16 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::Position;
-use strum::VariantArray as _;
 use tokio::sync::mpsc::OwnedPermit;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::debug;
 
 use ox_core::command::{self, Parsed};
-use ox_core::permission::Mode;
 use ox_core::protocol::{Op, SignInCode};
 
 use super::queue::QueuedPrompt;
 use super::{App, EXIT_WINDOW};
-use crate::action::{APP_KEYMAP, Action, AppAction};
+use crate::action::{APP_KEYMAP, Action, AppAction, next_mode};
 use crate::components::input::InputOutcome;
 use crate::components::status::Status;
 use crate::keymap::{CTRL_C, CTRL_D};
@@ -27,7 +25,7 @@ use crate::now;
 use crate::slash::{self, SlashContext, SlashKind, SlashOutcome};
 use crate::theme::Theme;
 use crate::theme::builtin::BuiltinTheme;
-use crate::viewport::wrap_next;
+use crate::viewport::Direction;
 
 impl App {
     pub(super) fn handle_crossterm_event(&mut self, event: &CrosstermEvent) {
@@ -244,7 +242,7 @@ impl App {
             Action::SlashPrompt { line, prompt } => {
                 self.start_turn(QueuedPrompt::slash(line, prompt));
             }
-            Action::CycleMode => self.cycle_mode(),
+            Action::CycleMode(direction) => self.cycle_mode(direction),
             Action::PreviewTheme(theme) => self.preview_theme(theme),
             Action::SwapTheme(theme) => self.swap_theme(theme),
         }
@@ -343,13 +341,9 @@ impl App {
         }
     }
 
-    /// Switches to the mode after the last requested one in the keyboard cycle.
-    fn cycle_mode(&mut self) {
-        let index = Mode::VARIANTS
-            .iter()
-            .position(|&mode| mode == self.requested_mode)
-            .expect("every permission mode is in Mode::VARIANTS");
-        let next = Mode::VARIANTS[wrap_next(index, Mode::VARIANTS.len())];
+    /// Switches to the mode one step from the last requested one in the keyboard cycle.
+    fn cycle_mode(&mut self, direction: Direction) {
+        let next = next_mode(self.requested_mode, direction);
         self.dispatch_op(Op::SetMode(next));
     }
 
@@ -557,8 +551,7 @@ mod tests {
     use super::*;
     use crate::app::testing::{
         FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, cell_of, long_chat_block,
-        push_answerable_approval, render_app, rendered_text, test_app, test_app_with,
-        unknown_model_session_info,
+        push_answerable_approval, render_app, rendered_text, test_app,
     };
     use crate::components::status::StatusHyperlink;
     use crate::modal::testing::ScriptedModal;
@@ -1086,7 +1079,7 @@ mod tests {
 
             app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
 
-            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Yolo)));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Plan)));
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
             assert_eq!(app.input.lines(), ["next task"]);
             assert_eq!(app.status, Status::Streaming);
@@ -2298,68 +2291,46 @@ mod tests {
 
                 app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
 
-                assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Yolo)), "{draft:?}");
+                assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Plan)), "{draft:?}");
                 assert_eq!(app.input.lines(), [draft], "{draft:?}");
             }
         }
 
         #[test]
-        fn shift_tab_cycles_while_a_completion_stays_open() {
+        fn shift_tab_steps_back_while_a_completion_stays_open() {
             let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Op(Op::SetMode(Mode::Plan)));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Plan)));
             app.handle_crossterm_event(&CrosstermEvent::Paste("/mode p".to_owned()));
             assert!(app.input.popup_visible());
 
             app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
 
-            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Yolo)));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Manual)));
             assert_eq!(app.input.lines(), ["/mode p"]);
             assert!(app.input.popup_visible());
         }
 
         #[test]
-        fn both_keys_cycle_through_every_mode_from_each_session_start() {
-            for (code, modifiers) in [
-                (KeyCode::Tab, KeyModifiers::NONE),
-                (KeyCode::BackTab, KeyModifiers::SHIFT),
-            ] {
-                for (start, expected) in [
-                    (
-                        Mode::Manual,
-                        [Mode::Yolo, Mode::Plan, Mode::Manual, Mode::Yolo],
-                    ),
-                    (
-                        Mode::Yolo,
-                        [Mode::Plan, Mode::Manual, Mode::Yolo, Mode::Plan],
-                    ),
-                    (
-                        Mode::Plan,
-                        [Mode::Manual, Mode::Yolo, Mode::Plan, Mode::Manual],
-                    ),
-                ] {
-                    for confirm_switch in [true, false] {
-                        let mut info = unknown_model_session_info();
-                        info.config.permission_mode = start;
-                        let (mut app, mut rx, _event_tx) = test_app_with(info, None);
-                        app.input.set_text("draft\nsecond line");
+        fn both_keys_step_the_mode_and_an_unconfirmed_press_advances() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.input.set_text("draft\nsecond line");
 
-                        for (step, mode) in expected.into_iter().enumerate() {
-                            app.handle_crossterm_event(&key_event(code, modifiers));
+            app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Plan)));
+            assert_eq!(app.input.lines(), ["draft", "second line"]);
 
-                            assert_eq!(
-                                rx.try_recv(),
-                                Ok(Op::SetMode(mode)),
-                                "{code:?} from {start}, confirm={confirm_switch}, step={step}",
-                            );
-                            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
-                            assert_eq!(app.input.lines(), ["draft", "second line"]);
+            app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Yolo)));
 
-                            if confirm_switch {
-                                app.handle_engine_event(Event::ModeChanged(mode));
-                            }
-                        }
-                    }
-                }
-            }
+            app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Plan)));
+
+            app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Manual)));
+
+            app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Yolo)));
         }
     }
 

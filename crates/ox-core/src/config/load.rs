@@ -1042,7 +1042,7 @@ mod tests {
             for (body, error) in [
                 (
                     r#"permission.mode = "auto""#,
-                    "unknown variant `auto`, expected one of `manual`, `yolo`, `plan`",
+                    "unknown variant `auto`, expected one of `manual`, `plan`, `yolo`",
                 ),
                 (
                     r#"permission.allow = ["bash(ls)"]"#,
