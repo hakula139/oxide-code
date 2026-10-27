@@ -73,7 +73,7 @@ pub(crate) fn config_changed(
         (_, _, Some(eff)) => (format!("{named} · effort {eff}"), None),
     };
     let compaction = (before.auto_compaction != after.auto_compaction)
-        .then(|| format!("Auto compaction {}", after.auto_compaction));
+        .then(|| format!("Auto compaction {}", after.auto_compaction.abbreviated()));
     match (effort, compaction) {
         (None, None) => head,
         (Some(effort), None) => format!("{head}. {effort}."),
@@ -97,6 +97,7 @@ mod tests {
     use super::*;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
     use crate::model::ResolvedModelId;
+    use crate::util::text::compact_count;
 
     mod compacted {
         use super::*;
@@ -295,7 +296,8 @@ mod tests {
                 s,
                 format!(
                     "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high. \
-                     Auto compaction at {WINDOW_1M_THRESHOLD} tokens.",
+                     Auto compaction at {} tokens.",
+                    compact_count(WINDOW_1M_THRESHOLD),
                 ),
             );
         }
@@ -323,7 +325,8 @@ mod tests {
                 format!(
                     "Switched to custom-model (custom-model). \
                      Effort unchanged (model has no effort levels, asked for max). \
-                     Auto compaction at {WINDOW_1M_THRESHOLD} tokens.",
+                     Auto compaction at {} tokens.",
+                    compact_count(WINDOW_1M_THRESHOLD),
                 ),
             );
         }

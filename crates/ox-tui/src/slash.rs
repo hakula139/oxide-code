@@ -37,6 +37,11 @@ use futures::TryFutureExt as _;
 
 use ox_core::command::Parsed;
 
+/// Returns whether `name` is a built-in slash command or one of its aliases.
+pub fn is_built_in(name: &str) -> bool {
+    registry::lookup_in(registry::BUILT_INS, name).is_some()
+}
+
 /// Filters the built-in registry against a popup query (leading `/` stripped).
 pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
     matcher::filter_and_rank(registry::BUILT_INS, query)

@@ -866,12 +866,14 @@ impl fmt::Display for Basis {
     }
 }
 
-/// `text` as a Markdown code span, with a fence of two backticks and padding when it holds one.
+/// `text` as a Markdown code span, fenced past its longest backtick run and padded if it has one.
 fn code_span(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
     if text.contains('`') {
-        format!("`` {text} ``")
+        format!("{fence} {text} {fence}")
     } else {
-        format!("`{text}`")
+        format!("{fence}{text}{fence}")
     }
 }
 
@@ -1377,7 +1379,7 @@ fn read_holder<'a>(
     })
 }
 
-/// The first `read` rule among the deny or ask `tiers` that may match a named read or its descendants.
+/// The first `read` rule among the deny or ask `tiers` that may match a named read or a descendant.
 fn named_read_holder<'a>(
     segment: &Segment,
     tiers: &(impl Iterator<Item = (&'a TierRule, Tier)> + Clone),
@@ -2584,6 +2586,22 @@ mod tests {
                          so no permission rule can allow this command"
                     ),
                 );
+            }
+        }
+    }
+
+    mod code_span {
+        use super::*;
+
+        #[test]
+        fn fences_longer_than_the_longest_backtick_run_and_pads_against_the_fence() {
+            for (text, span) in [
+                ("alias ls=rm", "`alias ls=rm`"),
+                ("echo `id`", "`` echo `id` ``"),
+                ("echo ``id``", "``` echo ``id`` ```"),
+                ("`id`", "`` `id` ``"),
+            ] {
+                assert_eq!(code_span(text), span, "{text}");
             }
         }
     }

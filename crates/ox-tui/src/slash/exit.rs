@@ -16,7 +16,7 @@ impl SlashCommand for ExitCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Quit ox"
+        "Quit oxide-code"
     }
 
     fn classify(&self, _args: &str) -> SlashKind {

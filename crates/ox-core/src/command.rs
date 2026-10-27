@@ -81,7 +81,8 @@ pub fn compact(args: &str) -> Op {
 
 /// `/effort <level>`, case-insensitive.
 pub fn effort(arg: &str) -> Result<Op, String> {
-    let arg = required(arg, "level", "/effort <level>")?;
+    let usage = format!("/effort <{}>", variant::names_joined::<Effort>("|"));
+    let arg = required(arg, "level", &usage)?;
     let pick = arg.to_ascii_lowercase().parse().map_err(|_| {
         format!(
             "Unknown effort: `{arg}`. Valid: {}.",
@@ -93,7 +94,8 @@ pub fn effort(arg: &str) -> Result<Op, String> {
 
 /// `/mode <mode>`, case-insensitive.
 pub fn mode(arg: &str) -> Result<Op, String> {
-    let arg = required(arg, "mode", "/mode <mode>")?;
+    let usage = format!("/mode <{}>", variant::names_joined::<Mode>("|"));
+    let arg = required(arg, "mode", &usage)?;
     let mode = arg.to_ascii_lowercase().parse::<Mode>().map_err(|_| {
         format!(
             "Unknown mode: `{arg}`. Valid: {}.",
@@ -340,8 +342,11 @@ mod tests {
         #[test]
         fn bare_forms_that_need_an_argument_name_the_usage() {
             for (name, usage) in [
-                ("effort", "Missing level. Usage: `/effort <level>`."),
-                ("mode", "Missing mode. Usage: `/mode <mode>`."),
+                (
+                    "effort",
+                    "Missing level. Usage: `/effort <low|medium|high|xhigh|max>`.",
+                ),
+                ("mode", "Missing mode. Usage: `/mode <manual|yolo|plan>`."),
                 ("model", "Missing model ID. Usage: `/model <id>`."),
                 ("rename", "Missing title. Usage: `/rename <title>`."),
                 (

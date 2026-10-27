@@ -41,10 +41,13 @@ pub(crate) enum AppAction {
     ToggleExpanded,
 }
 
+/// Ctrl+O, which toggles the expanded chat view.
+pub(crate) const TOGGLE_EXPANDED: KeyChord = KeyChord::ctrl('o');
+
 /// The app's key actions, which take their keys before the input box sees them.
 pub(crate) const APP_KEYMAP: Keymap<AppAction, ()> = Keymap::new(&[KeyAction {
     action: AppAction::ToggleExpanded,
-    key: KeyChord::ctrl('o'),
+    key: TOGGLE_EXPANDED,
     label: |()| Some("to expand"),
 }]);
 

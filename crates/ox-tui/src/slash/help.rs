@@ -6,6 +6,8 @@ use ox_core::command;
 
 use super::context::SlashContext;
 use super::registry::{BUILT_INS, SlashCommand, SlashOutcome};
+use crate::action::TOGGLE_EXPANDED;
+use crate::keymap::{CTRL_C, CTRL_D};
 use crate::modal::kv_overview::{KvOverview, KvSection};
 
 // ── HelpCmd ──
@@ -37,7 +39,33 @@ fn build_modal() -> KvOverview {
         .iter()
         .map(|cmd| (display_label(*cmd), cmd.description().to_owned()))
         .collect();
-    KvOverview::new("Help", vec![KvSection::new(rows)])
+    KvOverview::new(
+        "Help",
+        vec![
+            KvSection::new(rows).with_heading("Commands"),
+            KvSection::new(vec![
+                (
+                    "Tab / Shift+Tab".to_owned(),
+                    "Switch the permission mode".to_owned(),
+                ),
+                ("Esc".to_owned(), "Stop the running turn".to_owned()),
+                (
+                    TOGGLE_EXPANDED.to_string(),
+                    "Expand or collapse long output".to_owned(),
+                ),
+                (
+                    format!("{CTRL_C} twice"),
+                    "Exit, even with a draft".to_owned(),
+                ),
+                (CTRL_D.to_string(), "Exit with an empty input".to_owned()),
+                (
+                    "//".to_owned(),
+                    "Send text that starts with a slash".to_owned(),
+                ),
+            ])
+            .with_heading("Keys"),
+        ],
+    )
 }
 
 /// `/name (aliases) <usage>`, where the aliases and usage are optional.
