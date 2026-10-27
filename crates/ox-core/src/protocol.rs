@@ -582,16 +582,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::client::testing::five_hour_limit;
     use crate::config::compaction::CompactionConfig;
-    use crate::permission::testing::exec_grant;
-    use crate::permission::{PermissionClass, Tier};
-    use crate::tool::bash::background::testing::shells_in_each_state;
-    use crate::tool::tasks::testing::plan;
-    use crate::tool::testing::bash_preview;
-    use crate::tool::view::{
-        ApprovalBody, DiffChunk, EditDiff, GrepFileGroup, GrepMatchLine, NumberedLine,
-    };
 
     mod op {
         use super::*;
