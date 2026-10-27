@@ -226,7 +226,7 @@ pub(super) async fn agent_turn(
 
         let ran = round_index + 1;
         let estimate =
-            report.context_estimate(&transcript.prompt, &tool_defs, transcript.messages());
+            report.context_estimate(transcript.prompt(), &tool_defs, transcript.messages());
         if ran < cap && auto_compaction_due(auto_compaction, estimate, transcript.messages()) {
             return TurnOutcome::stopped(report, TurnStop::Compact { rounds_run: ran });
         }
@@ -296,8 +296,8 @@ async fn commit_assistant_message(
         role: Role::Assistant,
         content,
     };
-    let outcome = transcript.record_message(message).await;
-    sink.session_write_error(outcome.failure.as_deref());
+    let failure = transcript.record_message(message).await;
+    sink.session_write_error(failure.as_deref());
 }
 
 /// Ends a turn on a user abort with [`record_interruption`].
@@ -314,8 +314,8 @@ async fn interrupt_turn(
 /// Records and appends [`Message::interruption`] after whatever an aborted turn committed, so later
 /// requests leave the abandoned prompts unanswered.
 pub(super) async fn record_interruption(transcript: &mut LiveTranscript, sink: &dyn EventSink) {
-    let outcome = transcript.record_message(Message::interruption()).await;
-    sink.session_write_error(outcome.failure.as_deref());
+    let failure = transcript.record_message(Message::interruption()).await;
+    sink.session_write_error(failure.as_deref());
 }
 
 /// User-facing notice for a `refusal` stop, naming the policy category and explanation when the API
@@ -418,10 +418,10 @@ async fn commit_round(
         role: Role::User,
         content: results,
     };
-    let outcome = transcript
+    let failure = transcript
         .record_round(assistant_msg, tool_result_msg, sidecars)
         .await;
-    sink.session_write_error(outcome.failure.as_deref());
+    sink.session_write_error(failure.as_deref());
 }
 
 /// Records and appends each queued prompt, then confirms it with [`Event::PromptDrained`].
@@ -431,8 +431,8 @@ pub(super) async fn record_drained_prompts(
     sink: &dyn EventSink,
 ) {
     for text in texts {
-        let outcome = transcript.record_message(Message::user(text.clone())).await;
-        sink.session_write_error(outcome.failure.as_deref());
+        let failure = transcript.record_message(Message::user(text.clone())).await;
+        sink.session_write_error(failure.as_deref());
         sink.emit(Event::PromptDrained(text), "prompt-drained");
     }
 }
@@ -447,7 +447,7 @@ async fn stream_response(
     sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
 ) -> Result<Response> {
-    let prompt = &transcript.prompt;
+    let prompt = transcript.prompt();
     let rx = client.stream_message(
         transcript.messages(),
         &prompt.system,
@@ -2976,6 +2976,45 @@ mod tests {
                     title: Some("Edited a.rs".to_owned()),
                     ..ToolMetadata::default()
                 }),
+            );
+        }
+    }
+
+    mod stream_response {
+        use super::*;
+
+        /// A wire that rejects every request before it streams.
+        struct RefusingWire;
+
+        impl Wire for RefusingWire {
+            fn stream_message(
+                &self,
+                _messages: &[Message],
+                _system: &SystemPrompt,
+                _user_context: Option<&str>,
+                _tools: &[ToolDefinition],
+            ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+                bail!("the API refused the request")
+            }
+        }
+
+        #[tokio::test]
+        async fn returns_the_error_of_a_request_that_never_streamed() {
+            let session = dead_test_session();
+            let transcript = LiveTranscript::with_messages(&session, vec![Message::user("hi")]);
+            let sink = CapturingSink::default();
+            let mut usage = None;
+
+            let result = stream_response(&RefusingWire, &transcript, &[], &sink, &mut usage).await;
+
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "the API refused the request",
+                "the turn reports the request's own failure",
+            );
+            assert_eq!(
+                usage, None,
+                "a request that never streamed reported no usage"
             );
         }
     }

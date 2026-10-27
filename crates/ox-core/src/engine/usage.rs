@@ -5,7 +5,7 @@ use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 
 use super::Engine;
-use super::compaction::{AutoCompactFailures, request_tokens};
+use super::compaction::AutoCompactFailures;
 use super::turn::TurnReport;
 use crate::model::{self, TokenUsage};
 use crate::protocol::{Event, EventSink, UsageSnapshot};
@@ -44,7 +44,7 @@ impl UsageLedger {
 impl Engine {
     pub(super) async fn account_usage(&mut self, sink: &dyn EventSink, report: &TurnReport) {
         self.usage.context_estimate = report.context_estimate(
-            &self.transcript.prompt,
+            self.transcript.prompt(),
             &self.tools.definitions(),
             self.transcript.messages(),
         );
@@ -70,25 +70,16 @@ impl Engine {
             })
             .collect();
         self.usage.total_estimated_cost_usd += estimate_cost_usd(&records);
-        let outcome = self.transcript.record_usage(records).await;
-        sink.session_write_error(outcome.failure.as_deref());
+        let failure = self.transcript.record_usage(records).await;
+        sink.session_write_error(failure.as_deref());
     }
 
     /// Forgets the usage and auto-compaction failures of a transcript the session no longer sends.
     /// The context estimate comes from the parts of the next request until a turn reports usage.
     pub(super) fn reset_context_usage(&mut self, sink: &dyn EventSink) {
         self.usage.auto_compaction_failures.reset(sink);
-        self.usage.context_estimate = self.request_estimate();
+        self.usage.context_estimate = self.transcript.request_estimate(&self.tools.definitions());
         self.usage.displayed_usage = None;
-    }
-
-    /// The context the parts of the next request fill, which stands in until a turn reports usage.
-    pub(super) fn request_estimate(&self) -> u32 {
-        request_tokens(
-            &self.transcript.prompt,
-            &self.tools.definitions(),
-            self.transcript.messages(),
-        )
     }
 
     /// Shows the context usage and session cost, first adding the title request's cost once its

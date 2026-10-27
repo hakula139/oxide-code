@@ -6,18 +6,19 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use super::compaction::request_tokens;
 use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::Message;
 use crate::model::ModelSpec;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::session::entry::{CompactBoundary, CompactInfo, UsageRecord};
 use crate::session::handle::{
-    self, Checkpoint, CompactOutcome, LoadedTranscript, Outcome, RecordOutcome, RollIntoOutcome,
+    self, Checkpoint, CompactOutcome, LoadedTranscript, RecordOutcome, RollIntoOutcome,
     RollOutcome, SessionHandle,
 };
 use crate::session::store::SessionStore;
-use crate::tool::ToolMetadata;
 use crate::tool::tasks::Task;
+use crate::tool::{ToolDefinition, ToolMetadata};
 
 /// The live session and the transcript it holds. Only its methods write either one, so the
 /// in-memory messages always match what the session recorded, and a resumed session reads what the
@@ -31,10 +32,10 @@ pub(super) struct LiveTranscript {
     pub(super) tool_metadata: HashMap<String, ToolMetadata>,
     /// The task list the model keeps with the `tasks` tool, which a compaction carries over.
     pub(super) tasks: Vec<Task>,
-    pub(super) prompt: PromptParts,
+    prompt: PromptParts,
     /// Whether `prompt` changed since the session last recorded it, so the next user message
     /// records it.
-    pub(super) prompt_unrecorded: bool,
+    prompt_unrecorded: bool,
     pub(super) file_tracker: Arc<FileTracker>,
     /// The tracked files the loaded session read that changed on disk since, until
     /// [`Engine::emit_session_start`](super::Engine::emit_session_start) reports them.
@@ -108,6 +109,15 @@ impl LiveTranscript {
         &self.messages
     }
 
+    pub(super) fn prompt(&self) -> &PromptParts {
+        &self.prompt
+    }
+
+    /// The context the parts of the next request fill, which stands in until a turn reports usage.
+    pub(super) fn request_estimate(&self, tools: &[ToolDefinition]) -> u32 {
+        request_tokens(&self.prompt, tools, &self.messages)
+    }
+
     /// The state [`Self::roll_back`] returns to before a turn's prompt.
     pub(super) fn start_of_turn(&self) -> TranscriptStart {
         TranscriptStart {
@@ -161,32 +171,34 @@ impl LiveTranscript {
         outcome
     }
 
-    /// Records `msg`, then appends it.
-    pub(super) async fn record_message(&mut self, msg: Message) -> RecordOutcome {
+    /// Records `msg`, then appends it. Returns the session's write failure.
+    pub(super) async fn record_message(&mut self, msg: Message) -> Option<String> {
         let outcome = self.session.record_message(msg.clone()).await;
         self.messages.push(msg);
-        outcome
+        outcome.failure
     }
 
     /// Records one tool round, then appends the assistant message and the results answering it.
+    /// Returns the session's write failure.
     pub(super) async fn record_round(
         &mut self,
         assistant: Message,
         tool_results: Message,
         metadata: Vec<(String, ToolMetadata)>,
-    ) -> Outcome {
+    ) -> Option<String> {
         let outcome = self
             .session
             .record_round(assistant.clone(), tool_results.clone(), metadata)
             .await;
         self.messages.push(assistant);
         self.messages.push(tool_results);
-        outcome
+        outcome.failure
     }
 
-    /// Records `records` against the session without changing the messages.
-    pub(super) async fn record_usage(&self, records: Vec<UsageRecord>) -> Outcome {
-        self.session.record_usage(records).await
+    /// Records `records` against the session without changing the messages. Returns the session's
+    /// write failure.
+    pub(super) async fn record_usage(&self, records: Vec<UsageRecord>) -> Option<String> {
+        self.session.record_usage(records).await.failure
     }
 
     /// Renames the session, returning its write failure.
@@ -284,6 +296,19 @@ impl LiveTranscript {
     /// Replaces the session without finalizing the one the transcript holds.
     pub(super) fn set_session(&mut self, session: SessionHandle) {
         self.session = session;
+    }
+
+    /// Whether the next user message records the prompt.
+    pub(super) fn prompt_unrecorded(&self) -> bool {
+        self.prompt_unrecorded
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl LiveTranscript {
+    /// The prompt, which a test fixture may change as another project's context would.
+    pub(super) fn prompt_mut(&mut self) -> &mut PromptParts {
+        &mut self.prompt
     }
 }
 

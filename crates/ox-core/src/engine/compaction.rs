@@ -282,7 +282,7 @@ impl Engine {
         let summary = await_unless_aborted(
             request_summary(
                 &self.client,
-                &self.transcript.prompt,
+                self.transcript.prompt(),
                 &tools,
                 self.transcript.messages(),
                 instructions.as_deref(),
@@ -301,7 +301,7 @@ impl Engine {
                     summary,
                     instructions,
                     tasks: self.transcript.tasks.clone(),
-                    context: self.transcript.prompt.refreshed(fresh),
+                    context: self.transcript.prompt().refreshed(fresh),
                 };
                 let compacted = self.replace_with_summary(sink, boundary, trigger).await;
                 if compacted.is_some() {
@@ -1109,17 +1109,18 @@ mod tests {
                     engine.usage.total_estimated_cost_usd,
                 );
                 assert_ne!(
-                    engine.transcript.prompt.user_context, SESSION_CONTEXT,
+                    engine.transcript.prompt().user_context,
+                    SESSION_CONTEXT,
                     "the compacted transcript starts from a fresh user context"
                 );
                 assert!(
-                    !engine.transcript.prompt_unrecorded,
+                    !engine.transcript.prompt_unrecorded(),
                     "the boundary records the fresh prompt"
                 );
                 let data = store.load_session_data(engine.session_id()).unwrap();
                 assert_eq!(
                     data.context,
-                    Some(engine.transcript.prompt.session_context())
+                    Some(engine.transcript.prompt().session_context())
                 );
                 assert_eq!(
                     engine.usage.auto_compaction_failures,

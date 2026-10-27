@@ -143,7 +143,10 @@ impl Engine {
         self.instruction_warnings = warnings;
         self.policy.clear_session_allow();
         self.usage.auto_compaction_failures.reset(sink);
-        self.usage = UsageLedger::for_session(&usage, self.request_estimate());
+        self.usage = UsageLedger::for_session(
+            &usage,
+            self.transcript.request_estimate(&self.tools.definitions()),
+        );
     }
 
     pub(super) async fn rename(&self, sink: &dyn EventSink, title: String) {
@@ -406,11 +409,11 @@ mod tests {
             engine.clear(&sink).await;
             assert_eq!(engine.transcript.messages(), []);
             assert_eq!(engine.policy.session_allow(), []);
-            assert_ne!(engine.transcript.prompt.user_context, SESSION_CONTEXT);
+            assert_ne!(engine.transcript.prompt().user_context, SESSION_CONTEXT);
             assert!(
                 engine
                     .transcript
-                    .prompt
+                    .prompt()
                     .user_context
                     .contains("# Current date")
             );
@@ -419,7 +422,7 @@ mod tests {
                 engine.transcript.session().session_id()
             );
 
-            SESSION_CONTEXT.clone_into(&mut engine.transcript.prompt.user_context);
+            SESSION_CONTEXT.clone_into(&mut engine.transcript.prompt_mut().user_context);
             engine.usage.total_estimated_cost_usd = 1.23;
             engine.policy.allow_for_session(rule);
             let target_path = store.find_session_path(&target_id).unwrap();
@@ -428,7 +431,7 @@ mod tests {
             assert_eq!(engine.transcript.session().session_id(), target_id);
             assert_eq!(engine.client.session_id(), target_id);
             assert_eq!(engine.transcript.messages().len(), 2);
-            assert_ne!(engine.transcript.prompt.user_context, SESSION_CONTEXT);
+            assert_ne!(engine.transcript.prompt().user_context, SESSION_CONTEXT);
             assert!(
                 engine.usage.total_estimated_cost_usd.abs() < f64::EPSILON,
                 "a session that recorded no usage resumes at zero"
@@ -845,7 +848,11 @@ mod tests {
 
                 assert_eq!(
                     engine.usage.context_estimate,
-                    request_tokens(&engine.transcript.prompt, &[], engine.transcript.messages())
+                    request_tokens(
+                        engine.transcript.prompt(),
+                        &[],
+                        engine.transcript.messages()
+                    )
                 );
                 assert!(auto_compaction_due(
                     engine.auto_compaction(),
@@ -914,8 +921,8 @@ mod tests {
                 engine
                     .resume(&sink, ResumeTarget::Path(recorded_path))
                     .await;
-                assert_eq!(engine.transcript.prompt.user_context, SESSION_CONTEXT);
-                assert!(!engine.transcript.prompt_unrecorded);
+                assert_eq!(engine.transcript.prompt().user_context, SESSION_CONTEXT);
+                assert!(!engine.transcript.prompt_unrecorded());
                 engine.submit_prompt("second", None, &sink, &mut ops).await;
 
                 let turns = request_bodies(&server).await;

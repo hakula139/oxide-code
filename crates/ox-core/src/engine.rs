@@ -22,7 +22,6 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 
 use self::abort::{Inbox, TurnAbort};
-use self::compaction::request_tokens;
 use self::transcript::{LiveTranscript, TranscriptStart};
 use self::turn::{TurnContext, TurnOutcome, TurnReport, TurnStop};
 use self::usage::UsageLedger;
@@ -164,11 +163,7 @@ impl Engine {
         let workspace = Arc::new(config.workspace.clone());
         let (transcript, usage, instruction_warnings) =
             LiveTranscript::load(handle, transcript, client.model(), workspace.cwd()).await;
-        let context_estimate = request_tokens(
-            &transcript.prompt,
-            &tools.definitions(),
-            transcript.messages(),
-        );
+        let context_estimate = transcript.request_estimate(&tools.definitions());
         Ok(Self {
             client,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
@@ -701,7 +696,7 @@ mod tests {
                 let recorded = engine(server.uri(), &store, dir.path())
                     .await
                     .transcript
-                    .prompt
+                    .prompt()
                     .session_context();
                 let warning = write_unreadable_instructions(dir.path());
                 let usage = [UsageRecord {
@@ -737,10 +732,10 @@ mod tests {
                         engine.usage.total_estimated_cost_usd,
                     );
                     assert_eq!(
-                        engine.transcript.prompt.user_context == SESSION_CONTEXT,
+                        engine.transcript.prompt().user_context == SESSION_CONTEXT,
                         replayed
                     );
-                    assert_eq!(engine.transcript.prompt_unrecorded, !replayed);
+                    assert_eq!(engine.transcript.prompt_unrecorded(), !replayed);
                     let built_warnings = if replayed {
                         Vec::new()
                     } else {
@@ -751,7 +746,7 @@ mod tests {
                     assert!(
                         engine
                             .transcript
-                            .prompt
+                            .prompt()
                             .seen
                             .model
                             .contains(&format!("The exact model ID is {model}.")),
@@ -2206,13 +2201,13 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let today = engine.transcript.prompt.seen.date.clone();
+                let today = engine.transcript.prompt().seen.date.clone();
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
                 let end = engine.submit_prompt("first", None, &sink, &mut ops).await;
                 assert_eq!(end, TurnEnd::Completed);
-                "2000-01-01".clone_into(&mut engine.transcript.prompt.seen.date);
+                "2000-01-01".clone_into(&mut engine.transcript.prompt_mut().seen.date);
                 let end = engine.submit_prompt("second", None, &sink, &mut ops).await;
                 assert_eq!(end, TurnEnd::Completed);
 
@@ -2238,7 +2233,7 @@ mod tests {
                 assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
 
                 let id = engine.transcript.session().session_id().to_owned();
-                let expected = engine.transcript.prompt.session_context();
+                let expected = engine.transcript.prompt().session_context();
                 engine.finalize().await;
                 let data = store.load_session_data(&id).unwrap();
                 assert_eq!(data.context, Some(expected));
@@ -2592,12 +2587,12 @@ mod tests {
                             Box::new(TasksTool),
                             Box::new(ReadTool),
                         ]));
-                let today = engine.transcript.prompt.seen.date.clone();
+                let today = engine.transcript.prompt().seen.date.clone();
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
                 let first = engine.submit_prompt("first", None, &sink, &mut ops).await;
                 assert_eq!(first, TurnEnd::Completed);
-                "2000-01-01".clone_into(&mut engine.transcript.prompt.seen.date);
+                "2000-01-01".clone_into(&mut engine.transcript.prompt_mut().seen.date);
                 let before_refusal = sink.events().len();
 
                 let refused = engine.submit_prompt("refused", None, &sink, &mut ops).await;
@@ -2649,7 +2644,7 @@ mod tests {
                 );
 
                 let id = engine.transcript.session().session_id().to_owned();
-                let expected = engine.transcript.prompt.session_context();
+                let expected = engine.transcript.prompt().session_context();
                 engine.finalize().await;
                 let data = store.load_session_data(&id).unwrap();
                 let [.., done, prompt, reply] = &data.messages[..] else {
@@ -3107,14 +3102,14 @@ mod tests {
                     "the rollback keeps the tracker the summary cleared"
                 );
                 assert!(
-                    !engine.transcript.prompt_unrecorded,
+                    !engine.transcript.prompt_unrecorded(),
                     "the summary recorded the prompt"
                 );
                 let data = store.load_session_data(engine.session_id()).unwrap();
                 assert_eq!(data.messages, [mid_turn_summary()]);
                 assert_eq!(
                     data.context,
-                    Some(engine.transcript.prompt.session_context())
+                    Some(engine.transcript.prompt().session_context())
                 );
                 let events = sink.events();
                 assert!(
