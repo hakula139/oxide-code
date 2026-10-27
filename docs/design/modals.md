@@ -2,7 +2,7 @@
 
 Focus-grabbing UI overlays opened by slash commands, by the App in response to engine events requesting tool approval, and at startup with `ox --resume`. Lives in the band between the chat scroll and the input area, the same row range the slash autocomplete popup uses, but wider.
 
-Companion docs: [commands.md](slash-commands.md) covers the slash-command surface that opens modals.
+Companion docs: [Slash Commands](slash-commands.md) covers the slash-command surface that opens modals.
 
 A modal is a self-contained UI that takes keyboard focus, owns its render, emits a typed result, and dismisses. Chat blocks are persistent transcript artifacts, while modals are ephemeral overlays. Three needs drove the abstraction: `/theme` swaps palettes as the user arrows through choices and snaps back on Esc, the combined `/model + /effort` picker and the confirm-delete modal nested in `/resume` need several steps, and a tool call that needs approval emits `Event::ApprovalRequested` and blocks until the App pushes an `ApprovalModal` and routes the decision back as `Op::Resolve`.
 
@@ -101,6 +101,10 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - **Concurrent modals on different layers** (e.g. toast over modal). The chat error-block path already covers what toasts would.
 
 - **User-defined modal commands.** The trait already supports them, and user-invocable skills are tracked in [#163](https://github.com/hakula139/oxide-code/issues/163).
+
+- **Imperative `dialog.show()` calls.** A command returns an effect that the App applies, so opening a modal needs no handle outside the stack.
+
+- **A permanent `ChatComposer`.** The input box lives outside the modal stack, so a modal that needs text opens an editor instead.
 
 ## Sources
 

@@ -2,7 +2,7 @@
 
 Research on how coding agents gate mutating tool calls before they run. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
-Verified 2026-10-26 against Claude Code 2.1.87 (`4b9d30f79532`), Codex `2351d9e1b608`, and opencode `v1.4.11-1713-g7d5e91b80`.
+Verified 2026-10-26 against Claude Code 2.1.87 (the frozen source snapshot), Codex `2351d9e1b608`, and opencode `v1.4.11-1713-g7d5e91b80`.
 
 This is the pre-implementation survey behind oxide-code's permission gate, whose shipped design lives in [design/permissions.md](../../design/permissions.md). When it was written, oxide-code ran every tool unconditionally. `bash` executed an opaque `bash -c` string (`tool/bash.rs` `execute`), `edit` performed the replacement once the Read-before-Edit gate passed, and `write` could create a new file plus arbitrary parent directories with no prior read (`tool/write.rs` `run`). The FileTracker gate only checks _integrity_ (it proves the model saw the current bytes) and grants no _authorization_: it never asks whether the path is inside the working directory and never asks the human. A permission layer has to decide, before each call, three things: which tool classes are dangerous enough to gate, how a standing policy (mode plus rules) resolves to allow / ask / deny, and how an interactive "ask" reaches the user and rides a decision back without deadlocking the turn loop. Claude Code, Codex, and opencode answer these differently, and one of the axes (OS sandboxing) collapses entirely because oxide-code has no sandbox to lean on.
 

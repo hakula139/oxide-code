@@ -10,7 +10,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/clear`**: Rolls the session UUID and clears the chat and the file tracker. Send-first ordering: `ClearCmd` forwards `Op::Clear`, and the App drops chat history only when `SessionRolled` confirms the roll. `Event::SessionTitleUpdated` carries the originating session ID so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
 
-- **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary and a synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [compact.md](compaction.md).
+- **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary and a synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [Compaction](compaction.md).
 
 - **`/config`**: Opens a [`KvOverview`](modals.md) of the resolved config, with the layer that set each value, and the config files loaded at startup. The values start from that load. A `/model`, `/effort`, `/mode`, or `/theme` switch, or Tab or Shift+Tab, credits the model, effort, mode, or theme it sets to the session, while an effort the new model derives on its own shows as `default`. Values derived from the model, such as Max Tokens and Auto-Compaction, and the Auth value after `/login` or `/logout` keep their loaded source.
 
@@ -115,7 +115,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/picker.rs`: combined model and effort picker modal.
 - `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, and the `SlashCommand` trait.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
-- `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
+- `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see [Resume](resume.md)).
 - `crates/ox-tui/src/slash/sessions.rs`: `open_store`, `resolve_error_message`, `saved_error_message`, and the live-session recovery hints, shared by the session commands, plus `format_metadata_line` for the delete confirm modal.
 - `crates/ox-tui/src/slash/status.rs`: `/status` row builder plus `KvOverview` constructor.
 - `crates/ox-tui/src/slash/theme.rs`: `ThemeCmd`, picker open plus typed-arg validator.

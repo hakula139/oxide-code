@@ -66,7 +66,7 @@ These rules apply to errors, warnings, notices, and other strings shown to users
 - When you add or edit a claim in a research note, record when you verified it and which version you checked. Delete the claim if a newer test contradicts it or you can no longer verify it.
 - Cite Claude Code, [Codex](https://github.com/openai/codex), [pi](https://github.com/badlogic/pi-mono), and [oh-my-pi](https://github.com/can1357/oh-my-pi) as reference implementations in new research and design notes. Existing notes may retain their opencode citations.
 - Open a feature's design doc with a sentence saying what the feature does, then describe its mechanism in sections named for their topics. Follow with `## Design Decisions`, a numbered list of the choices that need a rationale, each giving its reason, and with `## Out of Scope`, linking the issues that track deferred work, when there is any. End each one with `## Sources`.
-- Cite a design decision by its bold title, not its number, since inserting a decision renumbers the list and leaves every numeric reference pointing at a different choice.
+- Cite a design decision by its bold title, since inserting a decision renumbers the list and leaves every numeric reference pointing at a different choice. Use `(**Title**)` in the same page and `[**Title**](page.md#design-decisions)` from another page.
 - In a design doc's `## Sources` section, list each source file it describes by full path, in alphabetical order, with a one-clause annotation and no line numbers:
 
   ```markdown

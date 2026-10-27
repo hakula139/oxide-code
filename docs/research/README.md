@@ -1,6 +1,6 @@
 # Research Notes
 
-External research and API reference for oxide-code development. The surveys compare [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), [pi](https://github.com/badlogic/pi-mono), [oh-my-pi](https://github.com/can1357/oh-my-pi), and [opencode](https://github.com/anomalyco/opencode), and the API notes summarize Anthropic's documentation. The terminal UI surveys also cover terminal emulators and other TUI apps. Each survey records the date and versions it was verified against.
+External research and API reference for oxide-code development. The surveys compare [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode), and the API notes summarize Anthropic's documentation. The terminal UI surveys also cover terminal emulators and other TUI apps. Each survey records the date and versions it was verified against.
 
 Each note informs the matching page in [`docs/design/`](../design/), where the shipped decisions live.
 
@@ -18,7 +18,7 @@ Each note informs the matching page in [`docs/design/`](../design/), where the s
 | --------------------------------- | ----------------------------------------------------------------------------------------------- |
 | [Compaction](agent/compaction.md) | Manual and automatic triggers, token signals, prompts, replacement strategies, failure handling |
 
-## Slash Commands
+## Commands
 
 | Document                      | Description                                                      |
 | ----------------------------- | ---------------------------------------------------------------- |

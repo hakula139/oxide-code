@@ -1,6 +1,6 @@
 # Welcome Screen
 
-The welcome screen paints in the chat region while the chat has no blocks, showing the app's identity, the session environment, and a short list of starter slash commands. It answers three questions: what is running, with the name, version, active model and effort, and auth source, where the session runs, and what to do next, with three sampled starter commands plus a randomized tip.
+The welcome screen paints in the chat region while the chat has no blocks, showing the app's identity, the session environment, and a short list of starter slash commands. It answers three questions: what is running (the name, version, active model and effort, and auth source), where the session runs, and what to do next (three sampled starter commands plus a randomized tip).
 
 ## Rendering
 

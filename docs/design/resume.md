@@ -2,7 +2,7 @@
 
 `/resume` (alias `/continue`) opens a searchable session picker when bare, or jumps directly when given a session ID. The picker loads sessions a page at a time as the cursor nears the end of the loaded rows. At startup, `ox --resume` without a session opens the same picker.
 
-Companion docs: [commands.md](slash-commands.md), [modals.md](modals.md). Underlying research: [research/slash/resume.md](../research/slash/resume.md).
+Companion docs: [Slash Commands](slash-commands.md), [Modals](modals.md). Underlying research: [research/slash/resume.md](../research/slash/resume.md).
 
 ## Resume Surfaces
 
@@ -45,7 +45,7 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 
 6. **Surface old-session finalize failures and tracker drift as distinct events.** They have two causes: the previous session failing to finalize (writer), and tracked files drifting since the resumed session (filesystem). The finalize failure is an error that names the previous session, so the user does not read it as a current-writer fault. Drift is a notice, since the Read-before-Edit gate handles it and nothing failed.
 
-7. **Drop queued prompts on resume, then surface the count.** Queued prompts belong to the source thread, so replaying them in a different transcript would amount to silent corruption. Every session switch drops them, `/clear` and bare `/archive` included, and prints `Discarded N queued prompts from the previous session` so the user knows their typing didn't carry over. [cancellation.md](cancellation.md) records the policy under **a cancel leaves the queue to the user**.
+7. **Drop queued prompts on resume, then surface the count.** Queued prompts belong to the source thread, so replaying them in a different transcript would amount to silent corruption. Every session switch drops them, `/clear` and bare `/archive` included, and prints `Discarded N queued prompts from the previous session` so the user knows their typing didn't carry over. The policy is [**A cancel leaves the queue to the user**](cancellation.md#design-decisions).
 
 8. **`SearchableList` as a sibling primitive to `ListPicker`.** `ListPicker` is small and focused, and adding search and a viewport would double its surface for the simpler pickers. `SearchableList` follows the same trait and delegation pattern beside it.
 
@@ -80,6 +80,7 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 - **Worktree / branch tree expansion** (Claude Code's `▼` / `▶`) and **side preview pane.** Both double layout complexity for marginal gain.
 - **In-picker rename of other sessions.** `/rename` covers the live session's title.
 - **Fuzzy search.** Substring search covers typical session counts.
+- **Agentic AI search.** A model-backed query adds a request to each search and orders results unpredictably, while substring search covers typical session counts.
 - **`/sessions` listing variant.** One slash command per intent. `ox --list` already covers script-friendly listing.
 
 ## Sources

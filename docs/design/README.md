@@ -6,16 +6,16 @@ Each page covers one topic, and [`docs/research/`](../research/) holds the exter
 
 ## Overview
 
-| Document                        | Description                                             |
-| ------------------------------- | ------------------------------------------------------- |
-| [Architecture](architecture.md) | Top-level module map and the layers imports follow      |
-| [Engine](engine.md)             | `Op` / `Event` contract, terminal events, turn pipeline |
-| [Client](client.md)             | Request shape, beta sets, cache breakpoints, retries    |
+| Document                        | Description                                          |
+| ------------------------------- | ---------------------------------------------------- |
+| [Architecture](architecture.md) | Top-level module map and the layers imports follow   |
+| [Client](client.md)             | Request shape, beta sets, cache breakpoints, retries |
 
 ## Agent Loop
 
 | Document                    | Description                                                           |
 | --------------------------- | --------------------------------------------------------------------- |
+| [Engine](engine.md)         | `Op` / `Event` contract, terminal events, turn pipeline               |
 | [Compaction](compaction.md) | Manual and automatic compaction, threshold, summarizer, failure reset |
 
 ## Session

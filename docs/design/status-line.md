@@ -81,6 +81,7 @@ The status line retains the highest-priority segment, truncating it if needed, t
 ## Out of Scope
 
 - **A user-command segment** ([#166](https://github.com/hakula139/oxide-code/issues/166)).
+- **ccusage integration.** It would re-read session files to total cost, while the status line already shows the response's own usage.
 - **Pricing for other providers** ([#152](https://github.com/hakula139/oxide-code/issues/152)), with the data-driven model catalog.
 
 ## Sources

@@ -2,7 +2,7 @@
 
 Research on how manual `/compact` and automatic context compression work in Claude Code, OpenAI Codex, and opencode. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
-Verified 2026-10-26 against Claude Code 2.1.87 (`4b9d30f79532`), Codex `2351d9e1b608`, and opencode `v1.4.11-1713-g7d5e91b80`.
+Verified 2026-10-26 against Claude Code 2.1.87 (the frozen source snapshot), Codex `2351d9e1b608`, and opencode `v1.4.11-1713-g7d5e91b80`.
 
 Companion to [commands.md](../slash/commands.md), which covers the command surface. This note focuses on the summarization path: trigger, prompt, replacement strategy, persistence, and the automatic policy.
 
@@ -20,7 +20,7 @@ The most elaborate of the three: a 9-section rubric, a partial-compact rewind UI
 
 - **Bookkeeping**: `readFileState` cleared and file attachments recreated under a budget. Plan-mode files, MCP instructions, and deferred tool listings re-attached. `preCompactDiscoveredTools` recorded for tool-schema continuity. `PreCompact` / `PostCompact` / `SessionStart` hooks fire around the boundary, and the pre-compact segment is archived via `writeSessionTranscriptSegment`.
 
-- **Auto-compact**: Threshold is `effective_context_window - 13_000`, checked at the start of every `query()` after `snip` and `microcompact`. Token signal: last assistant `usage.total_tokens` plus a tail estimate. The circuit breaker disables auto after 3 consecutive failures. Env opt-out: `DISABLE_COMPACT` / `DISABLE_AUTO_COMPACT`.
+- **Auto-compact**: Threshold is `effective_context_window - 13_000`, checked at the start of every `query()` after `snip` and `microcompact`. A warning shows at `threshold - 20_000`, and a blocking limit sits at `effective_window - 3_000`. Token signal: last assistant `usage.total_tokens` plus a tail estimate. The circuit breaker disables auto after 3 consecutive failures. Env opt-out: `DISABLE_COMPACT` / `DISABLE_AUTO_COMPACT`.
 
 - **Microcompact**: A pre-stage that clears specific tool-result bodies (Read, shell, Grep, Glob, Edit, Write, web) older than a TTL with `[Old tool result content cleared]` placeholders, adding its own boundary marker.
 
@@ -46,7 +46,7 @@ A terse prompt and a history rebuild that drops every non-user-text round. Auto-
 
 - **Persistence**: Appends `RolloutItem::Compacted { message, replacement_history? }` to the rollout JSONL. The test suite covers `compact → shutdown → resume → fork`.
 
-- **Auto-compact**: Fires at `(context_window * 9) / 10` (90%). Two sites in `core/src/session/turn.rs`: pre-sampling before a new turn enters `run_turn`, and mid-turn after `run_sampling_request` returns when the turn still `needs_follow_up`. Token signal: `Session::get_total_token_usage` (last API total plus client estimates).
+- **Auto-compact**: Fires at `(context_window * 9) / 10` (90%). Three sites in `core/src/session/turn.rs`: pre-sampling before a new turn enters `run_turn`, mid-turn after `run_sampling_request` returns when the turn still `needs_follow_up`, and a previous-model pass when the compaction hash changed or the turn switches to a smaller context-window model. A configured `auto_compact_token_limit` replaces the 90% default as an absolute token count, clamped to that 90% ceiling, and the downshift check falls back to `i64::MAX` when the new model has no limit. Token signal: `Session::get_total_token_usage` (last API total plus client estimates).
 
 - **UX**: A regular task-running spinner during compaction. After success the thread renders a `ThreadItem::ContextCompaction` info line.
 
@@ -69,13 +69,13 @@ A dedicated `compaction` agent, anchored re-summarization via `<previous-summary
 
 - **Rubric**: A Markdown template with terse bullets in this order: Goal · Constraints · Progress · Key Decisions · Next Steps · Critical Context · Relevant Files. Exact paths, commands, and error strings are preserved verbatim.
 
-- **Input selection**: `select` finds the older prefix and excludes ranges between previously completed `compaction` and `summary` pairs so prior summaries aren't re-summarized. Tool outputs truncate to 2,000 chars, media is stripped, and the default model is the user's selected one unless `agent.compaction.model` is set.
+- **Input selection**: `select` finds the older prefix and excludes ranges between previously completed `compaction` and `summary` pairs so prior summaries aren't re-summarized. Tool outputs truncate to 2,000 chars, media is stripped, and the default model is the user's selected one unless `agent.compaction.model` is set. The tail keeps the last 2 turns, budgeted at 25% of the usable window clamped to 2,000-8,000 tokens.
 
 - **Replacement**: Same session, no roll. Appends an empty `user` row with `type: "compaction"`, then an `assistant` row with `summary: true, mode: "compaction"` carrying the text. `MessageV2.filterCompacted` makes the active context behave like `[marker, summary, optional verbatim tail]` while older turns remain in storage. The compaction part stores `tail_start_id` so forks find the boundary.
 
 - **Auto-continue plugin**: After an automatic success, `experimental.compaction.autocontinue` can synthesize a `synthetic: true` continue prompt to drive the next turn without user input.
 
-- **Auto-compact**: `isOverflow({ tokens, model })` returns true when `count >= usable(model)`, where `count` is the last assistant `tokens.total` and `usable = limit.input - reserved`. It fires after a non-summary assistant turn finishes, and again when the stream processor returns a `"compact"` signal from a `ContextOverflowError`.
+- **Auto-compact**: `isOverflow({ tokens, model })` returns true when `count >= usable(model)`, where `count` is the last assistant `tokens.total` and `usable` is `limit.input - reserved`, or `context - max_output_tokens` when the model publishes no input limit. `reserved` defaults to the smaller of 20,000 and the model's max output tokens. It fires after a non-summary assistant turn finishes, and again when the stream processor returns a `"compact"` signal from a `ContextOverflowError`.
 
 - **Config**: `compaction.auto`, `compaction.prune`, `compaction.tail_turns`, `compaction.preserve_recent_tokens`, `compaction.reserved`. Env overrides: `OPENCODE_DISABLE_AUTOCOMPACT` and `OPENCODE_DISABLE_PRUNE`.
 
@@ -96,7 +96,7 @@ Key files:
 | ------------------- | -------------------------------------------- | -------------------------------------------- | ---------------------------------------- |
 | Slash trigger       | `/compact [instructions]`                    | `/compact` (no args, idle only)              | `/compact`, alias `/summarize`           |
 | Auto-compact        | `window - 13k`, default on, env opt-out      | 90% of window, default on                    | `usage ≥ usable`, default on             |
-| Auto check site     | start of every `query()`                     | pre-sampling + mid-turn loop                 | post-finished-turn + mid-stream          |
+| Auto check site     | start of every `query()`                     | pre-sampling + mid-turn + downshift          | post-finished-turn + mid-stream          |
 | Prompt shape        | 9-section rubric, `<analysis>` + `<summary>` | short paragraph + `summary_prefix` for next  | Markdown template, anchored update       |
 | Anchored re-compact | no                                           | no, prior summaries skipped on walk-back     | yes, via `<previous-summary>` block      |
 | Summarizer model    | same as main loop                            | same as main loop                            | configurable per `agent.compaction`      |

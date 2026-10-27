@@ -49,4 +49,5 @@ The attribution block follows the same split. A first-party request carries the 
 - `crates/ox-core/src/client/anthropic/betas.rs`: `compute_betas` and the beta header constants.
 - `crates/ox-core/src/client/anthropic/transport.rs`: `with_retry`, `retry_delay`, and the failure classification.
 - `crates/ox-core/src/client/anthropic/wire.rs`: `CacheControl`, `static_prefix`, and `conversation`.
-- `crates/ox-core/src/config.rs`: `BaseUrl::is_first_party` and the prompt-cache TTL.
+- `crates/ox-core/src/config.rs`: the prompt-cache TTL.
+- `crates/ox-core/src/config/base_url.rs`: `BaseUrl::is_first_party`, the gate on the host-based cache scope.

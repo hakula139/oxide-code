@@ -1,6 +1,6 @@
 # Engine
 
-`Engine` owns the live session and runs one operation at a time. Every frontend, the TUI, the bare REPL, and a headless run, sends `Op` values on one channel and renders the `Event` values that come back, so behavior added in the engine reaches all three without frontend-specific code. This page defines the operation and event contract. [Terminal UI](tui.md), [Headless Mode](../guide/headless.md), and [Cancellation](cancellation.md) describe how each frontend consumes it.
+`Engine` owns the live session and runs one operation at a time. Every frontend (the TUI, the bare REPL, and a headless run) sends `Op` values on one channel and renders the `Event` values that come back, so behavior added in the engine reaches all three without frontend-specific code. This page defines the operation and event contract. [Terminal UI](tui.md), [Headless Mode](../guide/headless.md), and [Cancellation](cancellation.md) describe how each frontend consumes it.
 
 ## Operations
 
@@ -10,21 +10,13 @@ An `Op` is one of three kinds:
 - **A session operation.** `Compact`, `Clear`, `Archive`, `SetArchive`, `Resume`, and `Rename` change the session, and `SetModel` and `SetMode` change the settings the next turn uses.
 - **Sign-in and shutdown.** `Login`, `LoginCode`, and `Logout` manage the oxide-code login, and `Shutdown` ends the process.
 
-`Prompt`, `SetModel`, `Compact`, `Clear`, `Archive`, `SetArchive`, `Resume`, `Rename`, `Login`, and `Logout` require an idle engine. A frontend waits for the preceding operation's terminal event before sending one, and the engine drops an idle-only op that arrives during another operation without a terminal event, since the frontend still owns it. `Queue`, `Interrupt`, `Resolve`, and `LoginCode` act on the operation in flight, so they arrive on the same channel and race the running stream and tool futures in one biased `select!`.
+`Prompt`, `SetModel`, `Compact`, `Clear`, `Archive`, `SetArchive`, `Resume`, `Rename`, `Login`, and `Logout` require an idle engine. A frontend waits for the preceding operation's terminal event before sending one, and the engine drops an idle-only op that arrives during another operation without a terminal event, since the frontend still owns it. `Queue`, `Interrupt`, `Resolve`, `LoginCode`, `SetMode`, and `Shutdown` act on the operation in flight, so they arrive on the same channel and race the running stream and tool futures in one biased `select!`.
 
 ## Events
 
 Events report progress, then end an operation. `Event` carries streamed text and thinking, tool calls and their results, usage, rate limits, session and configuration changes, retrying notices, and warnings.
 
-Each attended operation ends with exactly one terminal event, unless a shutdown stops it first:
-
-- A turn ends with `TurnComplete`, `TurnFailed`, or `Cancelled`, or with `TurnRolledBack` before a `TurnFailed` when the model refused.
-- `Compact` ends with `SessionCompacted` or `TurnFailed`, and `Cancelled` when interrupted.
-- `Clear` and `Archive` end with `SessionRolled`, `Resume` with `SessionResumed`, and `Rename` with `SessionTitleUpdated` or `RenameFailed`.
-- `SetModel` ends with `ConfigChanged`, `SetMode` with `ModeChanged`, and `SetArchive` with `ArchiveUpdated`.
-- `Login` ends with `SignedIn` or `TurnFailed`, and `Logout` with `SignedOut` or `TurnFailed`.
-
-`TurnEnd::of` maps an op and an event to how the op ended, counting a `ConfigChanged` that rejects an `/effort` pick as a failure. The REPL and headless drivers render until the op they sent ends, and the TUI holds input from the start of an operation until its terminal event, then runs the teardown that submits the queued prompt. A failed `/resume` or `/archive` returns to idle with the queue still held, since its prompts were meant for the session it did not reach.
+Each attended operation ends with exactly one terminal event, unless a shutdown stops it first. A turn ends with `TurnComplete`, `TurnFailed`, or `Cancelled`, or with `TurnRolledBack` before a `TurnFailed` when the model refused. `Event`'s rustdoc in `crates/ox-core/src/protocol.rs` names the terminal event of every other op, its failure case included. `TurnEnd::of` maps an op and an event to how the op ended, counting a `ConfigChanged` that rejects an `/effort` pick as a failure. The REPL and headless drivers render until the op they sent ends, and the TUI holds input from the start of an operation until its terminal event, then runs the teardown that submits the queued prompt. A failed `/resume` or `/archive` returns to idle with the queue still held, since its prompts were meant for the session it did not reach.
 
 `Error` reports a failure that leaves the operation running, such as a failed session write. `Notice` warns about a condition the session works around, such as a drifted file, and `Retrying` is a dim notice for a request the client sends again.
 
@@ -40,11 +32,11 @@ A turn is a loop of rounds. Each round sends the transcript to the model, stream
 
 3. **An idle-only op is dropped.** Queueing it would apply a model or session change at a moment the user did not choose, such as after a turn they already interrupted. Dropping it keeps the frontend's own copy authoritative, and the frontend resubmits when it is ready.
 
-4. **Mid-turn controls share the op channel.** `Queue`, `Interrupt`, `Resolve`, and `LoginCode` race the running futures in one `select!`, so a cancel or an approval does not wait for a stream to finish, and the engine needs no second input path.
+4. **Mid-turn controls share the op channel.** `Queue`, `Interrupt`, `Resolve`, `LoginCode`, `SetMode`, and `Shutdown` race the running futures in one `select!`, so a cancel, an approval, or a mode switch does not wait for a stream to finish, and the engine needs no second input path.
 
 ## Out of Scope
 
-- Editor integrations and a GUI, tracked in [#150](https://github.com/hakula139/oxide-code/issues/150).
+- **An ACP frontend for editors** ([#150](https://github.com/hakula139/oxide-code/issues/150)) would drive the same contract.
 
 ## Sources
 

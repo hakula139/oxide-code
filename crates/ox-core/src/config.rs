@@ -157,7 +157,7 @@ pub enum StatusLineSegment {
 }
 
 impl StatusLineSegment {
-    /// Order rationale documented in `docs/design/tui/status-line.md`.
+    /// Order rationale documented in `docs/design/status-line.md`.
     pub const DEFAULT: &'static [Self] = &[
         Self::CurrentDir,
         Self::GitBranch,

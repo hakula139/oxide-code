@@ -2,7 +2,7 @@
 
 Research on TUI cancellation, exit, and input queueing across reference projects. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
-Verified 2026-10-26 against Claude Code 2.1.87 (`4b9d30f79532`), Codex `2351d9e1b608`, and opencode `v1.4.11-1713-g7d5e91b80`.
+Verified 2026-10-26 against Claude Code 2.1.87 (the frozen source snapshot), Codex `2351d9e1b608`, and opencode `v1.4.11-1713-g7d5e91b80`.
 
 ## Claude Code (TypeScript)
 
