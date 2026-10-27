@@ -3,7 +3,6 @@
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::display::id_prefix;
@@ -13,7 +12,7 @@ use super::store::{delete_at, set_archived_at};
 /// Why an operation on a saved session failed, where `id` is the session's [`id_prefix`]. Resume
 /// refuses the live session through [`Self::Live`] too. `Display` is the lowercase `anyhow`
 /// headline, which each frontend phrases as a sentence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SavedError {
     /// The target is the live session, which only a roll to a new session can leave.
     #[error("session {id} is the live session")]
@@ -31,8 +30,7 @@ pub enum SavedError {
 }
 
 /// The saved-session write that can fail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 #[strum(serialize_all = "lowercase")]
 pub enum SavedAction {
     Archive,
