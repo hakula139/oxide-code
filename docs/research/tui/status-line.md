@@ -2,8 +2,6 @@
 
 Research on status-line composition in terminal coding assistants. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
-Verified 2026-10-26 against Claude Code 2.1.87 (the frozen source snapshot), Codex `2351d9e1b608`, and opencode `v1.4.11-1713-g7d5e91b80`.
-
 ## Claude Code (TypeScript)
 
 Claude Code delegates the whole status line to a command you configure. The command receives session data as JSON on stdin and prints the row, and Claude Code reruns it on session events, debounced at 300 ms, plus an optional `refreshInterval` timer ([status line docs](https://code.claude.com/docs/en/statusline), read on 2026-10-18).
