@@ -184,7 +184,7 @@ mod tests {
                     .into_iter()
                     .map(|(value, _)| value)
                     .collect::<Vec<_>>(),
-                ["manual", "yolo", "plan"]
+                ["manual", "plan", "yolo"]
             );
             assert_eq!(
                 rows("Y"),
@@ -213,7 +213,7 @@ mod tests {
         fn unknown_mode_errors_listing_valid_options() {
             assert_eq!(
                 run_execute(&ModeCmd, "turbo").unwrap_err(),
-                "Unknown mode: `turbo`. Valid: manual, yolo, plan."
+                "Unknown mode: `turbo`. Valid: manual, plan, yolo."
             );
         }
     }
@@ -238,8 +238,8 @@ mod tests {
                         "Switch the permission mode for this session. Restarting returns to your config.",
                         "",
                         "  1. manual    Ask before tool calls that no permission rule allows or denies",
-                        "  2. yolo      Run tool calls unless a deny rule or your ask rules hold them",
-                        "> 3. plan    ✓ Read-only: deny edits and commands",
+                        "> 2. plan    ✓ Read-only: deny edits and commands",
+                        "  3. yolo      Run tool calls unless a deny rule or your ask rules hold them",
                         "",
                         "Enter to confirm  ·  Esc to cancel",
                     ]
@@ -267,11 +267,11 @@ mod tests {
             fn enter_switches_to_the_row_under_the_cursor() {
                 assert_eq!(
                     submitted(Mode::Manual, &[KeyCode::Down]),
-                    Some(Op::SetMode(Mode::Yolo))
+                    Some(Op::SetMode(Mode::Plan))
                 );
                 assert_eq!(
                     submitted(Mode::Manual, &[KeyCode::Char('k')]),
-                    Some(Op::SetMode(Mode::Plan))
+                    Some(Op::SetMode(Mode::Yolo))
                 );
                 assert_eq!(
                     submitted(Mode::Yolo, &[KeyCode::Char('1')]),

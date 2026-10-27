@@ -41,7 +41,7 @@ const TIP_POOL: &[&str] = &[
     "press Ctrl+End to jump chat back to bottom",
     "press Enter to send, Shift+Enter for newline",
     "press Esc to cancel an in-flight response",
-    "press Shift+Tab to switch to plan mode and back",
+    "press Tab to change the permission mode",
 ];
 
 const STARTER_PICK: usize = 3;

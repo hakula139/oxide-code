@@ -9,13 +9,13 @@ use tokio::sync::mpsc;
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use super::compaction::{auto_compaction_due, request_tokens, transcript_tokens};
 use super::dispatch::{self, DispatchContext};
+use super::transcript::LiveTranscript;
 use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::config::compaction::AutoCompactionConfig;
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::TokenUsage;
 use crate::prompt::PromptParts;
 use crate::protocol::{Event, EventSink, Op};
-use crate::session::handle::SessionHandle;
 use crate::tool::tasks::Task;
 use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry};
 use crate::util::text::join_sentences;
@@ -115,9 +115,7 @@ impl TurnOutcome {
 pub(super) struct TurnContext<'a> {
     pub(super) client: &'a dyn Wire,
     pub(super) tools: &'a ToolRegistry,
-    pub(super) prompt: &'a PromptParts,
     pub(super) sink: &'a dyn EventSink,
-    pub(super) session: &'a SessionHandle,
     /// How many rounds may run without a final reply before the turn fails, unbounded when `None`.
     pub(super) max_tool_rounds: Option<u32>,
     /// When the context needs compacting before the next round.
@@ -136,7 +134,7 @@ pub(super) struct TurnContext<'a> {
 /// threshold returns [`TurnStop::Compact`] so the caller can compact and resume.
 pub(super) async fn agent_turn(
     turn: TurnContext<'_>,
-    messages: &mut Vec<Message>,
+    transcript: &mut LiveTranscript,
     ops: &mut mpsc::Receiver<Op>,
     inbox: &mut Inbox,
     dispatch_ctx: &mut DispatchContext<'_>,
@@ -144,9 +142,7 @@ pub(super) async fn agent_turn(
     let TurnContext {
         client,
         tools,
-        prompt,
         sink,
-        session,
         max_tool_rounds,
         auto_compaction,
         rounds_run,
@@ -157,10 +153,10 @@ pub(super) async fn agent_turn(
     let cap = max_tool_rounds.unwrap_or(u32::MAX);
 
     for round_index in rounds_run..cap {
-        let sent_messages = messages.len();
+        let sent_messages = transcript.messages().len();
         let mut round_usage = None;
         let stream = await_unless_aborted(
-            stream_response(client, messages, &tool_defs, prompt, sink, &mut round_usage),
+            stream_response(client, transcript, &tool_defs, sink, &mut round_usage),
             ops,
             inbox,
             sink,
@@ -175,10 +171,10 @@ pub(super) async fn agent_turn(
         } = match stream {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => return TurnOutcome::aborted(report, TurnAbort::Failed(error)),
-            Err(abort) => return interrupt_turn(session, sink, messages, report, abort).await,
+            Err(abort) => return interrupt_turn(transcript, sink, report, abort).await,
         };
 
-        let blocks = match settle_stop_reason(stop_reason, blocks, session, sink, messages).await {
+        let blocks = match settle_stop_reason(stop_reason, blocks, transcript, sink).await {
             StopAction::Proceed(blocks) => blocks,
             StopAction::Resume => continue,
             StopAction::Refused => {
@@ -191,8 +187,8 @@ pub(super) async fn agent_turn(
         let tool_uses = dispatch::collect_tool_uses(&blocks);
         if tool_uses.is_empty() {
             // Queued prompts drain on the TUI side at idle.
-            commit_assistant_message(session, sink, messages, blocks).await;
-            notify_if_interrupted(messages, sink);
+            commit_assistant_message(transcript, sink, blocks).await;
+            notify_if_interrupted(transcript.messages(), sink);
             return TurnOutcome::stopped(report, TurnStop::Replied);
         }
         let assistant_msg = Message {
@@ -215,9 +211,8 @@ pub(super) async fn agent_turn(
         }
         // Calls that finished before an abort already took effect, so the model must see them.
         commit_round(
-            session,
+            transcript,
             sink,
-            messages,
             assistant_msg,
             round.results,
             round.sidecars,
@@ -225,13 +220,14 @@ pub(super) async fn agent_turn(
         .await;
         ran_tools = true;
         if let Some(abort) = round.abort {
-            return interrupt_turn(session, sink, messages, report, abort).await;
+            return interrupt_turn(transcript, sink, report, abort).await;
         }
-        record_drained_prompts(inbox.prompts.drain(..), messages, session, sink).await;
+        record_drained_prompts(inbox.prompts.drain(..), transcript, sink).await;
 
         let ran = round_index + 1;
-        let estimate = report.context_estimate(prompt, &tool_defs, messages);
-        if ran < cap && auto_compaction_due(auto_compaction, estimate, messages) {
+        let estimate =
+            report.context_estimate(transcript.prompt(), &tool_defs, transcript.messages());
+        if ran < cap && auto_compaction_due(auto_compaction, estimate, transcript.messages()) {
             return TurnOutcome::stopped(report, TurnStop::Compact { rounds_run: ran });
         }
     }
@@ -261,9 +257,8 @@ enum StopAction {
 async fn settle_stop_reason(
     stop_reason: Option<StopReason>,
     blocks: Vec<ContentBlock>,
-    session: &SessionHandle,
+    transcript: &mut LiveTranscript,
     sink: &dyn EventSink,
-    messages: &mut Vec<Message>,
 ) -> StopAction {
     match stop_reason {
         // The API asks clients to drop refused output without running it.
@@ -276,11 +271,11 @@ async fn settle_stop_reason(
                 .into_iter()
                 .filter(|b| !matches!(b, ContentBlock::ToolUse { .. }))
                 .collect();
-            commit_assistant_message(session, sink, messages, prose).await;
+            commit_assistant_message(transcript, sink, prose).await;
             StopAction::Finish(TurnAbort::Failed(error))
         }
         Some(StopReason::PauseTurn) => {
-            commit_assistant_message(session, sink, messages, blocks).await;
+            commit_assistant_message(transcript, sink, blocks).await;
             StopAction::Resume
         }
         _ => StopAction::Proceed(blocks),
@@ -290,9 +285,8 @@ async fn settle_stop_reason(
 /// Records and appends a final assistant reply. An empty reply is skipped because the API rejects
 /// an assistant message with no content on every later request.
 async fn commit_assistant_message(
-    session: &SessionHandle,
+    transcript: &mut LiveTranscript,
     sink: &dyn EventSink,
-    messages: &mut Vec<Message>,
     content: Vec<ContentBlock>,
 ) {
     if content.is_empty() {
@@ -302,32 +296,26 @@ async fn commit_assistant_message(
         role: Role::Assistant,
         content,
     };
-    record_message(session, message.clone(), sink).await;
-    messages.push(message);
+    let failure = transcript.record_message(message).await;
+    sink.session_write_error(failure.as_deref());
 }
 
 /// Ends a turn on a user abort with [`record_interruption`].
 async fn interrupt_turn(
-    session: &SessionHandle,
+    transcript: &mut LiveTranscript,
     sink: &dyn EventSink,
-    messages: &mut Vec<Message>,
     report: TurnReport,
     abort: TurnAbort,
 ) -> TurnOutcome {
-    record_interruption(session, sink, messages).await;
+    record_interruption(transcript, sink).await;
     TurnOutcome::aborted(report, abort)
 }
 
 /// Records and appends [`Message::interruption`] after whatever an aborted turn committed, so later
 /// requests leave the abandoned prompts unanswered.
-pub(super) async fn record_interruption(
-    session: &SessionHandle,
-    sink: &dyn EventSink,
-    messages: &mut Vec<Message>,
-) {
-    let marker = Message::interruption();
-    record_message(session, marker.clone(), sink).await;
-    messages.push(marker);
+pub(super) async fn record_interruption(transcript: &mut LiveTranscript, sink: &dyn EventSink) {
+    let failure = transcript.record_message(Message::interruption()).await;
+    sink.session_write_error(failure.as_deref());
 }
 
 /// User-facing notice for a `refusal` stop, naming the policy category and explanation when the API
@@ -420,9 +408,8 @@ fn ends_on_interrupted_work(blocks: &[ContentBlock]) -> bool {
 
 /// Persists one tool round, then appends it to the live transcript.
 async fn commit_round(
-    session: &SessionHandle,
+    transcript: &mut LiveTranscript,
     sink: &dyn EventSink,
-    messages: &mut Vec<Message>,
     assistant_msg: Message,
     results: Vec<ContentBlock>,
     sidecars: Vec<(String, ToolMetadata)>,
@@ -431,46 +418,42 @@ async fn commit_round(
         role: Role::User,
         content: results,
     };
-    let outcome = session
-        .record_round(assistant_msg.clone(), tool_result_msg.clone(), sidecars)
+    let failure = transcript
+        .record_round(assistant_msg, tool_result_msg, sidecars)
         .await;
-    sink.session_write_error(outcome.failure.as_deref());
-    messages.push(assistant_msg);
-    messages.push(tool_result_msg);
+    sink.session_write_error(failure.as_deref());
 }
 
 /// Records and appends each queued prompt, then confirms it with [`Event::PromptDrained`].
 pub(super) async fn record_drained_prompts(
     texts: impl IntoIterator<Item = String>,
-    messages: &mut Vec<Message>,
-    session: &SessionHandle,
+    transcript: &mut LiveTranscript,
     sink: &dyn EventSink,
 ) {
     for text in texts {
-        let queued_msg = Message::user(text.clone());
-        record_message(session, queued_msg.clone(), sink).await;
-        messages.push(queued_msg);
+        let failure = transcript.record_message(Message::user(text.clone())).await;
+        sink.session_write_error(failure.as_deref());
         sink.emit(Event::PromptDrained(text), "prompt-drained");
     }
 }
 
-async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn EventSink) {
-    let outcome = session.record_message(msg).await;
-    sink.session_write_error(outcome.failure.as_deref());
-}
-
 // ── Stream Processing ──
 
-/// Streams one conversation request and collects its reply with [`collect_response`].
+/// Streams the transcript's next request and collects its reply with [`collect_response`].
 async fn stream_response(
     client: &dyn Wire,
-    messages: &[Message],
+    transcript: &LiveTranscript,
     tools: &[ToolDefinition],
-    prompt: &PromptParts,
     sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
 ) -> Result<Response> {
-    let rx = client.stream_message(messages, &prompt.system, Some(&prompt.user_context), tools)?;
+    let prompt = transcript.prompt();
+    let rx = client.stream_message(
+        transcript.messages(),
+        &prompt.system,
+        Some(&prompt.user_context),
+        tools,
+    )?;
     collect_response(rx, sink, usage).await
 }
 
@@ -503,7 +486,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
     use std::pin::Pin;
-    use std::sync::{Arc, LazyLock, Mutex};
+    use std::sync::{Arc, Mutex};
 
     use indoc::indoc;
     use serde_json::json;
@@ -527,6 +510,7 @@ mod tests {
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{ApprovalDecision, ConfigPick, ResumeTarget, ToolCall, ToolResult};
     use crate::session::handle;
+    use crate::session::handle::SessionHandle;
     use crate::session::store::testing::test_store;
     use crate::tool::view::{NumberedLine, ToolResultView};
     use crate::tool::{
@@ -639,11 +623,6 @@ mod tests {
             reply.stop_reason = Some(stop_reason);
             reply.stop_details = stop_details;
             events
-        }
-
-        fn empty_prompt() -> &'static PromptParts {
-            static PROMPT: LazyLock<PromptParts> = LazyLock::new(PromptParts::default);
-            &PROMPT
         }
 
         fn test_session(dir: &Path) -> SessionHandle {
@@ -802,18 +781,31 @@ mod tests {
             client: &'a dyn Wire,
             tools: &'a ToolRegistry,
             sink: &'a dyn EventSink,
-            session: &'a SessionHandle,
         ) -> TurnContext<'a> {
             TurnContext {
                 client,
                 tools,
-                prompt: empty_prompt(),
                 sink,
-                session,
                 max_tool_rounds: None,
                 auto_compaction: AutoCompactionConfig::disabled(),
                 rounds_run: 0,
             }
+        }
+
+        /// Runs [`super::agent_turn`] on a live transcript seeded with `messages`, writing the
+        /// transcript's messages back into `messages` on return.
+        async fn run_on_messages(
+            turn: TurnContext<'_>,
+            session: &SessionHandle,
+            messages: &mut Vec<Message>,
+            ops: &mut mpsc::Receiver<Op>,
+            inbox: &mut Inbox,
+            dispatch_ctx: &mut DispatchContext<'_>,
+        ) -> TurnOutcome {
+            let mut transcript = LiveTranscript::with_messages(session, std::mem::take(messages));
+            let outcome = super::agent_turn(turn, &mut transcript, ops, inbox, dispatch_ctx).await;
+            *messages = transcript.messages().to_vec();
+            outcome
         }
 
         /// Dispatch context in `cwd` under `yolo`, so turn tests run the loop without approvals.
@@ -879,8 +871,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            let outcome = agent_turn(
-                turn_context(&client, tools, &sink, &session),
+            let outcome = run_on_messages(
+                turn_context(&client, tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -898,8 +891,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![crate::message::Message::user("hi")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -932,8 +926,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -975,8 +970,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1011,8 +1007,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            let report = agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            let report = run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1037,8 +1034,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1115,8 +1113,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("view notes")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1175,8 +1174,9 @@ mod tests {
                 Message::user("continue"),
             ];
 
-            let report = agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            let report = run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1210,8 +1210,9 @@ mod tests {
             // Hold the sender so `recv()` stays pending after the queued submit.
             tx.send(Op::Queue("follow up".to_owned())).await.unwrap();
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut rx,
                 &mut Inbox::default(),
@@ -1264,8 +1265,9 @@ mod tests {
             tx.send(Op::Queue("first".to_owned())).await.unwrap();
             tx.send(Op::Queue("second".to_owned())).await.unwrap();
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut rx,
                 &mut Inbox::default(),
@@ -1311,8 +1313,9 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             tx.try_send(Op::Interrupt).unwrap();
 
-            let abort = agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            let abort = run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut rx,
                 &mut Inbox::default(),
@@ -1340,8 +1343,9 @@ mod tests {
             let mut inbox = Inbox::default();
 
             let (outcome, ()) = tokio::join!(
-                agent_turn(
-                    turn_context(&client, &tools, &sink, &session),
+                run_on_messages(
+                    turn_context(&client, &tools, &sink),
+                    &session,
                     &mut messages,
                     &mut rx,
                     &mut inbox,
@@ -1380,8 +1384,9 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             tx.try_send(Op::Shutdown).unwrap();
 
-            let abort = agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            let abort = run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut rx,
                 &mut Inbox::default(),
@@ -1407,8 +1412,9 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<Op>(1);
             drop(tx);
 
-            let abort = agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            let abort = run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut rx,
                 &mut Inbox::default(),
@@ -1458,8 +1464,9 @@ mod tests {
                 let (tx, mut rx) = mpsc::channel::<Op>(1);
                 tx.try_send(op.clone()).unwrap();
 
-                let outcome = agent_turn(
-                    turn_context(&client, &tools, &sink, &session),
+                let outcome = run_on_messages(
+                    turn_context(&client, &tools, &sink),
+                    &session,
                     &mut messages,
                     &mut rx,
                     &mut inbox,
@@ -1504,8 +1511,9 @@ mod tests {
             let mut inbox = Inbox::default();
 
             let (turn_result, ()) = tokio::join!(
-                agent_turn(
-                    turn_context(&client, &tools, &sink, &session),
+                run_on_messages(
+                    turn_context(&client, &tools, &sink),
+                    &session,
                     &mut messages,
                     &mut rx,
                     &mut inbox,
@@ -1593,8 +1601,9 @@ mod tests {
             let mut inbox = Inbox::default();
 
             let (outcome, ()) = tokio::join!(
-                agent_turn(
-                    turn_context(&client, &tools, &sink, &session),
+                run_on_messages(
+                    turn_context(&client, &tools, &sink),
+                    &session,
                     &mut messages,
                     &mut rx,
                     &mut inbox,
@@ -1632,8 +1641,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1670,8 +1680,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1720,11 +1731,12 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("loop forever")];
 
-            let err = agent_turn(
+            let err = run_on_messages(
                 TurnContext {
                     max_tool_rounds: Some(CAP),
-                    ..turn_context(&client, &tools, &sink, &session)
+                    ..turn_context(&client, &tools, &sink)
                 },
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1754,11 +1766,12 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("loop forever")];
 
-            let outcome = agent_turn(
+            let outcome = run_on_messages(
                 TurnContext {
                     max_tool_rounds: Some(CAP),
-                    ..turn_context(&client, &tools, &sink, &session)
+                    ..turn_context(&client, &tools, &sink)
                 },
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1801,11 +1814,12 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut messages = tool_heavy_transcript();
 
-                let outcome = agent_turn(
+                let outcome = run_on_messages(
                     TurnContext {
                         auto_compaction: CompactionConfig::with_threshold(50_000).auto,
-                        ..turn_context(&client, &tools, &sink, &session)
+                        ..turn_context(&client, &tools, &sink)
                     },
+                    &session,
                     &mut messages,
                     &mut inert_ops(),
                     &mut Inbox::default(),
@@ -1837,11 +1851,12 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = tool_heavy_transcript();
 
-            let outcome = agent_turn(
+            let outcome = run_on_messages(
                 TurnContext {
                     auto_compaction: CompactionConfig::with_threshold(1_000).auto,
-                    ..turn_context(&client, &tools, &sink, &session)
+                    ..turn_context(&client, &tools, &sink)
                 },
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1869,12 +1884,13 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = tool_heavy_transcript();
 
-            let err = agent_turn(
+            let err = run_on_messages(
                 TurnContext {
                     max_tool_rounds: Some(1),
                     auto_compaction: CompactionConfig::with_threshold(50_000).auto,
-                    ..turn_context(&client, &tools, &sink, &session)
+                    ..turn_context(&client, &tools, &sink)
                 },
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1904,12 +1920,13 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("keep going")];
 
-            let err = agent_turn(
+            let err = run_on_messages(
                 TurnContext {
                     max_tool_rounds: Some(3),
                     rounds_run: 2,
-                    ..turn_context(&client, &tools, &sink, &session)
+                    ..turn_context(&client, &tools, &sink)
                 },
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1941,8 +1958,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("loop a while then stop")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1965,8 +1983,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            let err = agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            let err = run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -1995,8 +2014,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            let outcome = agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            let outcome = run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -2032,8 +2052,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -2065,8 +2086,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -2096,8 +2118,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("look it up")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -2145,8 +2168,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("write the file")];
 
-            let abort = agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            let abort = run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -2188,8 +2212,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -2213,8 +2238,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
 
-            let abort = agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            let abort = run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -2497,8 +2523,9 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut inert_ops(),
                 &mut Inbox::default(),
@@ -2553,8 +2580,9 @@ mod tests {
             let mut inbox = Inbox::default();
             let mut dispatch_ctx = yolo_dispatch();
 
-            let outcome = agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            let outcome = run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut rx,
                 &mut inbox,
@@ -2617,8 +2645,9 @@ mod tests {
                 };
                 let mut messages = vec![Message::user("run echo")];
 
-                let outcome = agent_turn(
-                    turn_context(&client, &tools, &sink, &session),
+                let outcome = run_on_messages(
+                    turn_context(&client, &tools, &sink),
+                    &session,
                     &mut messages,
                     &mut ops,
                     &mut Inbox::default(),
@@ -2693,8 +2722,9 @@ mod tests {
                 decision: ApprovalDecision::Deny,
             };
 
-            agent_turn(
-                turn_context(&client, &tools, &sink, &session),
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
                 &mut messages,
                 &mut ops,
                 &mut Inbox::default(),
@@ -2903,7 +2933,8 @@ mod tests {
             let sid = session.session_id().to_owned();
             session.record_message(Message::user("prompt")).await;
             let sink = CapturingSink::default();
-            let mut messages = vec![Message::user("prompt")];
+            let mut transcript =
+                LiveTranscript::with_messages(&session, vec![Message::user("prompt")]);
             // Leaves the task with no cooperative budget, so the first await that needs a permit
             // yields before the command lands.
             while tokio::task::coop::has_budget_remaining() {
@@ -2911,9 +2942,8 @@ mod tests {
             }
 
             commit_round(
-                &session,
+                &mut transcript,
                 &sink,
-                &mut messages,
                 Message::assistant("answer"),
                 vec![ContentBlock::tool_result("tool_1", "ok", false)],
                 vec![(
@@ -2946,6 +2976,45 @@ mod tests {
                     title: Some("Edited a.rs".to_owned()),
                     ..ToolMetadata::default()
                 }),
+            );
+        }
+    }
+
+    mod stream_response {
+        use super::*;
+
+        /// A wire that rejects every request before it streams.
+        struct RefusingWire;
+
+        impl Wire for RefusingWire {
+            fn stream_message(
+                &self,
+                _messages: &[Message],
+                _system: &SystemPrompt,
+                _user_context: Option<&str>,
+                _tools: &[ToolDefinition],
+            ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+                bail!("the API refused the request")
+            }
+        }
+
+        #[tokio::test]
+        async fn returns_the_error_of_a_request_that_never_streamed() {
+            let session = dead_test_session();
+            let transcript = LiveTranscript::with_messages(&session, vec![Message::user("hi")]);
+            let sink = CapturingSink::default();
+            let mut usage = None;
+
+            let result = stream_response(&RefusingWire, &transcript, &[], &sink, &mut usage).await;
+
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "the API refused the request",
+                "the turn reports the request's own failure",
+            );
+            assert_eq!(
+                usage, None,
+                "a request that never streamed reported no usage"
             );
         }
     }

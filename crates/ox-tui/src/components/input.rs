@@ -13,6 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget as _};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
+use ox_core::permission::Mode;
 use ox_core::util::text::trim_blank_edges;
 
 use self::popup::{PopupState, SlashPopup, popup_state};
@@ -22,6 +23,7 @@ use crate::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::saturating_u16;
 use crate::slash::arg_placeholder_for;
 use crate::theme::Theme;
+use crate::viewport::Direction;
 
 // ── Constants ──
 
@@ -105,12 +107,13 @@ impl InputArea {
         self.popup.render(frame, area, theme);
     }
 
-    pub(crate) fn footer(&self, width: u16, busy: bool) -> Line<'static> {
-        let hints = if self.popup_visible() {
+    pub(crate) fn footer(&self, width: u16, busy: bool, next_mode: Mode) -> Line<'static> {
+        let mode_hint = format!("Tab → {next_mode}");
+        let hints: [&str; 4] = if self.popup_visible() {
             ["Tab complete", "↑/↓ select", "Esc close", "Enter run"]
         } else {
             [
-                "Tab / Shift+Tab mode",
+                &mode_hint,
                 if busy { "Enter queue" } else { "Enter send" },
                 "Shift+Enter newline",
                 "/ commands",
@@ -208,7 +211,9 @@ impl InputArea {
 
     fn handle_key(&mut self, key: &KeyEvent) -> InputOutcome {
         match (key.code, key.modifiers) {
-            (KeyCode::BackTab, _) => return InputOutcome::Action(Action::CycleMode),
+            (KeyCode::BackTab, _) => {
+                return InputOutcome::Action(Action::CycleMode(Direction::Backward));
+            }
             (KeyCode::PageUp | KeyCode::PageDown, _)
             | (KeyCode::Home | KeyCode::End, KeyModifiers::CONTROL) => {
                 return InputOutcome::Ignored;
@@ -224,7 +229,9 @@ impl InputArea {
         }
 
         match key.code {
-            KeyCode::Tab if key.modifiers.is_empty() => InputOutcome::Action(Action::CycleMode),
+            KeyCode::Tab if key.modifiers.is_empty() => {
+                InputOutcome::Action(Action::CycleMode(Direction::Forward))
+            }
             KeyCode::Enter => {
                 // Kitty reports SHIFT directly. VS Code and Cursor send Shift+Enter as `\x1b\r`
                 // (ESC CR), which crossterm parses as Alt+Enter.

@@ -12,7 +12,7 @@ use ox_core::config::DEFAULT_MODEL;
 use ox_core::model::{Effort, MODELS, ModelInfo, ResolvedModelId};
 use ox_core::protocol::{ConfigPick, Op};
 
-use super::effort_slider::{Direction, step_level};
+use super::effort_slider::step_level;
 use crate::action::Action;
 use crate::glyphs::RADIO_SELECTED;
 use crate::modal::chrome::{
@@ -22,6 +22,7 @@ use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
+use crate::viewport::Direction;
 
 // ── Constants ──
 
