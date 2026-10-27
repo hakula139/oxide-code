@@ -1030,7 +1030,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let (snapshots, kept, drifted) = tracked_files(dir.path());
-                let mut config = test_config("http://127.0.0.1:9".to_owned(), api_key(), MODEL);
+                let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
                 config.workspace = Workspace::new(dir.path());
 
                 let engine = Engine::new(
