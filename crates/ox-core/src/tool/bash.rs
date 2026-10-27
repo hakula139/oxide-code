@@ -105,10 +105,11 @@ impl Tool for BashTool {
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
-        input: &'a serde_json::Value,
+        prepared: &'a Prepared,
         cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
-        let background = input
+        let background = prepared
+            .input
             .get("run_in_background")
             .and_then(serde_json::Value::as_bool)
             == Some(true);
@@ -119,7 +120,7 @@ impl Tool for BashTool {
             } else {
                 label
             },
-            body: ApprovalBody::Command(self.summarize_call(name, input, cwd)),
+            body: ApprovalBody::Command(self.summarize_call(name, &prepared.input, cwd)),
         }))
     }
 
@@ -851,12 +852,19 @@ mod tests {
             let cwd = Path::new("/repo");
 
             let foreground = tool
-                .approval_preview("bash", &serde_json::json!({"command": "cargo test"}), cwd)
+                .approval_preview(
+                    "bash",
+                    &local_testing::prepared(serde_json::json!({"command": "cargo test"})),
+                    cwd,
+                )
                 .await;
             let background = tool
                 .approval_preview(
                     "bash",
-                    &serde_json::json!({"command": "cargo watch", "run_in_background": true}),
+                    &local_testing::prepared(serde_json::json!({
+                        "command": "cargo watch",
+                        "run_in_background": true,
+                    })),
                     cwd,
                 )
                 .await;

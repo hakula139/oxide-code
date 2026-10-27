@@ -63,10 +63,10 @@ impl Tool for GlobTool {
         &self,
         input: &serde_json::Value,
         content: &str,
-        metadata: &ToolMetadata,
+        _metadata: &ToolMetadata,
         _cwd: &Path,
     ) -> Option<ToolResultView> {
-        parse_files_view(input, content, metadata)
+        parse_files_view(input, content)
     }
 
     fn run<'a>(
@@ -251,11 +251,7 @@ fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, String> {
 
 /// Reconstructs the files view of a result that stored none, as sidecars from older releases do,
 /// retaining unrecognized output as text.
-fn parse_files_view(
-    input: &serde_json::Value,
-    content: &str,
-    metadata: &ToolMetadata,
-) -> Option<ToolResultView> {
+fn parse_files_view(input: &serde_json::Value, content: &str) -> Option<ToolResultView> {
     let pattern = extract_input_field(input, "pattern")?.to_owned();
     let trimmed = content.trim_end();
     if trimmed == NO_FILES_FOUND {
@@ -272,10 +268,7 @@ fn parse_files_view(
     if files.is_empty() {
         return None;
     }
-    let total = metadata.truncated_total.unwrap_or(files.len());
-    if total < files.len() {
-        return None;
-    }
+    let total = files.len();
     Some(ToolResultView::GlobFiles {
         pattern,
         files,
@@ -305,8 +298,8 @@ mod tests {
 
     use super::*;
     use crate::permission::Access;
-    use crate::tool::ToolRegistry;
     use crate::tool::local_testing::{self, ctx, deny_reads, search_root, temp_ctx};
+    use crate::tool::{StoredView, ToolRegistry};
     use crate::util::fs::testing::deny_read_access;
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::slash_separated;
@@ -368,7 +361,7 @@ mod tests {
         }
 
         #[test]
-        fn pulls_total_from_metadata_and_drops_prose_footer() {
+        fn drops_the_prose_footer() {
             let files: Vec<String> = (0..MAX_RESULTS).map(|i| format!("f{i:03}.rs")).collect();
             let body = files.join("\n");
             let content = formatdoc! {"
@@ -376,15 +369,11 @@ mod tests {
 
                 (Showing {MAX_RESULTS} of 1234 matches. Use a more specific pattern.)"
             };
-            let metadata = ToolMetadata {
-                truncated_total: Some(1234),
-                ..ToolMetadata::default()
-            };
             let view = glob_tool()
                 .result_view(
                     &serde_json::json!({"pattern": "**/*.rs"}),
                     &content,
-                    &metadata,
+                    &ToolMetadata::default(),
                     Path::new("/repo"),
                 )
                 .unwrap();
@@ -394,7 +383,7 @@ mod tests {
                 ToolResultView::GlobFiles {
                     pattern: "**/*.rs".to_owned(),
                     files,
-                    total: 1234,
+                    total: MAX_RESULTS,
                 },
             );
         }
@@ -484,30 +473,6 @@ mod tests {
         }
 
         #[test]
-        fn metadata_total_equal_to_file_count_succeeds() {
-            let metadata = ToolMetadata {
-                truncated_total: Some(2),
-                ..ToolMetadata::default()
-            };
-            let view = glob_tool()
-                .result_view(
-                    &serde_json::json!({"pattern": "*.rs"}),
-                    "a.rs\nb.rs",
-                    &metadata,
-                    Path::new("/repo"),
-                )
-                .unwrap();
-            assert_eq!(
-                view,
-                ToolResultView::GlobFiles {
-                    pattern: "*.rs".to_owned(),
-                    files: vec!["a.rs".to_owned(), "b.rs".to_owned()],
-                    total: 2,
-                },
-            );
-        }
-
-        #[test]
         fn path_with_embedded_blank_line_falls_back() {
             let view = parse_files_view(
                 &serde_json::json!({"pattern": "*.rs"}),
@@ -517,22 +482,6 @@ mod tests {
                     name.rs
                     next.rs"
                 },
-                &ToolMetadata::default(),
-            );
-            assert!(view.is_none());
-        }
-
-        #[test]
-        fn falls_back_when_metadata_total_under_visible_files() {
-            let metadata = ToolMetadata {
-                truncated_total: Some(1),
-                ..ToolMetadata::default()
-            };
-            let view = glob_tool().result_view(
-                &serde_json::json!({"pattern": "*.rs"}),
-                "a.rs\nb.rs",
-                &metadata,
-                Path::new("/repo"),
             );
             assert!(view.is_none());
         }
@@ -609,8 +558,7 @@ mod tests {
                 output.content,
                 "public.rs\n\n(1 file withheld by read deny or ask rules)"
             );
-            assert!(output.metadata.raw_text);
-            assert_eq!(output.metadata.result_view, None);
+            assert_eq!(output.metadata.result_view, Some(StoredView::Text));
             assert_eq!(
                 registry.result_view(
                     "glob",
@@ -649,11 +597,11 @@ mod tests {
             assert_eq!(output.content, format!("{name}/a.txt"));
             assert_eq!(
                 output.metadata.result_view,
-                Some(ToolResultView::GlobFiles {
+                Some(StoredView::View(ToolResultView::GlobFiles {
                     pattern: "*.txt".to_owned(),
                     files: vec![format!("{name}/a.txt")],
                     total: 1,
-                }),
+                })),
             );
         }
 
@@ -690,7 +638,8 @@ mod tests {
             let output = local_testing::run(&glob_tool(), input, &ctx(dir.path())).await;
 
             assert!(!output.is_error);
-            let Some(ToolResultView::GlobFiles { total: shown, .. }) = output.metadata.result_view
+            let Some(StoredView::View(ToolResultView::GlobFiles { total: shown, .. })) =
+                output.metadata.result_view
             else {
                 panic!("a truncated listing stores its files view");
             };

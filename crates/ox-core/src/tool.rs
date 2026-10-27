@@ -30,7 +30,7 @@ use self::grep::GrepTool;
 use self::read::ReadTool;
 use self::spill::Spills;
 use self::tasks::{Task, TasksTool};
-use self::view::{ApprovalBody, ApprovalPreview, EditDiff, ToolResultView};
+use self::view::{ApprovalBody, ApprovalPreview, ToolResultView};
 use self::write::WriteTool;
 use crate::file_tracker::FileTracker;
 use crate::permission::{Access, PermissionClass, ReadFilter, Workspace};
@@ -98,16 +98,13 @@ pub struct Prepared {
 }
 
 impl Prepared {
-    /// The parsed input and the resolved path of a path tool, which `prepare` has already resolved
-    /// from the tool's path field.
+    /// The parsed input and resolved `file_path` of a file tool.
     pub(crate) fn into_path_input<T: DeserializeOwned>(self) -> Result<(T, PathBuf), String> {
         let input = parse_input(self.input)?;
-        let path = self
-            .access
-            .resolved()
-            .expect("prepare resolves the path field of a path tool")
-            .to_owned();
-        Ok((input, path))
+        let Some(path) = self.access.resolved() else {
+            return Err("Invalid input: missing field `file_path`".to_owned());
+        };
+        Ok((input, path.clone()))
     }
 }
 
@@ -147,16 +144,17 @@ impl ToolOutput {
         self
     }
 
-    fn with_result_view(mut self, view: ToolResultView) -> Self {
-        self.metadata.result_view = Some(view);
-        self.metadata.raw_text = false;
-        self
+    fn with_result_view(self, view: ToolResultView) -> Self {
+        self.with_stored_view(StoredView::View(view))
     }
 
-    /// Marks the content as the whole result body, dropping any stored view.
-    fn with_raw_text(mut self) -> Self {
-        self.metadata.raw_text = true;
-        self.metadata.result_view = None;
+    /// Marks the content as the whole result body, so it renders as text.
+    fn with_raw_text(self) -> Self {
+        self.with_stored_view(StoredView::Text)
+    }
+
+    fn with_stored_view(mut self, view: StoredView) -> Self {
+        self.metadata.result_view = Some(view);
         self
     }
 
@@ -172,37 +170,19 @@ pub struct ToolMetadata {
     /// A one-line summary of the call, which the UI shows on its result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
-    /// What a successful `edit` changed. Read from sidecars that predate the stored diff view.
-    #[serde(default, skip_serializing)]
-    pub(crate) diff: Option<EditDiff>,
-    /// Unbounded match count when a tool capped returned rows. Read from sidecars that predate the
-    /// stored glob view.
-    #[serde(default, skip_serializing)]
-    pub(crate) truncated_total: Option<usize>,
-    /// The structured view produced with the result, whose paths already use the call's working
-    /// directory. The text view is never stored, since the result content carries it.
+    /// What the result stores for replay beyond its text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) result_view: Option<ToolResultView>,
-    /// Whether the result content renders as text without the tool's own view derivation. Capped
-    /// output and search results carrying notes set it, since their text would not parse as rows.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) raw_text: bool,
+    pub(crate) result_view: Option<StoredView>,
 }
 
-impl ToolMetadata {
-    /// Whether a sidecar written from this metadata would hold display data. The legacy fields do
-    /// not count, since they are read-only.
-    pub(crate) fn has_display_data(&self) -> bool {
-        self.title.is_some() || self.result_view.is_some() || self.raw_text
-    }
-}
-
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde calls skip_serializing_if with a reference"
-)]
-fn is_false(value: &bool) -> bool {
-    !value
+/// What a result stores for replay beyond its text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StoredView {
+    /// The content renders as text without the tool's own view derivation.
+    Text,
+    /// Structured view whose paths already use the call's working directory.
+    View(ToolResultView),
 }
 
 // ── Tool Trait ──
@@ -277,17 +257,18 @@ pub trait Tool: Send + Sync {
         None
     }
 
-    /// Builds the approval modal's preview of `input`, by default the tool name over its label from
-    /// [`Self::summarize_call`]. Async because the write preview reads the file it would replace.
+    /// Builds the approval modal's preview of `prepared`, by default the tool name over its label
+    /// from [`Self::summarize_call`]. Async because the write preview reads the file it would
+    /// replace through the resolved path.
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
-        input: &'a serde_json::Value,
+        prepared: &'a Prepared,
         cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
         Box::pin(std::future::ready(ApprovalPreview {
             title: pascal_case(name),
-            body: ApprovalBody::Command(self.summarize_call(name, input, cwd)),
+            body: ApprovalBody::Command(self.summarize_call(name, &prepared.input, cwd)),
         }))
     }
 
@@ -381,7 +362,7 @@ impl ToolRegistry {
     }
 
     /// Resolves the result view for a tool call, with paths relative to `cwd`. Errors, results
-    /// marked as raw text, and unknown tools render as [`ToolResultView::Text`].
+    /// marked as plain text, and unknown tools render as [`ToolResultView::Text`].
     pub(crate) fn result_view(
         &self,
         name: &str,
@@ -391,19 +372,23 @@ impl ToolRegistry {
         is_error: bool,
         cwd: &Path,
     ) -> ToolResultView {
-        if is_error || metadata.raw_text {
+        if is_error {
             return ToolResultView::Text {
                 content: content.to_owned(),
             };
         }
-        if let Some(view) = &metadata.result_view {
-            return view.clone();
-        }
-        self.get(name)
-            .and_then(|(_, tool)| tool.result_view(input, content, metadata, cwd))
-            .unwrap_or_else(|| ToolResultView::Text {
+        match &metadata.result_view {
+            Some(StoredView::View(view)) => view.clone(),
+            Some(StoredView::Text) => ToolResultView::Text {
                 content: content.to_owned(),
-            })
+            },
+            None => self
+                .get(name)
+                .and_then(|(_, tool)| tool.result_view(input, content, metadata, cwd))
+                .unwrap_or_else(|| ToolResultView::Text {
+                    content: content.to_owned(),
+                }),
+        }
     }
 }
 
@@ -488,7 +473,7 @@ pub(crate) mod local_testing {
 
     use super::search::{SearchRoot, search_path};
     use super::spill::run_capped;
-    use super::{Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
+    use super::{Prepared, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
     use crate::file_tracker::FileTracker;
     use crate::permission::rule::Rule;
     use crate::permission::{Access, Mode, PermissionClass, Policy, ReadFilter, Workspace};
@@ -560,6 +545,14 @@ pub(crate) mod local_testing {
                     .collect();
                 assert_eq!(temporary, [] as [std::ffi::OsString; 0]);
             }
+        }
+    }
+
+    /// A prepared call carrying `input` alone, for tests of a part that does not resolve a path.
+    pub(crate) fn prepared(input: serde_json::Value) -> Prepared {
+        Prepared {
+            input,
+            access: Access::default(),
         }
     }
 
@@ -659,7 +652,8 @@ pub mod testing {
 
     use super::bash::BashTool;
     use super::edit::synthesize_diff;
-    use super::{ApprovalBody, ApprovalPreview, EditDiff, Tool, ToolRegistry};
+    use super::{ApprovalBody, ApprovalPreview, Tool, ToolRegistry};
+    use crate::tool::view::EditDiff;
 
     /// The approval preview of a foreground `bash` call that runs `command`.
     pub fn bash_preview(command: &str) -> ApprovalPreview {
@@ -687,7 +681,7 @@ mod tests {
 
     use super::local_testing::{ctx, deny_reads, temp_ctx};
     use super::testing::bash_registry;
-    use super::view::{DiffChunk, NumberedLine};
+    use super::view::{DiffChunk, EditDiff, NumberedLine};
     use super::*;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
@@ -1017,7 +1011,7 @@ mod tests {
             let preview = GlobTool::new(ReadFilter::default())
                 .approval_preview(
                     "glob",
-                    &serde_json::json!({"pattern": "*.rs"}),
+                    &local_testing::prepared(serde_json::json!({"pattern": "*.rs"})),
                     Path::new("/repo"),
                 )
                 .await;
@@ -1357,11 +1351,11 @@ mod tests {
                     "new_string": "b",
                 });
                 let metadata = ToolMetadata {
-                    result_view: Some(ToolResultView::GlobFiles {
+                    result_view: Some(StoredView::View(ToolResultView::GlobFiles {
                         pattern: "*.rs".to_owned(),
                         files: vec!["stale.rs".to_owned()],
                         total: 1,
-                    }),
+                    })),
                     ..ToolMetadata::default()
                 };
                 let view = registry.result_view(
@@ -1390,7 +1384,7 @@ mod tests {
                     total: 7,
                 };
                 let metadata = ToolMetadata {
-                    result_view: Some(expected.clone()),
+                    result_view: Some(StoredView::View(expected.clone())),
                     ..ToolMetadata::default()
                 };
 
@@ -1407,11 +1401,11 @@ mod tests {
             }
 
             #[test]
-            fn raw_text_suppresses_the_tools_own_derivation() {
+            fn stored_text_suppresses_the_tools_own_derivation() {
                 let registry =
                     ToolRegistry::new(vec![Box::new(GlobTool::new(ReadFilter::default()))]);
                 let metadata = ToolMetadata {
-                    raw_text: true,
+                    result_view: Some(StoredView::Text),
                     ..ToolMetadata::default()
                 };
                 let content = "a.rs\nb.rs";

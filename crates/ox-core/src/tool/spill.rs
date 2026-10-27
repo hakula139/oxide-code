@@ -378,8 +378,7 @@ mod tests {
             );
             let metadata: ToolMetadata =
                 serde_json::from_value(serde_json::to_value(&output.metadata).unwrap()).unwrap();
-            assert!(metadata.raw_text);
-            assert_eq!(metadata.result_view, None);
+            assert_eq!(metadata.result_view, Some(crate::tool::StoredView::Text));
             assert!(
                 output
                     .content

@@ -21,8 +21,9 @@ impl Tool for WriteTool {
                 name: "write".to_owned(),
                 description: "Write content to a file, \
                               creating it if it does not exist or overwriting it if it does. \
-                              Before overwriting an existing file, read all of it with the `read` tool \
-                              in this session, in one call or by paging with offset and limit. \
+                              Before overwriting an existing file, read all of it with the \
+                              `read` tool in this session, in one call or by paging with offset \
+                              and limit. \
                               As with the `edit` tool, a write also fails for a file \
                               that changed externally since the last `read`. \
                               Creating a new file needs no prior `read`."
@@ -45,17 +46,17 @@ impl Tool for WriteTool {
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
-        input: &'a serde_json::Value,
+        prepared: &'a Prepared,
         cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
         Box::pin(async move {
-            let content = extract_input_field(input, "content").unwrap_or_default();
-            let current = match extract_input_field(input, "file_path") {
-                Some(path) => current_text(&cwd.join(path)).await,
+            let content = extract_input_field(&prepared.input, "content").unwrap_or_default();
+            let current = match prepared.access.resolved() {
+                Some(path) => current_text(&path).await,
                 None => String::new(),
             };
             ApprovalPreview {
-                title: self.summarize_call(name, input, cwd),
+                title: self.summarize_call(name, &prepared.input, cwd),
                 body: ApprovalBody::Diff(super::edit::synthesize_chunk(&current, content)),
             }
         })
@@ -265,16 +266,23 @@ mod tests {
             })
         }
 
+        fn prepare(input: serde_json::Value, cwd: &Path) -> Prepared {
+            WriteTool.prepare(input, &ctx(cwd))
+        }
+
         #[tokio::test]
         async fn renders_a_new_file_as_an_all_added_diff() {
-            let input = serde_json::json!({
-                "file_path": "/repo/src/new.rs",
-                "content": "fn main() {}",
-            });
+            let dir = canonical_tempdir();
+            let cwd = dir.path().to_path_buf();
+            let prepared = prepare(
+                serde_json::json!({
+                    "file_path": "src/new.rs",
+                    "content": "fn main() {}",
+                }),
+                &cwd,
+            );
 
-            let preview = WriteTool
-                .approval_preview("write", &input, Path::new("/repo"))
-                .await;
+            let preview = WriteTool.approval_preview("write", &prepared, &cwd).await;
 
             assert_eq!(preview.title, "Write(src/new.rs)");
             assert_eq!(preview.body, added_line("fn main() {}"));
@@ -282,11 +290,10 @@ mod tests {
 
         #[tokio::test]
         async fn without_a_file_path_renders_the_content_as_added() {
-            let input = serde_json::json!({"content": "fn main() {}"});
+            let cwd = Path::new("/repo");
+            let prepared = prepare(serde_json::json!({"content": "fn main() {}"}), cwd);
 
-            let preview = WriteTool
-                .approval_preview("write", &input, Path::new("/repo"))
-                .await;
+            let preview = WriteTool.approval_preview("write", &prepared, cwd).await;
 
             assert_eq!(preview.title, "Write");
             assert_eq!(preview.body, added_line("fn main() {}"));
@@ -297,13 +304,16 @@ mod tests {
             let dir = canonical_tempdir();
             let path = dir.path().join("notes.txt");
             fs::write(&path, "keep\nold line\n").unwrap();
-            let input = serde_json::json!({
-                "file_path": path,
-                "content": "keep\nnew line\n",
-            });
+            let prepared = prepare(
+                serde_json::json!({
+                    "file_path": path,
+                    "content": "keep\nnew line\n",
+                }),
+                dir.path(),
+            );
 
             let preview = WriteTool
-                .approval_preview("write", &input, dir.path())
+                .approval_preview("write", &prepared, dir.path())
                 .await;
 
             assert_eq!(
@@ -322,22 +332,37 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn does_not_read_through_a_symlink() {
+        async fn previews_the_resolved_target_of_a_symlink() {
             let dir = canonical_tempdir();
-            let secret = dir.path().join("secret.txt");
-            fs::write(&secret, "token").unwrap();
+            let target = dir.path().join("target.txt");
+            fs::write(&target, "token").unwrap();
             let link = dir.path().join("link.txt");
-            symlink_file(&secret, &link);
-            let input = serde_json::json!({
-                "file_path": link,
-                "content": "new",
-            });
+            symlink_file(&target, &link);
+            let prepared = prepare(
+                serde_json::json!({
+                    "file_path": link,
+                    "content": "new",
+                }),
+                dir.path(),
+            );
 
             let preview = WriteTool
-                .approval_preview("write", &input, dir.path())
+                .approval_preview("write", &prepared, dir.path())
                 .await;
 
-            assert_eq!(preview.body, added_line("new"));
+            assert_eq!(
+                preview.body,
+                ApprovalBody::Diff(DiffChunk {
+                    old: vec![NumberedLine {
+                        number: 1,
+                        text: "token".to_owned(),
+                    }],
+                    new: vec![NumberedLine {
+                        number: 1,
+                        text: "new".to_owned(),
+                    }],
+                }),
+            );
         }
     }
 

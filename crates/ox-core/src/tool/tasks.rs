@@ -80,7 +80,8 @@ impl Tool for TasksTool {
                               which the user sees while you work. \
                               Use it for work that takes three or more steps \
                               or when the user asks for several things at once, \
-                              and skip it for a single straightforward step or a conversational reply. \
+                              and skip it for a single straightforward step \
+                              or a conversational reply. \
                               Each call replaces the whole list, \
                               so send every task with its current status each time. \
                               Mark a task in_progress just before starting it, \

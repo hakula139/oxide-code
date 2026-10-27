@@ -248,26 +248,28 @@ expression: recovered
   "tool_metadata": {
     "t1": {
       "result_view": {
-        "data": {
-          "chunk": {
-            "new": [
-              {
-                "number": 1,
-                "text": "fn run() {}"
-              }
-            ],
-            "old": [
-              {
-                "number": 1,
-                "text": "fn main() {}"
-              }
+        "view": {
+          "data": {
+            "chunk": {
+              "new": [
+                {
+                  "number": 1,
+                  "text": "fn run() {}"
+                }
+              ],
+              "old": [
+                {
+                  "number": 1,
+                  "text": "fn main() {}"
+                }
+              ]
+            },
+            "locations": [
+              1
             ]
           },
-          "locations": [
-            1
-          ]
-        },
-        "type": "diff"
+          "type": "diff"
+        }
       },
       "title": "Edited f.rs"
     },
@@ -276,14 +278,16 @@ expression: recovered
     },
     "t3": {
       "result_view": {
-        "data": {
-          "files": [
-            "g.rs"
-          ],
-          "pattern": "*.rs",
-          "total": 250
-        },
-        "type": "glob_files"
+        "view": {
+          "data": {
+            "files": [
+              "g.rs"
+            ],
+            "pattern": "*.rs",
+            "total": 250
+          },
+          "type": "glob_files"
+        }
       },
       "title": "Found 100 files"
     }

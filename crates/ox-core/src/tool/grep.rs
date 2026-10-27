@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use super::search::{NO_FILES_FOUND, SearchRoot, SearchRow, SearchRows, Unreadable};
 use super::view::{GrepFileGroup, GrepMatchLine, ToolResultView};
 use super::{
-    Prepared, Tool, ToolCtx, ToolDefinition, ToolMetadata, ToolOutput, ToolSpec,
+    Prepared, StoredView, Tool, ToolCtx, ToolDefinition, ToolMetadata, ToolOutput, ToolSpec,
     extract_input_field,
 };
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
@@ -202,15 +202,11 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
             content,
             title,
             view,
-            raw_text,
         }) => {
             let output = ToolOutput::success(content).with_title(title);
-            if raw_text {
-                output.with_raw_text()
-            } else if let Some(view) = view {
-                output.with_result_view(view)
-            } else {
-                output
+            match view {
+                Some(view) => output.with_stored_view(view),
+                None => output,
             }
         }
         Err(msg) => ToolOutput::error(msg),
@@ -237,11 +233,9 @@ struct GrepParams<'a> {
 struct GrepOutput {
     content: String,
     title: String,
-    /// The match rows of a content-mode result. Other modes, and notes appended after the rows,
-    /// leave it `None`, so the result renders as text.
-    view: Option<ToolResultView>,
-    /// Whether notes appended to `content` keep it from parsing as match rows.
-    raw_text: bool,
+    /// The match rows of a content-mode result. Other modes leave it `None`, and notes appended
+    /// after the rows store [`StoredView::Text`], so the result renders as text.
+    view: Option<StoredView>,
 }
 
 impl GrepOutput {
@@ -250,7 +244,6 @@ impl GrepOutput {
             content,
             title,
             view: None,
-            raw_text: false,
         }
     }
 }
@@ -306,8 +299,7 @@ fn grep_files(params: &GrepParams<'_>) -> Result<GrepOutput, String> {
     super::search::push_unreadable_note(&mut output.content, &unreadable, cwd);
     super::search::push_withheld_note(&mut output.content, withheld);
     if !skipped_large.is_empty() || !unreadable.is_empty() || withheld > 0 {
-        output.view = None;
-        output.raw_text = true;
+        output.view = Some(StoredView::Text);
     }
 
     Ok(output)
@@ -494,8 +486,10 @@ fn format_matches(rows: SearchRows) -> GrepOutput {
     GrepOutput {
         content,
         title,
-        view: Some(ToolResultView::GrepMatches { groups, truncated }),
-        raw_text: false,
+        view: Some(StoredView::View(ToolResultView::GrepMatches {
+            groups,
+            truncated,
+        })),
     }
 }
 
@@ -658,8 +652,8 @@ fn format_count<'a>(
 
 // ── Result View ──
 
-/// Reconstructs the match rows of a content-mode result, falling back to text for unrecognized
-/// lines. Grep stores no matches view, so it parses live results too.
+/// Reconstructs the match rows of a content-mode result that stored no view, as sidecars from
+/// older releases do, falling back to text for unrecognized lines.
 fn parse_content_view(content: &str) -> Option<ToolResultView> {
     let trimmed = content.trim_end();
     if trimmed == NO_MATCHES_FOUND {
@@ -867,8 +861,11 @@ mod tests {
                     output.content,
                     format!("{body}\n\n(1 file withheld by read deny or ask rules)")
                 );
-                assert!(output.metadata.raw_text, "{mode}");
-                assert_eq!(output.metadata.result_view, None, "{mode}");
+                assert_eq!(
+                    output.metadata.result_view,
+                    Some(StoredView::Text),
+                    "{mode}"
+                );
                 assert_eq!(
                     registry.result_view(
                         "grep",
@@ -1982,13 +1979,13 @@ mod tests {
                     .collect();
                 assert_eq!(
                     output.view,
-                    Some(ToolResultView::GrepMatches {
+                    Some(StoredView::View(ToolResultView::GrepMatches {
                         groups: vec![GrepFileGroup {
                             path: "a.rs".to_owned(),
                             lines: expected_lines
                         }],
                         truncated,
-                    })
+                    }))
                 );
             }
         }
@@ -2001,10 +1998,10 @@ mod tests {
             assert_eq!(output.title, "No matches found");
             assert_eq!(
                 output.view,
-                Some(ToolResultView::GrepMatches {
+                Some(StoredView::View(ToolResultView::GrepMatches {
                     groups: vec![],
                     truncated: false
-                })
+                }))
             );
         }
     }

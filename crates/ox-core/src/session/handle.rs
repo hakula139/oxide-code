@@ -577,6 +577,7 @@ mod tests {
         TEST_PROJECT, WriterBarrier, archive_test_session, isolated_store, seed_test_session,
         test_project_dir, test_store,
     };
+    use crate::tool::StoredView;
     use crate::tool::tasks::testing::plan;
     use crate::tool::view::{DiffChunk, EditDiff, NumberedLine, ToolResultView};
 
@@ -742,15 +743,15 @@ mod tests {
                             "t1".to_owned(),
                             ToolMetadata {
                                 title: Some("Edited a.rs".to_owned()),
-                                ..ToolMetadata::default()
+                                result_view: None,
                             },
                         ),
                         ("t2".to_owned(), ToolMetadata::default()),
                         (
                             "t3".to_owned(),
                             ToolMetadata {
-                                raw_text: true,
-                                ..ToolMetadata::default()
+                                title: None,
+                                result_view: Some(StoredView::Text),
                             },
                         ),
                     ],
@@ -783,7 +784,10 @@ mod tests {
                     .as_deref(),
                 Some("Edited a.rs"),
             );
-            assert!(data.tool_result_metadata.get("t3").unwrap().raw_text);
+            assert_eq!(
+                data.tool_result_metadata.get("t3").unwrap().result_view,
+                Some(StoredView::Text),
+            );
         }
 
         #[tokio::test]
@@ -803,7 +807,7 @@ mod tests {
                         "t1".to_owned(),
                         ToolMetadata {
                             title: Some("f.rs".to_owned()),
-                            ..ToolMetadata::default()
+                            result_view: None,
                         },
                     )],
                 )
@@ -2507,19 +2511,18 @@ mod tests {
                             "t2".to_owned(),
                             ToolMetadata {
                                 title: Some("Read g.rs".to_owned()),
-                                ..ToolMetadata::default()
+                                result_view: None,
                             },
                         ),
                         (
                             "t3".to_owned(),
                             ToolMetadata {
                                 title: Some("Found 100 files".to_owned()),
-                                result_view: Some(ToolResultView::GlobFiles {
+                                result_view: Some(StoredView::View(ToolResultView::GlobFiles {
                                     pattern: "*.rs".to_owned(),
                                     files: vec!["g.rs".to_owned()],
                                     total: 250,
-                                }),
-                                ..ToolMetadata::default()
+                                })),
                             },
                         ),
                     ],
@@ -2530,7 +2533,7 @@ mod tests {
         fn edit_metadata() -> ToolMetadata {
             ToolMetadata {
                 title: Some("Edited f.rs".to_owned()),
-                result_view: Some(ToolResultView::Diff(EditDiff {
+                result_view: Some(StoredView::View(ToolResultView::Diff(EditDiff {
                     chunk: DiffChunk {
                         old: vec![NumberedLine {
                             number: 1,
@@ -2542,8 +2545,7 @@ mod tests {
                         }],
                     },
                     locations: vec![1],
-                })),
-                ..ToolMetadata::default()
+                }))),
             }
         }
 

@@ -251,8 +251,8 @@ mod tests {
     use super::*;
     use crate::file_tracker::{FileSource, FileState, LastView};
     use crate::message::{ContentBlock, Role};
+    use crate::tool::StoredView;
     use crate::tool::tasks::testing::plan;
-    use crate::tool::view::{DiffChunk, EditDiff, ToolResultView};
 
     #[test]
     fn header_round_trips_with_correct_discriminator_and_version() {
@@ -394,13 +394,12 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_metadata_round_trips_with_title_and_raw_text() {
+    fn tool_result_metadata_round_trips_with_title_and_stored_view() {
         let entry = Entry::ToolResultMetadata {
             tool_use_id: "grep1".to_owned(),
             metadata: ToolMetadata {
                 title: Some("Found 2 files".to_owned()),
-                raw_text: true,
-                ..ToolMetadata::default()
+                result_view: Some(StoredView::Text),
             },
             timestamp: datetime!(2026-04-16 12:06:00 UTC),
         };
@@ -408,41 +407,11 @@ mod tests {
         assert_eq!(json["type"], "tool_result_metadata");
         assert_eq!(json["tool_use_id"], "grep1");
         assert_eq!(json["metadata"]["title"], "Found 2 files");
-        assert_eq!(json["metadata"]["raw_text"], true);
+        assert_eq!(json["metadata"]["result_view"], "text");
         assert_eq!(json["timestamp"], "2026-04-16T12:06:00Z");
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
-    }
-
-    #[test]
-    fn tool_result_metadata_reads_legacy_fields_without_rewriting_them() {
-        let json = r#"{"type":"tool_result_metadata","tool_use_id":"edit1","metadata":{"title":"Edited f.rs","diff":{"chunk":{"old":[],"new":[]},"locations":[]},"truncated_total":3,"result_view":{"type":"text","data":{"content":"kept"}}},"timestamp":"2026-04-16T12:06:00Z"}"#;
-
-        let Entry::ToolResultMetadata { metadata, .. } =
-            serde_json::from_str(json).expect("a legacy sidecar still parses")
-        else {
-            panic!("expected ToolResultMetadata");
-        };
-
-        assert_eq!(
-            metadata.diff,
-            Some(EditDiff {
-                chunk: DiffChunk {
-                    old: Vec::new(),
-                    new: Vec::new(),
-                },
-                locations: Vec::new(),
-            })
-        );
-        assert_eq!(metadata.truncated_total, Some(3));
-        assert_eq!(
-            metadata.result_view,
-            Some(ToolResultView::Text {
-                content: "kept".to_owned(),
-            })
-        );
-        assert!(!metadata.raw_text);
     }
 
     #[test]

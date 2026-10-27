@@ -95,11 +95,10 @@ pub(super) async fn read_validated(
         .map_err(|e| format!("Failed to access {}: {e}", path.display()))?;
     validate_file_target(path, &metadata, verb)?;
 
-    let shown = path.display().to_string();
     let read_path = path.to_owned();
     tokio::task::spawn_blocking(move || read_regular_file(&read_path, MAX_TRACKED_FILE_SIZE))
         .await
-        .map_err(|error| format!("Failed to read {shown}: {error}"))?
+        .map_err(|error| format!("Failed to read {}: {error}", path.display()))?
         .map_err(|error| file_read_error(path, error, verb))
 }
 

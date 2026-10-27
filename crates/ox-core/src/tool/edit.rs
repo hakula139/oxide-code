@@ -25,8 +25,10 @@ impl Tool for EditTool {
             definition: ToolDefinition {
                 name: "edit".to_owned(),
                 description: "Perform exact string replacement in a file. \
-                              The old_string must be unique in the file unless replace_all is true. \
-                              Read the file with the `read` tool in this session before editing it. \
+                              The old_string must be unique in the file \
+                              unless replace_all is true. \
+                              Read the file with the `read` tool in this session \
+                              before editing it. \
                               A `read` of the lines being changed is enough. \
                               An edit also fails for a file that changed externally \
                               since the last `read`."
@@ -50,13 +52,9 @@ impl Tool for EditTool {
         &self,
         input: &serde_json::Value,
         _content: &str,
-        metadata: &ToolMetadata,
+        _metadata: &ToolMetadata,
         _cwd: &Path,
     ) -> Option<ToolResultView> {
-        // Sidecars from before the stored diff view kept the diff in its own field.
-        if let Some(diff) = &metadata.diff {
-            return Some(ToolResultView::Diff(diff.clone()));
-        }
         let old = input.get("old_string")?.as_str()?;
         let new = input.get("new_string")?.as_str()?;
         Some(ToolResultView::Diff(synthesize_diff(old, new)))
@@ -65,13 +63,13 @@ impl Tool for EditTool {
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
-        input: &'a serde_json::Value,
+        prepared: &'a Prepared,
         cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
-        let old = extract_input_field(input, "old_string").unwrap_or_default();
-        let new = extract_input_field(input, "new_string").unwrap_or_default();
+        let old = extract_input_field(&prepared.input, "old_string").unwrap_or_default();
+        let new = extract_input_field(&prepared.input, "new_string").unwrap_or_default();
         Box::pin(std::future::ready(ApprovalPreview {
-            title: self.summarize_call(name, input, cwd),
+            title: self.summarize_call(name, &prepared.input, cwd),
             body: ApprovalBody::Diff(synthesize_chunk(old, new)),
         }))
     }
@@ -312,9 +310,9 @@ fn region_eol(text: &str) -> Option<&'static str> {
 
 // ── Diff Production ──
 
-/// The diff of replacing every range in `ranges` of `original` with `new_string`, and the new-content
-/// lines each replacement writes. Old-side numbers count lines of `original`, and new-side numbers
-/// count lines of the edited text.
+/// The diff of replacing every range in `ranges` of `original` with `new_string`, and the
+/// new-content lines each replacement writes. Old-side numbers count lines of `original`, and
+/// new-side numbers count lines of the edited text.
 fn build_diff(
     original: &str,
     old_string: &str,
@@ -480,37 +478,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn prefers_a_legacy_recorded_diff() {
-            let input = serde_json::json!({
-                "file_path": "/tmp/f.rs",
-                "old_string": "a",
-                "new_string": "b",
-                "replace_all": true,
-            });
-            let diff = EditDiff {
-                chunk: DiffChunk {
-                    old: vec![line(12, "a")],
-                    new: vec![line(12, "b")],
-                },
-                locations: vec![12, 47],
-            };
-            let metadata = ToolMetadata {
-                diff: Some(diff.clone()),
-                ..ToolMetadata::default()
-            };
-
-            let view = EditTool.result_view(
-                &input,
-                "Replaced 2 occurrences in /tmp/f.rs.",
-                &metadata,
-                Path::new("/repo"),
-            );
-
-            assert_eq!(view, Some(ToolResultView::Diff(diff)));
-        }
-
-        #[test]
-        fn without_a_recorded_diff_synthesizes_one_from_the_input() {
+        fn synthesizes_a_diff_from_the_input() {
             let input = serde_json::json!({
                 "file_path": "/tmp/f.rs",
                 "old_string": "fn foo()",
@@ -567,11 +535,11 @@ mod tests {
             let preview = tool
                 .approval_preview(
                     "edit",
-                    &serde_json::json!({
+                    &crate::tool::local_testing::prepared(serde_json::json!({
                         "file_path": "/repo/src/main.rs",
                         "old_string": "let a = 1;",
                         "new_string": "let a = 2;",
-                    }),
+                    })),
                     Path::new("/repo"),
                 )
                 .await;
@@ -662,6 +630,44 @@ mod tests {
                 format!("Successfully edited {}.", path.display())
             );
             assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
+        }
+
+        #[cfg(target_os = "linux")]
+        #[tokio::test]
+        async fn edits_a_target_under_a_non_utf8_working_directory() {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let dir = canonical_tempdir();
+            let cwd = dir
+                .path()
+                .join(std::ffi::OsString::from_vec(b"caf\xe9".to_vec()));
+            fs::create_dir(&cwd).unwrap();
+            let path = cwd.join("notes.txt");
+            fs::write(&path, "old\n").unwrap();
+            let ctx = ctx_with(&cwd, tracker_seeded(&path));
+
+            let output = local_testing::run(
+                &EditTool,
+                serde_json::json!({
+                    "file_path": "notes.txt",
+                    "old_string": "old",
+                    "new_string": "new",
+                }),
+                &ctx,
+            )
+            .await;
+
+            assert!(!output.is_error, "{}", output.content);
+            assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+            let entries: Vec<_> = fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(
+                entries,
+                [cwd.file_name().unwrap()],
+                "the edit must not touch the lossy spelling",
+            );
         }
 
         #[tokio::test]
@@ -975,7 +981,8 @@ mod tests {
             assert_eq!(
                 err,
                 format!(
-                    "{} is not valid UTF-8, so edit cannot change it. Use the bash tool to edit it.",
+                    "{} is not valid UTF-8, so edit cannot change it. \
+                     Use the bash tool to edit it.",
                     path.display()
                 ),
             );
@@ -1189,6 +1196,35 @@ mod tests {
                         Y
                     "}
                 );
+            }
+        }
+    }
+
+    mod match_ranges {
+        use super::*;
+
+        #[test]
+        fn matches_each_occurrence_with_either_line_ending() {
+            for (case, content, old, expected) in [
+                ("one line", "a\nb\na\n", "a", vec![(0, 1), (4, 5)]),
+                ("several lines", "a\nb\nc\n", "a\nb", vec![(0, 3)]),
+                ("leading break", "a\nb\nc\n", "\nb", vec![(1, 3)]),
+                ("lone break", "a\nb\n", "\n", vec![(1, 2), (3, 4)]),
+                ("crlf match", "a\r\nb\r\n", "a\nb", vec![(0, 4)]),
+                (
+                    "leading break before crlf",
+                    "a\r\nb\r\nc",
+                    "\nb",
+                    vec![(1, 4)],
+                ),
+                (
+                    "resumes past a mismatch",
+                    "a\nc\na\nb",
+                    "a\nb",
+                    vec![(4, 7)],
+                ),
+            ] {
+                assert_eq!(match_ranges(content, old), expected, "{case}");
             }
         }
     }

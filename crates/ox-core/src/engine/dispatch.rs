@@ -377,7 +377,7 @@ impl<'r> Dispatcher<'r, '_> {
                     .policy
                     .session_grant(class, &prepared.access);
                 let preview = tool
-                    .approval_preview(name, &prepared.input, self.dispatch_ctx.workspace.cwd())
+                    .approval_preview(name, prepared, self.dispatch_ctx.workspace.cwd())
                     .await;
                 if self
                     .sink
