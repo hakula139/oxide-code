@@ -56,7 +56,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **`/effort` slider**: `EffortSlider` is the bare `/effort` horizontal Speed ↔ Intelligence visual. Lists all five levels and seeds the cursor at the active effort. Unknown model IDs have no effort, so bare `/effort` errors on them. Levels render with uniform `●` / `○` glyphs in the five `effort_*` theme slots, graded blue → red. Color encodes identity, bold encodes the active pick, and a theme can restyle the gradient.
 
-- **`/mode` picker**: `ModePicker` wraps `ListPicker<ModeRow>` over `manual`, `yolo`, and `plan`, each with a short description, and seeds the cursor at the active mode. Enter forwards `Op::SetMode` for the highlighted row and cancels on the active one, and numeric `1`–`3` shortcuts jump to a row.
+- **`/mode` picker**: `ModePicker` wraps `ListPicker<ModeRow>` over `manual`, `plan`, and `yolo`, each with a short description, and seeds the cursor at the active mode. Enter forwards `Op::SetMode` for the highlighted row and cancels on the active one, and numeric `1`–`3` shortcuts jump to a row.
 
 - **`/theme` picker**: `ThemePicker` wraps `ListPicker<ThemeRow>` over the curated built-in roster and emits `Action::PreviewTheme` on every cursor move so the App repaints the chat in the candidate palette without committing. Esc snaps back via the cached `preview_theme_snapshot`, while Enter promotes the preview to an `Action::SwapTheme` swap. Numeric `1`–`9` shortcuts jump to a row to match the visual ladder.
 

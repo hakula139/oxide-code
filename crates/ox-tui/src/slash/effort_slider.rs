@@ -17,6 +17,7 @@ use crate::modal::chrome::{CONFIRM_HINTS, HINT_SEPARATOR, KEY_LEFT_RIGHT};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
+use crate::viewport::Direction;
 
 // ── Constants ──
 
@@ -161,12 +162,6 @@ impl Modal for EffortSlider {
 }
 
 // ── Effort Ladder ──
-
-#[derive(Debug, Clone, Copy)]
-pub(super) enum Direction {
-    Forward,
-    Backward,
-}
 
 /// The index one level from `idx` along [`Effort::VARIANTS`], stopping at either end so a held key
 /// cannot overshoot onto the opposite end.

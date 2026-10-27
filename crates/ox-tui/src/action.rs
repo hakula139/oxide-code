@@ -1,10 +1,14 @@
 //! What the input box, slash commands, modals, and the app's named keys ask the
 //! [`App`](crate::app::App) to do.
 
+use strum::VariantArray as _;
+
+use ox_core::permission::Mode;
 use ox_core::protocol::Op;
 
 use crate::keymap::{KeyAction, KeyChord, Keymap};
 use crate::theme::builtin::BuiltinTheme;
+use crate::viewport::{Direction, wrap_next, wrap_prev};
 
 /// A request from a TUI surface. [`Self::Submit`] runs as a slash command or a prompt, [`Self::Op`]
 /// reaches the engine after the app applies its local state change, and [`Self::SlashPrompt`]
@@ -23,13 +27,28 @@ pub(crate) enum Action {
         line: String,
         prompt: String,
     },
-    /// Switches to the next permission mode.
-    CycleMode,
+    /// Steps to the permission mode on `direction`.
+    CycleMode(Direction),
     /// A preview of the picker's highlighted theme, without committing it. Cursor moves in the
     /// `/theme` modal emit this, and cancelling the modal restores the open-time snapshot.
     PreviewTheme(&'static BuiltinTheme),
     /// A theme swap for the rest of the session. A restart returns to the configured theme.
     SwapTheme(&'static BuiltinTheme),
+}
+
+// ── Mode Cycle ──
+
+/// The mode one step from `current` in `direction`, wrapping at both ends.
+pub(crate) fn next_mode(current: Mode, direction: Direction) -> Mode {
+    let index = Mode::VARIANTS
+        .iter()
+        .position(|&mode| mode == current)
+        .expect("Mode::VARIANTS lists every permission mode");
+    let next = match direction {
+        Direction::Forward => wrap_next(index, Mode::VARIANTS.len()),
+        Direction::Backward => wrap_prev(index, Mode::VARIANTS.len()),
+    };
+    Mode::VARIANTS[next]
 }
 
 // ── App Keymap ──
@@ -72,6 +91,30 @@ mod tests {
                 APP_KEYMAP.hint(AppAction::ToggleExpanded, &()).as_deref(),
                 Some("Ctrl+O to expand"),
             );
+        }
+    }
+
+    mod next_mode {
+        use super::*;
+
+        #[test]
+        fn steps_through_every_mode_and_wraps_at_both_ends() {
+            for (start, forward, backward) in [
+                (Mode::Manual, Mode::Plan, Mode::Yolo),
+                (Mode::Plan, Mode::Yolo, Mode::Manual),
+                (Mode::Yolo, Mode::Manual, Mode::Plan),
+            ] {
+                assert_eq!(
+                    next_mode(start, Direction::Forward),
+                    forward,
+                    "{start} forward",
+                );
+                assert_eq!(
+                    next_mode(start, Direction::Backward),
+                    backward,
+                    "{start} backward",
+                );
+            }
         }
     }
 }
