@@ -48,7 +48,7 @@ impl TurnReport {
     pub(super) fn context_estimate(
         &self,
         prompt: &PromptParts,
-        tools: &[ToolDefinition],
+        tools: &[&ToolDefinition],
         messages: &[Message],
     ) -> u32 {
         self.usage().map_or_else(
@@ -443,7 +443,7 @@ pub(super) async fn record_drained_prompts(
 async fn stream_response(
     client: &dyn Wire,
     transcript: &LiveTranscript,
-    tools: &[ToolDefinition],
+    tools: &[&ToolDefinition],
     sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
 ) -> Result<Response> {
@@ -565,7 +565,7 @@ mod tests {
                 messages: &[Message],
                 _system: &SystemPrompt,
                 _user_context: Option<&str>,
-                _tools: &[ToolDefinition],
+                _tools: &[&ToolDefinition],
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
                 self.requests.lock().unwrap().push(messages.to_vec());
                 let events = self
@@ -670,9 +670,11 @@ mod tests {
         impl Tool for PathViewTool {
             fn spec(&self) -> ToolSpec {
                 ToolSpec {
-                    name: "path_view".to_owned(),
-                    description: "view a path".to_owned(),
-                    input_schema: json!({"type": "object"}),
+                    definition: ToolDefinition {
+                        name: "path_view".to_owned(),
+                        description: "view a path".to_owned(),
+                        input_schema: json!({"type": "object"}),
+                    },
                     class: crate::permission::PermissionClass::Read,
                     parallel_safe: true,
                 }
@@ -724,7 +726,7 @@ mod tests {
                 _messages: &[Message],
                 _system: &SystemPrompt,
                 _user_context: Option<&str>,
-                _tools: &[ToolDefinition],
+                _tools: &[&ToolDefinition],
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
                 let (tx, rx) = mpsc::channel(1);
                 tx.try_send(Ok(ResponseEvent::Text(self.0.to_owned())))
@@ -742,9 +744,11 @@ mod tests {
         impl Tool for GateTool {
             fn spec(&self) -> ToolSpec {
                 ToolSpec {
-                    name: "gate".to_owned(),
-                    description: "blocks until the turn is cancelled".to_owned(),
-                    input_schema: json!({"type": "object"}),
+                    definition: ToolDefinition {
+                        name: "gate".to_owned(),
+                        description: "blocks until the turn is cancelled".to_owned(),
+                        input_schema: json!({"type": "object"}),
+                    },
                     class: crate::permission::PermissionClass::Exec,
                     parallel_safe: false,
                 }
@@ -2992,7 +2996,7 @@ mod tests {
                 _messages: &[Message],
                 _system: &SystemPrompt,
                 _user_context: Option<&str>,
-                _tools: &[ToolDefinition],
+                _tools: &[&ToolDefinition],
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
                 bail!("the API refused the request")
             }

@@ -749,7 +749,7 @@ mod tests {
                         (
                             "t3".to_owned(),
                             ToolMetadata {
-                                truncated_total: Some(2),
+                                raw_text: true,
                                 ..ToolMetadata::default()
                             },
                         ),
@@ -783,10 +783,7 @@ mod tests {
                     .as_deref(),
                 Some("Edited a.rs"),
             );
-            assert_eq!(
-                data.tool_result_metadata.get("t3").unwrap().truncated_total,
-                Some(2),
-            );
+            assert!(data.tool_result_metadata.get("t3").unwrap().raw_text);
         }
 
         #[tokio::test]
@@ -2258,7 +2255,8 @@ mod tests {
             drop(handle);
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) =
+                FileTracker::restored(resumed.transcript.file_snapshots).await;
 
             let restored =
                 resumed_tracker.verify_current_content(&path_a, b"alpha", GatePurpose::Edit);
@@ -2292,7 +2290,8 @@ mod tests {
             std::fs::write(&path_a, b"externally edited bytes").unwrap();
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) =
+                FileTracker::restored(resumed.transcript.file_snapshots).await;
 
             let result = resumed_tracker.verify_current_content(
                 &path_a,
@@ -2326,7 +2325,8 @@ mod tests {
             std::fs::remove_file(&path_a).unwrap();
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) =
+                FileTracker::restored(resumed.transcript.file_snapshots).await;
             let result = resumed_tracker.verify_current_content(&path_a, b"", GatePurpose::Edit);
             assert_eq!(
                 result,
@@ -2514,7 +2514,6 @@ mod tests {
                             "t3".to_owned(),
                             ToolMetadata {
                                 title: Some("Found 100 files".to_owned()),
-                                truncated_total: Some(250),
                                 result_view: Some(ToolResultView::GlobFiles {
                                     pattern: "*.rs".to_owned(),
                                     files: vec!["g.rs".to_owned()],
@@ -2531,7 +2530,7 @@ mod tests {
         fn edit_metadata() -> ToolMetadata {
             ToolMetadata {
                 title: Some("Edited f.rs".to_owned()),
-                diff: Some(EditDiff {
+                result_view: Some(ToolResultView::Diff(EditDiff {
                     chunk: DiffChunk {
                         old: vec![NumberedLine {
                             number: 1,
@@ -2543,7 +2542,7 @@ mod tests {
                         }],
                     },
                     locations: vec![1],
-                }),
+                })),
                 ..ToolMetadata::default()
             }
         }

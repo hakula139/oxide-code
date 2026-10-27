@@ -27,7 +27,7 @@ pub(crate) trait Wire: Send + Sync {
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
-        tools: &[ToolDefinition],
+        tools: &[&ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>>;
 
     /// Streams a request no later request extends, so caching its transcript tail would only add a
@@ -37,7 +37,7 @@ pub(crate) trait Wire: Send + Sync {
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
-        tools: &[ToolDefinition],
+        tools: &[&ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         self.stream_message(messages, system, user_context, tools)
     }

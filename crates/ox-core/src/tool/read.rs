@@ -9,8 +9,8 @@ use serde::Deserialize;
 use super::file::FileVerb;
 use super::view::{NumberedLine, ToolResultView};
 use super::{
-    Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, display_path, extract_input_field,
-    tool_path,
+    Prepared, Tool, ToolCtx, ToolDefinition, ToolMetadata, ToolOutput, ToolSpec, display_path,
+    extract_input_field, tool_path,
 };
 use crate::file_tracker::{CACHE_HIT_STUB, LastView, RecordRead};
 use crate::permission::PermissionClass;
@@ -27,9 +27,11 @@ pub(crate) struct ReadTool;
 impl Tool for ReadTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "read".to_owned(),
-            description: "Read the contents of a file with line numbers.".to_owned(),
-            input_schema: input_schema(),
+            definition: ToolDefinition {
+                name: "read".to_owned(),
+                description: "Read the contents of a file with line numbers.".to_owned(),
+                input_schema: input_schema(),
+            },
             class: PermissionClass::Read,
             parallel_safe: true,
         }
@@ -59,7 +61,7 @@ impl Tool for ReadTool {
         prepared: Prepared,
         ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(run(prepared.input, ctx))
+        Box::pin(run(prepared, ctx))
     }
 }
 
@@ -88,40 +90,40 @@ fn input_schema() -> serde_json::Value {
 
 #[derive(Deserialize)]
 struct Input {
-    file_path: String,
     offset: Option<usize>,
     limit: Option<usize>,
 }
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
-    let input: Input = match super::parse_input(raw) {
+async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
+    let (input, path): (Input, _) = match prepared.into_path_input() {
         Ok(v) => v,
         Err(msg) => return ToolOutput::error(msg),
     };
+    let shown = path.display().to_string();
 
-    match read_file(&input.file_path, input.offset, input.limit, ctx).await {
-        Ok(content) => ToolOutput::success(content)
-            .with_title(format!("Read {}", super::file_name(&input.file_path))),
+    match read_file(&path, input.offset, input.limit, ctx).await {
+        Ok(content) => {
+            ToolOutput::success(content).with_title(format!("Read {}", super::file_name(&shown)))
+        }
         Err(msg) => ToolOutput::error(msg),
     }
 }
 
-/// Reads `path`, resolved against the context's cwd, as a `LINENO\tTEXT` excerpt of at most `limit`
-/// lines and [`OUTPUT_BUDGET`] bytes, and records the lines shown in the context's tracker for the
+/// Reads `path`, which `prepare` resolved, as a `LINENO\tTEXT` excerpt of at most `limit` lines and
+/// [`OUTPUT_BUDGET`] bytes, and records the lines shown in the context's tracker for the
 /// Read-before-Edit gate. A footer names those lines when the excerpt leaves lines out.
 ///
 /// Refuses directories, non-regular files, files over the tracked size cap, and binary files, and
 /// strips a leading UTF-8 BOM.
 async fn read_file(
-    path: &str,
+    path: &Path,
     offset: Option<usize>,
     limit: Option<usize>,
     ctx: &ToolCtx,
 ) -> Result<String, String> {
-    let file_path = ctx.cwd().join(path);
-    let (_, bytes) = super::file::read_validated(&file_path, path, FileVerb::Read).await?;
+    let (_, bytes) = super::file::read_validated(path, FileVerb::Read).await?;
 
     if super::file::is_binary(&bytes) {
         return Err(
@@ -129,7 +131,7 @@ async fn read_file(
         );
     }
 
-    let key = super::file::tracker_key(&file_path).await;
+    let key = super::file::tracker_key(path).await;
 
     let text = String::from_utf8_lossy(&bytes);
     let text = strip_bom(&text);
@@ -255,7 +257,7 @@ mod tests {
 
     use super::*;
     use crate::file_tracker::{GateError, GatePurpose, MAX_TRACKED_FILE_SIZE};
-    use crate::tool::local_testing::{ctx, temp_ctx};
+    use crate::tool::local_testing::{self, ctx, temp_ctx};
     use crate::tool::spill::MAX_OUTPUT_BYTES;
     use crate::util::fs::testing::symlink_file;
     use crate::util::path::local_testing::canonical_tempdir;
@@ -412,7 +414,8 @@ mod tests {
             let path = dir.path().join("test.txt");
             fs::write(&path, "hello\nworld\n").unwrap();
 
-            let output = run(
+            let output = local_testing::run(
+                &ReadTool,
                 serde_json::json!({"file_path": path.to_str().unwrap()}),
                 &temp_ctx(),
             )
@@ -429,7 +432,8 @@ mod tests {
             fs::write(&path, "hello\n").unwrap();
             let ctx = temp_ctx();
 
-            let output = run(
+            let output = local_testing::run(
+                &ReadTool,
                 serde_json::json!({"file_path": path.to_str().unwrap()}),
                 &ctx,
             )
@@ -449,14 +453,16 @@ mod tests {
             fs::write(&path, "hello\nworld\n").unwrap();
             let ctx = temp_ctx();
 
-            let first = run(
+            let first = local_testing::run(
+                &ReadTool,
                 serde_json::json!({"file_path": path.to_str().unwrap()}),
                 &ctx,
             )
             .await;
             assert_eq!(first.content, "1\thello\n2\tworld");
 
-            let second = run(
+            let second = local_testing::run(
+                &ReadTool,
                 serde_json::json!({"file_path": path.to_str().unwrap()}),
                 &ctx,
             )
@@ -486,8 +492,8 @@ mod tests {
                 "offset": 1,
                 "limit": 2,
             });
-            let first = run(json.clone(), &ctx).await;
-            let second = run(json, &ctx).await;
+            let first = local_testing::run(&ReadTool, json.clone(), &ctx).await;
+            let second = local_testing::run(&ReadTool, json, &ctx).await;
             assert_ne!(second.content, CACHE_HIT_STUB);
             assert_eq!(first.content, second.content);
         }
@@ -498,7 +504,12 @@ mod tests {
             fs::write(dir.path().join("notes.txt"), "in the ctx cwd\n").unwrap();
             let ctx = ctx(dir.path());
 
-            let output = run(serde_json::json!({"file_path": "notes.txt"}), &ctx).await;
+            let output = local_testing::run(
+                &ReadTool,
+                serde_json::json!({"file_path": "notes.txt"}),
+                &ctx,
+            )
+            .await;
 
             assert!(!output.is_error, "{}", output.content);
             assert_eq!(output.content, "1\tin the ctx cwd");
@@ -510,9 +521,33 @@ mod tests {
             assert_eq!(recorded, Ok(()));
         }
 
+        #[cfg(target_os = "linux")]
+        #[tokio::test]
+        async fn opens_a_target_under_a_non_utf8_working_directory() {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let dir = canonical_tempdir();
+            let cwd = dir
+                .path()
+                .join(std::ffi::OsString::from_vec(b"caf\xe9".to_vec()));
+            fs::create_dir(&cwd).unwrap();
+            fs::write(cwd.join("notes.txt"), "hello\n").unwrap();
+            let ctx = ctx(&cwd);
+
+            let output = local_testing::run(
+                &ReadTool,
+                serde_json::json!({"file_path": "notes.txt"}),
+                &ctx,
+            )
+            .await;
+
+            assert!(!output.is_error, "{}", output.content);
+            assert_eq!(output.content, "1\thello");
+        }
+
         #[tokio::test]
         async fn missing_file_path_reports_input_error() {
-            let output = run(serde_json::json!({}), &temp_ctx()).await;
+            let output = local_testing::run(&ReadTool, serde_json::json!({}), &temp_ctx()).await;
 
             assert!(output.is_error);
             assert_eq!(output.content, "Invalid input: missing field `file_path`");
@@ -520,7 +555,8 @@ mod tests {
 
         #[tokio::test]
         async fn read_error_omits_title() {
-            let output = run(
+            let output = local_testing::run(
+                &ReadTool,
                 serde_json::json!({"file_path": "/nonexistent/path.txt"}),
                 &temp_ctx(),
             )
@@ -550,9 +586,7 @@ mod tests {
             )
             .unwrap();
 
-            let result = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
-                .await
-                .unwrap();
+            let result = read_file(&path, None, None, &temp_ctx()).await.unwrap();
             assert_eq!(
                 result,
                 indoc! {"
@@ -579,7 +613,7 @@ mod tests {
             )
             .unwrap();
 
-            let result = read_file(path.to_str().unwrap(), Some(2), Some(2), &temp_ctx())
+            let result = read_file(&path, Some(2), Some(2), &temp_ctx())
                 .await
                 .unwrap();
             assert_eq!(
@@ -600,9 +634,7 @@ mod tests {
             fs::write(&path, "a\nb\n").unwrap();
             let ctx = temp_ctx();
 
-            read_file(path.to_str().unwrap(), Some(1), Some(10), &ctx)
-                .await
-                .unwrap();
+            read_file(&path, Some(1), Some(10), &ctx).await.unwrap();
 
             let result = ctx
                 .tracker
@@ -618,9 +650,7 @@ mod tests {
             fs::write(&path, &content).unwrap();
             let ctx = temp_ctx();
 
-            let output = read_file(path.to_str().unwrap(), None, None, &ctx)
-                .await
-                .unwrap();
+            let output = read_file(&path, None, None, &ctx).await.unwrap();
             assert!(output.ends_with(&format!("of {} total)", DEFAULT_LINE_LIMIT + 1)));
 
             let edit =
@@ -644,9 +674,7 @@ mod tests {
             fs::write(&path, &content).unwrap();
             let ctx = temp_ctx();
 
-            let output = read_file(path.to_str().unwrap(), None, None, &ctx)
-                .await
-                .unwrap();
+            let output = read_file(&path, None, None, &ctx).await.unwrap();
 
             assert!(output.len() <= MAX_OUTPUT_BYTES, "{}", output.len());
             let (body, footer) = output.rsplit_once("\n\n").unwrap();
@@ -665,13 +693,9 @@ mod tests {
                 "lines past the budget keep Write closed: {write:?}",
             );
 
-            let repeated = read_file(path.to_str().unwrap(), None, None, &ctx)
-                .await
-                .unwrap();
+            let repeated = read_file(&path, None, None, &ctx).await.unwrap();
             assert_eq!(repeated, output);
-            let remaining = read_file(path.to_str().unwrap(), Some(shown + 1), None, &ctx)
-                .await
-                .unwrap();
+            let remaining = read_file(&path, Some(shown + 1), None, &ctx).await.unwrap();
             let rows = (shown + 1..=1000)
                 .map(|line| format!("{line}\t{}", "x".repeat(199)))
                 .collect::<Vec<_>>()
@@ -697,9 +721,7 @@ mod tests {
             fs::write(&path, &content).unwrap();
             let ctx = temp_ctx();
 
-            let output = read_file(path.to_str().unwrap(), None, None, &ctx)
-                .await
-                .unwrap();
+            let output = read_file(&path, None, None, &ctx).await.unwrap();
 
             assert_eq!(output, format!("1\t{fits}\n2\t{over}"));
             assert_eq!(
@@ -707,9 +729,7 @@ mod tests {
                     .verify_current_content(&path, content.as_bytes(), GatePurpose::Write),
                 Ok(())
             );
-            let repeated = read_file(path.to_str().unwrap(), None, None, &ctx)
-                .await
-                .unwrap();
+            let repeated = read_file(&path, None, None, &ctx).await.unwrap();
             assert_eq!(repeated, CACHE_HIT_STUB);
         }
 
@@ -724,16 +744,12 @@ mod tests {
                 let offset = if prefix.is_empty() { 1 } else { 2 };
 
                 if !prefix.is_empty() {
-                    let first = read_file(path.to_str().unwrap(), None, None, &ctx)
-                        .await
-                        .unwrap();
+                    let first = read_file(&path, None, None, &ctx).await.unwrap();
                     assert_eq!(
                         first, "1\tfirst\n\n(Showing lines 1–1 of 2 total)",
                         "{name}"
                     );
-                    let repeated = read_file(path.to_str().unwrap(), None, None, &ctx)
-                        .await
-                        .unwrap();
+                    let repeated = read_file(&path, None, None, &ctx).await.unwrap();
                     assert_eq!(repeated, first, "{name}");
                     assert_eq!(
                         ctx.tracker.verify_current_content(
@@ -745,7 +761,7 @@ mod tests {
                         "{name}"
                     );
                 }
-                let err = read_file(path.to_str().unwrap(), Some(offset), None, &ctx)
+                let err = read_file(&path, Some(offset), None, &ctx)
                     .await
                     .unwrap_err();
 
@@ -782,9 +798,7 @@ mod tests {
             let path = dir.path().join("test.txt");
             fs::write(&path, "first\nsecond\n").unwrap();
 
-            let result = read_file(path.to_str().unwrap(), Some(0), None, &temp_ctx())
-                .await
-                .unwrap();
+            let result = read_file(&path, Some(0), None, &temp_ctx()).await.unwrap();
             assert_eq!(result, "1\tfirst\n2\tsecond");
         }
 
@@ -794,9 +808,7 @@ mod tests {
             let path = dir.path().join("bom.txt");
             fs::write(&path, "\u{feff}hello\n").unwrap();
 
-            let result = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
-                .await
-                .unwrap();
+            let result = read_file(&path, None, None, &temp_ctx()).await.unwrap();
 
             assert_eq!(result, "1\thello");
         }
@@ -807,9 +819,7 @@ mod tests {
             let path = dir.path().join("empty.txt");
             fs::write(&path, "").unwrap();
 
-            let result = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
-                .await
-                .unwrap();
+            let result = read_file(&path, None, None, &temp_ctx()).await.unwrap();
             assert_eq!(result, "(empty file)");
         }
 
@@ -817,7 +827,9 @@ mod tests {
         async fn missing_file_reports_error() {
             let path = "/nonexistent/path.txt";
 
-            let err = read_file(path, None, None, &temp_ctx()).await.unwrap_err();
+            let err = read_file(Path::new(path), None, None, &temp_ctx())
+                .await
+                .unwrap_err();
 
             let cause = fs::metadata(path).unwrap_err();
             assert_eq!(err, format!("Failed to access {path}: {cause}"));
@@ -828,7 +840,9 @@ mod tests {
             let dir = canonical_tempdir();
             let path = dir.path().to_str().unwrap();
 
-            let err = read_file(path, None, None, &temp_ctx()).await.unwrap_err();
+            let err = read_file(Path::new(path), None, None, &temp_ctx())
+                .await
+                .unwrap_err();
 
             assert_eq!(
                 err,
@@ -843,9 +857,7 @@ mod tests {
             let f = fs::File::create(&path).unwrap();
             f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
-            let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
-                .await
-                .unwrap_err();
+            let err = read_file(&path, None, None, &temp_ctx()).await.unwrap_err();
 
             assert_eq!(
                 err,
@@ -859,9 +871,7 @@ mod tests {
             let path = dir.path().join("binary.bin");
             fs::write(&path, b"hello\x00world").unwrap();
 
-            let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
-                .await
-                .unwrap_err();
+            let err = read_file(&path, None, None, &temp_ctx()).await.unwrap_err();
 
             assert_eq!(
                 err,
@@ -875,7 +885,7 @@ mod tests {
             let path = dir.path().join("test.txt");
             fs::write(&path, "a\nb\n").unwrap();
 
-            let err = read_file(path.to_str().unwrap(), Some(100), None, &temp_ctx())
+            let err = read_file(&path, Some(100), None, &temp_ctx())
                 .await
                 .unwrap_err();
 
@@ -892,9 +902,7 @@ mod tests {
             let path = dir.path().join("notes.md");
             symlink_file(&secret, &path);
 
-            let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
-                .await
-                .unwrap_err();
+            let err = read_file(&path, None, None, &temp_ctx()).await.unwrap_err();
 
             #[cfg(unix)]
             let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32);
@@ -911,9 +919,7 @@ mod tests {
             let path = dir.path().join("sock");
             let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
-            let err = read_file(path.to_str().unwrap(), None, None, &temp_ctx())
-                .await
-                .unwrap_err();
+            let err = read_file(&path, None, None, &temp_ctx()).await.unwrap_err();
 
             assert_eq!(
                 err,

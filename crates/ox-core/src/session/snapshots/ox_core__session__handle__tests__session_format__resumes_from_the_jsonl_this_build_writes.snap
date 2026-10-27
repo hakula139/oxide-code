@@ -247,24 +247,27 @@ expression: recovered
   "title": "Fix f.rs",
   "tool_metadata": {
     "t1": {
-      "diff": {
-        "chunk": {
-          "new": [
-            {
-              "number": 1,
-              "text": "fn run() {}"
-            }
-          ],
-          "old": [
-            {
-              "number": 1,
-              "text": "fn main() {}"
-            }
+      "result_view": {
+        "data": {
+          "chunk": {
+            "new": [
+              {
+                "number": 1,
+                "text": "fn run() {}"
+              }
+            ],
+            "old": [
+              {
+                "number": 1,
+                "text": "fn main() {}"
+              }
+            ]
+          },
+          "locations": [
+            1
           ]
         },
-        "locations": [
-          1
-        ]
+        "type": "diff"
       },
       "title": "Edited f.rs"
     },
@@ -282,8 +285,7 @@ expression: recovered
         },
         "type": "glob_files"
       },
-      "title": "Found 100 files",
-      "truncated_total": 250
+      "title": "Found 100 files"
     }
   },
   "usage": [

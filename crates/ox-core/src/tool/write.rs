@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use super::file::{FileVerb, WriteMode};
 use super::view::{ApprovalBody, ApprovalPreview};
-use super::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field};
+use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::{FileTracker, GatePurpose, LastView};
 use crate::permission::PermissionClass;
 
@@ -17,16 +17,18 @@ pub(crate) struct WriteTool;
 impl Tool for WriteTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "write".to_owned(),
-            description: "Write content to a file, \
-                          creating it if it does not exist or overwriting it if it does. \
-                          Before overwriting an existing file, read all of it with the `read` tool \
-                          in this session, in one call or by paging with offset and limit. \
-                          As with the `edit` tool, a write also fails for a file \
-                          that changed externally since the last `read`. \
-                          Creating a new file needs no prior `read`."
-                .to_owned(),
-            input_schema: input_schema(),
+            definition: ToolDefinition {
+                name: "write".to_owned(),
+                description: "Write content to a file, \
+                              creating it if it does not exist or overwriting it if it does. \
+                              Before overwriting an existing file, read all of it with the `read` tool \
+                              in this session, in one call or by paging with offset and limit. \
+                              As with the `edit` tool, a write also fails for a file \
+                              that changed externally since the last `read`. \
+                              Creating a new file needs no prior `read`."
+                    .to_owned(),
+                input_schema: input_schema(),
+            },
             class: PermissionClass::Edit,
             parallel_safe: false,
         }
@@ -49,7 +51,7 @@ impl Tool for WriteTool {
         Box::pin(async move {
             let content = extract_input_field(input, "content").unwrap_or_default();
             let current = match extract_input_field(input, "file_path") {
-                Some(path) => current_text(&cwd.join(path), path).await,
+                Some(path) => current_text(&cwd.join(path)).await,
                 None => String::new(),
             };
             ApprovalPreview {
@@ -64,14 +66,14 @@ impl Tool for WriteTool {
         prepared: Prepared,
         ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(run(prepared.input, ctx))
+        Box::pin(run(prepared, ctx))
     }
 }
 
-/// The text an overwrite of `path`, spelled `shown`, would replace. A missing file, or one the
-/// write refuses (a symlink, a non-regular or oversized file), previews as empty.
-async fn current_text(path: &Path, shown: &str) -> String {
-    read_target(path, shown)
+/// The text an overwrite of `path` would replace. A missing file, or one the write refuses (a
+/// symlink, a non-regular or oversized file), previews as empty.
+async fn current_text(path: &Path) -> String {
+    read_target(path)
         .await
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default()
@@ -98,32 +100,30 @@ fn input_schema() -> serde_json::Value {
 
 #[derive(Deserialize)]
 struct Input {
-    file_path: String,
     content: String,
 }
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
-    let input: Input = match super::parse_input(raw) {
+async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
+    let (input, path): (Input, _) = match prepared.into_path_input() {
         Ok(v) => v,
         Err(msg) => return ToolOutput::error(msg),
     };
+    let shown = path.display().to_string();
+    let name = super::file_name(&shown);
 
-    let path = &input.file_path;
-    let name = super::file_name(path);
-    match write_file(path, &input.content, ctx).await {
-        Ok(WriteMode::CreateNew) => ToolOutput::success(format!("Successfully created {path}."))
+    match write_file(&path, &input.content, ctx).await {
+        Ok(WriteMode::CreateNew) => ToolOutput::success(format!("Successfully created {shown}."))
             .with_title(format!("Created {name}")),
-        Ok(WriteMode::Overwrite) => ToolOutput::success(format!("Successfully updated {path}."))
+        Ok(WriteMode::Overwrite) => ToolOutput::success(format!("Successfully updated {shown}."))
             .with_title(format!("Updated {name}")),
         Err(msg) => ToolOutput::error(msg),
     }
 }
 
-/// Writes `content` to `path`, resolved against the context's cwd, and returns the [`WriteMode`]
-/// the write took.
-async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<WriteMode, String> {
+/// Writes `content` to the resolved `path` and returns the [`WriteMode`] it took.
+async fn write_file(path: &Path, content: &str, ctx: &ToolCtx) -> Result<WriteMode, String> {
     write_file_with_parent(path, content, ctx, |parent| async move {
         tokio::fs::create_dir_all(parent).await
     })
@@ -131,7 +131,7 @@ async fn write_file(path: &str, content: &str, ctx: &ToolCtx) -> Result<WriteMod
 }
 
 async fn write_file_with_parent<F>(
-    path: &str,
+    path: &Path,
     content: &str,
     ctx: &ToolCtx,
     create_parent: impl FnOnce(PathBuf) -> F + Send + 'static,
@@ -139,16 +139,15 @@ async fn write_file_with_parent<F>(
 where
     F: Future<Output = std::io::Result<()>> + Send,
 {
-    let file_path = ctx.cwd().join(path);
-    let pre_meta = match tokio::fs::symlink_metadata(&file_path).await {
+    let pre_meta = match tokio::fs::symlink_metadata(path).await {
         Ok(meta) => Some(meta),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("Failed to access {path}: {e}")),
+        Err(e) => return Err(format!("Failed to access {}: {e}", path.display())),
     };
 
     let expected = if let Some(meta) = &pre_meta {
         validate_write_target(path, meta)?;
-        Some(check_gate(&file_path, path, &ctx.tracker).await?)
+        Some(check_gate(path, &ctx.tracker).await?)
     } else {
         None
     };
@@ -158,7 +157,7 @@ where
     } else {
         WriteMode::CreateNew
     };
-    let shown = path.to_owned();
+    let file_path = path.to_owned();
     let bytes = content.as_bytes().to_vec();
     ctx.tracker
         .write_and_record(&ctx.tool_use_id, LastView::Full, async move {
@@ -167,7 +166,7 @@ where
                     .await
                     .with_context(|| format!("Failed to create directory {}", parent.display()))?;
             }
-            super::file::write_file(file_path, shown, bytes, expected).await
+            super::file::write_file(file_path, bytes, expected).await
         })
         .await
         .map_err(|error| format!("{error:#}"))?;
@@ -176,17 +175,18 @@ where
 
 /// Validates an existing target's `metadata`. The gate pinned the path to its resolved location, so
 /// a symlink there appeared afterward and is refused.
-fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
+fn validate_write_target(path: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {
     if metadata.file_type().is_symlink() {
         return Err(format!(
-            "{path} is a symlink. Refusing to write through it."
+            "{} is a symlink. Refusing to write through it.",
+            path.display()
         ));
     }
     super::file::validate_file_target(path, metadata, FileVerb::Write)
 }
 
-async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<Vec<u8>, String> {
-    let bytes = read_target(path, shown).await?;
+async fn check_gate(path: &Path, tracker: &FileTracker) -> Result<Vec<u8>, String> {
+    let bytes = read_target(path).await?;
     tracker
         .verify_current_content(
             &super::file::tracker_key(path).await,
@@ -197,10 +197,10 @@ async fn check_gate(path: &Path, shown: &str, tracker: &FileTracker) -> Result<V
     Ok(bytes)
 }
 
-/// Reads the existing target `path`, spelled `shown`. The no-follow open refuses a symlink, and
+/// Reads the existing target `path`. The no-follow open refuses a symlink, and
 /// [`validate_write_target`] refuses a non-regular or oversized file.
-async fn read_target(path: &Path, shown: &str) -> Result<Vec<u8>, String> {
-    let (_, bytes) = super::file::read_validated(path, shown, FileVerb::Write).await?;
+async fn read_target(path: &Path) -> Result<Vec<u8>, String> {
+    let (_, bytes) = super::file::read_validated(path, FileVerb::Write).await?;
     Ok(bytes)
 }
 
@@ -224,16 +224,11 @@ pub(crate) mod testing {
         release: Arc<Notify>,
     ) -> Result<(), String> {
         let cancel = ctx.cancel.clone();
-        super::write_file_with_parent(
-            path.to_str().unwrap(),
-            content,
-            ctx,
-            move |parent| async move {
-                started.send(cancel).unwrap();
-                release.notified().await;
-                tokio::fs::create_dir_all(parent).await
-            },
-        )
+        super::write_file_with_parent(path, content, ctx, move |parent| async move {
+            started.send(cancel).unwrap();
+            release.notified().await;
+            tokio::fs::create_dir_all(parent).await
+        })
         .await
         .map(|_| ())
     }
@@ -373,7 +368,12 @@ mod tests {
 
         #[tokio::test]
         async fn missing_required_fields_reports_input_error() {
-            let output = run(serde_json::json!({"file_path": "/tmp/x"}), &temp_ctx()).await;
+            let output = local_testing::run(
+                &WriteTool,
+                serde_json::json!({"file_path": "/tmp/x"}),
+                &temp_ctx(),
+            )
+            .await;
 
             assert!(output.is_error);
             assert_eq!(output.content, "Invalid input: missing field `content`");
@@ -387,7 +387,8 @@ mod tests {
             let ctx = temp_ctx();
             seed_full_read(&ctx.tracker, &path);
 
-            let output = run(
+            let output = local_testing::run(
+                &WriteTool,
                 serde_json::json!({
                     "file_path": path.to_str().unwrap(),
                     "content": "new",
@@ -415,7 +416,8 @@ mod tests {
             let path = dir.path().join("existing.txt");
             fs::write(&path, "old").unwrap();
 
-            let output = run(
+            let output = local_testing::run(
+                &WriteTool,
                 serde_json::json!({
                     "file_path": path.to_str().unwrap(),
                     "content": "new",
@@ -441,7 +443,7 @@ mod tests {
             let path = dir.path().join("new.txt");
             let ctx = temp_ctx();
 
-            let result = write_file(path.to_str().unwrap(), "content", &ctx).await;
+            let result = write_file(&path, "content", &ctx).await;
 
             assert_eq!(result.unwrap(), WriteMode::CreateNew);
             assert_eq!(fs::read_to_string(&path).unwrap(), "content");
@@ -453,10 +455,15 @@ mod tests {
             let ctx = ctx(dir.path());
             let path = dir.path().join("notes/new.txt");
 
-            let result = write_file("notes/new.txt", "content", &ctx).await;
+            let output = local_testing::run(
+                &WriteTool,
+                serde_json::json!({"file_path": "notes/new.txt", "content": "content"}),
+                &ctx,
+            )
+            .await;
 
             assert!(path.parent().unwrap().is_dir());
-            assert_eq!(result.unwrap(), WriteMode::CreateNew);
+            assert!(!output.is_error, "{}", output.content);
             assert_eq!(fs::read_to_string(&path).unwrap(), "content");
             assert_eq!(
                 ctx.tracker
@@ -474,7 +481,7 @@ mod tests {
             let ctx = temp_ctx();
             seed_full_read(&ctx.tracker, &path);
 
-            let result = write_file(path.to_str().unwrap(), "new content", &ctx).await;
+            let result = write_file(&path, "new content", &ctx).await;
 
             assert_eq!(result.unwrap(), WriteMode::Overwrite);
             assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
@@ -490,12 +497,11 @@ mod tests {
             let before = ctx.tracker.snapshot_all();
             let changed = path.clone();
 
-            let error =
-                write_file_with_parent(path.to_str().unwrap(), "ours", &ctx, |_| async move {
-                    fs::write(changed, "theirs")
-                })
-                .await
-                .unwrap_err();
+            let error = write_file_with_parent(&path, "ours", &ctx, |_| async move {
+                fs::write(changed, "theirs")
+            })
+            .await
+            .unwrap_err();
 
             assert!(error.contains("the file changed"), "{error}");
             assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
@@ -508,7 +514,7 @@ mod tests {
             let path = dir.path().join("a").join("b").join("c.txt");
             let ctx = temp_ctx();
 
-            let result = write_file(path.to_str().unwrap(), "deep", &ctx).await;
+            let result = write_file(&path, "deep", &ctx).await;
 
             assert!(path.parent().unwrap().is_dir());
             assert_eq!(result.unwrap(), WriteMode::CreateNew);
@@ -521,10 +527,45 @@ mod tests {
             let path = dir.path().join("empty.txt");
             let ctx = temp_ctx();
 
-            let result = write_file(path.to_str().unwrap(), "", &ctx).await;
+            let result = write_file(&path, "", &ctx).await;
 
             assert_eq!(result.unwrap(), WriteMode::CreateNew);
             assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        }
+
+        #[cfg(target_os = "linux")]
+        #[tokio::test]
+        async fn writes_a_target_under_a_non_utf8_working_directory() {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let dir = canonical_tempdir();
+            let cwd = dir
+                .path()
+                .join(std::ffi::OsString::from_vec(b"caf\xe9".to_vec()));
+            fs::create_dir(&cwd).unwrap();
+            let path = cwd.join("notes.txt");
+            fs::write(&path, "old\n").unwrap();
+            let ctx = ctx(&cwd);
+            seed_full_read(&ctx.tracker, &path);
+
+            let output = local_testing::run(
+                &WriteTool,
+                serde_json::json!({"file_path": "notes.txt", "content": "new\n"}),
+                &ctx,
+            )
+            .await;
+
+            assert!(!output.is_error, "{}", output.content);
+            assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+            let entries: Vec<_> = fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(
+                entries,
+                [cwd.file_name().unwrap()],
+                "the write must not create a sibling beside the lossy spelling",
+            );
         }
 
         #[tokio::test]
@@ -533,7 +574,7 @@ mod tests {
             let path = dir.path().join("existing.txt");
             fs::write(&path, "old content").unwrap();
 
-            let err = write_file(path.to_str().unwrap(), "new content", &temp_ctx())
+            let err = write_file(&path, "new content", &temp_ctx())
                 .await
                 .unwrap_err();
 
@@ -562,9 +603,7 @@ mod tests {
             )
             .await;
             assert!(!first.is_error, "{}", first.content);
-            let err = write_file(path.to_str().unwrap(), "new", &ctx)
-                .await
-                .unwrap_err();
+            let err = write_file(&path, "new", &ctx).await.unwrap_err();
             assert_eq!(
                 err,
                 format!(
@@ -583,7 +622,7 @@ mod tests {
             .await;
             assert!(!rest.is_error, "{}", rest.content);
 
-            let result = write_file(path.to_str().unwrap(), "new", &ctx).await;
+            let result = write_file(&path, "new", &ctx).await;
 
             assert_eq!(result.unwrap(), WriteMode::Overwrite);
             assert_eq!(fs::read_to_string(&path).unwrap(), "new");
@@ -599,9 +638,7 @@ mod tests {
             seed_full_read(&ctx.tracker, &path);
             fs::write(&path, "external edit").unwrap();
 
-            let err = write_file(path.to_str().unwrap(), "our edit", &ctx)
-                .await
-                .unwrap_err();
+            let err = write_file(&path, "our edit", &ctx).await.unwrap_err();
 
             assert_eq!(
                 err,
@@ -623,9 +660,7 @@ mod tests {
             fs::write(&blocker, "I am a file").unwrap();
             let path = blocker.join("child.txt");
 
-            let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
-                .await
-                .unwrap_err();
+            let err = write_file(&path, "content", &temp_ctx()).await.unwrap_err();
 
             #[cfg(unix)]
             let expected = format!(
@@ -648,7 +683,9 @@ mod tests {
             let dir = canonical_tempdir();
             let path = dir.path().to_str().unwrap();
 
-            let err = write_file(path, "content", &temp_ctx()).await.unwrap_err();
+            let err = write_file(Path::new(path), "content", &temp_ctx())
+                .await
+                .unwrap_err();
 
             assert_eq!(err, format!("{path} is a directory. Refusing to write."));
         }
@@ -660,9 +697,7 @@ mod tests {
             let f = fs::File::create(&path).unwrap();
             f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
-            let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
-                .await
-                .unwrap_err();
+            let err = write_file(&path, "content", &temp_ctx()).await.unwrap_err();
 
             assert_eq!(
                 err,
@@ -678,9 +713,7 @@ mod tests {
             let link = dir.path().join("notes.md");
             symlink_file(&target, &link);
 
-            let err = write_file(link.to_str().unwrap(), "payload", &temp_ctx())
-                .await
-                .unwrap_err();
+            let err = write_file(&link, "payload", &temp_ctx()).await.unwrap_err();
 
             assert_eq!(
                 err,
@@ -701,9 +734,7 @@ mod tests {
             seed_full_read(&ctx.tracker, &path);
             local_testing::make_read_only(&path);
 
-            let err = write_file(path.to_str().unwrap(), "overwrite", &ctx)
-                .await
-                .unwrap_err();
+            let err = write_file(&path, "overwrite", &ctx).await.unwrap_err();
 
             let cause = fs::OpenOptions::new().write(true).open(&path).unwrap_err();
             assert_eq!(err, format!("Failed to write {}: {cause}", path.display()));
@@ -721,9 +752,7 @@ mod tests {
             let path = nested.join("file.txt");
             let _denied = deny_subdir_creation(&locked);
 
-            let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
-                .await
-                .unwrap_err();
+            let err = write_file(&path, "content", &temp_ctx()).await.unwrap_err();
 
             let cause = fs::create_dir(&nested).unwrap_err();
             assert_eq!(
@@ -816,7 +845,7 @@ mod tests {
 
             let via_link = dir.path().join("link/new.txt");
 
-            let result = write_file(via_link.to_str().unwrap(), "fresh", &ctx).await;
+            let result = write_file(&via_link, "fresh", &ctx).await;
 
             assert_eq!(result.unwrap(), WriteMode::CreateNew);
             let real = dir.path().join("real/new.txt");
@@ -835,9 +864,7 @@ mod tests {
             let path = dir.path().join("socket");
             let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
-            let err = write_file(path.to_str().unwrap(), "content", &temp_ctx())
-                .await
-                .unwrap_err();
+            let err = write_file(&path, "content", &temp_ctx()).await.unwrap_err();
 
             assert_eq!(
                 err,

@@ -13,7 +13,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::search::{NO_FILES_FOUND, SearchRoot, SearchRow, SearchRows, Unreadable};
 use super::view::{GrepFileGroup, GrepMatchLine, ToolResultView};
-use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
+use super::{
+    Prepared, Tool, ToolCtx, ToolDefinition, ToolMetadata, ToolOutput, ToolSpec,
+    extract_input_field,
+};
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
 use crate::util::fs::{FileReadError, read_regular_file};
@@ -43,9 +46,11 @@ impl GrepTool {
 impl Tool for GrepTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "grep".to_owned(),
-            description: "Search file contents using a regular expression.".to_owned(),
-            input_schema: input_schema(),
+            definition: ToolDefinition {
+                name: "grep".to_owned(),
+                description: "Search file contents using a regular expression.".to_owned(),
+                input_schema: input_schema(),
+            },
             class: PermissionClass::Read,
             parallel_safe: true,
         }
@@ -197,9 +202,17 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
             content,
             title,
             view,
-        }) => ToolOutput::success(content)
-            .with_title(title)
-            .with_result_view(view),
+            raw_text,
+        }) => {
+            let output = ToolOutput::success(content).with_title(title);
+            if raw_text {
+                output.with_raw_text()
+            } else if let Some(view) = view {
+                output.with_result_view(view)
+            } else {
+                output
+            }
+        }
         Err(msg) => ToolOutput::error(msg),
     }
 }
@@ -224,17 +237,20 @@ struct GrepParams<'a> {
 struct GrepOutput {
     content: String,
     title: String,
-    view: ToolResultView,
+    /// The match rows of a content-mode result. Other modes, and notes appended after the rows,
+    /// leave it `None`, so the result renders as text.
+    view: Option<ToolResultView>,
+    /// Whether notes appended to `content` keep it from parsing as match rows.
+    raw_text: bool,
 }
 
 impl GrepOutput {
     fn text(content: String, title: String) -> Self {
         Self {
-            view: ToolResultView::Text {
-                content: content.clone(),
-            },
             content,
             title,
+            view: None,
+            raw_text: false,
         }
     }
 }
@@ -290,9 +306,8 @@ fn grep_files(params: &GrepParams<'_>) -> Result<GrepOutput, String> {
     super::search::push_unreadable_note(&mut output.content, &unreadable, cwd);
     super::search::push_withheld_note(&mut output.content, withheld);
     if !skipped_large.is_empty() || !unreadable.is_empty() || withheld > 0 {
-        output.view = ToolResultView::Text {
-            content: output.content.clone(),
-        };
+        output.view = None;
+        output.raw_text = true;
     }
 
     Ok(output)
@@ -479,7 +494,8 @@ fn format_matches(rows: SearchRows) -> GrepOutput {
     GrepOutput {
         content,
         title,
-        view: ToolResultView::GrepMatches { groups, truncated },
+        view: Some(ToolResultView::GrepMatches { groups, truncated }),
+        raw_text: false,
     }
 }
 
@@ -642,7 +658,8 @@ fn format_count<'a>(
 
 // ── Result View ──
 
-/// Reconstructs a legacy result without stored rows, falling back to text for unrecognized lines.
+/// Reconstructs the match rows of a content-mode result, falling back to text for unrecognized
+/// lines. Grep stores no matches view, so it parses live results too.
 fn parse_content_view(content: &str) -> Option<ToolResultView> {
     let trimmed = content.trim_end();
     if trimmed == NO_MATCHES_FOUND {
@@ -824,7 +841,7 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn persists_the_text_view_when_search_notes_are_present() {
+        async fn marks_notes_as_raw_text() {
             let dir = canonical_tempdir();
             fs::write(dir.path().join("public.rs"), "hit\n").unwrap();
             fs::write(dir.path().join("secret.rs"), "hit\n").unwrap();
@@ -850,14 +867,8 @@ mod tests {
                     output.content,
                     format!("{body}\n\n(1 file withheld by read deny or ask rules)")
                 );
-                let expected = ToolResultView::Text {
-                    content: output.content.clone(),
-                };
-                assert_eq!(
-                    output.metadata.result_view,
-                    Some(expected.clone()),
-                    "{mode}"
-                );
+                assert!(output.metadata.raw_text, "{mode}");
+                assert_eq!(output.metadata.result_view, None, "{mode}");
                 assert_eq!(
                     registry.result_view(
                         "grep",
@@ -867,7 +878,9 @@ mod tests {
                         output.is_error,
                         dir.path()
                     ),
-                    expected,
+                    ToolResultView::Text {
+                        content: output.content.clone(),
+                    },
                     "{mode}"
                 );
             }
@@ -1969,13 +1982,13 @@ mod tests {
                     .collect();
                 assert_eq!(
                     output.view,
-                    ToolResultView::GrepMatches {
+                    Some(ToolResultView::GrepMatches {
                         groups: vec![GrepFileGroup {
                             path: "a.rs".to_owned(),
                             lines: expected_lines
                         }],
                         truncated,
-                    }
+                    })
                 );
             }
         }
@@ -1988,10 +2001,10 @@ mod tests {
             assert_eq!(output.title, "No matches found");
             assert_eq!(
                 output.view,
-                ToolResultView::GrepMatches {
+                Some(ToolResultView::GrepMatches {
                     groups: vec![],
                     truncated: false
-                }
+                })
             );
         }
     }

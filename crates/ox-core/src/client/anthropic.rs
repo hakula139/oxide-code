@@ -233,7 +233,7 @@ impl Client {
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
-        tools: &[ToolDefinition],
+        tools: &[&ToolDefinition],
         breakpoint: Option<CacheControl>,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let prefix_cache = CacheControl::static_prefix(self.is_first_party, self.prompt_cache_ttl);
@@ -277,7 +277,7 @@ impl Wire for Client {
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
-        tools: &[ToolDefinition],
+        tools: &[&ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let breakpoint = CacheControl::conversation(self.prompt_cache_ttl);
         self.stream(messages, system, user_context, tools, Some(breakpoint))
@@ -288,7 +288,7 @@ impl Wire for Client {
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
-        tools: &[ToolDefinition],
+        tools: &[&ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         self.stream(messages, system, user_context, tools, None)
     }
@@ -400,7 +400,7 @@ struct RequestSpec<'a> {
     max_tokens: u32,
     /// The text after the identity block, each with its `cache_control`. Empty text is left out.
     system: &'a [(&'a str, Option<CacheControl>)],
-    tools: Option<&'a [ToolDefinition]>,
+    tools: Option<&'a [&'a ToolDefinition]>,
     output_config: Option<OutputConfig<'a>>,
     messages: RequestMessages<'a>,
 }

@@ -292,12 +292,12 @@ impl Batch {
         });
     }
 
-    /// Queues one sidecar per item, skipping default metadata since it adds no display fields.
+    /// Queues one sidecar per item, skipping metadata without display data.
     fn queue_tool_metadata(&mut self, items: Vec<(String, ToolMetadata)>, now: OffsetDateTime) {
         self.entries.extend(
             items
                 .into_iter()
-                .filter(|(_, metadata)| *metadata != ToolMetadata::default())
+                .filter(|(_, metadata)| metadata.has_display_data())
                 .map(|(tool_use_id, metadata)| Entry::ToolResultMetadata {
                     tool_use_id,
                     metadata,

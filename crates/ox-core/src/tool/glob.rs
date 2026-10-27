@@ -10,7 +10,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::search::{NO_FILES_FOUND, SearchRoot, SearchRow, SearchRows};
 use super::view::ToolResultView;
-use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
+use super::{
+    Prepared, Tool, ToolCtx, ToolDefinition, ToolMetadata, ToolOutput, ToolSpec,
+    extract_input_field,
+};
 use crate::permission::{PermissionClass, ReadFilter};
 use crate::util::text::plural;
 
@@ -32,11 +35,13 @@ impl GlobTool {
 impl Tool for GlobTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "glob".to_owned(),
-            description: "Find files matching a glob pattern. \
-                          Returns paths sorted by modification time (newest first)."
-                .to_owned(),
-            input_schema: input_schema(),
+            definition: ToolDefinition {
+                name: "glob".to_owned(),
+                description: "Find files matching a glob pattern. \
+                              Returns paths sorted by modification time (newest first)."
+                    .to_owned(),
+                input_schema: input_schema(),
+            },
             class: PermissionClass::Read,
             parallel_safe: true,
         }
@@ -123,15 +128,12 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
         Ok(GlobOutput {
             content,
             title,
-            truncated_total,
             view,
         }) => {
-            let output = ToolOutput::success(content)
-                .with_title(title)
-                .with_result_view(view);
-            match truncated_total {
-                Some(total) => output.with_truncated_total(total),
-                None => output,
+            let output = ToolOutput::success(content).with_title(title);
+            match view {
+                Some(view) => output.with_result_view(view),
+                None => output.with_raw_text(),
             }
         }
         Err(msg) => ToolOutput::error(msg),
@@ -143,14 +145,14 @@ struct GlobOutput {
     content: String,
     /// A one-line summary of the call, which the UI shows on its result.
     title: String,
-    truncated_total: Option<usize>,
-    view: ToolResultView,
+    /// The listed files, or `None` when notes in `content` keep it from parsing as rows.
+    view: Option<ToolResultView>,
 }
 
 /// Lists up to [`MAX_RESULTS`] files under `root` that match `pattern`, newest first and relative
 /// to the root's canonical cwd, until `cancel` fires. Trailing notes name the paths the walk could
 /// not read and count the matches and unreadable paths `read_filter` withholds. A truncated list
-/// says so inline and reports its total on `truncated_total`.
+/// says so inline and carries its total in the stored files view.
 fn glob_files(
     pattern: &str,
     root: &SearchRoot,
@@ -209,22 +211,15 @@ fn glob_files(
     }
     super::search::push_unreadable_note(&mut content, &unreadable, cwd);
     super::search::push_withheld_note(&mut content, withheld);
-    let view = if unreadable.is_empty() && withheld == 0 {
-        ToolResultView::GlobFiles {
-            pattern: pattern.to_owned(),
-            files: rows.kept.iter().map(ToString::to_string).collect(),
-            total,
-        }
-    } else {
-        ToolResultView::Text {
-            content: content.clone(),
-        }
-    };
+    let view = (unreadable.is_empty() && withheld == 0).then(|| ToolResultView::GlobFiles {
+        pattern: pattern.to_owned(),
+        files: rows.kept.iter().map(ToString::to_string).collect(),
+        total,
+    });
 
     Ok(GlobOutput {
         content,
         title,
-        truncated_total: truncated.then_some(total),
         view,
     })
 }
@@ -254,7 +249,8 @@ fn compile_glob(pattern: &str) -> Result<globset::GlobMatcher, String> {
 
 // ── Result View ──
 
-/// Reconstructs a legacy result without stored paths, retaining unrecognized output as text.
+/// Reconstructs the files view of a result that stored none, as sidecars from older releases do,
+/// retaining unrecognized output as text.
 fn parse_files_view(
     input: &serde_json::Value,
     content: &str,
@@ -596,7 +592,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn persists_the_text_view_when_search_notes_are_present() {
+        async fn marks_notes_as_raw_text() {
             let dir = canonical_tempdir();
             fs::write(dir.path().join("public.rs"), "").unwrap();
             fs::write(dir.path().join("secret.rs"), "").unwrap();
@@ -613,10 +609,8 @@ mod tests {
                 output.content,
                 "public.rs\n\n(1 file withheld by read deny or ask rules)"
             );
-            let expected = ToolResultView::Text {
-                content: output.content.clone(),
-            };
-            assert_eq!(output.metadata.result_view, Some(expected.clone()));
+            assert!(output.metadata.raw_text);
+            assert_eq!(output.metadata.result_view, None);
             assert_eq!(
                 registry.result_view(
                     "glob",
@@ -626,7 +620,9 @@ mod tests {
                     output.is_error,
                     dir.path()
                 ),
-                expected
+                ToolResultView::Text {
+                    content: output.content.clone(),
+                }
             );
         }
 
@@ -651,7 +647,14 @@ mod tests {
             let name = dir.path().file_name().unwrap().to_str().unwrap();
             assert!(!output.is_error);
             assert_eq!(output.content, format!("{name}/a.txt"));
-            assert!(output.metadata.truncated_total.is_none());
+            assert_eq!(
+                output.metadata.result_view,
+                Some(ToolResultView::GlobFiles {
+                    pattern: "*.txt".to_owned(),
+                    files: vec![format!("{name}/a.txt")],
+                    total: 1,
+                }),
+            );
         }
 
         #[tokio::test]
@@ -675,7 +678,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn truncated_attaches_total_to_metadata() {
+        async fn truncated_view_carries_the_total() {
             let dir = canonical_tempdir();
             let total = MAX_RESULTS + 10;
             for i in 0..total {
@@ -687,7 +690,11 @@ mod tests {
             let output = local_testing::run(&glob_tool(), input, &ctx(dir.path())).await;
 
             assert!(!output.is_error);
-            assert_eq!(output.metadata.truncated_total, Some(total));
+            let Some(ToolResultView::GlobFiles { total: shown, .. }) = output.metadata.result_view
+            else {
+                panic!("a truncated listing stores its files view");
+            };
+            assert_eq!(shown, total);
         }
 
         #[cfg(unix)]
@@ -723,7 +730,10 @@ mod tests {
             let mut files: Vec<&str> = result.content.lines().collect();
             files.sort_unstable();
             assert_eq!(files, ["bar.txt", "foo.txt"]);
-            assert!(result.truncated_total.is_none());
+            let Some(ToolResultView::GlobFiles { total, .. }) = result.view else {
+                panic!("a listing without notes stores its files view");
+            };
+            assert_eq!(total, 2);
         }
 
         #[test]
@@ -817,7 +827,14 @@ mod tests {
             let result = glob_in("*.rs", None, dir.path(), &ReadFilter::default()).unwrap();
             assert_eq!(result.content, "No files found");
             assert_eq!(result.title, "No files found");
-            assert!(result.truncated_total.is_none());
+            assert_eq!(
+                result.view,
+                Some(ToolResultView::GlobFiles {
+                    pattern: "*.rs".to_owned(),
+                    files: Vec::new(),
+                    total: 0,
+                }),
+            );
         }
 
         #[test]
@@ -880,7 +897,10 @@ mod tests {
                     MAX_RESULTS + 10,
                 ),
             );
-            assert_eq!(result.truncated_total, Some(MAX_RESULTS + 10));
+            let Some(ToolResultView::GlobFiles { total, .. }) = result.view else {
+                panic!("a truncated listing stores its files view");
+            };
+            assert_eq!(total, MAX_RESULTS + 10);
             assert_eq!(result.title, format!("Found {MAX_RESULTS} files"));
         }
 
@@ -901,9 +921,9 @@ mod tests {
                     (1 file withheld by read deny or ask rules)"
                 }
             );
-            assert_eq!(result.truncated_total, None);
+            assert_eq!(result.view, None);
             assert_eq!(result.title, "Found 1 file");
-            // The structured view would drop the note, so the text view shows it.
+            // The structured view would drop the note, so the call marks its content as raw text.
             let view = glob_tool().result_view(
                 &serde_json::json!({"pattern": "*.toml"}),
                 &result.content,

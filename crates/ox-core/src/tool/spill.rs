@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
-use super::view::ToolResultView;
 use super::{Prepared, Tool, ToolCtx, ToolOutput, run_blocking};
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::util::fs::create_private_dir_all;
@@ -33,9 +32,7 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
     let spill = ctx.spills().file(".txt");
     match run_blocking(move || Ok(cap_output(&content, spill))).await {
         Ok(capped) => {
-            output.metadata.result_view = Some(ToolResultView::Text {
-                content: capped.clone(),
-            });
+            output = output.with_raw_text();
             output.content = capped;
         }
         Err(e) => return ToolOutput::error(e),
@@ -260,7 +257,8 @@ mod tests {
     use crate::tool::grep::GrepTool;
     use crate::tool::local_testing::{ctx, spill_path};
     use crate::tool::testing::bash_registry;
-    use crate::tool::{ToolMetadata, ToolRegistry, ToolSpec};
+    use crate::tool::view::ToolResultView;
+    use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry, ToolSpec};
 
     /// Splits output capped by [`cap_output`] into its head, the text inside its omission marker,
     /// and its tail.
@@ -279,9 +277,11 @@ mod tests {
         impl Tool for Fixed {
             fn spec(&self) -> ToolSpec {
                 ToolSpec {
-                    name: "fixed".to_owned(),
-                    description: "return fixed text".to_owned(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    definition: ToolDefinition {
+                        name: "fixed".to_owned(),
+                        description: "return fixed text".to_owned(),
+                        input_schema: serde_json::json!({"type": "object"}),
+                    },
                     class: PermissionClass::Read,
                     parallel_safe: true,
                 }
@@ -378,7 +378,8 @@ mod tests {
             );
             let metadata: ToolMetadata =
                 serde_json::from_value(serde_json::to_value(&output.metadata).unwrap()).unwrap();
-            assert_eq!(metadata.result_view, Some(view));
+            assert!(metadata.raw_text);
+            assert_eq!(metadata.result_view, None);
             assert!(
                 output
                     .content

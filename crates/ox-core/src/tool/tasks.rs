@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, VariantArray};
 
 use super::view::ToolResultView;
-use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, invalid_input};
+use super::{
+    Prepared, Tool, ToolCtx, ToolDefinition, ToolMetadata, ToolOutput, ToolSpec, invalid_input,
+};
 use crate::message::{ContentBlock, Message};
 use crate::permission::PermissionClass;
 use crate::util::text::plural;
@@ -72,23 +74,25 @@ pub(crate) struct TasksTool;
 impl Tool for TasksTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: NAME.to_owned(),
-            description: "Maintain the task list for this session, \
-                          which the user sees while you work. \
-                          Use it for work that takes three or more steps \
-                          or when the user asks for several things at once, \
-                          and skip it for a single straightforward step or a conversational reply. \
-                          Each call replaces the whole list, \
-                          so send every task with its current status each time. \
-                          Mark a task in_progress just before starting it, \
-                          with at most one in_progress at a time, \
-                          and completed only once it is fully done. \
-                          Remove tasks that no longer apply, \
-                          and send an empty list when the user changes course. \
-                          Once every task is completed, the list clears. \
-                          The user already sees the list, so don't repeat it in your reply."
-                .to_owned(),
-            input_schema: input_schema(),
+            definition: ToolDefinition {
+                name: NAME.to_owned(),
+                description: "Maintain the task list for this session, \
+                              which the user sees while you work. \
+                              Use it for work that takes three or more steps \
+                              or when the user asks for several things at once, \
+                              and skip it for a single straightforward step or a conversational reply. \
+                              Each call replaces the whole list, \
+                              so send every task with its current status each time. \
+                              Mark a task in_progress just before starting it, \
+                              with at most one in_progress at a time, \
+                              and completed only once it is fully done. \
+                              Remove tasks that no longer apply, \
+                              and send an empty list when the user changes course. \
+                              Once every task is completed, the list clears. \
+                              The user already sees the list, so don't repeat it in your reply."
+                    .to_owned(),
+                input_schema: input_schema(),
+            },
             // It touches only the session's own task list, so it never needs approval.
             class: PermissionClass::Read,
             parallel_safe: false,
