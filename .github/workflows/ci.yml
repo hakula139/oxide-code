@@ -161,6 +161,8 @@ jobs:
       actions: read
     steps:
       - name: Check results
+        # Unlike the default shell, `bash` sets pipefail, so a failed API call fails the gate.
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GATE_ID: ${{ job.check_run_id }}
