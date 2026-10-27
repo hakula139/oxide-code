@@ -40,6 +40,9 @@ jobs:
     name: CI
     # ci.yml already checks pull requests, so calling it here would duplicate those checks.
     if: github.event_name != 'pull_request' && !inputs.notes
+    permissions:
+      actions: read
+      contents: read
     uses: ./.github/workflows/ci.yml
     secrets: inherit
 
