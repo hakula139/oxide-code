@@ -49,7 +49,7 @@ extra_roots = ["~/src/shared-lib"]
 exec = ["cargo test *"]
 ```
 
-The trailing `*` covers any flags, while a [chained command](#chained-commands-and-redirections) needs a pattern for each part.
+The trailing `*` covers bare `cargo test` and any arguments after it, while a [chained command](#chained-commands-and-redirections) needs a pattern for each part.
 
 ### Deny a Secret File
 

@@ -145,7 +145,7 @@ Automatic compaction runs before a prompt and between the tool rounds of a long 
 
 `show_thinking = true` opts the request into `thinking.display = "summarized"`, so the API streams reasoning text. The chat shows it as it arrives, then collapses it to a `Thought` header that **Ctrl+O** or a click expands.
 
-With the default `false`, reasoning stays hidden. The chat still shows the progress notes the model writes before each tool call on every supported model except Haiku 5.5. Haiku 5.5 writes none, so its requests ask for `thinking.display = "omitted"` and the chat shows no reasoning.
+With the default `false`, reasoning stays hidden. The chat still shows the progress notes the model writes before each tool call, since requests to every supported model except Haiku 5.5 ask for `thinking.display = "updates"`. Haiku 5.5 writes none, so its requests ask for `thinking.display = "omitted"` and the chat shows no reasoning.
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 

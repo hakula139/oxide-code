@@ -40,7 +40,7 @@ A window renders its utilization floored to a whole percent, after rounding to b
 
 ## Default Order
 
-The default order is the `status_line` list in the [configuration example](../guide/configuration.md#config-file).
+`StatusLineSegment::DEFAULT` owns the default order, which the [configuration example](../guide/configuration.md#config-file) spells out.
 
 Claude Code's status line is a command you configure, and each line it prints becomes a row. oxide-code renders its built-in segments in one row because Ratatui owns the app chrome.
 
