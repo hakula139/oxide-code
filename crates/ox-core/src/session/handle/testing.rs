@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::{
-    Checkpoint, CompactBoundary, CompactOutcome, RecordOutcome, SessionHandle, SharedState,
-    WriteReport,
+    AiTitleOutcome, Checkpoint, CompactBoundary, CompactOutcome, RecordOutcome, SessionHandle,
+    SharedState, WriteReport,
 };
 use crate::file_tracker::FileTracker;
 use crate::file_tracker::testing::record_tracked_file;
@@ -101,11 +101,16 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                 SessionCmd::Rewind { ack, .. }
                 | SessionCmd::RecordRound { ack, .. }
                 | SessionCmd::Usage { ack, .. }
-                | SessionCmd::AppendAiTitle { ack, .. }
                 | SessionCmd::SetManualTitle { ack, .. }
                 | SessionCmd::Archive { ack }
                 | SessionCmd::Finish { ack, .. } => {
                     _ = ack.send(WriteReport::default());
+                }
+                SessionCmd::AppendAiTitle { ack, .. } => {
+                    _ = ack.send(AiTitleOutcome {
+                        applied: true,
+                        report: WriteReport::default(),
+                    });
                 }
                 SessionCmd::Compact { ack, .. } => {
                     _ = ack.send(CompactOutcome {
@@ -137,7 +142,6 @@ fn handle(
         shared: Arc::new(SharedState::new(
             session_id,
             std::env::temp_dir().join(session_id),
-            false,
         )),
         actor_join: Arc::new(Mutex::new(join)),
         title_task: Arc::default(),
