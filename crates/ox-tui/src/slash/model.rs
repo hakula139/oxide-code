@@ -1,13 +1,15 @@
 //! `/model` opens the picker, or swaps with `/model <id>`, which
 //! [`ox_core::command::typed_form`] resolves.
 
+mod picker;
+
 use std::borrow::Cow;
 
 use ox_core::model::MODELS;
 
+use self::picker::ModelEffortPicker;
 use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
-use super::picker::ModelEffortPicker;
 use super::registry::{ArgCompletion, SlashCommand, SlashOutcome, typed_form};
 
 // ── ModelCmd ──

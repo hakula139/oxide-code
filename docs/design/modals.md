@@ -104,7 +104,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/ox-tui/src/slash/help.rs`: `/help` row builder plus `KvOverview`.
 - `crates/ox-tui/src/slash/init.rs`: `/init` instruction-file picker (`InitPicker`).
 - `crates/ox-tui/src/slash/mode.rs`: `/mode` picker (`ModeCmd` plus `ModePicker`).
-- `crates/ox-tui/src/slash/picker.rs`: combined `/model + /effort` picker.
+- `crates/ox-tui/src/slash/model/picker.rs`: combined `/model + /effort` picker.
 - `crates/ox-tui/src/slash/registry.rs`: `SlashOutcome`, including the `Modal` variant.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker`.

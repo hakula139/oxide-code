@@ -84,7 +84,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/matcher.rs`: `filter_and_rank`, the popup's four-tier ranking, and `rank_by_prefix` for arg completions.
 - `crates/ox-tui/src/slash/mode.rs`: `ModeCmd` plus `ModePicker`.
 - `crates/ox-tui/src/slash/model.rs`: `ModelCmd`.
-- `crates/ox-tui/src/slash/picker.rs`: combined model and effort picker modal.
+- `crates/ox-tui/src/slash/model/picker.rs`: combined model and effort picker modal.
 - `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashOutcome`, the `SlashCommand` trait, and `typed_form`, which runs a shared typed form.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see [Resume](resume.md)).

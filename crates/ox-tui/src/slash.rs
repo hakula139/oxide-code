@@ -19,7 +19,6 @@ mod login;
 mod matcher;
 mod mode;
 mod model;
-mod picker;
 mod registry;
 mod rename;
 mod resume;
