@@ -34,7 +34,7 @@ On model swap, recompute the snapshot with the new model's context window. The s
 
 A Claude subscription sign-in's responses carry `anthropic-ratelimit-unified-5h-utilization` and `-5h-reset`, and the same pair for `7d`. Utilization is the spent share of the window, from 0 to 1, and reset is the window's end in Unix seconds. API keys receive neither pair, so the segments stay hidden for them.
 
-The SSE pump reads the headers of each attempt's response and forwards them as `ResponseEvent::RateLimits`, ahead of the stream's events. The agent loop emits `Event::RateLimitsUpdated`, and the status bar keeps the latest. The summarization requests behind a compaction report their limits the same way.
+The SSE pump reads the headers of each attempt's response and forwards them as `ResponseEvent::RateLimits`, ahead of the stream's events. The agent loop emits `Event::RateLimitsUpdated`, and `LiveSessionInfo` keeps the latest. The summarization requests behind a compaction report their limits the same way.
 
 A window renders its utilization floored to a whole percent, after rounding to basis points so a share like `0.29` keeps its exact percent. The App's tick drops a window once its reset time passes, since the spent share no longer applies until the next response reports the new window. A sign-in or sign-out drops both windows, which belonged to the previous credential.
 
@@ -87,3 +87,4 @@ The status line retains the highest-priority segment, truncating it if needed, t
 - `crates/ox-tui/src/components/status.rs`: `StatusBar`, `StatusView`, and `RunLabel`, the run-state segment's text and tone.
 - `crates/ox-tui/src/components/status/line.rs`: `StatusLine` segment rendering and width fitting.
 - `crates/ox-tui/src/git_probes.rs`: `GitProbes` background branch and pull-request polling, at the detail the roster needs.
+- `crates/ox-tui/src/session_info.rs`: `LiveSessionInfo`, which holds the title, usage, and usage limits the bar shows and drops a usage-limit window once it resets.

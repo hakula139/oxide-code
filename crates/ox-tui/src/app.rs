@@ -218,14 +218,7 @@ impl App {
                 () = sleep_until(next_tick) => {
                     let now = now();
                     last_tick = now;
-                    self.git_probes.poll(now);
-                    self.dirty |= self.status_bar.tick(now);
-                    self.dirty |= self.session_info
-                        .expire_rate_limits(OffsetDateTime::now_utc().unix_timestamp());
-                    self.dirty |= self.expire_armed_exit(now);
-                    self.dirty |= self.chat.tick_selection(now);
-                    self.dirty |= self.expire_copy_notice(now);
-                    self.dirty |= self.modals.tick(now);
+                    self.dirty |= self.tick(now);
                     if self.dirty {
                         self.render(terminal)?;
                         self.dirty = false;
@@ -239,6 +232,20 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Advances every timed component to `now`. Returns whether anything shown changed.
+    fn tick(&mut self, now: Instant) -> bool {
+        self.git_probes.poll(now);
+        let mut dirty = self.status_bar.tick(now);
+        dirty |= self
+            .session_info
+            .expire_rate_limits(OffsetDateTime::now_utc().unix_timestamp());
+        dirty |= self.expire_armed_exit(now);
+        dirty |= self.chat.tick_selection(now);
+        dirty |= self.expire_copy_notice(now);
+        dirty |= self.modals.tick(now);
+        dirty
     }
 
     /// When the loop next ticks: one frame after `last_tick` while a redraw is pending, and
@@ -286,15 +293,14 @@ mod tests {
     use ox_core::client::{RateLimitWindow, RateLimits};
     use ox_core::config::StatusLineSegment;
 
-    use super::testing::{
-        long_chat_block, render_app, rendered_text, start_op, test_app, unknown_model_session_info,
-    };
+    use super::testing::{long_chat_block, render_app, rendered_text, start_op, test_app};
     use super::*;
     use crate::components::status::SPINNER_FRAME_INTERVAL;
     use crate::git_probes::GitUpdate;
     use crate::glyphs::SPINNER_FRAMES;
     use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
+    use crate::session_info::testing::unknown_model_session_info;
     use crate::terminal::testing::capture_terminal;
     use crate::testing::{buffer_rows, key_event, mouse_event, mouse_event_at};
 
@@ -317,7 +323,7 @@ mod tests {
         }
 
         #[test]
-        fn plumbs_resumed_title_and_branch_into_status_bar() {
+        fn plumbs_resumed_title_and_branch() {
             let (app, _rx, _event_tx) = test_app(Some("Resumed title"));
 
             assert_eq!(app.session_info.title.as_deref(), Some("Resumed title"));
@@ -336,8 +342,7 @@ mod tests {
         }
 
         #[test]
-        fn whitespace_title_is_filtered_by_status_bar() {
-            // The status bar drops whitespace-only titles, so a blank resumed title leaves no slot.
+        fn drops_a_blank_resumed_title() {
             let (app, _rx, _event_tx) = test_app(Some("   \n "));
 
             assert!(app.session_info.title.is_none());
@@ -549,6 +554,37 @@ mod tests {
             .unwrap();
 
             assert!(app.should_quit);
+        }
+    }
+
+    mod tick {
+        use super::*;
+
+        #[test]
+        fn drops_a_usage_limit_window_once_it_resets() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let unix_now = OffsetDateTime::now_utc().unix_timestamp();
+            let window = |resets_at| {
+                Some(RateLimitWindow {
+                    utilization: 0.97,
+                    resets_at,
+                })
+            };
+            app.session_info.rate_limits = Some(RateLimits {
+                five_hour: window(unix_now - 1),
+                seven_day: window(unix_now + 3600),
+            });
+
+            let dirty = app.tick(now());
+
+            assert!(dirty, "the bar loses the reset window");
+            assert_eq!(
+                app.session_info.rate_limits,
+                Some(RateLimits {
+                    five_hour: None,
+                    seven_day: window(unix_now + 3600),
+                }),
+            );
         }
     }
 

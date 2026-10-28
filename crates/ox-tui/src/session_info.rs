@@ -27,7 +27,7 @@ pub(crate) struct LiveSessionInfo {
     pub(crate) project_root: PathBuf,
     pub(crate) version: &'static str,
     pub(crate) session_id: String,
-    /// Never blank, since [`Self::set_title`] drops a blank title.
+    /// Written through [`Self::set_title`].
     pub(crate) title: Option<String>,
     /// Context and cost of the session's last request, until the session or its context changes.
     pub(crate) usage: Option<UsageSnapshot>,
@@ -45,6 +45,7 @@ pub(crate) struct LiveSessionInfo {
 }
 
 impl LiveSessionInfo {
+    /// Sets the title, dropping a blank one.
     pub(crate) fn set_title(&mut self, title: Option<String>) {
         self.title = title.filter(|t| !t.trim().is_empty());
     }
@@ -88,7 +89,7 @@ pub(crate) mod testing {
     use ox_core::config::ConfigSnapshot;
     use ox_core::config::compaction::CompactionConfig;
     use ox_core::config::testing::test_snapshot;
-    use ox_core::model::Effort;
+    use ox_core::model::{Effort, ModelSpec};
     use ox_core::session::store::SessionStore;
 
     use super::LiveSessionInfo;
@@ -117,6 +118,14 @@ pub(crate) mod testing {
             },
             theme_overrides: Vec::new(),
         }
+    }
+
+    /// [`test_session_info`] on `test-model`, an unknown ID whose display name falls back to the
+    /// literal ID, keeping insta snapshots stable.
+    pub(crate) fn unknown_model_session_info() -> LiveSessionInfo {
+        let mut info = test_session_info();
+        info.config.model = ModelSpec::resolve("test-model");
+        info
     }
 }
 

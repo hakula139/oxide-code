@@ -1,6 +1,6 @@
 ---
 source: crates/ox-tui/src/components/status.rs
-expression: "render_status(&mut bar, 80)"
+expression: scene.render(80)
 ---
 "  ~/projects/demo │ main │ Opus 5.5 (xhigh) │ manual │ Ready                    "
 "────────────────────────────────────────────────────────────────────────────────"

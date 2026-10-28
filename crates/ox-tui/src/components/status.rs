@@ -182,15 +182,6 @@ impl StatusBar {
         self.current_minute = Some(current);
         true
     }
-
-    /// Takes `run` as the run state, restarting the spinner when the text changes.
-    fn follow_run(&mut self, run: RunLabel) {
-        if run.text != self.run.text {
-            self.spinner_frame = 0;
-            self.next_spinner_frame = crate::now() + SPINNER_FRAME_INTERVAL;
-        }
-        self.run = run;
-    }
 }
 
 impl StatusBar {
@@ -286,6 +277,15 @@ impl StatusBar {
             width,
         )
     }
+
+    /// Takes `run` as the run state, restarting the spinner when the text changes.
+    fn follow_run(&mut self, run: RunLabel) {
+        if run.text != self.run.text {
+            self.spinner_frame = 0;
+            self.next_spinner_frame = crate::now() + SPINNER_FRAME_INTERVAL;
+        }
+        self.run = run;
+    }
 }
 
 fn local_minute() -> u16 {
@@ -312,10 +312,7 @@ mod tests {
     use ox_core::util::git::testing::pull_request;
 
     use super::*;
-    use crate::session_info::testing::test_session_info;
-
-    /// 2100-01-01, a reset no test run reaches.
-    const FUTURE_RESET: i64 = 4_102_444_800;
+    use crate::session_info::testing::unknown_model_session_info;
 
     /// A bar and the App state it renders.
     struct Scene {
@@ -329,8 +326,7 @@ mod tests {
     impl Scene {
         /// An idle `test-model` session at `High` effort in `~/test` on `main`, showing `segments`.
         fn new(segments: Vec<StatusLineSegment>) -> Self {
-            let mut session = test_session_info();
-            session.config.model = ModelSpec::resolve("test-model");
+            let session = unknown_model_session_info();
             Self {
                 bar: StatusBar::new(segments, Some("main".to_owned())),
                 session,
@@ -450,55 +446,6 @@ mod tests {
             assert!(!bar.set_pull_request(Some(pull_request(1))));
             assert!(bar.set_pull_request(Some(pull_request(2))));
             assert_eq!(bar.pull_request, Some(pull_request(2)));
-        }
-    }
-
-    mod follow_run {
-        use super::*;
-
-        #[test]
-        fn resets_spinner_on_transition() {
-            let mut bar = bar_showing(busy("Streaming"));
-            advance_spinner(&mut bar, 3);
-
-            bar.follow_run(busy("Running bash"));
-
-            assert_eq!(bar.spinner_frame, 0);
-        }
-
-        #[test]
-        fn same_label_preserves_spinner() {
-            let mut bar = bar_showing(busy("Streaming"));
-            advance_spinner(&mut bar, 2);
-
-            bar.follow_run(busy("Streaming"));
-
-            assert_eq!(bar.spinner_frame, 2);
-        }
-
-        #[test]
-        fn to_ready_resets_spinner() {
-            let mut bar = bar_showing(busy("Streaming"));
-            advance_spinner(&mut bar, 2);
-
-            bar.follow_run(RunLabel::READY);
-
-            assert_eq!(bar.spinner_frame, 0);
-            assert!(!bar.tick(bar.next_spinner_frame));
-        }
-
-        #[test]
-        fn render_takes_the_run_state_of_its_view() {
-            let mut scene = Scene::new(vec![StatusLineSegment::RunState]);
-            scene.run = busy("Streaming");
-
-            let row = scene.top_row(40);
-
-            assert_eq!(row, format!("  {} Streaming", SPINNER_FRAMES[0]));
-            assert_eq!(
-                scene.bar.next_tick(crate::now()),
-                Some(scene.bar.next_spinner_frame)
-            );
         }
     }
 
@@ -651,6 +598,9 @@ mod tests {
     mod render {
         use super::*;
 
+        /// 2100-01-01, a reset no test run reaches.
+        const FUTURE_RESET: i64 = 4_102_444_800;
+
         fn rate_limits() -> RateLimits {
             let window = |utilization| {
                 Some(RateLimitWindow {
@@ -662,6 +612,20 @@ mod tests {
                 five_hour: window(0.42),
                 seven_day: window(0.13),
             }
+        }
+
+        #[test]
+        fn takes_the_run_state_of_its_view() {
+            let mut scene = Scene::new(vec![StatusLineSegment::RunState]);
+            scene.run = busy("Streaming");
+
+            let row = scene.top_row(40);
+
+            assert_eq!(row, format!("  {} Streaming", SPINNER_FRAMES[0]));
+            assert_eq!(
+                scene.bar.next_tick(crate::now()),
+                Some(scene.bar.next_spinner_frame)
+            );
         }
 
         #[test]
@@ -764,7 +728,7 @@ mod tests {
         #[test]
         fn theme_at_wide_and_narrow_widths() {
             let mut scene = Scene::segment(StatusLineSegment::Theme);
-            scene.session.config.theme_name = "mocha".to_owned();
+            scene.session.config.theme_name = "latte".to_owned();
             insta::assert_snapshot!(scene.wide_and_narrow());
         }
 
@@ -972,6 +936,41 @@ mod tests {
                 bar.status_span(&Theme::default()),
                 Span::styled("Press Ctrl+C again to exit", Theme::default().warning())
             );
+        }
+    }
+
+    mod follow_run {
+        use super::*;
+
+        #[test]
+        fn resets_spinner_on_transition() {
+            let mut bar = bar_showing(busy("Streaming"));
+            advance_spinner(&mut bar, 3);
+
+            bar.follow_run(busy("Running bash"));
+
+            assert_eq!(bar.spinner_frame, 0);
+        }
+
+        #[test]
+        fn same_label_preserves_spinner() {
+            let mut bar = bar_showing(busy("Streaming"));
+            advance_spinner(&mut bar, 2);
+
+            bar.follow_run(busy("Streaming"));
+
+            assert_eq!(bar.spinner_frame, 2);
+        }
+
+        #[test]
+        fn to_ready_resets_spinner() {
+            let mut bar = bar_showing(busy("Streaming"));
+            advance_spinner(&mut bar, 2);
+
+            bar.follow_run(RunLabel::READY);
+
+            assert_eq!(bar.spinner_frame, 0);
+            assert!(!bar.tick(bar.next_spinner_frame));
         }
     }
 

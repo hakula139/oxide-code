@@ -803,6 +803,19 @@ mod tests {
         }
 
         #[test]
+        fn model_with_effort_shows_the_bare_model_without_an_effort() {
+            let rendered = render(
+                vec![
+                    StatusLineSegment::ModelWithEffort,
+                    StatusLineSegment::RunState,
+                ],
+                &bare_state(),
+            );
+
+            assert_eq!(text_of(&rendered), "  m │ Ready");
+        }
+
+        #[test]
         fn manual_mode_yields_to_the_model_while_plan_and_yolo_stay_visible() {
             for (model_segment, model, label) in [
                 (StatusLineSegment::Model, "long-model", "long-model"),

@@ -547,12 +547,13 @@ mod tests {
     use crate::action::Action;
     use crate::app::testing::{
         FakeModal, activity, five_hour_limit, render_app, rendered_text, start_op, test_app,
-        test_app_with, unknown_model_session_info,
+        test_app_with,
     };
     use crate::clipboard::CopyError;
     use crate::glyphs::INTERRUPTED_MARKER;
     use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
+    use crate::session_info::testing::unknown_model_session_info;
     use crate::slash::{ResumePicker, SlashOutcome, WorkingTreeDiff};
     use crate::theme::builtin;
 
@@ -1234,7 +1235,7 @@ mod tests {
         }
 
         #[test]
-        fn usage_updated_sets_status_bar_usage() {
+        fn usage_updated_records_the_session_usage() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let usage = usage_snapshot();
 
@@ -1949,9 +1950,11 @@ mod tests {
 
             assert_eq!(app.session_info.config.model.id(), "claude-sonnet-5-5");
             assert_eq!(app.session_info.config.effort, Some(Effort::High),);
+            let text = rendered_text(&mut app, 120, 10);
+            let status = text.lines().next().unwrap();
             assert!(
-                rendered_text(&mut app, 120, 10).contains("Sonnet 5.5"),
-                "the status bar shows the new model",
+                status.contains("Sonnet 5.5 (high)") && !status.contains("test-model"),
+                "the status bar shows the new model: {status}",
             );
             assert_eq!(
                 app.session_info.config.compaction.auto.threshold_tokens,
