@@ -50,6 +50,9 @@ pub(crate) trait Modal: Send {
     /// Marks a saved-session archive of `target` accepted by the engine.
     fn archive_started(&mut self, _target: &SavedTarget) {}
 
+    /// Marks a delete of the saved session `id` accepted by the engine.
+    fn delete_started(&mut self, _id: &str) {}
+
     /// Receives the result of a saved-session archive of `target` to `state` while this modal
     /// remains on the stack.
     fn archive_updated(
@@ -182,6 +185,12 @@ impl ModalStack {
     ) {
         for modal in &mut self.stack {
             modal.archive_updated(target, state, result);
+        }
+    }
+
+    pub(crate) fn delete_started(&mut self, id: &str) {
+        for modal in &mut self.stack {
+            modal.delete_started(id);
         }
     }
 
@@ -429,6 +438,13 @@ pub(crate) mod testing {
                 .push(format!("started:{target:?}"));
         }
 
+        fn delete_started(&mut self, id: &str) {
+            self.saved_events
+                .lock()
+                .unwrap()
+                .push(format!("deleting:{id}"));
+        }
+
         fn archive_updated(
             &mut self,
             target: &SavedTarget,
@@ -641,6 +657,23 @@ mod tests {
                 stack.handle_key(&KeyEvent::from(KeyCode::Esc)),
                 Some(ModalAction::Cancelled)
             ));
+        }
+    }
+
+    mod delete_started {
+        use super::*;
+
+        #[test]
+        fn reaches_a_modal_below_the_top() {
+            let mut stack = ModalStack::default();
+            let below = ScriptedModal::new(ModalAction::Dispatch(Action::Op(Op::Clear)));
+            let observed = Arc::clone(&below.saved_events);
+            stack.push(Box::new(below));
+            stack.push(Box::new(BareModal));
+
+            stack.delete_started("saved");
+
+            assert_eq!(*observed.lock().unwrap(), ["deleting:saved"]);
         }
     }
 

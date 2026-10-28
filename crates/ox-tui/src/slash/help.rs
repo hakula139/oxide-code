@@ -55,7 +55,10 @@ fn build_modal() -> KvOverview {
                     format!("{CTRL_C} twice"),
                     "Exit, even with a draft".to_owned(),
                 ),
-                (CTRL_D.to_string(), "Exit with an empty input".to_owned()),
+                (
+                    format!("{CTRL_D} twice"),
+                    "Exit with an empty input".to_owned(),
+                ),
                 (
                     "//".to_owned(),
                     "Send text that starts with a slash".to_owned(),

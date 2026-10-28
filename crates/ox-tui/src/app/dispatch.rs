@@ -292,7 +292,10 @@ impl App {
                 self.modals.archive_started(target);
             }
             Op::FindSaved { .. } => self.set_status(Status::Searching),
-            Op::DeleteSaved { .. } => self.set_status(Status::Deleting),
+            Op::DeleteSaved { session_id } => {
+                self.set_status(Status::Deleting);
+                self.modals.delete_started(session_id);
+            }
             Op::SetMode(mode) => self.requested_mode = *mode,
             Op::Prompt { .. }
             | Op::Queue(_)
@@ -589,6 +592,7 @@ mod tests {
         push_answerable_approval, render_app, rendered_text, test_app,
     };
     use crate::components::status::StatusHyperlink;
+    use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::modal::testing::ScriptedModal;
     use crate::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};
     use crate::testing::{key_event, mouse_event, mouse_event_at};
@@ -2388,6 +2392,44 @@ mod tests {
                 assert_eq!(app.requested_mode, mode, "{op:?}");
                 assert_eq!(rx.try_recv(), Ok(op.clone()), "{op:?}");
                 assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{op:?}");
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_dropped_delete_leaves_the_confirm_modal_taking_y_again() {
+            for full in [false, true] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+                render_app(&mut app, 60, 12);
+                tokio::time::advance(TYPE_AHEAD_GUARD).await;
+                let buffered = if full {
+                    fill_channel(&app)
+                } else {
+                    app.set_status(Status::Archiving);
+                    Vec::new()
+                };
+                let y = key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+
+                app.handle_crossterm_event(&y);
+
+                assert_eq!(
+                    app.chat.last_error_text(),
+                    Some(BUSY_DROPPED),
+                    "full={full}"
+                );
+                for op in buffered {
+                    assert_eq!(rx.try_recv(), Ok(op), "full={full}");
+                }
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "full={full}");
+
+                app.set_status(Status::Idle);
+                app.handle_crossterm_event(&y);
+
+                let delete = Op::DeleteSaved {
+                    session_id: "saved".to_owned(),
+                };
+                assert_eq!(rx.try_recv(), Ok(delete), "full={full}");
+                assert_eq!(app.status, Status::Deleting, "full={full}");
             }
         }
     }
