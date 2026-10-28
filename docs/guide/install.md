@@ -98,14 +98,14 @@ inputs.oxide-code = {
   url = "github:hakula139/oxide-code";
   inputs = {
     nixpkgs.follows = "nixpkgs";
-    flake-utils.follows = "flake-utils";
     git-hooks-nix.follows = "git-hooks-nix";
     home-manager.follows = "home-manager";
+    rust-overlay.follows = "rust-overlay";
   };
 };
 ```
 
-Leave `rust-overlay` unfollowed, since the flake's lock carries a revision that knows the Rust release `rust-toolchain.toml` pins, which an older lock of yours may lack.
+The package builds with the Rust release of the nixpkgs it follows, which must be Rust 1.91 or later, as in NixOS 25.11 and newer.
 
 Then import the module in your Home Manager configuration:
 
