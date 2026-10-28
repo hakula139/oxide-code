@@ -18,7 +18,7 @@ const SUMMARY_PREFIX: &str = "This conversation has been compacted. \
 /// Composes the synthetic post-compact root message, reminding the model of the task list and the
 /// open background shells the summarized transcript leaves. After a [`CompactTrigger::MidTurn`]
 /// compaction it also tells the model to resume its turn.
-pub(crate) fn synthesize_post_compact_message(
+pub(super) fn synthesize_post_compact_message(
     summary: &str,
     tasks: &[Task],
     shells: &[BackgroundShell],

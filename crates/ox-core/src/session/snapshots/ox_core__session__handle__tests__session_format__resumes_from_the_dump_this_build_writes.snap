@@ -75,12 +75,7 @@ expression: recovered
       "content": [
         {
           "origin": "compaction_summary",
-          "text": "This conversation has been compacted. The summary below covers the prior work. Continue from here without re-asking the engineer what to do.\n\nAsked to edit f.rs.\n",
-          "type": "text"
-        },
-        {
-          "origin": "system_reminder",
-          "text": "<system-reminder>\nYour task list carries over from before the summary. Keep it current with the tasks tool:\n\n- [completed] Read the config loader\n- [in_progress] Add the entry type\n- [pending] Write the tests\n</system-reminder>",
+          "text": "Asked to edit f.rs.",
           "type": "text"
         }
       ],

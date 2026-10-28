@@ -1598,7 +1598,7 @@ mod tests {
 
         #[tokio::test]
         async fn generated_reminders_and_interruptions_keep_their_saved_presentation() {
-            let (dir, store) = isolated_store();
+            let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id();
             let literal = "<system-reminder>Explain this tag.</system-reminder>";
@@ -1619,23 +1619,9 @@ mod tests {
             assert_eq!(original.finalize(Vec::new()).await, WriteReport::default());
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            let history = crate::session::history::interactions(
-                &resumed.transcript.messages,
-                resumed.transcript.compact.as_ref(),
-                &resumed.transcript.tool_metadata,
-                &crate::tool::ToolRegistry::new(Vec::new()),
-                dir.path(),
-            );
             resumed.handle.shutdown().await;
 
             assert_eq!(resumed.transcript.messages, messages);
-            assert_eq!(
-                history,
-                [
-                    crate::protocol::Interaction::UserText(literal.to_owned()),
-                    crate::protocol::Interaction::Interrupted,
-                ]
-            );
         }
 
         #[tokio::test]
@@ -1647,7 +1633,7 @@ mod tests {
                 ),
                 ("literal interruption", crate::message::INTERRUPTION_MARKER),
             ] {
-                let (dir, store) = isolated_store();
+                let (_dir, store) = isolated_store();
                 let original = start(&store, "m", None);
                 let session_id = original.session_id();
                 let recorded = original.record_message(Message::user(text)).await;
@@ -1659,20 +1645,9 @@ mod tests {
                 );
 
                 let resumed = resume_id(&store, &session_id).unwrap();
-                let history = crate::session::history::interactions(
-                    &resumed.transcript.messages,
-                    resumed.transcript.compact.as_ref(),
-                    &resumed.transcript.tool_metadata,
-                    &crate::tool::ToolRegistry::new(Vec::new()),
-                    dir.path(),
-                );
                 resumed.handle.shutdown().await;
 
-                assert_eq!(
-                    history,
-                    [crate::protocol::Interaction::UserText(text.to_owned())],
-                    "{name}",
-                );
+                assert_eq!(resumed.transcript.messages, [Message::user(text)], "{name}");
             }
         }
 
@@ -1934,12 +1909,13 @@ mod tests {
                         },
                         context: prompt.session_context(),
                     },
-                    crate::session::post_compact::synthesize_post_compact_message(
-                        "Asked to edit f.rs.",
-                        &plan(),
-                        &[],
-                        crate::protocol::CompactTrigger::Manual,
-                    ),
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::generated_text(
+                            "Asked to edit f.rs.",
+                            TextOrigin::CompactionSummary,
+                        )],
+                    },
                 )
                 .await;
 

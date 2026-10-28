@@ -5,8 +5,6 @@
 mod actor;
 pub mod display;
 pub mod handle;
-pub(crate) mod history;
-pub(crate) mod post_compact;
 pub mod resolver;
 mod sanitize;
 pub mod saved;

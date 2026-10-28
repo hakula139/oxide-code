@@ -62,10 +62,10 @@ On `SessionResumed`, the TUI rebuilds the chat, clears the modals, and discards 
 
 ## Sources
 
+- `crates/ox-core/src/engine/history.rs`: `interactions`, the display projection `SessionResumed` carries.
 - `crates/ox-core/src/engine/sessions.rs`: `Engine::resume`, `format_drift_warning`.
 - `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::roll_into`, which swaps the live transcript for the loaded one.
 - `crates/ox-core/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
-- `crates/ox-core/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_target`, which maps a `ResumeTarget` to a session ID, importing an export path, and `resolve_prefix`.
 - `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`, `ProjectScope`.
 - `crates/ox-tui/src/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items`, which keeps the cursor when rows drop.
