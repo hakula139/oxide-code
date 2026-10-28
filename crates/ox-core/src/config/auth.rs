@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
-use serde::{Deserialize, Serialize};
 use tokio_util::task::TaskTracker;
 use tracing::warn;
 
@@ -54,9 +53,8 @@ impl AuthKind {
 // ── AuthSource ──
 
 /// Where the active credential came from, listed in resolution order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(strum::VariantArray))]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AuthSource {
     AuthTokenEnv,
     ApiKeyEnv,
