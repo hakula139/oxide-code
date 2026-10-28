@@ -220,6 +220,16 @@ struct Prompter<R, W> {
     out: W,
 }
 
+/// What the session-rule prompt answered.
+enum RuleAnswer {
+    /// A rule the grant accepts.
+    Accepted(Rule),
+    /// Why the grant rejects the typed pattern.
+    Rejected(anyhow::Error),
+    /// The input ended, or could not be read, before an answer.
+    Ended,
+}
+
 impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<R, W> {
     async fn decide(
         &mut self,
@@ -240,13 +250,15 @@ impl<R: AsyncBufRead + Unpin, W: Write> Approver for Prompter<R, W> {
             match (answer.to_ascii_lowercase().as_str(), grant) {
                 ("y" | "yes", _) => return Ok(ApprovalDecision::Approve),
                 ("a", Some(grant)) => match self.rule(grant).await? {
-                    Some(Ok(rule)) => {
+                    RuleAnswer::Accepted(rule) => {
                         return Ok(ApprovalDecision::AllowForSession {
                             rule: Box::new(rule),
                         });
                     }
-                    Some(Err(e)) => writeln!(self.out, "Rule rejected: {e:#}")?,
-                    None => return Ok(ApprovalDecision::Abort),
+                    RuleAnswer::Rejected(error) => {
+                        writeln!(self.out, "Rule rejected: {error:#}")?;
+                    }
+                    RuleAnswer::Ended => return Ok(ApprovalDecision::Abort),
                 },
                 ("n" | "no", _) => return Ok(ApprovalDecision::Deny),
                 ("f", _) => match self.ask("Feedback for the model: ").await? {
@@ -301,22 +313,23 @@ impl<R: AsyncBufRead + Unpin, W: Write> Prompter<R, W> {
     }
 
     /// Reads and validates a session-rule pattern, using the suggestion for empty input.
-    /// Ended or unreadable input returns `None`. The outer error reports output failure, and the
-    /// inner error explains why the grant rejects the rule.
-    async fn rule(&mut self, grant: &SessionGrant) -> Result<Option<Result<Rule>>> {
+    async fn rule(&mut self, grant: &SessionGrant) -> Result<RuleAnswer> {
         let suggested = grant.suggested().pattern().to_owned();
         let Some(answer) = self
             .ask(&format!("Pattern to allow [{suggested}]: "))
             .await?
         else {
-            return Ok(None);
+            return Ok(RuleAnswer::Ended);
         };
         let text = if answer.is_empty() {
             &suggested
         } else {
             &answer
         };
-        Ok(Some(grant.accept(text)))
+        Ok(match grant.accept(text) {
+            Ok(rule) => RuleAnswer::Accepted(rule),
+            Err(error) => RuleAnswer::Rejected(error),
+        })
     }
 }
 

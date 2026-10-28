@@ -227,9 +227,9 @@ impl Cli {
     /// Returns whether the run opens the TUI, which needs a terminal on stdout. Fails when the
     /// session picker needs the TUI but stdout is not a terminal, or when the TUI would open with
     /// stdin piped, since it reads keys from stdin.
-    fn tui_mode(&self) -> Result<bool> {
-        let tui_mode = !self.no_tui && !self.print && !self.list && io::stdout().is_terminal();
-        if tui_mode && !io::stdin().is_terminal() {
+    fn tui_mode(&self, stdin_is_terminal: bool, stdout_is_terminal: bool) -> Result<bool> {
+        let tui_mode = !self.no_tui && !self.print && !self.list && stdout_is_terminal;
+        if tui_mode && !stdin_is_terminal {
             bail!(
                 "stdin is not a terminal, so the TUI cannot read keys. Pass `-p` to answer the \
                  piped input, or `--no-tui` to read prompts from it."
@@ -421,7 +421,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         return check_config();
     }
 
-    let tui_mode = cli.tui_mode()?;
+    let tui_mode = cli.tui_mode(io::stdin().is_terminal(), io::stdout().is_terminal())?;
     let _log_guard = util::log::init_tracing(tui_mode)?;
     if let Some(e) = offset_error {
         warn!(error = %e, "failed to read the local timezone offset, so times show in UTC");
@@ -478,6 +478,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         )
     });
 
+    let generates_titles = tui_mode;
     let engine = Engine::new(
         &config,
         PlatformTrust(config.extra_ca_certs.clone()),
@@ -487,7 +488,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
             handle,
             transcript,
         },
-        tui_mode,
+        generates_titles,
     )
     .await?;
 
@@ -840,22 +841,6 @@ mod tests {
             assert_eq!(help.kind(), ErrorKind::DisplayHelp);
         }
 
-        #[test]
-        fn a_stray_word_after_the_prompt_is_an_unexpected_argument() {
-            let error = Cli::try_parse_from(["ox", "-p", "fix", "the", "bug"])
-                .map_err(unexpected_word)
-                .err()
-                .expect("an unquoted prompt fails");
-
-            assert_eq!(error.kind(), ErrorKind::UnknownArgument);
-            assert!(
-                error.to_string().starts_with(
-                    "error: unexpected argument 'the' found. Quote a prompt that has spaces.\n"
-                ),
-                "{error}",
-            );
-        }
-
         mod validate {
             use super::*;
 
@@ -900,27 +885,62 @@ mod tests {
             }
         }
 
-        mod session_target {
+        mod tui_mode {
             use super::*;
 
-            #[test]
-            fn is_the_latest_for_continue_and_the_named_session_for_resume() {
-                let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap();
+            /// A case: its arguments, whether stdin and stdout are terminals, and the mode or the
+            /// message it rejects with.
+            type ModeCase = (
+                &'static [&'static str],
+                bool,
+                bool,
+                Result<bool, &'static str>,
+            );
 
-                assert_eq!(
-                    parse(&["ox", "-c"]).session_target(),
-                    Some(SessionTarget::Latest),
-                );
-                assert_eq!(
-                    parse(&["ox", "-r", "a1b2"]).session_target(),
-                    Some(SessionTarget::Named("a1b2")),
-                );
-                assert_eq!(
-                    parse(&["ox", "-r"]).session_target(),
-                    None,
-                    "the picker starts a new session",
-                );
-                assert_eq!(parse(&["ox"]).session_target(), None);
+            #[test]
+            fn opens_the_tui_only_with_the_terminals_it_needs() {
+                let cases: [ModeCase; 9] = [
+                    (&["ox"], true, true, Ok(true)),
+                    (&["ox"], false, true, Err("stdin is not a terminal")),
+                    (&["ox"], true, false, Ok(false)),
+                    (&["ox", "--no-tui"], true, true, Ok(false)),
+                    (&["ox", "-p", "hi"], true, true, Ok(false)),
+                    (&["ox", "--resume"], true, true, Ok(true)),
+                    (
+                        &["ox", "--resume"],
+                        true,
+                        false,
+                        Err("needs a terminal on stdout"),
+                    ),
+                    (
+                        &["ox", "--resume"],
+                        false,
+                        true,
+                        Err("stdin is not a terminal"),
+                    ),
+                    (
+                        &["ox", "--resume", "--no-tui"],
+                        true,
+                        true,
+                        Err("needs a terminal on stdout"),
+                    ),
+                ];
+
+                for (args, stdin_is_terminal, stdout_is_terminal, expected) in cases {
+                    let cli = Cli::try_parse_from(args).unwrap();
+
+                    let result = cli.tui_mode(stdin_is_terminal, stdout_is_terminal);
+
+                    match (result, expected) {
+                        (Ok(mode), Ok(expected)) => assert_eq!(mode, expected, "{args:?}"),
+                        (Err(error), Err(message)) => {
+                            assert!(error.to_string().contains(message), "{args:?}: {error}");
+                        }
+                        (result, expected) => {
+                            panic!("{args:?}: expected {expected:?}, got {result:?}");
+                        }
+                    }
+                }
             }
         }
 
@@ -955,6 +975,50 @@ mod tests {
                     },
                 );
             }
+        }
+
+        mod session_target {
+            use super::*;
+
+            #[test]
+            fn is_the_latest_for_continue_and_the_named_session_for_resume() {
+                let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap();
+
+                assert_eq!(
+                    parse(&["ox", "-c"]).session_target(),
+                    Some(SessionTarget::Latest),
+                );
+                assert_eq!(
+                    parse(&["ox", "-r", "a1b2"]).session_target(),
+                    Some(SessionTarget::Named("a1b2")),
+                );
+                assert_eq!(
+                    parse(&["ox", "-r"]).session_target(),
+                    None,
+                    "the picker starts a new session",
+                );
+                assert_eq!(parse(&["ox"]).session_target(), None);
+            }
+        }
+    }
+
+    mod unexpected_word {
+        use super::*;
+
+        #[test]
+        fn a_stray_word_after_the_prompt_is_an_unexpected_argument() {
+            let error = Cli::try_parse_from(["ox", "-p", "fix", "the", "bug"])
+                .map_err(unexpected_word)
+                .err()
+                .expect("an unquoted prompt fails");
+
+            assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+            assert!(
+                error.to_string().starts_with(
+                    "error: unexpected argument 'the' found. Quote a prompt that has spaces.\n"
+                ),
+                "{error}",
+            );
         }
     }
 }

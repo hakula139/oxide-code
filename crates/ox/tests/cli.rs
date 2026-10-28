@@ -1,4 +1,5 @@
-//! CLI startup, headless session persistence, signal exits, and session-list output.
+//! CLI startup and argument handling, `ox config check`, credential discovery, the REPL and
+//! headless drivers, session persistence, signal exits, and session-list output.
 
 #[path = "support/env.rs"]
 mod env;
@@ -11,6 +12,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use ox_core::engine::testing::{mount_reply, mount_tool_call_once, request_bodies};
+use ox_core::util::git::testing::{isolate_git, isolated_git};
 use ox_core::util::tls::testing::TEST_CA_PATH;
 
 fn ox(root: &Path) -> Command {
@@ -20,6 +22,7 @@ fn ox(root: &Path) -> Command {
             || env::is_ox_setting(name)
             || matches!(name, "RUST_BACKTRACE" | "RUST_LOG")
     });
+    isolate_git(&mut ox);
     env::use_scratch_dirs(&mut ox, root);
     // On Linux, building the HTTP client reads the system trust store and fails when it holds no
     // certificates, so the tests pin it to a test CA.
@@ -1311,12 +1314,8 @@ async fn headless_rejected_request_preserves_branch_and_user_message() {
         .await;
 
     let dir = tempfile::tempdir().unwrap();
-    let init = Command::new("git")
+    let init = isolated_git(dir.path())
         .args(["init", "--initial-branch", "fixture-branch"])
-        .current_dir(dir.path())
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
         .output()
         .unwrap();
     assert!(init.status.success(), "{init:?}");
@@ -1328,9 +1327,6 @@ async fn headless_rejected_request_preserves_branch_and_user_message() {
         .env("XDG_DATA_HOME", &data_dir)
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .env("ANTHROPIC_BASE_URL", server.uri())
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
         .output()
         .await
         .unwrap();
@@ -1483,7 +1479,7 @@ async fn headless_without_a_prompt_or_with_a_list_flag_fails_with_a_usage_error(
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains(message), "{stderr}");
     }
-    assert_eq!(request_bodies(&server).await.len(), 0);
+    assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
 }
 
 #[tokio::test]

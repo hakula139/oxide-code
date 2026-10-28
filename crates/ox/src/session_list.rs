@@ -148,10 +148,10 @@ mod tests {
     };
 
     use super::*;
+    use crate::driver::testing::ClosedPipe;
 
     mod write {
         use super::*;
-        use crate::driver::testing::ClosedPipe;
 
         /// The list `write` prints for `scope` and `limit` from `store`'s project.
         fn listed(store: &SessionStore, scope: ListScope, limit: usize) -> String {
