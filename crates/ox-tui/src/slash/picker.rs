@@ -199,7 +199,7 @@ mod tests {
     use ox_core::model::ModelSpec;
 
     use super::*;
-    use crate::modal::testing::render_rows;
+    use crate::modal::testing::{render_modal, render_rows};
     use crate::session_info::testing::test_session_info;
 
     /// `test_session_info` ships Opus 5.5 active at `high`.
@@ -262,11 +262,8 @@ mod tests {
         #[test]
         fn lists_models_above_the_effort_row_and_footer() {
             let mut p = picker();
-            let height = p.height(80, 20);
+            let rows = render_modal(&mut p, 80, 20);
 
-            let rows = render_rows(&mut p, 80, height);
-
-            let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
             assert_eq!(
                 rows,
                 [

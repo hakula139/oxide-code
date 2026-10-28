@@ -201,7 +201,6 @@ mod tests {
                 let mut modal = RenameModal::new(Some("Fix auth"));
                 let rows = render_modal(&mut modal, 40, u16::MAX);
 
-                let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
                 assert_eq!(
                     rows,
                     [
@@ -220,8 +219,7 @@ mod tests {
                 let mut modal = RenameModal::new(Some(&long));
                 let rows = render_modal(&mut modal, 20, u16::MAX);
 
-                let input = &rows[2];
-                assert_eq!(input.trim_end(), format!("/ {}tail", "x".repeat(13)));
+                assert_eq!(rows[2], format!("/ {}tail", "x".repeat(13)));
             }
 
             #[test]

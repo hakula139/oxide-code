@@ -210,7 +210,7 @@ impl ChatView {
     /// Pending thinking is committed first so a `Thinking → Text` boundary always lands at a block
     /// split. Auto-scroll only follows the tail when the user hasn't manually scrolled up.
     pub(crate) fn append_stream_token(&mut self, token: &str) {
-        self.commit_thinking_buffer();
+        self.commit_thinking();
         if self.streaming.is_none() {
             self.bump_paused_counter();
         }
@@ -248,16 +248,16 @@ impl ChatView {
     /// Pending thinking is flushed first so a turn that produced only thinking still leaves an
     /// `AssistantThinking` block in the transcript.
     pub(crate) fn commit_streaming(&mut self) {
-        self.commit_thinking_buffer();
+        self.commit_thinking();
         if let Some(streaming) = self.streaming.take() {
-            let text = streaming.into_buffer();
+            let text = streaming.into_text();
             if !text.is_empty() {
                 self.push_block(AssistantText::new(text));
             }
         }
     }
 
-    fn commit_thinking_buffer(&mut self) {
+    fn commit_thinking(&mut self) {
         if self.thinking.is_empty() {
             return;
         }

@@ -634,7 +634,7 @@ mod tests {
     use super::*;
     use crate::modal::ModalStack;
     use crate::modal::acceptance::TYPE_AHEAD_GUARD;
-    use crate::modal::testing::{render_modal, render_rows};
+    use crate::modal::testing::render_rows;
 
     fn fresh_command_modal(command: &str) -> ApprovalModal {
         ApprovalModal::new(
@@ -672,12 +672,10 @@ mod tests {
         out
     }
 
-    /// [`render_modal`] as text, each row ending in a newline.
+    /// Renders `modal` at `width` and the height it asks for within `max_height`.
     fn rendered(modal: &mut ApprovalModal, width: u16, max_height: u16) -> String {
-        render_modal(modal, width, max_height)
-            .into_iter()
-            .map(|row| row + "\n")
-            .collect()
+        let height = modal.height(width, max_height);
+        render_to_string(modal, width, height)
     }
 
     mod height {

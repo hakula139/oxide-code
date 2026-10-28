@@ -1665,7 +1665,7 @@ mod tests {
             picker.load_error = Some("permission denied".to_owned());
 
             let rows = render_modal(&mut picker, 60, 40);
-            assert_eq!(rows.last().unwrap().trim_end(), "! permission denied");
+            assert_eq!(rows.last().unwrap(), "! permission denied");
         }
     }
 
@@ -1975,8 +1975,8 @@ mod tests {
                 panic!("Ctrl+D must push the confirm modal, got {outcome:?}");
             };
             let rows = render_modal(&mut *confirm, 60, u16::MAX);
-            assert_eq!(rows[2].trim_end(), "Fix auth");
-            assert_eq!(rows[3].trim_end(), "11111111 · 2026-04-18 · 3 msgs");
+            assert_eq!(rows[2], "Fix auth");
+            assert_eq!(rows[3], "11111111 · 2026-04-18 · 3 msgs");
         }
 
         #[test]

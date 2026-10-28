@@ -20,7 +20,7 @@ impl StreamingAssistant {
     }
 
     /// The streamed text, ending the turn's buffering.
-    pub(crate) fn into_buffer(mut self) -> String {
+    pub(crate) fn into_text(mut self) -> String {
         self.text.take()
     }
 

@@ -164,7 +164,7 @@ mod tests {
             let mut modal = confirm_modal(&info);
 
             let rows = render_modal(&mut *modal, 80, u16::MAX);
-            assert_eq!(rows[2].trim_end(), "Doomed session");
+            assert_eq!(rows[2], "Doomed session");
             assert!(rows[3].starts_with("abababab · "), "{}", rows[3]);
         }
     }

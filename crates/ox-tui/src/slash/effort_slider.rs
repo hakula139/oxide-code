@@ -231,7 +231,6 @@ mod tests {
 
             let rows = render_modal(&mut s, 80, u16::MAX);
 
-            let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
             assert_eq!(
                 rows,
                 [

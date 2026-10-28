@@ -153,7 +153,7 @@ impl Modal for ModePicker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modal::testing::render_rows;
+    use crate::modal::testing::render_modal;
     use crate::slash::registry::testing::run_execute;
 
     mod classify {
@@ -227,11 +227,8 @@ mod tests {
             #[test]
             fn marks_the_current_mode_above_the_footer() {
                 let mut picker = ModePicker::new(Mode::Plan);
-                let height = picker.height(80, 20);
+                let rows = render_modal(&mut picker, 80, 20);
 
-                let rows = render_rows(&mut picker, 80, height);
-
-                let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
                 assert_eq!(
                     rows,
                     [

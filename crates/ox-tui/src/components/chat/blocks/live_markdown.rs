@@ -65,7 +65,7 @@ impl LiveMarkdown {
         width: u16,
         render: impl Fn(&str, bool) -> (Vec<Line<'static>>, bool),
     ) {
-        if self.width != 0 && self.width != width {
+        if self.width != width {
             self.invalidate();
         }
         if width == 0 {
