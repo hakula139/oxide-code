@@ -5,6 +5,7 @@
 
 mod dispatch;
 mod events;
+mod operation;
 mod queue;
 mod render;
 #[cfg(test)]
@@ -25,11 +26,12 @@ use ox_core::protocol::{Event, Interaction, Op};
 use ox_core::session::display::archive_notice;
 use ox_core::session::entry::ArchiveState;
 
+use self::operation::InFlight;
 use self::queue::PromptQueue;
 use crate::clipboard::{Clipboard, Environment};
 use crate::components::chat::ChatView;
 use crate::components::input::InputArea;
-use crate::components::status::{Status, StatusBar, StatusBarInit, StatusHyperlink};
+use crate::components::status::{StatusBar, StatusBarInit, StatusHyperlink};
 use crate::components::tasks::TaskPanel;
 use crate::git_probes::GitProbes;
 use crate::modal::{Modal, ModalStack};
@@ -51,9 +53,10 @@ pub(crate) struct App {
     theme_overrides: ThemeOverrides,
     /// Theme saved when a `/theme` picker opens. Restored if the modal cancels.
     preview_theme_snapshot: Option<Theme>,
-    /// What the app is doing, which gates input and sets the status bar's run state. Change it
-    /// through [`Self::set_status`], which shows it in both.
-    status: Status,
+    /// The operation the engine runs, which keeps idle-only input local until its terminal event.
+    in_flight: Option<InFlight>,
+    /// When the window for a second exit key closes, while one is open.
+    exit_armed: Option<Instant>,
     status_bar: StatusBar,
     git_probes: GitProbes,
     chat: ChatView,
@@ -138,7 +141,8 @@ impl App {
             theme,
             theme_overrides,
             preview_theme_snapshot: None,
-            status: Status::Idle,
+            in_flight: None,
+            exit_armed: None,
             status_bar,
             git_probes,
             chat,
@@ -170,12 +174,6 @@ impl App {
     pub(crate) fn push_modal(&mut self, modal: Box<dyn Modal>) {
         self.modals.push(modal);
         self.dirty = true;
-    }
-
-    /// Moves to `status` and shows it in the status bar.
-    fn set_status(&mut self, status: Status) {
-        self.status_bar.set_status(status.clone());
-        self.status = status;
     }
 
     /// Runs until the user quits or the engine's event channel closes.
@@ -250,14 +248,10 @@ impl App {
             return Some(frame);
         }
         let now = now();
-        let exit_window = match self.status {
-            Status::ExitArmed { until } => Some(until),
-            _ => None,
-        };
         [
             self.git_probes.next_poll(),
             self.status_bar.next_tick(now),
-            exit_window,
+            self.exit_armed,
             self.chat.next_selection_tick(now),
             self.copy_notice.as_ref().map(|notice| notice.until),
             self.modals.next_tick(now),
@@ -288,7 +282,7 @@ mod tests {
     use ox_core::config::StatusLineSegment;
 
     use super::testing::{
-        long_chat_block, render_app, rendered_text, test_app, unknown_model_session_info,
+        long_chat_block, render_app, rendered_text, start_op, test_app, unknown_model_session_info,
     };
     use super::*;
     use crate::components::status::SPINNER_FRAME_INTERVAL;
@@ -324,7 +318,7 @@ mod tests {
 
             assert_eq!(app.status_bar.title(), Some("Resumed title"));
             assert_eq!(app.status_bar.git_branch(), Some("main"));
-            assert_eq!(app.status, Status::Idle);
+            assert!(app.in_flight.is_none());
             assert_eq!(app.chat.entry_count(), 0);
             assert!(!app.should_quit);
             assert!(app.dirty, "first frame must render");
@@ -399,7 +393,7 @@ mod tests {
             let until = now()
                 .checked_sub(EXIT_WINDOW)
                 .expect("monotonic clock has run long enough for a test deadline");
-            app.set_status(Status::ExitArmed { until });
+            app.exit_armed = Some(until);
             app.dirty = false;
             let mut terminal = capture_terminal(60, 8);
             let closer = tokio::spawn(async move {
@@ -415,7 +409,7 @@ mod tests {
             .unwrap();
             closer.await.unwrap();
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(app.exit_armed, None);
             assert!(app.should_quit);
         }
 
@@ -449,7 +443,7 @@ mod tests {
         #[tokio::test(start_paused = true)]
         async fn repaints_when_the_spinner_frame_advances() {
             let (mut app, _rx, event_tx) = test_app(None);
-            app.set_status(Status::Streaming);
+            start_op(&mut app, &Op::prompt("running"));
             app.dirty = false;
             let mut terminal = capture_terminal(60, 8);
             let driver = tokio::spawn(async move {
@@ -492,7 +486,10 @@ mod tests {
 
             assert!(app.should_quit);
             assert_eq!(app.input.lines(), vec!["x"], "crossterm key reached input");
-            assert_eq!(app.status, Status::Streaming, "engine StreamToken arrived");
+            assert!(
+                rendered_text(&mut app, 60, 8).contains("hi"),
+                "engine StreamToken arrived"
+            );
         }
 
         #[tokio::test(start_paused = true)]
@@ -598,7 +595,8 @@ mod tests {
         async fn wakes_for_the_next_spinner_frame_while_busy() {
             let last_tick = now();
             let mut app = settled_app();
-            app.set_status(Status::Streaming);
+            start_op(&mut app, &Op::prompt("running"));
+            _ = render_app(&mut app, 60, 8);
 
             assert_eq!(
                 app.next_tick(last_tick),
@@ -610,9 +608,7 @@ mod tests {
         fn wakes_when_the_exit_window_closes() {
             let last_tick = now();
             let mut app = settled_app();
-            app.set_status(Status::ExitArmed {
-                until: last_tick + Duration::from_secs(1),
-            });
+            app.exit_armed = Some(last_tick + Duration::from_secs(1));
 
             assert_eq!(
                 app.next_tick(last_tick),
@@ -677,9 +673,7 @@ mod tests {
         fn wakes_for_the_earliest_deadline_but_no_sooner_than_a_frame() {
             let last_tick = now();
             let mut app = settled_app();
-            app.set_status(Status::ExitArmed {
-                until: last_tick + Duration::from_secs(1),
-            });
+            app.exit_armed = Some(last_tick + Duration::from_secs(1));
             app.copy_notice = Some(CopyNotice {
                 text: "Copied".to_owned(),
                 failed: false,
@@ -691,7 +685,7 @@ mod tests {
                 Some(last_tick + Duration::from_millis(500))
             );
 
-            app.set_status(Status::ExitArmed { until: last_tick });
+            app.exit_armed = Some(last_tick);
 
             assert_eq!(app.next_tick(last_tick), Some(last_tick + TICK_INTERVAL));
         }

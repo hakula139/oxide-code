@@ -18,6 +18,7 @@ use ox_core::protocol::{Event, Op};
 use ox_core::session::entry::ArchiveState;
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
+use super::operation::{Activity, InFlight};
 use super::{App, AppHistory};
 use crate::clipboard::{self, Clipboard, Environment};
 use crate::git_probes::GitProbes;
@@ -71,6 +72,16 @@ pub(super) fn test_app_with(
         terminal: clipboard::Terminal::Other,
     });
     (app, op_rx, event_tx)
+}
+
+/// Puts `op` in flight as if [`App::dispatch_op`] had sent it.
+pub(super) fn start_op(app: &mut App, op: &Op) {
+    app.in_flight = InFlight::new(op);
+}
+
+/// What the in-flight operation does, or `None` while idle.
+pub(super) fn activity(app: &App) -> Option<&Activity> {
+    app.in_flight.as_ref().map(InFlight::activity)
 }
 
 /// The shared session fixture on `test-model`, an unknown ID whose display name falls back to the

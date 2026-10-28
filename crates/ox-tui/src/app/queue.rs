@@ -98,8 +98,9 @@ enum HandBack {
     /// Nothing, since the prompt ran and the queue goes on.
     #[default]
     Nothing,
-    /// Nothing, but the queue waits for the user, since a compaction is running and after its
-    /// failure the next prompt would start another summary request.
+    /// Nothing, but the queue waits for the user, since a compaction or a session switch is
+    /// running. After a failed compaction the next prompt would start another summary request, and
+    /// after a failed switch the prompts typed for the new session would run in the old one.
     HeldQueue,
     /// The prompt, since the automatic compaction ahead of it failed, so the engine never sent it.
     UnsentPrompt,
@@ -234,11 +235,11 @@ impl PromptQueue {
         }
     }
 
-    /// Settles a failed turn by what it marked. A failed compaction holds the queue. An unsent
-    /// prompt returns for the input when the input and the queue are empty, so Enter sends it
-    /// again, and otherwise heads the queue so it still runs first. A rolled-back turn returns the
-    /// queued prompts it took in to the queue head, and its own prompt for the input when
-    /// `input_empty`, or else ahead of them.
+    /// Settles a failed turn by what it marked. A failed compaction or session switch holds the
+    /// queue. An unsent prompt returns for the input when the input and the queue are empty, so
+    /// Enter sends it again, and otherwise heads the queue so it still runs first. A rolled-back
+    /// turn returns the queued prompts it took in to the queue head, and its own prompt for the
+    /// input when `input_empty`, or else ahead of them.
     pub(super) fn fail_turn(&mut self, input_empty: bool) -> FailedTurn {
         match self.hand_back {
             HandBack::Nothing => FailedTurn::Ran,
@@ -277,9 +278,10 @@ impl PromptQueue {
     }
 
     /// Notes that a session switch starts. The prompts queued so far belong to the session it
-    /// leaves, and the ones queued while it runs to the session it reaches.
+    /// leaves, and later ones to the session it reaches, so a failed switch holds them.
     pub(super) fn mark_switch(&mut self) {
         self.before_switch = Some(self.pending.len());
+        self.hand_back = HandBack::HeldQueue;
     }
 
     /// Drops the prompts that belong to the session just left, returning how many there were.
