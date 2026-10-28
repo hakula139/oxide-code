@@ -20,7 +20,7 @@ use super::{App, EXIT_WINDOW, SlashTask};
 use crate::action::{APP_KEYMAP, Action, AppAction, next_mode};
 use crate::components::input::InputOutcome;
 use crate::keymap::{CTRL_C, CTRL_D};
-use crate::modal::ModalAction;
+use crate::modal::{EngineUpdate, ModalAction};
 use crate::now;
 use crate::slash::{self, SlashContext, SlashOutcome};
 use crate::theme::Theme;
@@ -196,6 +196,18 @@ impl App {
         }
     }
 
+    /// Passes `update` to the open modals and applies the actions of those it closes. Returns
+    /// whether a modal shows the update.
+    pub(super) fn notify_modals(&mut self, update: EngineUpdate<'_>) -> bool {
+        let Some(actions) = self.modals.notify(update) else {
+            return false;
+        };
+        for action in actions {
+            self.apply_modal_action(action);
+        }
+        true
+    }
+
     pub(super) fn clear_modals(&mut self) {
         self.cancel_theme_preview();
         for action in self.modals.clear() {
@@ -281,13 +293,13 @@ impl App {
             Op::Clear | Op::Archive => self.queue.mark_switch(SwitchTo::Fresh),
             Op::Resume { .. } => self.queue.mark_switch(SwitchTo::Saved),
             Op::Compact { .. } => self.queue.mark_compacting(),
-            Op::SetArchive { target, .. } => self.modals.archive_started(target),
-            Op::DeleteSaved { session_id } => self.modals.delete_started(session_id),
             Op::SetMode(mode) => self.requested_mode = *mode,
             Op::Prompt { .. }
             | Op::Queue(_)
             | Op::Resolve { .. }
             | Op::FindSaved { .. }
+            | Op::SetArchive { .. }
+            | Op::DeleteSaved { .. }
             | Op::SetModel(_)
             | Op::Rename { .. }
             | Op::Login
@@ -295,6 +307,7 @@ impl App {
             | Op::Logout
             | Op::Shutdown => {}
         }
+        self.notify_modals(EngineUpdate::Admitted(&op));
         self.begin(&op);
         permit.send(op);
     }
@@ -2203,7 +2216,7 @@ mod tests {
         fn saved_archive_retains_ownership_and_reports_after_the_picker_closes() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             let modal = ScriptedModal::new(ModalAction::Cancelled);
-            let observed = Arc::clone(&modal.saved_events);
+            let observed = Arc::clone(&modal.updates);
             app.push_modal(Box::new(modal));
             let target = SavedTarget::Prefix("saved".to_owned());
             let op = Op::SetArchive {
@@ -2224,7 +2237,7 @@ mod tests {
 
             assert_eq!(rx.try_recv(), Ok(op.clone()));
             assert_eq!(activity(&app), Some(&Activity::Archiving));
-            let started = r#"started:Prefix("saved")"#;
+            let started = r#"Admitted(SetArchive { target: Prefix("saved"), state: Archived })"#;
             assert_eq!(*observed.lock().unwrap(), [started]);
 
             app.handle_engine_event(Event::ArchiveUpdated {
@@ -2237,7 +2250,7 @@ mod tests {
             });
 
             assert_eq!(activity(&app), None);
-            let completed = r#"completed:Prefix("saved"):Archived:Ok(ArchiveUpdate { id: "saved", changed: true })"#;
+            let completed = r#"Event(ArchiveUpdated { target: Prefix("saved"), state: Archived, result: Ok(ArchiveUpdate { id: "saved", changed: true }) })"#;
             assert_eq!(*observed.lock().unwrap(), [started, completed]);
             assert_eq!(
                 app.chat.last_system_text(),

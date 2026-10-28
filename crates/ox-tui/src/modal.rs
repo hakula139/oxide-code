@@ -17,9 +17,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use ox_core::protocol::SavedTarget;
-use ox_core::session::saved::{ArchiveUpdate, SavedError};
-use ox_core::session::store::listing::ArchiveState;
+use ox_core::protocol::{Event, Op};
 
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
@@ -47,25 +45,11 @@ pub(crate) trait Modal: Send {
     /// Receives bracketed-paste text. Default no-op, so a paste never answers a prompt.
     fn handle_paste(&mut self, _text: &str) {}
 
-    /// Marks a saved-session archive of `target` accepted by the engine.
-    fn archive_started(&mut self, _target: &SavedTarget) {}
-
-    /// Marks a delete of the saved session `id` accepted by the engine.
-    fn delete_started(&mut self, _id: &str) {}
-
-    /// Receives the result of a saved-session archive of `target` to `state` while this modal
-    /// remains on the stack.
-    fn archive_updated(
-        &mut self,
-        _target: &SavedTarget,
-        _state: ArchiveState,
-        _result: &Result<ArchiveUpdate, SavedError>,
-    ) {
-    }
-
-    /// Receives the result of deleting saved session `id` while this modal remains on the stack.
-    fn saved_deleted(&mut self, _id: &str, _result: &Result<(), SavedError>) -> DeleteReply {
-        DeleteReply::Unclaimed
+    /// Receives an op the App sent or an event the engine reported while this modal is on the
+    /// stack, so a modal that sent an op learns whether it left and how it ended. Default
+    /// unclaimed.
+    fn on_engine(&mut self, _update: EngineUpdate<'_>) -> UpdateReply {
+        UpdateReply::Unclaimed
     }
 
     /// Fires on frame ticks while the modal is on top, for state that changes with time, such as a
@@ -148,14 +132,23 @@ pub(crate) enum ModalAction {
     SystemMessage(String),
 }
 
-/// How a modal took the result of a saved-session delete.
+/// What [`Modal::on_engine`] receives.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum EngineUpdate<'a> {
+    /// The App sent the op to the engine.
+    Admitted(&'a Op),
+    /// The engine reported the event.
+    Event(&'a Event),
+}
+
+/// How a modal took an [`EngineUpdate`].
 #[derive(Debug)]
-pub(crate) enum DeleteReply {
-    /// The modal leaves the result for the App to report.
+pub(crate) enum UpdateReply {
+    /// The modal leaves the update for the App to report.
     Unclaimed,
-    /// The modal shows the result and stays open.
+    /// The modal shows the update and stays open.
     Shown,
-    /// The modal closes, replaced by the action that reports the result.
+    /// The modal closes, replaced by the action that reports the update.
     Closed(ModalAction),
 }
 
@@ -182,47 +175,20 @@ impl ModalStack {
         self.stack.push(modal);
     }
 
-    pub(crate) fn archive_started(&mut self, target: &SavedTarget) {
-        for modal in &mut self.stack {
-            modal.archive_started(target);
-        }
-    }
-
-    pub(crate) fn delete_started(&mut self, id: &str) {
-        for modal in &mut self.stack {
-            modal.delete_started(id);
-        }
-    }
-
-    pub(crate) fn archive_updated(
-        &mut self,
-        target: &SavedTarget,
-        state: ArchiveState,
-        result: &Result<ArchiveUpdate, SavedError>,
-    ) {
-        for modal in &mut self.stack {
-            modal.archive_updated(target, state, result);
-        }
-    }
-
-    /// Passes a delete result to every modal, dropping each one the result closes. Returns the
-    /// closed modals' replacement actions in stack order, or `None` when no modal shows the result,
-    /// so the caller reports it.
-    pub(crate) fn saved_deleted(
-        &mut self,
-        id: &str,
-        result: &Result<(), SavedError>,
-    ) -> Option<Vec<ModalAction>> {
+    /// Passes `update` to every modal, dropping each one it closes. Returns the closed modals'
+    /// replacement actions in stack order, or `None` when no modal shows the update, so the caller
+    /// reports it.
+    pub(crate) fn notify(&mut self, update: EngineUpdate<'_>) -> Option<Vec<ModalAction>> {
         let mut claimed = false;
         let mut actions = Vec::new();
         self.stack
-            .retain_mut(|modal| match modal.saved_deleted(id, result) {
-                DeleteReply::Unclaimed => true,
-                DeleteReply::Shown => {
+            .retain_mut(|modal| match modal.on_engine(update) {
+                UpdateReply::Unclaimed => true,
+                UpdateReply::Shown => {
                     claimed = true;
                     true
                 }
-                DeleteReply::Closed(action) => {
+                UpdateReply::Closed(action) => {
                     claimed = true;
                     actions.push(action);
                     false
@@ -413,10 +379,10 @@ pub(crate) mod testing {
         pub(crate) tick_count: Arc<AtomicU32>,
         /// Deadline returned from [`Modal::next_tick`].
         pub(crate) next_tick: Option<Instant>,
-        /// Take-once reply from [`Modal::saved_deleted`], which is otherwise unclaimed.
-        pub(crate) delete_reply: Option<DeleteReply>,
-        /// The saved-session results received, shared like `tick_count`.
-        pub(crate) saved_events: Arc<std::sync::Mutex<Vec<String>>>,
+        /// Take-once reply from [`Modal::on_engine`], which is otherwise unclaimed.
+        pub(crate) reply: Option<UpdateReply>,
+        /// The engine updates received, shared like `tick_count`.
+        pub(crate) updates: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl ScriptedModal {
@@ -435,45 +401,16 @@ pub(crate) mod testing {
                 declared_height: 3,
                 tick_count: Arc::new(AtomicU32::new(0)),
                 next_tick: None,
-                delete_reply: None,
-                saved_events: Arc::default(),
+                reply: None,
+                updates: Arc::default(),
             }
         }
     }
 
     impl Modal for ScriptedModal {
-        fn archive_started(&mut self, target: &SavedTarget) {
-            self.saved_events
-                .lock()
-                .unwrap()
-                .push(format!("started:{target:?}"));
-        }
-
-        fn delete_started(&mut self, id: &str) {
-            self.saved_events
-                .lock()
-                .unwrap()
-                .push(format!("deleting:{id}"));
-        }
-
-        fn archive_updated(
-            &mut self,
-            target: &SavedTarget,
-            state: ArchiveState,
-            result: &Result<ArchiveUpdate, SavedError>,
-        ) {
-            self.saved_events
-                .lock()
-                .unwrap()
-                .push(format!("completed:{target:?}:{state:?}:{result:?}"));
-        }
-
-        fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> DeleteReply {
-            self.saved_events
-                .lock()
-                .unwrap()
-                .push(format!("deleted:{id}:{result:?}"));
-            self.delete_reply.take().unwrap_or(DeleteReply::Unclaimed)
+        fn on_engine(&mut self, update: EngineUpdate<'_>) -> UpdateReply {
+            self.updates.lock().unwrap().push(format!("{update:?}"));
+            self.reply.take().unwrap_or(UpdateReply::Unclaimed)
         }
 
         fn height(&mut self, _width: u16, _max_height: u16) -> u16 {
@@ -533,8 +470,6 @@ mod tests {
     use std::time::Duration;
 
     use crossterm::event::KeyModifiers;
-
-    use ox_core::protocol::Op;
 
     use super::testing::{ScriptedModal, render_rows_with};
     use super::*;
@@ -633,109 +568,84 @@ mod tests {
         }
     }
 
-    mod delete_started {
+    mod notify {
         use super::*;
 
         #[test]
-        fn reaches_a_modal_below_the_top() {
+        fn reaches_a_modal_below_the_top_without_closing_the_overlay() {
             let mut stack = ModalStack::default();
             let below = ScriptedModal::new(ModalAction::Dispatch(Action::Op(Op::Clear)));
-            let observed = Arc::clone(&below.saved_events);
+            let observed = Arc::clone(&below.updates);
             stack.push(Box::new(below));
             stack.push(Box::new(BareModal));
-
-            stack.delete_started("saved");
-
-            assert_eq!(*observed.lock().unwrap(), ["deleting:saved"]);
-        }
-    }
-
-    mod archive_updated {
-        use super::*;
-
-        #[test]
-        fn completes_a_covered_picker_without_dismissing_the_overlay() {
-            let mut stack = ModalStack::default();
-            let picker = ScriptedModal::new(ModalAction::Dispatch(Action::Op(Op::Clear)));
-            let observed = Arc::clone(&picker.saved_events);
-            stack.push(Box::new(picker));
-            stack.push(Box::new(BareModal));
-            let target = SavedTarget::Id("saved".to_owned());
-            let update = ArchiveUpdate {
+            let delete = Op::DeleteSaved {
+                session_id: "saved".to_owned(),
+            };
+            let deleted = Event::SavedDeleted {
                 id: "saved".to_owned(),
-                changed: true,
+                result: Ok(()),
             };
 
-            stack.archive_started(&target);
-            stack.archive_updated(&target, ArchiveState::Archived, &Ok(update));
+            let admitted = stack.notify(EngineUpdate::Admitted(&delete));
+            let reported = stack.notify(EngineUpdate::Event(&deleted));
 
+            assert!(admitted.is_none() && reported.is_none());
             assert_eq!(
                 *observed.lock().unwrap(),
                 [
-                    r#"started:Id("saved")"#,
-                    r#"completed:Id("saved"):Archived:Ok(ArchiveUpdate { id: "saved", changed: true })"#,
+                    r#"Admitted(DeleteSaved { session_id: "saved" })"#,
+                    r#"Event(SavedDeleted { id: "saved", result: Ok(()) })"#,
                 ]
             );
-            assert!(
-                stack
-                    .handle_key(&KeyEvent::from(KeyCode::Char('s')))
-                    .is_none()
+            assert_eq!(
+                stack.height(80, 40),
+                1 + TOP_BORDER_HEIGHT,
+                "the overlay stays on top"
             );
-            assert!(matches!(
-                stack.handle_key(&KeyEvent::from(KeyCode::Esc)),
-                Some(ModalAction::Cancelled)
-            ));
         }
-    }
-
-    mod saved_deleted {
-        use super::*;
 
         #[test]
-        fn closes_only_the_modals_the_result_closes_and_returns_their_actions() {
+        fn closes_only_the_modals_the_update_closes_and_returns_their_actions() {
             let mut stack = ModalStack::default();
-            let picker = ScriptedModal::new(ModalAction::Cancelled);
-            let observed = Arc::clone(&picker.saved_events);
             let mut confirm = ScriptedModal::new(ModalAction::Cancelled);
             confirm.declared_height = 5;
-            confirm.delete_reply = Some(DeleteReply::Closed(ModalAction::SystemMessage(
+            confirm.reply = Some(UpdateReply::Closed(ModalAction::SystemMessage(
                 "Deleted".to_owned(),
             )));
-            stack.push(Box::new(picker));
+            stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
             stack.push(Box::new(confirm));
 
-            let actions = stack.saved_deleted("saved", &Ok(()));
+            let actions = stack.notify(EngineUpdate::Event(&Event::SessionReady));
 
             assert!(
                 matches!(actions.as_deref(), Some([ModalAction::SystemMessage(msg)]) if msg == "Deleted"),
                 "{actions:?}"
             );
-            assert_eq!(*observed.lock().unwrap(), ["deleted:saved:Ok(())"]);
             assert_eq!(
                 stack.height(80, 40),
                 3 + TOP_BORDER_HEIGHT,
-                "the picker is back on top"
+                "the modal below is back on top"
             );
         }
 
         #[test]
-        fn claims_the_result_only_when_a_modal_shows_or_closes_on_it() {
-            let cases: [(&str, Option<DeleteReply>, Option<usize>); 3] = [
+        fn claims_the_update_only_when_a_modal_shows_or_closes_on_it() {
+            let cases: [(&str, Option<UpdateReply>, Option<usize>); 3] = [
                 ("unclaimed", None, None),
-                ("shown", Some(DeleteReply::Shown), Some(0)),
+                ("shown", Some(UpdateReply::Shown), Some(0)),
                 (
                     "closed",
-                    Some(DeleteReply::Closed(ModalAction::Cancelled)),
+                    Some(UpdateReply::Closed(ModalAction::Cancelled)),
                     Some(1),
                 ),
             ];
             for (name, reply, expected) in cases {
                 let mut stack = ModalStack::default();
                 let mut modal = ScriptedModal::new(ModalAction::Cancelled);
-                modal.delete_reply = reply;
+                modal.reply = reply;
                 stack.push(Box::new(modal));
 
-                let actions = stack.saved_deleted("saved", &Ok(()));
+                let actions = stack.notify(EngineUpdate::Event(&Event::SessionReady));
 
                 assert_eq!(actions.map(|a| a.len()), expected, "{name}");
                 assert_eq!(stack.is_active(), expected != Some(1), "{name}");

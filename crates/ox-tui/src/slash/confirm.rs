@@ -6,9 +6,8 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use ox_core::protocol::Op;
+use ox_core::protocol::{Event, Op};
 use ox_core::session::display::{DisplayTitle, id_prefix};
-use ox_core::session::saved::SavedError;
 use ox_core::util::text::truncate_to_width;
 
 use super::sessions::{CLEAR_THEN_DELETE_HINT, saved_error_message};
@@ -16,7 +15,7 @@ use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::modal::acceptance::Acceptance;
 use crate::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
-use crate::modal::{DeleteReply, Modal, ModalAction, ModalKey};
+use crate::modal::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
 use crate::theme::Theme;
 
 // ── Constants ──
@@ -112,27 +111,29 @@ impl Modal for ConfirmDeleteSessionModal {
         self.acceptance.is_guarded()
     }
 
-    fn delete_started(&mut self, id: &str) {
-        if id == self.session_id {
-            self.pending = true;
-        }
-    }
-
-    fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> DeleteReply {
-        if id != self.session_id {
-            return DeleteReply::Unclaimed;
-        }
-        self.pending = false;
-        match result {
-            Ok(()) => DeleteReply::Closed(ModalAction::SystemMessage(format!(
-                "Deleted session {}: {}",
-                id_prefix(id),
-                self.display_title,
-            ))),
-            Err(error) => {
-                self.error = Some(saved_error_message(error, CLEAR_THEN_DELETE_HINT));
-                DeleteReply::Shown
+    fn on_engine(&mut self, update: EngineUpdate<'_>) -> UpdateReply {
+        match update {
+            EngineUpdate::Admitted(Op::DeleteSaved { session_id })
+                if *session_id == self.session_id =>
+            {
+                self.pending = true;
+                UpdateReply::Unclaimed
             }
+            EngineUpdate::Event(Event::SavedDeleted { id, result }) if *id == self.session_id => {
+                self.pending = false;
+                match result {
+                    Ok(()) => UpdateReply::Closed(ModalAction::SystemMessage(format!(
+                        "Deleted session {}: {}",
+                        id_prefix(id),
+                        self.display_title,
+                    ))),
+                    Err(error) => {
+                        self.error = Some(saved_error_message(error, CLEAR_THEN_DELETE_HINT));
+                        UpdateReply::Shown
+                    }
+                }
+            }
+            _ => UpdateReply::Unclaimed,
         }
     }
 
@@ -147,6 +148,7 @@ mod tests {
     use time::OffsetDateTime;
     use time::macros::datetime;
 
+    use ox_core::session::saved::SavedError;
     use ox_core::session::store::listing::SessionInfo;
     use ox_core::session::store::testing::{listed_session, stamped_id};
 
@@ -189,6 +191,25 @@ mod tests {
             Some(ModalAction::Dispatch(Action::Op(Op::DeleteSaved { session_id })))
                 if *session_id == stamped_id(0xab)
         )
+    }
+
+    /// Tells `modal` the App sent the delete of the session stamped `byte`.
+    fn admit(modal: &mut ConfirmDeleteSessionModal, byte: u8) {
+        modal.on_engine(EngineUpdate::Admitted(&Op::DeleteSaved {
+            session_id: stamped_id(byte),
+        }));
+    }
+
+    /// Reports `result` for the delete of the session stamped `byte` to `modal`.
+    fn report(
+        modal: &mut ConfirmDeleteSessionModal,
+        byte: u8,
+        result: Result<(), SavedError>,
+    ) -> UpdateReply {
+        modal.on_engine(EngineUpdate::Event(&Event::SavedDeleted {
+            id: stamped_id(byte),
+            result,
+        }))
     }
 
     mod render {
@@ -253,7 +274,7 @@ mod tests {
                 show_and_arm(&mut modal);
 
                 let outcome = modal.handle_key(&event);
-                modal.delete_started(&stamped_id(0xab));
+                admit(&mut modal, 0xab);
                 let repeat = modal.handle_key(&event);
 
                 assert!(
@@ -379,7 +400,7 @@ mod tests {
         }
     }
 
-    mod delete_started {
+    mod on_engine {
         use super::*;
 
         #[test]
@@ -388,7 +409,7 @@ mod tests {
             show_and_arm(&mut modal);
             modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
 
-            modal.delete_started(&stamped_id(0xcd));
+            admit(&mut modal, 0xcd);
 
             let repeat = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
             assert!(
@@ -396,17 +417,13 @@ mod tests {
                 "{repeat:?}"
             );
         }
-    }
-
-    mod saved_deleted {
-        use super::*;
 
         /// The modal of the session stamped `0xab`, with its delete accepted by the engine.
         fn pending_modal() -> ConfirmDeleteSessionModal {
             let mut modal = modal(0xab, "Fix auth flow");
             show_and_arm(&mut modal);
             modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
-            modal.delete_started(&stamped_id(0xab));
+            admit(&mut modal, 0xab);
             modal
         }
 
@@ -414,10 +431,10 @@ mod tests {
         fn a_delete_closes_the_modal_with_a_chat_confirmation() {
             let mut modal = pending_modal();
 
-            let action = modal.saved_deleted(&stamped_id(0xab), &Ok(()));
+            let action = report(&mut modal, 0xab, Ok(()));
 
             assert!(
-                matches!(&action, DeleteReply::Closed(ModalAction::SystemMessage(msg))
+                matches!(&action, UpdateReply::Closed(ModalAction::SystemMessage(msg))
                     if msg == "Deleted session abababab: Fix auth flow"),
                 "{action:?}",
             );
@@ -431,9 +448,9 @@ mod tests {
                 id: "abababab".to_owned(),
             };
 
-            let action = modal.saved_deleted(&stamped_id(0xab), &Err(live));
+            let action = report(&mut modal, 0xab, Err(live));
 
-            assert!(matches!(action, DeleteReply::Shown), "{action:?}");
+            assert!(matches!(action, UpdateReply::Shown), "{action:?}");
             assert_eq!(modal.error.as_deref(), Some(LIVE_REFUSAL));
             let retry = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
             assert!(
@@ -446,9 +463,9 @@ mod tests {
         fn ignores_another_sessions_result() {
             let mut modal = pending_modal();
 
-            let action = modal.saved_deleted(&stamped_id(0xcd), &Ok(()));
+            let action = report(&mut modal, 0xcd, Ok(()));
 
-            assert!(matches!(action, DeleteReply::Unclaimed), "{action:?}");
+            assert!(matches!(action, UpdateReply::Unclaimed), "{action:?}");
             let repeat = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
             assert!(
                 matches!(repeat, ModalKey::Consumed),
