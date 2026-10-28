@@ -66,8 +66,6 @@ fn supported_attribute(file: &File, name: &str) -> io::Result<Option<Vec<u8>>> {
 mod tests {
     use super::*;
 
-    use crate::tool::local_testing::WorkspaceWrite;
-
     #[test]
     fn capture_reads_the_owner_mode_and_available_attributes() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -77,7 +75,6 @@ mod tests {
         std::fs::write(&path, b"original").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o751)).unwrap();
         let file = File::open(&path).unwrap();
-        let attempt = WorkspaceWrite::new(&path);
         let supported = file.set_xattr("user.ox.value", b"\x00\xff").is_ok();
         if !supported {
             assert_eq!(
@@ -99,7 +96,6 @@ mod tests {
         } else {
             assert!(snapshot.attributes.is_empty());
         }
-        attempt.assert_unchanged();
     }
 
     #[test]

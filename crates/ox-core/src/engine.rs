@@ -415,7 +415,6 @@ impl Engine {
         checkpoint: Option<Checkpoint>,
         report: &TurnReport,
     ) {
-        self.transcript.file_tracker.drain_writes().await;
         self.bill(sink, &report.billable_rounds).await;
         let failure = self.transcript.roll_back(start, checkpoint).await;
         sink.session_write_error(failure.as_deref());
@@ -500,11 +499,10 @@ impl Engine {
         }
     }
 
-    /// Settles workspace writes, ends background shells, and closes the live session, then waits
+    /// Ends background shells, settles workspace writes, and closes the live session, then waits
     /// for stored-login reloads still in flight so exiting cannot cancel their write-back.
     /// Returns the session's write failure, if any.
     async fn finalize(self) -> Option<String> {
-        self.transcript.file_tracker.drain_writes().await;
         self.shells.stop_all().await;
         let failure = self.transcript.finalize().await;
         self.client.finish_reloads().await;
@@ -561,7 +559,7 @@ mod tests {
 
     use super::local_testing::{
         TITLE_MODEL, dead_test_session, finished_session, greeting_title, inert_ops, login_urls,
-        mount_title, next_matching, service_log, session_ids, submit, system_prompt, texts,
+        mount_title, next_matching, service_log, submit, system_prompt, texts,
         tool_heavy_transcript, tracked_paths, turn_events, write_unreadable_instructions,
     };
     use super::sessions::format_drift_warning;
@@ -595,7 +593,9 @@ mod tests {
     use crate::session::handle::testing::record_write_call;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::saved::ArchiveUpdate;
-    use crate::session::store::testing::{WriterBarrier, seed_test_session, test_store};
+    use crate::session::store::testing::{
+        WriterBarrier, listed_ids, seed_test_session, test_store,
+    };
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
     use crate::tool::bash::background::testing::shell;
@@ -1756,7 +1756,7 @@ mod tests {
                 handle.ops.send(Op::Shutdown).await.unwrap();
                 assert_eq!(handle.task.join().await.unwrap(), None);
 
-                assert_eq!(session_ids(&store), [] as [String; 0]);
+                assert_eq!(listed_ids(&store, ArchiveState::Active), [] as [String; 0]);
             })
             .await;
         }
@@ -1873,7 +1873,7 @@ mod tests {
                     "the prompt never reaches the model"
                 );
                 assert_eq!(
-                    session_ids(&store),
+                    listed_ids(&store, ArchiveState::Active),
                     [] as [String; 0],
                     "neither the prompt nor an interruption marker is recorded",
                 );

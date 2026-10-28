@@ -60,6 +60,8 @@ xxhash-rust.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 xattr.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -34,7 +34,7 @@ const NO_NEW_OUTPUT_MARKER: &str = "(no new output)";
 // ── Shell State ──
 
 /// A background shell as the session lists it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BackgroundShell {
     pub id: String,
     pub(crate) command: String,
@@ -55,7 +55,7 @@ impl BackgroundShell {
 }
 
 /// Whether a shell is still running, and how it ended if not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ShellState {
     Running,

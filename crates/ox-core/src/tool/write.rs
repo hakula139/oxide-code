@@ -6,7 +6,7 @@ use std::pin::Pin;
 use anyhow::Context as _;
 use serde::Deserialize;
 
-use super::file::{FileVerb, WriteMode};
+use super::file::FileVerb;
 use super::view::{ApprovalBody, ApprovalPreview};
 use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::{FileTracker, GatePurpose, LastView};
@@ -74,7 +74,7 @@ impl Tool for WriteTool {
 /// The text an overwrite of `path` would replace. A missing file, or one the write refuses (a
 /// symlink, a non-regular or oversized file), previews as empty.
 async fn current_text(path: &Path) -> String {
-    read_target(path)
+    super::file::read_validated(path, FileVerb::Write)
         .await
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default()
@@ -111,8 +111,8 @@ async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
         Ok(v) => v,
         Err(msg) => return ToolOutput::error(msg),
     };
-    let shown = path.display().to_string();
-    let name = super::file_name(&shown);
+    let shown = path.display();
+    let name = super::file_name(&path);
 
     match write_file(&path, &input.content, ctx).await {
         Ok(WriteMode::CreateNew) => ToolOutput::success(format!("Successfully created {shown}."))
@@ -121,6 +121,12 @@ async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
             .with_title(format!("Updated {name}")),
         Err(msg) => ToolOutput::error(msg),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteMode {
+    CreateNew,
+    Overwrite,
 }
 
 /// Writes `content` to the resolved `path` and returns the [`WriteMode`] it took.
@@ -174,8 +180,8 @@ where
     Ok(mode)
 }
 
-/// Validates an existing target's `metadata`. The gate pinned the path to its resolved location, so
-/// a symlink there appeared afterward and is refused.
+/// Refuses an existing target whose `metadata` shows a symlink. The gate pinned the path to its
+/// resolved location, so a symlink there appeared afterward.
 fn validate_write_target(path: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {
     if metadata.file_type().is_symlink() {
         return Err(format!(
@@ -183,11 +189,11 @@ fn validate_write_target(path: &Path, metadata: &std::fs::Metadata) -> Result<()
             path.display()
         ));
     }
-    super::file::validate_file_target(path, metadata, FileVerb::Write)
+    Ok(())
 }
 
 async fn check_gate(path: &Path, tracker: &FileTracker) -> Result<Vec<u8>, String> {
-    let bytes = read_target(path).await?;
+    let bytes = super::file::read_validated(path, FileVerb::Write).await?;
     tracker
         .verify_current_content(
             &super::file::tracker_key(path).await,
@@ -195,13 +201,6 @@ async fn check_gate(path: &Path, tracker: &FileTracker) -> Result<Vec<u8>, Strin
             GatePurpose::Write,
         )
         .map_err(|e| e.to_string())?;
-    Ok(bytes)
-}
-
-/// Reads the existing target `path`. The no-follow open refuses a symlink, and
-/// [`validate_write_target`] refuses a non-regular or oversized file.
-async fn read_target(path: &Path) -> Result<Vec<u8>, String> {
-    let (_, bytes) = super::file::read_validated(path, FileVerb::Write).await?;
     Ok(bytes)
 }
 

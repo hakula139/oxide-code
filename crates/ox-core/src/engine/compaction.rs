@@ -337,7 +337,6 @@ impl Engine {
         boundary: CompactBoundary,
         trigger: CompactTrigger,
     ) -> Option<Checkpoint> {
-        self.transcript.file_tracker.drain_writes().await;
         let synthetic = synthesize_post_compact_message(
             &boundary.record.summary,
             &boundary.record.tasks,

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use strum::VariantArray;
 use tokio_util::sync::CancellationToken;
 
-use super::search::{NO_FILES_FOUND, SearchRoot, SearchRow, SearchRows, Unreadable};
+use super::search::{NO_FILES_FOUND, SearchOutput, SearchRoot, SearchRow, SearchRows, Unreadable};
 use super::view::{GrepMatchLine, ToolResultView};
 use super::{
     Prepared, StoredView, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field,
@@ -164,7 +164,7 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
 
     let workspace = Arc::clone(&ctx.workspace);
     let cancel = ctx.cancel.clone();
-    match super::run_blocking(move || {
+    super::run_blocking(move || {
         grep_files(&GrepParams {
             pattern: &pattern,
             root: SearchRoot::new(&access, path.as_deref(), workspace)?,
@@ -178,20 +178,7 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
         })
     })
     .await
-    {
-        Ok(GrepOutput {
-            content,
-            title,
-            view,
-        }) => {
-            let output = ToolOutput::success(content).with_title(title);
-            match view {
-                Some(view) => output.with_stored_view(view),
-                None => output,
-            }
-        }
-        Err(msg) => ToolOutput::error(msg),
-    }
+    .map_or_else(ToolOutput::error, ToolOutput::from)
 }
 
 // ── Search ──
@@ -210,26 +197,7 @@ struct GrepParams<'a> {
     cancel: CancellationToken,
 }
 
-#[derive(Debug)]
-struct GrepOutput {
-    content: String,
-    title: String,
-    /// The match rows of a content-mode result. Other modes leave it `None`, and notes appended
-    /// after the rows store [`StoredView::Text`], so the result renders as text.
-    view: Option<StoredView>,
-}
-
-impl GrepOutput {
-    fn text(content: String, title: String) -> Self {
-        Self {
-            content,
-            title,
-            view: None,
-        }
-    }
-}
-
-fn grep_files(params: &GrepParams<'_>) -> Result<GrepOutput, String> {
+fn grep_files(params: &GrepParams<'_>) -> Result<SearchOutput, String> {
     // Each line is matched alone, so `^` and `$` anchor at line boundaries without the multi-line
     // flag. The size limits keep an adversarial pattern from exhausting memory.
     let re = regex::RegexBuilder::new(params.pattern)
@@ -391,7 +359,7 @@ fn texts<'a>(
 /// never blocks on a fifo, and the opened file must be a regular file within `size_limit` bytes, so
 /// an entry swapped after the walk checked it is not read through.
 fn read_text(path: &Path, size_limit: u64) -> io::Result<Option<String>> {
-    let (_, bytes) = read_regular_file(path, size_limit).map_err(|error| match error {
+    let bytes = read_regular_file(path, size_limit).map_err(|error| match error {
         FileReadError::Io(error) => error,
         FileReadError::Directory | FileReadError::NonRegular => {
             io::Error::other("not a regular file")
@@ -428,7 +396,7 @@ fn format_content<'a>(
     re: &regex::Regex,
     context: usize,
     head_limit: usize,
-) -> GrepOutput {
+) -> SearchOutput {
     let mut rows = SearchRows::new(head_limit);
 
     while !rows.full()
@@ -446,7 +414,7 @@ fn format_content<'a>(
     format_matches(rows)
 }
 
-fn format_matches(rows: SearchRows) -> GrepOutput {
+fn format_matches(rows: SearchRows) -> SearchOutput {
     let truncated = rows.full();
     let mut content = rows.render();
     if let Some(footer) = rows.limit_description("lines") {
@@ -464,7 +432,7 @@ fn format_matches(rows: SearchRows) -> GrepOutput {
     } else {
         format!("{matches} {}", plural(matches, "match", "matches"))
     };
-    GrepOutput {
+    SearchOutput {
         content,
         title,
         view: Some(StoredView::View(ToolResultView::GrepMatches {
@@ -557,7 +525,7 @@ fn format_files_with_matches<'a>(
     cwd: &Path,
     re: &regex::Regex,
     head_limit: usize,
-) -> GrepOutput {
+) -> SearchOutput {
     let mut rows = SearchRows::new(head_limit);
     while !rows.full()
         && let Some((path, text)) = texts.next()
@@ -568,7 +536,7 @@ fn format_files_with_matches<'a>(
     }
 
     if rows.kept.is_empty() {
-        return GrepOutput::text(NO_FILES_FOUND.into(), NO_MATCHES_FOUND.into());
+        return SearchOutput::plain(NO_FILES_FOUND.into(), NO_MATCHES_FOUND.into());
     }
 
     let num_files = rows.kept.len();
@@ -585,7 +553,7 @@ fn format_files_with_matches<'a>(
         _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{footer})");
     }
 
-    GrepOutput::text(content, title)
+    SearchOutput::plain(content, title)
 }
 
 // ── Count Mode ──
@@ -595,7 +563,7 @@ fn format_count<'a>(
     cwd: &Path,
     re: &regex::Regex,
     head_limit: usize,
-) -> GrepOutput {
+) -> SearchOutput {
     let mut rows = SearchRows::new(head_limit);
     let mut total_matches: usize = 0;
     let mut total_files: usize = 0;
@@ -615,7 +583,7 @@ fn format_count<'a>(
     }
 
     if total_files == 0 {
-        return GrepOutput::text(NO_MATCHES_FOUND.into(), NO_MATCHES_FOUND.into());
+        return SearchOutput::plain(NO_MATCHES_FOUND.into(), NO_MATCHES_FOUND.into());
     }
 
     let title = format!(
@@ -628,7 +596,7 @@ fn format_count<'a>(
         _ = write!(content, "\n\n{RESULTS_LIMIT_PREFIX}{footer})");
     }
 
-    GrepOutput::text(content, title)
+    SearchOutput::plain(content, title)
 }
 
 #[cfg(test)]
@@ -1035,7 +1003,7 @@ mod tests {
 
             let mut p = params("MATCH", dir.path());
             p.context = 1;
-            let GrepOutput {
+            let SearchOutput {
                 content: result,
                 title,
                 ..
@@ -1254,7 +1222,7 @@ mod tests {
             fs::write(&secret, "hit\n").unwrap();
             let _denied = [deny_read_access(&locked), deny_read_access(&secret)];
 
-            let GrepOutput {
+            let SearchOutput {
                 content: result,
                 title,
                 ..
@@ -1336,7 +1304,7 @@ mod tests {
             );
 
             p.pattern = "secret";
-            let GrepOutput {
+            let SearchOutput {
                 content: result,
                 title,
                 ..
@@ -1532,7 +1500,7 @@ mod tests {
 
             let mut p = params("fn", dir.path());
             p.output_mode = OutputMode::FilesWithMatches;
-            let GrepOutput {
+            let SearchOutput {
                 content: result,
                 title,
                 ..
@@ -1669,7 +1637,7 @@ mod tests {
 
             let mut p = params("match", dir.path());
             p.output_mode = OutputMode::Count;
-            let GrepOutput {
+            let SearchOutput {
                 content: result,
                 title,
                 ..

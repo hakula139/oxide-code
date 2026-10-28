@@ -11,7 +11,7 @@ use crate::protocol::notice::session_write_failed;
 use crate::protocol::{Event, EventSink, ResumeTarget, SavedTarget};
 use crate::session::display::id_prefix;
 use crate::session::entry::ArchiveState;
-use crate::session::handle::{LoadedTranscript, RollIntoOutcome};
+use crate::session::handle::LoadedTranscript;
 use crate::session::saved::{self, SavedError};
 use crate::session::store::SessionStore;
 use crate::util::git::current_branch;
@@ -103,7 +103,6 @@ impl Engine {
     }
 
     async fn roll_session(&mut self, sink: &dyn EventSink, old_session: ArchiveState) {
-        self.transcript.file_tracker.drain_writes().await;
         let git_branch = current_branch(self.cwd()).await;
         let outcome = self
             .transcript
@@ -124,7 +123,7 @@ impl Engine {
 
     /// Finalizes the live session and continues `target`. On failure the live session stays.
     pub(super) async fn resume(&mut self, sink: &dyn EventSink, target: ResumeTarget) {
-        let outcome = match self.roll_into(target).await {
+        let outcome = match self.transcript.roll_into(&self.store, target).await {
             Ok(outcome) => outcome,
             Err(e) => {
                 sink.emit(
@@ -150,13 +149,6 @@ impl Engine {
         report_finalize_failure(sink, outcome.finalize_failure);
         self.emit_session_start(sink);
         sink.emit(Event::SessionReady, "session-ready");
-    }
-
-    /// Finalizes the live session and swaps to the one `target` names. A prefix must match one
-    /// saved session other than the live one.
-    async fn roll_into(&mut self, target: ResumeTarget) -> Result<RollIntoOutcome> {
-        self.transcript.file_tracker.drain_writes().await;
-        self.transcript.roll_into(&self.store, target).await
     }
 
     async fn adopt_session(&mut self, sink: &dyn EventSink, transcript: LoadedTranscript) {
@@ -274,14 +266,15 @@ mod tests {
     use crate::engine::compaction::{AutoCompactFailures, auto_compaction_due, request_tokens};
     use crate::engine::local_testing::{
         EchoTool, dead_test_session, finished_session, greeting_title, inert_ops, mount_title,
-        next_matching, session_ids, system_prompt, texts, tracked_paths,
-        write_unreadable_instructions,
+        next_matching, system_prompt, texts, tracked_paths, write_unreadable_instructions,
     };
     use crate::engine::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, mount_tool_call_once, request_bodies,
         with_pinned_home,
     };
-    use crate::file_tracker::testing::{assert_writes_draining, blocked_write, seed_full_read};
+    use crate::file_tracker::testing::{
+        assert_writes_draining, blocked_write, poll_until_draining, seed_full_read,
+    };
     use crate::file_tracker::{FileTracker, GateError, GatePurpose};
     use crate::message::Message;
     use crate::model::TokenUsage;
@@ -294,7 +287,7 @@ mod tests {
     use crate::session::saved::ArchiveUpdate;
     use crate::session::store::SessionStore;
     use crate::session::store::local_testing::test_session_file;
-    use crate::session::store::testing::{test_project_dir, test_store};
+    use crate::session::store::testing::{listed_ids, test_project_dir, test_store};
     use crate::tool::ToolRegistry;
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
@@ -390,7 +383,7 @@ mod tests {
                     } else {
                         Box::pin(engine.clear(&sink))
                     };
-                    assert!(futures::poll!(operation.as_mut()).is_pending(), "{name}");
+                    poll_until_draining(&tracker, operation.as_mut()).await;
                     assert_writes_draining(&tracker);
                     assert_eq!(std::fs::read(&path).unwrap(), b"alpha", "{name}");
                     assert_eq!(tracker.snapshot_all(), previous, "{name}");
@@ -979,7 +972,7 @@ mod tests {
                         },
                     ]
                 );
-                assert_eq!(session_ids(&store), [] as [String; 0]);
+                assert_eq!(listed_ids(&store, ArchiveState::Active), [] as [String; 0]);
             })
             .await;
         }

@@ -16,7 +16,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use caseless::Caseless as _;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,9 @@ use unicode_normalization::UnicodeNormalization as _;
 use self::defaults::{ProtectedRoots, Shipped, ShippedTier, protected_roots};
 use self::rule::{MatchDiscipline, Rule};
 use self::shell::{CommandTarget, Segment};
-use crate::util::path::{expand_user, lexical_normalize, requires_directory, slash_separated};
+use crate::util::path::{
+    expand_absolute, expand_user, lexical_normalize, requires_directory, slash_separated,
+};
 use crate::util::variant;
 
 // ── Mode ──
@@ -207,11 +209,7 @@ impl Workspace {
 /// Resolves the configured extra root `raw`, which must be absolute or `~/`-rooted, resolvable, and
 /// neither `/`, `$HOME`, nor an ancestor of it.
 pub(crate) fn extra_root(raw: &str) -> Result<PathBuf> {
-    let root = expand_user(raw)?;
-    ensure!(
-        root.is_absolute(),
-        "invalid extra root {raw:?}: expected an absolute or `~/` path"
-    );
+    let root = expand_absolute(raw).with_context(|| format!("invalid extra root {raw:?}"))?;
     let root = match resolve(&root) {
         Ok(root) => root,
         Err(unreachable) => bail!("invalid extra root {raw:?}: {unreachable}"),
@@ -789,8 +787,7 @@ pub(crate) struct Verdict {
 
 /// What settled a call's [`Decision`], which the gate logs, a denial names to the model, and an
 /// approval prompt shows the user.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Basis {
     /// A configured pattern in the deny, ask, or allow tier.
     Rule { tier: Tier, rule: Rule },
@@ -870,7 +867,7 @@ impl fmt::Display for Basis {
 fn code_span(text: &str) -> String {
     let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let fence = "`".repeat(longest + 1);
-    if text.contains('`') {
+    if longest > 0 {
         format!("{fence} {text} {fence}")
     } else {
         format!("{fence}{text}{fence}")
@@ -1395,7 +1392,7 @@ fn named_read_holder<'a>(
 
 /// An approval's "allow for this session" offer: the suggested rule, plus the call that any edit of
 /// it must keep covering.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionGrant {
     class: PermissionClass,
     target: Access,
@@ -1756,7 +1753,7 @@ mod tests {
                         (base_raw.as_str(), too_broad(&base_raw)),
                     ] {
                         let err = Workspace::resolve(&repo, &[raw.to_owned()]).unwrap_err();
-                        assert_eq!(err.to_string(), expected, "{raw}");
+                        assert_eq!(format!("{err:#}"), expected, "{raw}");
                     }
                 });
             }
@@ -1819,7 +1816,7 @@ mod tests {
 
                     let err = Workspace::resolve(&home, &["shared".to_owned()]).unwrap_err();
                     assert_eq!(
-                        err.to_string(),
+                        format!("{err:#}"),
                         r#"invalid extra root "shared": expected an absolute or `~/` path"#,
                     );
                 });
@@ -4985,29 +4982,6 @@ mod tests {
             let edit = Rule::parse(EDIT, "*").unwrap();
             let err = grant.admit(edit).unwrap_err().to_string();
             assert_eq!(err, "the rule must stay an `exec` rule");
-        }
-
-        #[test]
-        fn round_trips_through_json_and_still_admits_the_call() {
-            let root_dir = canonical_tempdir();
-            let root = root_dir.path();
-            let cwd = root.join("cwd");
-            std::fs::create_dir(&cwd).unwrap();
-            let target = Access::for_path("../notes.md", &Workspace::new(&cwd));
-            let grant = policy(Mode::Manual, &[], &[], &[])
-                .session_grant(EDIT, &target)
-                .unwrap();
-
-            let json = serde_json::to_value(&grant).unwrap();
-            assert_eq!(json["class"], "edit");
-            assert_eq!(json["target"]["type"], "path");
-            assert_eq!(json["suggested"]["pattern"], grant.suggested().pattern());
-            let back: SessionGrant = serde_json::from_value(json).unwrap();
-            assert_eq!(back, grant);
-            assert_eq!(
-                back.accept(grant.suggested().pattern()).unwrap(),
-                *grant.suggested()
-            );
         }
     }
 

@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail, ensure};
 use globset::{Glob, GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
 use regex_syntax::hir::literal::Extractor;
-use serde::{Deserialize, Serialize};
 
 use super::shell::{PatternWord, Segment, ShellWord, bare_program, pattern_words};
 use super::{
@@ -27,21 +26,13 @@ use crate::util::text::is_hidden;
 
 // ── Rule ──
 
-/// One parsed permission rule, which serializes as its class and its pattern as written.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(try_from = "RuleSpec", into = "RuleSpec")]
+/// One parsed permission rule.
+#[derive(Debug, Clone)]
 pub struct Rule {
     class: PermissionClass,
     /// The pattern as written, such as `cargo test *`.
     source: String,
     pattern: Pattern,
-}
-
-/// The serialized form of a [`Rule`].
-#[derive(Serialize, Deserialize)]
-struct RuleSpec {
-    class: PermissionClass,
-    pattern: String,
 }
 
 /// The matchable body of a rule, chosen by its class at parse time.
@@ -272,23 +263,6 @@ impl PartialEq for Rule {
 }
 
 impl Eq for Rule {}
-
-impl TryFrom<RuleSpec> for Rule {
-    type Error = anyhow::Error;
-
-    fn try_from(spec: RuleSpec) -> Result<Self> {
-        Self::parse(spec.class, &spec.pattern)
-    }
-}
-
-impl From<Rule> for RuleSpec {
-    fn from(rule: Rule) -> Self {
-        Self {
-            class: rule.class,
-            pattern: rule.source,
-        }
-    }
-}
 
 /// Returns whether `c` paints as one visible cell or more, or is a plain space.
 fn paints_as_itself(c: char) -> bool {
@@ -653,25 +627,6 @@ mod tests {
 
     fn matches_path(rule: &Rule, target: &Target<'_>, discipline: MatchDiscipline) -> bool {
         rule.matches(rule.class(), target, discipline)
-    }
-
-    #[test]
-    fn serializes_as_its_class_and_pattern() {
-        let rule = exec("  cargo test * ");
-
-        let json = serde_json::to_value(&rule).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({"class": "exec", "pattern": "cargo test *"})
-        );
-        let back: Rule = serde_json::from_value(json).unwrap();
-        assert_eq!(back, rule);
-        assert!(allows(&back, "cargo test --all"));
-
-        let err =
-            serde_json::from_value::<Rule>(serde_json::json!({"class": "exec", "pattern": "a; b"}))
-                .unwrap_err();
-        assert!(err.to_string().contains("one simple command"), "{err}");
     }
 
     mod parse {

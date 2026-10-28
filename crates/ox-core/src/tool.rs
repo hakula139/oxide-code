@@ -166,7 +166,7 @@ impl ToolOutput {
 
 /// Structured data for UI display and logging. The model never sees it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolMetadata {
+pub(crate) struct ToolMetadata {
     /// A one-line summary of the call, which the UI shows on its result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
@@ -413,12 +413,11 @@ fn display_path(path: &Path, base: &Path) -> String {
     slash_separated(shown)
 }
 
-/// Returns the trailing file name of `path`, or `path` itself when it has none or it is not UTF-8.
-fn file_name(path: &str) -> &str {
-    Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path)
+/// Returns the trailing file name of `path`, or `path` itself when it has none.
+fn file_name(path: &Path) -> Cow<'_, str> {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
 }
 
 // ── Blocking Work ──
@@ -454,8 +453,7 @@ fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
 
 #[cfg(test)]
 pub(crate) mod local_testing {
-    use std::fs::{self, File};
-    use std::io;
+    use std::fs::File;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
@@ -468,76 +466,6 @@ pub(crate) mod local_testing {
     use crate::file_tracker::FileTracker;
     use crate::permission::rule::Rule;
     use crate::permission::{Access, Mode, PermissionClass, Policy, ReadFilter, Workspace};
-
-    /// Original-file evidence for one workspace write attempt.
-    pub(crate) struct WorkspaceWrite {
-        path: PathBuf,
-        original: Option<(File, fs::Metadata, Vec<u8>)>,
-    }
-
-    impl WorkspaceWrite {
-        pub(crate) fn new(path: &Path) -> Self {
-            let original = match File::open(path) {
-                Ok(file) => {
-                    let metadata = file.metadata().unwrap();
-                    let bytes = fs::read(path).unwrap();
-                    Some((file, metadata, bytes))
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                Err(error) => panic!("cannot inspect {}: {error}", path.display()),
-            };
-            Self {
-                path: path.to_owned(),
-                original,
-            }
-        }
-
-        pub(crate) fn assert_unchanged(&self) {
-            if let Some((original, metadata, bytes)) = &self.original {
-                let current = File::open(&self.path).unwrap();
-                assert_eq!(fs::read(&self.path).unwrap(), *bytes);
-                assert_eq!(
-                    current.metadata().unwrap().permissions(),
-                    metadata.permissions()
-                );
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt as _;
-
-                    let current = current.metadata().unwrap();
-                    let original = original.metadata().unwrap();
-                    assert_eq!(
-                        (current.dev(), current.ino(), current.uid(), current.gid()),
-                        (
-                            original.dev(),
-                            original.ino(),
-                            original.uid(),
-                            original.gid()
-                        )
-                    );
-                }
-                #[cfg(windows)]
-                assert_eq!(
-                    crate::util::fs::file_id(&current).unwrap(),
-                    crate::util::fs::file_id(original).unwrap()
-                );
-            } else {
-                assert!(!self.path.exists());
-            }
-            let parent = self.path.parent().unwrap();
-            if parent.exists() {
-                let temporary: Vec<_> = fs::read_dir(parent)
-                    .unwrap()
-                    .map(|entry| entry.unwrap().file_name())
-                    .filter(|name| {
-                        let name = name.to_string_lossy();
-                        name.starts_with(".ox-write.") || name.starts_with(".ox-mode.")
-                    })
-                    .collect();
-                assert_eq!(temporary, [] as [std::ffi::OsString; 0]);
-            }
-        }
-    }
 
     /// A prepared call carrying `input` alone, for tests of a part that does not resolve a path.
     pub(crate) fn prepared(input: serde_json::Value) -> Prepared {
@@ -1494,8 +1422,9 @@ mod tests {
             for (case, path, expected) in [
                 ("full path", "/home/user/project/src/main.rs", "main.rs"),
                 ("bare name", "README.md", "README.md"),
+                ("root", "/", "/"),
             ] {
-                assert_eq!(file_name(path), expected, "{case}");
+                assert_eq!(file_name(Path::new(path)), expected, "{case}");
             }
         }
     }

@@ -129,13 +129,14 @@ impl LiveTranscript {
         }
     }
 
-    /// Returns the transcript and the session to `start` and `checkpoint`, dropping what the turn
-    /// after them added. Returns the session's write failure.
+    /// Returns the transcript and the session to `start` and `checkpoint` once pending writes settle,
+    /// dropping what the turn after them added. Returns the session's write failure.
     pub(super) async fn roll_back(
         &mut self,
         start: TranscriptStart,
         checkpoint: Option<Checkpoint>,
     ) -> Option<String> {
+        self.file_tracker.drain_writes().await;
         self.messages.truncate(start.len);
         self.prompt.seen = start.seen;
         self.prompt_unrecorded = start.prompt_unrecorded;
@@ -213,12 +214,13 @@ impl LiveTranscript {
     }
 
     /// Saves `boundary` and swaps the transcript to `synthetic`, which adopts the boundary's
-    /// prompt context. Clears the tracked files with the transcript.
+    /// prompt context. Clears the tracked files with the transcript once pending writes settle.
     pub(super) async fn compact(
         &mut self,
         boundary: CompactBoundary,
         synthetic: Message,
     ) -> CompactOutcome {
+        self.file_tracker.drain_writes().await;
         let context = boundary.context.clone();
         let outcome = self.session.compact(boundary, synthetic.clone()).await;
         if outcome.checkpoint.is_some() {
@@ -237,6 +239,7 @@ impl LiveTranscript {
         model: &str,
         git_branch: Option<String>,
     ) -> RollOutcome {
+        self.file_tracker.drain_writes().await;
         handle::roll(
             &mut self.session,
             store,
@@ -254,6 +257,7 @@ impl LiveTranscript {
         store: &SessionStore,
         target: ResumeTarget,
     ) -> Result<RollIntoOutcome> {
+        self.file_tracker.drain_writes().await;
         handle::roll_into(
             &mut self.session,
             store,
@@ -263,9 +267,10 @@ impl LiveTranscript {
         .await
     }
 
-    /// Closes the session with a snapshot of the files the transcript read, after the caller drains
-    /// the pending writes. Returns the session's write failure.
+    /// Closes the session with a snapshot of the files the transcript read once pending writes
+    /// settle. Returns the session's write failure.
     pub(super) async fn finalize(self) -> Option<String> {
+        self.file_tracker.drain_writes().await;
         self.session
             .finalize(self.file_tracker.snapshot_all())
             .await

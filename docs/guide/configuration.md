@@ -123,7 +123,7 @@ base_url = "https://gw.llm.corp.example/anthropic"
 extra_ca_certs = "~/.config/ox/corp-cachain.pem"
 ```
 
-The path must be absolute or `~`-rooted, and `ox` rejects a relative one, which would depend on the directory it starts in. `OX_EXTRA_CA_CERTS` wins over this field, and `NODE_EXTRA_CA_CERTS` applies only when neither is set. Both variables may hold a relative path, which resolves from the working directory as in Node (see [LLM gateways](authentication.md#llm-gateways)).
+The path must be absolute or start with `~/`, and `ox` rejects a relative one, which would depend on the directory it starts in. `OX_EXTRA_CA_CERTS` wins over this field, and `NODE_EXTRA_CA_CERTS` applies only when neither is set. Both variables may hold a relative path, which resolves from the working directory as in Node (see [LLM gateways](authentication.md#llm-gateways)).
 
 On macOS, a server certificate valid for longer than Apple's 825-day limit is accepted when it chains to a CA in the bundle, even one already installed system-wide, unless that CA is one of Apple's built-in roots.
 

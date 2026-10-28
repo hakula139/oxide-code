@@ -22,7 +22,7 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr, VariantArray};
 use tracing::warn;
@@ -41,7 +41,7 @@ use crate::permission::defaults::Shipped;
 use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
 use crate::util::git::project_root;
-use crate::util::path::{expand_user, tildify};
+use crate::util::path::{expand_absolute, expand_user, tildify};
 use crate::util::tls::{PlatformTrust, load_extra_ca_certs};
 use crate::util::variant;
 
@@ -456,16 +456,13 @@ fn resolve_extra_ca_certs(
         .map(|raw| ("OX_EXTRA_CA_CERTS", raw))
         .or(file.map(|raw| ("client.extra_ca_certs", raw)));
     if let Some((key, raw)) = explicit {
-        let from_file = matches!(raw.source, Source::File(_));
-        let path = expand_user(&raw.value)
-            .and_then(|path| {
-                ensure!(
-                    !from_file || path.is_absolute(),
-                    "must be an absolute or ~/ path"
-                );
-                check_ca_bundle(&path).map(|()| path)
-            })
-            .with_context(|| format!("invalid {key}"))?;
+        let path = if matches!(raw.source, Source::File(_)) {
+            expand_absolute(&raw.value)
+        } else {
+            expand_user(&raw.value)
+        }
+        .and_then(|path| check_ca_bundle(&path).map(|()| path))
+        .with_context(|| format!("invalid {key}"))?;
         return Ok(Sourced::new(Some(path), raw.source));
     }
 
@@ -505,10 +502,7 @@ fn resolve_explicit_auth(
     base_url: &BaseUrl,
     gateway: &ResolvedGateway,
 ) -> Result<(Sourced<Option<Auth>>, Option<PendingAuth>)> {
-    let config = match file_auth {
-        Some(file_auth) => auth::configured_auth(file_auth)?,
-        None => None,
-    };
+    let config = file_auth.map(auth::configured_auth).transpose()?.flatten();
     let explicit = auth::first_explicit(config)?;
     let explicit_source = explicit.as_ref().map(auth::ExplicitAuth::source);
     if explicit_source.is_some() || base_url.is_first_party() {
@@ -1282,7 +1276,11 @@ mod tests {
 
         #[tokio::test]
         async fn boolean_env_errors_name_the_variable_and_values() {
-            for var in ["OX_SHOW_THINKING", "OX_SHOW_WELCOME"] {
+            for var in [
+                "OX_COMPACTION_AUTO_ENABLED",
+                "OX_SHOW_THINKING",
+                "OX_SHOW_WELCOME",
+            ] {
                 let dir = tempfile::tempdir().unwrap();
 
                 let err = load_with(&dir, &[(var, "maybe")])
@@ -1532,7 +1530,7 @@ mod tests {
 
             assert_eq!(
                 format!("{err:#}"),
-                "invalid client.extra_ca_certs: must be an absolute or ~/ path",
+                "invalid client.extra_ca_certs: expected an absolute or `~/` path",
             );
         }
 
@@ -1548,37 +1546,6 @@ mod tests {
             );
             let config = load_with(&dir, &[("OX_EXTRA_CA_CERTS", "")]).await.unwrap();
             assert_eq!(config.extra_ca_certs, Some(PathBuf::from(TEST_CA_PATH)),);
-        }
-
-        #[tokio::test]
-        async fn env_api_key_beats_file_api_key() {
-            let dir = tempfile::tempdir().unwrap();
-            write_user_config(
-                dir.path(),
-                indoc! {r#"
-                    [client]
-                    auth = { type = "api-key", value = "sk-from-file" }
-                "#},
-            );
-            let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "sk-from-env")])
-                .await
-                .unwrap();
-            assert_auth(&config, AuthSource::ApiKeyEnv, "sk-from-env");
-        }
-
-        #[tokio::test]
-        async fn file_api_key_used_when_env_is_empty() {
-            let dir = tempfile::tempdir().unwrap();
-            let user = write_user_config(
-                dir.path(),
-                indoc! {r#"
-                    [client]
-                    auth = { type = "api-key", value = "sk-from-file" }
-                "#},
-            );
-            let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "")]).await.unwrap();
-            assert_auth(&config, AuthSource::ClientApiKey, "sk-from-file");
-            assert_eq!(config.provenance.auth, Source::File(user));
         }
 
         #[tokio::test]
@@ -1618,6 +1585,32 @@ mod tests {
             assert!(message.contains("client.auth.file"), "{message}");
             assert!(message.contains(&token.display().to_string()), "{message}");
             assert!(!message.contains("private-token-sentinel"), "{message}");
+        }
+
+        #[tokio::test]
+        async fn native_auth_rejects_a_relative_credential_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let user = write_user_config(
+                dir.path(),
+                indoc! {"
+                    [client.auth]
+                    type = 'bearer'
+                    file = 'secrets/token'
+                "},
+            );
+
+            let err = load_with(&dir, &[])
+                .await
+                .expect_err("a relative credential file depends on the working directory");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid config at {}: line 1, column 1, in `client.auth`: \
+                     invalid client.auth.file: expected an absolute or `~/` path",
+                    user.path().display(),
+                ),
+            );
         }
 
         #[tokio::test]
@@ -1739,35 +1732,63 @@ mod tests {
 
         #[tokio::test]
         async fn resolves_credentials_in_precedence_order() {
-            // Each row drops the previous winner. `ANTHROPIC_API_KEY` stays unset throughout.
-            for (auth_token, file_key, winner, secret) in [
+            // Each row drops the previous winner, and an empty `ANTHROPIC_API_KEY` counts as unset.
+            for (auth_token, api_key, file_key, winner, secret, variable) in [
                 (
                     Some("gateway-token"),
+                    Some("sk-from-env"),
                     true,
                     AuthSource::AuthTokenEnv,
                     "gateway-token",
+                    Some("ANTHROPIC_AUTH_TOKEN"),
                 ),
-                (None, true, AuthSource::ClientApiKey, "sk-from-file"),
-                (None, false, AuthSource::OAuthTokenEnv, "oauth-token"),
+                (
+                    None,
+                    Some("sk-from-env"),
+                    true,
+                    AuthSource::ApiKeyEnv,
+                    "sk-from-env",
+                    Some("ANTHROPIC_API_KEY"),
+                ),
+                (
+                    None,
+                    Some(""),
+                    true,
+                    AuthSource::ClientApiKey,
+                    "sk-from-file",
+                    None,
+                ),
+                (
+                    None,
+                    None,
+                    false,
+                    AuthSource::OAuthTokenEnv,
+                    "oauth-token",
+                    Some("CLAUDE_CODE_OAUTH_TOKEN"),
+                ),
             ] {
                 let dir = tempfile::tempdir().unwrap();
-                if file_key {
+                let user = file_key.then(|| {
                     write_user_config(
                         dir.path(),
                         indoc! {r#"
                             [client]
                             auth = { type = "api-key", value = "sk-from-file" }
                         "#},
-                    );
-                }
+                    )
+                });
                 let vars = env_vars(vec![
                     xdg(&dir),
-                    ("ANTHROPIC_API_KEY", None),
+                    ("ANTHROPIC_API_KEY", api_key.map(str::to_owned)),
                     ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
                     env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
                 ]);
+
                 let config = load_in(&dir, vars, false).await.unwrap();
+
                 assert_auth(&config, winner, secret);
+                let source = variable.map_or_else(|| Source::File(user.unwrap()), Source::Env);
+                assert_eq!(config.provenance.auth, source, "{winner:?}");
             }
         }
 

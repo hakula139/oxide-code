@@ -74,7 +74,7 @@ pub enum AuthSource {
 
 /// One slot in [`AuthSource::EXPLICIT`].
 #[derive(Debug, Clone, Copy)]
-pub(super) enum Explicit {
+enum Explicit {
     /// A credential environment variable.
     Env(AuthSource),
     /// The `[client.auth]` credential, whichever type it selects.
@@ -84,7 +84,7 @@ pub(super) enum Explicit {
 impl AuthSource {
     /// The explicit credential slots in the order they win over each other and over the stored
     /// logins: the environment variables around the one config slot.
-    pub(super) const EXPLICIT: [Explicit; 4] = [
+    const EXPLICIT: [Explicit; 4] = [
         Explicit::Env(Self::AuthTokenEnv),
         Explicit::Env(Self::ApiKeyEnv),
         Explicit::Config,

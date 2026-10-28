@@ -121,16 +121,14 @@ async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
     )
     .await
     {
-        Ok(Edited {
-            replacements, diff, ..
-        }) => {
-            let shown = path.display().to_string();
+        Ok(Edited { replacements, diff }) => {
+            let shown = path.display();
             let content = match replacements {
                 1 => format!("Successfully edited {shown}."),
                 n => format!("Replaced {n} occurrences in {shown}."),
             };
             ToolOutput::success(content)
-                .with_title(format!("Edited {}", super::file_name(&shown)))
+                .with_title(format!("Edited {}", super::file_name(&path)))
                 .with_result_view(ToolResultView::Diff(diff))
         }
         Err(msg) => ToolOutput::error(msg),
@@ -158,7 +156,7 @@ async fn edit_file(
         return Err("old_string and new_string are identical. No changes to make.".to_owned());
     }
 
-    let (_, content_bytes) = super::file::read_validated(path, FileVerb::Edit).await?;
+    let content_bytes = super::file::read_validated(path, FileVerb::Edit).await?;
     let key = super::file::tracker_key(path).await;
     ctx.tracker
         .verify_current_content(&key, &content_bytes, GatePurpose::Edit)
