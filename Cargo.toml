@@ -51,7 +51,7 @@ globset = "0.4"
 ignore = "0.4"
 indoc = "2"
 insta = { version = "1", features = ["glob"] }
-nix = { version = "0.31", default-features = false, features = ["fs", "user"] }
+nix = { version = "0.31", default-features = false, features = ["fs"] }
 open = "5"
 ox-core = { path = "crates/ox-core" }
 ox-tui = { path = "crates/ox-tui" }
@@ -122,15 +122,7 @@ unicode-width = "0.2"
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 winapi-util = "0.1"
-windows-sys = { version = "0.61", features = [
-  "Wdk_Storage_FileSystem",
-  "Win32_Foundation",
-  "Win32_Security_Authorization",
-  "Win32_Storage_FileSystem",
-  "Win32_System_IO",
-  "Win32_System_Ioctl",
-  "Win32_System_SystemServices",
-] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 wiremock = "0.6"
 xattr = "1.6"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
