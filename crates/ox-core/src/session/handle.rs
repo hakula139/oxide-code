@@ -577,6 +577,7 @@ mod tests {
         TEST_PROJECT, WriterBarrier, archive_test_session, isolated_store, seed_test_session,
         test_project_dir, test_store,
     };
+    use crate::tool::StoredView;
     use crate::tool::tasks::testing::plan;
     use crate::tool::view::{DiffChunk, EditDiff, NumberedLine, ToolResultView};
 
@@ -742,15 +743,15 @@ mod tests {
                             "t1".to_owned(),
                             ToolMetadata {
                                 title: Some("Edited a.rs".to_owned()),
-                                ..ToolMetadata::default()
+                                result_view: None,
                             },
                         ),
                         ("t2".to_owned(), ToolMetadata::default()),
                         (
                             "t3".to_owned(),
                             ToolMetadata {
-                                truncated_total: Some(2),
-                                ..ToolMetadata::default()
+                                title: None,
+                                result_view: Some(StoredView::Text),
                             },
                         ),
                     ],
@@ -784,8 +785,8 @@ mod tests {
                 Some("Edited a.rs"),
             );
             assert_eq!(
-                data.tool_result_metadata.get("t3").unwrap().truncated_total,
-                Some(2),
+                data.tool_result_metadata.get("t3").unwrap().result_view,
+                Some(StoredView::Text),
             );
         }
 
@@ -806,7 +807,7 @@ mod tests {
                         "t1".to_owned(),
                         ToolMetadata {
                             title: Some("f.rs".to_owned()),
-                            ..ToolMetadata::default()
+                            result_view: None,
                         },
                     )],
                 )
@@ -2258,7 +2259,8 @@ mod tests {
             drop(handle);
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) =
+                FileTracker::restored(resumed.transcript.file_snapshots).await;
 
             let restored =
                 resumed_tracker.verify_current_content(&path_a, b"alpha", GatePurpose::Edit);
@@ -2292,7 +2294,8 @@ mod tests {
             std::fs::write(&path_a, b"externally edited bytes").unwrap();
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) =
+                FileTracker::restored(resumed.transcript.file_snapshots).await;
 
             let result = resumed_tracker.verify_current_content(
                 &path_a,
@@ -2326,7 +2329,8 @@ mod tests {
             std::fs::remove_file(&path_a).unwrap();
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) =
+                FileTracker::restored(resumed.transcript.file_snapshots).await;
             let result = resumed_tracker.verify_current_content(&path_a, b"", GatePurpose::Edit);
             assert_eq!(
                 result,
@@ -2507,20 +2511,18 @@ mod tests {
                             "t2".to_owned(),
                             ToolMetadata {
                                 title: Some("Read g.rs".to_owned()),
-                                ..ToolMetadata::default()
+                                result_view: None,
                             },
                         ),
                         (
                             "t3".to_owned(),
                             ToolMetadata {
                                 title: Some("Found 100 files".to_owned()),
-                                truncated_total: Some(250),
-                                result_view: Some(ToolResultView::GlobFiles {
+                                result_view: Some(StoredView::View(ToolResultView::GlobFiles {
                                     pattern: "*.rs".to_owned(),
                                     files: vec!["g.rs".to_owned()],
                                     total: 250,
-                                }),
-                                ..ToolMetadata::default()
+                                })),
                             },
                         ),
                     ],
@@ -2531,7 +2533,7 @@ mod tests {
         fn edit_metadata() -> ToolMetadata {
             ToolMetadata {
                 title: Some("Edited f.rs".to_owned()),
-                diff: Some(EditDiff {
+                result_view: Some(StoredView::View(ToolResultView::Diff(EditDiff {
                     chunk: DiffChunk {
                         old: vec![NumberedLine {
                             number: 1,
@@ -2543,8 +2545,7 @@ mod tests {
                         }],
                     },
                     locations: vec![1],
-                }),
-                ..ToolMetadata::default()
+                }))),
             }
         }
 

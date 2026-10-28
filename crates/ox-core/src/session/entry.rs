@@ -251,6 +251,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::{FileSource, FileState, LastView};
     use crate::message::{ContentBlock, Role};
+    use crate::tool::StoredView;
     use crate::tool::tasks::testing::plan;
 
     #[test]
@@ -393,21 +394,20 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_metadata_round_trips_with_title_and_truncated_total() {
+    fn tool_result_metadata_round_trips_with_title_and_stored_view() {
         let entry = Entry::ToolResultMetadata {
-            tool_use_id: "edit1".to_owned(),
+            tool_use_id: "grep1".to_owned(),
             metadata: ToolMetadata {
-                title: Some("Edited f.rs".to_owned()),
-                truncated_total: Some(3),
-                ..ToolMetadata::default()
+                title: Some("Found 2 files".to_owned()),
+                result_view: Some(StoredView::Text),
             },
             timestamp: datetime!(2026-04-16 12:06:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["type"], "tool_result_metadata");
-        assert_eq!(json["tool_use_id"], "edit1");
-        assert_eq!(json["metadata"]["title"], "Edited f.rs");
-        assert_eq!(json["metadata"]["truncated_total"], 3);
+        assert_eq!(json["tool_use_id"], "grep1");
+        assert_eq!(json["metadata"]["title"], "Found 2 files");
+        assert_eq!(json["metadata"]["result_view"], "text");
         assert_eq!(json["timestamp"], "2026-04-16T12:06:00Z");
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();

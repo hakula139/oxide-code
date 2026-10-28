@@ -88,8 +88,9 @@ const VCS_DIRS: &[&str] = &[".bzr", ".git", ".hg", ".jj", ".sl", ".svn"];
 /// cannot read goes to `unreadable`.
 ///
 /// Honors `.gitignore` and global ignore files, includes hidden entries such as `.github/` so
-/// dotfile config stays searchable, skips VCS metadata directories below `base`, and pins the walk
-/// to the starting filesystem so symlinked mounts don't escape.
+/// dotfile config stays searchable, skips VCS metadata directories below `base`, and stays on the
+/// starting filesystem, so a bind mount or container volume below `base` is searched only when the
+/// caller roots the search there.
 pub(super) fn walk_files<'a>(
     base: &Path,
     cancel: &'a CancellationToken,

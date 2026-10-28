@@ -79,7 +79,8 @@ impl FileTracker {
     /// Builds the tracker of a resumed session from the `snapshots` it saved. On duplicate paths
     /// the snapshot with the newer `recorded_at` wins, and it must still match disk by content
     /// hash. Also returns the dropped paths, sorted, which need a fresh Read before any mutation.
-    pub(crate) fn restored(snapshots: Vec<FileSnapshot>) -> (Self, Vec<PathBuf>) {
+    /// The hashing runs on the blocking pool, so it never stalls the async runtime.
+    pub(crate) async fn restored(snapshots: Vec<FileSnapshot>) -> (Self, Vec<PathBuf>) {
         let mut latest = HashMap::<PathBuf, FileState>::new();
         for FileSnapshot { path, state } in snapshots {
             let replace = latest
@@ -90,21 +91,26 @@ impl FileTracker {
             }
         }
 
-        let mut dropped: Vec<_> = latest
-            .extract_if(|path, state| {
-                verify_on_disk(path, state.content_hash)
-                    .inspect_err(|e| {
-                        debug!(
-                            path = %path.display(),
-                            error = %format_args!("{e:#}"),
-                            "dropping a tracked file that changed on disk",
-                        );
-                    })
-                    .is_err()
-            })
-            .map(|(path, _)| path)
-            .collect();
-        dropped.sort();
+        let (latest, dropped) = tokio::task::spawn_blocking(move || {
+            let mut dropped: Vec<_> = latest
+                .extract_if(|path, state| {
+                    verify_on_disk(path, state.content_hash)
+                        .inspect_err(|e| {
+                            debug!(
+                                path = %path.display(),
+                                error = %format_args!("{e:#}"),
+                                "dropping a tracked file that changed on disk",
+                            );
+                        })
+                        .is_err()
+                })
+                .map(|(path, _)| path)
+                .collect();
+            dropped.sort();
+            (latest, dropped)
+        })
+        .await
+        .expect("verifying restored snapshots never panics");
         let tracker = Self {
             by_path: Mutex::new(latest),
             ..Self::default()
@@ -960,76 +966,76 @@ mod tests {
             }
         }
 
-        #[test]
-        fn keeps_the_snapshots_that_match_disk() {
+        #[tokio::test]
+        async fn keeps_the_snapshots_that_match_disk() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("a.rs");
             std::fs::write(&path, b"persisted bytes").unwrap();
             let snap = snapshot(&path, b"persisted bytes", OffsetDateTime::now_utc());
 
-            let (tracker, dropped) = FileTracker::restored(vec![snap.clone()]);
+            let (tracker, dropped) = FileTracker::restored(vec![snap.clone()]).await;
 
             assert_eq!(dropped, [] as [PathBuf; 0]);
             assert_eq!(tracker.snapshot_all(), [snap]);
         }
 
-        #[test]
-        fn content_drift_drops_snapshot() {
+        #[tokio::test]
+        async fn content_drift_drops_snapshot() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("a.rs");
             std::fs::write(&path, b"new").unwrap();
 
             let snap = snapshot(&path, b"old", OffsetDateTime::now_utc());
 
-            let (tracker, dropped) = FileTracker::restored(vec![snap]);
+            let (tracker, dropped) = FileTracker::restored(vec![snap]).await;
 
             assert_eq!(dropped, vec![path.clone()]);
             assert_eq!(tracker.snapshot_all(), []);
         }
 
-        #[test]
-        fn non_regular_file_drops_snapshot() {
+        #[tokio::test]
+        async fn non_regular_file_drops_snapshot() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("subdir");
             std::fs::create_dir(&path).unwrap();
             let snap = snapshot(&path, b"", OffsetDateTime::now_utc());
 
-            let (tracker, dropped) = FileTracker::restored(vec![snap]);
+            let (tracker, dropped) = FileTracker::restored(vec![snap]).await;
 
             assert_eq!(dropped, vec![path.clone()]);
             assert_eq!(tracker.snapshot_all(), []);
         }
 
-        #[test]
-        fn too_large_file_drops_snapshot_without_reading() {
+        #[tokio::test]
+        async fn too_large_file_drops_snapshot_without_reading() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("huge.rs");
             let f = std::fs::File::create(&path).unwrap();
             f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
             let snap = snapshot(&path, b"", OffsetDateTime::now_utc());
 
-            let (tracker, dropped) = FileTracker::restored(vec![snap]);
+            let (tracker, dropped) = FileTracker::restored(vec![snap]).await;
 
             assert_eq!(dropped, vec![path.clone()]);
             assert_eq!(tracker.snapshot_all(), []);
         }
 
-        #[test]
-        fn unreadable_file_drops_snapshot() {
+        #[tokio::test]
+        async fn unreadable_file_drops_snapshot() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("a.rs");
             std::fs::write(&path, b"content").unwrap();
             let snap = snapshot(&path, b"content", OffsetDateTime::now_utc());
             let _denied = deny_read_access(&path);
 
-            let (tracker, dropped) = FileTracker::restored(vec![snap]);
+            let (tracker, dropped) = FileTracker::restored(vec![snap]).await;
 
             assert_eq!(dropped, vec![path.clone()]);
             assert_eq!(tracker.snapshot_all(), []);
         }
 
-        #[test]
-        fn final_symlink_drops_snapshot_even_when_content_matches() {
+        #[tokio::test]
+        async fn final_symlink_drops_snapshot_even_when_content_matches() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("a.rs");
             let target = dir.path().join("target.rs");
@@ -1037,14 +1043,14 @@ mod tests {
             crate::util::fs::testing::symlink_file(&target, &path);
             let snap = snapshot(&path, b"content", OffsetDateTime::now_utc());
 
-            let (tracker, dropped) = FileTracker::restored(vec![snap]);
+            let (tracker, dropped) = FileTracker::restored(vec![snap]).await;
 
             assert_eq!(dropped, [path]);
             assert_eq!(tracker.snapshot_all(), []);
         }
 
-        #[test]
-        fn reports_dropped_paths_in_sorted_order() {
+        #[tokio::test]
+        async fn reports_dropped_paths_in_sorted_order() {
             let dir = tempfile::tempdir().unwrap();
             let kept_path = dir.path().join("kept.rs");
             let drifted_path = dir.path().join("drifted.rs");
@@ -1058,7 +1064,7 @@ mod tests {
                 snapshot(&missing_path, b"", OffsetDateTime::now_utc()),
             ];
 
-            let (tracker, dropped) = FileTracker::restored(snaps);
+            let (tracker, dropped) = FileTracker::restored(snaps).await;
 
             let mut expected = vec![drifted_path, missing_path];
             expected.sort();
@@ -1070,8 +1076,8 @@ mod tests {
             assert_eq!(stored_paths, vec![kept_path]);
         }
 
-        #[test]
-        fn verifies_only_newest_snapshot_per_path() {
+        #[tokio::test]
+        async fn verifies_only_newest_snapshot_per_path() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("a.rs");
             std::fs::write(&path, b"x").unwrap();
@@ -1088,7 +1094,7 @@ mod tests {
                 vec![older.clone(), newer.clone()],
                 vec![newer.clone(), older.clone()],
             ] {
-                let (tracker, dropped) = FileTracker::restored(snaps);
+                let (tracker, dropped) = FileTracker::restored(snaps).await;
 
                 assert_eq!(dropped, [] as [PathBuf; 0]);
                 assert_eq!(

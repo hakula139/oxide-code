@@ -433,7 +433,7 @@ mod tests {
     use ox_core::protocol::testing::ls_call;
     use ox_core::session::store::testing::test_store;
     use ox_core::tool::testing::bash_registry;
-    use ox_core::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec};
+    use ox_core::tool::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
 
     use super::*;
     use crate::driver::testing::ClosedPipe;
@@ -559,9 +559,11 @@ mod tests {
         impl Tool for LookTool {
             fn spec(&self) -> ToolSpec {
                 ToolSpec {
-                    name: "look".to_owned(),
-                    description: "Looks around the project.".to_owned(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    definition: ToolDefinition {
+                        name: "look".to_owned(),
+                        description: "Looks around the project.".to_owned(),
+                        input_schema: serde_json::json!({"type": "object"}),
+                    },
                     class: PermissionClass::Read,
                     parallel_safe: true,
                 }

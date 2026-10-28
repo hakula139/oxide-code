@@ -23,7 +23,9 @@ use tracing::warn;
 use self::background::{BackgroundShells, ShellState};
 use super::spill::{Spill, omission_marker, whole_line_head, whole_line_tail};
 use super::view::{ApprovalBody, ApprovalPreview};
-use super::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, pascal_case};
+use super::{
+    Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field, pascal_case,
+};
 use crate::config::auth::secret_env_vars;
 use crate::permission::{Access, PermissionClass};
 
@@ -68,16 +70,18 @@ impl BashTool {
 impl Tool for BashTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "bash".to_owned(),
-            description: "Execute a shell command and return its output. \
-                          For a dev server, a watcher, or a long build, set run_in_background, \
-                          without a trailing `&`: the call returns a shell ID at once. \
-                          You are not notified when the command finishes, \
-                          so check on it with bash_output, and stop it with bash_stop. \
-                          A background shell stays open, running or finished, \
-                          until bash_stop stops it or the session ends."
-                .to_owned(),
-            input_schema: input_schema(),
+            definition: ToolDefinition {
+                name: "bash".to_owned(),
+                description: "Execute a shell command and return its output. \
+                              For a dev server, a watcher, or a long build, set run_in_background, \
+                              without a trailing `&`: the call returns a shell ID at once. \
+                              You are not notified when the command finishes, \
+                              so check on it with bash_output, and stop it with bash_stop. \
+                              A background shell stays open, running or finished, \
+                              until bash_stop stops it or the session ends."
+                    .to_owned(),
+                input_schema: input_schema(),
+            },
             class: PermissionClass::Exec,
             parallel_safe: false,
         }
@@ -101,10 +105,11 @@ impl Tool for BashTool {
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
-        input: &'a serde_json::Value,
+        prepared: &'a Prepared,
         cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
-        let background = input
+        let background = prepared
+            .input
             .get("run_in_background")
             .and_then(serde_json::Value::as_bool)
             == Some(true);
@@ -115,7 +120,7 @@ impl Tool for BashTool {
             } else {
                 label
             },
-            body: ApprovalBody::Command(self.summarize_call(name, input, cwd)),
+            body: ApprovalBody::Command(self.summarize_call(name, &prepared.input, cwd)),
         }))
     }
 
@@ -847,12 +852,19 @@ mod tests {
             let cwd = Path::new("/repo");
 
             let foreground = tool
-                .approval_preview("bash", &serde_json::json!({"command": "cargo test"}), cwd)
+                .approval_preview(
+                    "bash",
+                    &local_testing::prepared(serde_json::json!({"command": "cargo test"})),
+                    cwd,
+                )
                 .await;
             let background = tool
                 .approval_preview(
                     "bash",
-                    &serde_json::json!({"command": "cargo watch", "run_in_background": true}),
+                    &local_testing::prepared(serde_json::json!({
+                        "command": "cargo watch",
+                        "run_in_background": true,
+                    })),
                     cwd,
                 )
                 .await;
