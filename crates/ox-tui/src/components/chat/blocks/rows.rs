@@ -11,6 +11,7 @@ use ox_core::util::text::ELLIPSIS;
 
 use super::RenderCtx;
 use crate::glyphs::{BAR, TOOL_BORDER_CONT};
+use crate::grapheme::head_end;
 use crate::wrap::{expand_tabs, wrap_line};
 
 const DEFAULT_SEPARATOR: &str = " │ ";
@@ -215,12 +216,12 @@ fn pad_to_width(line: &mut Line<'static>, target_width: usize, bg: Style) {
 /// Byte budget for one row's text in the compact view, past which [`truncate_to_bytes`] cuts it.
 pub(super) const MAX_ROW_BYTES: usize = 512;
 
-/// Cuts `s` to at most `max_bytes` on a char boundary and marks the cut with [`ELLIPSIS`].
+/// Cuts `s` to at most `max_bytes` between grapheme clusters and marks the cut with [`ELLIPSIS`].
 pub(super) fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_owned();
     }
-    let boundary = s.floor_char_boundary(max_bytes);
+    let boundary = head_end(s, max_bytes);
     format!("{}{ELLIPSIS}", &s[..boundary])
 }
 
@@ -554,6 +555,8 @@ mod tests {
                 ("overflow", "hello world", 5, "hello..."),
                 ("inside a multibyte character", "中中中中", 5, "中..."),
                 ("exact multibyte boundary", "中中", 6, "中中"),
+                ("inside a family emoji", "a👨‍👩‍👧b", 8, "a..."),
+                ("inside a combining mark", "e\u{301}x", 2, "..."),
             ] {
                 assert_eq!(truncate_to_bytes(input, max_bytes), expected, "{case}");
             }

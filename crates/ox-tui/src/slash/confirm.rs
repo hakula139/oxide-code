@@ -82,18 +82,16 @@ impl ConfirmDeleteSessionModal {
 }
 
 impl Modal for ConfirmDeleteSessionModal {
-    fn height(&self, _width: u16, _max_height: u16) -> u16 {
+    fn height(&mut self, _width: u16, _max_height: u16) -> u16 {
         self.header.height() + BODY_HEIGHT + u16::from(self.error.is_some()) + FOOTER_HEIGHT
     }
 
-    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let budget = usize::from(area.width);
+        let fits = area.height >= self.height(area.width, u16::MAX);
         let metadata = truncate_to_width(&self.metadata, budget);
-        self.acceptance.update(
-            area.width > 0
-                && metadata.starts_with(id_prefix(&self.session_id))
-                && area.height >= self.height(area.width, u16::MAX),
-        );
+        let targeted = area.width > 0 && metadata.starts_with(id_prefix(&self.session_id));
+        self.acceptance.update(targeted && fits);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(usize::from(area.height));
         self.header.push_lines(&mut lines, area.width, theme);
 
@@ -141,7 +139,7 @@ mod tests {
     use super::*;
     use crate::modal::ModalStack;
     use crate::modal::acceptance::TYPE_AHEAD_GUARD;
-    use crate::modal::testing::{render_rows, render_rows_with};
+    use crate::modal::testing::{render_modal, render_rows_with};
     use crate::slash::sessions::format_metadata_line;
 
     const LAST_ACTIVE: OffsetDateTime = datetime!(2026-04-18 09:00:00 UTC);
@@ -170,8 +168,8 @@ mod tests {
     mod render {
         use super::*;
 
-        fn rendered_rows(modal: &ConfirmDeleteSessionModal, width: u16) -> Vec<String> {
-            render_rows(modal, width, modal.height(width, u16::MAX))
+        fn rendered_rows(modal: &mut ConfirmDeleteSessionModal, width: u16) -> Vec<String> {
+            render_modal(modal, width)
                 .into_iter()
                 .map(|row| row.trim_end().to_owned())
                 .collect()
@@ -180,9 +178,9 @@ mod tests {
         #[test]
         fn names_the_session_by_title_above_the_metadata_that_carries_its_id() {
             let (_dir, store) = isolated_store();
-            let modal = seed_modal(&store, 0xab, "Fix auth flow");
+            let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
 
-            let rows = rendered_rows(&modal, 60);
+            let rows = rendered_rows(&mut modal, 60);
 
             assert_eq!(
                 rows,
@@ -203,7 +201,7 @@ mod tests {
             let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
             modal.error = Some("permission denied".to_owned());
 
-            let rows = rendered_rows(&modal, 60);
+            let rows = rendered_rows(&mut modal, 60);
 
             assert_eq!(
                 rows[3..],
@@ -219,9 +217,9 @@ mod tests {
         #[test]
         fn does_not_panic_at_minimum_widths() {
             let (_dir, store) = isolated_store();
-            let modal = seed_modal(&store, 0xab, "T");
+            let mut modal = seed_modal(&store, 0xab, "T");
             for width in [4_u16, 8, 20] {
-                rendered_rows(&modal, width);
+                rendered_rows(&mut modal, width);
             }
         }
     }
@@ -229,8 +227,8 @@ mod tests {
     mod handle_key {
         use super::*;
 
-        fn show_and_arm(modal: &ConfirmDeleteSessionModal) {
-            render_rows(modal, 60, modal.height(60, u16::MAX));
+        fn show_and_arm(modal: &mut ConfirmDeleteSessionModal) {
+            render_modal(modal, 60);
             modal.acceptance.expire();
         }
 
@@ -254,7 +252,7 @@ mod tests {
             ] {
                 let (_dir, store) = isolated_store();
                 let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
-                show_and_arm(&modal);
+                show_and_arm(&mut modal);
 
                 let outcome = modal.handle_key(&event);
 
@@ -314,8 +312,8 @@ mod tests {
         async fn clipped_targets_rearm_when_they_reappear() {
             for (width, height) in [(60, 0), (60, 1), (60, 6), (0, 7), (7, 7), (8, 7), (10, 7)] {
                 let (_dir, store) = isolated_store();
-                let modal = seed_modal(&store, 0xab, "Fix auth flow");
-                show_and_arm(&modal);
+                let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
+                show_and_arm(&mut modal);
                 let mut stack = ModalStack::default();
                 stack.push(Box::new(modal));
                 render_rows_with(width, height, |frame, area, theme| {
@@ -348,8 +346,8 @@ mod tests {
         #[test]
         fn modified_confirmation_keys_do_not_delete() {
             let (_dir, store) = isolated_store();
-            let modal = seed_modal(&store, 0xab, "Fix auth");
-            show_and_arm(&modal);
+            let mut modal = seed_modal(&store, 0xab, "Fix auth");
+            show_and_arm(&mut modal);
 
             let mut stack = ModalStack::default();
             stack.push(Box::new(modal));
@@ -397,7 +395,7 @@ mod tests {
             let (_dir, store) = isolated_store();
             let live_id = stamped_id(0xab);
             let mut modal = seed_modal_with_live(&store, 0xab, "Fix auth flow", &live_id);
-            show_and_arm(&modal);
+            show_and_arm(&mut modal);
 
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
             assert!(matches!(outcome, ModalKey::Consumed));
@@ -417,7 +415,7 @@ mod tests {
             let live_id = stamped_id(0xab);
             let mut modal = seed_modal_with_live(&store, 0xab, "Fix auth flow", &live_id);
             modal.error = Some("permission denied".to_owned());
-            show_and_arm(&modal);
+            show_and_arm(&mut modal);
 
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
 

@@ -20,6 +20,9 @@ use self::popup::{PopupState, SlashPopup, popup_state};
 use crate::action::Action;
 use crate::cursor::place_clamped;
 use crate::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
+use crate::grapheme;
+use crate::keymap::{KeyChord, hint};
+use crate::modal::chrome::KEY_UP_DOWN;
 use crate::saturating_u16;
 use crate::slash::arg_placeholder_for;
 use crate::theme::Theme;
@@ -108,15 +111,22 @@ impl InputArea {
     }
 
     pub(crate) fn footer(&self, width: u16, busy: bool, next_mode: Mode) -> Line<'static> {
-        let mode_hint = format!("Tab → {next_mode}");
-        let hints: [&str; 4] = if self.popup_visible() {
-            ["Tab complete", "↑/↓ select", "Esc close", "Enter run"]
+        let hints: [String; 4] = if self.popup_visible() {
+            [
+                hint(KeyChord::plain(KeyCode::Tab), "complete"),
+                hint(KEY_UP_DOWN, "select"),
+                hint(KeyChord::plain(KeyCode::Esc), "close"),
+                hint(KeyChord::plain(KeyCode::Enter), "run"),
+            ]
         } else {
             [
-                &mode_hint,
-                if busy { "Enter queue" } else { "Enter send" },
-                "Shift+Enter newline",
-                "/ commands",
+                hint(KeyChord::plain(KeyCode::Tab), &next_mode.to_string()),
+                hint(
+                    KeyChord::plain(KeyCode::Enter),
+                    if busy { "queue" } else { "send" },
+                ),
+                hint("Shift+Enter", "add a line"),
+                hint("/", "show commands"),
             ]
         };
         let mut line = Line::default();
@@ -265,9 +275,10 @@ impl InputArea {
         }
     }
 
-    /// Feeds one key to the textarea, dropping the cached line count when the text changed.
+    /// Feeds one key through the shared editor table, dropping the cached line count when the
+    /// text changed.
     fn input_key(&mut self, key: KeyEvent) {
-        if self.textarea.input(key) {
+        if grapheme::edit(&mut self.textarea, &key) {
             self.visual_lines.set(None);
         }
     }
@@ -277,6 +288,7 @@ impl InputArea {
         // Terminals send CRLF or bare CR line breaks, and the textarea splits only on LF.
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         self.textarea.insert_str(text);
+        grapheme::advance_cursor_to_boundary(&mut self.textarea);
         self.visual_lines.set(None);
         self.refresh_popup();
     }
@@ -707,6 +719,19 @@ mod tests {
             let outcome = input.handle_event(&Event::Paste("one\r\ntwo\rthree\nfour".to_owned()));
             assert_eq!(outcome, InputOutcome::Consumed);
             assert_eq!(input.textarea.lines(), vec!["one", "two", "three", "four"]);
+        }
+
+        #[test]
+        fn paste_that_joins_clusters_leaves_backspace_on_the_joined_one() {
+            let mut input = test_input();
+            type_text(&mut input, "ab👨👩");
+            input.textarea.move_cursor(CursorMove::Back);
+
+            input.handle_event(&Event::Paste("\u{200d}".to_owned()));
+
+            assert_eq!(input.textarea.cursor(), (0, 5), "past the joined cluster");
+            input.handle_event(&key(KeyCode::Backspace, KeyModifiers::NONE));
+            assert_eq!(input.textarea.lines(), ["ab"]);
         }
 
         #[test]

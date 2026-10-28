@@ -72,7 +72,7 @@ impl App {
         }
         match event {
             CrosstermEvent::Key(key) if CTRL_C.matches(key) => self.handle_ctrl_c(),
-            CrosstermEvent::Key(key) if CTRL_D.matches(key) => self.handle_ctrl_d(),
+            CrosstermEvent::Key(key) if CTRL_D.matches(key) => self.handle_ctrl_d(key),
             CrosstermEvent::Key(KeyEvent {
                 code: KeyCode::Esc, ..
             }) => {
@@ -213,11 +213,13 @@ impl App {
         }
     }
 
-    /// Quits on an empty input when idle, as a shell does at EOF. Text in the input stays, and a
-    /// busy Ctrl+D does nothing, so a habitual EOF press never tears down a running turn.
-    fn handle_ctrl_d(&mut self) {
+    /// Deletes forward while the input holds text. An empty idle input quits as a shell does at EOF,
+    /// through the same double-press window as Ctrl+C, so a habitual EOF press does not close `ox`.
+    fn handle_ctrl_d(&mut self, key: &KeyEvent) {
         if self.status.is_idle() && self.input.is_empty() {
-            self.dispatch_op(Op::Shutdown);
+            self.confirm_exit();
+        } else {
+            _ = self.input.handle_event(&CrosstermEvent::Key(*key));
         }
     }
 
@@ -329,7 +331,7 @@ impl App {
         }
     }
 
-    /// Quits on a second Ctrl+C inside the exit window, or arms the window.
+    /// Quits on a second exit key inside the window, or arms it.
     fn confirm_exit(&mut self) {
         if let Status::ExitArmed { until } = &self.status
             && now() < *until
@@ -928,17 +930,18 @@ mod tests {
         }
 
         #[test]
-        fn ctrl_d_on_an_empty_input_quits_only_while_idle() {
-            for (status, quits) in [
-                (Status::Idle, true),
+        fn ctrl_d_on_an_empty_input_arms_exit_and_quits_only_when_armed() {
+            for (status, armed, quits) in [
+                (Status::Idle, true, false),
                 (
                     Status::ExitArmed {
                         until: now() + EXIT_WINDOW,
                     },
                     true,
+                    true,
                 ),
-                (Status::Streaming, false),
-                (Status::Cancelling, false),
+                (Status::Streaming, false, false),
+                (Status::Cancelling, false, false),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 app.set_status(status.clone());
@@ -946,21 +949,27 @@ mod tests {
                 app.handle_crossterm_event(&key_event(KeyCode::Char('d'), KeyModifiers::CONTROL));
 
                 assert_eq!(app.should_quit, quits, "{status:?}");
-                let sent = rx.try_recv().ok();
-                assert_eq!(sent, quits.then_some(Op::Shutdown), "{status:?}");
+                assert_eq!(
+                    matches!(app.status, Status::ExitArmed { .. }),
+                    armed,
+                    "{status:?}"
+                );
+                assert_eq!(rx.try_recv().ok(), None, "{status:?}");
             }
         }
 
         #[test]
-        fn ctrl_d_keeps_typed_text() {
+        fn ctrl_d_with_text_deletes_forward_and_stays_idle() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.input.set_text("draft");
+            app.handle_crossterm_event(&key_event(KeyCode::Home, KeyModifiers::NONE));
 
             app.handle_crossterm_event(&key_event(KeyCode::Char('d'), KeyModifiers::CONTROL));
 
             assert!(!app.should_quit);
+            assert_eq!(app.status, Status::Idle);
             assert_eq!(rx.try_recv().ok(), None);
-            assert_eq!(app.input.lines(), ["draft"]);
+            assert_eq!(app.input.lines(), ["raft"]);
         }
 
         #[tokio::test]
@@ -1128,7 +1137,7 @@ mod tests {
             app.handle_crossterm_event(&mouse_event(MouseEventKind::ScrollUp));
 
             let text = rendered_text(&mut app, 60, 10);
-            assert!(text.contains("Jump to bottom"), "{text}");
+            assert!(text.contains("Ctrl+End to jump to bottom"), "{text}");
             assert!(app.dirty);
         }
 

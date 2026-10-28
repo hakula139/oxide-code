@@ -1,0 +1,18 @@
+---
+source: crates/ox-tui/src/app/render.rs
+expression: "render_app(&mut app, 80, 14)"
+---
+"  ~/test │ main │ test-model (high) │ manual │ Ready                            "
+"────────────────────────────────────────────────────────────────────────────────"
+"                                                                                "
+"                        ━━━━ oxide-code v0.0.0-test ━━━━                        "
+"                                                                                "
+"                       test-model · high effort · API key                       "
+"                       ~/test                                                   "
+"────────────────────────────────────────────────────────────────────────────────"
+"Bash                                                                            "
+"                                                                                "
+"cargo test                                                                      "
+"                                                                                "
+"Y to approve  ·  A to allow for the session  ·  N to deny  ·  F to give feedback"
+"Esc to abort                                                                    "

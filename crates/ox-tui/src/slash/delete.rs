@@ -105,7 +105,7 @@ mod tests {
 
     use super::*;
     use crate::modal::Modal;
-    use crate::modal::testing::render_rows;
+    use crate::modal::testing::render_modal;
     use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_background;
 
@@ -147,8 +147,8 @@ mod tests {
         }
 
         /// The title and metadata rows the confirm modal shows for the session it will delete.
-        fn target_rows(modal: &dyn Modal) -> [String; 2] {
-            let rows = render_rows(modal, 80, modal.height(80, u16::MAX));
+        fn target_rows(modal: &mut dyn Modal) -> [String; 2] {
+            let rows = render_modal(modal, 80);
             [rows[2].trim_end().to_owned(), rows[3].trim_end().to_owned()]
         }
 
@@ -184,9 +184,9 @@ mod tests {
                     datetime!(2026-04-18 09:00:00 UTC),
                 );
 
-                let modal = run_execute(&target_id[..4]).await.unwrap().into_modal();
+                let mut modal = run_execute(&target_id[..4]).await.unwrap().into_modal();
 
-                let [title, metadata] = target_rows(&*modal);
+                let [title, metadata] = target_rows(&mut *modal);
                 assert_eq!(title, "Doomed session");
                 assert!(metadata.starts_with("abababab · "), "{metadata}");
             })
@@ -209,9 +209,9 @@ mod tests {
                         datetime!(2026-04-18 09:00:00 UTC),
                     );
 
-                    let modal = run_execute(&target_id[..4]).await.unwrap().into_modal();
+                    let mut modal = run_execute(&target_id[..4]).await.unwrap().into_modal();
 
-                    let [title, metadata] = target_rows(&*modal);
+                    let [title, metadata] = target_rows(&mut *modal);
                     assert_eq!(title, "Foreign");
                     assert!(metadata.starts_with("abababab · "), "{metadata}");
                 }
@@ -253,7 +253,7 @@ mod tests {
                 },
             )
             .await;
-            target_rows(&*modal);
+            target_rows(&mut *modal);
             tokio::time::advance(crate::modal::acceptance::TYPE_AHEAD_GUARD).await;
 
             let outcome = modal.handle_key(&crossterm::event::KeyEvent::from(
@@ -318,9 +318,9 @@ mod tests {
                     datetime!(2026-04-18 09:01:00 UTC),
                 );
 
-                let modal = run_execute("test-").await.unwrap().into_modal();
+                let mut modal = run_execute("test-").await.unwrap().into_modal();
 
-                let [title, metadata] = target_rows(&*modal);
+                let [title, metadata] = target_rows(&mut *modal);
                 assert_eq!(title, "Other");
                 assert!(metadata.starts_with("test-oth · "), "{metadata}");
             })

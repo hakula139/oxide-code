@@ -67,7 +67,7 @@ pub(crate) const TOGGLE_EXPANDED: KeyChord = KeyChord::ctrl('o');
 pub(crate) const APP_KEYMAP: Keymap<AppAction, ()> = Keymap::new(&[KeyAction {
     action: AppAction::ToggleExpanded,
     key: TOGGLE_EXPANDED,
-    label: |()| Some("to expand"),
+    effect: |()| Some("expand"),
 }]);
 
 #[cfg(test)]

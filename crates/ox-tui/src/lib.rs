@@ -7,6 +7,7 @@ mod components;
 mod cursor;
 mod git_probes;
 pub mod glyphs;
+mod grapheme;
 mod keymap;
 mod labels;
 mod markdown;

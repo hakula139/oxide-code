@@ -20,7 +20,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/effort`**: Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)), since a two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete levels, with no `auto` state. Both forms are mutating and idle-gated because they can emit `Op::SetModel`.
 
-- **`/exit`** (alias `/quit`): Forwards `Op::Shutdown`, the same op as Ctrl+D on an empty idle input, and quits `ox`. It is `Steering`, so it runs mid-turn, and a turn in flight ends as a shutdown does.
+- **`/exit`** (alias `/quit`): Forwards `Op::Shutdown` and quits `ox`. It is `Steering`, so it runs mid-turn, and a turn in flight ends as a shutdown does.
 
 - **`/help`**: Opens a [`KvOverview`](modals.md) listing every registered command with its description.
 
@@ -56,7 +56,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 7. **Aliases resolve to canonical but display by surface.** `/clear` is canonical, while `/new` and `/reset` are aliases. The alias table lives in `command`, so the TUI registry and the bare REPL resolve the same aliases. The popup shows only the alias the user typed.
 
-8. **`/exit` quits, with `/quit` as its alias.** Claude Code, Codex, and pi all accept a typed quit command, so users reach for one before they learn the keys. It forwards `Op::Shutdown`, the same op as Ctrl+D on an empty idle input. It is `Steering`, unlike a busy Ctrl+D, because typing the command is deliberate where a habitual EOF press is not. The bare REPL runs it too, stopping before the lines after it and exiting with success.
+8. **`/exit` quits, with `/quit` as its alias.** Claude Code, Codex, and pi all accept a typed quit command, so users reach for one before they learn the keys. It forwards `Op::Shutdown` and is `Steering`, so it quits mid-turn, while Ctrl+D quits only from an empty idle input and only on a second press, because typing the command is deliberate where a habitual EOF press is not. The bare REPL runs it too, stopping before the lines after it and exiting with success.
 
 9. **Built-in commands only.** `BUILT_INS` is the entire registry, with no discovery of user-defined commands. Skills as commands are tracked in [#163](https://github.com/hakula139/oxide-code/issues/163).
 

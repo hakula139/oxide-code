@@ -159,13 +159,13 @@ impl ModelEffortPicker {
 }
 
 impl Modal for ModelEffortPicker {
-    fn height(&self, width: u16, max_height: u16) -> u16 {
+    fn height(&mut self, width: u16, max_height: u16) -> u16 {
         height_above(max_height, BELOW_LIST_HEIGHT, |room| {
             self.list.height(width, room)
         })
     }
 
-    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let list_area = above(area, BELOW_LIST_HEIGHT);
         self.list.render(frame, list_area, theme);
 
@@ -247,10 +247,10 @@ mod tests {
             let theme = Theme::default();
             let row_text = |p: &ModelEffortPicker| p.render_effort_row(&theme).to_string();
 
-            assert_eq!(row_text(&picker()), "● high effort  ← / → to adjust");
+            assert_eq!(row_text(&picker()), "● high effort  Left / Right to adjust");
             assert_eq!(
                 row_text(&picker_on_unknown_model()),
-                "● medium effort (default)  ← / → to adjust"
+                "● medium effort (default)  Left / Right to adjust"
             );
         }
     }
@@ -260,10 +260,10 @@ mod tests {
 
         #[test]
         fn lists_models_above_the_effort_row_and_footer() {
-            let p = picker();
+            let mut p = picker();
             let height = p.height(80, 20);
 
-            let rows = render_rows(&p, 80, height);
+            let rows = render_rows(&mut p, 80, height);
 
             let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
             assert_eq!(
@@ -277,7 +277,7 @@ mod tests {
                     "  3. claude-sonnet-5-5    Claude Sonnet 5.5",
                     "  4. claude-haiku-5-5     Claude Haiku 5.5",
                     "",
-                    "● high effort  ← / → to adjust",
+                    "● high effort  Left / Right to adjust",
                     "",
                     "Enter to confirm  ·  Esc to cancel",
                 ]
@@ -289,7 +289,7 @@ mod tests {
             let mut p = picker();
             p.handle_key(&KeyEvent::from(KeyCode::Char('4')));
 
-            let rows = render_rows(&p, 80, 8);
+            let rows = render_rows(&mut p, 80, 8);
 
             let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
             assert_eq!(
@@ -300,7 +300,7 @@ mod tests {
                     "",
                     "> 4. claude-haiku-5-5     Claude Haiku 5.5",
                     "",
-                    "● high effort  ← / → to adjust",
+                    "● high effort  Left / Right to adjust",
                     "",
                     "Enter to confirm  ·  Esc to cancel",
                 ]

@@ -13,12 +13,12 @@ A modal is `Send` (App lives on tokio) but not `Sync`, since modals own mutable 
 - **Consumed**: Stay open, key handled internally.
 - **Cancelled**: Close and dispatch the modal's `on_cancel` action, if any.
 - **Submitted**: Close and dispatch an `Action` (an op for the engine or a TUI-only change, or a no-op when the modal already applied its effect locally).
-- **Preview**: Forward an action without closing. Used for live-preview cursor moves like `/theme`, where each Up / Down repaints the chat in the candidate without committing.
+- **Emit**: Forward an action without closing. Used for live-preview cursor moves like `/theme`, where each Up / Down repaints the chat in the candidate without committing, and for `/resume`'s Ctrl+X archive toggle, which commits while the picker stays open.
 - **Push**: Nest a child modal above the current one. The parent regains focus on pop via `Modal::on_focus_regained` (default no-op).
 
 The App's frame tick also calls `Modal::tick` on the top modal, which reports whether time-driven state such as an expiring notice or a page loaded in the background needs a repaint. `Modal::next_tick` tells the loop when that state next changes, so an idle modal does not keep the loop awake. Both default to no-ops.
 
-`Submitted` and `Preview` carry a `ModalAction`: `Dispatch(Action)` (dispatched like a keyboard action) or `SystemMessage(String)` (push a confirmation line into chat after pop). A close without an action of its own surfaces as `ModalAction::Cancelled`, which reverts any live preview.
+`Submitted` and `Emit` carry a `ModalAction`: `Dispatch(Action)` (dispatched like a keyboard action) or `SystemMessage(String)` (push a confirmation line into chat after pop). A close without an action of its own surfaces as `ModalAction::Cancelled`, which reverts any live preview.
 
 Dispatched actions flow through the same channel as keyboard input, so the modal never needs to know what handler will run on the other side.
 
