@@ -94,7 +94,36 @@ jobs:
       - name: Test with coverage
         id: coverage
         if: ${{ !cancelled() }}
+        env:
+          # insta appends the path of each snapshot a test asserts to this file, which
+          # `cargo insta test --unreferenced` also reads.
+          INSTA_SNAPSHOT_REFERENCES_FILE: ${{ runner.temp }}/snapshot-references
         run: cargo llvm-cov --locked --lcov --output-path lcov.info
+
+      - name: Check for unreferenced snapshots
+        if: ${{ !cancelled() && matrix.os == 'Linux' && steps.coverage.outcome == 'success' }}
+        shell: bash
+        env:
+          REFERENCES: ${{ runner.temp }}/snapshot-references
+        run: |
+          if [[ ! -s "$REFERENCES" ]]; then
+            echo "::error::insta recorded no snapshot references, so this check cannot run"
+            exit 1
+          fi
+
+          unreferenced=$(
+            git ls-files -z '*.snap' |
+              xargs -0 realpath |
+              sort |
+              comm -23 - <(sort -u "$REFERENCES")
+          )
+
+          if [[ -n "$unreferenced" ]]; then
+            while read -r file; do
+              echo "::error::No test asserts $file"
+            done <<<"$unreferenced"
+            exit 1
+          fi
 
       - name: Upload to Codecov
         if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
