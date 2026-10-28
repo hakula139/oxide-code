@@ -51,6 +51,7 @@ These rules apply to errors, warnings, notices, and other strings shown to users
 
 - Put each paragraph on one line without hard wrapping, and separate paragraphs with a blank line.
 - Use prose for explanations, bullets for parallel options or requirements, numbered lists for sequences, and tables for comparisons.
+- Make a list loose, with a blank line between items, when any item holds a nested list, a second paragraph, or a code block. Keep a list of single-paragraph items tight, even when it is nested in a loose list.
 - Align trailing comments in directory trees and similar listings in one column, several spaces beyond the longest entry.
 - Write headings in Title Case. Capitalize every word except articles, coordinating conjunctions, and prepositions of four letters or fewer, such as `a`, `and`, `for`, `from`, and `with`, unless the word starts or ends the heading. In a hyphenated compound, capitalize each part except an inner small word, as in `Built-In` and `Fork-on-Conflict`. Keep code spans and lowercase names such as oxide-code and opencode as written. PR, issue, and release bodies follow GitHub's sentence case, so the PR template keeps `## Test plan` and `CHANGELOG.md` keeps `### Breaking changes`.
 - Join a modifier to its key or mouse action with `+`, as in Shift+Tab and Ctrl+click, and write approval keys as the uppercase letters the TUI prompt shows. In the README and user guides, also put key names in bold, such as **Esc** and **Ctrl+C**.
@@ -67,12 +68,17 @@ These rules apply to errors, warnings, notices, and other strings shown to users
 
 ### Design Docs
 
-- A design doc explains how a mechanism works at module level and why it works that way, for the maintainer who changes it next. Leave per-function walkthroughs to the code, and leave sets the code enumerates, such as accepted options, builtin names, or enum variants, to the rustdoc beside the constant or type, where tests keep them current. Link the user guide for user-facing behavior, such as commands, keys, and config keys, and keep the design doc to what that behavior means for the mechanism.
-- Open the doc with a sentence saying what the feature does, then describe its mechanism in sections named for their topics.
-- Follow with `## Design Decisions`, a numbered list of the choices a maintainer could plausibly make differently, each giving its reason. A design the page rejects belongs here with the reason it lost. Leave out facts that had no alternative, such as a trait implementation the compiler requires.
-- Add `## Out of Scope` when the page defers a feature. Each bullet opens with a bold label naming the deferred feature, links its issue when one exists, and gives the reason.
+- A design doc explains how a feature's mechanism works at module level and why it works that way, for the maintainer who changes it next. Leave per-function walkthroughs to the code. Leave a set the code enumerates, such as accepted options, builtin names, or enum variants, to the constant or type that holds it, whose rustdoc says what the set is for without restating its members. A set users rely on, such as the commands `manual` runs without asking, belongs in the user guide. Link the guide for user-facing behavior, such as commands, keys, and config keys, and keep the design doc to what that behavior means for the mechanism.
+
+- Open a feature's design doc with a sentence saying what the feature does, then describe its mechanism in sections named for their topics, followed by the sections below in this order.
+
+- Follow with `## Design Decisions`, a numbered list of the choices a maintainer could plausibly make differently, each giving its reason. An alternative way to build the shipped mechanism belongs in the reason of the choice that beat it, while that reason still constrains the mechanism. Leave out facts that had no alternative, such as a trait implementation the compiler requires.
+
 - Cite a design decision by its bold title, since inserting a decision renumbers the list and leaves every numeric reference pointing at a different choice. Use `(**Title**)` in the same page and `[**Title**](page.md#design-decisions)` from another page.
-- End the doc with `## Sources`, listing the files that own the mechanism by full path, in alphabetical order, with a one-clause annotation and no line numbers. Files that only call into the mechanism stay out, since the [module map](../design/architecture.md) already places them:
+
+- Add `## Out of Scope` when the page leaves out a feature. Each bullet opens with a bold label naming the feature, then links its issue if the feature is deferred or gives the reason if it is declined.
+
+- End the doc with `## Sources`, listing the files that own the mechanism by full path, in alphabetical order, with a one-clause annotation and no line numbers. Files that only call into the mechanism stay out, since the [module map](../design/architecture.md) places their modules:
 
   ```markdown
   - `crates/ox-core/src/tool/read.rs`: `DEFAULT_LINE_LIMIT`, `MAX_LINE_CHARS`, `OUTPUT_BUDGET`.
@@ -80,5 +86,5 @@ These rules apply to errors, warnings, notices, and other strings shown to users
 
 ### Research Notes
 
-- `docs/research/` holds API references and surveys that inform open design questions. Once a survey's decisions ship, move any comparison a decision still depends on into that decision's reason, then delete the survey, since nobody re-verifies a survey whose question is closed and its claims drift as the reference implementations change.
-- Follow each survey's opening paragraph with a `Verified <date> against <versions>.` line naming the reference implementations and versions it read. When you add or edit a claim in any research note, record when you verified it and which version you checked. Delete a claim if a newer test contradicts it or you can no longer verify it.
+- `docs/research/` holds API references and surveys that inform open design questions. Each survey links the `design` issues it informs. The PR that settles one of them moves any comparison its decision still depends on into that decision's reason and trims the survey's part on it, and the PR that closes the last one deletes the survey, since nobody re-verifies a survey whose questions are closed while its claims drift as the reference implementations change.
+- Follow each survey's opening paragraph with a `Verified <date> against <versions>.` line naming the reference implementations and versions its last full re-read covered. A claim you add or edit afterward in any research note carries its own date and version. Delete a claim if a newer test contradicts it or you can no longer verify it.

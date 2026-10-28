@@ -33,6 +33,7 @@ The Node-based hooks run tools pinned in `node_modules`, which pnpm installs bef
 `nixfmt` formats `flake.nix` and the files in `nix/`, and `statix` and `deadnix` lint them. These rules cover what the tools leave open:
 
 - Keep code within 100 columns, counting the indent, and wrap comments as [Writing](writing.md#comments) describes, since `nixfmt` does not reflow them.
+
 - Mark the file header with `=` banners at column 0, and mark each section with `-` banners indented to match the code around them. Every banner line ends at column 100. A file without banners stays without them:
 
   ```nix
@@ -46,10 +47,15 @@ The Node-based hooks run tools pinned in `node_modules`, which pnpm installs bef
   ```
 
 - Put each argument of a top-level function on its own line, even when the list would fit on one. Take `...` only when the caller passes a broader set, as with flake outputs. A `callPackage` derivation omits it, so an unexpected argument fails.
+
 - Declare each dependency of a `callPackage` file, such as `nix/package.nix`, as its own argument, as nixpkgs does, so `.override` can replace it. Put `lib` first and the other arguments in alphabetical order. In the flake, reach packages through `pkgs`.
+
 - Put `inherit` entries first in a `let` block and in a call's argument set. In a set that returns data, keep each `inherit` where its entry belongs.
+
 - Group related bindings and attributes, and order a `let` block so that each binding follows what it depends on. Within a group, use alphabetical order unless a stronger order applies.
+
 - Follow a multiline binding or attribute with a blank line before its next sibling. Keep single-line siblings together and separate their groups with a blank line. A single-line binding may lead directly into a related multiline one.
+
 - Write multiline text, such as a shell hook, as an indented string with literal line breaks.
 
 ## Config Style
