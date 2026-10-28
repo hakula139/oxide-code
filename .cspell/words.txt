@@ -38,7 +38,6 @@ esac
 esbenp
 ESRCH
 euvx
-fchmod
 fcntl
 feff
 fffd

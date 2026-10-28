@@ -15,9 +15,9 @@ pub(super) fn write(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> io::R
 /// The points of an in-place write where a test can act on the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// The original is checked and still unchanged.
-    Prepared,
-    /// The new bytes are written and synced, before the final check.
+    /// The new bytes are written over the truncated original, before the sync.
+    Written,
+    /// The new bytes are synced, before the final check.
     Synced,
 }
 
@@ -57,7 +57,8 @@ fn left_partial_file(error: &io::Error) -> io::Error {
 }
 
 /// Rewrites `path` through the handle checked against `expected`, which keeps the inode with its
-/// metadata and every hard link. A crash or a full disk mid-write can leave partial content.
+/// metadata and every hard link. A crash mid-write can leave partial content, and a failed write
+/// after the truncation says so.
 fn write_in_place(
     path: &Path,
     bytes: &[u8],
@@ -66,11 +67,14 @@ fn write_in_place(
 ) -> io::Result<()> {
     let mut original = Original::open(path, expected)?;
     original.verify(path, expected)?;
-    checkpoint(Phase::Prepared)?;
     original.file.set_len(0)?;
-    original.file.rewind()?;
-    original.file.write_all(bytes)?;
-    original.file.sync_all()?;
+    original
+        .file
+        .rewind()
+        .and_then(|()| original.file.write_all(bytes))
+        .and_then(|()| checkpoint(Phase::Written))
+        .and_then(|()| original.file.sync_all())
+        .map_err(|error| left_partial_file(&error))?;
     checkpoint(Phase::Synced)?;
     original.verify(path, bytes)
 }
@@ -200,15 +204,19 @@ mod tests {
             ] {
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("target");
-                if existing {
+                let before = existing.then(|| {
                     fs::write(&path, b"original").unwrap();
-                }
+                    identity_of(&path)
+                });
 
                 let result = write(&path, bytes, existing.then_some(b"original".as_slice()));
 
                 result.unwrap();
                 assert_eq!(fs::read(&path).unwrap(), bytes);
                 assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+                if let Some(before) = before {
+                    assert_eq!(identity_of(&path), before, "the write keeps the inode");
+                }
             }
         }
 
@@ -352,24 +360,6 @@ mod tests {
             }
         }
 
-        /// A POSIX ACL whose owner entry grants `owner` permissions.
-        #[cfg(target_os = "linux")]
-        fn acl(owner: u16) -> Vec<u8> {
-            let mut bytes = 2_u32.to_le_bytes().to_vec();
-            for (tag, permissions, id) in [
-                (1_u16, owner, u32::MAX),
-                (2, 4_u16, 65534),
-                (4, 4, u32::MAX),
-                (16, 4, u32::MAX),
-                (32, 0, u32::MAX),
-            ] {
-                bytes.extend(tag.to_le_bytes());
-                bytes.extend(permissions.to_le_bytes());
-                bytes.extend(id.to_le_bytes());
-            }
-            bytes
-        }
-
         #[cfg(target_os = "linux")]
         #[test]
         fn keeps_a_named_user_acl() {
@@ -378,7 +368,20 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("target");
             fs::write(&path, b"original").unwrap();
-            let acl = acl(6);
+            // The kernel's version 2 ACL encoding: owner rw, user 65534 r, group r, mask r, other
+            // none, each as a little-endian (tag, permissions, id) entry.
+            let mut acl = 2_u32.to_le_bytes().to_vec();
+            for (tag, permissions, id) in [
+                (1_u16, 6_u16, u32::MAX),
+                (2, 4, 65534),
+                (4, 4, u32::MAX),
+                (16, 4, u32::MAX),
+                (32, 0, u32::MAX),
+            ] {
+                acl.extend(tag.to_le_bytes());
+                acl.extend(permissions.to_le_bytes());
+                acl.extend(id.to_le_bytes());
+            }
             let file = File::open(&path).unwrap();
             let acl_supported = match file.set_xattr("system.posix_acl_access", &acl) {
                 Ok(()) => true,
@@ -452,23 +455,24 @@ mod tests {
         use super::*;
 
         #[test]
-        fn a_failure_before_writing_leaves_the_original_unchanged() {
+        fn a_failed_write_says_a_partial_file_remains() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("target");
             fs::write(&path, b"original").unwrap();
-            let before = entries(dir.path());
 
-            let error = write_with(&path, b"replacement", Some(b"original"), |phase| {
-                if phase == Phase::Prepared {
-                    return Err(io::Error::other("injected preparation failure"));
-                }
-                Ok(())
+            let error = write_with(&path, b"new", Some(b"original"), |phase| {
+                assert_eq!(phase, Phase::Written);
+                Err(io::Error::new(io::ErrorKind::StorageFull, "disk full"))
             })
             .unwrap_err();
 
-            assert!(error.to_string().contains("injected"), "{error}");
-            assert_eq!(entries(dir.path()), before);
-            assert_eq!(fs::read(&path).unwrap(), b"original");
+            assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+            assert_eq!(
+                error.to_string(),
+                "disk full. A partial file remains. Read it before writing again."
+            );
+            assert_eq!(fs::read(&path).unwrap(), b"new");
+            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
         }
 
         #[test]
@@ -560,6 +564,18 @@ mod tests {
 
                 assert!(error.to_string().contains("set-ID"), "mode={mode:o}");
             }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod has_capability {
+        use super::*;
+
+        #[test]
+        fn reads_a_file_without_extended_attribute_support_as_having_none() {
+            let file = File::open("/proc/self/status").unwrap();
+
+            assert!(!has_capability(&file).unwrap());
         }
     }
 }
