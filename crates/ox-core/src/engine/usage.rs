@@ -84,18 +84,20 @@ impl UsageLedger {
         );
     }
 
-    /// Waits for `usage`, the result of the title request just started, to join the session total.
-    pub(super) fn await_title_usage(&mut self, usage: oneshot::Receiver<UsageRecord>) {
+    /// Holds `usage`, the receiver for the title request just started, until its usage joins the
+    /// session total.
+    pub(super) fn track_title_usage(&mut self, usage: oneshot::Receiver<UsageRecord>) {
         self.title_usage = Some(usage);
     }
 
-    /// The title request's usage once the request ends, `None` when it reported none. Pending until
-    /// then, and forever when no title request is in flight.
-    pub(super) async fn title_usage(&mut self) -> Option<UsageRecord> {
-        match &mut self.title_usage {
+    /// Accounts the title request once it ends, returning whether it billed any usage. Pending
+    /// until then, and forever when no title request is in flight.
+    pub(super) async fn title_usage_landed(&mut self) -> bool {
+        let record = match &mut self.title_usage {
             Some(pending) => pending.await.ok(),
             None => std::future::pending().await,
-        }
+        };
+        self.account_title_usage(record)
     }
 
     /// Adds the title request's cost to the session total once its usage lands, and stops waiting
@@ -113,7 +115,7 @@ impl UsageLedger {
     }
 
     /// Consumes the title result and returns whether it reported usage.
-    pub(super) fn account_title_usage(&mut self, record: Option<UsageRecord>) -> bool {
+    fn account_title_usage(&mut self, record: Option<UsageRecord>) -> bool {
         self.title_usage = None;
         let Some(record) = record else {
             return false;
@@ -125,7 +127,7 @@ impl UsageLedger {
 
 #[cfg(test)]
 impl UsageLedger {
-    pub(super) const fn awaits_title_usage(&self) -> bool {
+    pub(super) const fn tracks_title_usage(&self) -> bool {
         self.title_usage.is_some()
     }
 
@@ -141,8 +143,8 @@ impl UsageLedger {
         self.context_estimate = estimate;
     }
 
-    pub(super) const fn set_displayed_usage(&mut self, usage: Option<TokenUsage>) {
-        self.displayed_usage = usage;
+    pub(super) const fn set_displayed_usage(&mut self, usage: TokenUsage) {
+        self.displayed_usage = Some(usage);
     }
 
     pub(super) const fn set_total_estimated_cost_usd(&mut self, cost: f64) {

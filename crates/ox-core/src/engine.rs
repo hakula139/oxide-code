@@ -250,8 +250,8 @@ impl Engine {
         loop {
             let op = tokio::select! {
                 biased;
-                usage = self.usage.title_usage() => {
-                    if self.usage.account_title_usage(usage) {
+                billed = self.usage.title_usage_landed() => {
+                    if billed {
                         self.emit_usage_update(&sink);
                     }
                     continue;
@@ -338,7 +338,7 @@ impl Engine {
         if self.generates_titles
             && let Some(seed) = outcome.ai_title_seed
         {
-            self.usage.await_title_usage(title_generator::spawn(
+            self.usage.track_title_usage(title_generator::spawn(
                 self.client.clone(),
                 auth.clone(),
                 self.settings.prompt_cache_ttl(),
@@ -1096,7 +1096,7 @@ mod tests {
                 let session = engine.transcript.session().clone();
                 let session_id = engine.session_id();
                 let (billed, usage) = oneshot::channel();
-                engine.usage.await_title_usage(usage);
+                engine.usage.track_title_usage(usage);
                 let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
                 let (sink, events) = mpsc::unbounded_channel();
                 let task = EngineTask(tokio::spawn(engine.run(sink.clone(), op_rx)));
@@ -1161,7 +1161,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let (billed, usage) = oneshot::channel();
-                engine.usage.await_title_usage(usage);
+                engine.usage.track_title_usage(usage);
                 drop(billed);
                 let mut handle = engine.spawn();
 
@@ -2740,7 +2740,7 @@ mod tests {
                         "hello".to_owned(),
                     );
                     let (billed, usage) = oneshot::channel();
-                    engine.usage.await_title_usage(usage);
+                    engine.usage.track_title_usage(usage);
                     let failure = async {
                         assert!(
                             title.await.is_err(),
@@ -2904,7 +2904,7 @@ mod tests {
                         .await;
                     assert_eq!(end, TurnEnd::Completed);
                     if manual {
-                        assert!(!resumed.usage.awaits_title_usage());
+                        assert!(!resumed.usage.tracks_title_usage());
                     } else {
                         let title = tokio::time::timeout(Duration::from_secs(5), async {
                             loop {
@@ -3096,9 +3096,7 @@ mod tests {
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.transcript.set_messages(tool_heavy_transcript());
                 engine.usage.set_context_estimate(50_000);
-                engine
-                    .usage
-                    .set_displayed_usage(Some(TokenUsage::new(50_000, 1)));
+                engine.usage.set_displayed_usage(TokenUsage::new(50_000, 1));
                 engine.usage.set_total_estimated_cost_usd(1.23);
                 engine.usage.auto_compaction_failures = AutoCompactFailures::new(2);
                 let sink = CapturingSink::default();

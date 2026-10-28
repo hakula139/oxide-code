@@ -395,7 +395,7 @@ mod tests {
 
             let pick = submitted_pick(p.handle_key(&KeyEvent::from(KeyCode::Enter)));
 
-            assert_eq!(pick, model_pick("claude-sonnet-5-5", Some(Effort::Xhigh)),);
+            assert_eq!(pick, model_pick("claude-sonnet-5-5", Some(Effort::Xhigh)));
         }
 
         #[test]

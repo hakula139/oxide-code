@@ -1111,9 +1111,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine
-                    .usage
-                    .set_displayed_usage(Some(TokenUsage::new(90_000, 9)));
+                engine.usage.set_displayed_usage(TokenUsage::new(90_000, 9));
                 engine.usage.set_total_estimated_cost_usd(1.23);
                 engine.usage.auto_compaction_failures = AutoCompactFailures::new(3);
                 let sink = CapturingSink::default();
@@ -1339,7 +1337,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.set_displayed_usage(Some(TokenUsage::new(90_000, 9)));
+                engine.usage.set_displayed_usage(TokenUsage::new(90_000, 9));
                 engine.usage.set_total_estimated_cost_usd(1.23);
                 let sink = CapturingSink::default();
 
@@ -1470,9 +1468,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine
-                    .usage
-                    .set_displayed_usage(Some(TokenUsage::new(50_000, 1)));
+                engine.usage.set_displayed_usage(TokenUsage::new(50_000, 1));
                 engine.usage.set_total_estimated_cost_usd(1.23);
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
