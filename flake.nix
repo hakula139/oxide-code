@@ -92,6 +92,7 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        nodejs = pkgs.nodejs_24;
 
         rustToolchain = toolchainFor pkgs;
         rustDevToolchain = rustToolchain.override (prev: {
@@ -120,6 +121,24 @@
 
           shellcheck.enable = true;
 
+          comment-width = {
+            enable = true;
+            entry = pkgs.lib.getExe (
+              pkgs.writeShellApplication {
+                name = "check-comment-width";
+                runtimeInputs = [ pkgs.gawk ];
+                text = builtins.readFile ./scripts/check-comment-width.sh;
+              }
+            );
+            types_or = [
+              "nix"
+              "rust"
+              "shell"
+              "toml"
+              "yaml"
+            ];
+          };
+
           rustfmt = {
             enable = true;
             packageOverrides = {
@@ -137,7 +156,7 @@
             pkgs.writeShellApplication {
               inherit name;
               runtimeInputs = with pkgs; [
-                nodejs_24
+                nodejs
                 pnpm
               ];
 
@@ -175,12 +194,13 @@
         };
 
         preCommit = git-hooks-nix.lib.${system}.run {
-          src = ./.;
           hooks = hooks // nodeHooks;
+          src = ./.;
         };
 
+        # The flake check leaves rustfmt to CI's Rust job, so it never fetches the pinned toolchain.
         preCommitCheck = git-hooks-nix.lib.${system}.run {
-          inherit hooks;
+          hooks = removeAttrs hooks [ "rustfmt" ];
           src = ./.;
         };
 
@@ -189,7 +209,7 @@
       in
       {
         # ------------------------------------------------------------------------------------------
-        # Dev Shell
+        # Dev Shells
         # ------------------------------------------------------------------------------------------
         devShells.default = pkgs.mkShell {
           name = "oxide-code-dev";
@@ -206,7 +226,7 @@
             cargo-llvm-cov
             cargo-mutants
             git-cliff
-            nodejs_24
+            nodejs
             pnpm
             sqlite
           ]);
@@ -227,6 +247,20 @@
               ) 9>"$common/git-hooks.lock"
             fi
           '';
+        };
+
+        # CI's Lint job runs in this shell, which leaves out the pinned toolchain so that every tool
+        # comes from the nixpkgs binary cache. `cargo deny` needs only `cargo metadata`, which
+        # nixpkgs' cargo serves for this workspace.
+        devShells.lint = pkgs.mkShell {
+          name = "oxide-code-lint";
+
+          packages = with pkgs; [
+            cargo
+            cargo-deny
+            nodejs
+            pnpm
+          ];
         };
 
         # ------------------------------------------------------------------------------------------

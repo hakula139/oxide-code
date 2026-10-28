@@ -220,7 +220,7 @@ impl App {
         }
     }
 
-    /// Deletes forward while the input holds text. An empty idle input quits as a shell does at EOF,
+    /// Deletes forward while the input holds text. An empty idle input quits like a shell at EOF,
     /// through the same double-press window as Ctrl+C, so a habitual EOF press does not close `ox`.
     fn handle_ctrl_d(&mut self, key: &KeyEvent) {
         if self.in_flight.is_none() && self.input.is_empty() {

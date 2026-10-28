@@ -174,7 +174,7 @@ pub(super) fn withhold_unreadable(
     found - unreadable.len()
 }
 
-/// The newest `limit` entries and the full count, keeping walk order among equal modification times.
+/// The newest `limit` entries and the full count, in walk order among equal modification times.
 pub(super) fn newest_first(
     entries: impl Iterator<Item = ignore::DirEntry>,
     limit: usize,
