@@ -456,7 +456,7 @@ impl Tool for BashOutputTool {
     }
 
     fn prepare(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<Prepared, String> {
-        Prepared::parse(input, |_: &OutputInput| Access::None)
+        Prepared::parse(input, |_: &OutputInput| Ok(Access::None))
     }
 
     fn icon(&self) -> &'static str {
@@ -508,7 +508,7 @@ impl Tool for BashStopTool {
     }
 
     fn prepare(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<Prepared, String> {
-        Prepared::parse(input, |_: &StopInput| Access::None)
+        Prepared::parse(input, |_: &StopInput| Ok(Access::None))
     }
 
     fn icon(&self) -> &'static str {
@@ -542,7 +542,8 @@ fn output_input_schema() -> serde_json::Value {
                                 Omit or pass 0 to read at once."
             }
         },
-        "required": ["shell_id"]
+        "required": ["shell_id"],
+        "additionalProperties": false
     })
 }
 
@@ -559,7 +560,8 @@ fn stop_input_schema() -> serde_json::Value {
         "properties": {
             "shell_id": shell_id_property()
         },
-        "required": ["shell_id"]
+        "required": ["shell_id"],
+        "additionalProperties": false
     })
 }
 
@@ -1095,33 +1097,6 @@ mod tests {
                 stopped.content,
                 "(no new output)\n\n(stopped after it exited with code 0)"
             );
-        }
-    }
-
-    mod shell_id_input {
-        use super::*;
-
-        #[tokio::test]
-        async fn is_required_by_bash_output_and_bash_stop() {
-            let ctx = temp_ctx();
-
-            let read = local_testing::run(
-                &BashOutputTool::new(Arc::default()),
-                serde_json::json!({}),
-                &ctx,
-            )
-            .await;
-            let stopped = local_testing::run(
-                &BashStopTool::new(Arc::default()),
-                serde_json::json!({}),
-                &ctx,
-            )
-            .await;
-
-            for output in [read, stopped] {
-                assert!(output.is_error);
-                assert_eq!(output.content, "Invalid input: missing field `shell_id`");
-            }
         }
     }
 }

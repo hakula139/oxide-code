@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, VariantArray};
 
 use super::view::ToolResultView;
-use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, invalid_input};
+use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
 use crate::message::{ContentBlock, Message};
 use crate::permission::{Access, PermissionClass};
 use crate::util::text::plural;
@@ -99,7 +99,10 @@ impl Tool for TasksTool {
     }
 
     fn prepare(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<Prepared, String> {
-        Prepared::parse(input, |_: &Input| Access::None)
+        Prepared::parse(input, |input: &Input| {
+            check(&input.tasks)?;
+            Ok(Access::None)
+        })
     }
 
     fn icon(&self) -> &'static str {
@@ -112,7 +115,7 @@ impl Tool for TasksTool {
         _content: &str,
         _cwd: &Path,
     ) -> Option<ToolResultView> {
-        let tasks = requested(input).ok()?;
+        let tasks = requested(input)?;
         Some(ToolResultView::Tasks { tasks })
     }
 
@@ -121,7 +124,8 @@ impl Tool for TasksTool {
         prepared: Prepared,
         _ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(std::future::ready(run(&prepared.input)))
+        let Input { tasks } = prepared.into_input();
+        Box::pin(std::future::ready(run(collapsed(tasks))))
     }
 }
 
@@ -151,7 +155,8 @@ fn input_schema() -> serde_json::Value {
                 }
             }
         },
-        "required": ["tasks"]
+        "required": ["tasks"],
+        "additionalProperties": false
     })
 }
 
@@ -161,9 +166,33 @@ struct Input {
     tasks: Vec<Task>,
 }
 
-/// The tasks `input` lists, each with its content collapsed onto one line.
-fn parse(input: &serde_json::Value) -> Result<Vec<Task>, serde_json::Error> {
-    let Input { mut tasks } = Input::deserialize(input)?;
+/// Why the list a call sends cannot stand, if it cannot.
+fn check(tasks: &[Task]) -> Result<(), String> {
+    if let Some(index) = tasks.iter().position(|task| task.content.trim().is_empty()) {
+        return Err(format!(
+            "Task {} has no content. Describe each task in a few words.",
+            index + 1,
+        ));
+    }
+    let in_progress = count(tasks, TaskStatus::InProgress);
+    if in_progress > 1 {
+        return Err(format!(
+            "{in_progress} tasks are in_progress, but at most one can be at a time. \
+             Mark the others pending or completed."
+        ));
+    }
+    Ok(())
+}
+
+/// The list a successful call with `input` sent, or `None` when it does not parse. Fields beside
+/// `tasks` are ignored, so a call in a transcript older than the strict [`Input`] still reads.
+fn requested(input: &serde_json::Value) -> Option<Vec<Task>> {
+    let tasks = Vec::<Task>::deserialize(input.get("tasks")?).ok()?;
+    Some(collapsed(tasks))
+}
+
+/// `tasks` with each content collapsed onto one line.
+fn collapsed(mut tasks: Vec<Task>) -> Vec<Task> {
     for task in &mut tasks {
         task.content = task
             .content
@@ -171,36 +200,12 @@ fn parse(input: &serde_json::Value) -> Result<Vec<Task>, serde_json::Error> {
             .collect::<Vec<_>>()
             .join(" ");
     }
-    Ok(tasks)
-}
-
-/// The list a call with `input` sends, or the message telling the model why it is invalid.
-fn requested(input: &serde_json::Value) -> Result<Vec<Task>, String> {
-    let tasks = parse(input).map_err(|e| invalid_input(&e))?;
-    if let Some(index) = tasks.iter().position(|task| task.content.is_empty()) {
-        return Err(format!(
-            "Task {} has no content. Describe each task in a few words.",
-            index + 1,
-        ));
-    }
-    let in_progress = count(&tasks, TaskStatus::InProgress);
-    if in_progress > 1 {
-        return Err(format!(
-            "{in_progress} tasks are in_progress, but at most one can be at a time. \
-             Mark the others pending or completed."
-        ));
-    }
-    Ok(tasks)
+    tasks
 }
 
 // ── Execution ──
 
-fn run(input: &serde_json::Value) -> ToolOutput {
-    let tasks = match requested(input) {
-        Ok(tasks) => tasks,
-        Err(message) => return ToolOutput::error(message),
-    };
-
+fn run(tasks: Vec<Task>) -> ToolOutput {
     match Progress::of(&tasks) {
         None => ToolOutput::success("Cleared the task list.")
             .with_title("Cleared the task list")
@@ -247,8 +252,8 @@ pub(crate) fn latest(messages: &[Message]) -> Option<Vec<Task>> {
             ContentBlock::ToolUse { id, name, input }
                 if name == NAME && succeeded.get(id.as_str()) == Some(&true) =>
             {
-                if let Some(tasks) = run(input).tasks {
-                    return Some(tasks);
+                if let Some(tasks) = requested(input) {
+                    return run(tasks).tasks;
                 }
             }
             _ => {}
@@ -335,6 +340,43 @@ mod tests {
         }
     }
 
+    mod prepare {
+        use super::*;
+
+        #[test]
+        fn rejects_a_list_that_cannot_stand() {
+            let cases = [
+                (
+                    input(&[
+                        task("Fix the parser", TaskStatus::InProgress),
+                        task("Run the tests", TaskStatus::InProgress),
+                    ]),
+                    "2 tasks are in_progress, but at most one can be at a time. \
+                     Mark the others pending or completed.",
+                ),
+                (
+                    input(&[
+                        task("Fix the parser", TaskStatus::Pending),
+                        task(" \n ", TaskStatus::Pending),
+                    ]),
+                    "Task 2 has no content. Describe each task in a few words.",
+                ),
+                (
+                    json!({"tasks": [{"content": "Fix the parser", "status": "blocked"}]}),
+                    "Invalid input: unknown variant `blocked`, \
+                     expected one of `pending`, `in_progress`, `completed`",
+                ),
+            ];
+            for (input, message) in cases {
+                assert_eq!(
+                    TasksTool.prepare(input.clone(), &temp_ctx()).unwrap_err(),
+                    message,
+                    "{input}",
+                );
+            }
+        }
+    }
+
     mod result_view {
         use super::*;
 
@@ -414,56 +456,6 @@ mod tests {
             assert_eq!(output.content, "Cleared the task list.");
             assert_eq!(output.tasks, Some(Vec::new()));
         }
-
-        #[tokio::test]
-        async fn rejects_more_than_one_task_in_progress() {
-            let tasks = [
-                task("Fix the parser", TaskStatus::InProgress),
-                task("Run the tests", TaskStatus::InProgress),
-            ];
-
-            let output = local_testing::run(&TasksTool, input(&tasks), &temp_ctx()).await;
-
-            assert!(output.is_error);
-            assert_eq!(
-                output.content,
-                "2 tasks are in_progress, but at most one can be at a time. \
-                 Mark the others pending or completed."
-            );
-            assert_eq!(output.tasks, None);
-        }
-
-        #[tokio::test]
-        async fn rejects_a_task_without_content() {
-            let tasks = [
-                task("Fix the parser", TaskStatus::Pending),
-                task(" \n ", TaskStatus::Pending),
-            ];
-
-            let output = local_testing::run(&TasksTool, input(&tasks), &temp_ctx()).await;
-
-            assert!(output.is_error);
-            assert_eq!(
-                output.content,
-                "Task 2 has no content. Describe each task in a few words."
-            );
-            assert_eq!(output.tasks, None);
-        }
-
-        #[tokio::test]
-        async fn rejects_an_unknown_status() {
-            let raw = json!({"tasks": [{"content": "Fix the parser", "status": "blocked"}]});
-
-            let output = local_testing::run(&TasksTool, raw, &temp_ctx()).await;
-
-            assert!(output.is_error);
-            assert_eq!(
-                output.content,
-                "Invalid input: unknown variant `blocked`, \
-                 expected one of `pending`, `in_progress`, `completed`",
-            );
-            assert_eq!(output.tasks, None);
-        }
     }
 
     mod latest {
@@ -527,6 +519,15 @@ mod tests {
                 tasks_call("t2", unknown_status),
                 result("t2", false),
             ];
+
+            assert_eq!(latest(&messages), Some(plan()));
+        }
+
+        #[test]
+        fn reads_a_call_with_a_field_the_tool_now_refuses() {
+            let mut older = input(&plan());
+            older["note"] = json!("sent before the input turned strict");
+            let messages = [tasks_call("t1", older), result("t1", false)];
 
             assert_eq!(latest(&messages), Some(plan()));
         }

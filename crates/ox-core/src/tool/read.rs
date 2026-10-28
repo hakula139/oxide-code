@@ -44,7 +44,7 @@ impl Tool for ReadTool {
     }
 
     fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
-        Prepared::parse(input, |input: &Input| ctx.path_access(&input.file_path))
+        Prepared::parse(input, |input: &Input| Ok(ctx.path_access(&input.file_path)))
     }
 
     fn icon(&self) -> &'static str {
@@ -91,7 +91,8 @@ fn input_schema() -> serde_json::Value {
                 )
             }
         },
-        "required": ["file_path"]
+        "required": ["file_path"],
+        "additionalProperties": false
     })
 }
 
@@ -524,14 +525,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn missing_file_path_reports_input_error() {
-            let output = local_testing::run(&ReadTool, serde_json::json!({}), &temp_ctx()).await;
-
-            assert!(output.is_error);
-            assert_eq!(output.content, "Invalid input: missing field `file_path`");
-        }
-
-        #[tokio::test]
         async fn read_error_omits_title() {
             let output = local_testing::run(
                 &ReadTool,
@@ -872,8 +865,8 @@ mod tests {
 
         #[tokio::test]
         async fn refuses_a_symlink_at_the_final_component() {
-            // The gate pins the resolved path, so a link there was swapped in after the check and
-            // its target was never gated.
+            // The run opens the path the gate resolved, so a link there was swapped in after the
+            // check and its target was never gated.
             let dir = canonical_tempdir();
             let secret = dir.path().join("secret.txt");
             fs::write(&secret, "SECRET=1\n").unwrap();

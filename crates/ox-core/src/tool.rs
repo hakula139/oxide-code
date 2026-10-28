@@ -103,15 +103,16 @@ pub struct Prepared {
 }
 
 impl Prepared {
-    /// Validates `input` as a `T`, resolving what the call accesses from the parsed input, or
-    /// returns the `Invalid input: ...` message the model reads.
+    /// Validates `input` as a `T`, then lets `access` check the parsed input further and resolve
+    /// what the call accesses. An error is the message the model reads, `Invalid input: ...` for
+    /// input that does not parse.
     fn parse<T: DeserializeOwned>(
         input: serde_json::Value,
-        access: impl FnOnce(&T) -> Access,
+        access: impl FnOnce(&T) -> Result<Access, String>,
     ) -> Result<Self, String> {
         let parsed = T::deserialize(&input).map_err(|e| invalid_input(&e))?;
         Ok(Self {
-            access: access(&parsed),
+            access: access(&parsed)?,
             input,
         })
     }
@@ -119,6 +120,22 @@ impl Prepared {
     /// The input as the `T` that [`Self::parse`] validated it as.
     fn parsed<T: DeserializeOwned>(&self) -> T {
         T::deserialize(&self.input).expect(VALIDATED)
+    }
+
+    /// The `Name(path)` title of a file tool's call, with its resolved path relative to `cwd`.
+    fn path_title(&self, name: &str, cwd: &Path) -> String {
+        call_label(name, Some(&display_path(&self.path(), cwd)))
+    }
+
+    /// The parsed input and resolved `file_path` of a file tool.
+    fn into_path_input<T: DeserializeOwned>(self) -> (T, PathBuf) {
+        let path = self.path();
+        (self.into_input(), path)
+    }
+
+    /// The input as the `T` that [`Self::parse`] validated it as.
+    fn into_input<T: DeserializeOwned>(self) -> T {
+        self.into_parts().0
     }
 
     /// The input as the `T` that [`Self::parse`] validated it as, with what the call accesses.
@@ -129,27 +146,11 @@ impl Prepared {
         )
     }
 
-    /// The input as the `T` that [`Self::parse`] validated it as.
-    fn into_input<T: DeserializeOwned>(self) -> T {
-        self.into_parts().0
-    }
-
     /// The resolved `file_path` of a file tool.
     fn path(&self) -> PathBuf {
         self.access
             .resolved()
             .expect("a file tool's prepare resolves its path")
-    }
-
-    /// The parsed input and resolved `file_path` of a file tool.
-    fn into_path_input<T: DeserializeOwned>(self) -> (T, PathBuf) {
-        let path = self.path();
-        (self.into_input(), path)
-    }
-
-    /// The `Name(path)` title of a file tool's call, with its resolved path relative to `cwd`.
-    fn path_title(&self, name: &str, cwd: &Path) -> String {
-        call_label(name, Some(&display_path(&self.path(), cwd)))
     }
 }
 
@@ -292,17 +293,22 @@ pub trait Tool: Send + Sync {
     }
 
     /// Builds the approval modal's preview of `prepared`, by default the tool name over its label
-    /// from [`Self::summarize_call`]. Async because the write preview reads the file it would
-    /// replace through the resolved path.
+    /// from [`Self::summarize_call`], or over where its path resolved for a tool with a
+    /// [`Self::path_field`]. Async because the write preview reads the file it would replace
+    /// through the resolved path.
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
         prepared: &'a Prepared,
         cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
+        let label = match self.path_field() {
+            Some(_) => prepared.path_title(name, cwd),
+            None => self.summarize_call(name, &prepared.input, cwd),
+        };
         Box::pin(std::future::ready(ApprovalPreview {
             title: pascal_case(name),
-            body: ApprovalBody::Command(self.summarize_call(name, &prepared.input, cwd)),
+            body: ApprovalBody::Command(label),
         }))
     }
 
@@ -323,11 +329,6 @@ fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'
     input.get(key).and_then(serde_json::Value::as_str)
 }
 
-/// Renders a tool name as the label the UI shows, `bash_output` as `BashOutput`.
-fn pascal_case(name: &str) -> String {
-    name.split('_').map(capitalize_first).collect()
-}
-
 /// `Name(arg)` for a call of the tool registered as `name`, or the bare `Name` without an `arg`.
 fn call_label(name: &str, arg: Option<&str>) -> String {
     let label = pascal_case(name);
@@ -335,6 +336,11 @@ fn call_label(name: &str, arg: Option<&str>) -> String {
         Some(arg) => format!("{label}({arg})"),
         None => label,
     }
+}
+
+/// Renders a tool name as the label the UI shows, `bash_output` as `BashOutput`.
+fn pascal_case(name: &str) -> String {
+    name.split('_').map(capitalize_first).collect()
 }
 
 // ── Tool Registry ──
@@ -502,18 +508,10 @@ pub(crate) mod local_testing {
 
     use super::search::{SearchRoot, search_path};
     use super::spill::run_capped;
-    use super::{Prepared, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
+    use super::{Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
     use crate::file_tracker::FileTracker;
     use crate::permission::rule::Rule;
     use crate::permission::{Access, Mode, PermissionClass, Policy, ReadFilter, Workspace};
-
-    /// A prepared call carrying `input` alone, for tests of a part that does not resolve a path.
-    pub(crate) fn prepared(input: serde_json::Value) -> Prepared {
-        Prepared {
-            input,
-            access: Access::default(),
-        }
-    }
 
     /// A fresh tracker's context in `cwd`, for call `toolu_test` of session `test-session`, whose
     /// artifact directory is `cwd/session`.
@@ -546,17 +544,15 @@ pub(crate) mod local_testing {
             .join(format!("toolu_test{suffix}"))
     }
 
-    /// Prepares `input` for `tool` and runs it in `ctx`, the way dispatch does when the gate allows
-    /// the call, so input that does not prepare ends as its error.
+    /// Prepares valid `input` for `tool` and runs it in `ctx`, the way dispatch does when the gate
+    /// allows the call.
     pub(super) async fn run(
         tool: &dyn Tool,
         input: serde_json::Value,
         ctx: &ToolCtx,
     ) -> ToolOutput {
-        match tool.prepare(input, ctx) {
-            Ok(prepared) => tool.run(prepared, ctx).await,
-            Err(message) => ToolOutput::error(message),
-        }
+        let prepared = tool.prepare(input, ctx).expect("the input is valid");
+        tool.run(prepared, ctx).await
     }
 
     /// The read filter of a policy that denies reading whatever one of `patterns` matches.
@@ -636,6 +632,7 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
 
     use super::local_testing::{ctx, deny_reads, temp_ctx};
@@ -788,28 +785,44 @@ mod tests {
                 assert_eq!(relative.as_deref(), Some("a.rs"), "tool {name}");
                 assert_eq!(*zone, Zone::Workspace, "tool {name}");
                 assert_eq!(prepared.input, input, "tool {name}");
-
-                assert_eq!(
-                    t.prepare(serde_json::json!({}), &ctx).unwrap_err(),
-                    "Invalid input: missing field `file_path`",
-                    "tool {name}",
-                );
             }
         }
 
         #[test]
-        fn every_built_in_tool_rejects_a_field_its_schema_lacks() {
+        fn every_built_in_tool_parses_the_fields_its_schema_lists() {
             let ctx = temp_ctx();
             for (spec, t) in built_in().iter() {
-                let name = &spec.definition.name;
+                let ToolDefinition {
+                    name, input_schema, ..
+                } = &spec.definition;
+                let listed: BTreeSet<&str> = input_schema["properties"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
 
-                let error = t
+                let unknown = t
                     .prepare(serde_json::json!({"unknown": true}), &ctx)
                     .unwrap_err();
+                let missing = t.prepare(serde_json::json!({}), &ctx).unwrap_err();
 
-                assert!(
-                    error.starts_with("Invalid input: unknown field `unknown`, expected "),
-                    "tool {name}: {error}",
+                let prefix = "Invalid input: unknown field `unknown`, expected ";
+                assert!(unknown.starts_with(prefix), "tool {name}: {unknown}");
+                let accepted: BTreeSet<&str> = unknown[prefix.len()..]
+                    .split('`')
+                    .skip(1)
+                    .step_by(2)
+                    .collect();
+                assert_eq!(accepted, listed, "tool {name}: {unknown}");
+                assert_eq!(input_schema["additionalProperties"], false, "tool {name}");
+                assert_eq!(
+                    missing,
+                    format!(
+                        "Invalid input: missing field `{}`",
+                        input_schema["required"][0].as_str().unwrap(),
+                    ),
+                    "tool {name}",
                 );
             }
         }
@@ -991,15 +1004,41 @@ mod tests {
 
         #[tokio::test]
         async fn default_titles_with_the_tool_name() {
-            let preview = GlobTool::new(ReadFilter::default())
-                .approval_preview(
-                    "glob",
-                    &local_testing::prepared(serde_json::json!({"pattern": "*.rs"})),
-                    Path::new("/repo"),
-                )
+            let tool = GlobTool::new(ReadFilter::default());
+            let prepared = tool
+                .prepare(serde_json::json!({"pattern": "*.rs"}), &temp_ctx())
+                .unwrap();
+
+            let preview = tool
+                .approval_preview("glob", &prepared, Path::new("/repo"))
                 .await;
+
             assert_eq!(preview.title, "Glob");
             assert_eq!(preview.body, ApprovalBody::Command("Glob(*.rs)".to_owned()));
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn default_names_where_a_path_tool_call_lands() {
+            let dir = canonical_tempdir();
+            fs::write(dir.path().join("target.txt"), "x").unwrap();
+            std::os::unix::fs::symlink("target.txt", dir.path().join("link.txt")).unwrap();
+            let prepared = ReadTool
+                .prepare(
+                    serde_json::json!({"file_path": "link.txt"}),
+                    &ctx(dir.path()),
+                )
+                .unwrap();
+
+            let preview = ReadTool
+                .approval_preview("read", &prepared, dir.path())
+                .await;
+
+            assert_eq!(preview.title, "Read");
+            assert_eq!(
+                preview.body,
+                ApprovalBody::Command("Read(target.txt)".to_owned())
+            );
         }
     }
 

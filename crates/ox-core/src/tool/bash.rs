@@ -99,7 +99,7 @@ impl Tool for BashTool {
 
     fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
         Prepared::parse(input, |input: &Input| {
-            Access::for_command(&input.command, &ctx.workspace)
+            Ok(Access::for_command(&input.command, &ctx.workspace))
         })
     }
 
@@ -164,7 +164,8 @@ fn input_schema() -> serde_json::Value {
                                 The timeout field does not apply."
             }
         },
-        "required": ["command"]
+        "required": ["command"],
+        "additionalProperties": false
     })
 }
 
@@ -884,25 +885,19 @@ mod tests {
         #[tokio::test]
         async fn marks_a_background_command_in_the_title() {
             let tool = BashTool::new(Arc::default());
-            let cwd = Path::new("/repo");
-
+            let ctx = temp_ctx();
             let foreground = tool
-                .approval_preview(
-                    "bash",
-                    &local_testing::prepared(serde_json::json!({"command": "cargo test"})),
-                    cwd,
-                )
-                .await;
+                .prepare(serde_json::json!({"command": "cargo test"}), &ctx)
+                .unwrap();
             let background = tool
-                .approval_preview(
-                    "bash",
-                    &local_testing::prepared(serde_json::json!({
-                        "command": "cargo watch",
-                        "run_in_background": true,
-                    })),
-                    cwd,
+                .prepare(
+                    serde_json::json!({"command": "cargo watch", "run_in_background": true}),
+                    &ctx,
                 )
-                .await;
+                .unwrap();
+
+            let foreground = tool.approval_preview("bash", &foreground, ctx.cwd()).await;
+            let background = tool.approval_preview("bash", &background, ctx.cwd()).await;
 
             assert_eq!(foreground, bash_preview("cargo test"));
             assert_eq!(

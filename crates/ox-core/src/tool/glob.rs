@@ -47,7 +47,7 @@ impl Tool for GlobTool {
 
     fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
         Prepared::parse(input, |input: &Input| {
-            super::search::root_access(input.path.as_deref(), ctx)
+            Ok(super::search::root_access(input.path.as_deref(), ctx))
         })
     }
 
@@ -86,7 +86,8 @@ fn input_schema() -> serde_json::Value {
                 "description": "The directory to search in (default: current working directory)"
             }
         },
-        "required": ["pattern"]
+        "required": ["pattern"],
+        "additionalProperties": false
     })
 }
 
@@ -360,14 +361,6 @@ mod tests {
                     total: 1,
                 })),
             );
-        }
-
-        #[tokio::test]
-        async fn missing_pattern_reports_input_error() {
-            let output = local_testing::run(&glob_tool(), serde_json::json!({}), &temp_ctx()).await;
-
-            assert!(output.is_error);
-            assert_eq!(output.content, "Invalid input: missing field `pattern`");
         }
 
         #[tokio::test]

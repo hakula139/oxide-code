@@ -1354,8 +1354,8 @@ mod tests {
 
             #[tokio::test]
             async fn malformed_input_settles_without_asking() {
-                // `manual` asks for every edit, so reaching the policy would prompt for a call
-                // that cannot run.
+                // An edit without a path has no workspace target, so in `manual` the policy would
+                // ask about a call that cannot run.
                 let tools = ToolRegistry::new(vec![Box::new(EditTool)]);
                 let sink = CapturingSink::default();
                 let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));

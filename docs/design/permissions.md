@@ -54,7 +54,7 @@ Tab and Shift+Tab step through the modes in a fixed cycle (**The keyboard cycle 
 
 ## Decision Pipeline
 
-Before the gate, the tool's `Tool::prepare` parses the call's input, rejecting a missing or mistyped field and a field the tool does not take. A call whose input does not parse ends with the parse error as its result, so it neither asks nor reaches the unapproved-call reason below.
+Before the gate, the tool's `Tool::prepare` parses the call's input, rejecting a missing or mistyped field, a field the tool does not take, and input the tool can never run, such as an `edit` whose `old_string` and `new_string` are identical. A rejected call ends with that error as its result, so it neither asks nor reaches the unapproved-call reason below.
 
 The gate evaluates each call in a fixed order and stops at the first match.
 

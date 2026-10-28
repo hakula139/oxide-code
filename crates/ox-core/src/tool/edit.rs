@@ -45,7 +45,17 @@ impl Tool for EditTool {
     }
 
     fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
-        Prepared::parse(input, |input: &Input| ctx.path_access(&input.file_path))
+        Prepared::parse(input, |input: &Input| {
+            if input.old_string.is_empty() {
+                return Err("old_string must not be empty.".to_owned());
+            }
+            if input.old_string == input.new_string {
+                return Err(
+                    "old_string and new_string are identical. No changes to make.".to_owned(),
+                );
+            }
+            Ok(ctx.path_access(&input.file_path))
+        })
     }
 
     fn icon(&self) -> &'static str {
@@ -98,7 +108,8 @@ fn input_schema() -> serde_json::Value {
                 "description": "Replace all occurrences (default: false)"
             }
         },
-        "required": ["file_path", "old_string", "new_string"]
+        "required": ["file_path", "old_string", "new_string"],
+        "additionalProperties": false
     })
 }
 
@@ -140,7 +151,8 @@ async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
     }
 }
 
-/// Replaces `old_string` in the file at `path`, which `prepare` resolved.
+/// Replaces `old_string` in the file at `path`, which `prepare` resolved after checking that
+/// `old_string` is not empty and differs from `new_string`.
 ///
 /// - `old_string` must occur once without `replace_all`, and each line break in it matches either
 ///   ending, so the model cannot edit the wrong site.
@@ -153,14 +165,6 @@ async fn edit_file(
     replace_all: bool,
     ctx: &ToolCtx,
 ) -> Result<Edited, String> {
-    if old_string.is_empty() {
-        return Err("old_string must not be empty.".to_owned());
-    }
-
-    if old_string == new_string {
-        return Err("old_string and new_string are identical. No changes to make.".to_owned());
-    }
-
     let content_bytes = super::file::read_validated(path, FileVerb::Edit).await?;
     let key = super::file::tracker_key(path).await;
     ctx.tracker
@@ -458,6 +462,35 @@ mod tests {
         }
     }
 
+    mod prepare {
+        use super::*;
+
+        #[test]
+        fn rejects_a_call_that_cannot_change_the_file() {
+            let cases = [
+                (
+                    serde_json::json!({"file_path": "a.rs", "old_string": "a"}),
+                    "Invalid input: missing field `new_string`",
+                ),
+                (
+                    serde_json::json!({"file_path": "a.rs", "old_string": "", "new_string": "x"}),
+                    "old_string must not be empty.",
+                ),
+                (
+                    serde_json::json!({"file_path": "a.rs", "old_string": "a", "new_string": "a"}),
+                    "old_string and new_string are identical. No changes to make.",
+                ),
+            ];
+            for (input, message) in cases {
+                assert_eq!(
+                    EditTool.prepare(input.clone(), &temp_ctx()).unwrap_err(),
+                    message,
+                    "{input}",
+                );
+            }
+        }
+    }
+
     mod approval_preview {
         use super::*;
 
@@ -647,22 +680,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn missing_required_fields_reports_input_error() {
-            let output = local_testing::run(
-                &EditTool,
-                serde_json::json!({
-                    "file_path": "/tmp/x",
-                    "old_string": "a"
-                }),
-                &temp_ctx(),
-            )
-            .await;
-
-            assert!(output.is_error);
-            assert_eq!(output.content, "Invalid input: missing field `new_string`");
-        }
-
-        #[tokio::test]
         async fn edit_error_omits_edited_title() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
@@ -811,36 +828,6 @@ mod tests {
                 ),
             );
             assert_eq!(fs::read_to_string(&path).unwrap(), "uno\ntwo\nthree\n");
-        }
-
-        #[tokio::test]
-        async fn rejects_empty_old_string() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("test.txt");
-            fs::write(&path, "hello").unwrap();
-
-            let err = edit_file(&path, "", "x", false, &temp_ctx())
-                .await
-                .unwrap_err();
-
-            assert_eq!(err, "old_string must not be empty.");
-            assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
-        }
-
-        #[tokio::test]
-        async fn rejects_identical_strings() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("test.txt");
-            fs::write(&path, "hello").unwrap();
-
-            let err = edit_file(&path, "hello", "hello", false, &temp_ctx())
-                .await
-                .unwrap_err();
-
-            assert_eq!(
-                err,
-                "old_string and new_string are identical. No changes to make."
-            );
         }
 
         #[tokio::test]

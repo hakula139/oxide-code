@@ -40,7 +40,7 @@ impl Tool for WriteTool {
     }
 
     fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
-        Prepared::parse(input, |input: &Input| ctx.path_access(&input.file_path))
+        Prepared::parse(input, |input: &Input| Ok(ctx.path_access(&input.file_path)))
     }
 
     fn icon(&self) -> &'static str {
@@ -96,7 +96,8 @@ fn input_schema() -> serde_json::Value {
                 "description": "The content to write to the file"
             }
         },
-        "required": ["file_path", "content"]
+        "required": ["file_path", "content"],
+        "additionalProperties": false
     })
 }
 
@@ -338,6 +339,7 @@ mod tests {
                 .approval_preview("write", &prepared, dir.path())
                 .await;
 
+            assert_eq!(preview.title, "Write(target.txt)");
             assert_eq!(
                 preview.body,
                 ApprovalBody::Diff(DiffChunk {
@@ -377,19 +379,6 @@ mod tests {
             );
             assert_eq!(output.metadata.title.as_deref(), Some("Created new.txt"));
             assert_eq!(fs::read_to_string(&path).unwrap(), "hello world");
-        }
-
-        #[tokio::test]
-        async fn missing_required_fields_reports_input_error() {
-            let output = local_testing::run(
-                &WriteTool,
-                serde_json::json!({"file_path": "/tmp/x"}),
-                &temp_ctx(),
-            )
-            .await;
-
-            assert!(output.is_error);
-            assert_eq!(output.content, "Invalid input: missing field `content`");
         }
 
         #[tokio::test]
