@@ -241,7 +241,9 @@ pub trait Tool: Send + Sync {
     /// permissive one.
     fn spec(&self) -> ToolSpec;
 
-    /// The input field naming the file a call acts on, if any, which its label shows.
+    /// The input field naming the file a call acts on, if any, which its label shows. A tool that
+    /// names one must resolve it in `prepare` through [`ToolCtx::path_access`], since the default
+    /// approval preview names the resolved path.
     fn path_field(&self) -> Option<&'static str> {
         None
     }
@@ -635,12 +637,15 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
 
+    use serde_json::Value;
+
     use super::local_testing::{ctx, deny_reads, temp_ctx};
     use super::testing::bash_registry;
     use super::view::NumberedLine;
     use super::*;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
+    use crate::util::fs::testing::symlink_file;
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::testing::HOME_VAR;
 
@@ -674,6 +679,10 @@ mod tests {
                 assert!(
                     input_schema["required"].is_array(),
                     "{name}: schema.required"
+                );
+                assert_eq!(
+                    input_schema["additionalProperties"], false,
+                    "{name}: schema.additionalProperties"
                 );
             }
         }
@@ -802,10 +811,28 @@ mod tests {
                     .map(String::as_str)
                     .collect();
 
+                let required: BTreeSet<&str> = input_schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|field| field.as_str().unwrap())
+                    .collect();
+
                 let unknown = t
                     .prepare(serde_json::json!({"unknown": true}), &ctx)
                     .unwrap_err();
-                let missing = t.prepare(serde_json::json!({}), &ctx).unwrap_err();
+                let mut input = serde_json::Map::new();
+                while let Err(error) = t.prepare(Value::Object(input.clone()), &ctx)
+                    && let Some(field) = error.strip_prefix("Invalid input: missing field `")
+                {
+                    let field = field.trim_end_matches('`');
+                    let placeholder = if input_schema["properties"][field]["type"] == "array" {
+                        Value::Array(Vec::new())
+                    } else {
+                        Value::from(field)
+                    };
+                    input.insert(field.to_owned(), placeholder);
+                }
 
                 let prefix = "Invalid input: unknown field `unknown`, expected ";
                 assert!(unknown.starts_with(prefix), "tool {name}: {unknown}");
@@ -815,15 +842,8 @@ mod tests {
                     .step_by(2)
                     .collect();
                 assert_eq!(accepted, listed, "tool {name}: {unknown}");
-                assert_eq!(input_schema["additionalProperties"], false, "tool {name}");
-                assert_eq!(
-                    missing,
-                    format!(
-                        "Invalid input: missing field `{}`",
-                        input_schema["required"][0].as_str().unwrap(),
-                    ),
-                    "tool {name}",
-                );
+                let reported: BTreeSet<&str> = input.keys().map(String::as_str).collect();
+                assert_eq!(reported, required, "tool {name}");
             }
         }
 
@@ -1017,12 +1037,12 @@ mod tests {
             assert_eq!(preview.body, ApprovalBody::Command("Glob(*.rs)".to_owned()));
         }
 
-        #[cfg(unix)]
         #[tokio::test]
         async fn default_names_where_a_path_tool_call_lands() {
             let dir = canonical_tempdir();
-            fs::write(dir.path().join("target.txt"), "x").unwrap();
-            std::os::unix::fs::symlink("target.txt", dir.path().join("link.txt")).unwrap();
+            let target = dir.path().join("target.txt");
+            fs::write(&target, "x").unwrap();
+            symlink_file(&target, &dir.path().join("link.txt"));
             let prepared = ReadTool
                 .prepare(
                     serde_json::json!({"file_path": "link.txt"}),

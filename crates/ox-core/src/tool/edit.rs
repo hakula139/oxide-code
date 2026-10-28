@@ -49,7 +49,7 @@ impl Tool for EditTool {
             if input.old_string.is_empty() {
                 return Err("old_string must not be empty.".to_owned());
             }
-            if input.old_string == input.new_string {
+            if normalize_eol(&input.old_string) == normalize_eol(&input.new_string) {
                 return Err(
                     "old_string and new_string are identical. No changes to make.".to_owned(),
                 );
@@ -478,6 +478,14 @@ mod tests {
                 ),
                 (
                     serde_json::json!({"file_path": "a.rs", "old_string": "a", "new_string": "a"}),
+                    "old_string and new_string are identical. No changes to make.",
+                ),
+                (
+                    serde_json::json!({
+                        "file_path": "a.rs",
+                        "old_string": "a\r\nb",
+                        "new_string": "a\nb",
+                    }),
                     "old_string and new_string are identical. No changes to make.",
                 ),
             ];

@@ -181,8 +181,8 @@ where
     Ok(mode)
 }
 
-/// Refuses an existing target whose `metadata` shows a symlink. The gate pinned the path to its
-/// resolved location, so a symlink there appeared afterward.
+/// Refuses an existing target whose `metadata` shows a symlink. The gate resolved the path, so a
+/// symlink there appeared afterward.
 fn validate_write_target(path: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {
     if metadata.file_type().is_symlink() {
         return Err(format!(

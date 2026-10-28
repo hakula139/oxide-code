@@ -855,10 +855,6 @@ mod tests {
         fn rejects_input_that_does_not_parse() {
             let cases = [
                 (
-                    serde_json::json!({}),
-                    "Invalid input: missing field `command`",
-                ),
-                (
                     serde_json::json!({"command": 1}),
                     "Invalid input: invalid type: integer `1`, expected a string",
                 ),
