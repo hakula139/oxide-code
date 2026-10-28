@@ -92,6 +92,7 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        nodejs = pkgs.nodejs_24;
 
         rustToolchain = toolchainFor pkgs;
         rustDevToolchain = rustToolchain.override (prev: {
@@ -119,10 +120,7 @@
           statix.enable = true;
 
           shellcheck.enable = true;
-        };
 
-        # The flake check leaves rustfmt to CI's Rust job, so it never fetches the pinned toolchain.
-        rustHooks = {
           rustfmt = {
             enable = true;
             packageOverrides = {
@@ -140,7 +138,7 @@
             pkgs.writeShellApplication {
               inherit name;
               runtimeInputs = with pkgs; [
-                nodejs_24
+                nodejs
                 pnpm
               ];
 
@@ -179,11 +177,12 @@
 
         preCommit = git-hooks-nix.lib.${system}.run {
           src = ./.;
-          hooks = hooks // rustHooks // nodeHooks;
+          hooks = hooks // nodeHooks;
         };
 
         preCommitCheck = git-hooks-nix.lib.${system}.run {
-          inherit hooks;
+          # The flake check leaves rustfmt to CI's Rust job, so it never fetches the pinned toolchain.
+          hooks = removeAttrs hooks [ "rustfmt" ];
           src = ./.;
         };
 
@@ -209,7 +208,7 @@
             cargo-llvm-cov
             cargo-mutants
             git-cliff
-            nodejs_24
+            nodejs
             pnpm
           ]);
 
@@ -240,7 +239,7 @@
           packages = with pkgs; [
             cargo
             cargo-deny
-            nodejs_24
+            nodejs
             pnpm
           ];
         };

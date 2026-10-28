@@ -67,10 +67,6 @@ jobs:
       - name: Set up Rust
         run: rustup toolchain install
 
-      - name: Format
-        if: ${{ matrix.os == 'Linux' }}
-        run: cargo fmt --check
-
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
@@ -79,7 +75,12 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Format
+        if: ${{ matrix.os == 'Linux' }}
+        run: cargo fmt --check
+
       - name: Clippy
+        if: ${{ !cancelled() }}
         run: cargo clippy --locked --all-targets
 
       - name: Clippy without test targets
