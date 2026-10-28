@@ -33,7 +33,7 @@ expression: "render_modal(&mut modal, 100, u16::MAX)"
     "Esc                               Stop the running turn",
     "Ctrl+O                            Expand or collapse long output",
     "Ctrl+C twice                      Exit, even with a draft",
-    "Ctrl+D                            Exit with an empty input",
+    "Ctrl+D twice                      Exit with an empty input",
     "//                                Send text that starts with a slash",
     "",
     "Esc to close",
