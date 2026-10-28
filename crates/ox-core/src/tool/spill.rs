@@ -45,7 +45,7 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
 /// meets the marker at a line boundary near its cut, or else at a UTF-8 boundary.
 fn cap_output(content: &str, mut spill: Spill) -> String {
     spill.write(content.as_bytes());
-    let note = spill.note("output");
+    let note = spill.note();
     // The full length has at least as many digits as the omitted count the marker ends up with.
     let reserve = omission_marker(content.len(), &note).len() + "\n\n".len();
     let half = (MAX_OUTPUT_BYTES - reserve) / 2;
@@ -212,19 +212,19 @@ impl Spill {
         SpillState::Failed(error.to_owned())
     }
 
-    /// Where the full `what`, such as `stdout`, is kept, as the omission marker names it. Call it
-    /// only once a write has started the spill.
-    pub(super) fn note(&self, what: &str) -> String {
+    /// Where the full output is kept, as the omission marker names it. Call it only once a write
+    /// has started the spill.
+    pub(super) fn note(&self) -> String {
         let path = self.path.display();
         match &self.state {
             SpillState::Pending => unreachable!("a result omits bytes only after they spill"),
-            SpillState::Open { full: false, .. } => format!("full {what} saved to {path}"),
+            SpillState::Open { full: false, .. } => format!("full output saved to {path}"),
             SpillState::Open { full: true, .. } => {
                 let size = format_size(MAX_SPILL_BYTES);
-                format!("first {size} of {what} saved to {path}")
+                format!("first {size} of output saved to {path}")
             }
             SpillState::Failed(error) => {
-                format!("saving the full {what} to {path} failed: {error}")
+                format!("saving the full output to {path} failed: {error}")
             }
         }
     }
@@ -583,7 +583,7 @@ mod tests {
             let spilled = fs::metadata(&path).unwrap().len();
             assert_eq!(spilled, MAX_SPILL_BYTES);
             assert_eq!(
-                spill.note("output"),
+                spill.note(),
                 format!("first 10 MiB of output saved to {}", path.display()),
             );
         }
@@ -607,7 +607,7 @@ mod tests {
 
             let error = read_only().write_all(b"x").unwrap_err();
             assert_eq!(
-                spill.note("output"),
+                spill.note(),
                 format!(
                     "saving the full output to {} failed: {error}",
                     path.display()

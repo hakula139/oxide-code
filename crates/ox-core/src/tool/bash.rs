@@ -33,7 +33,7 @@ use crate::permission::{Access, PermissionClass};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 const MAX_TIMEOUT: Duration = Duration::from_mins(10);
-/// How long a drain waits for the pipes to close once the shell has exited or its tree is gone.
+/// How long a drain waits for the pipe to close once the shell has exited or its tree is gone.
 const DRAIN_GRACE: Duration = Duration::from_millis(250);
 
 /// The variable each command's environment carries the session ID in, so a script it runs can tell
@@ -236,7 +236,9 @@ async fn execute_until(
     // pipe open cannot stretch the call past the timeout.
     let finished = tokio::select! {
         biased;
-        finished = async { tokio::join!(shell.wait(), capture.drain(&mut output)) } => Some(finished),
+        finished = async { tokio::join!(shell.wait(), capture.drain(&mut output)) } => {
+            Some(finished)
+        }
         () = deadline => None,
     };
 
@@ -255,9 +257,7 @@ async fn execute_until(
         }
     };
     if let Err(e) = read {
-        return Ok(ToolOutput::error(format!(
-            "Failed to read command output: {e}"
-        )));
+        capture.push_note(&format!("Failed to read command output: {e}"));
     }
     // Descendants that released the pipe, such as a redirected background server, keep running.
     shell.disarm();
@@ -271,7 +271,7 @@ async fn execute_until(
     }
 
     // A nonzero exit stays a success because probes such as `grep` (1 on no match) and `test`
-    // signal through it, so `is_error` marks only spawn, pipe, and timeout failures.
+    // signal through it, so `is_error` marks only spawn, wait, and timeout failures.
     Ok(ToolOutput::success(content))
 }
 
@@ -356,9 +356,8 @@ fn git_bash_on(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
 /// Renders the captured output with [`OUTPUT_BUDGET`] for decoded content, less the spill path its
 /// omission marker names, spilling a truncated capture.
 fn render_output(capture: &mut PipeCapture) -> String {
-    let kept = capture.kept_bytes();
     let budget = OUTPUT_BUDGET - capture.spill.path().as_os_str().len();
-    render_pipe(capture, &kept, budget)
+    render_pipe(capture, budget)
 }
 
 fn push_footer(content: &mut String, footer: &str) {
@@ -368,22 +367,16 @@ fn push_footer(content: &mut String, footer: &str) {
     content.push_str(footer);
 }
 
-/// Splits `budget` between parts wanting `first` and `second` bytes. Each gets up to half, and a
-/// part needing less hands its unused share to the other.
-fn split_budget(first: usize, second: usize, budget: usize) -> (usize, usize) {
-    let second = second.min(budget - first.min(budget / 2));
-    (first.min(budget - second), second)
-}
-
 /// Renders `pipe` with at most `budget` decoded payload bytes, plus an omission marker, replacing
 /// invalid UTF-8 with U+FFFD and trimming leading line breaks and trailing whitespace. Cuts move to
-/// nearby line boundaries, and the marker counts raw bytes. A truncated pipe spills its
-/// [`PipeCapture::kept_bytes`] in `kept` if needed so the marker names the full output.
-fn render_pipe(pipe: &mut PipeCapture, kept: &[u8], budget: usize) -> String {
-    let text = if pipe.omitted == 0 && decoded_len(kept) <= budget {
-        String::from_utf8_lossy(kept).into_owned()
+/// nearby line boundaries, and the marker counts raw bytes. A truncated pipe spills its kept bytes
+/// if needed so the marker names the full output.
+fn render_pipe(pipe: &mut PipeCapture, budget: usize) -> String {
+    let kept = pipe.kept_bytes();
+    let text = if pipe.omitted == 0 && decoded_len(&kept) <= budget {
+        String::from_utf8_lossy(&kept).into_owned()
     } else {
-        let (split, tail_starts_line) = pipe.split(kept);
+        let (split, tail_starts_line) = pipe.split(&kept);
         let (head, tail) = kept.split_at(split);
         let (head, tail) = ends_within(head, tail, tail_starts_line, budget);
         if !pipe.spill.started() {
@@ -392,7 +385,7 @@ fn render_pipe(pipe: &mut PipeCapture, kept: &[u8], budget: usize) -> String {
 
         let omitted = pipe.omitted + kept.len() - head.len() - tail.len();
         let head = String::from_utf8_lossy(head);
-        let marker = omission_marker(omitted, &pipe.spill.note("output"));
+        let marker = omission_marker(omitted, &pipe.spill.note());
         let tail = String::from_utf8_lossy(tail);
         formatdoc! {"
             {head}
@@ -436,6 +429,13 @@ fn ends_within<'a>(
         whole_line_head(kept_head, ends_line),
         whole_line_tail(kept_tail, starts_line),
     )
+}
+
+/// Splits `budget` between parts wanting `first` and `second` bytes. Each gets up to half, and a
+/// part needing less hands its unused share to the other.
+fn split_budget(first: usize, second: usize, budget: usize) -> (usize, usize) {
+    let second = second.min(budget - first.min(budget / 2));
+    (first.min(budget - second), second)
 }
 
 /// The length of `bytes` once [`String::from_utf8_lossy`] decodes them.
@@ -561,6 +561,14 @@ impl PipeCapture {
         self.omitted += overflow;
     }
 
+    /// Appends `note` on a line of its own.
+    fn push_note(&mut self, note: &str) {
+        if self.kept_len() > 0 {
+            self.push(b"\n");
+        }
+        self.push(note.as_bytes());
+    }
+
     /// Starts the spill with the kept bytes, which hold everything the pipe sent while nothing was
     /// dropped.
     fn spill_kept(&mut self) {
@@ -601,10 +609,15 @@ struct ShellTree {
 
 impl ShellTree {
     /// Spawns `command` with `bash` in the context's cwd, returning the tree and the read end of
-    /// the one pipe its stdout and stderr share, so their lines keep the order they were written in.
+    /// the one pipe stdout and stderr share. Output comes in the order their writes reach the pipe.
     fn spawn(bash: Bash, command: &str, ctx: &ToolCtx) -> io::Result<(Self, ChildStdout)> {
         let (output, stdout) = io::pipe()?;
         let stderr = stdout.try_clone()?;
+        #[cfg(unix)]
+        let output = std::os::fd::OwnedFd::from(output);
+        #[cfg(windows)]
+        let output = std::os::windows::io::OwnedHandle::from(output);
+        let output = ChildStdout::from_std(std::process::ChildStdout::from(output))?;
         let mut cmd = CommandWrap::with_new(bash.0, |cmd| {
             cmd.arg("-c")
                 .arg(command)
@@ -622,13 +635,8 @@ impl ShellTree {
         #[cfg(windows)]
         cmd.wrap(process_wrap::tokio::JobObject);
         let child = cmd.spawn()?;
-        // The command holds the parent's write ends, and the read end sees EOF only once they close.
+        // The command holds the parent's write ends, and the reader sees EOF only once they close.
         drop(cmd);
-        #[cfg(unix)]
-        let output = std::os::fd::OwnedFd::from(output);
-        #[cfg(windows)]
-        let output = std::os::windows::io::OwnedHandle::from(output);
-        let output = ChildStdout::from_std(std::process::ChildStdout::from(output))?;
         Ok((Self { child, armed: true }, output))
     }
 
@@ -942,13 +950,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn stderr_output_preserves_content() {
-            let output = run_default("echo err >&2").await;
-            assert!(!output.is_error);
-            assert_eq!(output.content, "err");
-        }
-
-        #[tokio::test]
         async fn interleaves_stdout_and_stderr_in_the_order_written() {
             let output = run_default("echo out; echo '  err' >&2; echo more; echo last >&2").await;
             assert!(!output.is_error);
@@ -1048,7 +1049,7 @@ mod tests {
 
         #[tokio::test]
         async fn cancelled_mid_run_kills_backgrounded_children() {
-            // The shell either still runs or has exited while a descendant holds its pipes.
+            // The shell either still runs or has exited while a descendant holds its pipe.
             for tail in ["sleep 30", "echo done"] {
                 let dir = tempfile::tempdir().unwrap();
                 let pid_file = dir.path().join("pid");
@@ -1067,7 +1068,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn finished_call_keeps_descendants_detached_from_its_pipes() {
+        async fn finished_call_keeps_descendants_detached_from_its_pipe() {
             let dir = tempfile::tempdir().unwrap();
             let parent = dir.path().join("parent");
             let ready = dir.path().join("ready");
@@ -1203,7 +1204,7 @@ mod tests {
 
         #[tokio::test]
         async fn timeout_covers_background_pipe_holders() {
-            // The backgrounded `sleep` holds the pipes open past bash's exit, so only a deadline
+            // The backgrounded `sleep` holds the pipe open past bash's exit, so only a deadline
             // that covers the drain ends the call before the `sleep` does.
             let dir = tempfile::tempdir().unwrap();
             let pid_file = dir.path().join("pid");
@@ -1270,7 +1271,7 @@ mod tests {
             // Each invalid byte, such as `0xFF`, decodes as the three bytes of U+FFFD.
             let cases = [
                 (b'a', 10 << 20, 0),
-                (b'a', 600 << 10, 3),
+                (b'a', 600 << 10, 5),
                 (0xFF, 300 << 10, 0),
             ];
             for (byte, len, depth) in cases {
@@ -1291,18 +1292,6 @@ mod tests {
         }
     }
 
-    mod split_budget {
-        use super::*;
-
-        #[test]
-        fn hands_an_unused_share_to_the_other_part() {
-            assert_eq!(split_budget(10, 20, 100), (10, 20));
-            assert_eq!(split_budget(10, 1_000, 100), (10, 90));
-            assert_eq!(split_budget(1_000, 10, 100), (90, 10));
-            assert_eq!(split_budget(1_000, 1_000, 100), (50, 50));
-        }
-    }
-
     mod render_pipe {
         use super::*;
 
@@ -1316,10 +1305,6 @@ mod tests {
         }
 
         /// Renders up to `budget` decoded bytes from `pipe`, plus an omission marker.
-        fn render(pipe: &mut PipeCapture, budget: usize) -> String {
-            let kept = pipe.kept_bytes();
-            render_pipe(pipe, &kept, budget)
-        }
 
         #[test]
         fn marks_the_omitted_middle_between_head_and_tail() {
@@ -1329,7 +1314,7 @@ mod tests {
                 ..capture(dir.path(), b"hello\n", b"world\n", 7)
             };
 
-            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(rendered, format!("hello\n{}\nworld", marker(dir.path(), 8)));
         }
@@ -1339,7 +1324,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"one\ntwo\n333", b"33\nfour\nfive\n", 5);
 
-            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(
                 rendered,
@@ -1354,7 +1339,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut pipe = capture(dir.path(), b"l1\nl2\nl3\n", b"l4\nl5\nl6\n", 0);
 
-                let rendered = render(&mut pipe, budget);
+                let rendered = render_pipe(&mut pipe, budget);
 
                 assert_eq!(
                     rendered,
@@ -1369,7 +1354,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"aa\nbb\ncc", b"dd\nee\n", 5);
 
-            let rendered = render(&mut pipe, 10);
+            let rendered = render_pipe(&mut pipe, 10);
 
             assert_eq!(rendered, format!("aa\nbb\n{}\nee", marker(dir.path(), 11)));
         }
@@ -1382,7 +1367,7 @@ mod tests {
                 ..capture(dir.path(), b"aa\n", b"\x80abc\ndef\n", 5)
             };
 
-            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(rendered, format!("aa\n{}\ndef", marker(dir.path(), 11)));
         }
@@ -1392,7 +1377,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"one\ntwo\nthree\nfour\nlast li", b"ne\n", 0);
 
-            let rendered = render(&mut pipe, 20);
+            let rendered = render_pipe(&mut pipe, 20);
 
             assert_eq!(
                 rendered,
@@ -1405,7 +1390,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"aaaa\n2222\n", b"cc\n", 0);
 
-            let rendered = render(&mut pipe, 8);
+            let rendered = render_pipe(&mut pipe, 8);
 
             assert_eq!(rendered, format!("aaaa\n{}\ncc", marker(dir.path(), 6)));
         }
@@ -1421,7 +1406,7 @@ mod tests {
                 5,
             );
 
-            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(rendered, format!("ab\n{}\ncd", marker(dir.path(), 10)));
         }
@@ -1432,7 +1417,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"a\xFF\xFFcd", b"\xFF\xFFw\xE2\x82yz", 0);
 
-            let rendered = render(&mut pipe, 14);
+            let rendered = render_pipe(&mut pipe, 14);
 
             let r = char::REPLACEMENT_CHARACTER;
             assert_eq!(
@@ -1450,7 +1435,7 @@ mod tests {
             let crab = "🦀".as_bytes();
             let mut pipe = capture(dir.path(), &crab[..2], &crab[2..], 0);
 
-            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(rendered, "🦀");
             assert!(!dir.path().join("session").exists());
@@ -1460,7 +1445,19 @@ mod tests {
         fn trims_outer_line_breaks_and_keeps_indentation_and_internal_newlines() {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"\n\n  err\n\nmore\n\n", b"", 0);
-            assert_eq!(render(&mut pipe, OUTPUT_BUDGET), "  err\n\nmore");
+            assert_eq!(render_pipe(&mut pipe, OUTPUT_BUDGET), "  err\n\nmore");
+        }
+    }
+
+    mod split_budget {
+        use super::*;
+
+        #[test]
+        fn hands_an_unused_share_to_the_other_part() {
+            assert_eq!(split_budget(10, 20, 100), (10, 20));
+            assert_eq!(split_budget(10, 1_000, 100), (10, 90));
+            assert_eq!(split_budget(1_000, 10, 100), (90, 10));
+            assert_eq!(split_budget(1_000, 1_000, 100), (50, 50));
         }
     }
 

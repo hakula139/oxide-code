@@ -269,11 +269,10 @@ struct ShellOutput {
     spills: Spills,
 }
 
-/// The output of the shell's `read`th read, counted from 1, which numbers its spill file. Its
-/// capture has its own lock, so the pump writing to the spill does not hold up the next swap.
+/// The output of the shell's `read`th read, counted from 1, which numbers its spill file.
 struct Unread {
     read: usize,
-    capture: Arc<Mutex<PipeCapture>>,
+    capture: PipeCapture,
 }
 
 impl Unread {
@@ -281,7 +280,7 @@ impl Unread {
         let spill = spills.file(&format!(".{read}.output.txt"));
         Self {
             read,
-            capture: Arc::new(Mutex::new(PipeCapture::new(spill))),
+            capture: PipeCapture::new(spill),
         }
     }
 }
@@ -310,31 +309,22 @@ impl ShellOutput {
     /// and starts the next read empty. The render waits only for a spill write already in flight,
     /// so its markers name complete files.
     fn take(&self) -> String {
-        let unread = {
+        let mut unread = {
             let mut unread = self.lock();
             let next = Unread::new(&self.spills, unread.read + 1);
             std::mem::replace(&mut *unread, next)
         };
-        render_output(&mut lock_capture(&unread.capture))
+        render_output(&mut unread.capture)
     }
 
-    /// Runs `f` on the current read's capture. The capture is locked before the read is released,
-    /// so a read that takes the capture over sees what `f` adds.
+    /// Runs `f` on the current read's capture.
     fn with_capture(&self, f: impl FnOnce(&mut PipeCapture)) {
-        let unread = self.lock();
-        let capture = Arc::clone(&unread.capture);
-        let mut capture = lock_capture(&capture);
-        drop(unread);
-        f(&mut capture);
+        f(&mut self.lock().capture);
     }
 
     fn lock(&self) -> MutexGuard<'_, Unread> {
         lock_or_recover(&self.unread, "background shell output")
     }
-}
-
-fn lock_capture(capture: &Mutex<PipeCapture>) -> MutexGuard<'_, PipeCapture> {
-    lock_or_recover(capture, "background shell capture")
 }
 
 // ── Supervisor ──
@@ -387,7 +377,7 @@ fn exit_state(status: io::Result<ExitStatus>, output: &ShellOutput) -> ShellStat
         Ok(status) => ShellState::of(status),
         Err(e) => {
             output.with_capture(|capture| {
-                push_note(capture, &format!("Failed to wait for the command: {e}"));
+                capture.push_note(&format!("Failed to wait for the command: {e}"));
             });
             ShellState::Exited(-1)
         }
@@ -406,17 +396,9 @@ where
     .await;
     if let Err(e) = read {
         output.with_capture(|capture| {
-            push_note(capture, &format!("Failed to read command output: {e}"));
+            capture.push_note(&format!("Failed to read command output: {e}"));
         });
     }
-}
-
-/// Appends `note` to `capture` on a line of its own.
-fn push_note(capture: &mut PipeCapture, note: &str) {
-    if capture.kept_len() > 0 {
-        capture.push(b"\n");
-    }
-    capture.push(note.as_bytes());
 }
 
 // ── Starting ──
@@ -1045,7 +1027,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn ends_a_descendant_still_holding_the_pipes_of_a_finished_shell() {
+        async fn ends_a_descendant_still_holding_the_pipe_of_a_finished_shell() {
             let dir = tempfile::tempdir().unwrap();
             let pid_file = dir.path().join("pid");
             let (shells, _sink) = shells();
@@ -1082,7 +1064,7 @@ mod tests {
 
         #[cfg(unix)]
         #[tokio::test]
-        async fn leaves_a_descendant_that_released_the_pipes_as_a_foreground_call_does() {
+        async fn leaves_a_descendant_that_released_the_pipe_as_a_foreground_call_does() {
             let dir = tempfile::tempdir().unwrap();
             let pid_file = dir.path().join("pid");
             let (shells, _sink) = shells();
@@ -1106,10 +1088,7 @@ mod tests {
             };
             let alive = signal(&["-0"]);
             signal(&["-9"]);
-            assert!(
-                alive,
-                "the stop killed a descendant that released the pipes"
-            );
+            assert!(alive, "the stop killed a descendant that released the pipe");
             assert_eq!(
                 stopped.content,
                 "(no new output)\n\n(stopped after it exited with code 0)"
