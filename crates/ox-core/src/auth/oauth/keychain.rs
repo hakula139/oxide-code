@@ -98,14 +98,16 @@ fn keychain_service() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use std::collections::BTreeMap;
+
     use super::*;
+    #[cfg(target_os = "macos")]
+    use crate::util::log::testing::LogCapture;
 
     #[cfg(target_os = "macos")]
     mod system_keychain {
-        use std::collections::BTreeMap;
-
         use super::*;
-        use crate::util::log::testing::LogCapture;
 
         mod read {
             use super::*;

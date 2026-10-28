@@ -220,38 +220,6 @@ mod tests {
     use crate::config::testing::base_url;
     use crate::util::path::local_testing::abs;
 
-    mod secret_env_vars {
-        use super::*;
-
-        #[test]
-        fn lists_each_credential_variable_and_the_custom_headers() {
-            assert_eq!(
-                secret_env_vars().collect::<Vec<_>>(),
-                [
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "ANTHROPIC_API_KEY",
-                    "CLAUDE_CODE_OAUTH_TOKEN",
-                    "ANTHROPIC_CUSTOM_HEADERS",
-                ],
-            );
-        }
-    }
-
-    mod withhold_secrets {
-        use super::*;
-
-        #[test]
-        fn removes_each_secret_env_var() {
-            let mut cmd = Command::new("true");
-
-            withhold_secrets(&mut cmd);
-
-            let removed: BTreeMap<_, _> = cmd.get_envs().collect();
-            let secrets = secret_env_vars().map(|var| (OsStr::new(var), None));
-            assert_eq!(removed, secrets.collect());
-        }
-    }
-
     mod first_explicit {
         use super::*;
 
@@ -451,6 +419,38 @@ mod tests {
                 format!("{err:#}"),
                 "Claude Code login has expired. Run `claude` to sign in again.",
             );
+        }
+    }
+
+    mod secret_env_vars {
+        use super::*;
+
+        #[test]
+        fn lists_each_credential_variable_and_the_custom_headers() {
+            assert_eq!(
+                secret_env_vars().collect::<Vec<_>>(),
+                [
+                    "ANTHROPIC_AUTH_TOKEN",
+                    "ANTHROPIC_API_KEY",
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    "ANTHROPIC_CUSTOM_HEADERS",
+                ],
+            );
+        }
+    }
+
+    mod withhold_secrets {
+        use super::*;
+
+        #[test]
+        fn removes_each_secret_env_var() {
+            let mut cmd = Command::new("true");
+
+            withhold_secrets(&mut cmd);
+
+            let removed: BTreeMap<_, _> = cmd.get_envs().collect();
+            let secrets = secret_env_vars().map(|var| (OsStr::new(var), None));
+            assert_eq!(removed, secrets.collect());
         }
     }
 }

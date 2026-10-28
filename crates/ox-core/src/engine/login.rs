@@ -225,6 +225,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::auth::LoginUnavailable;
     use crate::auth::oauth::testing::write_creds;
     use crate::engine::local_testing::{inert_ops, login_urls, submit, tool_heavy_transcript};
     use crate::engine::testing::{engine, mount_reply, with_pinned_home};
@@ -242,7 +243,6 @@ mod tests {
 
     mod try_from {
         use super::*;
-        use crate::auth::LoginUnavailable;
 
         #[test]
         fn signs_in_with_a_ready_credential() {

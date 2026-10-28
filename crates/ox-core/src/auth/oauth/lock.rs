@@ -186,6 +186,12 @@ mod tests {
     mod acquire_lock {
         use super::*;
 
+        /// Sets the lock's mtime to `at`, as its holder or a process taking it over would.
+        fn set_lock_mtime(lock_path: &Path, at: SystemTime) -> SystemTime {
+            open_dir(lock_path).unwrap().set_modified(at).unwrap();
+            lock_mtime(lock_path).unwrap()
+        }
+
         #[tokio::test]
         async fn creates_and_drop_removes() {
             let dir = tempfile::tempdir().unwrap();
@@ -210,12 +216,6 @@ mod tests {
 
             let _guard = acquire_lock(&lock_path).await.unwrap();
             assert!(!is_stale_lock(&lock_path));
-        }
-
-        /// Sets the lock's mtime to `at`, as its holder or a process taking it over would.
-        fn set_lock_mtime(lock_path: &Path, at: SystemTime) -> SystemTime {
-            open_dir(lock_path).unwrap().set_modified(at).unwrap();
-            lock_mtime(lock_path).unwrap()
         }
 
         #[tokio::test(start_paused = true)]

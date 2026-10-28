@@ -1,4 +1,4 @@
-//! OAuth sign-in with PKCE, a loopback callback or pasted code, and credential storage.
+//! OAuth sign-in with PKCE, through a loopback callback or a pasted code.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;

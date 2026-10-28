@@ -10,8 +10,11 @@ use tracing::warn;
 
 use super::keychain::Keychain;
 use super::lock::{Unlocked, acquire_lock, sibling_lock, wait_for_lock};
-use super::token::{TokenRequestError, TokenResponse, refresh_oauth_token};
-use super::{Login, LoginError, Token, UnsavedRefresh, is_expired, is_near_expiry};
+use super::token::{
+    Token, TokenRequestError, TokenResponse, UnsavedRefresh, is_expired, is_near_expiry,
+    refresh_oauth_token,
+};
+use super::{Login, LoginError};
 use crate::util::fs::{atomic_write_private, create_private_dir_all};
 use crate::util::path::{CLAUDE_CREDENTIALS, XdgBase, app_dir, claude_dir};
 use crate::util::tls::Trust;
@@ -114,9 +117,9 @@ impl fmt::Display for Backend<'_> {
 #[derive(Clone)]
 pub(super) struct Store<'a> {
     pub(super) login: Login,
-    pub(super) keychain: Option<&'a dyn Keychain>,
-    pub(super) file: PathBuf,
-    pub(super) lock: PathBuf,
+    keychain: Option<&'a dyn Keychain>,
+    file: PathBuf,
+    lock: PathBuf,
 }
 
 impl<'a> Store<'a> {
@@ -145,6 +148,32 @@ impl<'a> Store<'a> {
                     lock: sibling_lock(&dir),
                 })
             }
+        }
+    }
+
+    /// The oxide-code login stored in `file`, locked beside it.
+    #[cfg(test)]
+    pub(super) fn ox_at(file: &Path) -> Self {
+        Self {
+            login: Login::Ox,
+            keychain: None,
+            file: file.to_owned(),
+            lock: file.with_extension("lock"),
+        }
+    }
+
+    /// The Claude Code login stored in `file` and, when given, `keychain`, locked at `lock`.
+    #[cfg(test)]
+    pub(super) fn claude_code(
+        keychain: Option<&'a dyn Keychain>,
+        file: &Path,
+        lock: &Path,
+    ) -> Self {
+        Self {
+            login: Login::ClaudeCode,
+            keychain,
+            file: file.to_owned(),
+            lock: lock.to_owned(),
         }
     }
 }
@@ -388,11 +417,10 @@ mod tests {
 
     use super::*;
     use crate::auth::oauth::lock::LOCK_RETRY_INTERVAL;
-    use crate::auth::oauth::now_millis;
     use crate::auth::oauth::testing::{
-        FakeKeychain, claude_code_store, creds_json, ok_refresh_body, read_json, write_creds,
+        FakeKeychain, creds_json, ok_refresh_body, read_json, write_creds,
     };
-    use crate::auth::oauth::token::TOKEN_REQUEST_TIMEOUT;
+    use crate::auth::oauth::token::{TOKEN_REQUEST_TIMEOUT, now_millis};
     use crate::util::fs::testing::symlink_dir;
     use crate::util::log::testing::LogCapture;
     use crate::util::path::local_testing::{abs, canonical_tempdir};
@@ -424,85 +452,80 @@ mod tests {
         }
     }
 
-    mod store {
+    mod locate {
         use super::*;
 
-        mod locate {
-            use super::*;
+        #[test]
+        fn keeps_each_login_in_its_own_tools_directory() {
+            let (home, data) = (abs("/home/user"), abs("/data"));
+            let keychain = FakeKeychain::empty();
+            let (ox, default_ox, claude_code) = temp_env::with_vars(
+                [
+                    (HOME_VAR, Some(home.as_str())),
+                    ("XDG_DATA_HOME", Some(data.as_str())),
+                    ("CLAUDE_CONFIG_DIR", None),
+                ],
+                || {
+                    let ox = Store::locate(Login::Ox, Some(&keychain)).unwrap();
+                    let default_ox = temp_env::with_var_unset("XDG_DATA_HOME", || {
+                        Store::locate(Login::Ox, None).unwrap()
+                    });
+                    let claude_code = Store::locate(Login::ClaudeCode, Some(&keychain)).unwrap();
+                    (ox, default_ox, claude_code)
+                },
+            );
 
-            #[test]
-            fn keeps_each_login_in_its_own_tools_directory() {
-                let (home, data) = (abs("/home/user"), abs("/data"));
-                let keychain = FakeKeychain::empty();
-                let (ox, default_ox, claude_code) = temp_env::with_vars(
-                    [
-                        (HOME_VAR, Some(home.as_str())),
-                        ("XDG_DATA_HOME", Some(data.as_str())),
-                        ("CLAUDE_CONFIG_DIR", None),
-                    ],
-                    || {
-                        let ox = Store::locate(Login::Ox, Some(&keychain)).unwrap();
-                        let default_ox = temp_env::with_var_unset("XDG_DATA_HOME", || {
-                            Store::locate(Login::Ox, None).unwrap()
-                        });
-                        let claude_code =
-                            Store::locate(Login::ClaudeCode, Some(&keychain)).unwrap();
-                        (ox, default_ox, claude_code)
-                    },
-                );
+            let data_dir = Path::new(&data).join("ox");
+            assert_eq!(ox.file, data_dir.join("credentials.json"));
+            assert_eq!(ox.lock, data_dir.join("credentials.lock"));
+            assert!(ox.keychain.is_none());
+            assert_eq!(
+                default_ox.file,
+                Path::new(&home).join(".local/share/ox/credentials.json")
+            );
+            assert_eq!(
+                claude_code.file,
+                Path::new(&home).join(".claude").join(".credentials.json")
+            );
+            assert_eq!(claude_code.lock, Path::new(&home).join(".claude.lock"));
+            assert!(claude_code.keychain.is_some());
+        }
 
-                let data_dir = Path::new(&data).join("ox");
-                assert_eq!(ox.file, data_dir.join("credentials.json"));
-                assert_eq!(ox.lock, data_dir.join("credentials.lock"));
-                assert!(ox.keychain.is_none());
-                assert_eq!(
-                    default_ox.file,
-                    Path::new(&home).join(".local/share/ox/credentials.json")
-                );
-                assert_eq!(
-                    claude_code.file,
-                    Path::new(&home).join(".claude").join(".credentials.json")
-                );
-                assert_eq!(claude_code.lock, Path::new(&home).join(".claude.lock"));
-                assert!(claude_code.keychain.is_some());
-            }
+        #[test]
+        fn keeps_the_claude_code_login_in_claude_config_dir_and_locks_beside_its_real_path() {
+            let root = canonical_tempdir();
+            let root = root.path();
+            std::fs::create_dir(root.join("other")).unwrap();
+            std::fs::create_dir(root.join("claude-work")).unwrap();
+            let spelled = root.join("other").join("..").join("claude-work");
 
-            #[test]
-            fn keeps_the_claude_code_login_in_claude_config_dir_and_locks_beside_its_real_path() {
-                let root = canonical_tempdir();
-                let root = root.path();
-                std::fs::create_dir(root.join("other")).unwrap();
-                std::fs::create_dir(root.join("claude-work")).unwrap();
-                let spelled = root.join("other").join("..").join("claude-work");
+            let store = temp_env::with_var("CLAUDE_CONFIG_DIR", Some(&spelled), || {
+                Store::locate(Login::ClaudeCode, None).unwrap()
+            });
 
-                let store = temp_env::with_var("CLAUDE_CONFIG_DIR", Some(&spelled), || {
-                    Store::locate(Login::ClaudeCode, None).unwrap()
-                });
+            assert_eq!(
+                store.file,
+                std::path::absolute(&spelled)
+                    .unwrap()
+                    .join(".credentials.json")
+            );
+            assert_eq!(store.lock, root.join("claude-work.lock"));
+        }
 
-                assert_eq!(
-                    store.file,
-                    std::path::absolute(&spelled)
-                        .unwrap()
-                        .join(".credentials.json")
-                );
-                assert_eq!(store.lock, root.join("claude-work.lock"));
-            }
+        #[test]
+        fn locks_where_a_symlinked_claude_directory_resolves() {
+            let home = canonical_tempdir();
+            let home = home.path();
+            std::fs::create_dir(home.join("dotfiles")).unwrap();
+            symlink_dir(&home.join("dotfiles"), &home.join(".claude"));
 
-            #[test]
-            fn locks_where_a_symlinked_claude_directory_resolves() {
-                let home = canonical_tempdir();
-                let home = home.path();
-                std::fs::create_dir(home.join("dotfiles")).unwrap();
-                symlink_dir(&home.join("dotfiles"), &home.join(".claude"));
+            let store = temp_env::with_vars(
+                [(HOME_VAR, Some(home)), ("CLAUDE_CONFIG_DIR", None)],
+                || Store::locate(Login::ClaudeCode, None).unwrap(),
+            );
 
-                let store = temp_env::with_vars(
-                    [(HOME_VAR, Some(home)), ("CLAUDE_CONFIG_DIR", None)],
-                    || Store::locate(Login::ClaudeCode, None).unwrap(),
-                );
-
-                assert_eq!(store.file, home.join(".claude/.credentials.json"));
-                assert_eq!(store.lock, home.join("dotfiles.lock"));
-            }
+            assert_eq!(store.file, home.join(".claude/.credentials.json"));
+            assert_eq!(store.lock, home.join("dotfiles.lock"));
         }
     }
 
@@ -536,7 +559,7 @@ mod tests {
             write_creds(&creds, "tok", Some("ref"), 9_999_999_999_999);
 
             let token = load(
-                &claude_code_store(None, &creds, &lock),
+                &Store::claude_code(None, &creds, &lock),
                 "http://should-not-be-called",
             )
             .await
@@ -558,7 +581,7 @@ mod tests {
                 now_millis().unwrap() + 1_000,
             );
 
-            let token = load(&claude_code_store(None, &creds, &lock), &server.uri())
+            let token = load(&Store::claude_code(None, &creds, &lock), &server.uri())
                 .await
                 .unwrap();
             assert_eq!(token.access_token, "fresh-access");
@@ -587,7 +610,7 @@ mod tests {
             );
 
             let token = load(
-                &claude_code_store(Some(&keychain), &creds, &lock),
+                &Store::claude_code(Some(&keychain), &creds, &lock),
                 &server.uri(),
             )
             .await
@@ -616,7 +639,7 @@ mod tests {
             let keychain = FakeKeychain::holding(keychain_json.to_string());
 
             let token = load(
-                &claude_code_store(Some(&keychain), &creds, &lock),
+                &Store::claude_code(Some(&keychain), &creds, &lock),
                 &server.uri(),
             )
             .await
@@ -645,7 +668,7 @@ mod tests {
             let keychain = FakeKeychain::holding("not json");
 
             let token = load(
-                &claude_code_store(Some(&keychain), &creds, &lock),
+                &Store::claude_code(Some(&keychain), &creds, &lock),
                 &server.uri(),
             )
             .await
@@ -668,7 +691,7 @@ mod tests {
 
             let keychain = FakeKeychain::denying();
             let token = load(
-                &claude_code_store(Some(&keychain), &creds, &lock),
+                &Store::claude_code(Some(&keychain), &creds, &lock),
                 "http://unused",
             )
             .await
@@ -689,7 +712,7 @@ mod tests {
             let logs = LogCapture::default();
 
             let token = load(
-                &claude_code_store(Some(&keychain), &creds, &lock),
+                &Store::claude_code(Some(&keychain), &creds, &lock),
                 &server.uri(),
             )
             .with_subscriber(logs.dispatch())
@@ -721,7 +744,7 @@ mod tests {
             write_creds(&creds, "tok", None, now_millis().unwrap() + 60_000);
 
             let token = load(
-                &claude_code_store(None, &creds, &lock),
+                &Store::claude_code(None, &creds, &lock),
                 "http://should-not-be-called",
             )
             .await
@@ -748,7 +771,7 @@ mod tests {
                 now_millis().unwrap() + 60_000,
             );
 
-            let token = load(&claude_code_store(None, &creds, &lock), &server.uri())
+            let token = load(&Store::claude_code(None, &creds, &lock), &server.uri())
                 .await
                 .unwrap();
             assert_eq!(token.access_token, "stale");
@@ -781,7 +804,7 @@ mod tests {
             let logs = LogCapture::default();
 
             let token = load_token_from(
-                &claude_code_store(None, &creds, &lock),
+                &Store::claude_code(None, &creds, &lock),
                 &server.uri(),
                 &NoRoots,
                 Some(&held),
@@ -830,7 +853,7 @@ mod tests {
             std::fs::create_dir(&lock).unwrap();
 
             let token = load(
-                &claude_code_store(None, &creds, &lock),
+                &Store::claude_code(None, &creds, &lock),
                 "http://should-not-be-called",
             )
             .await
@@ -845,7 +868,7 @@ mod tests {
             let lock = dir.path().join("lock");
             write_creds(&creds, "tok", None, 0);
 
-            let err = load(&claude_code_store(None, &creds, &lock), "http://unused")
+            let err = load(&Store::claude_code(None, &creds, &lock), "http://unused")
                 .await
                 .expect_err("expired without refresh must bail");
             assert!(
@@ -868,7 +891,7 @@ mod tests {
             let lock = dir.path().join("lock");
             write_creds(&creds, "dead", Some("old"), 0);
 
-            let err = load(&claude_code_store(None, &creds, &lock), &server.uri())
+            let err = load(&Store::claude_code(None, &creds, &lock), &server.uri())
                 .await
                 .expect_err("expired + refresh down must bail");
             assert!(
@@ -903,7 +926,7 @@ mod tests {
             let lock = dir.path().join("lock");
             write_creds(&creds, "dead", Some("old"), 0);
 
-            let err = load(&claude_code_store(None, &creds, &lock), &server.uri())
+            let err = load(&Store::claude_code(None, &creds, &lock), &server.uri())
                 .await
                 .expect_err("expired + refresh rejected must bail");
 
@@ -921,7 +944,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let creds = dir.path().join("creds.json");
             let lock = dir.path().join("missing").join("lock");
-            let store = claude_code_store(None, &creds, &lock);
+            let store = Store::claude_code(None, &creds, &lock);
 
             write_creds(&creds, "dead", Some("ref"), 0);
             let err = load(&store, "http://should-not-be-called")
@@ -972,7 +995,7 @@ mod tests {
             std::fs::create_dir(&lock).unwrap();
 
             let err = load(
-                &claude_code_store(None, &creds, &lock),
+                &Store::claude_code(None, &creds, &lock),
                 "http://should-not-be-called",
             )
             .await
@@ -1010,7 +1033,7 @@ mod tests {
             });
 
             let token = load(
-                &claude_code_store(None, &creds, &lock),
+                &Store::claude_code(None, &creds, &lock),
                 "http://should-not-be-called",
             )
             .await
@@ -1040,7 +1063,7 @@ mod tests {
             });
 
             let token = load(
-                &claude_code_store(None, &creds, &lock),
+                &Store::claude_code(None, &creds, &lock),
                 "http://should-not-be-called",
             )
             .await
@@ -1069,7 +1092,7 @@ mod tests {
             });
 
             let token = load(
-                &claude_code_store(None, &creds, &lock),
+                &Store::claude_code(None, &creds, &lock),
                 "http://should-not-be-called",
             )
             .await
@@ -1100,7 +1123,7 @@ mod tests {
             });
 
             let token = load(
-                &claude_code_store(None, &creds, &lock),
+                &Store::claude_code(None, &creds, &lock),
                 "http://should-not-be-called",
             )
             .await
@@ -1122,7 +1145,7 @@ mod tests {
 
             for keychain in [None, Some(&empty as &dyn Keychain)] {
                 let err = load(
-                    &claude_code_store(keychain, &missing, &lock),
+                    &Store::claude_code(keychain, &missing, &lock),
                     "http://unused",
                 )
                 .await
@@ -1131,7 +1154,7 @@ mod tests {
             }
 
             let err = load(
-                &claude_code_store(Some(&denying), &missing, &lock),
+                &Store::claude_code(Some(&denying), &missing, &lock),
                 "http://unused",
             )
             .await
@@ -1139,7 +1162,7 @@ mod tests {
             assert!(matches!(err, LoginError::KeychainDenied), "{err:?}");
 
             let err = load(
-                &claude_code_store(Some(&garbled), &missing, &lock),
+                &Store::claude_code(Some(&garbled), &missing, &lock),
                 "http://unused",
             )
             .await
@@ -1155,7 +1178,7 @@ mod tests {
             let unreadable = dir.path().join("directory.json");
             std::fs::create_dir(&unreadable).unwrap();
             let err = load(
-                &claude_code_store(Some(&empty), &unreadable, &lock),
+                &Store::claude_code(Some(&empty), &unreadable, &lock),
                 "http://unused",
             )
             .await

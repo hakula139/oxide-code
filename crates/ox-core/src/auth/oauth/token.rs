@@ -1,4 +1,5 @@
-//! Requests to the OAuth token endpoint: the authorization-code exchange and the refresh.
+//! The session's access token, and the requests to the OAuth token endpoint that issue it: the
+//! authorization-code exchange and the refresh.
 
 use std::time::Duration;
 
@@ -6,11 +7,59 @@ use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use super::{OAUTH_CLIENT_ID, OAUTH_SCOPES, Token, now_millis};
+use super::{OAUTH_CLIENT_ID, OAUTH_SCOPES};
 use crate::util::response::{self, condense, http_status};
 use crate::util::tls::Trust;
 
+const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 pub(super) const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+// ── Token ──
+
+/// An access token and when it expires, in Unix milliseconds.
+#[expect(
+    clippy::struct_field_names,
+    reason = "`access_token` matches the field in `OAuthCredential` and `TokenResponse`, \
+              which this token is built from"
+)]
+#[cfg_attr(test, derive(Debug))]
+pub(super) struct Token {
+    pub(super) access_token: String,
+    pub(super) expires_at_ms: u64,
+    /// The refresh token issued with `access_token`, held only when the store failed to save it.
+    pub(super) unsaved: Option<UnsavedRefresh>,
+}
+
+/// A rotated refresh token that the store failed to save, which reloads send in place of the stored
+/// one it replaced.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone)]
+pub(super) struct UnsavedRefresh {
+    pub(super) refresh_token: String,
+    /// The stored refresh token this one superseded. A store holding any other was written by
+    /// another process, and its login wins.
+    pub(super) replaced: String,
+}
+
+pub(super) fn is_near_expiry(expires_at_ms: u64) -> bool {
+    now_millis().is_none_or(|now| now.saturating_add(TOKEN_EXPIRY_BUFFER_MS) >= expires_at_ms)
+}
+
+pub(super) fn is_expired(expires_at_ms: u64) -> bool {
+    now_millis().is_none_or(|now| now >= expires_at_ms)
+}
+
+pub(super) fn now_millis() -> Option<u64> {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis(),
+    )
+    .ok()
+}
+
+// ── Token Endpoint ──
 
 /// Tokens the token endpoint issues for a code exchange or a refresh.
 #[cfg_attr(test, derive(Debug))]
@@ -24,7 +73,7 @@ pub(super) struct TokenResponse {
 
 impl TokenResponse {
     /// The issued access token, expiring `expires_in` seconds from now. A clock set before 1970
-    /// records it as expired, as [`is_near_expiry`](super::is_near_expiry) reads such a clock.
+    /// records it as expired, as [`is_near_expiry`] reads such a clock.
     pub(super) fn token(&self) -> Token {
         Token {
             access_token: self.access_token.clone(),
@@ -189,6 +238,30 @@ mod tests {
     use crate::auth::oauth::testing::ok_refresh_body;
     use crate::util::tls::PlatformTrust;
     use crate::util::tls::testing::{NoRoots, TEST_CA_PATH};
+
+    mod is_near_expiry {
+        use super::*;
+
+        #[test]
+        fn distinguishes_past_and_future() {
+            for (case, expires_at, expected) in [("far future", u64::MAX, false), ("past", 0, true)]
+            {
+                assert_eq!(is_near_expiry(expires_at), expected, "{case}");
+            }
+        }
+    }
+
+    mod is_expired {
+        use super::*;
+
+        #[test]
+        fn distinguishes_past_and_future() {
+            for (case, expires_at, expected) in [("far future", u64::MAX, false), ("past", 0, true)]
+            {
+                assert_eq!(is_expired(expires_at), expected, "{case}");
+            }
+        }
+    }
 
     mod refresh_oauth_token {
         use super::*;

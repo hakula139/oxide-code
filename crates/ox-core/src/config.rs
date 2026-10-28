@@ -34,7 +34,7 @@ use self::merge::Origins;
 use self::provenance::{Provenance, Source, Sourced, TierPattern};
 use self::schema::{ClientAuth, FileConfig, PermissionTable, ThemeTable, TierTable, TuiTable};
 use crate::auth::oauth::ClaudeCodeKeychain;
-use crate::auth::{AuthSource, LoginUnavailable};
+use crate::auth::{self, AuthSource, LoginUnavailable};
 use crate::model::{Effort, ModelSettings, ModelSpec, PromptCacheTtl};
 use crate::permission::defaults::Shipped;
 use crate::permission::{Mode, Policy, Tier, Workspace};
@@ -376,7 +376,7 @@ impl Config {
             return Ok(());
         }
         let trust = PlatformTrust(self.extra_ca_certs.clone());
-        let stored = crate::auth::stored_login(ClaudeCodeKeychain::SYSTEM, &trust);
+        let stored = auth::stored_login(ClaudeCodeKeychain::SYSTEM, &trust);
         self.auth = match credentials::fallback(&self.base_url, stored).await {
             Ok(auth) => AuthState::Ready(auth),
             Err(CredentialError::SignedOut { cause, .. }) if can_sign_in => {

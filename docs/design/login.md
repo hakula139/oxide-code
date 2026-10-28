@@ -45,12 +45,12 @@ A refresh required by a request, whether for an expired token or after a 401, re
 ## Sources
 
 - `crates/ox-core/src/auth.rs`: `AuthSource`, the stored-login search, and `Auth::credential`, which refreshes a stored login before a request.
-- `crates/ox-core/src/auth/oauth.rs`: `SessionLogin`, the token a session holds, and `save_login` and `delete_login`, which `/login` and `/logout` call.
+- `crates/ox-core/src/auth/oauth.rs`: `SessionLogin`, which holds a session's token, and `save_login` and `delete_login`, which `/login` and `/logout` call.
 - `crates/ox-core/src/auth/oauth/keychain.rs`: Claude Code's macOS Keychain entry.
 - `crates/ox-core/src/auth/oauth/lock.rs`: the lock directory, which matches Claude Code's `proper-lockfile`.
 - `crates/ox-core/src/auth/oauth/login.rs`: PKCE, the loopback listener, the pasted code, and code exchange.
 - `crates/ox-core/src/auth/oauth/store.rs`: credential stores, refresh, and write-back.
-- `crates/ox-core/src/auth/oauth/token.rs`: the token endpoint requests.
+- `crates/ox-core/src/auth/oauth/token.rs`: the session's `Token`, its expiry checks, and the token endpoint requests that issue it.
 - `crates/ox-core/src/client.rs`: `Request`, which carries the credential each conversation request sends.
 - `crates/ox-core/src/client/anthropic.rs`: `Client::finish_reloads`, which waits for the reloads in flight.
 - `crates/ox-core/src/client/anthropic/transport.rs`: `MessagesRequest`, which carries the credential into every attempt, and `post_messages`, which resends a request after a 401.

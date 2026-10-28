@@ -21,7 +21,7 @@ use self::keychain::Keychain;
 use self::keychain::SystemKeychain;
 use self::lock::LOCK_WAIT;
 use self::store::{Store, load_token_from};
-use self::token::TokenResponse;
+use self::token::{Token, TokenResponse, is_near_expiry};
 use crate::util::path::{CLAUDE_CREDENTIALS, claude_dir, tildify};
 use crate::util::text::join_sentences;
 use crate::util::tls::Trust;
@@ -35,7 +35,6 @@ const OAUTH_SCOPES: &[&str] = &[
     "user:profile",
     "user:sessions:claude_code",
 ];
-const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 
 // ── Login ──
 
@@ -152,51 +151,6 @@ impl ClaudeCodeKeychain {
     /// No Keychain, so only the credentials file holds the login.
     #[cfg(any(test, feature = "testing"))]
     pub(crate) const NONE: Self = Self(None);
-}
-
-// ── Token ──
-
-/// An access token and when it expires, in Unix milliseconds.
-#[expect(
-    clippy::struct_field_names,
-    reason = "`access_token` matches the field in `OAuthCredential` and `TokenResponse`, \
-              which this token is built from"
-)]
-#[cfg_attr(test, derive(Debug))]
-struct Token {
-    access_token: String,
-    expires_at_ms: u64,
-    /// The refresh token issued with `access_token`, held only when the store failed to save it.
-    unsaved: Option<UnsavedRefresh>,
-}
-
-/// A rotated refresh token that the store failed to save, which reloads send in place of the stored
-/// one it replaced.
-#[cfg_attr(test, derive(Debug))]
-#[derive(Clone)]
-struct UnsavedRefresh {
-    refresh_token: String,
-    /// The stored refresh token this one superseded. A store holding any other was written by
-    /// another process, and its login wins.
-    replaced: String,
-}
-
-fn is_near_expiry(expires_at_ms: u64) -> bool {
-    now_millis().is_none_or(|now| now.saturating_add(TOKEN_EXPIRY_BUFFER_MS) >= expires_at_ms)
-}
-
-fn is_expired(expires_at_ms: u64) -> bool {
-    now_millis().is_none_or(|now| now >= expires_at_ms)
-}
-
-fn now_millis() -> Option<u64> {
-    u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_millis(),
-    )
-    .ok()
 }
 
 // ── Stores ──
@@ -349,7 +303,8 @@ pub(crate) mod testing {
 
     use super::keychain::Keychain;
     use super::store::Store;
-    use super::{Login, LoginError, SessionLogin, Token};
+    use super::token::Token;
+    use super::{LoginError, SessionLogin};
     use crate::auth::Auth;
 
     /// A stored `claudeAiOauth` document, with no refresh token when `refresh` is `None`.
@@ -443,32 +398,12 @@ pub(crate) mod testing {
         access_token: &str,
         expires_at_ms: u64,
     ) -> Auth {
-        let store = Store {
-            login: Login::Ox,
-            keychain: None,
-            file: file.to_owned(),
-            lock: file.with_extension("lock"),
-        };
         let token = Token {
             access_token: access_token.to_owned(),
             expires_at_ms,
             unsaved: None,
         };
-        Auth::stored(SessionLogin::new(store, refresh_url, token))
-    }
-
-    /// The Claude Code login stored in `file` and, when given, `keychain`, locked at `lock`.
-    pub(super) fn claude_code_store<'a>(
-        keychain: Option<&'a dyn Keychain>,
-        file: &Path,
-        lock: &Path,
-    ) -> Store<'a> {
-        Store {
-            login: Login::ClaudeCode,
-            keychain,
-            file: file.to_owned(),
-            lock: lock.to_owned(),
-        }
+        Auth::stored(SessionLogin::new(Store::ox_at(file), refresh_url, token))
     }
 
     pub(super) fn read_json(path: &Path) -> serde_json::Value {
@@ -559,9 +494,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::testing::{
-        FakeKeychain, HeldRefresh, claude_code_store, creds_json, ok_refresh_body, read_json,
-        write_creds,
+        FakeKeychain, HeldRefresh, creds_json, ok_refresh_body, read_json, write_creds,
     };
+    use super::token::now_millis;
     use super::*;
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::local_testing::no_roots;
@@ -632,7 +567,7 @@ mod tests {
             let keychain: &'static FakeKeychain =
                 Box::leak(Box::new(FakeKeychain::unwritable(json)));
             let store =
-                claude_code_store(Some(keychain), &dir.join("creds.json"), &dir.join("lock"));
+                Store::claude_code(Some(keychain), &dir.join("creds.json"), &dir.join("lock"));
             let login = session_login(store, refresh_url, access, expires_at_ms);
             (login, keychain)
         }
@@ -699,7 +634,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let missing = dir.path().join("creds.json");
                 let login = session_login(
-                    claude_code_store(None, &missing, &dir.path().join("lock")),
+                    Store::claude_code(None, &missing, &dir.path().join("lock")),
                     "http://should-not-be-called",
                     "held",
                     9_999_999_999_999,
@@ -837,7 +772,7 @@ mod tests {
                 let creds = dir.path().join("creds.json");
                 write_creds(&creds, "expired", Some("old-refresh"), 0);
                 let login = Arc::new(session_login(
-                    claude_code_store(None, &creds, &dir.path().join("lock")),
+                    Store::claude_code(None, &creds, &dir.path().join("lock")),
                     &server.uri(),
                     "expired",
                     0,
@@ -867,7 +802,7 @@ mod tests {
                 let keychain: &'static FakeKeychain =
                     Box::leak(Box::new(FakeKeychain::panicking()));
                 let login = Arc::new(session_login(
-                    claude_code_store(
+                    Store::claude_code(
                         Some(keychain),
                         &dir.path().join("creds.json"),
                         &dir.path().join("lock"),
@@ -900,7 +835,7 @@ mod tests {
                 let creds = dir.path().join("creds.json");
                 write_creds(&creds, "rotated", Some("ref"), 9_999_999_999_999);
                 let login = session_login(
-                    claude_code_store(None, &creds, &dir.path().join("lock")),
+                    Store::claude_code(None, &creds, &dir.path().join("lock")),
                     "http://should-not-be-called",
                     "rejected",
                     9_999_999_999_999,
@@ -962,7 +897,7 @@ mod tests {
                 let creds = dir.path().join("creds.json");
                 write_creds(&creds, "rejected", Some("old-refresh"), 9_999_999_999_999);
                 let login = Arc::new(session_login(
-                    claude_code_store(None, &creds, &dir.path().join("lock")),
+                    Store::claude_code(None, &creds, &dir.path().join("lock")),
                     &server.uri(),
                     "rejected",
                     9_999_999_999_999,
@@ -984,30 +919,6 @@ mod tests {
                 assert_eq!(stored["accessToken"], "fresh-access");
                 assert_eq!(stored["refreshToken"], "fresh-refresh");
                 server.verify().await;
-            }
-        }
-    }
-
-    mod is_near_expiry {
-        use super::*;
-
-        #[test]
-        fn distinguishes_past_and_future() {
-            for (case, expires_at, expected) in [("far future", u64::MAX, false), ("past", 0, true)]
-            {
-                assert_eq!(is_near_expiry(expires_at), expected, "{case}");
-            }
-        }
-    }
-
-    mod is_expired {
-        use super::*;
-
-        #[test]
-        fn distinguishes_past_and_future() {
-            for (case, expires_at, expected) in [("far future", u64::MAX, false), ("past", 0, true)]
-            {
-                assert_eq!(is_expired(expires_at), expected, "{case}");
             }
         }
     }
