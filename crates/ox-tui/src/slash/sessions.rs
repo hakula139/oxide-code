@@ -1,15 +1,14 @@
 //! Store access, error messages, and metadata lines for the commands that act on saved sessions.
 
-pub(super) use ox_core::session::saved::{BARE_ARCHIVE_HINT, saved_error_message};
-
 use std::fmt::Write as _;
 
 use time::OffsetDateTime;
 
 use ox_core::session::display::id_prefix;
 use ox_core::session::resolver::ResolveError;
+use ox_core::session::saved::SavedError;
 use ox_core::session::store::SessionStore;
-use ox_core::util::text::plural;
+use ox_core::util::text::{capitalize_first, plural};
 
 use crate::session_info::LiveSessionInfo;
 
@@ -25,25 +24,31 @@ pub(super) fn open_store(info: &LiveSessionInfo) -> Result<SessionStore, String>
 
 pub(super) const CLEAR_THEN_DELETE_HINT: &str = "Run `/clear` to start a new one, then delete it.";
 
+pub(super) const BARE_ARCHIVE_HINT: &str = "Use bare `/archive` to archive it and start a new one.";
+
 /// Phrases `error` as a sentence, ending a live-session match with `live_recovery` when given.
-pub(super) fn resolve_error_message(error: ResolveError, live_recovery: Option<&str>) -> String {
-    match error {
-        ResolveError::NoMatch { prefix } => format!("No session matching `{prefix}`"),
-        ResolveError::Live { prefix } => {
-            let live = format!("Session prefix `{prefix}` matches the live session");
-            match live_recovery {
-                Some(recovery) => format!("{live}. {recovery}"),
-                None => live,
-            }
-        }
-        ResolveError::Ambiguous {
-            prefix,
-            count,
-            preview,
-        } => format!("Ambiguous prefix `{prefix}` matches {count} sessions: {preview}"),
-        ResolveError::List { scope, cause } => {
-            format!("Failed to list sessions in {scope}: {cause:#}")
-        }
+pub(super) fn resolve_error_message(error: &ResolveError, live_recovery: Option<&str>) -> String {
+    phrase(
+        &error.to_string(),
+        matches!(error, ResolveError::Live { .. }),
+        live_recovery,
+    )
+}
+
+/// Phrases `error` as a sentence, ending a live-session refusal with `live_recovery` when given.
+pub(super) fn saved_error_message(error: &SavedError, live_recovery: Option<&str>) -> String {
+    phrase(
+        &error.to_string(),
+        matches!(error, SavedError::Live { .. }),
+        live_recovery,
+    )
+}
+
+fn phrase(sentence: &str, live: bool, live_recovery: Option<&str>) -> String {
+    let sentence = capitalize_first(sentence);
+    match (live, live_recovery) {
+        (true, Some(recovery)) => format!("{sentence}. {recovery}"),
+        _ => sentence,
     }
 }
 
@@ -162,7 +167,7 @@ mod tests {
                 prefix: "zz".to_owned(),
             };
             assert_eq!(
-                resolve_error_message(no_match, None),
+                resolve_error_message(&no_match, None),
                 "No session matching `zz`"
             );
 
@@ -170,12 +175,12 @@ mod tests {
                 prefix: "test-".to_owned(),
             };
             assert_eq!(
-                resolve_error_message(live(), Some(BARE_ARCHIVE_HINT)),
+                resolve_error_message(&live(), Some(BARE_ARCHIVE_HINT)),
                 "Session prefix `test-` matches the live session. \
                  Use bare `/archive` to archive it and start a new one.",
             );
             assert_eq!(
-                resolve_error_message(live(), None),
+                resolve_error_message(&live(), None),
                 "Session prefix `test-` matches the live session",
             );
 
@@ -185,7 +190,7 @@ mod tests {
                 preview: "ab1, ab2, ab3, ab4, ab5, and 2 more".to_owned(),
             };
             assert_eq!(
-                resolve_error_message(ambiguous, None),
+                resolve_error_message(&ambiguous, None),
                 "Ambiguous prefix `ab` matches 7 sessions: ab1, ab2, ab3, ab4, ab5, and 2 more",
             );
 
@@ -194,7 +199,7 @@ mod tests {
                 cause: anyhow::anyhow!("disk unavailable"),
             };
             assert_eq!(
-                resolve_error_message(list, None),
+                resolve_error_message(&list, None),
                 "Failed to list sessions in all projects: disk unavailable",
             );
         }

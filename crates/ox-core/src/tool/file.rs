@@ -40,7 +40,7 @@ pub(super) enum FileVerb {
 /// Rejects targets the [`FileTracker`](crate::file_tracker::FileTracker) cannot gate, phrasing each
 /// refusal for `verb`.
 pub(super) fn validate_file_target(
-    path: &str,
+    path: &Path,
     metadata: &Metadata,
     verb: FileVerb,
 ) -> Result<(), String> {
@@ -48,20 +48,22 @@ pub(super) fn validate_file_target(
         .map_err(|error| file_read_error(path, error, verb))
 }
 
-fn file_read_error(path: &str, error: FileReadError, verb: FileVerb) -> String {
+fn file_read_error(path: &Path, error: FileReadError, verb: FileVerb) -> String {
     match error {
-        FileReadError::Io(error) => format!("Failed to read {path}: {error}"),
+        FileReadError::Io(error) => format!("Failed to read {}: {error}", path.display()),
         FileReadError::Directory => match verb {
-            FileVerb::Read => {
-                format!("{path} is a directory. Use the glob tool to list directory contents.")
-            }
+            FileVerb::Read => format!(
+                "{} is a directory. Use the glob tool to list directory contents.",
+                path.display()
+            ),
             FileVerb::Edit | FileVerb::Write => {
-                format!("{path} is a directory. Refusing to {verb}.")
+                format!("{} is a directory. Refusing to {verb}.", path.display())
             }
         },
-        FileReadError::NonRegular => {
-            format!("{path} is not a regular file (fifo, socket, or device). Refusing to {verb}.")
-        }
+        FileReadError::NonRegular => format!(
+            "{} is not a regular file (fifo, socket, or device). Refusing to {verb}.",
+            path.display()
+        ),
         FileReadError::TooLarge { size, max } => {
             let (size, max) = (format_size(size), format_size(max));
             format!(
@@ -83,22 +85,21 @@ pub(super) fn is_binary(bytes: &[u8]) -> bool {
 // ── File Reading ──
 
 /// Reads a bounded regular file, checking its metadata before opening and through the opened
-/// no-follow handle. Errors name the file as `shown` and phrase refusals for `verb`.
+/// no-follow handle. Errors name `path` and phrase refusals for `verb`.
 pub(super) async fn read_validated(
     path: &Path,
-    shown: &str,
     verb: FileVerb,
 ) -> Result<(Metadata, Vec<u8>), String> {
     let metadata = tokio::fs::metadata(path)
         .await
-        .map_err(|e| format!("Failed to access {shown}: {e}"))?;
-    validate_file_target(shown, &metadata, verb)?;
+        .map_err(|e| format!("Failed to access {}: {e}", path.display()))?;
+    validate_file_target(path, &metadata, verb)?;
 
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || read_regular_file(&path, MAX_TRACKED_FILE_SIZE))
+    let read_path = path.to_owned();
+    tokio::task::spawn_blocking(move || read_regular_file(&read_path, MAX_TRACKED_FILE_SIZE))
         .await
-        .map_err(|error| format!("Failed to read {shown}: {error}"))?
-        .map_err(|error| file_read_error(shown, error, verb))
+        .map_err(|error| format!("Failed to read {}: {error}", path.display()))?
+        .map_err(|error| file_read_error(path, error, verb))
 }
 
 // ── File Writing ──
@@ -113,13 +114,14 @@ pub(super) enum WriteMode {
 /// `None` requires a new path. The caller must use the tracker's owned write operation.
 pub(super) async fn write_file(
     path: PathBuf,
-    shown: String,
     bytes: Vec<u8>,
     expected: Option<Vec<u8>>,
 ) -> anyhow::Result<(PathBuf, Vec<u8>)> {
     let key = if expected.is_none() {
-        let parent = path.parent().context("the file has no parent")?;
-        let name = path.file_name().context("the file has no name")?;
+        let parent = path
+            .parent()
+            .expect("prepare resolves an absolute file path");
+        let name = path.file_name().expect("a file path names a file");
         let parent = tokio::fs::canonicalize(parent).await?;
         dunce::simplified(&parent).join(name)
     } else {
@@ -127,7 +129,7 @@ pub(super) async fn write_file(
     };
     tokio::task::spawn_blocking(move || {
         commit::write(&path, &bytes, expected.as_deref())
-            .with_context(|| format!("Failed to write {shown}"))?;
+            .with_context(|| format!("Failed to write {}", path.display()))?;
         Ok((key, bytes))
     })
     .await?
@@ -193,21 +195,17 @@ mod tests {
             let link = dir.path().join("link.txt");
             symlink_file(&target, &link);
 
-            let (metadata, bytes) = read_validated(&target, "target.txt", FileVerb::Read)
-                .await
-                .unwrap();
+            let (metadata, bytes) = read_validated(&target, FileVerb::Read).await.unwrap();
             assert_eq!(
                 (metadata.len(), bytes.as_slice()),
                 (8, b"original".as_slice())
             );
-            let err = read_validated(&link, "link.txt", FileVerb::Read)
-                .await
-                .unwrap_err();
+            let err = read_validated(&link, FileVerb::Read).await.unwrap_err();
             #[cfg(unix)]
             let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32);
             #[cfg(windows)]
             let cause = "the final path component is a symlink";
-            assert_eq!(err, format!("Failed to read link.txt: {cause}"));
+            assert_eq!(err, format!("Failed to read {}: {cause}", link.display()));
         }
 
         #[tokio::test]
@@ -220,7 +218,7 @@ mod tests {
                 .unwrap();
 
             for verb in [FileVerb::Read, FileVerb::Edit, FileVerb::Write] {
-                let err = read_validated(&path, "notes.md", verb).await.unwrap_err();
+                let err = read_validated(&path, verb).await.unwrap_err();
 
                 assert_eq!(
                     err,
@@ -232,7 +230,7 @@ mod tests {
         }
     }
 
-    mod atomic_write {
+    mod write {
         use super::*;
 
         #[test]
@@ -307,22 +305,33 @@ mod tests {
             assert_eq!(err.to_string(), "the final path component is a symlink");
             assert_eq!(fs::read_to_string(&target).unwrap(), "original");
         }
+    }
 
-        #[cfg(unix)]
+    #[cfg(unix)]
+    mod write_file {
+        use super::*;
+
         #[tokio::test]
         async fn overwrite_refuses_a_fifo_without_blocking() {
             let dir = tempfile::tempdir().unwrap();
             let fifo = dir.path().join("pipe");
             nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
 
-            let write = write_file(fifo, "pipe".to_owned(), b"x".to_vec(), Some(Vec::new()));
-            let result = tokio::time::timeout(std::time::Duration::from_secs(5), write).await;
-            assert!(result.expect("the open must not block").is_err());
+            let write = write_file(fifo.clone(), b"x".to_vec(), Some(Vec::new()));
+            let error = tokio::time::timeout(std::time::Duration::from_secs(5), write)
+                .await
+                .expect("the open must not block")
+                .unwrap_err();
+
+            assert_eq!(
+                format!("{error:#}"),
+                format!("Failed to write {}: not a regular file", fifo.display()),
+            );
         }
     }
 
     #[cfg(windows)]
-    mod open_no_follow {
+    mod compressed_files {
         use super::*;
 
         #[tokio::test]
@@ -344,9 +353,7 @@ mod tests {
                 String::from_utf8_lossy(&compact.stdout)
             );
 
-            let (_, bytes) = read_validated(&path, "notes.txt", FileVerb::Read)
-                .await
-                .unwrap();
+            let (_, bytes) = read_validated(&path, FileVerb::Read).await.unwrap();
             assert_eq!(bytes, content.as_bytes());
             commit::write(&path, b"rewritten", Some(content.as_bytes())).unwrap();
             assert_eq!(fs::read(&path).unwrap(), b"rewritten");

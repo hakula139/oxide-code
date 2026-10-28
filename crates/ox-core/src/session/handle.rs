@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use super::actor::{self, Record, SessionCmd};
 use super::entry::{ArchiveState, CompactBoundary, CompactInfo, UsageRecord};
+use super::resolver::resolve_saved_prefix;
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
 use super::state::SessionState;
@@ -24,6 +25,7 @@ use super::store::{SessionData, SessionStore, load_session_data_from_path, open_
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
+use crate::protocol::ResumeTarget;
 use crate::tool::ToolMetadata;
 use crate::tool::tasks::{self, Task};
 use crate::util::sync::lock_or_recover;
@@ -87,7 +89,7 @@ impl SharedState {
         self.manual_title_set.load(Ordering::Acquire)
     }
 
-    fn last_flush_failure(&self) -> Option<String> {
+    pub(super) fn last_flush_failure(&self) -> Option<String> {
         lock_or_recover(&self.last_flush_failure, "last_flush_failure").clone()
     }
 }
@@ -439,17 +441,16 @@ pub(crate) struct RollIntoOutcome {
     pub(crate) finalize_failure: Option<String>,
 }
 
-/// Loads and sanitizes the session at `target`, swaps it in, then finalizes the old one with
-/// `snapshots`, its file tracker state. Fails without swapping when `target` is the live session,
-/// whose append writer is in flight, or cannot be loaded.
+/// Resolves `target`, loads and sanitizes the session it names, swaps it in, then finalizes the old
+/// one with `snapshots`, its file tracker state. Fails without swapping when `target` is the live
+/// session, whose append writer is in flight, or cannot be loaded.
 pub(crate) async fn roll_into(
     session: &mut SessionHandle,
     store: &SessionStore,
     snapshots: Vec<FileSnapshot>,
-    target: &Path,
+    target: ResumeTarget,
 ) -> Result<RollIntoOutcome> {
     let store = store.clone();
-    let target = target.to_owned();
     let live_id = session.session_id().to_owned();
     let ResumedSession {
         handle: target_handle,
@@ -457,11 +458,15 @@ pub(crate) async fn roll_into(
         title,
         prior,
     } = tokio::task::spawn_blocking(move || {
-        let data = load_session_data_from_path(&target)?;
+        let path = match target {
+            ResumeTarget::Path(path) => path,
+            ResumeTarget::Prefix(prefix) => resolve_saved_prefix(&store, &prefix, &live_id)?.path,
+        };
+        let data = load_session_data_from_path(&path)?;
         if data.session_id == live_id {
             return Err(SavedError::live(&live_id).into());
         }
-        resume_loaded(&store, &target, data)
+        resume_loaded(&store, &path, data)
     })
     .await
     .context("session resume task failed")??;
@@ -499,12 +504,16 @@ fn resume_loaded(
         bail!("session {session_id} has no messages left after repair");
     }
     retain_visible_file_snapshots(&mut data.file_snapshots, &data.messages);
-    if data.archived {
+    if data.archive_state == ArchiveState::Archived {
         writer.set_archived(false)?;
     }
 
     let tasks = tasks::latest(&data.messages)
-        .or_else(|| data.compact.as_ref().map(|compact| compact.tasks.clone()))
+        .or_else(|| {
+            data.compact
+                .as_ref()
+                .map(|compact| compact.record.tasks.clone())
+        })
         .unwrap_or_default();
     let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);
     let title = data.title.map(|t| t.title);
@@ -530,7 +539,7 @@ fn resume_loaded(
             file_snapshots: data.file_snapshots,
         },
         title,
-        prior: ArchiveState::of(data.archived),
+        prior: data.archive_state,
     })
 }
 
@@ -566,7 +575,7 @@ mod tests {
     };
     use crate::message::{ContentBlock, Replay, Role, TextOrigin};
     use crate::prompt::PromptParts;
-    use crate::session::entry::{Entry, ExitInfo, SessionInfo};
+    use crate::session::entry::{CompactInfo, CompactRecord, Entry, ExitInfo, SessionInfo};
     use crate::session::handle::testing::record_write_call;
     use crate::session::store::encode_lines;
     use crate::session::store::listing::ProjectScope;
@@ -577,6 +586,7 @@ mod tests {
         TEST_PROJECT, WriterBarrier, archive_test_session, isolated_store, seed_test_session,
         test_project_dir, test_store,
     };
+    use crate::tool::StoredView;
     use crate::tool::tasks::testing::plan;
     use crate::tool::view::{DiffChunk, EditDiff, NumberedLine, ToolResultView};
 
@@ -742,15 +752,15 @@ mod tests {
                             "t1".to_owned(),
                             ToolMetadata {
                                 title: Some("Edited a.rs".to_owned()),
-                                ..ToolMetadata::default()
+                                result_view: None,
                             },
                         ),
                         ("t2".to_owned(), ToolMetadata::default()),
                         (
                             "t3".to_owned(),
                             ToolMetadata {
-                                truncated_total: Some(2),
-                                ..ToolMetadata::default()
+                                title: None,
+                                result_view: Some(StoredView::Text),
                             },
                         ),
                     ],
@@ -784,8 +794,8 @@ mod tests {
                 Some("Edited a.rs"),
             );
             assert_eq!(
-                data.tool_result_metadata.get("t3").unwrap().truncated_total,
-                Some(2),
+                data.tool_result_metadata.get("t3").unwrap().result_view,
+                Some(StoredView::Text),
             );
         }
 
@@ -806,7 +816,7 @@ mod tests {
                         "t1".to_owned(),
                         ToolMetadata {
                             title: Some("f.rs".to_owned()),
-                            ..ToolMetadata::default()
+                            result_view: None,
                         },
                     )],
                 )
@@ -1091,7 +1101,10 @@ mod tests {
             let outcome = handle
                 .compact(
                     CompactBoundary {
-                        instructions: Some("focus".to_owned()),
+                        record: CompactRecord {
+                            instructions: Some("focus".to_owned()),
+                            ..testing::boundary("synth summary").record
+                        },
                         ..testing::boundary("synth summary")
                     },
                     Message::user("post"),
@@ -1151,13 +1164,19 @@ mod tests {
             let outcome = original.archive().await;
             assert!(outcome.failure.is_none());
             original.shutdown().await;
-            assert!(store.load_session_data(&session_id).unwrap().archived);
+            assert_eq!(
+                store.load_session_data(&session_id).unwrap().archive_state,
+                ArchiveState::Archived,
+            );
 
             let resumed = resume_id(&store, &session_id).unwrap();
             assert_eq!(resumed.prior, ArchiveState::Archived);
             assert_eq!(resumed.transcript.messages, [Message::user("hello")]);
             resumed.handle.shutdown().await;
-            assert!(!store.load_session_data(&session_id).unwrap().archived);
+            assert_eq!(
+                store.load_session_data(&session_id).unwrap().archive_state,
+                ArchiveState::Active,
+            );
 
             let again = resume_id(&store, &session_id).unwrap();
             assert_eq!(again.prior, ArchiveState::Active);
@@ -1573,9 +1592,14 @@ mod tests {
             let mut session = start(&store, "m", None);
 
             let resume = tokio::spawn(async move {
-                let outcome = roll_into(&mut session, &store, Vec::new(), &target)
-                    .await
-                    .unwrap();
+                let outcome = roll_into(
+                    &mut session,
+                    &store,
+                    Vec::new(),
+                    ResumeTarget::Path(target.clone()),
+                )
+                .await
+                .unwrap();
                 session.shutdown().await;
                 outcome
             });
@@ -1606,9 +1630,14 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let target = test_session_file(dir.path(), &target_id);
-            let outcome = roll_into(&mut session, &store, Vec::new(), &target)
-                .await
-                .expect("roll_into must succeed for healthy target");
+            let outcome = roll_into(
+                &mut session,
+                &store,
+                Vec::new(),
+                ResumeTarget::Path(target.clone()),
+            )
+            .await
+            .expect("roll_into must succeed for healthy target");
 
             assert_eq!(
                 session.session_id(),
@@ -1650,9 +1679,14 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let missing = dir.path().join("missing-target.jsonl");
-            let err = roll_into(&mut session, &store, Vec::new(), &missing)
-                .await
-                .unwrap_err();
+            let err = roll_into(
+                &mut session,
+                &store,
+                Vec::new(),
+                ResumeTarget::Path(missing.clone()),
+            )
+            .await
+            .unwrap_err();
 
             assert_eq!(
                 err.to_string(),
@@ -1674,9 +1708,14 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let live_path = test_session_file(dir.path(), &live_id);
-            let err = roll_into(&mut session, &store, Vec::new(), &live_path)
-                .await
-                .expect_err("self-resume must be rejected");
+            let err = roll_into(
+                &mut session,
+                &store,
+                Vec::new(),
+                ResumeTarget::Path(live_path.clone()),
+            )
+            .await
+            .expect_err("self-resume must be rejected");
             assert_eq!(
                 err.to_string(),
                 format!("session {} is the live session", &live_id[..8])
@@ -1708,9 +1747,14 @@ mod tests {
             session.record_message(Message::user("live")).await;
 
             let target = test_session_file(dir.path(), &target_id);
-            let outcome = roll_into(&mut session, &store, tracker.snapshot_all(), &target)
-                .await
-                .expect("roll_into must succeed");
+            let outcome = roll_into(
+                &mut session,
+                &store,
+                tracker.snapshot_all(),
+                ResumeTarget::Path(target.clone()),
+            )
+            .await
+            .expect("roll_into must succeed");
 
             assert_eq!(
                 saved_snapshot_paths(&saved_entries(dir.path(), &original_id)),
@@ -1839,10 +1883,14 @@ mod tests {
                 let now = datetime!(2026-01-01 00:00:00 UTC);
                 let records = [
                     Entry::Compact {
-                        summary: "legacy summary".to_owned(),
-                        pre_message_count: 4,
-                        instructions: None,
-                        tasks: Vec::new(),
+                        info: CompactInfo {
+                            record: CompactRecord {
+                                summary: "legacy summary".to_owned(),
+                                instructions: None,
+                                tasks: Vec::new(),
+                            },
+                            pre_message_count: 4,
+                        },
                         timestamp: now,
                     },
                     Entry::Message {
@@ -2258,7 +2306,8 @@ mod tests {
             drop(handle);
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) =
+                FileTracker::restored(resumed.transcript.file_snapshots).await;
 
             let restored =
                 resumed_tracker.verify_current_content(&path_a, b"alpha", GatePurpose::Edit);
@@ -2292,7 +2341,8 @@ mod tests {
             std::fs::write(&path_a, b"externally edited bytes").unwrap();
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) =
+                FileTracker::restored(resumed.transcript.file_snapshots).await;
 
             let result = resumed_tracker.verify_current_content(
                 &path_a,
@@ -2326,7 +2376,8 @@ mod tests {
             std::fs::remove_file(&path_a).unwrap();
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            let (resumed_tracker, _) = FileTracker::restored(resumed.transcript.file_snapshots);
+            let (resumed_tracker, _) =
+                FileTracker::restored(resumed.transcript.file_snapshots).await;
             let result = resumed_tracker.verify_current_content(&path_a, b"", GatePurpose::Edit);
             assert_eq!(
                 result,
@@ -2371,9 +2422,11 @@ mod tests {
             session
                 .compact(
                     CompactBoundary {
-                        summary: "Asked to edit f.rs.".to_owned(),
-                        instructions: Some("focus on f.rs".to_owned()),
-                        tasks: plan(),
+                        record: CompactRecord {
+                            summary: "Asked to edit f.rs.".to_owned(),
+                            instructions: Some("focus on f.rs".to_owned()),
+                            tasks: plan(),
+                        },
                         context: prompt.session_context(),
                     },
                     crate::session::post_compact::synthesize_post_compact_message(
@@ -2507,20 +2560,18 @@ mod tests {
                             "t2".to_owned(),
                             ToolMetadata {
                                 title: Some("Read g.rs".to_owned()),
-                                ..ToolMetadata::default()
+                                result_view: None,
                             },
                         ),
                         (
                             "t3".to_owned(),
                             ToolMetadata {
                                 title: Some("Found 100 files".to_owned()),
-                                truncated_total: Some(250),
-                                result_view: Some(ToolResultView::GlobFiles {
+                                result_view: Some(StoredView::View(ToolResultView::GlobFiles {
                                     pattern: "*.rs".to_owned(),
                                     files: vec!["g.rs".to_owned()],
                                     total: 250,
-                                }),
-                                ..ToolMetadata::default()
+                                })),
                             },
                         ),
                     ],
@@ -2531,7 +2582,7 @@ mod tests {
         fn edit_metadata() -> ToolMetadata {
             ToolMetadata {
                 title: Some("Edited f.rs".to_owned()),
-                diff: Some(EditDiff {
+                result_view: Some(StoredView::View(ToolResultView::Diff(EditDiff {
                     chunk: DiffChunk {
                         old: vec![NumberedLine {
                             number: 1,
@@ -2543,8 +2594,7 @@ mod tests {
                         }],
                     },
                     locations: vec![1],
-                }),
-                ..ToolMetadata::default()
+                }))),
             }
         }
 
@@ -2648,15 +2698,15 @@ mod tests {
                     "title": listed.title.map(|title| title.title),
                     "git_branch": listed.git_branch,
                     "message_count": listed.exit.map(|exit| exit.message_count),
-                    "archived": listed.archived,
+                    "archive_state": listed.archive_state,
                 },
                 "title": resumed.title,
                 "prior": resumed.prior,
                 "compact": transcript.compact.as_ref().map(|compact| serde_json::json!({
-                    "summary": compact.summary,
+                    "summary": compact.record.summary,
                     "pre_message_count": compact.pre_message_count,
-                    "instructions": compact.instructions,
-                    "tasks": compact.tasks,
+                    "instructions": compact.record.instructions,
+                    "tasks": compact.record.tasks,
                 })),
                 "context": transcript.context,
                 "messages": transcript.messages,

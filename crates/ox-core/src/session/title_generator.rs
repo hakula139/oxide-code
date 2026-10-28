@@ -5,7 +5,6 @@ use indoc::{formatdoc, indoc};
 use serde::Deserialize;
 use tokio::sync::oneshot;
 use tracing::warn;
-use unicode_width::UnicodeWidthStr as _;
 
 use super::display::fit_title;
 use super::entry::UsageRecord;
@@ -14,7 +13,7 @@ use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::OutputFormat;
 use crate::model::{Effort, ModelSpec};
 use crate::protocol::{Event, EventSink};
-use crate::util::text::{ELLIPSIS, ELLIPSIS_WIDTH, truncate_to_width};
+use crate::util::text::ELLIPSIS;
 
 // ── Constants ──
 
@@ -209,11 +208,12 @@ fn parse_title(response: &str) -> Result<String> {
 /// Caps `s` for log and error messages, so a long Haiku refusal stays readable.
 fn truncate_for_log(s: &str) -> String {
     const LOG_CAP: usize = 120;
-    let prefix: String = s.chars().take(LOG_CAP).collect();
-    if prefix.len() == s.len() && s.width() <= LOG_CAP {
-        return prefix;
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(LOG_CAP).collect();
+    if chars.next().is_some() {
+        return format!("{prefix}{ELLIPSIS}");
     }
-    truncate_to_width(&format!("{prefix}{ELLIPSIS}"), LOG_CAP + ELLIPSIS_WIDTH)
+    prefix
 }
 
 /// Strips a surrounding triple-backtick code fence and its optional language tag, leaving other

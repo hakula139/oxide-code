@@ -123,6 +123,7 @@ pub(super) async fn run(
         {
             flow = batch.absorb(next, &mut state, &shared);
         }
+        let stopped_before = state.persistence_stopped();
         let (flushed, result) = tokio::task::spawn_blocking(move || {
             let result = state.flush_entries(batch.entries);
             (state, result)
@@ -134,7 +135,11 @@ pub(super) async fn run(
             Err(e) => {
                 let msg = format!("{e:#}");
                 warn!(error = %msg, "session write batch failed");
-                shared.record_flush_failure(&msg);
+                // Keep the I/O cause that stopped persistence from being replaced by the stop
+                // notice every later batch reports.
+                if !stopped_before {
+                    shared.record_flush_failure(&msg);
+                }
                 Some(msg)
             }
             Ok(()) => None,
@@ -388,7 +393,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::session::entry::ExitInfo;
+    use crate::session::entry::{ArchiveState, CompactInfo, CompactRecord, ExitInfo};
     use crate::session::handle::testing::boundary;
     use crate::session::state::MAX_UNWRITTEN_BYTES;
     use crate::session::store::local_testing::{saved_entries, saved_titles, test_session_file};
@@ -796,7 +801,10 @@ mod tests {
             let (compact_ack, _compact_rx) = oneshot::channel();
             let compact_cmd = SessionCmd::Compact {
                 boundary: CompactBoundary {
-                    instructions: Some("focus on auth".to_owned()),
+                    record: CompactRecord {
+                        instructions: Some("focus on auth".to_owned()),
+                        ..boundary("synth summary").record
+                    },
                     ..boundary("synth summary")
                 },
                 synthetic_message: Message::user("post"),
@@ -810,8 +818,16 @@ mod tests {
                 .iter()
                 .filter_map(|entry| match entry {
                     Entry::Compact {
-                        summary,
-                        instructions,
+                        info:
+                            CompactInfo {
+                                record:
+                                    CompactRecord {
+                                        summary,
+                                        instructions,
+                                        ..
+                                    },
+                                ..
+                            },
                         ..
                     } => Some((summary.as_str(), instructions.as_deref())),
                     _ => None,
@@ -981,6 +997,43 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn later_batches_keep_the_io_cause_that_stopped_persistence() {
+            let dir = tempdir().unwrap();
+            let state = SessionState::fresh(test_store(dir.path()), "m", None);
+            let (tx, rx) = mpsc::channel(1);
+            let shared = Arc::new(SharedState::default());
+            let actor = tokio::spawn(run(state, rx, Arc::clone(&shared)));
+            std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
+            for text in ["small".to_owned(), "x".repeat(MAX_UNWRITTEN_BYTES)] {
+                let (rec, rec_rx) = record_cmd(&text);
+                tx.send(rec).await.unwrap();
+                assert!(rec_rx.await.unwrap().failure.is_some());
+            }
+            let stopped_cause = shared
+                .last_flush_failure()
+                .expect("a flush failure is recorded");
+            assert!(
+                stopped_cause.contains("failed to create"),
+                "{stopped_cause}"
+            );
+
+            let (rec, rec_rx) = record_cmd("after stop");
+            tx.send(rec).await.unwrap();
+            assert!(
+                rec_rx.await.unwrap().failure.is_none(),
+                "the stop notice surfaces once",
+            );
+            drop(tx);
+            actor.await.unwrap();
+
+            assert_eq!(
+                shared.last_flush_failure().as_deref(),
+                Some(stopped_cause.as_str()),
+                "a later batch must not replace the I/O cause with the stop notice",
+            );
+        }
+
+        #[tokio::test]
         async fn failed_archive_is_dropped_while_later_records_land() {
             let dir = tempdir().unwrap();
             let store = test_store(dir.path());
@@ -1019,7 +1072,11 @@ mod tests {
             actor.await.unwrap();
 
             let data = store.load_session_data(&session_id).unwrap();
-            assert!(!data.archived, "failed archive must not reach disk");
+            assert_eq!(
+                data.archive_state,
+                ArchiveState::Active,
+                "failed archive must not reach disk",
+            );
             assert_eq!(
                 data.messages,
                 [

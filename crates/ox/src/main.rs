@@ -274,7 +274,7 @@ impl Cli {
     fn list_scope(&self) -> ListScope {
         ListScope {
             projects: self.projects(),
-            archive: ArchiveState::of(self.archived),
+            archive: self.archived.into(),
         }
     }
 

@@ -157,7 +157,6 @@ struct CredentialsFile {
 #[serde(rename_all = "camelCase")]
 struct OAuthCredential {
     access_token: String,
-    #[serde(default)]
     refresh_token: Option<String>,
     expires_at: i64,
 }
@@ -746,7 +745,6 @@ pub(super) struct TokenResponse {
     access_token: String,
     refresh_token: String,
     expires_in: u64,
-    #[serde(default)]
     scope: Option<String>,
 }
 

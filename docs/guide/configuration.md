@@ -8,7 +8,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 4. **Project config file**: `.ox/config.toml` in the nearest directory from the working directory up to the project root that has one. The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory outside a repository.
 5. **[Environment variables](#environment-variables)**: override every file. A command-line flag such as `--mode` overrides them in turn.
 
-Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$OX_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, `/mode`, or `/theme` change or a **Tab** or **Shift+Tab** mode switch. Its Permissions section lists every extra root, rule, and turned-off default group the files set, each with the layer that added it, since rule lists and extra roots combine across layers and any user file can turn a default off. It shows what the files set, so it still lists extra roots when a launch from `/`, `$HOME`, or an ancestor of `$HOME` leaves the workspace without roots.
+Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$OX_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, `/mode`, or `/theme` change or a **Tab** or **Shift+Tab** mode switch. [Permissions](permissions.md) covers the extra roots, rules, and turned-off default groups it also lists, each with the layer that added it.
 
 ## Layers
 
@@ -17,7 +17,6 @@ Run `/config` to see each resolved value next to the layer that set it: `default
 Each file sets only the keys it names, and a later layer wins key by key, so a drop-in that sets `client.effort` keeps the `client.model` from `config.toml`. Tables merge recursively, including `[tui.theme.overrides]`, with these replacement and list rules:
 
 - **`client.auth` and `client.headers`** come whole from the last layer that sets them. An empty header map clears the lower map.
-- **`client.api_key` and `client.auth`** are alternative credential settings, so a layer that sets either clears the other from lower layers. A single file cannot set both.
 - **`permission.extra_roots` and the class lists under `permission.deny`, `permission.ask`, and `permission.allow`**, such as `permission.allow.exec`, concatenate, so the entries from every layer apply.
 - **Other arrays**, such as `tui.status_line`, come whole from the last layer that sets them.
 - **`auto_threshold_tokens` and `auto_threshold_percent`** act as one setting, so a layer that sets either replaces both.
@@ -76,7 +75,7 @@ status_line = [
 
 #### `model`: Supported Models
 
-oxide-code supports `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`. Each has a 1M-token context window and adaptive thinking. Fable 5.1 isn't available to every account, and some third-party gateways serve it. Requests to it fail where your account or gateway does not serve it. Any other ID, such as a gateway alias, is sent verbatim without `effort`, `thinking`, or context management. Its `max_tokens` defaults to `16000`, no cost estimate is provided, and automatic compaction stays off unless you set `auto_threshold_tokens`. oxide-code warns about unsupported IDs at startup. For a `claude-*` ID that names a model family or an ID with a `[1m]` suffix, it suggests the matching supported model.
+oxide-code supports `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`. Each has a 1M-token context window and adaptive thinking. Fable 5.1 is not available to every account or gateway. Any other ID, such as a gateway alias, is sent verbatim without `effort`, `thinking`, or context management. Its `max_tokens` defaults to `16000`, no cost estimate is provided, and automatic compaction stays off unless you set `auto_threshold_tokens`. oxide-code warns about unsupported IDs at startup. For a `claude-*` ID that names a model family or an ID with a `[1m]` suffix, it suggests the matching supported model.
 
 #### `effort`: Reasoning Effort
 
@@ -112,7 +111,7 @@ When unset, the agent loop has no per-turn round cap. Setting `max_tool_rounds =
 
 #### `base_url`: Endpoint
 
-Set `base_url` in user config or `ANTHROPIC_BASE_URL`. The URL must use HTTPS unless it points at localhost for a local proxy, and it must omit query strings, fragments, and a username or password. Requests go to `/v1/messages` under it, so leave `/v1` off the URL. A path prefix is supported, and a trailing slash makes no difference. To authenticate against a gateway that takes its own token, set `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `[client.auth]`, which [LLM gateways](#llm-gateways) covers.
+Set `base_url` in user config or `ANTHROPIC_BASE_URL`. The URL must use HTTPS unless it points at localhost for a local proxy, and it must omit query strings, fragments, and a username or password. Requests go to `/v1/messages` under it, so leave `/v1` off the URL. A path prefix is supported, and a trailing slash makes no difference. To authenticate against a gateway that takes its own token, set `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `[client.auth]`, which [LLM gateways](authentication.md#llm-gateways) covers.
 
 #### `extra_ca_certs`: Corporate Trust Anchors
 
@@ -124,13 +123,13 @@ base_url = "https://gw.llm.corp.example/anthropic"
 extra_ca_certs = "~/.config/ox/corp-cachain.pem"
 ```
 
-Use an absolute or `~`-rooted path. Relative paths resolve from the working directory `ox` starts in. Equivalent env var: `OX_EXTRA_CA_CERTS`, which wins over this field. `NODE_EXTRA_CA_CERTS` applies only when neither is set (see [LLM gateways](#llm-gateways)).
+Use an absolute or `~`-rooted path. Relative paths resolve from the working directory `ox` starts in. Equivalent env var: `OX_EXTRA_CA_CERTS`, which wins over this field. `NODE_EXTRA_CA_CERTS` applies only when neither is set (see [LLM gateways](authentication.md#llm-gateways)).
 
 On macOS, a server certificate valid for longer than Apple's 825-day limit is accepted when it chains to a CA in the bundle, even one already installed system-wide, unless that CA is one of Apple's built-in roots.
 
 #### `prompt_cache_ttl`: Cache Duration
 
-Accepted values: `"5m"` (matches the server default as of 2026-03-06) and `"1h"` (higher write premium, bigger hit-rate win on long sessions). oxide-code defaults to `"1h"` because Anthropic's unannounced drop of the default TTL to 5 minutes in March 2026 cut typical prompt-caching savings from over 80% to 40-55%.
+Accepted values: `"5m"` (matches the server default) and `"1h"` (higher write premium, bigger hit-rate win on long sessions). oxide-code defaults to `"1h"`, which costs more per cache write and pays off in sessions with pauses over 5 minutes.
 
 ### `[client.compaction]`: Context Compression
 
@@ -144,11 +143,15 @@ Automatic compaction runs before a prompt and between the tool rounds of a long 
 
 ### `[tui]`: Terminal UI
 
-`show_thinking = true` opts the request into `thinking.display = "summarized"` so the API streams reasoning text, which the chat shows as it arrives and then collapses to a `Thought` header that **Ctrl+O** or a click expands. Otherwise, reasoning stays hidden, and the chat still shows the short progress notes the model writes before each tool call on every supported model except Haiku 5.5, which writes none, so its requests ask for `thinking.display = "omitted"` and the chat shows no reasoning.
+`show_thinking = true` opts the request into `thinking.display = "summarized"`, so the API streams reasoning text. The chat shows it as it arrives, then collapses it to a `Thought` header that **Ctrl+O** or a click expands.
+
+With the default `false`, reasoning stays hidden. The chat still shows the progress notes the model writes before each tool call on every supported model except Haiku 5.5. Haiku 5.5 writes none, so its requests ask for `thinking.display = "omitted"` and the chat shows no reasoning.
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
-`status_line` lists segments from the table below in display order and must contain at least one. Add, remove, or reorder any segment, including `permission-mode`, to control its presence and position. When unset, it is the list in the [example](#config-file): `current-dir`, `git-branch`, `pull-request`, `model-with-effort`, `context-used`, `session-cost`, `permission-mode`, `run-state`, and `thread-title`. Segments with no data, such as a missing git branch, an unopened pull request, context usage before the first completed turn, or usage limits under an API key, are omitted. The three pull request segments shell out to `gh pr view` so they require the GitHub CLI on PATH. Click one of them to open the PR, its checks, or its changed files. Terminals that open links on **Ctrl+click** or **Cmd+click** do the same. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
+`status_line` lists segments from the table below in display order and must contain at least one. Add, remove, or reorder any segment, including `permission-mode`, to control its presence and position. When unset, it is the list in the [example](#config-file): `current-dir`, `git-branch`, `pull-request`, `model-with-effort`, `context-used`, `session-cost`, `permission-mode`, `run-state`, and `thread-title`.
+
+Segments with no data, such as a missing git branch, an unopened pull request, context usage before the first completed turn, or usage limits under an API key, are omitted. The three pull request segments shell out to `gh pr view`, so they require the GitHub CLI on `PATH`. Click one of them to open the PR, its checks, or its changed files, and terminals that open links on **Ctrl+click** or **Cmd+click** do the same. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
 
 | Segment               | Renders                                                       | Refresh         |
 | --------------------- | ------------------------------------------------------------- | --------------- |
@@ -157,7 +160,7 @@ Automatic compaction runs before a prompt and between the tool rounds of a long 
 | `pull-request`        | Open PR as clickable `#86` when OSC 8 works                   | Every 60 s      |
 | `pull-request-checks` | `Checks: 2 failing`, `1 pending`, `1 cancelled`, or `passing` | Every 60 s      |
 | `pull-request-review` | `Review: approved`, `changes requested`, or `required`        | Every 60 s      |
-| `model`               | Compact model label (e.g., `Opus 5.5`)                        | On `/model`     |
+| `model`               | Compact model label, such as `Opus 5.5`                       | On `/model`     |
 | `model-with-effort`   | Model label plus the effort level in parens                   | On `/model`     |
 | `context-used`        | `Ctx: 10% (100k/1M)` after the first turn                     | Per turn        |
 | `session-cost`        | `Cost: $0.43` running USD estimate                            | Per turn        |
@@ -174,7 +177,7 @@ Automatic compaction runs before a prompt and between the tool rounds of a long 
 
 The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears when it resets and remains gone until the next response reports it again. The [theming guide](theming.md#status-line-segments) lists the colors used by the context and usage-limit segments as a window fills.
 
-On a narrow row, the highest-priority segment is retained and truncated if needed. Other segments are considered from highest to lowest utility and included when they fit, keeping their configured display order. A smaller segment can use space left after a larger one is omitted. The utility order, from lowest to highest, is `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `permission-mode` in `manual` → `model` → `model-with-effort` → `permission-mode` in `plan` or `yolo` → `run-state`.
+On a narrow row, lower-priority segments drop first, and the highest-priority segment is truncated if needed. [Status Line](../design/tui/status-line.md#narrow-rows) lists the utility order.
 
 `OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). A value with no segments (`","`), an empty entry between commas (`"model,,run-state"`), or an unknown segment name fails startup with a parse error.
 
@@ -195,64 +198,6 @@ See [Theming](theming.md) for the full slot reference, color value formats (hex,
 
 `[permission]` sets the permission mode, the deny, ask, and allow rules, the extra workspace roots, and which built-in rules apply. [Permissions](permissions.md) describes each key, the modes, the approval prompt, and the pattern grammar.
 
-## Authentication
-
-Each request carries one credential. oxide-code uses the first source that is set, in Claude Code's order with its own login ahead of the Claude Code login:
-
-| Source                                               | Sent as                         | Typical use                                           |
-| ---------------------------------------------------- | ------------------------------- | ----------------------------------------------------- |
-| 1. `ANTHROPIC_AUTH_TOKEN`                            | `Authorization: Bearer`         | [LLM gateways](#llm-gateways) that take bearer tokens |
-| 2. `ANTHROPIC_API_KEY`                               | `x-api-key`                     | Anthropic Console API key                             |
-| 3. `[client.auth]` or legacy `client.api_key`        | Configured scheme               | Private inline credential or secret file              |
-| 4. `CLAUDE_CODE_OAUTH_TOKEN`                         | `Authorization: Bearer` + OAuth | Long-lived token from `claude setup-token`            |
-| 5. oxide-code login                                  | `Authorization: Bearer` + OAuth | Signed in with `/login`                               |
-| 6. [Claude Code](https://code.claude.com/docs) login | `Authorization: Bearer` + OAuth | Claude Code installed and signed in                   |
-
-- **`CLAUDE_CODE_OAUTH_TOKEN`** is sent as is, so it suits CI, headless machines, and secret managers. oxide-code never refreshes it and does not read either stored login while it is set. When the API rejects it as expired or revoked, the error names the variable, and `claude setup-token` issues a new one.
-- **The oxide-code login** comes from [`/login`](slash-commands.md#signing-in), which stores it in `$XDG_DATA_HOME/ox/credentials.json` (default: `~/.local/share/ox/credentials.json`) with mode `0600`. `/logout` deletes that file and leaves the Claude Code login alone. When the oxide-code login exists but stops working, for example after it expires, oxide-code reports it with the fix and does not fall back to the Claude Code login.
-- **The Claude Code login** comes from the `"Claude Code-credentials"` Keychain entry on macOS, falling back to `.credentials.json` in Claude Code's config directory, which is the only store on Linux. That directory is `~/.claude`, or `$CLAUDE_CONFIG_DIR` when you set it to run Claude Code under another account, and with the variable set, the Keychain entry is the one Claude Code keeps for that directory. Set the same `CLAUDE_CONFIG_DIR` for `ox` to use that account's login.
-- **Both logins** refresh automatically near expiry and are sent only to the Anthropic API. With a custom `base_url` and no other credential, startup fails and names `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`, so a personal subscription token never reaches a third-party host.
-- **Without a credential**, `ox` starts signed out and shows how to sign in, and prompts fail until `/login` succeeds. When a stored login failed only for a passing reason, such as an unreachable token endpoint, the next prompt tries it again. `ox -p` and `ox --no-tui` exit at startup with the list of credential options.
-- **`/status` and `/config`** show the active source, such as `OAuth (CLAUDE_CODE_OAUTH_TOKEN)`, without its value.
-
-User configuration can select a fixed credential with `[client.auth]`:
-
-```toml
-[client.auth]
-type = "bearer"
-file = "~/.secrets/gateway-token"
-```
-
-`type` is `"bearer"` for an `Authorization: Bearer` gateway token, `"api-key"` for `x-api-key`, or `"oauth"` for a fixed OAuth token with the OAuth request shape. Set exactly one of `file` or `value`. A `file` path must be absolute or start with `~/`, and ox reads only the winning file once during startup, trimming trailing line endings. Restart ox to read a rotated file. `ox config check` validates the declaration without opening the credential file. A fixed OAuth token can use the configured endpoint and is never refreshed.
-
-An inline `value` or legacy `client.api_key` sits on disk in plaintext, so keep that user config private, conventionally mode `0600`. ox does not change its permissions. `type = "login"` takes neither `file` nor `value` and selects the remaining environment and stored-login fallback chain. Stored logins retain their first-party endpoint restriction.
-
-Commands the assistant runs with `bash` cannot access `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or `ANTHROPIC_CUSTOM_HEADERS`, so no command finds your credential in its own environment. On Linux, the built-in [`credentials` rule](permissions.md#built-in-rules) also covers each process's environment under `/proc`, including `ox`'s own. A script that needs its own Anthropic key, such as a test suite that calls the API, must read it from another variable or a file.
-
-## LLM Gateways
-
-User configuration supports `client.headers` as a map of header names to string values, `client.attribution` (default `true`), and `client.structured_outputs` (default `true`). These settings, authentication, the endpoint, and CA trust are user-only. A project config cannot set them.
-
-oxide-code reads the gateway variables Claude Code uses, which override the corresponding file settings:
-
-```bash
-export ANTHROPIC_BASE_URL=https://gateway.example.com/anthropic
-export ANTHROPIC_AUTH_TOKEN=...
-export ANTHROPIC_CUSTOM_HEADERS='X-Team: platform
-X-Route: blue'
-export NODE_EXTRA_CA_CERTS=~/.config/ox/corp-cachain.pem
-```
-
-- **`ANTHROPIC_AUTH_TOKEN`** authenticates with `Authorization: Bearer` and otherwise keeps the API-key request shape, without the OAuth beta.
-- **`ANTHROPIC_CUSTOM_HEADERS`** takes one `Name: value` per line and skips blank lines. The headers go on every API request after the built-in ones, so they can replace defaults such as `User-Agent`. oxide-code owns `anthropic-beta`, `anthropic-version`, `content-type`, `x-claude-code-session-id`, and the header that carries the active credential (`x-api-key` for an API key, `Authorization` otherwise), so naming any of them is an error. The other credential header stays free, so a gateway can take its own `Authorization` alongside an API key. A line without a colon, an invalid name or value, a reserved name, or a repeated name stops startup with an error that gives the line number and never prints the value. `/config` lists the header names only.
-- **`NODE_EXTRA_CA_CERTS`** works like [`extra_ca_certs`](#extra_ca_certs-corporate-trust-anchors) and ranks last, after `OX_EXTRA_CA_CERTS` and `client.extra_ca_certs`. Shells often export it for npm, so like Node, oxide-code logs a warning and skips the bundle when it cannot read it.
-- **`CLAUDE_CODE_ATTRIBUTION_HEADER=0`** drops the `x-anthropic-billing-header` attribution block from the system prompt. By default, every request carries it, whatever the credential, since some gateways check it to recognize Claude Code requests. As in Claude Code, the block on a custom base URL omits the per-request `cch` hash, so it stays the same from request to request.
-- **`CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS=1`** drops `output_config.format` from session-title requests, for gateways whose upstream rejects it. Titles then rely on the prompt alone to return JSON.
-
-oxide-code is stricter than Claude Code in three ways. It never sends a stored login to a custom base URL, it sends one credential even when several are set, and it rejects malformed `ANTHROPIC_CUSTOM_HEADERS` lines where Claude Code skips them.
-
-A gateway that does not serve the configured model may return HTTP 404 with a plain-text `404 page not found` response, which `ox` reports as `Anthropic API found no such endpoint or model`. The gateway may list the models it serves at `GET /v1/models`.
-
 ## Logs
 
 `ox` logs warnings and errors by default. Set `RUST_LOG=info` (or `debug`) for more detail. `ox` skips a directive it cannot parse and names it on stderr at startup. Where the log goes depends on the frontend:
@@ -268,21 +213,20 @@ Each key goes in the table its prefix names, so `client.compaction.auto_enabled`
 
 | Key                                        | Type    | Default                         | Description                                                                                                 |
 | ------------------------------------------ | ------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `client.api_key`                           | string  | -                               | [Anthropic API key](#authentication), user config only                                                      |
-| `client.attribution`                       | boolean | `true`                          | Send the [attribution block](#llm-gateways), user config only                                               |
-| `client.auth`                              | table   | -                               | [Typed credential](#authentication), user config only                                                       |
+| `client.attribution`                       | boolean | `true`                          | Send the [attribution block](authentication.md#llm-gateways), user config only                              |
+| `client.auth`                              | table   | -                               | [Typed credential](authentication.md), user config only                                                     |
 | `client.base_url`                          | string  | `"https://api.anthropic.com"`   | [API base URL](#base_url-endpoint), user config only                                                        |
 | `client.compaction.auto_enabled`           | boolean | `true`                          | Enable [automatic context compaction](#clientcompaction-context-compression)                                |
 | `client.compaction.auto_threshold_percent` | integer | model-derived                   | Share of the context window that [triggers compaction](#clientcompaction-context-compression), `1` to `100` |
 | `client.compaction.auto_threshold_tokens`  | integer | model-derived                   | Token count that [triggers compaction](#clientcompaction-context-compression)                               |
 | `client.effort`                            | string  | per-model                       | [Effort level](#effort-reasoning-effort), `"low"` to `"max"`                                                |
 | `client.extra_ca_certs`                    | string  | -                               | [PEM bundle](#extra_ca_certs-corporate-trust-anchors) appended to the trust store, user config only         |
-| `client.headers`                           | table   | empty                           | [Extra request headers](#llm-gateways), user config only                                                    |
+| `client.headers`                           | table   | empty                           | [Extra request headers](authentication.md#llm-gateways), user config only                                   |
 | `client.max_tokens`                        | integer | per-model                       | [Max tokens per response](#max_tokens-response-ceiling)                                                     |
 | `client.max_tool_rounds`                   | integer | unset (unbounded)               | [Per-turn safety cap](#max_tool_rounds-agent-loop-safety-cap) on tool rounds                                |
 | `client.model`                             | string  | `"claude-opus-5-5"`             | [Model](#model-supported-models) to use                                                                     |
 | `client.prompt_cache_ttl`                  | string  | `"1h"`                          | [Prompt-cache TTL](#prompt_cache_ttl-cache-duration), `"5m"` or `"1h"`                                      |
-| `client.structured_outputs`                | boolean | `true`                          | Allow [title JSON schemas](#llm-gateways), user config only                                                 |
+| `client.structured_outputs`                | boolean | `true`                          | Allow [title JSON schemas](authentication.md#llm-gateways), user config only                                |
 | `permission.allow`                         | table   | empty                           | [Calls that run without asking](permissions.md#rule-tables), user config only                               |
 | `permission.ask`                           | table   | empty                           | [Calls that ask first](permissions.md#rule-tables), even when an allow pattern matches                      |
 | `permission.defaults`                      | table   | all on                          | [Built-in rules](permissions.md#built-in-rules) to turn off by name, user config only                       |
@@ -299,36 +243,36 @@ Each key goes in the table its prefix names, so `client.compaction.auto_enabled`
 
 A variable that maps to a config key overrides that key in every file.
 
-| Variable                                 | Config key                                 | Description                                                                                   |
-| ---------------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------- |
-| `ANTHROPIC_API_KEY`                      | `client.api_key`                           | [Anthropic API key](#authentication)                                                          |
-| `ANTHROPIC_AUTH_TOKEN`                   | `client.auth`                              | [Gateway bearer token](#llm-gateways)                                                         |
-| `ANTHROPIC_BASE_URL`                     | `client.base_url`                          | API base URL                                                                                  |
-| `ANTHROPIC_CUSTOM_HEADERS`               | `client.headers`                           | [Extra request headers](#llm-gateways), one `Name: value` per line                            |
-| `CLAUDE_CODE_ATTRIBUTION_HEADER`         | `client.attribution`                       | Send the [attribution block](#llm-gateways), default `true`                                   |
-| `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` | `client.structured_outputs`                | Disable [title JSON schemas](#llm-gateways), default `false`, inverse of the config key       |
-| `CLAUDE_CODE_OAUTH_TOKEN`                | -                                          | [Long-lived OAuth token](#authentication)                                                     |
-| `CLAUDE_CONFIG_DIR`                      | -                                          | [Claude Code's config dir](#authentication), default `~/.claude`                              |
-| `NODE_EXTRA_CA_CERTS`                    | -                                          | [Fallback PEM trust bundle](#llm-gateways)                                                    |
-| `NO_COLOR`                               | -                                          | Any non-empty value turns off color in the TUI and in [logs](#logs) written to stderr         |
-| `OX_COMPACTION_AUTO_ENABLED`             | `client.compaction.auto_enabled`           | Enable auto-compaction                                                                        |
-| `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`   | `client.compaction.auto_threshold_percent` | Percent compaction trigger                                                                    |
-| `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`    | `client.compaction.auto_threshold_tokens`  | Absolute compaction trigger                                                                   |
-| `OX_EFFORT`                              | `client.effort`                            | Effort level                                                                                  |
-| `OX_EXTRA_CA_CERTS`                      | `client.extra_ca_certs`                    | Path to a PEM trust bundle                                                                    |
-| `OX_MAX_TOKENS`                          | `client.max_tokens`                        | Max tokens per response                                                                       |
-| `OX_MAX_TOOL_ROUNDS`                     | `client.max_tool_rounds`                   | Per-turn tool-round cap                                                                       |
-| `OX_MODEL`                               | `client.model`                             | Model to use                                                                                  |
-| `OX_PERMISSION_MODE`                     | `permission.mode`                          | Tool permission mode                                                                          |
-| `OX_PROMPT_CACHE_TTL`                    | `client.prompt_cache_ttl`                  | Prompt-cache TTL                                                                              |
-| `OX_SESSION_ID`                          | -                                          | Set by `ox` for each `bash` command to the [session's ID](sessions.md#session-id-in-commands) |
-| `OX_SHOW_THINKING`                       | `tui.show_thinking`                        | Show extended thinking                                                                        |
-| `OX_SHOW_WELCOME`                        | `tui.show_welcome`                         | Paint the welcome splash                                                                      |
-| `OX_STATUS_LINE`                         | `tui.status_line`                          | Comma-separated status-line segments                                                          |
-| `RUST_LOG`                               | -                                          | [Log filter](#logs), default `warn`                                                           |
-| `XDG_CONFIG_HOME`                        | -                                          | Base of the user config directory, default `~/.config`                                        |
-| `XDG_DATA_HOME`                          | -                                          | Base of the sessions, the device ID, and the oxide-code login, default `~/.local/share`       |
-| `XDG_STATE_HOME`                         | -                                          | Base of the log directory, default `~/.local/state`                                           |
+| Variable                                 | Config key                                 | Description                                                                                              |
+| ---------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `ANTHROPIC_API_KEY`                      | `client.auth`                              | [Anthropic API key](authentication.md)                                                                   |
+| `ANTHROPIC_AUTH_TOKEN`                   | `client.auth`                              | [Gateway bearer token](authentication.md#llm-gateways)                                                   |
+| `ANTHROPIC_BASE_URL`                     | `client.base_url`                          | API base URL                                                                                             |
+| `ANTHROPIC_CUSTOM_HEADERS`               | `client.headers`                           | [Extra request headers](authentication.md#llm-gateways), one `Name: value` per line                      |
+| `CLAUDE_CODE_ATTRIBUTION_HEADER`         | `client.attribution`                       | Send the [attribution block](authentication.md#llm-gateways), default `true`                             |
+| `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` | `client.structured_outputs`                | Disable [title JSON schemas](authentication.md#llm-gateways), default `false`, inverse of the config key |
+| `CLAUDE_CODE_OAUTH_TOKEN`                | -                                          | [Long-lived OAuth token](authentication.md)                                                              |
+| `CLAUDE_CONFIG_DIR`                      | -                                          | [Claude Code's config dir](authentication.md), default `~/.claude`                                       |
+| `NODE_EXTRA_CA_CERTS`                    | -                                          | [Fallback PEM trust bundle](authentication.md#llm-gateways)                                              |
+| `NO_COLOR`                               | -                                          | Any non-empty value turns off color in the TUI and in [logs](#logs) written to stderr                    |
+| `OX_COMPACTION_AUTO_ENABLED`             | `client.compaction.auto_enabled`           | Enable auto-compaction                                                                                   |
+| `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`   | `client.compaction.auto_threshold_percent` | Percent compaction trigger                                                                               |
+| `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`    | `client.compaction.auto_threshold_tokens`  | Absolute compaction trigger                                                                              |
+| `OX_EFFORT`                              | `client.effort`                            | Effort level                                                                                             |
+| `OX_EXTRA_CA_CERTS`                      | `client.extra_ca_certs`                    | Path to a PEM trust bundle                                                                               |
+| `OX_MAX_TOKENS`                          | `client.max_tokens`                        | Max tokens per response                                                                                  |
+| `OX_MAX_TOOL_ROUNDS`                     | `client.max_tool_rounds`                   | Per-turn tool-round cap                                                                                  |
+| `OX_MODEL`                               | `client.model`                             | Model to use                                                                                             |
+| `OX_PERMISSION_MODE`                     | `permission.mode`                          | Tool permission mode                                                                                     |
+| `OX_PROMPT_CACHE_TTL`                    | `client.prompt_cache_ttl`                  | Prompt-cache TTL                                                                                         |
+| `OX_SESSION_ID`                          | -                                          | Set by `ox` for each `bash` command to the [session's ID](permissions.md#commands-the-assistant-runs)    |
+| `OX_SHOW_THINKING`                       | `tui.show_thinking`                        | Show extended thinking                                                                                   |
+| `OX_SHOW_WELCOME`                        | `tui.show_welcome`                         | Paint the welcome splash                                                                                 |
+| `OX_STATUS_LINE`                         | `tui.status_line`                          | Comma-separated status-line segments                                                                     |
+| `RUST_LOG`                               | -                                          | [Log filter](#logs), default `warn`                                                                      |
+| `XDG_CONFIG_HOME`                        | -                                          | Base of the user config directory, default `~/.config`                                                   |
+| `XDG_DATA_HOME`                          | -                                          | Base of the sessions, the device ID, and the oxide-code login, default `~/.local/share`                  |
+| `XDG_STATE_HOME`                         | -                                          | Base of the log directory, default `~/.local/state`                                                      |
 
 `ox` treats an empty value of each variable in the table as unset. Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Numeric variables take a whole number: at least `1` for `OX_MAX_TOKENS` and `OX_MAX_TOOL_ROUNDS`, at least `0` for `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`, and `1` to `100` for `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`. Any other value makes `ox` exit at startup with an error naming the variable and the values it accepts. The matching config keys accept the same ranges, and an out-of-range value there names its file and line.
 

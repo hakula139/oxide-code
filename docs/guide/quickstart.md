@@ -26,7 +26,7 @@ You can also sign in with a Claude account:
 - Run `ox`, then `/login` to sign in through your browser.
 - If [Claude Code](https://code.claude.com/docs) is installed and signed in, oxide-code uses that login automatically.
 
-[Authentication](configuration.md#authentication) lists all credential sources and the order in which they apply.
+[Authentication](authentication.md) lists all credential sources and the order in which they apply.
 
 ## Start a Session
 

@@ -60,9 +60,9 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 9. **Built-in commands only.** `BUILT_INS` is the entire registry, with no discovery of user-defined commands. Skills as commands are tracked in [#163](https://github.com/hakula139/oxide-code/issues/163).
 
-10. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`, and the dispatcher runs them client-side even when input is disabled. Registry tests check that no read-only form forwards an action or starts a turn, and that a turn starts only from a `Prompt` outcome whose line the chat echoes. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn. `SlashKind::Steering` marks a form whose forwarded action applies mid-turn, either a TUI-only change or an op the engine applies to the turn in flight, so the dispatcher forwards it mid-turn too. `/exit`, `/mode <mode>`, and `/theme <name>` steer. An unknown name has no kind, so `slash::classify` returns `None` and the dispatcher runs it like a read-only command, which reports the error.
+10. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`, and the dispatcher runs them client-side even when input is disabled. Registry tests check that no read-only form forwards an action or starts a turn, and that a turn starts only from a `Prompt` outcome whose line the chat echoes. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn, and a `Mutating` command's background result re-checks the same gate when it finishes, dropping with the same notice while busy. `SlashKind::Steering` marks a form whose forwarded action applies mid-turn, either a TUI-only change or an op the engine applies to the turn in flight, so the dispatcher forwards it mid-turn too. `/exit`, `/mode <mode>`, and `/theme <name>` steer. An unknown name has no kind, so `slash::classify` returns `None` and the dispatcher runs it like a read-only command, which reports the error.
 
-11. **One trait return carries every effect: `SlashOutcome`.** `Forward(Action)` hands a state-mutating action back to the App, which applies a TUI-only action locally and sends an op to the engine. `Prompt(String)` starts a turn with a prompt the command built, which the chat and the prompt queue show as the typed line, the line a fresh session also takes as its first-prompt title. `Modal(_)` opens a modal, and `SystemMessage` prints into chat. `Background` carries a future for a command whose work is slow I/O, which the App runs in a `JoinSet` off the event loop. It prints the `ChatOutput` the future resolves to, and a session switch drops the future unfinished, so its output never lands in the next session's chat. A failure returns `Err(String)`, which the dispatcher prefixes with the typed command name, and it wraps a background future so that future's failure gets the same prefix.
+11. **One trait return carries every effect: `SlashOutcome`.** `Forward(Action)` hands a state-mutating action back to the App, which applies a TUI-only action locally and sends an op to the engine. `Prompt(String)` starts a turn with a prompt the command built, which the chat and the prompt queue show as the typed line, the line a fresh session also takes as its first-prompt title. `SystemMessage(String)` prints into chat, `GitDiff(WorkingTreeDiff)` appends a diff block, and `Modal(_)` opens a modal. `Background` carries a future for a command whose work is slow I/O, which the App runs in a `JoinSet` off the event loop. The future resolves to the `SlashOutcome` to apply, which takes the same path as a typed outcome, so it can forward an op or open a modal. A session switch drops the future unfinished, so its output never lands in the next session's chat. A failure returns `Err(String)`, which the dispatcher prefixes with the typed command name, and it wraps a background future so that future's failure gets the same prefix.
 
 12. **Commands read a borrowed `SlashContext` and write nothing.** The context carries `LiveSessionInfo` and the live session title. The App applies the returned outcome in one place on both the idle and busy paths, so no command reaches into `ChatView` or the modal stack. See [modals.md](modals.md) for the full modal design.
 
@@ -84,8 +84,8 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-core/src/session/saved.rs`: `set_archived` and `delete`, shared by the typed commands and the `/resume` picker, which refuse the live session and return a typed `SavedError`.
 - `crates/ox-core/src/session/store.rs`: `delete_at` and `set_archived_at`, the file operations behind `saved`.
 - `crates/ox-tui/src/action.rs`: `Action`, which slash commands forward.
-- `crates/ox-tui/src/app/dispatch.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, modal gate, echo gate.
-- `crates/ox-tui/src/app/events.rs`: `apply_slash_task`, which prints a finished `Background` outcome, and `apply_session_rolled`, which clears the chat when the roll lands.
+- `crates/ox-tui/src/app/dispatch.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, `allows_mutating`, modal gate, echo gate.
+- `crates/ox-tui/src/app/events.rs`: `apply_slash_task`, which applies a finished `Background` outcome through the dispatch path, and `apply_session_rolled`, which clears the chat when the roll lands.
 - `crates/ox-tui/src/components/chat/blocks/git_diff.rs`: `GitDiffBlock`, which renders `/diff` output.
 - `crates/ox-tui/src/components/chat/blocks/system.rs`: `SystemMessageBlock`, which renders confirmations and notes.
 - `crates/ox-tui/src/components/input/popup.rs`: `popup_state`, which reads the typed line as a command name or an argument, and `SlashPopup`, which lists the matching commands or the typed command's arg completions for Tab and Enter to complete.
@@ -100,7 +100,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
 - `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, inline error kept until a retry or close).
 - `crates/ox-tui/src/slash/context.rs`: `SlashContext` (the App's `LiveSessionInfo` plus the live title).
-- `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd`, which resolves its prefix through `ox-core`'s `resolve_saved_prefix` and pushes the confirm-delete modal.
+- `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd`, which resolves its prefix through `ox-core`'s `resolve_saved_prefix_blocking` in a background task that resolves to the confirm-delete modal.
 - `crates/ox-tui/src/slash/diff.rs`: `DiffCmd` and the git calls it makes from the work tree root.
 - `crates/ox-tui/src/slash/diff/view.rs`: `WorkingTreeDiff`, the typed rows parsed from git's output within the 64 KiB cap.
 - `crates/ox-tui/src/slash/effort.rs`: `EffortCmd`.
@@ -113,7 +113,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/mode.rs`: `ModeCmd` plus `ModePicker`.
 - `crates/ox-tui/src/slash/model.rs`: `ModelCmd`.
 - `crates/ox-tui/src/slash/picker.rs`: combined model and effort picker modal.
-- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, `ChatOutput`, and the `SlashCommand` trait.
+- `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, and the `SlashCommand` trait.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see `resume.md`).
 - `crates/ox-tui/src/slash/sessions.rs`: `open_store`, `resolve_error_message`, `saved_error_message`, and the live-session recovery hints, shared by the session commands, plus `format_metadata_line` for the delete confirm modal.

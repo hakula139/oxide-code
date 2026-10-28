@@ -2,8 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::lacks_progress_updates;
-
 // ── Role ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,7 +21,7 @@ pub(crate) enum Role {
 pub(crate) enum ContentBlock {
     Text {
         text: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         origin: Option<TextOrigin>,
     },
     ToolUse {
@@ -191,17 +189,6 @@ impl Message {
 pub(crate) const INTERRUPTION_MARKER: &str = "[Request interrupted by user]";
 
 // ── Progress Updates ──
-
-/// The progress note introducing the tool use at `blocks[index]`. See [`progress_note`]. Reasoning
-/// from a catalog model that writes no progress updates counts as empty.
-pub(crate) fn progress_update_before(blocks: &[ContentBlock], index: usize) -> Option<&str> {
-    progress_note(blocks[..index].iter().map(|block| match block {
-        ContentBlock::Thinking { replay, .. } if lacks_progress_updates(&replay.model) => Some(""),
-        ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
-        ContentBlock::RedactedThinking { .. } => Some(""),
-        _ => None,
-    }))
-}
 
 /// Picks the progress note from the blocks before a tool use, given in order as each block's
 /// thinking text (`""` for redacted thinking, `None` for any other block): the non-empty text in
@@ -473,75 +460,20 @@ mod tests {
         }
     }
 
-    mod progress_update_before {
+    mod progress_note {
         use super::*;
 
-        fn thinking(text: &str) -> ContentBlock {
-            ContentBlock::Thinking {
-                thinking: text.to_owned(),
-                replay: Replay::with_model(MODEL, "sig"),
-            }
-        }
-
-        fn tool_use() -> ContentBlock {
-            ContentBlock::tool_use("t1", "read", serde_json::json!({}))
-        }
-
         #[test]
-        fn finds_note_beside_empty_reasoning() {
-            for blocks in [
-                [thinking(""), thinking("Found the loader."), tool_use()],
-                [thinking("Found the loader."), thinking("  "), tool_use()],
-            ] {
-                assert_eq!(
-                    progress_update_before(&blocks, 2),
-                    Some("Found the loader.")
-                );
-            }
-        }
-
-        #[test]
-        fn stops_at_non_thinking_blocks() {
-            let text = ContentBlock::text("Checking.");
-            for (blocks, index) in [
-                (vec![thinking(""), tool_use()], 1),
-                (vec![thinking("Found it."), text, tool_use()], 2),
-                (vec![tool_use()], 0),
-            ] {
-                let note = progress_update_before(&blocks, index);
-
-                assert_eq!(note, None, "{blocks:?}");
-            }
-        }
-
-        #[test]
-        fn reads_through_redacted_thinking() {
+        fn keeps_the_run_of_thinking_directly_before_the_tool_use() {
             let blocks = [
-                thinking("note"),
-                ContentBlock::RedactedThinking {
-                    replay: Replay::with_model(MODEL, "opaque"),
-                },
-                tool_use(),
+                Some("earlier"),
+                None,
+                Some(""),
+                Some("Found the loader."),
+                Some("  "),
             ];
 
-            assert_eq!(progress_update_before(&blocks, 2), Some("note"));
-        }
-
-        #[test]
-        fn skips_reasoning_from_a_model_without_progress_updates() {
-            let haiku = ContentBlock::Thinking {
-                thinking: "Summarized reasoning.".to_owned(),
-                replay: Replay::with_model("claude-haiku-5-5", "sig"),
-            };
-
-            assert_eq!(
-                progress_update_before(&[haiku.clone(), tool_use()], 1),
-                None
-            );
-            assert_eq!(
-                progress_update_before(&[thinking("note"), haiku, tool_use()], 2),
-                Some("note")
-            );
+            assert_eq!(progress_note(blocks.into_iter()), Some("Found the loader."));
         }
     }
 }

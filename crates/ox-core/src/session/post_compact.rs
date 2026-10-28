@@ -112,23 +112,6 @@ pub(super) fn restore_post_compact_origin(message: &mut Message) {
     }
 }
 
-/// Removes the generated summary block that the compaction boundary already displays.
-pub(super) fn strip_post_compact_summary(message: &mut Message) -> bool {
-    if message.role != Role::User
-        || !matches!(
-            message.content.first(),
-            Some(ContentBlock::Text {
-                origin: Some(TextOrigin::CompactionSummary),
-                ..
-            })
-        )
-    {
-        return false;
-    }
-    message.content.remove(0);
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
@@ -289,83 +272,6 @@ mod tests {
 
                 assert_eq!(message, expected);
             }
-        }
-    }
-
-    mod strip_post_compact_summary {
-        use super::*;
-
-        #[test]
-        fn preserves_a_literal_summary_prefix() {
-            let mut message = Message::user(SUMMARY_PREFIX);
-            let expected = message.clone();
-
-            let stripped = strip_post_compact_summary(&mut message);
-
-            assert!(!stripped);
-            assert_eq!(message, expected);
-        }
-
-        #[test]
-        fn removes_only_the_prefix_block() {
-            let mut m = synthesize_post_compact_message(
-                "internal summary",
-                &[],
-                &[],
-                CompactTrigger::Manual,
-            );
-            restore_post_compact_origin(&mut m);
-            m.content.push(ContentBlock::text("real prompt"));
-
-            assert!(strip_post_compact_summary(&mut m));
-            assert_eq!(m, Message::user("real prompt"));
-        }
-
-        #[test]
-        fn removes_the_prefix_as_earlier_releases_wrapped_it() {
-            let mut m = Message::user(indoc! {"
-                This conversation has been compacted. The summary below covers the prior work. Continue from here
-                without re-asking the engineer what to do.
-
-                internal summary"
-            });
-            restore_post_compact_origin(&mut m);
-            m.content.push(ContentBlock::text("real prompt"));
-
-            assert!(strip_post_compact_summary(&mut m));
-            assert_eq!(m, Message::user("real prompt"));
-        }
-
-        #[test]
-        fn leaves_regular_user_text() {
-            let mut m = Message::user("This conversation should stay visible");
-
-            assert!(!strip_post_compact_summary(&mut m));
-            assert_eq!(m.content.len(), 1);
-        }
-
-        #[test]
-        fn leaves_assistant_messages() {
-            let mut m = Message::assistant(formatdoc! {"
-                {SUMMARY_PREFIX}
-
-                not a synthetic user root"
-            });
-
-            assert!(!strip_post_compact_summary(&mut m));
-            assert_eq!(m.role, Role::Assistant);
-            assert_eq!(m.content.len(), 1);
-        }
-
-        #[test]
-        fn leaves_non_text_first_block() {
-            let mut m = Message {
-                role: Role::User,
-                content: vec![ContentBlock::tool_result("toolu_1", SUMMARY_PREFIX, false)],
-            };
-
-            assert!(!strip_post_compact_summary(&mut m));
-            assert!(matches!(m.content[0], ContentBlock::ToolResult { .. }));
         }
     }
 }

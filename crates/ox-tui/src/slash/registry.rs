@@ -27,35 +27,31 @@ use super::theme::ThemeCmd;
 use crate::action::Action;
 use crate::modal::Modal;
 
-/// What a command hands back for the App to apply.
+/// What a command hands back for the App to apply, at submit or once its background task finishes.
 pub(crate) enum SlashOutcome {
+    /// Prints a system message into chat.
+    SystemMessage(String),
+    /// Appends a git diff block to chat.
+    GitDiff(WorkingTreeDiff),
     /// Dispatches a state-mutating action, applied locally or sent to the engine as an op.
     Forward(Action),
     /// Starts a turn with a prompt the command built, headed by the line the user typed.
     Prompt(String),
     /// Opens a modal over the input. The modal is the command's whole response.
     Modal(Box<dyn Modal>),
-    /// Prints a system message into chat.
-    SystemMessage(String),
-    /// Runs off the event loop so slow I/O does not stall input or rendering, then prints its
-    /// result into chat. A session switch drops it unfinished.
-    Background(BoxFuture<'static, Result<ChatOutput, String>>),
-}
-
-/// What a [`SlashOutcome::Background`] command prints when it finishes.
-#[derive(Debug)]
-pub(crate) enum ChatOutput {
-    SystemMessage(String),
-    GitDiff(WorkingTreeDiff),
+    /// Runs off the event loop so slow I/O does not stall input or rendering, then applies the
+    /// outcome it resolves to, never a nested `Background`. A session switch drops it unfinished.
+    Background(BoxFuture<'static, Result<SlashOutcome, String>>),
 }
 
 impl std::fmt::Debug for SlashOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SystemMessage(text) => f.debug_tuple("SystemMessage").field(text).finish(),
+            Self::GitDiff(diff) => f.debug_tuple("GitDiff").field(diff).finish(),
             Self::Forward(action) => f.debug_tuple("Forward").field(action).finish(),
             Self::Prompt(prompt) => f.debug_tuple("Prompt").field(prompt).finish(),
             Self::Modal(_) => f.write_str("Modal(<modal>)"),
-            Self::SystemMessage(text) => f.debug_tuple("SystemMessage").field(text).finish(),
             Self::Background(_) => f.write_str("Background(<task>)"),
         }
     }
@@ -84,7 +80,7 @@ impl SlashOutcome {
         }
     }
 
-    pub(super) fn into_background(self) -> BoxFuture<'static, Result<ChatOutput, String>> {
+    pub(super) fn into_background(self) -> BoxFuture<'static, Result<SlashOutcome, String>> {
         match self {
             Self::Background(task) => task,
             other => panic!("expected Background, got {other:?}"),
@@ -190,6 +186,14 @@ pub(super) mod testing {
         cmd.execute(args, &SlashContext::new(&test_session_info(), None))
     }
 
+    /// [`run_execute`] awaiting the background task a saved-session command returns.
+    pub(crate) async fn run_background(
+        cmd: &dyn SlashCommand,
+        args: &str,
+    ) -> Result<SlashOutcome, String> {
+        run_execute(cmd, args)?.into_background().await
+    }
+
     /// A command that fails with `error`, answering to the aliases the shared table gives `name`.
     pub(crate) struct FakeCmd {
         pub(crate) name: &'static str,
@@ -244,10 +248,6 @@ mod tests {
     mod slash_outcome {
         use super::*;
 
-        fn done() -> SlashOutcome {
-            SlashOutcome::SystemMessage("done".to_owned())
-        }
-
         fn background() -> SlashOutcome {
             SlashOutcome::Background(Box::pin(async { Err("never run".to_owned()) }))
         }
@@ -255,6 +255,14 @@ mod tests {
         #[test]
         fn debug_names_each_variant() {
             let modal = SlashOutcome::Modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            assert_eq!(
+                format!("{:?}", SlashOutcome::SystemMessage("clean".to_owned())),
+                r#"SystemMessage("clean")"#
+            );
+            assert!(
+                format!("{:?}", SlashOutcome::GitDiff(WorkingTreeDiff::default()))
+                    .starts_with("GitDiff("),
+            );
             assert_eq!(
                 format!("{:?}", SlashOutcome::Forward(Action::Op(Op::Clear))),
                 "Forward(Op(Clear))"
@@ -264,7 +272,6 @@ mod tests {
                 r#"Prompt("Create AGENTS.md")"#
             );
             assert_eq!(format!("{modal:?}"), "Modal(<modal>)");
-            assert_eq!(format!("{:?}", done()), r#"SystemMessage("done")"#);
             assert_eq!(format!("{:?}", background()), "Background(<task>)");
         }
 
@@ -272,9 +279,9 @@ mod tests {
             use super::*;
 
             #[test]
-            #[should_panic(expected = r#"expected Forward, got SystemMessage("done")"#)]
+            #[should_panic(expected = r#"expected Forward, got Prompt("Create AGENTS.md")"#)]
             fn names_the_variant_it_got() {
-                done().into_forward();
+                SlashOutcome::Prompt("Create AGENTS.md".to_owned()).into_forward();
             }
         }
 
@@ -288,23 +295,13 @@ mod tests {
             }
         }
 
-        mod into_system_message {
-            use super::*;
-
-            #[test]
-            #[should_panic(expected = "expected SystemMessage, got Forward(Op(Clear))")]
-            fn names_the_variant_it_got() {
-                SlashOutcome::Forward(Action::Op(Op::Clear)).into_system_message();
-            }
-        }
-
         mod into_background {
             use super::*;
 
             #[test]
-            #[should_panic(expected = r#"expected Background, got SystemMessage("done")"#)]
+            #[should_panic(expected = r#"expected Background, got Prompt("Create AGENTS.md")"#)]
             fn names_the_variant_it_got() {
-                _ = done().into_background();
+                _ = SlashOutcome::Prompt("Create AGENTS.md".to_owned()).into_background();
             }
         }
     }

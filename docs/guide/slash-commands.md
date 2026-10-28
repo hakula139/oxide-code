@@ -61,16 +61,6 @@ After compaction:
 
 `/compact` refuses conversations shorter than about 1,000 tokens. It counts messages, tool calls, and tool output, but not instructions or tool definitions. If the model returns an empty summary, compaction fails and leaves the conversation unchanged.
 
-## Signing In
-
-`/login` opens the Claude sign-in page in your browser, which returns to `ox` when you finish. If the browser does not open or runs on another machine, such as when `ox` runs over SSH, open the printed URL in any browser instead. After you sign in there, the page shows a code. Paste it at the prompt and press **Enter**. While sign-in waits, the prompt takes only the code, so send other prompts after sign-in ends. Other text stays in the input, and slash commands still run. Press **Esc** to cancel. Sign-in also ends automatically after 5 minutes.
-
-After you approve access, oxide-code stores the login in `$XDG_DATA_HOME/ox/credentials.json` (default: `~/.local/share/ox/credentials.json`) and uses it for the current and later sessions.
-
-`/logout` deletes that file. A session using it switches to the Claude Code login if one is available. Otherwise, it stays open signed out until the next `/login`. If the Claude Code login exists but cannot be used, for example because it expired, `/logout` explains why.
-
-Both commands end by naming the credential that requests will now use. An environment variable or `client.api_key` takes precedence over either login, and `/login` tells you when one of them keeps the session on that credential and how to remove it so the new login takes over after a restart. See [Authentication](configuration.md#authentication) for the full order.
-
 ## Sessions
 
 `/rename`, `/resume`, `/delete`, `/archive`, and `/unarchive` manage session titles and saved sessions without leaving the TUI. See [Titles](sessions.md#titles), [Mid-Session Resume](sessions.md#mid-session-resume), [Deleting a Session](sessions.md#deleting-a-session), and [Archiving a Session](sessions.md#archiving-a-session).

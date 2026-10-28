@@ -210,9 +210,17 @@ jobs:
 
           gh release create "$GITHUB_REF_NAME" release-assets/* "${options[@]}"
 
+  formula:
+    name: Check Homebrew Formula
+    if: github.ref_type == 'tag'
+    needs: publish
+    uses: ./.github/workflows/formula.yml
+    with:
+      tag: ${{ github.ref_name }}
+
   homebrew:
     name: Update Homebrew Formula
-    needs: publish
+    needs: [publish, formula]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -226,12 +234,11 @@ jobs:
         with:
           ref: main
 
-      - name: Download archives
+      - name: Download formula
         uses: actions/download-artifact@v8
         with:
-          pattern: oxide-code-*
-          path: release-assets
-          merge-multiple: true
+          name: formula
+          path: Formula
 
       - name: Open formula PR
         env:
@@ -272,7 +279,6 @@ jobs:
           branch="chore/homebrew-$GITHUB_REF_NAME"
           title="chore(release): refresh Homebrew formula for $GITHUB_REF_NAME"
           git switch -c "$branch"
-          ./scripts/update-homebrew-formula.sh "$GITHUB_REF_NAME" release-assets
           if git diff --quiet; then
             echo "The formula on main already points at $GITHUB_REF_NAME."
             exit 0

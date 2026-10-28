@@ -22,6 +22,7 @@ use crate::model::{Effort, ModelSpec, ResolvedModelId};
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, Mode, SessionGrant};
 use crate::session::entry::ArchiveState;
+use crate::session::saved::SavedError;
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 use crate::tool::view::{ApprovalPreview, ToolResultView};
@@ -267,10 +268,10 @@ pub enum Event {
     /// An [`Op::Rename`] could not record its title, so the title stays. Ends the rename as
     /// [`Self::SessionTitleUpdated`] does.
     RenameFailed(String),
-    /// The saved session's archive operation completed. The error is a display-ready sentence.
+    /// The saved session's archive operation completed. Each frontend phrases the typed error.
     ArchiveUpdated {
         id: String,
-        result: Result<ArchiveState, String>,
+        result: Result<ArchiveState, SavedError>,
     },
     /// [`Op::Clear`] or [`Op::Archive`] started session `id`. `old_session` reports the prior
     /// session's archive state for the frontend's notice.
@@ -316,7 +317,7 @@ pub enum Event {
     /// [`Op::LoginCode`].
     LoginStarted { url: String, manual_url: String },
     /// An [`Op::Login`] stored a new oxide-code login. `auth` is the credential requests now use,
-    /// which stays an env var or `client.api_key` when one outranks the login.
+    /// which stays an env var or `client.auth` when one outranks the login.
     SignedIn { auth: AuthSource },
     /// A stored login recovered from a transient failure. The pending prompt or compaction
     /// continues with `auth`.
@@ -583,6 +584,7 @@ mod tests {
 
     use super::*;
     use crate::config::compaction::CompactionConfig;
+    use crate::session::saved::SavedAction;
 
     mod op {
         use super::*;
@@ -630,7 +632,14 @@ mod tests {
 
                 for (result, expected) in [
                     (Ok(ArchiveState::Archived), TurnEnd::Completed),
-                    (Err("Archive failed".to_owned()), TurnEnd::Failed),
+                    (
+                        Err(SavedError::Failed {
+                            action: SavedAction::Archive,
+                            id: "saved".to_owned(),
+                            cause: "disk full".to_owned(),
+                        }),
+                        TurnEnd::Failed,
+                    ),
                 ] {
                     assert_eq!(
                         TurnEnd::of(

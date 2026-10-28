@@ -64,7 +64,7 @@ The draft lists PR titles, which are too short to explain each change to users. 
    cargo update --workspace
    ```
 
-3. Pin the install snippets to the tag by setting the `VERSION=` line in `README.md` and `docs/guide/install.md` to `VERSION=vX.Y.Z`.
+3. Pin the install snippets to the tag by setting the `VERSION=` line in `docs/guide/install.md` to `VERSION=vX.Y.Z`.
 
 4. For a stable tag, add the release's [session resume fixture](docs/design/session/persistence.md#compatibility), which is the byte-compatibility snapshot with its insta header deleted by `sed` from the first line through the second `---` line. `INSTA_UPDATE=unseen` then records how the new fixture resumes, while still failing if an earlier release's fixture now resumes differently:
 
@@ -103,7 +103,7 @@ The draft lists PR titles, which are too short to explain each change to users. 
 
 8. Run the [verification block](AGENTS.md#verification). Because `cspell` scans `CHANGELOG.md`, add any unknown words from the section to `.cspell/words.txt`.
 
-9. Commit, then open a PR titled `chore(release): vX.Y.Z`, whose title becomes the squash commit title on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `README.md`, `docs/guide/install.md`, and possibly `.cspell/words.txt`, plus, for a stable tag, the new fixture under `crates/ox-core/src/session/fixtures/` and its snapshot.
+9. Commit, then open a PR titled `chore(release): vX.Y.Z`, whose title becomes the squash commit title on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `docs/guide/install.md`, and possibly `.cspell/words.txt`, plus, for a stable tag, the new fixture under `crates/ox-core/src/session/fixtures/` and its snapshot.
 
 10. Merge after CI passes and the review is approved. If another PR merges first, recreate the branch from `main` and repeat the steps before curation, because updating the branch leaves a section that misses the new commit. Carry the curated entries over from the old branch, then curate the new ones.
 
@@ -127,7 +127,7 @@ Watch the [Release workflow](https://github.com/hakula139/oxide-code/actions/wor
 - Every [target](#targets) archive and its `.sha256` sidecar are attached, and `gh attestation verify <archive> --repo hakula139/oxide-code` passes for one of them.
 - `nix run github:hakula139/oxide-code/vX.Y.Z -- --version` prints the version on one host.
 
-The workflow then opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR and dispatches CI on it. Merging that PR is the final release step. Because GitHub Actions opened the PR, GitHub holds the PR's own CI run until someone with write access approves it. The dispatched run does not report the required `CI Result` check to the PR either, so the PR stays blocked ([#364](https://github.com/hakula139/oxide-code/issues/364)). Once the dispatched run passes, merge the PR with `gh pr merge --squash --admin`, then check that `brew update && brew upgrade oxide-code` installs the version. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. If the job fails, fix the cause and rerun it, since a rerun rebuilds the branch and reuses an open PR.
+The workflow then renders the formula from the release sidecars, installs it through a local tap on `macos-latest` and `ubuntu-latest`, and runs `brew test` there before it opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR and dispatches CI on it. The same check runs on pull requests that touch the formula, its rendering script, or the release workflows. Merging that PR is the final release step. Because GitHub Actions opened the PR, GitHub holds the PR's own CI run until someone with write access approves it. The dispatched run does not report the required `CI Result` check to the PR either, so the PR stays blocked ([#364](https://github.com/hakula139/oxide-code/issues/364)). Once the dispatched run passes, merge the PR with `gh pr merge --squash --admin`. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. If the job fails, fix the cause and rerun it, since a rerun rebuilds the branch and reuses an open PR.
 
 ## Re-Cut an Existing Tag
 

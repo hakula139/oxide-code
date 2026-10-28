@@ -20,7 +20,7 @@ use crate::permission::PermissionClass;
 use crate::protocol::{Event, EventSink};
 use crate::tool::spill::Spills;
 use crate::tool::{
-    Prepared, Tool, ToolCtx, ToolOutput, ToolSpec, extract_input_field, parse_input,
+    Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field, parse_input,
 };
 use crate::util::sync::lock_or_recover;
 use crate::util::text::ELLIPSIS;
@@ -461,17 +461,19 @@ impl BashOutputTool {
 impl Tool for BashOutputTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "bash_output".to_owned(),
-            description: "Read what a background shell printed since the last read, \
-                          and whether it is still running. \
-                          Pass a timeout to wait for the command to finish first, \
-                          so one call can wait out a build. \
-                          The wait ends when the command exits or the timeout passes, \
-                          so for a command that keeps running, \
-                          such as a server, it lasts the whole timeout. \
-                          An unknown ID lists the open shells."
-                .to_owned(),
-            input_schema: output_input_schema(),
+            definition: ToolDefinition {
+                name: "bash_output".to_owned(),
+                description: "Read what a background shell printed since the last read, \
+                              and whether it is still running. \
+                              Pass a timeout to wait for the command to finish first, \
+                              so one call can wait out a build. \
+                              The wait ends when the command exits or the timeout passes, \
+                              so for a command that keeps running, \
+                              such as a server, it lasts the whole timeout. \
+                              An unknown ID lists the open shells."
+                    .to_owned(),
+                input_schema: output_input_schema(),
+            },
             // It reads only a shell the session started, so it never needs approval.
             class: PermissionClass::Read,
             // A read empties the shell's unread output.
@@ -512,13 +514,15 @@ impl BashStopTool {
 impl Tool for BashStopTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "bash_stop".to_owned(),
-            description: "Stop a background shell and every process it started, \
-                          and return what it printed since the last read. \
-                          Stop a finished shell too once you no longer need its output, \
-                          since a session keeps only a limited number of shells open."
-                .to_owned(),
-            input_schema: stop_input_schema(),
+            definition: ToolDefinition {
+                name: "bash_stop".to_owned(),
+                description: "Stop a background shell and every process it started, \
+                              and return what it printed since the last read. \
+                              Stop a finished shell too once you no longer need its output, \
+                              since a session keeps only a limited number of shells open."
+                    .to_owned(),
+                input_schema: stop_input_schema(),
+            },
             // It ends only a shell the session started, so it never needs approval.
             class: PermissionClass::Read,
             parallel_safe: false,

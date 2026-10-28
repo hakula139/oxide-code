@@ -1,0 +1,78 @@
+name: Homebrew Formula
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/formula.yml
+      - .github/workflows/release.yml
+      - Formula/oxide-code.rb
+      - scripts/update-homebrew-formula.sh
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag whose release sidecars the formula is rendered from
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Tag whose release sidecars the formula is rendered from (defaults to the version
+          the committed formula follows)
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-latest
+          - ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Render formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [[ -n "$TAG" ]]; then
+            tag=$TAG
+          else
+            tag="v$(sed -nE 's/^  version "([^"]+)"$/\1/p' Formula/oxide-code.rb)"
+          fi
+          mkdir sidecars
+          gh release download "$tag" --pattern '*.sha256' --dir sidecars
+          ./scripts/update-homebrew-formula.sh "$tag" sidecars
+
+      - name: Put Homebrew on PATH
+        if: runner.os == 'Linux'
+        run: echo /home/linuxbrew/.linuxbrew/bin >> "$GITHUB_PATH"
+
+      # Homebrew refuses a formula read from a path, so install through a tap as a user would.
+      - name: Install and test formula
+        run: |
+          brew tap-new --no-git local/oxide-code
+          cp Formula/oxide-code.rb "$(brew --repository local/oxide-code)/Formula/"
+          brew install local/oxide-code/oxide-code
+          brew test local/oxide-code/oxide-code
+
+      - name: Upload formula
+        if: runner.os == 'macOS' && inputs.tag != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: formula
+          path: Formula/oxide-code.rb
+          if-no-files-found: error
+          overwrite: true

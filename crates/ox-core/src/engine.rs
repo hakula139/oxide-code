@@ -611,7 +611,7 @@ mod tests {
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
-    use crate::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec};
+    use crate::tool::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::tls::testing::NoRoots;
 
@@ -1498,7 +1498,10 @@ mod tests {
                     .await;
                 assert_ne!(fresh_id, archived_id);
                 assert_eq!(old_session, ArchiveState::Archived);
-                assert!(store.load_session_data(&archived_id).unwrap().archived);
+                assert_eq!(
+                    store.load_session_data(&archived_id).unwrap().archive_state,
+                    ArchiveState::Archived,
+                );
 
                 let target = ResumeTarget::Path(store.find_session_path(&archived_id).unwrap());
                 handle.ops.send(Op::Resume { target }).await.unwrap();
@@ -1510,7 +1513,10 @@ mod tests {
                 handle.shutdown().await.unwrap();
 
                 assert_eq!(resumed, (archived_id.clone(), ArchiveState::Archived));
-                assert!(!store.load_session_data(&archived_id).unwrap().archived);
+                assert_eq!(
+                    store.load_session_data(&archived_id).unwrap().archive_state,
+                    ArchiveState::Active,
+                );
             })
             .await;
         }
@@ -1552,7 +1558,10 @@ mod tests {
                 let independent = tokio::spawn(async { "runtime event" });
 
                 assert_eq!(independent.await.unwrap(), "runtime event");
-                assert!(!store.load_session_data("saved").unwrap().archived);
+                assert_eq!(
+                    store.load_session_data("saved").unwrap().archive_state,
+                    ArchiveState::Active,
+                );
                 barrier.release();
                 let archived = next_matching(&mut handle.events, |event| {
                     matches!(
@@ -1577,7 +1586,10 @@ mod tests {
                 handle.shutdown().await.unwrap();
 
                 assert_eq!(resumed, ("saved".to_owned(), ArchiveState::Archived));
-                assert!(!store.load_session_data("saved").unwrap().archived);
+                assert_eq!(
+                    store.load_session_data("saved").unwrap().archive_state,
+                    ArchiveState::Active,
+                );
             })
             .await;
         }
@@ -1926,13 +1938,15 @@ mod tests {
         impl Tool for BlockedWriteTool {
             fn spec(&self) -> ToolSpec {
                 ToolSpec {
-                    name: "blocked-write".to_owned(),
-                    description: "Controlled workspace write.".to_owned(),
-                    input_schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}},
-                        "required": ["text"],
-                    }),
+                    definition: ToolDefinition {
+                        name: "blocked-write".to_owned(),
+                        description: "Controlled workspace write.".to_owned(),
+                        input_schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"],
+                        }),
+                    },
                     class: PermissionClass::Read,
                     parallel_safe: false,
                 }
@@ -3626,7 +3640,7 @@ mod tests {
                 assert_eq!(std::fs::read(&path).unwrap(), b"committed");
                 let saved = store.load_session_data(&session_id).unwrap().file_snapshots;
                 assert_eq!(saved, tracker.snapshot_all());
-                let (restored, dropped) = FileTracker::restored(saved);
+                let (restored, dropped) = FileTracker::restored(saved).await;
                 assert_eq!(dropped, [] as [PathBuf; 0]);
                 assert_eq!(
                     restored.verify_current_content(&path, b"committed", GatePurpose::Write),

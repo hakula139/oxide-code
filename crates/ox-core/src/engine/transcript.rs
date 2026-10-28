@@ -11,6 +11,7 @@ use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::Message;
 use crate::model::ModelSpec;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
+use crate::protocol::ResumeTarget;
 use crate::session::entry::{CompactBoundary, CompactInfo, UsageRecord};
 use crate::session::handle::{
     self, Checkpoint, CompactOutcome, LoadedTranscript, RecordOutcome, RollIntoOutcome,
@@ -70,7 +71,7 @@ impl LiveTranscript {
             tasks,
             file_snapshots,
         } = transcript;
-        let (file_tracker, drifted) = FileTracker::restored(file_snapshots);
+        let (file_tracker, drifted) = FileTracker::restored(file_snapshots).await;
         let prompt_unrecorded = context.is_none();
         let (prompt, warnings) = session_prompt(context, model, cwd).await;
         let live = Self {
@@ -114,7 +115,7 @@ impl LiveTranscript {
     }
 
     /// The context the parts of the next request fill, which stands in until a turn reports usage.
-    pub(super) fn request_estimate(&self, tools: &[ToolDefinition]) -> u32 {
+    pub(super) fn request_estimate(&self, tools: &[&ToolDefinition]) -> u32 {
         request_tokens(&self.prompt, tools, &self.messages)
     }
 
@@ -246,12 +247,12 @@ impl LiveTranscript {
         .await
     }
 
-    /// Finalizes the session with the files the transcript read and swaps in the saved session at
-    /// `target` without swapping when it cannot be loaded.
+    /// Finalizes the session with the files the transcript read and swaps in the saved session
+    /// `target` names, without swapping when it cannot be resolved or loaded.
     pub(super) async fn roll_into(
         &mut self,
         store: &SessionStore,
-        target: &Path,
+        target: ResumeTarget,
     ) -> Result<RollIntoOutcome> {
         handle::roll_into(
             &mut self.session,

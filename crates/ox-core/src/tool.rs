@@ -30,21 +30,20 @@ use self::grep::GrepTool;
 use self::read::ReadTool;
 use self::spill::Spills;
 use self::tasks::{Task, TasksTool};
-use self::view::{ApprovalBody, ApprovalPreview, EditDiff, ToolResultView};
+use self::view::{ApprovalBody, ApprovalPreview, ToolResultView};
 use self::write::WriteTool;
 use crate::file_tracker::FileTracker;
 use crate::permission::{Access, PermissionClass, ReadFilter, Workspace};
 use crate::util::path::{expand_user, slash_separated};
-use crate::util::text::ELLIPSIS;
+use crate::util::text::{ELLIPSIS, capitalize_first};
 
 // ── Tool Spec ──
 
 /// What the model and the gate know of a tool. The registry takes it once, when the tool registers.
 #[derive(Debug, Clone)]
 pub struct ToolSpec {
-    pub name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
+    /// The name, description, and input schema the model sees.
+    pub definition: ToolDefinition,
     /// The permission class the gate files the tool's calls under.
     pub class: PermissionClass,
     /// Whether a call may run alongside the other parallel-safe calls of its round, since it
@@ -52,22 +51,12 @@ pub struct ToolSpec {
     pub parallel_safe: bool,
 }
 
-impl ToolSpec {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: self.name.clone(),
-            description: self.description.clone(),
-            input_schema: self.input_schema.clone(),
-        }
-    }
-}
-
-/// Tool schema exposed to the Anthropic API.
-#[derive(Clone, Serialize)]
-pub(crate) struct ToolDefinition {
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) input_schema: serde_json::Value,
+/// The name, description, and input schema of a tool, as the API receives them.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
 }
 
 // ── Tool Context ──
@@ -108,6 +97,17 @@ pub struct Prepared {
     pub(crate) access: Access,
 }
 
+impl Prepared {
+    /// The parsed input and resolved `file_path` of a file tool.
+    pub(crate) fn into_path_input<T: DeserializeOwned>(self) -> Result<(T, PathBuf), String> {
+        let input = parse_input(self.input)?;
+        let Some(path) = self.access.resolved() else {
+            return Err("Invalid input: missing field `file_path`".to_owned());
+        };
+        Ok((input, path.clone()))
+    }
+}
+
 // ── Tool Output ──
 
 /// Result returned from a tool execution to the agent loop.
@@ -144,17 +144,16 @@ impl ToolOutput {
         self
     }
 
-    fn with_diff(mut self, diff: EditDiff) -> Self {
-        self.metadata.diff = Some(diff);
-        self
+    fn with_result_view(self, view: ToolResultView) -> Self {
+        self.with_stored_view(StoredView::View(view))
     }
 
-    fn with_truncated_total(mut self, total: usize) -> Self {
-        self.metadata.truncated_total = Some(total);
-        self
+    /// Marks the content as the whole result body, so it renders as text.
+    fn with_text_view(self) -> Self {
+        self.with_stored_view(StoredView::Text)
     }
 
-    fn with_result_view(mut self, view: ToolResultView) -> Self {
+    fn with_stored_view(mut self, view: StoredView) -> Self {
         self.metadata.result_view = Some(view);
         self
     }
@@ -169,17 +168,21 @@ impl ToolOutput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolMetadata {
     /// A one-line summary of the call, which the UI shows on its result.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
-    /// What a successful `edit` changed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) diff: Option<EditDiff>,
-    /// Unbounded match count when a tool capped returned rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) truncated_total: Option<usize>,
-    /// The view produced with the result, whose paths already use the call's working directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) result_view: Option<ToolResultView>,
+    /// `None` when the tool derives its view from the call's input and result on each render.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result_view: Option<StoredView>,
+}
+
+/// What a result stores for replay beyond its text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StoredView {
+    /// The content renders as text without the tool's own view derivation.
+    Text,
+    /// Structured view whose paths already use the call's working directory.
+    View(ToolResultView),
 }
 
 // ── Tool Trait ──
@@ -242,29 +245,29 @@ pub trait Tool: Send + Sync {
     }
 
     /// Returns the structured shape of a successful tool result for richer UI rendering, with paths
-    /// shown relative to `cwd`, or `None` to fall back to [`ToolResultView::Text`]. Errors
-    /// short-circuit to text in the registry.
+    /// shown relative to `cwd`, or `None` to fall back to [`ToolResultView::Text`]. The registry
+    /// calls it only for a result that stored no view, and short-circuits errors to text.
     fn result_view(
         &self,
         _input: &serde_json::Value,
         _content: &str,
-        _metadata: &ToolMetadata,
         _cwd: &Path,
     ) -> Option<ToolResultView> {
         None
     }
 
-    /// Builds the approval modal's preview of `input`, by default the tool name over its label from
-    /// [`Self::summarize_call`]. Async because the write preview reads the file it would replace.
+    /// Builds the approval modal's preview of `prepared`, by default the tool name over its label
+    /// from [`Self::summarize_call`]. Async because the write preview reads the file it would
+    /// replace through the resolved path.
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
-        input: &'a serde_json::Value,
+        prepared: &'a Prepared,
         cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
         Box::pin(std::future::ready(ApprovalPreview {
             title: pascal_case(name),
-            body: ApprovalBody::Command(self.summarize_call(name, input, cwd)),
+            body: ApprovalBody::Command(self.summarize_call(name, &prepared.input, cwd)),
         }))
     }
 
@@ -287,15 +290,7 @@ fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'
 
 /// Renders a tool name as the label the UI shows, `bash_output` as `BashOutput`.
 fn pascal_case(name: &str) -> String {
-    let mut label = String::with_capacity(name.len());
-    for word in name.split('_') {
-        let mut chars = word.chars();
-        if let Some(first) = chars.next() {
-            label.extend(first.to_uppercase());
-            label.push_str(chars.as_str());
-        }
-    }
-    label
+    name.split('_').map(capitalize_first).collect()
 }
 
 // ── Tool Registry ──
@@ -332,14 +327,15 @@ impl ToolRegistry {
     pub(crate) fn get(&self, name: &str) -> Option<(&ToolSpec, &dyn Tool)> {
         self.tools
             .iter()
-            .find(|(spec, _)| spec.name == name)
+            .find(|(spec, _)| spec.definition.name == name)
             .map(|(spec, tool)| (spec, tool.as_ref()))
     }
 
-    pub(crate) fn definitions(&self) -> Vec<ToolDefinition> {
+    /// The definitions a request sends, in registration order.
+    pub(crate) fn definitions(&self) -> Vec<&ToolDefinition> {
         self.tools
             .iter()
-            .map(|(spec, _)| spec.definition())
+            .map(|(spec, _)| &spec.definition)
             .collect()
     }
 
@@ -356,8 +352,8 @@ impl ToolRegistry {
         )
     }
 
-    /// Resolves the result view for a tool call, with paths relative to `cwd`. Errors and unknown
-    /// tools render as [`ToolResultView::Text`].
+    /// Resolves the result view for a tool call, with paths relative to `cwd`. Errors, results
+    /// marked as plain text, and unknown tools render as [`ToolResultView::Text`].
     pub(crate) fn result_view(
         &self,
         name: &str,
@@ -372,14 +368,18 @@ impl ToolRegistry {
                 content: content.to_owned(),
             };
         }
-        if let Some(view) = &metadata.result_view {
-            return view.clone();
-        }
-        self.get(name)
-            .and_then(|(_, tool)| tool.result_view(input, content, metadata, cwd))
-            .unwrap_or_else(|| ToolResultView::Text {
+        match &metadata.result_view {
+            Some(StoredView::View(view)) => view.clone(),
+            Some(StoredView::Text) => ToolResultView::Text {
                 content: content.to_owned(),
-            })
+            },
+            None => self
+                .get(name)
+                .and_then(|(_, tool)| tool.result_view(input, content, cwd))
+                .unwrap_or_else(|| ToolResultView::Text {
+                    content: content.to_owned(),
+                }),
+        }
     }
 }
 
@@ -440,14 +440,10 @@ fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
     if line.len() <= max_chars {
         return Cow::Borrowed(line);
     }
-    let total_chars = line.chars().count();
-    if total_chars <= max_chars {
+    let Some((boundary, _)) = line.char_indices().nth(max_chars) else {
         return Cow::Borrowed(line);
-    }
-    let boundary = line
-        .char_indices()
-        .nth(max_chars)
-        .map_or(line.len(), |(i, _)| i);
+    };
+    let total_chars = max_chars + line[boundary..].chars().count();
     Cow::Owned(format!(
         "{}{ELLIPSIS} [{total_chars} chars]",
         &line[..boundary]
@@ -468,7 +464,7 @@ pub(crate) mod local_testing {
 
     use super::search::{SearchRoot, search_path};
     use super::spill::run_capped;
-    use super::{Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
+    use super::{Prepared, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
     use crate::file_tracker::FileTracker;
     use crate::permission::rule::Rule;
     use crate::permission::{Access, Mode, PermissionClass, Policy, ReadFilter, Workspace};
@@ -509,16 +505,16 @@ pub(crate) mod local_testing {
                     use std::os::unix::fs::MetadataExt as _;
 
                     let current = current.metadata().unwrap();
+                    let original = original.metadata().unwrap();
                     assert_eq!(
                         (current.dev(), current.ino(), current.uid(), current.gid()),
                         (
-                            metadata.dev(),
-                            metadata.ino(),
-                            metadata.uid(),
-                            metadata.gid()
+                            original.dev(),
+                            original.ino(),
+                            original.uid(),
+                            original.gid()
                         )
                     );
-                    let _: &File = original;
                 }
                 #[cfg(windows)]
                 assert_eq!(
@@ -540,6 +536,14 @@ pub(crate) mod local_testing {
                     .collect();
                 assert_eq!(temporary, [] as [std::ffi::OsString; 0]);
             }
+        }
+    }
+
+    /// A prepared call carrying `input` alone, for tests of a part that does not resolve a path.
+    pub(crate) fn prepared(input: serde_json::Value) -> Prepared {
+        Prepared {
+            input,
+            access: Access::default(),
         }
     }
 
@@ -638,8 +642,9 @@ pub mod testing {
     use std::sync::Arc;
 
     use super::bash::BashTool;
-    use super::edit::synthesize_diff;
-    use super::{ApprovalBody, ApprovalPreview, EditDiff, Tool, ToolRegistry};
+    use super::edit::{anchor_line, synthesize_chunk};
+    use super::{ApprovalBody, ApprovalPreview, Tool, ToolRegistry};
+    use crate::tool::view::EditDiff;
 
     /// The approval preview of a foreground `bash` call that runs `command`.
     pub fn bash_preview(command: &str) -> ApprovalPreview {
@@ -655,20 +660,21 @@ pub mod testing {
         ToolRegistry::new(tools)
     }
 
-    /// The diff the `edit` tool shows for replacing `old` with `new`, numbered from line 1.
+    /// An edit diff replacing `old` with `new` at line 1, as the TUI tests render it.
     pub fn edit_diff(old: &str, new: &str) -> EditDiff {
-        synthesize_diff(old, new)
+        let chunk = synthesize_chunk(old, new);
+        let locations = anchor_line(&chunk, 1, 1).into_iter().collect();
+        EditDiff { chunk, locations }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::fs;
 
     use super::local_testing::{ctx, deny_reads, temp_ctx};
     use super::testing::bash_registry;
-    use super::view::{DiffChunk, NumberedLine};
+    use super::view::NumberedLine;
     use super::*;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
@@ -680,18 +686,6 @@ mod tests {
         ToolRegistry::built_in(&ReadFilter::default(), &Arc::default())
     }
 
-    #[test]
-    fn catalog_names_and_icons_are_unique() {
-        let tools = built_in();
-
-        let names: HashSet<_> = tools.iter().map(|(spec, _)| &spec.name).collect();
-        let icons: HashSet<_> = tools.iter().map(|(_, tool)| tool.icon()).collect();
-
-        let count = tools.iter().count();
-        assert_eq!(names.len(), count, "duplicate name");
-        assert_eq!(icons.len(), count, "duplicate icon");
-    }
-
     mod spec {
         use super::*;
 
@@ -699,9 +693,12 @@ mod tests {
         fn every_tool_exposes_non_empty_name_description_and_object_schema() {
             for (spec, _) in built_in().iter() {
                 let ToolSpec {
-                    name,
-                    description,
-                    input_schema,
+                    definition:
+                        ToolDefinition {
+                            name,
+                            description,
+                            input_schema,
+                        },
                     ..
                 } = spec;
                 assert!(!name.is_empty(), "tool with empty name in catalog");
@@ -724,7 +721,13 @@ mod tests {
 
             let catalog: Vec<_> = tools
                 .iter()
-                .map(|(spec, _)| (spec.name.as_str(), spec.class, spec.parallel_safe))
+                .map(|(spec, _)| {
+                    (
+                        spec.definition.name.as_str(),
+                        spec.class,
+                        spec.parallel_safe,
+                    )
+                })
                 .collect();
 
             assert_eq!(
@@ -1001,7 +1004,7 @@ mod tests {
             let preview = GlobTool::new(ReadFilter::default())
                 .approval_preview(
                     "glob",
-                    &serde_json::json!({"pattern": "*.rs"}),
+                    &local_testing::prepared(serde_json::json!({"pattern": "*.rs"})),
                     Path::new("/repo"),
                 )
                 .await;
@@ -1036,7 +1039,7 @@ mod tests {
                 let names: Vec<_> = tools
                     .definitions()
                     .into_iter()
-                    .map(|tool| tool.name)
+                    .map(|tool| tool.name.as_str())
                     .collect();
 
                 assert_eq!(
@@ -1134,7 +1137,13 @@ mod tests {
                     .collect();
                 let registered: Vec<_> = registry
                     .iter()
-                    .map(|(spec, _)| (&spec.name, &spec.description, &spec.input_schema))
+                    .map(|(spec, _)| {
+                        (
+                            &spec.definition.name,
+                            &spec.definition.description,
+                            &spec.definition.input_schema,
+                        )
+                    })
                     .collect();
                 assert_eq!(listed, registered);
             }
@@ -1241,7 +1250,7 @@ mod tests {
             fn falls_back_to_bare_name_when_arg_missing() {
                 let tools = built_in();
                 for (spec, _) in tools.iter() {
-                    let name = &spec.name;
+                    let name = &spec.definition.name;
                     let got = tools.label(name, &serde_json::json!({}), Path::new("/repo"));
                     assert_eq!(got, pascal_case(name), "tool {name}");
                 }
@@ -1293,80 +1302,79 @@ mod tests {
 
             #[test]
             fn delegates_to_tool_for_structured_output() {
-                let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
-                let input = serde_json::json!({
-                    "file_path": "/tmp/f.rs",
-                    "old_string": "a",
-                    "new_string": "b",
-                });
+                let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+                let input = serde_json::json!({"file_path": "/tmp/f.rs"});
                 let metadata = ToolMetadata::default();
+
                 let view = registry.result_view(
-                    "edit",
+                    "read",
                     &input,
-                    "Successfully edited /tmp/f.rs.",
+                    "1\ta\n2\tb",
                     &metadata,
                     false,
                     Path::new("/repo"),
                 );
+
                 assert_eq!(
                     view,
-                    ToolResultView::Diff(EditDiff {
-                        chunk: DiffChunk {
-                            old: vec![NumberedLine {
+                    ToolResultView::ReadExcerpt {
+                        path: "/tmp/f.rs".to_owned(),
+                        lines: vec![
+                            NumberedLine {
                                 number: 1,
                                 text: "a".to_owned()
-                            }],
-                            new: vec![NumberedLine {
-                                number: 1,
+                            },
+                            NumberedLine {
+                                number: 2,
                                 text: "b".to_owned()
-                            }],
-                        },
-                        locations: vec![1],
-                    }),
-                );
-            }
-
-            #[test]
-            fn short_circuits_errors_to_text() {
-                let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
-                let input = serde_json::json!({
-                    "file_path": "/tmp/f.rs",
-                    "old_string": "a",
-                    "new_string": "b",
-                });
-                let metadata = ToolMetadata {
-                    result_view: Some(ToolResultView::GlobFiles {
-                        pattern: "*.rs".to_owned(),
-                        files: vec!["stale.rs".to_owned()],
-                        total: 1,
-                    }),
-                    ..ToolMetadata::default()
-                };
-                let view = registry.result_view(
-                    "edit",
-                    &input,
-                    "old_string not found",
-                    &metadata,
-                    true,
-                    Path::new("/repo"),
-                );
-                assert_eq!(
-                    view,
-                    ToolResultView::Text {
-                        content: "old_string not found".to_owned(),
+                            },
+                        ],
+                        total_lines: 2,
                     },
                 );
             }
 
             #[test]
-            fn stored_view_precedes_the_tools_legacy_parser() {
+            fn short_circuits_errors_to_text() {
+                let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+                let input = serde_json::json!({"file_path": "/tmp/f.rs"});
+                let metadata = ToolMetadata {
+                    result_view: Some(StoredView::View(ToolResultView::GlobFiles {
+                        pattern: "*.rs".to_owned(),
+                        files: vec!["stale.rs".to_owned()],
+                        total: 1,
+                    })),
+                    ..ToolMetadata::default()
+                };
+
+                let view = registry.result_view(
+                    "read",
+                    &input,
+                    "File not found: /tmp/f.rs",
+                    &metadata,
+                    true,
+                    Path::new("/repo"),
+                );
+
+                assert_eq!(
+                    view,
+                    ToolResultView::Text {
+                        content: "File not found: /tmp/f.rs".to_owned(),
+                    },
+                );
+            }
+
+            #[test]
+            fn stored_view_precedes_the_tools_own_derivation() {
                 let registry =
                     ToolRegistry::new(vec![Box::new(GlobTool::new(ReadFilter::default()))]);
-                let expected = ToolResultView::Text {
-                    content: "kept\n... [output omitted] ...\ntail".to_owned(),
+                let expected = ToolResultView::GlobFiles {
+                    pattern: "*.rs".to_owned(),
+                    files: vec!["kept.rs".to_owned()],
+                    total: 7,
                 };
                 let metadata = ToolMetadata {
-                    result_view: Some(expected.clone()),
+                    result_view: Some(StoredView::View(expected.clone())),
                     ..ToolMetadata::default()
                 };
 
@@ -1380,6 +1388,33 @@ mod tests {
                 );
 
                 assert_eq!(view, expected);
+            }
+
+            #[test]
+            fn stored_text_suppresses_the_tools_own_derivation() {
+                let registry =
+                    ToolRegistry::new(vec![Box::new(GlobTool::new(ReadFilter::default()))]);
+                let metadata = ToolMetadata {
+                    result_view: Some(StoredView::Text),
+                    ..ToolMetadata::default()
+                };
+                let content = "a.rs\nb.rs";
+
+                let view = registry.result_view(
+                    "glob",
+                    &serde_json::json!({"pattern": "*.rs"}),
+                    content,
+                    &metadata,
+                    false,
+                    Path::new("/repo"),
+                );
+
+                assert_eq!(
+                    view,
+                    ToolResultView::Text {
+                        content: content.to_owned(),
+                    },
+                );
             }
 
             #[test]
