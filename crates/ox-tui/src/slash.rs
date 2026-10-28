@@ -110,11 +110,10 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
         .join(", ")
 }
 
-/// Returns whether `parsed` waits for an idle App. An unknown command runs mid-turn, which reports
-/// the error.
-pub(crate) fn idle_only(parsed: &Parsed) -> bool {
-    registry::lookup_in(registry::BUILT_INS, &parsed.name)
-        .is_some_and(|cmd| cmd.idle_only(&parsed.args))
+/// Returns whether the command `name` waits for an idle App. An unknown command runs mid-turn,
+/// which reports the error.
+pub(crate) fn idle_only(name: &str) -> bool {
+    registry::lookup_in(registry::BUILT_INS, name).is_some_and(registry::SlashCommand::idle_only)
 }
 
 // ── Testing ──
@@ -245,40 +244,35 @@ mod tests {
         use super::*;
 
         #[test]
-        fn waits_for_idle_only_for_forms_that_change_the_session() {
+        fn pins_which_commands_wait_for_an_idle_app() {
             let cases = [
-                ("archive", "", true),
-                ("archive", "ab", true),
-                ("clear", "", true),
-                ("new", "", true),
-                ("compact", "focus", true),
-                ("config", "", false),
-                ("delete", "ab", true),
-                ("diff", "", false),
-                ("effort", "", true),
-                ("effort", "high", true),
-                ("exit", "", false),
-                ("quit", "", false),
-                ("help", "", false),
-                ("init", "", true),
-                ("login", "", true),
-                ("logout", "", true),
-                ("mode", "", false),
-                ("mode", "plan", false),
-                ("model", "", true),
-                ("model", "opus", true),
-                ("rename", "", true),
-                ("resume", "", true),
-                ("continue", "ab", true),
-                ("status", "", false),
-                ("theme", "", false),
-                ("theme", "latte", false),
-                ("unarchive", "ab", true),
-                ("no-such-thing", "", false),
+                ("archive", true),
+                ("clear", true),
+                ("new", true),
+                ("compact", true),
+                ("config", false),
+                ("delete", true),
+                ("diff", false),
+                ("effort", true),
+                ("exit", false),
+                ("quit", false),
+                ("help", false),
+                ("init", true),
+                ("login", true),
+                ("logout", true),
+                ("mode", false),
+                ("model", true),
+                ("rename", true),
+                ("resume", true),
+                ("continue", true),
+                ("status", false),
+                ("theme", false),
+                ("unarchive", true),
+                ("no-such-thing", false),
             ];
 
-            for (name, args, expected) in cases {
-                assert_eq!(idle_only(&parsed(name, args)), expected, "/{name} {args}");
+            for (name, expected) in cases {
+                assert_eq!(idle_only(name), expected, "/{name}");
             }
         }
     }

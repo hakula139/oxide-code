@@ -25,7 +25,7 @@ impl SlashCommand for EffortCmd {
         "Adjust reasoning effort"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
+    fn idle_only(&self) -> bool {
         true
     }
 

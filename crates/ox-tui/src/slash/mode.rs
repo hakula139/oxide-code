@@ -1,5 +1,6 @@
-//! `/mode` opens the picker, or switches with `/mode <mode>`, which [`ox_core::command::typed_form`] parses. Both
-//! forms run mid-turn, and the switch applies from the next tool call the gate weighs.
+//! `/mode` opens the picker, or switches with `/mode <mode>`, which
+//! [`ox_core::command::typed_form`] parses. Both forms run mid-turn, and the switch applies from
+//! the next tool call the gate weighs.
 
 use std::borrow::Cow;
 

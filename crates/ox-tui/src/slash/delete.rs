@@ -33,8 +33,7 @@ impl SlashCommand for DeleteCmd {
         "Delete a saved session"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
-        // Both forms wait for an idle App, since the typed-arg form deletes a session.
+    fn idle_only(&self) -> bool {
         true
     }
 
@@ -97,11 +96,6 @@ mod tests {
     use super::*;
     use crate::modal::testing::render_modal;
     use crate::slash::registry::testing::run_execute;
-
-    #[test]
-    fn requires_an_id_prefix() {
-        assert_eq!(DeleteCmd.usage(), Some("<id-prefix>"));
-    }
 
     mod echoes_input {
         use super::*;

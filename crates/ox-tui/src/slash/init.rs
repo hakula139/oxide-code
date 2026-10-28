@@ -33,7 +33,7 @@ impl SlashCommand for InitCmd {
         "Create or update AGENTS.md / CLAUDE.md"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
+    fn idle_only(&self) -> bool {
         true
     }
 

@@ -412,7 +412,7 @@ impl App {
         if echoes {
             self.chat.push_user_message(text.to_owned());
         }
-        if self.in_flight.is_some() && slash::idle_only(&parsed) {
+        if self.in_flight.is_some() && slash::idle_only(&parsed.name) {
             self.chat.push_system_message(format!(
                 "/{} runs only when idle. Try again after the turn finishes.",
                 parsed.name,

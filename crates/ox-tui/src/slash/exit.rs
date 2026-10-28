@@ -1,4 +1,5 @@
-//! `/exit` forwards [`ox_core::protocol::Op::Shutdown`], which quits `ox` as Ctrl+D on an empty idle input does.
+//! `/exit` forwards [`Op::Shutdown`](ox_core::protocol::Op::Shutdown), which quits `ox` as Ctrl+D
+//! on an empty idle input does.
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome, typed_form};

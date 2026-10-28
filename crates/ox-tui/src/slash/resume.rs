@@ -84,7 +84,7 @@ impl SlashCommand for ResumeCmd {
         "Resume a previous session"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
+    fn idle_only(&self) -> bool {
         true
     }
 

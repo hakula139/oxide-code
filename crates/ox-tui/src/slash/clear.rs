@@ -1,4 +1,4 @@
-//! `/clear` forwards [`ox_core::protocol::Op::Clear`]. The engine rolls the session.
+//! `/clear` forwards [`Op::Clear`](ox_core::protocol::Op::Clear). The engine rolls the session.
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome, typed_form};
@@ -16,7 +16,7 @@ impl SlashCommand for ClearCmd {
         "Start a new session (this one stays resumable)"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
+    fn idle_only(&self) -> bool {
         true
     }
 

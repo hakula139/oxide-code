@@ -95,10 +95,10 @@ pub(super) trait SlashCommand: Sync {
 
     fn description(&self) -> &'static str;
 
-    /// Whether the form `args` waits for an idle App, because it builds a prompt or sends an op
-    /// that [`ox_core::protocol::Op::is_idle_only`] holds for, directly or from the modal it opens.
-    /// The App runs every other form mid-turn.
-    fn idle_only(&self, _args: &str) -> bool {
+    /// Whether the command waits for an idle App, because any of its forms builds a prompt or sends
+    /// an op that [`ox_core::protocol::Op::is_idle_only`] holds for, directly or from the modal it
+    /// opens. The App runs every other command mid-turn.
+    fn idle_only(&self) -> bool {
         false
     }
 
@@ -356,7 +356,7 @@ mod tests {
             let ctx = SlashContext::new(&info);
             let forms: Vec<_> = forms()
                 .into_iter()
-                .filter(|(cmd, args)| !cmd.idle_only(args))
+                .filter(|(cmd, _)| !cmd.idle_only())
                 .collect();
             assert!(
                 forms.iter().any(|(cmd, args)| matches!(
@@ -371,9 +371,13 @@ mod tests {
                 .filter_map(|(cmd, args)| {
                     let outcome = cmd.execute(args, &ctx);
                     let races = match &outcome {
-                        Ok(SlashOutcome::Prompt(_)) => true,
                         Ok(SlashOutcome::Forward(Action::Op(op))) => op.is_idle_only(),
-                        _ => false,
+                        Ok(SlashOutcome::Modal(modal)) => modal.sends_idle_only_ops(),
+                        other => matches!(
+                            other,
+                            Ok(SlashOutcome::Prompt(_)
+                                | SlashOutcome::Forward(Action::SlashPrompt { .. }))
+                        ),
                     };
                     races.then(|| format!("/{} {args} returns {outcome:?}", cmd.name()))
                 })

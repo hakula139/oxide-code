@@ -36,7 +36,7 @@ impl SlashCommand for RenameCmd {
         "Rename the current session"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
+    fn idle_only(&self) -> bool {
         true
     }
 

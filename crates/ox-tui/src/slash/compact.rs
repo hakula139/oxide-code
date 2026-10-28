@@ -17,7 +17,7 @@ impl SlashCommand for CompactCmd {
         "Compress conversation context into a summary"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
+    fn idle_only(&self) -> bool {
         true
     }
 

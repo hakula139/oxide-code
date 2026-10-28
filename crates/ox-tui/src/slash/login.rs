@@ -20,7 +20,7 @@ impl SlashCommand for LoginCmd {
         "Sign in to a Claude account"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
+    fn idle_only(&self) -> bool {
         true
     }
 
@@ -42,7 +42,7 @@ impl SlashCommand for LogoutCmd {
         "Sign out of the oxide-code login"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
+    fn idle_only(&self) -> bool {
         true
     }
 

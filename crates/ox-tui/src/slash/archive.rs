@@ -23,7 +23,7 @@ impl SlashCommand for ArchiveCmd {
         "Archive this session or a saved one"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
+    fn idle_only(&self) -> bool {
         true
     }
 
@@ -52,7 +52,7 @@ impl SlashCommand for UnarchiveCmd {
         "Unarchive a saved session"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
+    fn idle_only(&self) -> bool {
         true
     }
 

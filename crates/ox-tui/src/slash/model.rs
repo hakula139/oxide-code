@@ -1,4 +1,5 @@
-//! `/model` opens the picker, or swaps with `/model <id>`, which [`ox_core::command::typed_form`] resolves.
+//! `/model` opens the picker, or swaps with `/model <id>`, which
+//! [`ox_core::command::typed_form`] resolves.
 
 use std::borrow::Cow;
 
@@ -22,7 +23,7 @@ impl SlashCommand for ModelCmd {
         "Switch the model"
     }
 
-    fn idle_only(&self, _args: &str) -> bool {
+    fn idle_only(&self) -> bool {
         true
     }
 
