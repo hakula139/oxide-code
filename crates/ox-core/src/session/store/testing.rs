@@ -160,9 +160,14 @@ pub fn seed_test_session(
 
 /// Archives the seeded session `session_id`, keeping the last-active time that orders listings.
 pub fn archive_test_session(store: &SessionStore, session_id: &str) {
-    store
+    let changed = store
         .set_archived(session_id, ArchiveState::Archived)
         .expect("the seeded session archives");
+    assert_eq!(
+        changed,
+        Some(true),
+        "session {session_id} is seeded and active"
+    );
 }
 
 /// Number of messages that resuming the session `session_id` loads.

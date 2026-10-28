@@ -16,7 +16,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
-use rusqlite::{Connection, Row};
+use rusqlite::{Connection, OptionalExtension as _, Row};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tracing::debug;
@@ -139,17 +139,24 @@ impl SessionStore {
             .with_context(|| format!("failed to lock {}", path.display()))
     }
 
-    /// Sets the archive state of session `session_id`, keeping its last-active time.
-    pub(crate) fn set_archived(&self, session_id: &str, state: ArchiveState) -> Result<()> {
-        let archived_at = (state == ArchiveState::Archived).then(now_millis);
-        let updated = self.connect()?.execute(
-            "UPDATE sessions SET archived_at = ?2 WHERE id = ?1",
-            (session_id, archived_at),
-        )?;
-        if updated == 0 {
-            bail!("session not found: {session_id}");
+    /// Moves session `session_id` into archive `state`, keeping its last-active time, and returns
+    /// whether it was in the other state, or `None` when no such session exists.
+    pub(crate) fn set_archived(
+        &self,
+        session_id: &str,
+        state: ArchiveState,
+    ) -> Result<Option<bool>> {
+        let conn = self.connect()?;
+        if commit::set_archive_state(&conn, session_id, state, now_millis())? {
+            return Ok(Some(true));
         }
-        Ok(())
+        let exists = conn
+            .query_row("SELECT 1 FROM sessions WHERE id = ?1", [session_id], |_| {
+                Ok(())
+            })
+            .optional()?
+            .is_some();
+        Ok(exists.then_some(false))
     }
 
     /// Deletes session `session_id` with its rows, artifact directory, and lock file. Refuses a
@@ -204,13 +211,16 @@ fn open_lock_file(path: &Path) -> Result<fs::File> {
 
 const MAX_SESSION_ID_LEN: usize = 64;
 
+/// Whether `b` may appear in a session ID.
+fn is_session_id_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
 /// Rejects an ID that could not name a file, since lock files and artifact directories carry it.
 pub(crate) fn validate_session_id(session_id: &str) -> Result<()> {
     let ok = !session_id.is_empty()
         && session_id.len() <= MAX_SESSION_ID_LEN
-        && session_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        && session_id.bytes().all(is_session_id_byte);
     if !ok {
         bail!("invalid session ID {session_id:?}");
     }
@@ -272,7 +282,7 @@ pub(crate) struct UsageRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::store::testing::isolated_store;
+    use crate::session::store::testing::{isolated_store, seed_test_session};
 
     mod open_in {
         use std::sync::Barrier;
@@ -314,14 +324,30 @@ mod tests {
         use super::*;
 
         #[test]
-        fn names_a_missing_session() {
+        fn reports_a_change_only_from_the_other_state_and_flags_a_missing_session() {
             let (_dir, store) = isolated_store();
+            seed_test_session(
+                &store,
+                "saved",
+                None,
+                1,
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
 
-            let err = store
-                .set_archived("missing", ArchiveState::Archived)
-                .unwrap_err();
+            for (step, (session_id, state, expected)) in [
+                ("saved", ArchiveState::Archived, Some(true)),
+                ("saved", ArchiveState::Archived, Some(false)),
+                ("saved", ArchiveState::Active, Some(true)),
+                ("saved", ArchiveState::Active, Some(false)),
+                ("missing", ArchiveState::Archived, None),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let changed = store.set_archived(session_id, state).unwrap();
 
-            assert_eq!(err.to_string(), "session not found: missing");
+                assert_eq!(changed, expected, "step {step}: {session_id} to {state:?}");
+            }
         }
     }
 

@@ -625,6 +625,38 @@ mod tests {
         }
 
         #[test]
+        fn fails_a_commit_that_repeats_an_id() {
+            for name in ["message", "usage"] {
+                let (_dir, store) = isolated_store();
+                let source = saved_session(&store, "start");
+                let mut state = open(&store, &source, "m");
+                if name == "message" {
+                    state.push_message(MessageRow {
+                        id: row_ids(&store, &source)[0],
+                        ..message_row(0, None, Message::user("again"))
+                    });
+                } else {
+                    let row = UsageRow {
+                        id: Uuid::new_v4(),
+                        record: usage(),
+                        created_at: 0,
+                    };
+                    state.records.push(Record::Usage(row.clone()));
+                    state.records.push(Record::Usage(row));
+                }
+
+                let err = state.flush().unwrap_err();
+
+                assert!(
+                    format!("{err:#}").contains("UNIQUE constraint failed"),
+                    "{name}: {err:#}"
+                );
+                assert_eq!(chain(&store, &source), ["start"], "{name}");
+                assert_eq!(usage_rows(&store, &source), 0, "{name}");
+            }
+        }
+
+        #[test]
         fn a_failed_commit_stops_persistence_for_good() {
             let (_dir, store) = isolated_store();
             let mut state = SessionState::fresh(store.clone(), "m", None);

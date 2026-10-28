@@ -11,7 +11,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::commit::{
-    MESSAGE_COLUMNS, MessageRow, UsageRow, find_head, insert_message, insert_usage, parse_id,
+    Duplicate, MESSAGE_COLUMNS, MessageRow, UsageRow, find_head, insert_message, insert_usage,
+    parse_id,
 };
 use super::{
     CompactInfo, Project, SessionStore, UsageRecord, check_format, from_millis, time_column,
@@ -290,10 +291,10 @@ impl Export {
             },
         };
         for message in &self.messages {
-            insert_message(tx, &target, message)?;
+            insert_message(tx, &target, message, Duplicate::Keep)?;
         }
         for usage in &self.usage {
-            insert_usage(tx, &target, usage)?;
+            insert_usage(tx, &target, usage, Duplicate::Keep)?;
         }
         Ok(target)
     }
