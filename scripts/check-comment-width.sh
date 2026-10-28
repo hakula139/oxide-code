@@ -8,8 +8,8 @@
 
 set -euo pipefail
 
-if (($# == 0)); then
-  echo "usage: $0 <file>..." >&2
+if [[ "$#" -eq 0 ]]; then
+  echo "Usage: $0 <file>..." >&2
   exit 2
 fi
 
