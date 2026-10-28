@@ -1,6 +1,7 @@
 //! Streaming assistant block. Buffers tokens with a rendered-prefix cache so completed markdown
 //! blocks are not re-parsed each frame. Promoted to [`super::AssistantText`] on `commit_streaming`.
 
+use ratatui::style::Style;
 use ratatui::text::Line;
 
 use super::RenderCtx;
@@ -58,7 +59,8 @@ fn chunk_renderer<'a>(
 ) -> impl Fn(&str, bool) -> (Vec<Line<'static>>, bool) + 'a {
     let width = assistant_markdown_width(ctx);
     move |chunk, after_block| {
-        let (text, after_block) = render_markdown_chunk(chunk, ctx.theme, width, after_block);
+        let (text, after_block) =
+            render_markdown_chunk(chunk, ctx.theme, Style::default(), width, after_block);
         (
             with_assistant_gutter(text.lines, ctx, starts_new_turn),
             after_block,

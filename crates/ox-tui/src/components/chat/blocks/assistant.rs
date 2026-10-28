@@ -1,5 +1,6 @@
 //! Assistant text, thinking, and progress-update blocks.
 
+use ratatui::style::Style;
 use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr as _;
 
@@ -32,7 +33,12 @@ impl AssistantText {
 
 impl ChatBlock for AssistantText {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        let text = render_markdown(&self.text, ctx.theme, assistant_markdown_width(ctx));
+        let text = render_markdown(
+            &self.text,
+            ctx.theme,
+            Style::default(),
+            assistant_markdown_width(ctx),
+        );
         with_assistant_gutter(text.lines, ctx, true)
     }
 
@@ -149,7 +155,12 @@ impl ProgressUpdate {
 
 impl ChatBlock for ProgressUpdate {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        let text = render_markdown(&self.text, ctx.theme, assistant_markdown_width(ctx));
+        let text = render_markdown(
+            &self.text,
+            ctx.theme,
+            Style::default(),
+            assistant_markdown_width(ctx),
+        );
         with_assistant_gutter(text.lines, ctx, true)
     }
 
