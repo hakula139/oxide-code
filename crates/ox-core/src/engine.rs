@@ -151,12 +151,7 @@ impl Engine {
             handle,
             transcript,
         } = session;
-        let client = Client::new(
-            config,
-            trust,
-            Some(handle.session_id().to_owned()),
-            device_id,
-        )?;
+        let client = Client::new(config, trust, device_id)?;
         let shells = Arc::new(BackgroundShells::default());
         let read_filter = config.permission.read_filter();
         let tools = Arc::new(ToolRegistry::built_in(&read_filter, &shells));
@@ -388,8 +383,7 @@ impl Engine {
         let mut dispatch_ctx = dispatch::DispatchContext {
             policy: &mut self.policy,
             workspace: Arc::clone(&self.workspace),
-            session_id: self.transcript.session().session_id().to_owned(),
-            artifact_dir: Arc::clone(self.transcript.session().artifact_dir()),
+            session: self.transcript.session().clone(),
             tracker: Arc::clone(&self.transcript.file_tracker),
         };
         let outcome = turn::agent_turn(
@@ -554,6 +548,7 @@ fn report_unsent(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) ->
 mod tests {
     use std::path::PathBuf;
     use std::pin::Pin;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use anyhow::anyhow;
@@ -755,11 +750,10 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn takes_the_agent_settings_from_config_and_binds_the_client_to_the_session() {
+        async fn takes_the_agent_settings_from_config() {
             with_pinned_home(async {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
-                let session = handle::start(&store, MODEL, None);
                 let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
                 config.max_tool_rounds = Some(3);
                 config.compaction = CompactionConfig::with_threshold(50_000);
@@ -776,7 +770,7 @@ mod tests {
                     DEVICE_ID.to_owned(),
                     SessionParts {
                         store: store.clone(),
-                        handle: session.clone(),
+                        handle: handle::start(&store, MODEL, None),
                         transcript: LoadedTranscript::default(),
                     },
                     false,
@@ -793,7 +787,6 @@ mod tests {
                     ["Not signed in. Run `/login` to sign in."],
                 );
                 assert!(engine.retry_login);
-                assert_eq!(engine.client.session_id(), session.session_id());
             })
             .await;
         }
@@ -2180,6 +2173,79 @@ mod tests {
                 ] {
                     Box::pin(assert_workspace_writes_drained(name, op, expected)).await;
                 }
+            })
+            .await;
+        }
+
+        /// Records the session ID and artifact directory each of its calls runs with.
+        #[derive(Default)]
+        struct SessionProbeTool {
+            seen: Arc<Mutex<Vec<(String, PathBuf)>>>,
+        }
+
+        impl Tool for SessionProbeTool {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    definition: ToolDefinition {
+                        name: "probe".to_owned(),
+                        description: "Report the call's session.".to_owned(),
+                        input_schema: serde_json::json!({"type": "object"}),
+                    },
+                    class: PermissionClass::Read,
+                    parallel_safe: false,
+                }
+            }
+
+            fn run<'a>(
+                &'a self,
+                _prepared: Prepared,
+                ctx: &'a ToolCtx,
+            ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((ctx.session_id.clone(), ctx.artifact_dir.to_path_buf()));
+                Box::pin(async { ToolOutput::success("probed") })
+            }
+        }
+
+        #[tokio::test]
+        async fn runs_every_round_and_turn_in_the_live_session() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let probe = SessionProbeTool::default();
+                let seen = Arc::clone(&probe.seen);
+                let mut engine = engine(server.uri(), &store, dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![Box::new(probe)]));
+                let sink = CapturingSink::default();
+                let live = |engine: &Engine| {
+                    let session = engine.transcript.session();
+                    (
+                        session.session_id().to_owned(),
+                        session.artifact_dir().to_path_buf(),
+                    )
+                };
+                mount_tool_call_once(&server, "toolu_1", "probe", "{}").await;
+                mount_tool_call_once(&server, "toolu_2", "probe", "{}").await;
+                mount_reply_once(&server, "done").await;
+
+                engine
+                    .submit_prompt("probe twice", None, &sink, &mut inert_ops())
+                    .await;
+                let first = live(&engine);
+                engine.clear(&sink).await;
+                mount_tool_call_once(&server, "toolu_3", "probe", "{}").await;
+                mount_reply_once(&server, "done").await;
+                engine
+                    .submit_prompt("probe again", None, &sink, &mut inert_ops())
+                    .await;
+                let cleared = live(&engine);
+
+                assert_ne!(first, cleared);
+                assert_eq!(*seen.lock().unwrap(), [first.clone(), first, cleared]);
             })
             .await;
         }

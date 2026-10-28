@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -18,6 +17,7 @@ use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, ConfigFix, Decision, Policy, SessionGrant, Workspace};
 use crate::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult};
+use crate::session::handle::SessionHandle;
 use crate::tool::spill::run_capped;
 use crate::tool::tasks::Task;
 use crate::tool::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry, ToolSpec};
@@ -26,8 +26,7 @@ use crate::tool::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistr
 pub(super) struct DispatchContext<'a> {
     pub(super) policy: &'a mut Policy,
     pub(super) workspace: Arc<Workspace>,
-    pub(super) session_id: String,
-    pub(super) artifact_dir: Arc<Path>,
+    pub(super) session: SessionHandle,
     pub(super) tracker: Arc<FileTracker>,
 }
 
@@ -36,8 +35,8 @@ impl DispatchContext<'_> {
     fn tool_ctx(&self, tool_use_id: &str) -> ToolCtx {
         ToolCtx {
             workspace: Arc::clone(&self.workspace),
-            session_id: self.session_id.clone(),
-            artifact_dir: Arc::clone(&self.artifact_dir),
+            session_id: self.session.session_id().to_owned(),
+            artifact_dir: Arc::clone(self.session.artifact_dir()),
             tracker: Arc::clone(&self.tracker),
             tool_use_id: tool_use_id.to_owned(),
             cancel: CancellationToken::new(),

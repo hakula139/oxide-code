@@ -20,10 +20,12 @@ use crate::tool::ToolDefinition;
 /// Streams model responses over one provider's API. A wire retries a failed attempt only before it
 /// streams any text, thinking, or progress, since a consumer cannot retract what it showed.
 pub(crate) trait Wire: Send + Sync {
-    /// Streams a conversation request. The receiver yields [`ResponseEvent`]s ending in one
-    /// [`ResponseEvent::Completed`], or a final `Err` when the request fails.
+    /// Streams a conversation request for the live session `session_id`. The receiver yields
+    /// [`ResponseEvent`]s ending in one [`ResponseEvent::Completed`], or a final `Err` when the
+    /// request fails.
     fn stream_message(
         &self,
+        session_id: &str,
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
@@ -34,12 +36,13 @@ pub(crate) trait Wire: Send + Sync {
     /// write premium. Defaults to [`Self::stream_message`] for wires that do no caching.
     fn stream_one_shot(
         &self,
+        session_id: &str,
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
         tools: &[&ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        self.stream_message(messages, system, user_context, tools)
+        self.stream_message(session_id, messages, system, user_context, tools)
     }
 }
 
@@ -164,6 +167,84 @@ mod tests {
     use strum::VariantArray as _;
 
     use super::*;
+
+    mod wire {
+        use super::*;
+
+        mod stream_one_shot {
+            use std::sync::Mutex;
+
+            use super::*;
+
+            /// What one `stream_message` call received: the session ID, messages, stable and
+            /// dynamic system text, user context, and tool names.
+            type Received = (
+                String,
+                Vec<Message>,
+                [String; 2],
+                Option<String>,
+                Vec<String>,
+            );
+
+            /// A wire without its own `stream_one_shot`, which records each `stream_message` call.
+            #[derive(Default)]
+            struct RecordingWire(Mutex<Vec<Received>>);
+
+            impl Wire for RecordingWire {
+                fn stream_message(
+                    &self,
+                    session_id: &str,
+                    messages: &[Message],
+                    system: &SystemPrompt,
+                    user_context: Option<&str>,
+                    tools: &[&ToolDefinition],
+                ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+                    self.0.lock().unwrap().push((
+                        session_id.to_owned(),
+                        messages.to_vec(),
+                        [system.stable.clone(), system.dynamic.clone()],
+                        user_context.map(ToOwned::to_owned),
+                        tools.iter().map(|tool| tool.name.clone()).collect(),
+                    ));
+                    Ok(mpsc::channel(1).1)
+                }
+            }
+
+            #[test]
+            fn defaults_to_the_same_request_through_stream_message() {
+                let wire = RecordingWire::default();
+                let system = SystemPrompt {
+                    stable: "stable".to_owned(),
+                    dynamic: "dynamic".to_owned(),
+                };
+                let tool = ToolDefinition {
+                    name: "read".to_owned(),
+                    description: "Read a file.".to_owned(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                };
+
+                wire.stream_one_shot(
+                    "sid-live",
+                    &[Message::user("hi")],
+                    &system,
+                    Some("context"),
+                    &[&tool],
+                )
+                .unwrap();
+
+                assert_eq!(
+                    *wire.0.lock().unwrap(),
+                    [(
+                        "sid-live".to_owned(),
+                        vec![Message::user("hi")],
+                        ["stable".to_owned(), "dynamic".to_owned()],
+                        Some("context".to_owned()),
+                        vec!["read".to_owned()],
+                    )],
+                );
+            }
+        }
+    }
 
     mod stop_reason {
         use super::*;

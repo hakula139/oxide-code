@@ -372,6 +372,20 @@ mod tests {
     use crate::session::store::{load_session_data_from_path, open_append_at};
     use crate::tool::tasks::testing::plan;
 
+    mod fresh {
+        use super::*;
+
+        #[test]
+        fn names_the_session_with_a_uuid_v4() {
+            let (_dir, store) = isolated_store();
+
+            let state = SessionState::fresh(store, "m", None);
+
+            let id = Uuid::parse_str(&state.session_id).unwrap();
+            assert_eq!(id.get_version_num(), 4, "{id}");
+        }
+    }
+
     mod try_defer_title {
         use super::*;
 

@@ -61,6 +61,7 @@ pub(super) struct MessagesRequest {
 impl Client {
     pub(super) fn messages_request(
         &self,
+        session_id: &str,
         betas: String,
         body: String,
         auth: &Auth,
@@ -68,7 +69,7 @@ impl Client {
         MessagesRequest {
             url: self.messages_url.clone(),
             betas,
-            session_id: self.session_id.clone(),
+            session_id: session_id.to_owned(),
             body: body.into(),
             auth: auth.clone(),
             trust: Arc::clone(&self.trust),
@@ -492,7 +493,7 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::local_testing::{
-        messages_request, plain_http, retry_counts, serve,
+        SESSION_ID, messages_request, plain_http, retry_counts, serve,
     };
     use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
 
@@ -564,7 +565,7 @@ mod tests {
             let received = server.received_requests().await.unwrap();
             let headers = &received[0].headers;
             assert_eq!(headers["anthropic-beta"], "beta-a,beta-b");
-            assert_eq!(headers["x-claude-code-session-id"], "sid");
+            assert_eq!(headers["x-claude-code-session-id"], SESSION_ID);
             assert_eq!(headers["x-stainless-retry-count"], "3");
             assert_eq!(headers["x-api-key"], "k");
         }

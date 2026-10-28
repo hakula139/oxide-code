@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
+use super::transcript::LiveTranscript;
 use super::turn::{collect_response, record_interruption};
 use super::{Engine, TurnEnd, report_abort};
 use crate::client::{PromptTooLong, Response, ResponseEvent, StopReason, Wire};
@@ -282,9 +283,8 @@ impl Engine {
         let summary = await_unless_aborted(
             request_summary(
                 &self.client,
-                self.transcript.prompt(),
+                &self.transcript,
                 &tools,
-                self.transcript.messages(),
                 instructions.as_deref(),
                 sink,
                 &mut spent,
@@ -381,9 +381,9 @@ pub(super) fn auto_compaction_due(
 
 // ── Summary Request ──
 
-/// Drives the summarization request and returns the trimmed summary. `prompt` and `tools` must be
-/// the ones the conversation's own requests send. `spent` receives the usage of every request, even
-/// when the summary fails or the caller drops the future.
+/// Drives the summarization request for `parent`'s session, prompt, and messages, and returns the
+/// trimmed summary. `tools` must be the ones the conversation's own requests send. `spent` receives
+/// the usage of every request, even when the summary fails or the caller drops the future.
 ///
 /// The summary streams to `sink` as [`Event::SummaryToken`]s. A retry, a failure, or a dropped
 /// future ends them with [`Event::SummaryDiscarded`]. On success the caller must end them with
@@ -393,13 +393,15 @@ pub(super) fn auto_compaction_due(
 /// stops before the summary finishes.
 async fn request_summary(
     client: &dyn Wire,
-    prompt: &PromptParts,
+    parent: &LiveTranscript,
     tools: &[&ToolDefinition],
-    transcript: &[Message],
     instructions: Option<&str>,
     sink: &dyn EventSink,
     spent: &mut Vec<TokenUsage>,
 ) -> Result<String> {
+    let session_id = parent.session().session_id();
+    let prompt = parent.prompt();
+    let transcript = parent.messages();
     if transcript.is_empty() {
         bail!("the session has no messages yet");
     }
@@ -415,7 +417,8 @@ async fn request_summary(
     let rubric = Message::user(build_user_message(instructions));
     let request: Vec<Message> = transcript.iter().chain([&rubric]).cloned().collect();
     let stream = SummaryStream::new(sink);
-    let mut rx = client.stream_message(&request, &prompt.system, user_context, tools)?;
+    let mut rx =
+        client.stream_message(session_id, &request, &prompt.system, user_context, tools)?;
     let mut kept = transcript.to_vec();
     let mut retries = 0;
     let response = loop {
@@ -435,7 +438,7 @@ async fn request_summary(
         kept = smaller;
         stream.discard();
         let request = retry_request(&kept, &rubric);
-        rx = client.stream_one_shot(&request, &prompt.system, user_context, tools)?;
+        rx = client.stream_one_shot(session_id, &request, &prompt.system, user_context, tools)?;
     };
     match response.stop_reason {
         None | Some(StopReason::EndTurn | StopReason::StopSequence) => {}
@@ -1688,11 +1691,14 @@ mod tests {
                 .await;
         }
 
-        fn parent_prompt() -> PromptParts {
-            let mut prompt = PromptParts::default();
+        /// The conversation a summary forks, holding `messages` under its own system prompt and
+        /// user context.
+        fn parent(messages: Vec<Message>) -> LiveTranscript {
+            let mut parent = LiveTranscript::with_messages(&dead_test_session(), messages);
+            let prompt = parent.prompt_mut();
             prompt.system.stable = "You are the parent conversation.".to_owned();
             "Project instructions.".clone_into(&mut prompt.user_context);
-            prompt
+            parent
         }
 
         async fn summarize(client: &Client, transcript: &[Message]) -> Result<String> {
@@ -1707,9 +1713,8 @@ mod tests {
             let sink = CapturingSink::default();
             let summary = request_summary(
                 client,
-                &parent_prompt(),
+                &parent(transcript.to_vec()),
                 &[],
-                transcript,
                 None,
                 &sink,
                 &mut Vec::new(),
@@ -1820,6 +1825,7 @@ mod tests {
         impl Wire for HeldStreamClient {
             fn stream_message(
                 &self,
+                _session_id: &str,
                 _messages: &[Message],
                 _system: &SystemPrompt,
                 _user_context: Option<&str>,
@@ -1892,17 +1898,18 @@ mod tests {
             let server = MockServer::start().await;
             mount_summary(&server, streamed_summary_body("done")).await;
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
-            let prompt = parent_prompt();
+            let conversation = parent(tool_heavy_transcript());
+            let prompt = conversation.prompt();
             let tools = [&ToolDefinition {
                 name: "read".to_owned(),
                 description: "Read a file.".to_owned(),
                 input_schema: json!({"type": "object"}),
             }];
-            let transcript = tool_heavy_transcript();
 
             let mut rx = client
                 .stream_message(
-                    &transcript,
+                    conversation.session().session_id(),
+                    conversation.messages(),
                     &prompt.system,
                     Some(&prompt.user_context),
                     &tools,
@@ -1911,9 +1918,8 @@ mod tests {
             while rx.recv().await.is_some() {}
             request_summary(
                 &client,
-                &prompt,
+                &conversation,
                 &tools,
-                &transcript,
                 Some("focus on auth"),
                 &CapturingSink::default(),
                 &mut Vec::new(),
@@ -1921,11 +1927,22 @@ mod tests {
             .await
             .unwrap();
 
+            let received = server.received_requests().await.expect("recorded requests");
+            let session_ids: Vec<_> = received
+                .iter()
+                .map(|request| {
+                    request.headers["x-claude-code-session-id"]
+                        .to_str()
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(session_ids, [conversation.session().session_id(); 2]);
             let mut bodies = request_bodies(&server).await;
             bodies.iter_mut().for_each(strip_cache_control);
             let [parent, fork] = bodies.as_slice() else {
                 panic!("expected two requests, got {}", bodies.len());
             };
+            assert_eq!(fork["metadata"], parent["metadata"]);
             // Skips the billing block, whose `cch` hashes the body and so differs per request.
             let system =
                 |body: &serde_json::Value| body["system"].as_array().unwrap()[1..].to_vec();
@@ -1952,18 +1969,11 @@ mod tests {
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
             let sink = CapturingSink::default();
             let mut spent = Vec::new();
+            let conversation = parent(overflowing_transcript());
 
-            let summary = request_summary(
-                &client,
-                &parent_prompt(),
-                &[],
-                &overflowing_transcript(),
-                None,
-                &sink,
-                &mut spent,
-            )
-            .await
-            .unwrap();
+            let summary = request_summary(&client, &conversation, &[], None, &sink, &mut spent)
+                .await
+                .unwrap();
 
             assert_eq!(summary, "trimmed summary");
             assert_eq!(
@@ -1974,6 +1984,12 @@ mod tests {
                     token("trimmed summary")
                 ],
                 "the retry starts the summary over",
+            );
+            let received = server.received_requests().await.expect("recorded requests");
+            assert_eq!(
+                received[1].headers["x-claude-code-session-id"],
+                conversation.session().session_id(),
+                "the retry stays attributed to the conversation's session",
             );
             let [_, retry] = request_bodies(&server).await.try_into().unwrap();
             assert!(
@@ -2107,9 +2123,8 @@ mod tests {
 
             let err = request_summary(
                 &client,
-                &parent_prompt(),
+                &parent(overflowing_transcript()),
                 &[],
-                &overflowing_transcript(),
                 None,
                 &sink,
                 &mut spent,
@@ -2241,9 +2256,8 @@ mod tests {
 
                 let err = request_summary(
                     &client,
-                    &parent_prompt(),
+                    &parent(tool_heavy_transcript()),
                     &[],
-                    &tool_heavy_transcript(),
                     None,
                     &sink,
                     &mut spent,
@@ -2268,16 +2282,15 @@ mod tests {
                 .await
                 .unwrap();
             let client = HeldStreamClient(Mutex::new(Some(rx)));
-            let (prompt, transcript) = (parent_prompt(), tool_heavy_transcript());
+            let conversation = parent(tool_heavy_transcript());
             let sink = CapturingSink::default();
             let mut spent = Vec::new();
 
             {
                 let mut compaction = pin!(request_summary(
                     &client,
-                    &prompt,
+                    &conversation,
                     &[],
-                    &transcript,
                     None,
                     &sink,
                     &mut spent,
@@ -2310,9 +2323,8 @@ mod tests {
 
             let summary = request_summary(
                 &client,
-                &parent_prompt(),
+                &parent(tool_heavy_transcript()),
                 &[],
-                &tool_heavy_transcript(),
                 None,
                 &sink,
                 &mut Vec::new(),

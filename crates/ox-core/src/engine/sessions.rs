@@ -165,8 +165,6 @@ impl Engine {
             .transcript
             .adopt(transcript, self.client.model(), self.workspace.cwd())
             .await;
-        self.client
-            .set_session_id(self.transcript.session().session_id().to_owned());
         self.instruction_warnings = warnings;
         self.policy.clear_session_allow();
         self.usage.auto_compaction_failures.reset(sink);
@@ -335,6 +333,22 @@ mod tests {
         engine.session_id().to_owned()
     }
 
+    /// The `x-claude-code-session-id` of each request `server` received, in order.
+    async fn session_ids_sent(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .iter()
+            .map(|request| {
+                request.headers["x-claude-code-session-id"]
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
     /// The names of the spill files in `artifact_dir`, sorted.
     fn spill_names(artifact_dir: &Path) -> Vec<String> {
         let mut names: Vec<_> = std::fs::read_dir(artifact_dir.join("tool-results"))
@@ -446,10 +460,6 @@ mod tests {
                     .user_context
                     .contains("# Current date")
             );
-            assert_eq!(
-                engine.client.session_id(),
-                engine.transcript.session().session_id()
-            );
 
             SESSION_CONTEXT.clone_into(&mut engine.transcript.prompt_mut().user_context);
             engine.usage.total_estimated_cost_usd = 1.23;
@@ -458,13 +468,65 @@ mod tests {
             engine.resume(&sink, ResumeTarget::Path(target_path)).await;
             assert_eq!(engine.policy.session_allow(), []);
             assert_eq!(engine.transcript.session().session_id(), target_id);
-            assert_eq!(engine.client.session_id(), target_id);
             assert_eq!(engine.transcript.messages().len(), 2);
             assert_ne!(engine.transcript.prompt().user_context, SESSION_CONTEXT);
             assert!(
                 engine.usage.total_estimated_cost_usd.abs() < f64::EPSILON,
                 "a session that recorded no usage resumes at zero"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn clear_sends_later_requests_as_the_new_session() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "done").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::default();
+            engine
+                .submit_prompt("before", None, &sink, &mut inert_ops())
+                .await;
+            let old_id = engine.session_id().to_owned();
+
+            engine.clear(&sink).await;
+            engine
+                .submit_prompt("after", None, &sink, &mut inert_ops())
+                .await;
+
+            let new_id = engine.session_id().to_owned();
+            assert_ne!(new_id, old_id);
+            assert_eq!(session_ids_sent(&server).await, [old_id, new_id]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resume_sends_later_requests_as_the_resumed_session() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "done").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            let target_id = finished_session(&store).await;
+            let sink = CapturingSink::default();
+            engine
+                .submit_prompt("before", None, &sink, &mut inert_ops())
+                .await;
+            let old_id = engine.session_id().to_owned();
+
+            engine
+                .resume(&sink, ResumeTarget::Id(target_id.clone()))
+                .await;
+            engine
+                .submit_prompt("after", None, &sink, &mut inert_ops())
+                .await;
+
+            assert_eq!(engine.session_id(), target_id);
+            assert_eq!(session_ids_sent(&server).await, [old_id, target_id]);
         })
         .await;
     }

@@ -10,26 +10,43 @@ use super::{Client, RequestKind, RequestSpec};
 use crate::message::Message;
 use crate::model::{Effort, ModelSpec, TokenUsage};
 
+// ── Side Query ──
+
+/// One side request: a single user message under its own system prompt and output settings.
+pub(crate) struct SideQuery<'a> {
+    pub(crate) model: ModelSpec,
+    pub(crate) system: &'a str,
+    pub(crate) user: &'a str,
+    pub(crate) max_tokens: u32,
+    pub(crate) effort: Option<Effort>,
+    /// Dropped when the config turns structured outputs off, so callers can set it unconditionally.
+    pub(crate) output_format: Option<&'a OutputFormat>,
+}
+
 // ── Client::complete ──
 
 impl Client {
-    /// Sends a non-streaming request and returns the concatenated assistant text, dropping tool-use
-    /// and thinking blocks, with the usage the response reported. The request carries no agentic
-    /// betas or `context_management` directive. `output_format` is dropped when the config turns
-    /// structured outputs off, so callers can pass it unconditionally.
+    /// Sends `query` for the live session `session_id` without streaming and returns the
+    /// concatenated assistant text, dropping tool-use and thinking blocks, with the usage the
+    /// response reported. The request carries no agentic betas or `context_management` directive.
     pub(crate) async fn complete(
         &self,
-        model: &ModelSpec,
-        system: &str,
-        user: &str,
-        max_tokens: u32,
-        effort: Option<Effort>,
-        output_format: Option<&OutputFormat>,
+        session_id: &str,
+        query: SideQuery<'_>,
     ) -> Result<(String, Option<TokenUsage>)> {
+        let SideQuery {
+            model,
+            system,
+            user,
+            max_tokens,
+            effort,
+            output_format,
+        } = query;
         let messages = [Message::user(user)];
         let request = &self.prepare(RequestSpec {
             kind: RequestKind::SideQuery,
-            model,
+            session_id,
+            model: &model,
             thinking: None,
             max_tokens,
             system: &[(system, None)],
@@ -84,8 +101,8 @@ mod tests {
 
     use super::*;
     use crate::client::anthropic::local_testing::{
-        COMPLETION_USAGE, auth_token, client_for, completion_body, oauth, request_count, serve,
-        test_client,
+        COMPLETION_USAGE, SESSION_ID, auth_token, client_for, completion_body, oauth,
+        request_count, serve, test_client,
     };
     use crate::client::anthropic::testing::{DEVICE_ID, api_key};
     use crate::client::anthropic::{SYSTEM_PROMPT_PREFIX, attribution_text, build_metadata};
@@ -99,13 +116,21 @@ mod tests {
 
             const HAIKU: &str = "claude-haiku-5-5";
 
-            fn haiku() -> ModelSpec {
-                ModelSpec::resolve(HAIKU)
+            /// A Haiku side query for `user` under `system`, capped at 40 tokens.
+            fn query<'a>(system: &'a str, user: &'a str) -> SideQuery<'a> {
+                SideQuery {
+                    model: ModelSpec::resolve(HAIKU),
+                    system,
+                    user,
+                    max_tokens: 40,
+                    effort: None,
+                    output_format: None,
+                }
             }
 
             async fn complete_err(client: &Client) -> String {
                 let err = client
-                    .complete(&haiku(), "", "u", 40, None, None)
+                    .complete(SESSION_ID, query("", "u"))
                     .await
                     .expect_err("the request must fail");
                 format!("{err:#}")
@@ -120,7 +145,7 @@ mod tests {
                 let client = test_client(server.uri(), api_key(), HAIKU);
 
                 let (text, usage) = client
-                    .complete(&haiku(), "sys", "user input", 40, None, None)
+                    .complete(SESSION_ID, query("sys", "user input"))
                     .await
                     .unwrap();
 
@@ -139,7 +164,7 @@ mod tests {
                 let client = client_for(&config);
 
                 client
-                    .complete(&haiku(), "sys", "Fix login", 40, None, None)
+                    .complete(SESSION_ID, query("sys", "Fix login"))
                     .await
                     .unwrap();
 
@@ -151,7 +176,7 @@ mod tests {
                         "model": HAIKU,
                         "max_tokens": 40,
                         "stream": false,
-                        "metadata": {"user_id": build_metadata(DEVICE_ID, "sid").user_id},
+                        "metadata": {"user_id": build_metadata(DEVICE_ID, SESSION_ID).user_id},
                         "system": [
                             {"type": "text", "text": SYSTEM_PROMPT_PREFIX},
                             {"type": "text", "text": "sys"},
@@ -164,23 +189,18 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn sends_the_current_session_id_header() {
-                // `/clear` rolls the id in place, so `complete` must send the current one.
+            async fn sends_the_caller_session_id_header() {
                 let server = MockServer::start().await;
                 Mock::given(method("POST"))
                     .and(path("/v1/messages"))
-                    .and(header("x-claude-code-session-id", "sid-rolled"))
+                    .and(header("x-claude-code-session-id", "sid-live"))
                     .respond_with(ResponseTemplate::new(200).set_body_string(completion_body("ok")))
                     .expect(1)
                     .mount(&server)
                     .await;
-                let mut client = test_client(server.uri(), api_key(), HAIKU);
-                client.set_session_id("sid-rolled".to_owned());
+                let client = test_client(server.uri(), api_key(), HAIKU);
 
-                client
-                    .complete(&haiku(), "", "u", 40, None, None)
-                    .await
-                    .unwrap();
+                client.complete("sid-live", query("", "u")).await.unwrap();
             }
 
             #[tokio::test]
@@ -202,10 +222,13 @@ mod tests {
                     config.gateway.structured_outputs = structured_outputs;
                     let client = client_for(&config);
 
-                    client
-                        .complete(&haiku(), "sys", "prompt", 40, Some(Effort::Low), Some(&fmt))
-                        .await
-                        .unwrap();
+                    let query = SideQuery {
+                        effort: Some(Effort::Low),
+                        output_format: Some(&fmt),
+                        ..query("sys", "prompt")
+                    };
+
+                    client.complete(SESSION_ID, query).await.unwrap();
 
                     let received = server.received_requests().await.expect("recorded requests");
                     let body: serde_json::Value =
@@ -241,7 +264,7 @@ mod tests {
                     config.gateway.attribution = attribution;
 
                     client_for(&config)
-                        .complete(&haiku(), "sys", "Fix login", 40, None, None)
+                        .complete(SESSION_ID, query("sys", "Fix login"))
                         .await
                         .unwrap();
 
@@ -270,7 +293,7 @@ mod tests {
                 let client = test_client(server.uri(), api_key(), HAIKU);
 
                 let (text, _) = client
-                    .complete(&haiku(), "sys", "user input", 40, None, None)
+                    .complete(SESSION_ID, query("sys", "user input"))
                     .await
                     .unwrap();
 
@@ -352,7 +375,7 @@ mod tests {
                 let client = test_client(server.uri(), api_key(), HAIKU);
 
                 let err = client
-                    .complete(&haiku(), "", "u", 40, None, None)
+                    .complete(SESSION_ID, query("", "u"))
                     .await
                     .expect_err("the request must fail");
 
