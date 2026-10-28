@@ -7,10 +7,10 @@ use strum::VariantArray as _;
 
 use ox_core::model::{Effort, ModelSpec};
 
-use super::context::SlashContext;
 use super::effort_slider::EffortSlider;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashOutcome, typed_form};
+use crate::session_info::LiveSessionInfo;
 
 // ── EffortCmd ──
 
@@ -47,18 +47,18 @@ impl SlashCommand for EffortCmd {
         !args.is_empty()
     }
 
-    fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, arg: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         if arg.is_empty() {
             // An unknown model has nothing to slide, so error with the same recovery hint the
             // typed-arg path uses.
-            let Some(slider) = EffortSlider::new(ctx.info) else {
-                return Err(no_effort_levels_msg(&ctx.info.config.model));
+            let Some(slider) = EffortSlider::new(info) else {
+                return Err(no_effort_levels_msg(&info.config.model));
             };
             return Ok(SlashOutcome::Modal(Box::new(slider)));
         }
-        let outcome = typed_form(self.name(), arg, ctx)?;
-        if ctx.info.config.model.info().is_none() {
-            return Err(no_effort_levels_msg(&ctx.info.config.model));
+        let outcome = typed_form(self.name(), arg, info)?;
+        if info.config.model.info().is_none() {
+            return Err(no_effort_levels_msg(&info.config.model));
         }
         Ok(outcome)
     }
@@ -128,7 +128,7 @@ mod tests {
         fn run_execute_with_model(model_id: &str, args: &str) -> Result<SlashOutcome, String> {
             let mut info = test_session_info();
             info.config.model = ModelSpec::resolve(model_id);
-            EffortCmd.execute(args, &SlashContext::new(&info))
+            EffortCmd.execute(args, &info)
         }
 
         #[test]

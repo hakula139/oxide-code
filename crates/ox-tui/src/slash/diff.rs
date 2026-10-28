@@ -15,8 +15,8 @@ use anyhow::{Result, anyhow, bail};
 
 use ox_core::util::git::{output_async, output_async_capped};
 
-use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
+use crate::session_info::LiveSessionInfo;
 
 // ── DiffCmd ──
 
@@ -31,8 +31,8 @@ impl SlashCommand for DiffCmd {
         "Show uncommitted working-tree changes"
     }
 
-    fn execute(&self, _args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let dir = ctx.info.project_root.clone();
+    fn execute(&self, _args: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
+        let dir = info.project_root.clone();
         Ok(SlashOutcome::Background(Box::pin(async move {
             let diff = collect_diff(&dir)
                 .await
@@ -251,7 +251,7 @@ mod tests {
             let mut info = test_session_info();
             info.project_root = project_root.to_owned();
             let task = DiffCmd
-                .execute("", &SlashContext::new(&info))
+                .execute("", &info)
                 .expect("/diff defers its failures to the task")
                 .into_background();
             with_isolated_git_env_async(task).await

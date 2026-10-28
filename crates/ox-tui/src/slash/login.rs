@@ -3,9 +3,9 @@
 
 use ox_core::protocol::Op;
 
-use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::action::Action;
+use crate::session_info::LiveSessionInfo;
 
 // ── LoginCmd ──
 
@@ -24,7 +24,7 @@ impl SlashCommand for LoginCmd {
         true
     }
 
-    fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, _args: &str, _info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         Ok(SlashOutcome::Forward(Action::Op(Op::Login)))
     }
 }
@@ -46,7 +46,7 @@ impl SlashCommand for LogoutCmd {
         true
     }
 
-    fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, _args: &str, _info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         Ok(SlashOutcome::Forward(Action::Op(Op::Logout)))
     }
 }

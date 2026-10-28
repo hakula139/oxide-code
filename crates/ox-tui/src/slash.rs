@@ -7,7 +7,6 @@ mod clear;
 mod compact;
 mod config;
 mod confirm;
-mod context;
 mod delete;
 mod diff;
 mod effort;
@@ -26,7 +25,6 @@ mod sessions;
 mod status;
 mod theme;
 
-pub(crate) use self::context::SlashContext;
 pub(crate) use self::delete::confirm_modal as delete_confirm_modal;
 pub(crate) use self::diff::{DiffRow, WorkingTreeDiff};
 pub(crate) use self::matcher::MatchedCommand;
@@ -39,6 +37,8 @@ pub(crate) use self::sessions::{
 use futures::TryFutureExt as _;
 
 use ox_core::command::Parsed;
+
+use crate::session_info::LiveSessionInfo;
 
 /// Returns whether `name` is a built-in slash command or one of its aliases.
 pub fn is_built_in(name: &str) -> bool {
@@ -72,14 +72,14 @@ pub(crate) fn echoes_input(parsed: &Parsed) -> bool {
 
 /// Resolves and runs `parsed` against the built-in registry. `Err` carries the chat-ready message
 /// for an unknown or failed command, as does a failed [`SlashOutcome::Background`] task.
-pub(crate) fn dispatch(parsed: &Parsed, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-    dispatch_with(registry::BUILT_INS, parsed, ctx)
+pub(crate) fn dispatch(parsed: &Parsed, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
+    dispatch_with(registry::BUILT_INS, parsed, info)
 }
 
 fn dispatch_with(
     commands: &[&dyn registry::SlashCommand],
     parsed: &Parsed,
-    ctx: &SlashContext<'_>,
+    info: &LiveSessionInfo,
 ) -> Result<SlashOutcome, String> {
     let Some(cmd) = registry::lookup_in(commands, &parsed.name) else {
         return Err(format!(
@@ -90,7 +90,7 @@ fn dispatch_with(
             available = format_available(commands),
         ));
     };
-    match cmd.execute(&parsed.args, ctx) {
+    match cmd.execute(&parsed.args, info) {
         Ok(SlashOutcome::Background(task)) => {
             let parsed = parsed.clone();
             Ok(SlashOutcome::Background(Box::pin(
@@ -168,7 +168,7 @@ mod tests {
 
         fn run_dispatch(name: &str) -> Result<SlashOutcome, String> {
             let parsed = parsed(name, "");
-            dispatch(&parsed, &SlashContext::new(&test_session_info()))
+            dispatch(&parsed, &test_session_info())
         }
 
         #[test]
@@ -193,7 +193,7 @@ mod tests {
                     ..FakeCmd::DEFAULT
                 }],
                 &parsed,
-                &SlashContext::new(&info),
+                &info,
             )
             .unwrap_err()
         }
@@ -222,8 +222,7 @@ mod tests {
                 ("clear", "/clear: Explicit failure."),
                 ("reset", "/reset: Explicit failure."),
             ] {
-                let ctx = SlashContext::new(&info);
-                let task = dispatch_with(&[&cmd], &parsed(typed, ""), &ctx)
+                let task = dispatch_with(&[&cmd], &parsed(typed, ""), &info)
                     .unwrap()
                     .into_background();
                 assert_eq!(task.await.unwrap_err(), expected);

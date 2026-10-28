@@ -1,7 +1,7 @@
 //! `/clear` forwards [`Op::Clear`](ox_core::protocol::Op::Clear). The engine rolls the session.
 
-use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome, typed_form};
+use crate::session_info::LiveSessionInfo;
 
 // ── ClearCmd ──
 
@@ -20,8 +20,8 @@ impl SlashCommand for ClearCmd {
         true
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        typed_form(self.name(), args, ctx)
+    fn execute(&self, args: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
+        typed_form(self.name(), args, info)
     }
 }
 

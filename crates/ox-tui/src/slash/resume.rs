@@ -30,7 +30,6 @@ use ox_core::util::text::{
 use ox_core::util::time::now_local;
 
 use super::confirm::ConfirmDeleteSessionModal;
-use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome, typed_form};
 use super::sessions::{
     BARE_ARCHIVE_HINT, SHORT_RELATIVE_TIME_WIDTH, format_metadata_line, format_short_relative_time,
@@ -45,6 +44,7 @@ use crate::modal::chrome::{
 use crate::modal::line_editor::LineEditor;
 use crate::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::modal::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
+use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
 use crate::{NOTICE_DURATION, now};
 
@@ -96,13 +96,13 @@ impl SlashCommand for ResumeCmd {
         !args.is_empty()
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, args: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         if !args.is_empty() {
-            return typed_form(self.name(), args, ctx);
+            return typed_form(self.name(), args, info);
         }
         Ok(SlashOutcome::Modal(Box::new(ResumePicker::new(
-            ctx.info.store.clone(),
-            ctx.info.session_id.clone(),
+            info.store.clone(),
+            info.session_id.clone(),
         ))))
     }
 }
