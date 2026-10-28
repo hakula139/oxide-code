@@ -1918,44 +1918,42 @@ mod tests {
     mod truncate_line {
         use super::*;
 
-        const MAX_CHARS: usize = 500;
-
         #[test]
         fn borrows_a_line_within_the_cap() {
             assert!(matches!(
-                truncate_line("hello", MAX_CHARS),
+                truncate_line("hello", MAX_LINE_CHARS),
                 Cow::Borrowed("hello")
             ));
         }
 
         #[test]
         fn long_text_ends_with_ellipsis() {
-            let long_line = "x".repeat(MAX_CHARS + 100);
-            let result = truncate_line(&long_line, MAX_CHARS);
-            let suffix = format!("... [{} chars]", MAX_CHARS + 100);
-            assert_eq!(result.len(), MAX_CHARS + suffix.len());
-            assert_eq!(&result[..MAX_CHARS], "x".repeat(MAX_CHARS));
-            assert_eq!(&result[MAX_CHARS..], suffix);
+            let long_line = "x".repeat(MAX_LINE_CHARS + 100);
+            let result = truncate_line(&long_line, MAX_LINE_CHARS);
+            let suffix = format!("... [{} chars]", MAX_LINE_CHARS + 100);
+            assert_eq!(result.len(), MAX_LINE_CHARS + suffix.len());
+            assert_eq!(&result[..MAX_LINE_CHARS], "x".repeat(MAX_LINE_CHARS));
+            assert_eq!(&result[MAX_LINE_CHARS..], suffix);
         }
 
         #[test]
         fn multibyte_text_preserves_character_boundaries() {
-            let mut line = "a".repeat(MAX_CHARS - 2);
+            let mut line = "a".repeat(MAX_LINE_CHARS - 2);
             line.push('🦀');
             line.push_str(&"b".repeat(100));
-            let result = truncate_line(&line, MAX_CHARS);
+            let result = truncate_line(&line, MAX_LINE_CHARS);
 
             let (prefix, suffix) = result.split_once("... [").unwrap();
-            let expected_prefix = "a".repeat(MAX_CHARS - 2) + "🦀" + "b";
+            let expected_prefix = "a".repeat(MAX_LINE_CHARS - 2) + "🦀" + "b";
             assert_eq!(prefix, expected_prefix);
-            assert_eq!(prefix.chars().count(), MAX_CHARS);
-            assert_eq!(suffix, format!("{} chars]", MAX_CHARS + 99));
+            assert_eq!(prefix.chars().count(), MAX_LINE_CHARS);
+            assert_eq!(suffix, format!("{} chars]", MAX_LINE_CHARS + 99));
         }
 
         #[test]
         fn counts_characters_against_the_cap_not_bytes() {
-            let line = "é".repeat(MAX_CHARS);
-            let result = truncate_line(&line, MAX_CHARS);
+            let line = "é".repeat(MAX_LINE_CHARS);
+            let result = truncate_line(&line, MAX_LINE_CHARS);
 
             assert!(matches!(result, Cow::Borrowed(_)));
             assert_eq!(result.as_ref(), line);

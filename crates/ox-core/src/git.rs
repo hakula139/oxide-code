@@ -301,15 +301,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn outside_a_repo_is_absent() {
-            let dir = tempfile::tempdir().unwrap();
-            assert_eq!(
-                with_isolated_git_env_async(repo_root(dir.path())).await,
-                None
-            );
-        }
-
-        #[tokio::test]
         async fn follows_a_core_worktree_that_project_root_ignores() {
             let dir = tempfile::tempdir().unwrap();
             let repo = dir.path().join("outer").join("repo");
@@ -329,6 +320,15 @@ mod tests {
                 dir.path().join("outer").canonicalize().unwrap(),
             );
             assert_eq!(project_root(&sub), repo);
+        }
+
+        #[tokio::test]
+        async fn outside_a_repo_is_absent() {
+            let dir = tempfile::tempdir().unwrap();
+            assert_eq!(
+                with_isolated_git_env_async(repo_root(dir.path())).await,
+                None
+            );
         }
     }
 

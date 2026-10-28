@@ -165,8 +165,9 @@ fn glob_files(
     let (mut content, title) = if files.is_empty() {
         (NO_FILES_FOUND.to_owned(), NO_FILES_FOUND.to_owned())
     } else {
-        let word = plural(files.len(), "file", "files");
-        (files.join("\n"), format!("Found {} {word}", files.len()))
+        let count = files.len();
+        let word = plural(count, "file", "files");
+        (files.join("\n"), format!("Found {count} {word}"))
     };
     if truncated {
         _ = write!(

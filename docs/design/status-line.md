@@ -78,11 +78,11 @@ The status line retains the highest-priority segment, truncating it if needed, t
 - `crates/ox-core/src/config.rs`: `StatusLineSegment`, the segment roster and its default order.
 - `crates/ox-core/src/engine/turn.rs`: `collect_response`, which emits `RateLimitsUpdated`.
 - `crates/ox-core/src/engine/usage.rs`: `Engine` usage accounting, `UsageUpdated` emission, and restored-cost pricing.
+- `crates/ox-core/src/git.rs`: the `current_branch` probe.
 - `crates/ox-core/src/model/pricing.rs`: `TokenCostRates`, the per-model rate cards and the request estimate.
 - `crates/ox-core/src/model/usage.rs`: `TokenUsage`, the token counts one request reports.
 - `crates/ox-core/src/session/store.rs`: `UsageRecord`, the per-request record a resume prices.
 - `crates/ox-core/src/session/title_generator.rs`: `spawn`, which records the title request's usage and hands it to the engine.
-- `crates/ox-core/src/git.rs`: the `current_branch` probe.
 - `crates/ox-tui/src/app/render.rs`: `App::draw_frame`, which builds the `StatusView` the status bar renders.
 - `crates/ox-tui/src/components/status.rs`: `StatusBar`, `StatusView`, and `RunLabel`, the run-state segment's text and tone.
 - `crates/ox-tui/src/components/status/line.rs`: `StatusLine` segment rendering and width fitting.

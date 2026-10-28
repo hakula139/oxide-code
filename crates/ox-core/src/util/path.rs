@@ -1,5 +1,5 @@
 //! XDG and Claude Code directory lookup, `~` expansion and display, lexical path normalization,
-//! and the slash-separated spelling of paths the model reads.
+//! the slash-separated spelling of paths the model reads, and the project root lookup.
 
 use std::path::{Component, Path, PathBuf};
 

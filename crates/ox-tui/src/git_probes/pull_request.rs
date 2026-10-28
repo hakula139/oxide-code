@@ -187,6 +187,56 @@ mod tests {
 
     use super::*;
 
+    mod pull_request_detail {
+        use super::*;
+
+        mod json_fields {
+            use super::*;
+
+            #[test]
+            fn requests_every_field_its_detail_parses() {
+                let full = serde_json::json!({
+                    "number": 86,
+                    "url": "https://github.com/o/r/pull/86",
+                    "statusCheckRollup": [{
+                        "__typename": "CheckRun",
+                        "name": "test",
+                        "workflowName": "CI",
+                        "startedAt": "2026-01-01T00:00:00Z",
+                        "status": "COMPLETED",
+                        "conclusion": "FAILURE",
+                    }],
+                    "reviewDecision": "APPROVED",
+                });
+                let cases = [
+                    (PullRequestDetail::Link, None, None),
+                    (
+                        PullRequestDetail::Status,
+                        Some(Checks::Failing(1)),
+                        Some(ReviewDecision::Approved),
+                    ),
+                ];
+                for (detail, checks, review) in cases {
+                    let requested: serde_json::Map<_, _> = detail
+                        .json_fields()
+                        .split(',')
+                        .map(|field| (field.to_owned(), full[field].clone()))
+                        .collect();
+
+                    let parsed = parse_pull_request(&serde_json::to_vec(&requested).unwrap());
+
+                    let expected = PullRequest {
+                        number: 86,
+                        url: "https://github.com/o/r/pull/86".to_owned(),
+                        checks,
+                        review,
+                    };
+                    assert_eq!(parsed, Some(expected), "{detail:?}");
+                }
+            }
+        }
+    }
+
     mod current_pull_request {
         use super::*;
 
