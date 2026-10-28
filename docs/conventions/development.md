@@ -8,7 +8,7 @@ The Nix flake provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `
 
 ```bash
 nix develop                                        # Dev shell with the toolchain, hooks, and Node tools
-nix flake check                                    # Run most hooks, the module tests, and the test suite
+nix flake check                                    # Run most hooks, the Home Manager module tests, and the test suite
 nix build                                          # Build ox from source without running the tests
 ```
 
@@ -24,7 +24,7 @@ The Node-based hooks run tools pinned in `node_modules`, which pnpm installs bef
 
 ## Toolchain
 
-- `rust-toolchain.toml` pins the exact Rust release used by the dev shell, CI, and release builds. The dev shell reads the pin through rust-overlay, while jobs outside Nix install it with `rustup toolchain install`.
+- `rust-toolchain.toml` pins the exact Rust release used by the dev shell, CI's Rust and MSRV jobs, and release builds. The dev shell reads the pin through rust-overlay, while jobs outside Nix install it with `rustup toolchain install`.
 - The Nix package and its `tests` check build with the Rust release of the nixpkgs they come from, so a consumer that follows its own nixpkgs never fetches the pinned toolchain.
 - Renovate bumps the pin in its automerged flake-inputs group. If a new release adds lint failures, fix them in that PR so it can merge.
 - `rust-version` in the root `Cargo.toml` sets the minimum supported Rust version for `cargo install` and Nix users. The MSRV job checks it, the Nix jobs fail when it passes the Rust release of the flake's nixpkgs, and [Versioning](../../RELEASING.md#versioning) explains how to bump it.

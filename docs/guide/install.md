@@ -105,7 +105,7 @@ inputs.oxide-code = {
 };
 ```
 
-The package builds with the Rust release of the nixpkgs it follows, which must be Rust 1.91 or later, as in NixOS 25.11 and newer.
+The package builds with the Rust release of the nixpkgs it follows, which must meet the Rust version that [From Source via Cargo](#from-source-via-cargo) requires.
 
 Then import the module in your Home Manager configuration:
 

@@ -286,8 +286,8 @@
           # Runs the test suite in the build sandbox, without the package's release build.
           tests = oxide-code.overrideAttrs {
             pname = "oxide-code-tests";
-            doCheck = true;
             buildPhase = "true";
+            doCheck = true;
             installPhase = "touch $out";
             doInstallCheck = false;
           };
