@@ -1,6 +1,6 @@
 # Compaction
 
-Context compression replaces the visible transcript with a summary so a long session keeps working. `/compact [instructions]` runs it on demand, and automatic compaction runs it when the estimated size of the next request nears the active model's context window. Both share one summarizer, one persisted boundary, and one failure pause.
+Context compression replaces the visible transcript with a summary so a long session keeps working. `/compact [instructions]` runs it on demand, and automatic compaction runs it when the estimated size of the next request nears the active model's context window. Both share one summarizer, one persisted boundary, and one failure pause. The [compaction survey](../research/agent/compaction.md) compares how Claude Code, Codex, and opencode compact, including the features this page defers.
 
 ## Triggers
 

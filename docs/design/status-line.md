@@ -1,6 +1,6 @@
 # Status Line
 
-The status line is the TUI's top row, a user-ordered roster of built-in segments. Most segments read in-process state, `git-branch` and the pull request segments probe `git` and the GitHub CLI, the context and session-cost segments count prompt-cache tokens, and the usage-limit segments read response headers. The [`[tui]` section of the configuration guide](../guide/configuration.md#tui-terminal-ui) lists each segment, what it renders, and how often it refreshes, and segments outside the [default order](#default-order) are opt-in. The [status line research](../research/tui/status-line.md) compares how other agents build theirs.
+The status line is the TUI's top row, a user-ordered roster of built-in segments. Most segments read in-process state, `git-branch` and the pull request segments probe `git` and the GitHub CLI, the context and session-cost segments count prompt-cache tokens, and the usage-limit segments read response headers. The [`[tui]` section of the configuration guide](../guide/configuration.md#tui-terminal-ui) lists each segment, what it renders, and how often it refreshes, and segments outside the [default order](#default-order) are opt-in.
 
 ## Segments
 

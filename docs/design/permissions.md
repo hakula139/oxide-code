@@ -2,7 +2,7 @@
 
 Every tool call passes through a permission gate. Rules place calls in one of three tiers: deny, ask, or allow. The mode decides the calls the rules leave open, and `plan` also denies every `edit`, `exec`, and `net` call.
 
-Companion docs: [research/tools/permissions.md](../research/tools/permissions.md), [Modals](modals.md), [File Tracking](file-tracking.md).
+Companion docs: [Modals](modals.md), [File Tracking](file-tracking.md).
 
 ## Rule Tables
 
