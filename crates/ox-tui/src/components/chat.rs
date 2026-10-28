@@ -2116,7 +2116,7 @@ mod tests {
         }
 
         #[test]
-        fn tool_call_with_edit_diff_over_budget_truncates_both_sides() {
+        fn tool_call_with_edit_diff_over_budget_elides_the_middle_of_the_hunk() {
             let mut chat = test_chat();
             chat.push_tool_call(call("✎", "Edit(/tmp/big.rs)"));
             let old = (0..14)
@@ -2169,12 +2169,20 @@ mod tests {
         }
 
         #[test]
-        fn tool_call_with_edit_diff_trims_identical_boundary_lines() {
+        fn tool_call_with_edit_diff_shows_context_and_a_gap_between_hunks() {
             let mut chat = test_chat();
             chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
-            let view = ToolResultView::Diff(edit_diff("fn foo()", "fn foo()\n    return 42;"));
+            let old = (1..=12)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            let new = old
+                .replace("line 2\n", "line 2\n    inserted\n")
+                .replace("line 11\n", "line eleven\n");
+            let view = ToolResultView::Diff(edit_diff(&old, &new));
             chat.push_tool_result(view_result("Edit(/tmp/f.rs)", "Edited f.rs", view, false));
-            insta::assert_snapshot!(render_chat(&mut chat, 60, 8));
+            insta::assert_snapshot!(render_chat(&mut chat, 60, 18));
         }
 
         #[test]

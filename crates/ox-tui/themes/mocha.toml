@@ -36,6 +36,8 @@ syntax_theme = "base16-ocean.dark"
 # Diff backgrounds
 diff_add = { bg = "#2a3a37" }
 diff_del = { bg = "#382c34" }
+diff_add_word = { bg = "#435c4c" }
+diff_del_word = { bg = "#5d3f4b" }
 
 # Markdown headings
 heading_h1 = { fg = "#cdd6f4", bold = true, underlined = true }

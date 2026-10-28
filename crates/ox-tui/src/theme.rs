@@ -93,6 +93,8 @@ macro_rules! for_each_slot {
             // Diff backgrounds
             (diff_add, Bg, "Background fill for added diff rows"),
             (diff_del, Bg, "Background fill for deleted diff rows"),
+            (diff_add_word, Bg, "Background fill for the changed words of added diff rows"),
+            (diff_del_word, Bg, "Background fill for the changed words of deleted diff rows"),
 
             // Markdown headings
             (heading_h1, Fg, "H1, the most prominent heading"),

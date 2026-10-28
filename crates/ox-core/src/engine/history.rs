@@ -211,8 +211,8 @@ mod tests {
     use crate::tool::StoredView;
     use crate::tool::edit::EditTool;
     use crate::tool::tasks::testing::plan;
-    use crate::tool::testing::bash_registry;
-    use crate::tool::view::{DiffChunk, EditDiff, NumberedLine};
+    use crate::tool::testing::{bash_registry, edit_diff};
+    use crate::tool::view::EditDiff;
 
     fn tools() -> ToolRegistry {
         bash_registry(vec![Box::new(EditTool)])
@@ -539,17 +539,8 @@ mod tests {
         #[test]
         fn resolves_a_result_through_its_tool_with_persisted_metadata() {
             let diff = EditDiff {
-                chunk: DiffChunk {
-                    old: vec![NumberedLine {
-                        number: 10,
-                        text: "a".to_owned(),
-                    }],
-                    new: vec![NumberedLine {
-                        number: 10,
-                        text: "b".to_owned(),
-                    }],
-                },
                 locations: vec![10, 20],
+                ..edit_diff("a", "b")
             };
             let input = serde_json::json!({
                 "file_path": "/repo/f.rs",

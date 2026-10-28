@@ -8,6 +8,7 @@
 //! - Tool status indicators (`✓` / `✗`) carry no trailing space. The renderer handles the gap.
 
 use ox_core::tool::tasks::TaskStatus;
+use ox_core::tool::view::DiffLineKind;
 
 // ── User Prompt ──
 
@@ -148,6 +149,20 @@ pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
 
 /// Line marking where a cancelled turn's reply stopped, in the chat and on stderr under `--no-tui`.
 pub const INTERRUPTED_MARKER: &str = "(interrupted)";
+
+// ── Diffs ──
+
+/// The row between two diff hunks, right-aligned in the number column.
+pub const HUNK_GAP: &str = "⋮";
+
+/// The separator between a diff row's number and its text, which signs a changed row.
+pub const fn diff_sign(kind: DiffLineKind) -> &'static str {
+    match kind {
+        DiffLineKind::Context => " │ ",
+        DiffLineKind::Removed => " - ",
+        DiffLineKind::Added => " + ",
+    }
+}
 
 // ── Status Spinner ──
 

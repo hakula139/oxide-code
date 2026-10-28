@@ -159,10 +159,12 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use. `latte`
 
 ### Diff Backgrounds (Background Only)
 
-| Slot       | Role                                         |
-| ---------- | -------------------------------------------- |
-| `diff_add` | Background fill for added rows in Edit diffs |
-| `diff_del` | Background fill for deleted rows             |
+| Slot            | Role                                                  |
+| --------------- | ----------------------------------------------------- |
+| `diff_add`      | Background fill for added rows in Edit diffs          |
+| `diff_del`      | Background fill for deleted rows                      |
+| `diff_add_word` | Background fill for the changed words of added rows   |
+| `diff_del_word` | Background fill for the changed words of deleted rows |
 
 ### Markdown Headings
 

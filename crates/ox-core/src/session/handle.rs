@@ -599,7 +599,8 @@ mod tests {
     };
     use crate::tool::StoredView;
     use crate::tool::tasks::testing::plan;
-    use crate::tool::view::{DiffChunk, EditDiff, NumberedLine, ToolResultView};
+    use crate::tool::testing::edit_diff;
+    use crate::tool::view::ToolResultView;
 
     /// The failure the first write after the actor stops reports.
     const STOPPED: &str =
@@ -2039,19 +2040,10 @@ mod tests {
         fn edit_metadata() -> ToolMetadata {
             ToolMetadata {
                 title: Some("Edited f.rs".to_owned()),
-                result_view: Some(StoredView::View(ToolResultView::Diff(EditDiff {
-                    chunk: DiffChunk {
-                        old: vec![NumberedLine {
-                            number: 1,
-                            text: "fn main() {}".to_owned(),
-                        }],
-                        new: vec![NumberedLine {
-                            number: 1,
-                            text: "fn run() {}".to_owned(),
-                        }],
-                    },
-                    locations: vec![1],
-                }))),
+                result_view: Some(StoredView::View(ToolResultView::Diff(edit_diff(
+                    "fn main() {}\n",
+                    "fn run() {}\n",
+                )))),
             }
         }
 

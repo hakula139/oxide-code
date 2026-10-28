@@ -210,7 +210,8 @@ fn overflow_footer(
 mod tests {
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::task;
-    use ox_core::tool::view::{DiffChunk, EditDiff, GrepFileGroup, GrepMatchLine, NumberedLine};
+    use ox_core::tool::testing::edit_diff;
+    use ox_core::tool::view::{GrepFileGroup, GrepMatchLine, NumberedLine};
 
     use super::*;
     use crate::theme::Theme;
@@ -239,19 +240,7 @@ mod tests {
                     &["src/lib.rs:1", "1 │ fn f() {}"],
                 ),
                 (
-                    ToolResultView::Diff(EditDiff {
-                        chunk: DiffChunk {
-                            old: vec![NumberedLine {
-                                number: 1,
-                                text: "a".to_owned(),
-                            }],
-                            new: vec![NumberedLine {
-                                number: 1,
-                                text: "b".to_owned(),
-                            }],
-                        },
-                        locations: vec![1],
-                    }),
+                    ToolResultView::Diff(edit_diff("a\n", "b\n")),
                     &["1 - a", "1 + b"],
                 ),
                 (

@@ -213,10 +213,20 @@ mod tests {
                         "{name}: {left_name} and {right_name} share a foreground"
                     );
                 }
-                assert_ne!(
-                    theme.diff_add.bg, theme.diff_del.bg,
-                    "{name}: diff_add and diff_del share a background"
-                );
+                let diff_bgs = [
+                    ("diff_add", theme.diff_add),
+                    ("diff_del", theme.diff_del),
+                    ("diff_add_word", theme.diff_add_word),
+                    ("diff_del_word", theme.diff_del_word),
+                ];
+                for (index, (left_name, left)) in diff_bgs.iter().enumerate() {
+                    for (right_name, right) in &diff_bgs[index + 1..] {
+                        assert_ne!(
+                            left.bg, right.bg,
+                            "{name}: {left_name} and {right_name} share a background"
+                        );
+                    }
+                }
             }
         }
 

@@ -31,7 +31,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
-use self::rows::{MAX_ROW_BYTES, prefixed_row, truncate_to_bytes};
+use self::rows::{MAX_ROW_BYTES, prefixed_row, truncate_spans_to_bytes, truncate_to_bytes};
 use crate::glyphs::INLINE_SEPARATOR;
 use crate::markdown::{render_markdown, render_markdown_chunk};
 use crate::theme::Theme;
@@ -76,6 +76,15 @@ impl RenderCtx<'_> {
             text.to_owned()
         } else {
             truncate_to_bytes(text, MAX_ROW_BYTES)
+        }
+    }
+
+    /// `spans` as one body row shows them, capped as [`RenderCtx::cap_row`] caps text.
+    pub(super) fn cap_spans(&self, spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+        if self.expanded {
+            spans
+        } else {
+            truncate_spans_to_bytes(spans, MAX_ROW_BYTES)
         }
     }
 

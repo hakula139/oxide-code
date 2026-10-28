@@ -23,7 +23,7 @@ expression: "lines.join(\"\\n\")"
 {"type":"turn_failed","data":"Anthropic API error (HTTP 400 Bad Request)"}
 {"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"text","data":{"content":"ok"}}}}
 {"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"read_excerpt","data":{"path":"src/main.rs","lines":[{"number":1,"text":"fn main() {}"}],"total_lines":1}}}}
-{"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"diff","data":{"chunk":{"old":[{"number":3,"text":"old"}],"new":[{"number":3,"text":"new"}]},"locations":[3]}}}}
+{"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"diff","data":{"hunks":[{"lines":[{"kind":"context","number":1,"text":"a"},{"kind":"removed","number":2,"text":"let x = 1;","changed":[{"start":8,"end":9}]},{"kind":"added","number":2,"text":"let x = 2;","changed":[{"start":8,"end":9}]}]}],"locations":[2]}}}}
 {"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"grep_matches","data":{"groups":[{"path":"src/lib.rs","lines":[{"number":7,"text":"TODO","is_match":true}]}],"truncated":true}}}}
 {"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"glob_files","data":{"pattern":"*.rs","files":["src/main.rs"],"total":1}}}}
 {"type":"tool_call_end","data":{"id":"call-1","content":"ok","is_error":false,"title":"Ran","view":{"type":"tasks","data":{"tasks":[{"content":"Read the config loader","status":"completed"},{"content":"Add the entry type","status":"in_progress"},{"content":"Write the tests","status":"pending"}]}}}}

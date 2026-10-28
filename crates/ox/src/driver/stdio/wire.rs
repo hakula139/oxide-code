@@ -128,9 +128,8 @@ mod tests {
     use ox_core::protocol::testing::{ls_call, op_id};
     use ox_core::tool::bash::background::testing::shells_in_each_state;
     use ox_core::tool::tasks::testing::plan;
-    use ox_core::tool::view::{
-        DiffChunk, EditDiff, GrepFileGroup, GrepMatchLine, NumberedLine, ToolResultView,
-    };
+    use ox_core::tool::testing::edit_diff;
+    use ox_core::tool::view::{GrepFileGroup, GrepMatchLine, NumberedLine, ToolResultView};
 
     use super::*;
 
@@ -148,19 +147,7 @@ mod tests {
                 }],
                 total_lines: 1,
             },
-            ToolResultView::Diff(EditDiff {
-                chunk: DiffChunk {
-                    old: vec![NumberedLine {
-                        number: 3,
-                        text: "old".to_owned(),
-                    }],
-                    new: vec![NumberedLine {
-                        number: 3,
-                        text: "new".to_owned(),
-                    }],
-                },
-                locations: vec![3],
-            }),
+            ToolResultView::Diff(edit_diff("a\nlet x = 1;\n", "a\nlet x = 2;\n")),
             ToolResultView::GrepMatches {
                 groups: vec![GrepFileGroup {
                     path: "src/lib.rs".to_owned(),

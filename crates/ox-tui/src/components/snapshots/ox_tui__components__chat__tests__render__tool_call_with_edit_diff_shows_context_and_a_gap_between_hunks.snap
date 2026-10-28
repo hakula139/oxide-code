@@ -1,0 +1,22 @@
+---
+source: crates/ox-tui/src/components/chat.rs
+expression: "render_chat(&mut chat, 60, 18)"
+---
+"▎ ✎ Edit(/tmp/f.rs)                                         "
+"▎ ✓ Edited f.rs                                             "
+"▎    1 │ line 1                                             "
+"▎    2 │ line 2                                             "
+"▎    3 +     inserted                                       "
+"▎    4 │ line 3                                             "
+"▎    5 │ line 4                                             "
+"▎    6 │ line 5                                             "
+"▎    ⋮                                                      "
+"▎    9 │ line 8                                             "
+"▎   10 │ line 9                                             "
+"▎   11 │ line 10                                            "
+"▎   11 - line 11                                            "
+"▎   12 + line eleven                                        "
+"▎   13 │ line 12                                            "
+"                                                            "
+"                                                            "
+"                                                            "

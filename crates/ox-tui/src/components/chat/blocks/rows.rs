@@ -8,13 +8,14 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
+use ox_core::tool::view::DiffLineKind;
 use ox_core::util::text::ELLIPSIS;
 
 use super::RenderCtx;
-use crate::glyphs::{BAR, TOOL_BORDER_CONT};
-use crate::wrap::{expand_tabs, wrap_line};
+use crate::glyphs::{BAR, TOOL_BORDER_CONT, diff_sign};
+use crate::wrap::{expand_tabs_in_spans, wrap_line};
 
-const DEFAULT_SEPARATOR: &str = " │ ";
+const DEFAULT_SEPARATOR: &str = diff_sign(DiffLineKind::Context);
 
 // ── Prefixed Rows ──
 
@@ -77,8 +78,8 @@ fn continuation_spans(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
 // ── NumberedRows ──
 
 /// Renders numbered rows under a tool-result body bar, with a gutter wide enough for the largest
-/// line number. Read and grep rows use the default pipe separator, while Edit-tool diff sides and
-/// `/diff` sign each row and tint its bg through [`NumberedRows::removed`] and
+/// line number. Read and grep rows and diff context rows use the default pipe separator, while
+/// edit and `/diff` changed rows take their sign and bg tint from [`NumberedRows::removed`] and
 /// [`NumberedRows::added`].
 pub(super) struct NumberedRows<'a> {
     ctx: &'a RenderCtx<'a>,
@@ -87,6 +88,7 @@ pub(super) struct NumberedRows<'a> {
     separator: &'static str,
     separator_style: Style,
     row_bg: Option<Style>,
+    word_bg: Option<Style>,
     cont_indent: usize,
     cont_spans: Vec<Span<'static>>,
 }
@@ -102,6 +104,7 @@ impl<'a> NumberedRows<'a> {
             DEFAULT_SEPARATOR,
             ctx.theme.tool_border(),
             None,
+            None,
         )
     }
 
@@ -111,9 +114,10 @@ impl<'a> NumberedRows<'a> {
             ctx,
             border_style,
             max_number,
-            " - ",
+            diff_sign(DiffLineKind::Removed),
             ctx.theme.error(),
             Some(ctx.theme.diff_del()),
+            Some(ctx.theme.diff_del_word()),
         )
     }
 
@@ -123,14 +127,15 @@ impl<'a> NumberedRows<'a> {
             ctx,
             border_style,
             max_number,
-            " + ",
+            diff_sign(DiffLineKind::Added),
             ctx.theme.success(),
             Some(ctx.theme.diff_add()),
+            Some(ctx.theme.diff_add_word()),
         )
     }
 
-    /// Rows with `separator` between the number and the text, and a `row_bg` whose tint spans the
-    /// full terminal width.
+    /// Rows with `separator` between the number and the text, a `row_bg` whose tint spans the full
+    /// terminal width, and a `word_bg` for the changed runs of [`NumberedRows::render_segments`].
     fn with_style(
         ctx: &'a RenderCtx<'a>,
         border_style: Style,
@@ -138,6 +143,7 @@ impl<'a> NumberedRows<'a> {
         separator: &'static str,
         separator_style: Style,
         row_bg: Option<Style>,
+        word_bg: Option<Style>,
     ) -> Self {
         let number_width = max_number.to_string().len();
         let separator_width = separator.width();
@@ -150,6 +156,7 @@ impl<'a> NumberedRows<'a> {
             separator,
             separator_style,
             row_bg,
+            word_bg,
             cont_indent,
             cont_spans,
         }
@@ -162,15 +169,37 @@ impl<'a> NumberedRows<'a> {
         text: &str,
         text_style: Style,
     ) {
-        let display_text = self.ctx.cap_row(&expand_tabs(text));
-        let line_number = format!("{:>width$}", number, width = self.number_width);
+        self.render_segments(out, number, [(text, false)], text_style);
+    }
+
+    /// Renders a row from runs of text, each flagged with whether it changed, as
+    /// [`DiffLine::segments`](ox_core::tool::view::DiffLine::segments) splits a diff line. A
+    /// changed run takes the word bg.
+    pub(super) fn render_segments<'t>(
+        &self,
+        out: &mut Vec<Line<'static>>,
+        number: usize,
+        segments: impl IntoIterator<Item = (&'t str, bool)>,
+        text_style: Style,
+    ) {
         let bg = self.row_bg.unwrap_or_default();
-        let rendered = Line::from(vec![
+        let plain = text_style.patch(bg);
+        let word = self.word_bg.map_or(plain, |word_bg| plain.patch(word_bg));
+        let text_spans = segments
+            .into_iter()
+            .map(|(text, changed)| {
+                Span::styled(text.to_owned(), if changed { word } else { plain })
+            })
+            .collect();
+
+        let line_number = format!("{:>width$}", number, width = self.number_width);
+        let mut spans = vec![
             Span::styled(TOOL_BORDER_CONT.to_owned(), self.border_style),
             Span::styled(line_number, self.ctx.theme.muted().patch(bg)),
             Span::styled(self.separator.to_owned(), self.separator_style.patch(bg)),
-            Span::styled(display_text, text_style.patch(bg)),
-        ]);
+        ];
+        spans.extend(self.ctx.cap_spans(expand_tabs_in_spans(text_spans)));
+        let rendered = Line::from(spans);
         let mut wrapped = wrap_line(
             rendered,
             usize::from(self.ctx.width),
@@ -228,6 +257,28 @@ pub(super) fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
         .last()
         .unwrap_or(0);
     format!("{}{ELLIPSIS}", &s[..boundary])
+}
+
+/// Cuts the text of `spans` to at most `max_bytes` as [`truncate_to_bytes`] does, marking the cut
+/// in the style of the span it falls in.
+pub(super) fn truncate_spans_to_bytes(
+    mut spans: Vec<Span<'static>>,
+    max_bytes: usize,
+) -> Vec<Span<'static>> {
+    let mut left = max_bytes;
+    let Some(cut) = spans.iter().position(|span| {
+        let fits = span.content.len() <= left;
+        if fits {
+            left -= span.content.len();
+        }
+        !fits
+    }) else {
+        return spans;
+    };
+    spans.truncate(cut + 1);
+    let last = &mut spans[cut];
+    last.content = truncate_to_bytes(&last.content, left).into();
+    spans
 }
 
 #[cfg(test)]
@@ -381,6 +432,7 @@ mod tests {
                 " + ",
                 theme.success(),
                 Some(theme.diff_add()),
+                None,
             );
             let mut out = Vec::new();
             renderer.render(&mut out, 7, "x", theme.success());
@@ -404,6 +456,7 @@ mod tests {
                 " - ",
                 theme.error(),
                 Some(theme.diff_del()),
+                None,
             );
             let mut out = Vec::new();
             renderer.render(&mut out, 1, "abc", theme.error());
@@ -433,6 +486,7 @@ mod tests {
                 " - ",
                 theme.error(),
                 Some(theme.diff_del()),
+                None,
             );
             let mut out = Vec::new();
             renderer.render(&mut out, 1, "alpha beta gamma delta", theme.error());
@@ -518,6 +572,7 @@ mod tests {
                 " - ",
                 theme.error(),
                 Some(theme.diff_del()),
+                None,
             );
             let mut out = Vec::new();
 
@@ -564,6 +619,38 @@ mod tests {
                 ("inside a combining mark", "e\u{301}x", 2, "..."),
             ] {
                 assert_eq!(truncate_to_bytes(input, max_bytes), expected, "{case}");
+            }
+        }
+    }
+
+    mod truncate_spans_to_bytes {
+        use ratatui::style::Color;
+
+        use super::*;
+
+        #[test]
+        fn cuts_in_the_span_the_budget_runs_out_in() {
+            let red = Style::default().fg(Color::Red);
+            let green = Style::default().fg(Color::Green);
+            let spans = || vec![Span::styled("let", red), Span::styled("value", green)];
+            for (case, max_bytes, expected) in [
+                (
+                    "fits",
+                    8,
+                    vec![Span::styled("let", red), Span::styled("value", green)],
+                ),
+                (
+                    "in a later span",
+                    5,
+                    vec![Span::styled("let", red), Span::styled("va...", green)],
+                ),
+                ("in the first span", 2, vec![Span::styled("le...", red)]),
+            ] {
+                assert_eq!(
+                    truncate_spans_to_bytes(spans(), max_bytes),
+                    expected,
+                    "{case}"
+                );
             }
         }
     }

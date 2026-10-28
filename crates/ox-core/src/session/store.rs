@@ -35,9 +35,9 @@ const LOCKS_DIR: &str = "locks";
 const SETUP_LOCK_FILE: &str = "sessions.db.lock";
 
 /// The content version this build writes with each message commit. It bumps when a closed serde
-/// enum in message content, such as a content block type, gains a value, so an older build skips
-/// or refuses a session it cannot read.
-pub(crate) const CONTENT_VERSION: u32 = 1;
+/// enum in message content, such as a content block type, gains a value, or a field older builds
+/// require goes away, so an older build skips or refuses a session it cannot read.
+pub(crate) const CONTENT_VERSION: u32 = 2;
 
 /// The `chain(seq)` table of the messages from message `?2` of session `?1` back through parents to
 /// its root, which a statement appends to.
