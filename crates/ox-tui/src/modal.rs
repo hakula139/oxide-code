@@ -18,8 +18,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use ox_core::protocol::SavedTarget;
-use ox_core::session::entry::ArchiveState;
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
+use ox_core::session::store::listing::ArchiveState;
 
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
@@ -49,6 +49,9 @@ pub(crate) trait Modal: Send {
 
     /// Marks a saved-session archive of `target` accepted by the engine.
     fn archive_started(&mut self, _target: &SavedTarget) {}
+
+    /// Marks a delete of the saved session `id` accepted by the engine.
+    fn delete_started(&mut self, _id: &str) {}
 
     /// Receives the result of a saved-session archive of `target` to `state` while this modal
     /// remains on the stack.
@@ -98,6 +101,12 @@ pub(crate) trait Modal: Send {
     /// the modal's bindings, such as a text field's editing keys. The stack drops every other
     /// modified key, so a plain binding such as `j` never fires as Alt+J. Default false.
     fn binds_modified_key(&self, _event: &KeyEvent) -> bool {
+        false
+    }
+
+    /// Returns whether the modal may send an op that needs an idle engine, so a queued prompt must
+    /// not start while it is open. Default false.
+    fn sends_idle_only_ops(&self) -> bool {
         false
     }
 }
@@ -164,6 +173,11 @@ impl ModalStack {
         !self.stack.is_empty()
     }
 
+    /// Returns whether an open modal may send an op that needs an idle engine.
+    pub(crate) fn sends_idle_only_ops(&self) -> bool {
+        self.stack.iter().any(|modal| modal.sends_idle_only_ops())
+    }
+
     pub(crate) fn push(&mut self, modal: Box<dyn Modal>) {
         self.stack.push(modal);
     }
@@ -171,6 +185,12 @@ impl ModalStack {
     pub(crate) fn archive_started(&mut self, target: &SavedTarget) {
         for modal in &mut self.stack {
             modal.archive_started(target);
+        }
+    }
+
+    pub(crate) fn delete_started(&mut self, id: &str) {
+        for modal in &mut self.stack {
+            modal.delete_started(id);
         }
     }
 
@@ -340,10 +360,14 @@ pub(crate) mod testing {
         render_rows(modal, width, height).join("\n")
     }
 
-    /// [`rendered_text`] as rows.
-    pub(crate) fn render_modal(modal: &mut dyn Modal, width: u16) -> Vec<String> {
-        let height = modal.height(width, u16::MAX);
+    /// Renders `modal` at `width` and the height it requests within `max_height`, returning each
+    /// row without its trailing spaces.
+    pub(crate) fn render_modal(modal: &mut dyn Modal, width: u16, max_height: u16) -> Vec<String> {
+        let height = modal.height(width, max_height);
         render_rows(modal, width, height)
+            .into_iter()
+            .map(|row| row.trim_end().to_owned())
+            .collect()
     }
 
     /// Renders `modal` into a `width` x `height` buffer and returns each row as displayed.
@@ -423,6 +447,13 @@ pub(crate) mod testing {
                 .lock()
                 .unwrap()
                 .push(format!("started:{target:?}"));
+        }
+
+        fn delete_started(&mut self, id: &str) {
+            self.saved_events
+                .lock()
+                .unwrap()
+                .push(format!("deleting:{id}"));
         }
 
         fn archive_updated(
@@ -599,6 +630,23 @@ mod tests {
 
             assert!(stack.is_active());
             assert_eq!(stack.height(80, 40), 3 + TOP_BORDER_HEIGHT);
+        }
+    }
+
+    mod delete_started {
+        use super::*;
+
+        #[test]
+        fn reaches_a_modal_below_the_top() {
+            let mut stack = ModalStack::default();
+            let below = ScriptedModal::new(ModalAction::Dispatch(Action::Op(Op::Clear)));
+            let observed = Arc::clone(&below.saved_events);
+            stack.push(Box::new(below));
+            stack.push(Box::new(BareModal));
+
+            stack.delete_started("saved");
+
+            assert_eq!(*observed.lock().unwrap(), ["deleting:saved"]);
         }
     }
 

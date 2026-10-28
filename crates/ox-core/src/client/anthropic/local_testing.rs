@@ -10,9 +10,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::Client;
 use super::testing::{DEVICE_ID, api_key};
 use super::transport::MessagesRequest;
-use crate::config::Config;
-use crate::config::auth::{Auth, AuthSource};
+use crate::auth::{Auth, AuthSource};
 use crate::config::testing::test_config;
+use crate::config::{Config, DEFAULT_MODEL};
 use crate::model::TokenUsage;
 use crate::util::tls::Trust as _;
 use crate::util::tls::testing::NoRoots;
@@ -22,8 +22,8 @@ use crate::util::tls::testing::NoRoots;
 pub(super) const SESSION_ID: &str = "sid";
 
 /// [`client_for`] on [`test_config`].
-pub(crate) fn test_client(base_url: impl AsRef<str>, auth: Auth, model: &str) -> Client {
-    client_for(&test_config(base_url, auth, model))
+pub(crate) fn test_client(base_url: impl AsRef<str>) -> Client {
+    client_for(&test_config(base_url, api_key(), DEFAULT_MODEL))
 }
 
 pub(crate) fn client_for(config: &Config) -> Client {

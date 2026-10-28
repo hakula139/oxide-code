@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use ox_core::protocol::Op;
-use ox_core::session::display::id_prefix;
+use ox_core::session::display::{DisplayTitle, id_prefix};
 use ox_core::session::saved::SavedError;
 use ox_core::util::text::truncate_to_width;
 
@@ -34,11 +34,11 @@ const BODY_HEIGHT: u16 = 2;
 pub(super) struct ConfirmDeleteSessionModal {
     header: Header,
     session_id: String,
-    display_title: String,
+    display_title: DisplayTitle,
     /// The [`format_metadata_line`](crate::slash::sessions::format_metadata_line) row, such as
     /// `abcd1234 · 2 hours ago · 14 msgs`, which carries the ID prefix.
     metadata: String,
-    /// Whether a delete went to the engine and has not reported back, which ignores another Y.
+    /// Whether the engine accepted a delete that has not reported back, which ignores another Y.
     pending: bool,
     /// Error from the last failed delete, shown until a retry replaces it or the modal closes.
     error: Option<String>,
@@ -46,7 +46,7 @@ pub(super) struct ConfirmDeleteSessionModal {
 }
 
 impl ConfirmDeleteSessionModal {
-    pub(super) fn new(session_id: String, display_title: String, metadata: String) -> Self {
+    pub(super) fn new(session_id: String, display_title: DisplayTitle, metadata: String) -> Self {
         Self {
             header: Header::new(TITLE),
             session_id,
@@ -58,8 +58,7 @@ impl ConfirmDeleteSessionModal {
         }
     }
 
-    fn confirm(&mut self) -> ModalKey {
-        self.pending = true;
+    fn confirm(&self) -> ModalKey {
         ModalKey::Emit(ModalAction::Dispatch(Action::Op(Op::DeleteSaved {
             session_id: self.session_id.clone(),
         })))
@@ -81,7 +80,7 @@ impl Modal for ConfirmDeleteSessionModal {
         self.header.push_lines(&mut lines, area.width, theme);
 
         lines.push(Line::from(Span::styled(
-            truncate_to_width(&self.display_title, budget),
+            self.display_title.fit(budget),
             theme.text(),
         )));
         lines.push(Line::from(Span::styled(metadata, theme.dim())));
@@ -113,6 +112,12 @@ impl Modal for ConfirmDeleteSessionModal {
         self.acceptance.is_guarded()
     }
 
+    fn delete_started(&mut self, id: &str) {
+        if id == self.session_id {
+            self.pending = true;
+        }
+    }
+
     fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> DeleteReply {
         if id != self.session_id {
             return DeleteReply::Unclaimed;
@@ -125,10 +130,14 @@ impl Modal for ConfirmDeleteSessionModal {
                 self.display_title,
             ))),
             Err(error) => {
-                self.error = Some(saved_error_message(error, Some(CLEAR_THEN_DELETE_HINT)));
+                self.error = Some(saved_error_message(error, CLEAR_THEN_DELETE_HINT));
                 DeleteReply::Shown
             }
         }
+    }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
     }
 }
 
@@ -138,7 +147,8 @@ mod tests {
     use time::OffsetDateTime;
     use time::macros::datetime;
 
-    use ox_core::session::store::testing::stamped_id;
+    use ox_core::session::store::listing::SessionInfo;
+    use ox_core::session::store::testing::{listed_session, stamped_id};
 
     use super::*;
     use crate::modal::ModalStack;
@@ -159,12 +169,16 @@ mod tests {
     fn modal(byte: u8, title: &str) -> ConfirmDeleteSessionModal {
         let id = stamped_id(byte);
         let metadata = format_metadata_line(&id, LAST_ACTIVE, NOW, MESSAGES, None, None);
-        ConfirmDeleteSessionModal::new(id, title.to_owned(), metadata)
+        let title = DisplayTitle::of(&SessionInfo {
+            title: Some(title.to_owned()),
+            ..listed_session(&id)
+        });
+        ConfirmDeleteSessionModal::new(id, title, metadata)
     }
 
     /// Renders `modal` in full so its acceptance arms, then lets the type-ahead guard lapse.
     fn show_and_arm(modal: &mut ConfirmDeleteSessionModal) {
-        render_modal(modal, 60);
+        render_modal(modal, 60, u16::MAX);
         modal.acceptance.expire();
     }
 
@@ -180,18 +194,11 @@ mod tests {
     mod render {
         use super::*;
 
-        fn rendered_rows(modal: &mut ConfirmDeleteSessionModal, width: u16) -> Vec<String> {
-            render_modal(modal, width)
-                .into_iter()
-                .map(|row| row.trim_end().to_owned())
-                .collect()
-        }
-
         #[test]
         fn names_the_session_by_title_above_the_metadata_that_carries_its_id() {
             let mut modal = modal(0xab, "Fix auth flow");
 
-            let rows = rendered_rows(&mut modal, 60);
+            let rows = render_modal(&mut modal, 60, u16::MAX);
 
             assert_eq!(
                 rows,
@@ -211,7 +218,7 @@ mod tests {
             let mut modal = modal(0xab, "Fix auth flow");
             modal.error = Some("permission denied".to_owned());
 
-            let rows = rendered_rows(&mut modal, 60);
+            let rows = render_modal(&mut modal, 60, u16::MAX);
 
             assert_eq!(
                 rows[3..],
@@ -228,7 +235,7 @@ mod tests {
         fn does_not_panic_at_minimum_widths() {
             let mut modal = modal(0xab, "T");
             for width in [4_u16, 8, 20] {
-                rendered_rows(&mut modal, width);
+                render_modal(&mut modal, width, u16::MAX);
             }
         }
     }
@@ -237,7 +244,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn y_sends_the_delete_once_until_the_result_arrives() {
+        fn y_sends_the_delete_and_ignores_another_once_it_starts() {
             for event in [
                 KeyEvent::from(KeyCode::Char('y')),
                 KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
@@ -246,6 +253,7 @@ mod tests {
                 show_and_arm(&mut modal);
 
                 let outcome = modal.handle_key(&event);
+                modal.delete_started(&stamped_id(0xab));
                 let repeat = modal.handle_key(&event);
 
                 assert!(
@@ -371,14 +379,34 @@ mod tests {
         }
     }
 
+    mod delete_started {
+        use super::*;
+
+        #[test]
+        fn another_sessions_delete_leaves_y_sending() {
+            let mut modal = modal(0xab, "Fix auth flow");
+            show_and_arm(&mut modal);
+            modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
+            modal.delete_started(&stamped_id(0xcd));
+
+            let repeat = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            assert!(
+                matches!(&repeat, ModalKey::Emit(action) if deletes(Some(action))),
+                "{repeat:?}"
+            );
+        }
+    }
+
     mod saved_deleted {
         use super::*;
 
-        /// The modal of the session stamped `0xab`, with its delete sent to the engine.
+        /// The modal of the session stamped `0xab`, with its delete accepted by the engine.
         fn pending_modal() -> ConfirmDeleteSessionModal {
             let mut modal = modal(0xab, "Fix auth flow");
             show_and_arm(&mut modal);
             modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            modal.delete_started(&stamped_id(0xab));
             modal
         }
 

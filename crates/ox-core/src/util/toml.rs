@@ -1,10 +1,10 @@
 //! TOML parse errors reported without the parsed source.
 
 /// Where a parse error points: the position and the dotted key, each when the error records one.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct ErrorLocation {
-    pub position: Option<String>,
-    pub key: Option<String>,
+    position: Option<String>,
+    pub(crate) key: Option<String>,
 }
 
 impl ErrorLocation {

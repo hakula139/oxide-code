@@ -6,57 +6,68 @@ use indoc::formatdoc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, warn};
 
-use ox_core::config::auth::AuthSource;
+use ox_core::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::{Effort, ModelSpec};
 use ox_core::permission::{Basis, Mode, SessionGrant};
-use ox_core::protocol::{CompactTrigger, Event, Interaction, SavedTarget, notice};
+use ox_core::protocol::{CompactTrigger, Event, Interaction, SavedTarget, TurnEnd, notice};
 use ox_core::session::display::{archive_notice, id_prefix};
-use ox_core::session::entry::{ArchiveState, SessionInfo};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
+use ox_core::session::store::listing::{ArchiveState, SessionInfo};
 use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::plural;
 
+use super::operation::{Activity, InFlight};
 use super::queue::FailedTurn;
 use super::{App, CopyNotice, SlashTask};
 use crate::clipboard::{CopyReport, Delivery};
-use crate::components::status::Status;
 use crate::git_probes::GitUpdate;
 use crate::modal::approval::ApprovalModal;
 use crate::slash;
 use crate::{NOTICE_DURATION, now};
 
 impl App {
+    /// Shows `event`, then ends the in-flight operation if `event` is its terminal event.
     pub(super) fn handle_engine_event(&mut self, event: Event) {
+        let end = self.in_flight.as_ref().and_then(|op| op.end(&event));
+        self.apply_event(event);
+        if let Some(end) = end
+            && let Some(ended) = self.in_flight.take()
+        {
+            self.end_operation(&ended, end);
+        }
+        self.dirty = true;
+    }
+
+    fn apply_event(&mut self, event: Event) {
         match event {
             Event::StreamToken(token) => {
                 self.chat.append_stream_token(&token);
-                self.set_active_status(Status::Streaming);
+                self.set_activity(Activity::Streaming);
             }
             Event::ThinkingToken(token) => {
                 self.chat.append_thinking_token(&token);
-                self.set_active_status(Status::Streaming);
+                self.set_activity(Activity::Streaming);
             }
             Event::ProgressUpdate(text) => self.chat.push_progress_update(text),
             Event::Retrying(notice) => self.chat.push_notice(notice),
             Event::ToolCallStart(call) => {
-                self.set_active_status(Status::ToolRunning {
+                self.set_activity(Activity::ToolRunning {
                     name: call.name.clone(),
                 });
                 self.chat.push_tool_call(call);
             }
             Event::ToolCallEnd(result) => self.chat.push_tool_result(result),
             Event::PromptDrained(text) => self.apply_prompt_drained(text),
-            Event::TurnComplete => self.finish_turn(),
+            // Terminal events that only end the operation, which `end_operation` settles.
+            Event::TurnComplete | Event::Cancelled | Event::SessionReady => {}
             Event::TurnRolledBack => self.queue.mark_rolled_back(),
             Event::PromptUnsent => self.queue.mark_unsent(),
-            Event::TurnFailed(msg) => self.apply_turn_failed(&msg),
-            Event::UsageUpdated(usage) => self.status_bar.set_usage(Some(usage)),
-            Event::RateLimitsUpdated(limits) => self.status_bar.set_rate_limits(Some(limits)),
-            Event::Cancelled => self.apply_cancelled(),
+            Event::UsageUpdated(usage) => self.session_info.usage = Some(usage),
+            Event::RateLimitsUpdated(limits) => self.session_info.rate_limits = Some(limits),
             Event::AutoCompactionStarted => {
                 self.queue.mark_compacting();
-                self.set_active_status(Status::Compacting);
+                self.set_activity(Activity::Compacting);
             }
             Event::AutoCompactionPaused { failures } => {
                 self.session_info.auto_compaction_paused_after = Some(failures);
@@ -66,7 +77,7 @@ impl App {
             Event::SummaryDiscarded => self.chat.discard_summary(),
             Event::SessionTitleUpdated { id, title } => {
                 if id == self.session_info.session_id {
-                    self.status_bar.set_title(Some(title));
+                    self.session_info.set_title(Some(title));
                 }
             }
             Event::ArchiveUpdated {
@@ -83,6 +94,7 @@ impl App {
                 prior,
                 history,
             } => self.apply_session_resumed(id, title, prior, history),
+            Event::SessionForked { id, from } => self.apply_session_forked(id, &from),
             Event::SessionCompacted {
                 summary,
                 pre_count,
@@ -91,7 +103,6 @@ impl App {
             } => {
                 self.apply_session_compacted(&summary, pre_count, instructions.as_deref(), trigger);
             }
-            Event::SessionReady => self.apply_session_ready(),
             Event::ConfigChanged {
                 model,
                 effort,
@@ -115,7 +126,9 @@ impl App {
                 fallback_error,
             } => self.apply_signed_out(removed, auth, fallback_error),
             Event::Notice(msg) => self.chat.push_system_message(msg),
-            Event::Error(msg) | Event::RenameFailed(msg) => self.chat.push_error(&msg),
+            Event::TurnFailed(msg) | Event::Error(msg) | Event::RenameFailed(msg) => {
+                self.chat.push_error(&msg);
+            }
             Event::ApprovalRequested {
                 id,
                 preview,
@@ -126,17 +139,57 @@ impl App {
             Event::TasksUpdated(tasks) => self.tasks.set(tasks),
             Event::BackgroundShellsUpdated(shells) => self.session_info.background_shells = shells,
         }
-        self.dirty = true;
     }
 
-    /// Ends a cancelled operation, handing back a prompt the engine never sent and otherwise
-    /// marking where the reply stopped.
-    fn apply_cancelled(&mut self) {
-        if self.queue.unsent() {
-            self.settle_failed_turn();
-        } else {
-            self.chat.push_interrupted_marker();
-            self.enter_idle();
+    /// Ends the in-flight operation as `end` reports, then starts the queue head. A cancel or a
+    /// failure that holds the queue holds it until the user submits a prompt or starts a session
+    /// switch, and a cancel also leaves the prompts a failed switch kept for its retry to the user.
+    /// An operation's end defers the head while a modal that may send the next operation is open.
+    fn end_operation(&mut self, ended: &InFlight, end: TurnEnd) {
+        self.chat.commit_streaming();
+        let goes_on = match end {
+            TurnEnd::Completed => true,
+            TurnEnd::Failed => self.settle_failure(),
+            TurnEnd::Cancelled | TurnEnd::Shutdown => {
+                if self.queue.unsent() {
+                    self.settle_failure();
+                } else {
+                    self.chat.push_interrupted_marker();
+                }
+                false
+            }
+        };
+        self.queue.end_turn();
+        self.chat.clear_pending_calls();
+        if ended.cancelling() {
+            self.queue.leave_to_user();
+        } else if !goes_on {
+            self.queue.hold();
+        }
+        self.head_awaits_modal = self.modals.sends_idle_only_ops();
+        if !self.head_awaits_modal {
+            self.drain_pending_prompt();
+        }
+    }
+
+    /// Settles a failure by what the engine and the dispatch marked: an unsent prompt hands itself
+    /// back, a rolled-back turn also hands back the prompts it drained, and a failed compaction or
+    /// session switch holds the queue. Returns whether the queue goes on.
+    fn settle_failure(&mut self) -> bool {
+        match self.queue.fail_turn(self.input.is_empty()) {
+            FailedTurn::Ran => true,
+            FailedTurn::Held => false,
+            FailedTurn::HandedBack(prompt) => {
+                if let Some(prompt) = prompt {
+                    self.input.set_text(prompt.line());
+                    if prompt.is_slash() {
+                        let line = prompt.line();
+                        self.chat
+                            .push_system_message(format!("Press Enter to run `{line}` again"));
+                    }
+                }
+                false
+            }
         }
     }
 
@@ -163,7 +216,6 @@ impl App {
         )));
     }
 
-    /// Leaves held prompts queued, since a retained picker can submit another idle-only operation.
     fn apply_archive_updated(
         &mut self,
         target: &SavedTarget,
@@ -175,7 +227,6 @@ impl App {
             Ok(note) => self.chat.push_system_message(note),
             Err(error) => self.chat.push_error(&error),
         }
-        self.enter_idle();
     }
 
     /// Opens the `/delete` confirm modal on the session the engine resolved the prefix to.
@@ -184,7 +235,6 @@ impl App {
             Ok(info) => self.push_modal(slash::delete_confirm_modal(&info)),
             Err(error) => self.chat.push_error(&slash::delete_lookup_error(&error)),
         }
-        self.enter_idle();
     }
 
     /// Hands a delete result to the confirm modal, which closes with its chat line on success and
@@ -203,53 +253,9 @@ impl App {
                     .push_system_message(format!("Deleted session {}", id_prefix(id))),
                 Err(error) => self.chat.push_error(&slash::saved_error_message(
                     error,
-                    Some(slash::CLEAR_THEN_DELETE_HINT),
+                    slash::CLEAR_THEN_DELETE_HINT,
                 )),
             },
-        }
-        self.enter_idle();
-    }
-
-    fn finish_turn(&mut self) {
-        self.chat.commit_streaming();
-        // A cancel that lost the race to the turn's end, or a failed resume or archive, still
-        // leaves the next step to the user.
-        if matches!(
-            &self.status,
-            Status::Cancelling | Status::Resuming | Status::Archiving
-        ) {
-            self.enter_idle();
-        } else {
-            self.finalize_idle();
-        }
-    }
-
-    /// Shows `msg` as an error, then settles the turn.
-    fn apply_turn_failed(&mut self, msg: &str) {
-        self.chat.push_error(msg);
-        self.settle_failed_turn();
-    }
-
-    /// Settles a failed or cancelled turn by what the engine marked: an unsent prompt hands itself
-    /// back, and a rolled-back turn also hands back the prompts it drained.
-    fn settle_failed_turn(&mut self) {
-        match self.queue.fail_turn(self.input.is_empty()) {
-            FailedTurn::Ran => self.finish_turn(),
-            FailedTurn::Held => {
-                self.chat.commit_streaming();
-                self.enter_idle();
-            }
-            FailedTurn::HandedBack(prompt) => {
-                if let Some(prompt) = prompt {
-                    self.input.set_text(prompt.line());
-                    if prompt.is_slash() {
-                        let line = prompt.line();
-                        self.chat
-                            .push_system_message(format!("Press Enter to run `{line}` again"));
-                    }
-                }
-                self.enter_idle();
-            }
         }
     }
 
@@ -261,6 +267,13 @@ impl App {
                 .push_system_message(archive_notice(&old_id, ArchiveState::Archived));
         }
         self.discard_queue();
+    }
+
+    /// Continues the conversation in the fork session `id`, keeping the chat.
+    fn apply_session_forked(&mut self, id: String, from: &str) {
+        self.chat
+            .push_system_message(notice::session_forked(&id, from));
+        self.session_info.session_id = id;
     }
 
     /// Mid-session resume: rebinds the session and rebuilds chat from the target transcript.
@@ -306,8 +319,8 @@ impl App {
         self.session_info.background_shells.clear();
         self.tasks.clear();
         self.slash_tasks = JoinSet::new();
-        self.status_bar.set_title(title);
-        self.status_bar.set_usage(None);
+        self.session_info.set_title(title);
+        self.session_info.usage = None;
         self.chat.clear_history();
         self.queue.clear_active();
         old_id
@@ -324,7 +337,7 @@ impl App {
         trigger: CompactTrigger,
     ) {
         self.chat.clear_history();
-        self.status_bar.set_usage(None);
+        self.session_info.usage = None;
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
         self.queue.mark_compacted();
@@ -340,18 +353,6 @@ impl App {
         }
     }
 
-    /// Ends a `/compact`, `/clear`, `/resume`, or `/archive` once the new transcript has reported
-    /// its state. A cancel that lost the race to the swap leaves the queue to the user.
-    fn apply_session_ready(&mut self) {
-        match &self.status {
-            Status::Compacting | Status::Clearing | Status::Resuming | Status::Archiving => {
-                self.finalize_idle();
-            }
-            Status::Cancelling => self.enter_idle(),
-            _ => {}
-        }
-    }
-
     fn apply_config_changed(
         &mut self,
         model: ModelSpec,
@@ -360,11 +361,6 @@ impl App {
         auto_compaction: AutoCompactionConfig,
         notice: String,
     ) {
-        if model.id() != self.session_info.config.model.id() {
-            self.status_bar
-                .set_model(model.short_display_name().to_owned());
-        }
-        self.status_bar.set_effort(effort);
         self.session_info
             .config
             .apply_swap(model, effort, requested_effort, auto_compaction);
@@ -398,7 +394,7 @@ impl App {
 
     fn apply_signed_in(&mut self, auth: AuthSource) {
         self.session_info.config.auth = Some(auth);
-        self.status_bar.set_rate_limits(None);
+        self.session_info.rate_limits = None;
         let recovery = match auth {
             AuthSource::OxLogin | AuthSource::ClaudeCodeLogin => None,
             AuthSource::ClientBearer | AuthSource::ClientApiKey | AuthSource::ClientOAuth => {
@@ -415,12 +411,11 @@ impl App {
             None => format!("Signed in. Requests now use {auth}."),
         };
         self.chat.push_system_message(message);
-        self.finish_turn();
     }
 
     fn apply_login_restored(&mut self, auth: AuthSource) {
         self.session_info.config.auth = Some(auth);
-        self.status_bar.set_rate_limits(None);
+        self.session_info.rate_limits = None;
         self.chat
             .push_system_message(format!("Signed in. Requests now use {auth}."));
     }
@@ -432,7 +427,7 @@ impl App {
         fallback_error: Option<String>,
     ) {
         self.session_info.config.auth = auth;
-        self.status_bar.set_rate_limits(None);
+        self.session_info.rate_limits = None;
         let outcome = if removed {
             "Signed out of oxide-code."
         } else {
@@ -444,40 +439,27 @@ impl App {
             (None, None) => "No credential is active. Run `/login` to sign in.".to_owned(),
         };
         self.chat.push_system_message(format!("{outcome} {active}"));
-        self.finish_turn();
     }
 
-    /// Goes idle, then submits the next queued prompt.
-    fn finalize_idle(&mut self) {
-        self.enter_idle();
-        self.drain_pending_prompt();
-    }
-
-    /// Resets to idle, clears orphan calls, and re-enables input. Queued prompts stay queued, and
-    /// the ended turn no longer holds any of them.
-    fn enter_idle(&mut self) {
-        self.queue.end_turn();
-        self.chat.clear_pending_calls();
-        self.set_status(Status::Idle);
-    }
-
-    /// Starts a turn with the oldest queued prompt.
+    /// Starts a turn with the oldest queued prompt, unless the queue is held.
     pub(super) fn drain_pending_prompt(&mut self) {
+        if self.queue.held() {
+            return;
+        }
         if let Some(next) = self.queue.pop_next() {
             self.start_turn(next);
         }
     }
 
-    /// Sets busy status unless a cancel is pending. Leaving `Compacting` releases the prompts held
-    /// during an automatic compaction.
-    fn set_active_status(&mut self, status: Status) {
-        match &self.status {
-            Status::Cancelling => {}
-            Status::Compacting => {
-                self.set_status(status);
-                self.forward_queued_prompts();
-            }
-            _ => self.set_status(status),
+    /// Shows what the running turn does now. Leaving an automatic compaction releases the prompts
+    /// it held.
+    fn set_activity(&mut self, activity: Activity) {
+        if self
+            .in_flight
+            .as_mut()
+            .is_some_and(|op| op.set_activity(activity))
+        {
+            self.forward_queued_prompts();
         }
     }
 
@@ -540,6 +522,7 @@ mod tests {
 
     use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
     use indoc::indoc;
+    use tokio::sync::mpsc;
     use tokio::sync::mpsc::error::TryRecvError;
 
     use ox_core::config::StatusLineSegment;
@@ -551,7 +534,6 @@ mod tests {
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::text_result;
     use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
-    use ox_core::session::entry::TitleInfo;
     use ox_core::session::resolver::ResolveError;
     use ox_core::session::saved::SavedAction;
     use ox_core::session::store::testing::{
@@ -566,11 +548,15 @@ mod tests {
 
     use super::*;
     use crate::action::Action;
-    use crate::app::testing::{five_hour_limit, rendered_text, test_app};
+    use crate::app::testing::{
+        FakeModal, activity, five_hour_limit, render_app, rendered_text, start_op, test_app,
+        test_app_with,
+    };
     use crate::clipboard::CopyError;
     use crate::glyphs::INTERRUPTED_MARKER;
     use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
+    use crate::session_info::testing::unknown_model_session_info;
     use crate::slash::{ResumePicker, SlashOutcome, WorkingTreeDiff};
     use crate::theme::builtin;
 
@@ -609,10 +595,12 @@ mod tests {
         #[test]
         fn stream_token_switches_to_streaming() {
             let (mut app, _rx, _event_tx) = test_app(None);
+            start_op(&mut app, &Op::prompt("running"));
+            app.handle_engine_event(bash_call_start("t1", "ls"));
 
             app.handle_engine_event(Event::StreamToken("partial".to_owned()));
 
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
         }
 
         #[test]
@@ -620,10 +608,12 @@ mod tests {
             // Thinking tokens land in the chat view as their own block and must flip the bar to
             // Streaming, so the user sees the engine working before any visible text arrives.
             let (mut app, _rx, _event_tx) = test_app(None);
+            start_op(&mut app, &Op::prompt("running"));
+            app.handle_engine_event(bash_call_start("t1", "ls"));
 
             app.handle_engine_event(Event::ThinkingToken("planning...".to_owned()));
 
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
         }
 
         #[test]
@@ -664,7 +654,7 @@ mod tests {
                 app.chat.last_error_text(),
                 Some("Session write failed: disk full")
             );
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
             assert_eq!(
                 rx.try_recv(),
                 Err(TryRecvError::Empty),
@@ -676,14 +666,15 @@ mod tests {
         #[test]
         fn tool_call_start_switches_to_tool_running() {
             let (mut app, _rx, _event_tx) = test_app(None);
+            start_op(&mut app, &Op::prompt("running"));
 
             app.handle_engine_event(bash_call_start("t1", "ls"));
 
             assert_eq!(
-                app.status,
-                Status::ToolRunning {
+                activity(&app),
+                Some(&Activity::ToolRunning {
                     name: "bash".to_owned()
-                },
+                }),
             );
             assert_eq!(
                 app.chat.entry_count(),
@@ -837,11 +828,11 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             // Drive into streaming first so TurnComplete has state to tear down.
             app.dispatch_action(Action::Submit("hi".to_owned()));
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
 
             app.handle_engine_event(Event::TurnComplete);
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
         }
 
         #[tokio::test]
@@ -856,7 +847,7 @@ mod tests {
 
             let forwarded: Vec<Op> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             assert_eq!(forwarded, [Op::prompt("a"), Op::Queue("b".to_owned())],);
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
             assert_eq!(*app.queue.pending(), ["b"],);
         }
 
@@ -877,7 +868,7 @@ mod tests {
                 Err(TryRecvError::Empty),
                 "nothing resubmits after a cancel"
             );
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(*app.queue.pending(), ["queued"],);
         }
 
@@ -897,7 +888,7 @@ mod tests {
                 "The model declined this request.".to_owned(),
             ));
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(app.input.lines(), ["//refused".to_owned()]);
             assert_eq!(
                 app.chat.last_system_text(),
@@ -926,7 +917,7 @@ mod tests {
                 "The model declined this request.".to_owned(),
             ));
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(app.input.lines(), ["/init AGENTS.md".to_owned()]);
             assert_eq!(
                 app.chat.last_system_text(),
@@ -950,7 +941,7 @@ mod tests {
                 app.chat.last_error_text(),
                 Some("Auto-compaction failed: summarizer down. The prompt was not sent.")
             );
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(
                 app.input.lines(),
                 ["//etc/hosts".to_owned()],
@@ -977,7 +968,7 @@ mod tests {
                 "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
             ));
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert!(app.input.is_empty());
             assert_eq!(
                 *app.queue.pending(),
@@ -1030,7 +1021,7 @@ mod tests {
                 app.chat.last_error_text(),
                 Some("Not signed in. Run `/login` to sign in.")
             );
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert!(app.input.is_empty());
             assert_eq!(
                 *app.queue.pending(),
@@ -1052,7 +1043,7 @@ mod tests {
             app.handle_engine_event(Event::TurnFailed("API blew up".to_owned()));
 
             assert_eq!(app.chat.last_error_text(), Some("API blew up"));
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
         }
 
         #[tokio::test]
@@ -1070,7 +1061,7 @@ mod tests {
                 app.chat.last_error_text(),
                 Some("Archive failed: disk full")
             );
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(*app.queue.pending(), ["typed meanwhile"]);
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
         }
@@ -1134,13 +1125,37 @@ mod tests {
                     .to_owned(),
             ));
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert!(app.input.is_empty(), "the sent prompt is not handed back");
             assert_eq!(*app.queue.pending(), ["queued"]);
             assert_eq!(
                 rx.try_recv(),
                 Err(TryRecvError::Empty),
                 "nothing retries compaction until the user sends again"
+            );
+        }
+
+        #[tokio::test]
+        async fn turn_failed_during_a_manual_compaction_holds_the_prompts_queued_during_it() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Compact { instructions: None });
+            assert_eq!(rx.try_recv().ok(), Some(Op::Compact { instructions: None }));
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+
+            app.handle_engine_event(Event::TurnFailed(
+                "Compaction failed: summarizer down".to_owned(),
+            ));
+
+            assert_eq!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty),
+                "nothing retries compaction until the user sends again"
+            );
+            assert_eq!(*app.queue.pending(), ["typed meanwhile"]);
+            assert_eq!(activity(&app), None);
+            assert_eq!(
+                app.chat.last_error_text(),
+                Some("Compaction failed: summarizer down")
             );
         }
 
@@ -1173,7 +1188,7 @@ mod tests {
                 Err(TryRecvError::Empty),
                 "nothing runs after a failed resume"
             );
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(*app.queue.pending(), ["second", "third"],);
         }
 
@@ -1223,13 +1238,13 @@ mod tests {
         }
 
         #[test]
-        fn usage_updated_sets_status_bar_usage() {
+        fn usage_updated_records_the_session_usage() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let usage = usage_snapshot();
 
             app.handle_engine_event(Event::UsageUpdated(usage));
 
-            assert_eq!(app.status_bar.usage(), Some(usage));
+            assert_eq!(app.session_info.usage, Some(usage));
             assert!(app.dirty);
         }
 
@@ -1239,11 +1254,11 @@ mod tests {
             app.dispatch_action(Action::Submit("hi".to_owned()));
             app.handle_engine_event(Event::StreamToken("partial answer".to_owned()));
             let entries_before = app.chat.entry_count();
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
 
             app.handle_engine_event(Event::Cancelled);
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(
                 app.chat.entry_count(),
                 entries_before + 2,
@@ -1261,15 +1276,15 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("hi".to_owned()));
             app.dispatch_action(Action::Op(Op::Interrupt));
-            assert_eq!(app.status, Status::Cancelling);
+            assert_eq!(activity(&app), Some(&Activity::Cancelling));
 
             app.handle_engine_event(Event::StreamToken("late".to_owned()));
 
-            assert_eq!(app.status, Status::Cancelling);
+            assert_eq!(activity(&app), Some(&Activity::Cancelling));
 
             app.handle_engine_event(bash_call_start("t-late", "ls"));
 
-            assert_eq!(app.status, Status::Cancelling);
+            assert_eq!(activity(&app), Some(&Activity::Cancelling));
         }
 
         #[test]
@@ -1298,7 +1313,7 @@ mod tests {
 
             app.handle_engine_event(Event::Cancelled);
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(*app.queue.pending(), ["active", "queued"]);
             let text = rendered_text(&mut app, 60, 12);
             assert!(
@@ -1326,7 +1341,7 @@ mod tests {
                 Err(TryRecvError::Empty),
                 "nothing resubmits after a cancel"
             );
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
 
             app.handle_esc();
 
@@ -1341,7 +1356,7 @@ mod tests {
 
             app.handle_engine_event(Event::AutoCompactionStarted);
 
-            assert_eq!(app.status, Status::Compacting);
+            assert_eq!(activity(&app), Some(&Activity::Compacting));
         }
 
         #[test]
@@ -1365,7 +1380,7 @@ mod tests {
                 title: "AI-generated".to_owned(),
             });
 
-            assert_eq!(app.status_bar.title(), Some("AI-generated"));
+            assert_eq!(app.session_info.title.as_deref(), Some("AI-generated"));
             assert!(app.dirty);
         }
 
@@ -1381,7 +1396,7 @@ mod tests {
             });
 
             assert_eq!(
-                app.status_bar.title(),
+                app.session_info.title.as_deref(),
                 Some("First prompt"),
                 "current-session title must survive a stale event",
             );
@@ -1392,7 +1407,7 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(Some("Old session title"));
             app.chat.push_user_message("old prompt".to_owned());
             let original_id = app.session_info.session_id.clone();
-            app.status_bar.set_usage(Some(usage_snapshot()));
+            app.session_info.usage = Some(usage_snapshot());
             app.session_info.session_allow =
                 vec![Rule::parse(PermissionClass::Exec, "ls").unwrap()];
             app.session_info.background_shells = shells_in_each_state();
@@ -1409,11 +1424,11 @@ mod tests {
             );
             assert_ne!(app.session_info.session_id, original_id);
             assert!(
-                app.status_bar.title().is_none(),
+                app.session_info.title.is_none(),
                 "stale AI title must be cleared on roll",
             );
             assert!(
-                app.status_bar.usage().is_none(),
+                app.session_info.usage.is_none(),
                 "stale usage must be cleared on roll",
             );
             assert_eq!(app.session_info.session_allow, []);
@@ -1485,7 +1500,7 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(Some("Old"));
             app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.chat.push_user_message("live prompt".to_owned());
-            app.status_bar.set_usage(Some(usage_snapshot()));
+            app.session_info.usage = Some(usage_snapshot());
             app.queue.push("queued-a".to_owned());
             app.queue.push("queued-b".to_owned());
             app.handle_engine_event(bash_call_start("pending-1", "ls"));
@@ -1507,9 +1522,9 @@ mod tests {
 
             assert_eq!(app.session_info.session_id, "resumed-session");
             assert_ne!(app.session_info.session_id, original_id);
-            assert_eq!(app.status_bar.title(), Some("Resumed title"));
+            assert_eq!(app.session_info.title.as_deref(), Some("Resumed title"));
             assert!(
-                app.status_bar.usage().is_none(),
+                app.session_info.usage.is_none(),
                 "stale usage must be cleared on resume",
             );
             assert_eq!(app.session_info.session_allow, []);
@@ -1535,6 +1550,21 @@ mod tests {
                 "queued prompts must drop on resume"
             );
             assert!(app.dirty);
+        }
+
+        #[test]
+        fn session_forked_notes_the_fork_and_moves_the_status_bar_to_it() {
+            let mut info = unknown_model_session_info();
+            info.config.status_line = vec![StatusLineSegment::SessionId];
+            let (mut app, _rx, _event_tx) = test_app_with(info, None);
+
+            app.handle_engine_event(Event::SessionForked {
+                id: stamped_id(0xf0),
+                from: app.session_info.session_id.clone(),
+            });
+
+            assert_eq!(app.session_info.session_id, stamped_id(0xf0));
+            insta::assert_snapshot!(render_app(&mut app, 80, 10));
         }
 
         #[test]
@@ -1612,7 +1642,7 @@ mod tests {
             });
 
             assert!(
-                app.status_bar.title().is_none(),
+                app.session_info.title.is_none(),
                 "Some(None) title must clear the chrome",
             );
             assert!(app.chat.is_empty());
@@ -1644,7 +1674,7 @@ mod tests {
         fn session_compacted_replays_summary_and_clears_pending_calls() {
             let (mut app, _rx, _event_tx) = test_app(Some("Pre-compact"));
             app.chat.push_user_message("pre-compact prompt".to_owned());
-            app.status_bar.set_usage(Some(usage_snapshot()));
+            app.session_info.usage = Some(usage_snapshot());
             app.handle_engine_event(bash_call_start("pending-1", "ls"));
             app.tasks.set(plan());
 
@@ -1666,7 +1696,7 @@ mod tests {
                 "pending tool calls must drop on compact",
             );
             assert!(
-                app.status_bar.usage().is_none(),
+                app.session_info.usage.is_none(),
                 "stale usage must be cleared on compact",
             );
             assert_eq!(
@@ -1694,7 +1724,8 @@ mod tests {
         #[test]
         fn session_compacted_automatic_keeps_busy_state_and_queued_prompts() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.set_status(Status::Compacting);
+            start_op(&mut app, &Op::prompt("running"));
+            app.handle_engine_event(Event::AutoCompactionStarted);
             app.queue.push("queued while busy".to_owned());
 
             app.handle_engine_event(Event::SessionCompacted {
@@ -1705,7 +1736,7 @@ mod tests {
             });
 
             assert_eq!(app.chat.entry_count(), 1);
-            assert_eq!(app.status, Status::Compacting);
+            assert_eq!(activity(&app), Some(&Activity::Compacting));
             assert_eq!(*app.queue.pending(), ["queued while busy"]);
             assert_eq!(
                 rx.try_recv(),
@@ -1741,7 +1772,7 @@ mod tests {
                 });
 
                 assert_eq!(app.chat.entry_count(), 2, "{shown}");
-                assert_eq!(app.status, Status::Compacting, "{shown}");
+                assert_eq!(activity(&app), Some(&Activity::Compacting), "{shown}");
                 let text = rendered_text(&mut app, 80, 10);
                 assert!(text.contains("auto summary"), "{text}");
                 assert!(
@@ -1831,7 +1862,7 @@ mod tests {
                 rx.try_recv().ok(),
                 Some(Op::prompt("queued before compact")),
             );
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
             let text = rendered_text(&mut app, 80, 12);
             let notice_at = text.find("Skipped instruction file CLAUDE.md").unwrap();
             let prompt_at = text.find("queued before compact").unwrap();
@@ -1857,7 +1888,7 @@ mod tests {
 
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
             assert_eq!(*app.queue.pending(), ["queued before compact"]);
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
         }
 
         #[tokio::test]
@@ -1875,11 +1906,11 @@ mod tests {
                 prior: ArchiveState::Active,
                 history: Vec::new(),
             });
-            let at_swap = app.status.clone();
+            let at_swap = activity(&app).cloned();
             app.handle_engine_event(Event::SessionReady);
 
-            assert_eq!(at_swap, Status::Resuming);
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(at_swap, Some(Activity::Resuming));
+            assert_eq!(activity(&app), None);
         }
 
         #[tokio::test]
@@ -1894,13 +1925,13 @@ mod tests {
                 id: "rolled-session".to_owned(),
                 old_session: ArchiveState::Archived,
             });
-            let at_roll = app.status.clone();
+            let at_roll = activity(&app).cloned();
             app.handle_engine_event(Event::SessionReady);
 
             assert_eq!(during, Err(TryRecvError::Empty));
-            assert_eq!(at_roll, Status::Archiving);
+            assert_eq!(at_roll, Some(Activity::Archiving));
             assert_eq!(rx.recv().await, Some(Op::prompt("next")));
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
         }
 
         #[test]
@@ -1922,7 +1953,12 @@ mod tests {
 
             assert_eq!(app.session_info.config.model.id(), "claude-sonnet-5-5");
             assert_eq!(app.session_info.config.effort, Some(Effort::High),);
-            assert_eq!(app.status_bar.model(), "Sonnet 5.5");
+            let text = rendered_text(&mut app, 120, 10);
+            let status = text.lines().next().unwrap();
+            assert!(
+                status.contains("Sonnet 5.5 (high)") && !status.contains("test-model"),
+                "the status bar shows the new model: {status}",
+            );
             assert_eq!(
                 app.session_info.config.compaction.auto.threshold_tokens,
                 Some(WINDOW_1M_THRESHOLD),
@@ -1931,25 +1967,6 @@ mod tests {
                 app.chat.last_system_text(),
                 Some("Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high"),
             );
-            assert!(app.dirty);
-        }
-
-        #[test]
-        fn config_changed_effort_only_keeps_status_bar_model_label() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            let original_model = app.status_bar.model().to_owned();
-
-            app.handle_engine_event(Event::ConfigChanged {
-                model: app.session_info.config.model.clone(),
-                effort: Some(Effort::Xhigh),
-                requested: ConfigPick::Effort(Effort::Xhigh),
-                auto_compaction: app.session_info.config.compaction.auto,
-                notice: "Effort set to xhigh".to_owned(),
-            });
-
-            assert_eq!(app.session_info.config.effort, Some(Effort::Xhigh),);
-            assert_eq!(app.status_bar.model(), original_model);
-            assert_eq!(app.chat.last_system_text(), Some("Effort set to xhigh"));
             assert!(app.dirty);
         }
 
@@ -2040,13 +2057,13 @@ mod tests {
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);
                 app.session_info.config.auth = None;
-                app.set_status(Status::SigningIn);
+                start_op(&mut app, &Op::Login);
 
                 app.handle_engine_event(Event::SignedIn { auth });
 
                 assert_eq!(app.session_info.config.auth, Some(auth));
                 assert_eq!(app.chat.last_system_text(), Some(expected));
-                assert_eq!(app.status, Status::Idle);
+                assert_eq!(activity(&app), None);
             }
         }
 
@@ -2062,7 +2079,7 @@ mod tests {
             });
 
             assert_eq!(rx.try_recv().ok(), Some(Op::prompt("held")));
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
         }
 
         #[tokio::test]
@@ -2071,13 +2088,14 @@ mod tests {
             app.dispatch_op(Op::Login);
             rx.try_recv().expect("login forwarded");
             app.queue.push("held".to_owned());
-            app.set_status(Status::Cancelling);
+            app.handle_esc();
+            assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
 
             app.handle_engine_event(Event::SignedIn {
                 auth: AuthSource::OxLogin,
             });
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(*app.queue.pending(), ["held"]);
             assert_eq!(
                 rx.try_recv(),
@@ -2090,7 +2108,7 @@ mod tests {
         fn login_restored_names_the_credential_and_keeps_the_turn_running() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.session_info.config.auth = None;
-            app.set_status(Status::Streaming);
+            start_op(&mut app, &Op::prompt("running"));
 
             app.handle_engine_event(Event::LoginRestored {
                 auth: AuthSource::ClaudeCodeLogin,
@@ -2104,7 +2122,7 @@ mod tests {
                 app.chat.last_system_text(),
                 Some("Signed in. Requests now use OAuth (Claude Code login).")
             );
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
         }
 
         #[test]
@@ -2157,7 +2175,7 @@ mod tests {
             app.dispatch_op(Op::Logout);
             assert_eq!(rx.recv().await, Some(Op::Logout));
             app.dispatch_action(Action::Submit("next".to_owned()));
-            let during = (app.status.clone(), rx.try_recv());
+            let during = (activity(&app).cloned(), rx.try_recv());
 
             app.handle_engine_event(Event::SignedOut {
                 removed: true,
@@ -2165,9 +2183,12 @@ mod tests {
                 fallback_error: None,
             });
 
-            assert_eq!(during, (Status::SigningOut, Err(TryRecvError::Empty)));
+            assert_eq!(
+                during,
+                (Some(Activity::SigningOut), Err(TryRecvError::Empty))
+            );
             assert_eq!(rx.recv().await, Some(Op::prompt("next")));
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
         }
 
         #[test]
@@ -2191,7 +2212,7 @@ mod tests {
 
                 app.handle_engine_event(event);
 
-                assert_eq!(app.status_bar.rate_limits(), None, "{label}");
+                assert_eq!(app.session_info.rate_limits, None, "{label}");
             }
         }
 
@@ -2207,8 +2228,8 @@ mod tests {
                 app.chat.last_error_text(),
                 Some("Session write failed: disk full")
             );
-            assert_eq!(app.status_bar.title(), Some("First prompt"));
-            assert!(app.status.is_idle());
+            assert_eq!(app.session_info.title.as_deref(), Some("First prompt"));
+            assert!(app.in_flight.is_none());
         }
 
         #[test]
@@ -2276,15 +2297,388 @@ mod tests {
         }
     }
 
+    mod end_operation {
+        use super::*;
+
+        /// Runs `op` to its `end` on an app whose queue holds "typed meanwhile", then checks that
+        /// nothing started.
+        fn assert_stays_held(
+            app: &mut App,
+            rx: &mut mpsc::Receiver<Op>,
+            op: &Op,
+            end: Event,
+            label: &str,
+        ) {
+            app.dispatch_op(op.clone());
+            assert_eq!(rx.try_recv().as_ref(), Ok(op), "{label}");
+
+            app.handle_engine_event(end);
+
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{label}");
+            assert_eq!(*app.queue.pending(), ["typed meanwhile"], "{label}");
+        }
+
+        #[test]
+        fn evicts_orphaned_pending_calls() {
+            // Every op end drops calls whose results never arrived, so stale IDs cannot pile up.
+            let (mut app, _rx, _event_tx) = test_app(None);
+            start_op(&mut app, &Op::prompt("running"));
+            app.handle_engine_event(bash_call_start("orphan", "ls"));
+            assert_eq!(app.chat.pending_call_count(), 1);
+
+            app.handle_engine_event(Event::TurnComplete);
+
+            assert_eq!(
+                app.chat.pending_call_count(),
+                0,
+                "turn end must evict calls whose result never arrived",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_saved_session_update_starts_the_queue_head_unless_the_user_cancelled() {
+            let failure = || SavedError::Failed {
+                action: SavedAction::Archive,
+                id: "saved".to_owned(),
+                cause: "disk full".to_owned(),
+            };
+            let update = || ArchiveUpdate {
+                id: "saved".to_owned(),
+                changed: true,
+            };
+            for (label, cancelled, result, starts) in [
+                ("archived", false, Ok(update()), true),
+                ("failed", false, Err(failure()), true),
+                ("cancelled", true, Ok(update()), false),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                let target = SavedTarget::Prefix("saved".to_owned());
+                app.dispatch_op(Op::SetArchive {
+                    target: target.clone(),
+                    state: ArchiveState::Archived,
+                });
+                rx.try_recv().expect("archive forwarded");
+                app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+                if cancelled {
+                    app.handle_esc();
+                    assert_eq!(rx.try_recv(), Ok(Op::Interrupt), "{label}");
+                }
+
+                app.handle_engine_event(Event::ArchiveUpdated {
+                    target,
+                    state: ArchiveState::Archived,
+                    result,
+                });
+
+                let started = rx.try_recv().ok();
+                assert_eq!(
+                    started,
+                    starts.then(|| Op::prompt("typed meanwhile")),
+                    "{label}"
+                );
+                let pending: &[&str] = if starts { &[] } else { &["typed meanwhile"] };
+                assert_eq!(*app.queue.pending(), pending, "{label}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_modal_the_lookup_opens_defers_the_queue_while_it_stays_open() {
+            for (case, result, stays_open) in [
+                ("deleted", Ok(()), false),
+                (
+                    "failed",
+                    Err(SavedError::Live {
+                        id: "saved".to_owned(),
+                    }),
+                    true,
+                ),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
+                rx.try_recv().expect("lookup forwarded");
+                app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+                app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{case}");
+                let delete = Op::DeleteSaved {
+                    session_id: "saved".to_owned(),
+                };
+                app.dispatch_op(delete.clone());
+                assert_eq!(rx.try_recv(), Ok(delete), "{case}");
+
+                app.handle_engine_event(Event::SavedDeleted {
+                    id: "saved".to_owned(),
+                    result,
+                });
+
+                assert_eq!(app.modals.is_active(), stays_open, "{case}");
+                assert_eq!(
+                    rx.try_recv().ok(),
+                    (!stays_open).then(|| Op::prompt("typed meanwhile")),
+                    "{case}"
+                );
+                let pending: &[&str] = if stays_open {
+                    &["typed meanwhile"]
+                } else {
+                    &[]
+                };
+                assert_eq!(*app.queue.pending(), pending, "{case}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_modal_the_lookup_opens_defers_the_queue_until_the_user_closes_it() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
+            rx.try_recv().expect("lookup forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+            let deferred = rx.try_recv();
+
+            app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
+
+            assert_eq!(deferred, Err(TryRecvError::Empty));
+            assert!(!app.modals.is_active(), "N declines the delete");
+            assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
+        }
+
+        #[tokio::test]
+        async fn closing_the_last_modal_that_sends_ops_starts_the_queue_under_a_read_only_one() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
+            rx.try_recv().expect("lookup forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.dispatch_action(Action::Submit("/help".to_owned()));
+            app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+            let deferred = rx.try_recv();
+
+            app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
+
+            assert_eq!(deferred, Err(TryRecvError::Empty));
+            assert!(
+                app.modals.is_active(),
+                "/help stays open under the closed confirm"
+            );
+            assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
+        }
+
+        #[tokio::test]
+        async fn a_modal_the_user_opened_meanwhile_leaves_the_queue_going() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Clear);
+            assert_eq!(rx.try_recv(), Ok(Op::Clear));
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.push_modal(Box::new(FakeModal::new("help")));
+
+            app.handle_engine_event(Event::SessionReady);
+
+            assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
+        }
+
+        #[tokio::test]
+        async fn a_failed_compaction_holds_the_queue_past_a_rename() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Compact { instructions: None });
+            rx.try_recv().expect("compaction forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.handle_engine_event(Event::TurnFailed("Compaction failed".to_owned()));
+
+            assert_stays_held(
+                &mut app,
+                &mut rx,
+                &Op::Rename {
+                    title: "x".to_owned(),
+                },
+                Event::SessionTitleUpdated {
+                    id: "test-session".to_owned(),
+                    title: "x".to_owned(),
+                },
+                "rename",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_failed_resume_holds_the_queue_past_a_model_change() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Resume {
+                target: ResumeTarget::Id("missing".to_owned()),
+            });
+            rx.try_recv().expect("resume forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.handle_engine_event(Event::TurnFailed("No session matches".to_owned()));
+            let end = Event::ConfigChanged {
+                model: app.session_info.config.model.clone(),
+                effort: Some(Effort::Low),
+                requested: ConfigPick::Effort(Effort::Low),
+                auto_compaction: app.session_info.config.compaction.auto,
+                notice: "Effort set to low".to_owned(),
+            };
+
+            assert_stays_held(
+                &mut app,
+                &mut rx,
+                &Op::SetModel(ConfigPick::Effort(Effort::Low)),
+                end,
+                "model",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_failed_switch_passes_its_prompt_only_to_the_same_kind_of_session() {
+            let rolled = || Event::SessionRolled {
+                id: "fresh".to_owned(),
+                old_session: ArchiveState::Active,
+            };
+            for (case, failed, retry, landed, kept) in [
+                (
+                    "/resume",
+                    Op::Resume {
+                        target: ResumeTarget::Id("missing".to_owned()),
+                    },
+                    Op::Resume {
+                        target: ResumeTarget::Id("abcd".to_owned()),
+                    },
+                    Event::SessionResumed {
+                        id: "abcd".to_owned(),
+                        title: None,
+                        prior: ArchiveState::Active,
+                        history: Vec::new(),
+                    },
+                    true,
+                ),
+                (
+                    "/clear after /archive",
+                    Op::Archive,
+                    Op::Clear,
+                    rolled(),
+                    true,
+                ),
+                (
+                    "/clear after /resume",
+                    Op::Resume {
+                        target: ResumeTarget::Id("missing".to_owned()),
+                    },
+                    Op::Clear,
+                    rolled(),
+                    false,
+                ),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.queue.push("for the old session".to_owned());
+                app.queue.hold();
+                app.dispatch_op(failed);
+                rx.try_recv().expect("switch forwarded");
+                app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+                app.handle_engine_event(Event::TurnFailed("Switch failed".to_owned()));
+                app.dispatch_op(retry);
+                rx.try_recv().expect("retry forwarded");
+
+                app.handle_engine_event(landed);
+                app.handle_engine_event(Event::SessionReady);
+
+                assert_eq!(
+                    rx.try_recv().ok(),
+                    kept.then(|| Op::prompt("typed meanwhile")),
+                    "{case}"
+                );
+                assert_eq!(*app.queue.pending(), [] as [&str; 0], "{case}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_cancel_during_a_failed_resume_leaves_its_prompts_to_the_retry_discard() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Resume {
+                target: ResumeTarget::Id("missing".to_owned()),
+            });
+            rx.try_recv().expect("resume forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.handle_esc();
+            assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
+            app.handle_engine_event(Event::TurnFailed("No session matches".to_owned()));
+            app.dispatch_op(Op::Resume {
+                target: ResumeTarget::Id("abcd".to_owned()),
+            });
+            rx.try_recv().expect("retry forwarded");
+
+            app.handle_engine_event(Event::SessionResumed {
+                id: "abcd".to_owned(),
+                title: None,
+                prior: ArchiveState::Active,
+                history: Vec::new(),
+            });
+            app.handle_engine_event(Event::SessionReady);
+
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+            assert_eq!(*app.queue.pending(), [] as [&str; 0]);
+        }
+
+        #[tokio::test]
+        async fn a_cancel_holds_the_queue_past_an_archive() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            start_op(&mut app, &Op::prompt("running"));
+            app.queue.push("typed meanwhile".to_owned());
+            app.handle_esc();
+            assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
+            app.handle_engine_event(Event::Cancelled);
+            let target = SavedTarget::Prefix("saved".to_owned());
+
+            assert_stays_held(
+                &mut app,
+                &mut rx,
+                &Op::SetArchive {
+                    target: target.clone(),
+                    state: ArchiveState::Archived,
+                },
+                Event::ArchiveUpdated {
+                    target,
+                    state: ArchiveState::Archived,
+                    result: Ok(ArchiveUpdate {
+                        id: "saved".to_owned(),
+                        changed: true,
+                    }),
+                },
+                "archive",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_rename_keeps_a_prompt_local_until_it_ends() {
+            for end in [
+                Event::SessionTitleUpdated {
+                    id: "test-session".to_owned(),
+                    title: "Renamed".to_owned(),
+                },
+                Event::RenameFailed("Session write failed: disk full".to_owned()),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.dispatch_action(Action::Submit("/rename Renamed".to_owned()));
+                assert_eq!(
+                    rx.try_recv(),
+                    Ok(Op::Rename {
+                        title: "Renamed".to_owned(),
+                    }),
+                    "{end:?}"
+                );
+                app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+                let during = rx.try_recv();
+
+                app.handle_engine_event(end.clone());
+
+                assert_eq!(during, Err(TryRecvError::Empty), "{end:?}");
+                assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")), "{end:?}");
+            }
+        }
+    }
+
     mod apply_archive_updated {
         use super::*;
 
         #[test]
         fn successful_completion_keeps_held_input_until_the_next_picker_action() {
             let archive_key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
-            for (next_key, next_status) in [
-                (archive_key, Status::Archiving),
-                (KeyEvent::from(KeyCode::Enter), Status::Resuming),
+            for (next_key, next_activity) in [
+                (archive_key, Activity::Archiving),
+                (KeyEvent::from(KeyCode::Enter), Activity::Resuming),
             ] {
                 let (_dir, store) = isolated_store();
                 for (id, second) in [("first", 0), ("second", 1)] {
@@ -2292,14 +2686,16 @@ mod tests {
                         &store,
                         id,
                         Some(id),
-                        Some(1),
+                        1,
                         time::macros::datetime!(2026-04-18 09:00:00 UTC)
                             + time::Duration::seconds(second),
                     );
                 }
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 app.queue.push("held prompt".to_owned());
-                app.set_status(Status::Cancelling);
+                start_op(&mut app, &Op::prompt("running"));
+                app.handle_esc();
+                assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
                 app.handle_engine_event(Event::Cancelled);
                 let picker = ResumePicker::loaded(store, app.session_info.session_id.clone());
                 app.push_modal(Box::new(picker));
@@ -2324,7 +2720,7 @@ mod tests {
                     }),
                 });
 
-                assert_eq!(app.status, Status::Idle, "{next_key:?}");
+                assert_eq!(activity(&app), None, "{next_key:?}");
                 assert_eq!(*app.queue.pending(), ["held prompt"], "{next_key:?}");
                 assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{next_key:?}");
 
@@ -2341,48 +2737,9 @@ mod tests {
                     }
                 };
                 assert_eq!(rx.try_recv(), Ok(expected), "{next_key:?}");
-                assert_eq!(app.status, next_status, "{next_key:?}");
+                assert_eq!(activity(&app), Some(&next_activity), "{next_key:?}");
                 assert_eq!(*app.queue.pending(), ["held prompt"], "{next_key:?}");
                 assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{next_key:?}");
-            }
-        }
-
-        #[test]
-        fn completion_keeps_queued_input_for_the_user() {
-            let update = || {
-                Ok(ArchiveUpdate {
-                    id: "saved".to_owned(),
-                    changed: true,
-                })
-            };
-            for (status, result) in [
-                (Status::Archiving, update()),
-                (Status::Cancelling, update()),
-                (
-                    Status::Archiving,
-                    Err(SavedError::Failed {
-                        action: SavedAction::Archive,
-                        id: "saved".to_owned(),
-                        cause: "disk full".to_owned(),
-                    }),
-                ),
-            ] {
-                let (mut app, mut rx, _event_tx) = test_app(None);
-                app.queue.push("next prompt".to_owned());
-                app.set_status(status);
-
-                app.apply_archive_updated(
-                    &SavedTarget::Prefix("saved".to_owned()),
-                    ArchiveState::Archived,
-                    &result,
-                );
-
-                assert_eq!(app.status, Status::Idle);
-                assert_eq!(*app.queue.pending(), ["next prompt"]);
-                assert_eq!(
-                    rx.try_recv(),
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-                );
             }
         }
     }
@@ -2393,22 +2750,32 @@ mod tests {
         #[test]
         fn opens_the_confirm_modal_or_reports_why_no_session_matched() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.set_status(Status::Searching);
+            start_op(
+                &mut app,
+                &Op::FindSaved {
+                    prefix: "1a2b".to_owned(),
+                },
+            );
 
             app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert!(app.modals.is_active(), "the confirm modal opens");
 
             app.modals.clear();
-            app.set_status(Status::Searching);
+            start_op(
+                &mut app,
+                &Op::FindSaved {
+                    prefix: "1a2b".to_owned(),
+                },
+            );
             app.handle_engine_event(Event::SavedFound(Err(SavedError::Resolve(
                 ResolveError::Live {
                     prefix: "test-".to_owned(),
                 },
             ))));
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert!(!app.modals.is_active());
             assert_eq!(
                 app.chat.last_error_text(),
@@ -2422,6 +2789,12 @@ mod tests {
 
     mod apply_saved_deleted {
         use super::*;
+
+        fn delete_saved(id: &str) -> Op {
+            Op::DeleteSaved {
+                session_id: id.to_owned(),
+            }
+        }
 
         #[test]
         fn a_delete_closes_the_confirm_modal_into_a_chat_note_and_a_failure_keeps_it() {
@@ -2438,21 +2811,18 @@ mod tests {
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);
                 let info = SessionInfo {
-                    title: Some(TitleInfo {
-                        title: "Old work".to_owned(),
-                        updated_at: time::macros::datetime!(2026-04-18 09:00:00 UTC),
-                    }),
+                    title: Some("Old work".to_owned()),
                     ..listed_session("saved")
                 };
                 app.handle_engine_event(Event::SavedFound(Ok(Box::new(info))));
-                app.set_status(Status::Deleting);
+                start_op(&mut app, &delete_saved("saved"));
 
                 app.handle_engine_event(Event::SavedDeleted {
                     id: "saved".to_owned(),
                     result: result.clone(),
                 });
 
-                assert_eq!(app.status, Status::Idle, "{result:?}");
+                assert_eq!(activity(&app), None, "{result:?}");
                 assert_eq!(app.modals.is_active(), !closes, "{result:?}");
                 let note = closes.then_some("Deleted session saved: Old work");
                 assert_eq!(app.chat.last_system_text(), note, "{result:?}");
@@ -2463,20 +2833,20 @@ mod tests {
         fn reports_the_result_in_chat_once_the_confirm_modal_is_gone() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let id = stamped_id(0xab);
-            app.set_status(Status::Deleting);
+            start_op(&mut app, &delete_saved(&id));
 
             app.handle_engine_event(Event::SavedDeleted {
                 id: id.clone(),
                 result: Ok(()),
             });
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(
                 app.chat.last_system_text(),
                 Some("Deleted session abababab")
             );
 
-            app.set_status(Status::Deleting);
+            start_op(&mut app, &delete_saved(&id));
             app.handle_engine_event(Event::SavedDeleted {
                 id,
                 result: Err(SavedError::Live {
@@ -2484,34 +2854,13 @@ mod tests {
                 }),
             });
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(
                 app.chat.last_error_text(),
                 Some(
                     "Session abababab is the live session. \
                      Run `/clear` to start a new one, then delete it."
                 )
-            );
-        }
-    }
-
-    mod finish_turn {
-        use super::*;
-
-        #[test]
-        fn evicts_orphaned_pending_calls() {
-            // Turn boundaries discard calls whose results never arrived, preventing stale IDs from
-            // accumulating.
-            let (mut app, _rx, _event_tx) = test_app(None);
-            app.handle_engine_event(bash_call_start("orphan", "ls"));
-            assert_eq!(app.chat.pending_call_count(), 1);
-
-            app.handle_engine_event(Event::TurnComplete);
-
-            assert_eq!(
-                app.chat.pending_call_count(),
-                0,
-                "turn end must evict calls whose result never arrived",
             );
         }
     }

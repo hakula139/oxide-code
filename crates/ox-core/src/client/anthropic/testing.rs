@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use indoc::writedoc;
 use wiremock::ResponseTemplate;
 
-use crate::config::auth::{Auth, AuthSource};
+use crate::auth::{Auth, AuthSource};
 
 pub(crate) const DEVICE_ID: &str = "did";
 

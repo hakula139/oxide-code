@@ -14,11 +14,11 @@ use tracing::debug;
 use ox_core::command::{self, Parsed};
 use ox_core::protocol::{Op, SignInCode};
 
-use super::queue::QueuedPrompt;
+use super::operation::InFlight;
+use super::queue::{QueuedPrompt, SwitchTo};
 use super::{App, EXIT_WINDOW, SlashTask};
 use crate::action::{APP_KEYMAP, Action, AppAction, next_mode};
 use crate::components::input::InputOutcome;
-use crate::components::status::Status;
 use crate::keymap::{CTRL_C, CTRL_D};
 use crate::modal::ModalAction;
 use crate::now;
@@ -147,6 +147,11 @@ impl App {
         if let Some(action) = self.modals.handle_key(key) {
             self.apply_modal_action(action);
         }
+        if self.head_awaits_modal && self.in_flight.is_none() && !self.modals.sends_idle_only_ops()
+        {
+            self.head_awaits_modal = false;
+            self.drain_pending_prompt();
+        }
         self.dirty = true;
     }
 
@@ -208,17 +213,17 @@ impl App {
     /// Arms the exit window, or quits inside it, when idle, and interrupts the running work when
     /// busy.
     fn handle_ctrl_c(&mut self) {
-        if self.status.is_idle() {
+        if self.in_flight.is_none() {
             self.confirm_exit();
         } else {
             self.dispatch_op(Op::Interrupt);
         }
     }
 
-    /// Deletes forward while the input holds text. An empty idle input quits as a shell does at EOF,
+    /// Deletes forward while the input holds text. An empty idle input quits like a shell at EOF,
     /// through the same double-press window as Ctrl+C, so a habitual EOF press does not close `ox`.
     fn handle_ctrl_d(&mut self, key: &KeyEvent) {
-        if self.status.is_idle() && self.input.is_empty() {
+        if self.in_flight.is_none() && self.input.is_empty() {
             self.confirm_exit();
         } else {
             _ = self.input.handle_event(&CrosstermEvent::Key(*key));
@@ -227,7 +232,7 @@ impl App {
 
     /// Cancels if busy, restores one queued prompt if idle, or no-ops.
     pub(super) fn handle_esc(&mut self) {
-        if !self.status.is_idle() {
+        if self.in_flight.is_some() {
             self.dispatch_op(Op::Interrupt);
         } else if self.input.is_empty()
             && let Some(prompt) = self.queue.pop_last()
@@ -253,14 +258,14 @@ impl App {
     }
 
     /// Reserves delivery before applying the op's local state change, and drops an idle-only op
-    /// with a chat error while another operation runs, since the engine would drop it silently.
-    /// Prompts reach the engine only through the prompt queue, by [`Self::start_turn`] and
-    /// [`Self::forward_queued_prompts`].
+    /// with a chat error while another operation runs, since the engine would drop it silently. An
+    /// idle-only op stays in flight until its terminal event. Prompts reach the engine only through
+    /// the prompt queue, by [`Self::start_turn`] and [`Self::forward_queued_prompts`].
     pub(super) fn dispatch_op(&mut self, op: Op) {
         if op == Op::Shutdown {
             self.should_quit = true;
         }
-        if op.is_idle_only() && !self.status.is_idle() {
+        if op.is_idle_only() && self.in_flight.is_some() {
             self.chat.push_error(BUSY_DROPPED);
             return;
         }
@@ -268,38 +273,38 @@ impl App {
             return;
         };
         match &op {
-            Op::Interrupt => self.set_status(Status::Cancelling),
-            Op::Clear => {
-                self.queue.mark_switch();
-                self.set_status(Status::Clearing);
+            Op::Interrupt => {
+                if let Some(in_flight) = &mut self.in_flight {
+                    in_flight.cancel();
+                }
             }
-            Op::Resume { .. } => {
-                self.queue.mark_switch();
-                self.set_status(Status::Resuming);
-            }
-            Op::Compact { .. } => self.set_status(Status::Compacting),
-            Op::Login => self.set_status(Status::SigningIn),
-            Op::Logout => self.set_status(Status::SigningOut),
-            Op::Archive => {
-                self.queue.mark_switch();
-                self.set_status(Status::Archiving);
-            }
-            Op::SetArchive { target, .. } => {
-                self.set_status(Status::Archiving);
-                self.modals.archive_started(target);
-            }
-            Op::FindSaved { .. } => self.set_status(Status::Searching),
-            Op::DeleteSaved { .. } => self.set_status(Status::Deleting),
+            Op::Clear | Op::Archive => self.queue.mark_switch(SwitchTo::Fresh),
+            Op::Resume { .. } => self.queue.mark_switch(SwitchTo::Saved),
+            Op::Compact { .. } => self.queue.mark_compacting(),
+            Op::SetArchive { target, .. } => self.modals.archive_started(target),
+            Op::DeleteSaved { session_id } => self.modals.delete_started(session_id),
             Op::SetMode(mode) => self.requested_mode = *mode,
             Op::Prompt { .. }
             | Op::Queue(_)
             | Op::Resolve { .. }
+            | Op::FindSaved { .. }
             | Op::SetModel(_)
             | Op::Rename { .. }
+            | Op::Login
             | Op::LoginCode(_)
+            | Op::Logout
             | Op::Shutdown => {}
         }
+        self.begin(&op);
         permit.send(op);
+    }
+
+    /// Puts `op` in flight when it runs until a terminal event, which also closes an exit window.
+    fn begin(&mut self, op: &Op) {
+        if let Some(in_flight) = InFlight::new(op) {
+            self.in_flight = Some(in_flight);
+            self.exit_armed = None;
+        }
     }
 
     /// Reserves capacity for `op`. A full channel surfaces as a chat error block, and a closed
@@ -340,13 +345,10 @@ impl App {
 
     /// Quits on a second exit key inside the window, or arms it.
     fn confirm_exit(&mut self) {
-        if let Status::ExitArmed { until } = &self.status
-            && now() < *until
-        {
+        if self.exit_armed.is_some_and(|until| now() < until) {
             self.should_quit = true;
         } else {
-            let until = now() + EXIT_WINDOW;
-            self.set_status(Status::ExitArmed { until });
+            self.exit_armed = Some(now() + EXIT_WINDOW);
         }
     }
 
@@ -356,15 +358,9 @@ impl App {
         self.dispatch_op(Op::SetMode(next));
     }
 
-    /// Clears an [`Status::ExitArmed`] window that ended by `now`. Returns whether it cleared.
+    /// Closes an exit window that ended by `now`. Returns whether it closed.
     pub(super) fn expire_armed_exit(&mut self, now: Instant) -> bool {
-        if let Status::ExitArmed { until } = &self.status
-            && now >= *until
-        {
-            self.set_status(Status::Idle);
-            return true;
-        }
-        false
+        self.exit_armed.take_if(|until| now >= *until).is_some()
     }
 
     fn preview_theme(&mut self, builtin: &BuiltinTheme) {
@@ -393,15 +389,19 @@ impl App {
     /// Queues the prompt, then starts a turn with the queue head when idle. While signing in, it
     /// takes only the sign-in code. Slash commands forward their own synthesized actions.
     fn handle_submit_prompt(&mut self, text: &str) {
-        let idle = self.status.is_idle();
+        let idle = self.in_flight.is_none();
         let Some(parsed) = command::parse_slash(text) else {
-            if self.status == Status::SigningIn {
+            if self
+                .in_flight
+                .as_ref()
+                .is_some_and(InFlight::awaits_sign_in_code)
+            {
                 self.submit_sign_in_code(text);
                 return;
             }
             self.queue.push(text.to_owned());
             if idle {
-                // Prompts a cancel left queued run before this one.
+                // Prompts a cancel or failure held run before this one.
                 self.drain_pending_prompt();
             } else {
                 self.forward_queued_prompts();
@@ -456,27 +456,20 @@ impl App {
             self.chat.push_user_message(display);
         }
         self.queue.set_active(prompt);
-        self.set_status(Status::Streaming);
+        self.begin(&op);
         permit.send(op);
         self.forward_queued_prompts();
     }
 
     /// Forwards the queued prompts the in-flight turn lacks, in order. A prompt that a full channel
-    /// turns away stays queued for a later call, and a closed channel quits. Holds them during an
-    /// op that runs no turn to splice them into, or while cancelling.
+    /// turns away stays queued for a later call, and a closed channel quits. Holds them unless
+    /// [`InFlight::takes_queued_prompts`].
     pub(super) fn forward_queued_prompts(&mut self) {
-        if matches!(
-            &self.status,
-            Status::Compacting
-                | Status::SigningIn
-                | Status::SigningOut
-                | Status::Clearing
-                | Status::Resuming
-                | Status::Archiving
-                | Status::Searching
-                | Status::Deleting
-                | Status::Cancelling,
-        ) {
+        if !self
+            .in_flight
+            .as_ref()
+            .is_some_and(InFlight::takes_queued_prompts)
+        {
             return;
         }
         while let Some(prompt) = self.queue.next_to_forward() {
@@ -494,7 +487,7 @@ impl App {
     /// Runs `parsed`, the command the user typed as `line`, and applies its outcome, returning the
     /// action it asks the caller to route.
     fn run_slash(&mut self, parsed: &Parsed, line: &str) -> Option<Action> {
-        let ctx = SlashContext::new(&self.session_info, self.status_bar.title());
+        let ctx = SlashContext::new(&self.session_info);
         let outcome = slash::dispatch(parsed, &ctx);
         self.apply_slash_outcome(outcome, line)
     }
@@ -502,7 +495,7 @@ impl App {
     /// Refuses a `Mutating` command while the App is busy, naming it in a chat notice. Returns
     /// whether the command may run.
     fn allows_mutating(&mut self, name: &str, kind: Option<SlashKind>) -> bool {
-        if self.status.is_idle() || kind != Some(SlashKind::Mutating) {
+        if self.in_flight.is_none() || kind != Some(SlashKind::Mutating) {
             return true;
         }
         self.chat.push_system_message(format!(
@@ -575,17 +568,19 @@ mod tests {
     use ox_core::protocol::{
         ApprovalDecision, CompactTrigger, ConfigPick, Event, ResumeTarget, SavedTarget,
     };
-    use ox_core::session::entry::ArchiveState;
     use ox_core::session::saved::{ArchiveUpdate, SavedAction, SavedError};
+    use ox_core::session::store::listing::ArchiveState;
     use ox_core::session::store::testing::{listed_session, stamped_id};
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
     use super::*;
+    use crate::app::operation::Activity;
     use crate::app::testing::{
-        FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, cell_of, long_chat_block,
-        push_answerable_approval, render_app, rendered_text, test_app,
+        FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, activity, cell_of, long_chat_block,
+        push_answerable_approval, render_app, rendered_text, start_op, test_app,
     };
     use crate::components::status::StatusHyperlink;
+    use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::modal::testing::ScriptedModal;
     use crate::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};
     use crate::testing::{key_event, mouse_event, mouse_event_at};
@@ -698,6 +693,7 @@ mod tests {
         async fn ctrl_c_copies_the_selection_without_interrupting() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.chat.push_system_message("copy this word");
+            start_op(&mut app, &Op::prompt("running"));
             app.handle_engine_event(Event::StreamToken("partial".to_owned()));
             select_word(&mut app, "this").await;
 
@@ -711,7 +707,7 @@ mod tests {
                 Err(TryRecvError::Empty),
                 "a copying Ctrl+C must not interrupt"
             );
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
         }
 
         #[tokio::test(start_paused = true)]
@@ -878,12 +874,7 @@ mod tests {
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
             assert!(!app.should_quit, "first press only arms");
-            assert_eq!(
-                app.status,
-                Status::ExitArmed {
-                    until: now() + EXIT_WINDOW
-                }
-            );
+            assert_eq!(app.exit_armed, Some(now() + EXIT_WINDOW));
 
             tokio::time::advance(EXIT_WINDOW.checked_sub(Duration::from_millis(1)).unwrap()).await;
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
@@ -900,19 +891,13 @@ mod tests {
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
             assert!(!app.should_quit);
-            assert_eq!(
-                app.status,
-                Status::ExitArmed {
-                    until: now() + EXIT_WINDOW
-                }
-            );
+            assert_eq!(app.exit_armed, Some(now() + EXIT_WINDOW));
         }
 
         #[tokio::test]
         async fn ctrl_c_while_busy_interrupts_without_quitting() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.handle_engine_event(Event::StreamToken("partial".to_owned()));
-            assert!(!app.status.is_idle());
+            start_op(&mut app, &Op::prompt("running"));
 
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
@@ -922,30 +907,22 @@ mod tests {
 
         #[test]
         fn ctrl_d_on_an_empty_input_arms_exit_and_quits_only_when_armed() {
-            for (status, armed, quits) in [
-                (Status::Idle, true, false),
-                (
-                    Status::ExitArmed {
-                        until: now() + EXIT_WINDOW,
-                    },
-                    true,
-                    true,
-                ),
-                (Status::Streaming, false, false),
-                (Status::Cancelling, false, false),
+            for (label, exit_armed, in_flight, armed, quits) in [
+                ("idle", None, None, true, false),
+                ("armed", Some(now() + EXIT_WINDOW), None, true, true),
+                ("busy", None, Some(Op::prompt("running")), false, false),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
-                app.set_status(status.clone());
+                app.exit_armed = exit_armed;
+                if let Some(op) = in_flight {
+                    start_op(&mut app, &op);
+                }
 
                 app.handle_crossterm_event(&key_event(KeyCode::Char('d'), KeyModifiers::CONTROL));
 
-                assert_eq!(app.should_quit, quits, "{status:?}");
-                assert_eq!(
-                    matches!(app.status, Status::ExitArmed { .. }),
-                    armed,
-                    "{status:?}"
-                );
-                assert_eq!(rx.try_recv().ok(), None, "{status:?}");
+                assert_eq!(app.should_quit, quits, "{label}");
+                assert_eq!(app.exit_armed.is_some(), armed, "{label}");
+                assert_eq!(rx.try_recv().ok(), None, "{label}");
             }
         }
 
@@ -958,7 +935,7 @@ mod tests {
             app.handle_crossterm_event(&key_event(KeyCode::Char('d'), KeyModifiers::CONTROL));
 
             assert!(!app.should_quit);
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(rx.try_recv().ok(), None);
             assert_eq!(app.input.lines(), ["raft"]);
         }
@@ -966,6 +943,7 @@ mod tests {
         #[tokio::test]
         async fn esc_while_busy_interrupts() {
             let (mut app, mut rx, _event_tx) = test_app(None);
+            start_op(&mut app, &Op::prompt("running"));
             app.handle_engine_event(Event::StreamToken("partial".to_owned()));
 
             app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
@@ -985,7 +963,7 @@ mod tests {
 
             assert!(app.dirty);
             assert_eq!(app.chat.entry_count(), 1);
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
             let forwarded = rx.try_recv().ok().unwrap();
             assert!(matches!(forwarded, Op::Prompt { text, title: None } if text == "hi"));
         }
@@ -1034,6 +1012,7 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.chat.push_system_message(long_chat_block());
             _ = render_app(&mut app, 80, 20);
+            start_op(&mut app, &Op::prompt("running"));
             app.handle_engine_event(Event::StreamToken("partial".to_owned()));
             app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
             assert!(app.input.popup_visible());
@@ -1108,7 +1087,7 @@ mod tests {
         #[test]
         fn tab_during_busy_switches_mode_without_queuing_or_editing_the_draft() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.set_status(Status::Streaming);
+            start_op(&mut app, &Op::prompt("running"));
             app.input.set_text("next task");
 
             app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
@@ -1116,7 +1095,7 @@ mod tests {
             assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Plan)));
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
             assert_eq!(app.input.lines(), ["next task"]);
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
         }
 
         #[test]
@@ -1392,11 +1371,12 @@ mod tests {
         async fn busy_dispatches_interrupt() {
             // Esc is routed by `App` because its meaning depends on queue state and run-state.
             let (mut app, mut rx, _event_tx) = test_app(None);
+            start_op(&mut app, &Op::prompt("running"));
             app.handle_engine_event(Event::StreamToken("partial".to_owned()));
 
             app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
 
-            assert_eq!(app.status, Status::Cancelling);
+            assert_eq!(activity(&app), Some(&Activity::Cancelling));
             let forwarded = rx.try_recv().expect("Interrupt forwarded");
             assert!(matches!(forwarded, Op::Interrupt));
         }
@@ -1407,7 +1387,7 @@ mod tests {
 
             app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
         }
 
@@ -1466,7 +1446,7 @@ mod tests {
             app.dispatch_action(Action::Submit("hello".to_owned()));
 
             assert_eq!(app.chat.entry_count(), 1);
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
             assert!(!app.should_quit);
             let forwarded = rx.try_recv().expect("forwarded action");
             assert!(matches!(forwarded, Op::Prompt { text, title: None } if text == "hello"));
@@ -1484,7 +1464,7 @@ mod tests {
                 0,
                 "modal-only commands push no chat blocks and suppress their own echo",
             );
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(app.chat.last_error_text(), None);
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
         }
@@ -1496,7 +1476,7 @@ mod tests {
             app.dispatch_action(Action::Submit("/no-such".to_owned()));
 
             assert_eq!(app.chat.entry_count(), 2);
-            assert!(app.status.is_idle());
+            assert!(app.in_flight.is_none());
             assert_eq!(
                 app.chat.last_error_text(),
                 Some(
@@ -1517,7 +1497,7 @@ mod tests {
             app.dispatch_action(Action::Submit("//etc/hosts".to_owned()));
 
             assert_eq!(app.chat.entry_count(), 1, "only the user message");
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
             assert_eq!(app.chat.last_error_text(), None);
             let forwarded = rx.try_recv().expect("forwarded action");
             assert!(matches!(
@@ -1546,7 +1526,7 @@ mod tests {
 
             assert!(app.should_quit, "closed channel must trigger teardown");
             assert_eq!(app.chat.last_error_text(), None);
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(app.queue.active(), None);
             assert_eq!(*app.queue.pending(), ["hi"]);
         }
@@ -1579,7 +1559,7 @@ mod tests {
                 app.dispatch_action(Action::Submit("next prompt".to_owned()));
 
                 assert!(!app.should_quit, "{command}");
-                assert_eq!(app.status, Status::Idle, "{command}");
+                assert_eq!(activity(&app), None, "{command}");
                 assert_eq!(app.queue.active(), None, "{command}");
                 assert_eq!(*app.queue.pending(), [line, "next prompt"], "{command}");
                 assert_eq!(app.queue.pending()[0].prompt(), prompt, "{command}");
@@ -1603,7 +1583,7 @@ mod tests {
 
                 app.dispatch_action(Action::Submit("retry prompt".to_owned()));
 
-                assert_eq!(app.status, Status::Streaming, "{command}");
+                assert_eq!(activity(&app), Some(&Activity::Streaming), "{command}");
                 assert_eq!(app.queue.active().map(QueuedPrompt::line), Some(line));
                 assert_eq!(
                     rx.try_recv(),
@@ -1627,7 +1607,7 @@ mod tests {
                 app.handle_engine_event(Event::PromptDrained("retry prompt".to_owned()));
                 app.handle_engine_event(Event::TurnComplete);
 
-                assert_eq!(app.status, Status::Idle, "{command}");
+                assert_eq!(activity(&app), None, "{command}");
                 assert_eq!(app.queue.active(), None, "{command}");
                 assert_eq!(*app.queue.pending(), [] as [&str; 0], "{command}");
                 assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{command}");
@@ -1707,7 +1687,7 @@ mod tests {
             // Buffered for preview and forwarded so the turn can splice it in at its next round
             // boundary. Chat stays untouched until `PromptDrained` lands.
             assert_eq!(*app.queue.pending(), ["queued"],);
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
             let forwarded = rx.try_recv().expect("queued submit forwarded");
             assert_eq!(forwarded, Op::Queue("queued".to_owned()));
         }
@@ -1719,7 +1699,7 @@ mod tests {
             rx.try_recv().expect("active submit forwarded");
             app.dispatch_action(Action::Op(Op::Interrupt));
             rx.try_recv().expect("cancel forwarded");
-            assert_eq!(app.status, Status::Cancelling);
+            assert_eq!(activity(&app), Some(&Activity::Cancelling));
 
             app.dispatch_action(Action::Submit("typed-during-cancel".to_owned()));
 
@@ -1736,7 +1716,7 @@ mod tests {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Op(Op::Compact { instructions: None }));
             rx.try_recv().expect("compact forwarded");
-            assert_eq!(app.status, Status::Compacting);
+            assert_eq!(activity(&app), Some(&Activity::Compacting));
 
             app.dispatch_action(Action::Submit("typed-during-compact".to_owned()));
 
@@ -1755,7 +1735,7 @@ mod tests {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             rx.try_recv().expect("active submit forwarded");
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
 
             app.dispatch_action(Action::Submit("/help".to_owned()));
 
@@ -1778,7 +1758,7 @@ mod tests {
         #[tokio::test]
         async fn clear_during_busy_refuses_with_system_message_no_dispatch() {
             // State-mutating commands refuse mid-turn, since rolling while `messages` is still
-            // draining would race the in-flight turn into the wrong JSONL.
+            // draining would race the in-flight turn into the wrong session.
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             rx.try_recv().expect("active submit forwarded");
@@ -1808,7 +1788,7 @@ mod tests {
             app.dispatch_action(Action::Submit("/init".to_owned()));
 
             assert_eq!(app.chat.entry_count(), 1, "only the typed `/init` line");
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
             assert_eq!(
                 app.queue.active().map(QueuedPrompt::line),
                 Some("/init"),
@@ -1846,7 +1826,7 @@ mod tests {
             app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
 
             assert!(!app.modals.is_active());
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
             assert_eq!(
                 app.queue.active().map(QueuedPrompt::line),
                 Some("/init CLAUDE.md"),
@@ -1874,7 +1854,7 @@ mod tests {
             app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
 
             assert!(!app.modals.is_active());
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
             let text = rendered_text(&mut app, 80, 10);
             assert_eq!(text.matches("/init").count(), 1, "{text}");
@@ -2012,6 +1992,18 @@ mod tests {
         use super::*;
 
         #[tokio::test]
+        async fn an_operation_closes_the_exit_window() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+            assert!(app.exit_armed.is_some(), "Ctrl+C arms the exit window");
+
+            app.dispatch_op(Op::Clear);
+
+            assert_eq!(rx.try_recv(), Ok(Op::Clear));
+            assert_eq!(app.exit_armed, None);
+        }
+
+        #[tokio::test]
         async fn interrupt_flips_status_to_cancelling_and_forwards() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("hi".to_owned()));
@@ -2021,7 +2013,7 @@ mod tests {
             app.dispatch_action(Action::Op(Op::Interrupt));
 
             assert_eq!(app.chat.entry_count(), entries_before, "no new chat entry");
-            assert_eq!(app.status, Status::Cancelling);
+            assert_eq!(activity(&app), Some(&Activity::Cancelling));
             assert!(!app.should_quit);
             let forwarded = rx.try_recv().expect("Interrupt forwarded");
             assert!(matches!(forwarded, Op::Interrupt));
@@ -2035,7 +2027,7 @@ mod tests {
 
             assert!(app.should_quit);
             assert_eq!(app.chat.entry_count(), 0);
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
         }
 
         #[test]
@@ -2050,7 +2042,7 @@ mod tests {
                 app.dispatch_op(Op::Shutdown);
 
                 assert!(app.should_quit, "closed={closed}");
-                assert_eq!(app.status, Status::Idle, "closed={closed}");
+                assert_eq!(activity(&app), None, "closed={closed}");
                 for op in buffered {
                     assert_eq!(rx.try_recv(), Ok(op), "closed={closed}");
                 }
@@ -2079,7 +2071,7 @@ mod tests {
 
             let forwarded = rx.try_recv().expect("Resume must reach the engine");
             assert_eq!(forwarded, action);
-            assert_eq!(app.status, Status::Resuming);
+            assert_eq!(activity(&app), Some(&Activity::Resuming));
         }
 
         #[tokio::test]
@@ -2095,7 +2087,7 @@ mod tests {
 
             let forwarded = rx.try_recv().expect("Compact must reach the engine");
             assert_eq!(forwarded, action);
-            assert_eq!(app.status, Status::Compacting);
+            assert_eq!(activity(&app), Some(&Activity::Compacting));
         }
 
         #[tokio::test]
@@ -2105,7 +2097,7 @@ mod tests {
             app.dispatch_op(Op::Login);
 
             assert_eq!(rx.try_recv().ok(), Some(Op::Login));
-            assert_eq!(app.status, Status::SigningIn);
+            assert_eq!(activity(&app), Some(&Activity::SigningIn));
         }
 
         #[tokio::test]
@@ -2123,15 +2115,19 @@ mod tests {
             for (command, switched, swapped) in [
                 (
                     "/clear",
-                    Status::Clearing,
+                    Activity::Clearing,
                     rolled("rolled-session", ArchiveState::Active),
                 ),
                 (
                     "/archive",
-                    Status::Archiving,
+                    Activity::Archiving,
                     rolled("rolled-session", ArchiveState::Archived),
                 ),
-                ("/resume abcd", Status::Resuming, landed("resumed-session")),
+                (
+                    "/resume abcd",
+                    Activity::Resuming,
+                    landed("resumed-session"),
+                ),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 app.queue.push("left by a cancel".to_owned());
@@ -2140,13 +2136,13 @@ mod tests {
 
                 app.dispatch_action(Action::Submit("after the switch".to_owned()));
 
-                assert_eq!(app.status, switched, "{command}");
+                assert_eq!(activity(&app), Some(&switched), "{command}");
                 assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{command}");
 
                 app.handle_engine_event(swapped);
                 app.handle_engine_event(Event::SessionReady);
 
-                assert_eq!(app.status, Status::Streaming, "{command}");
+                assert_eq!(activity(&app), Some(&Activity::Streaming), "{command}");
                 assert_eq!(
                     rx.try_recv().ok(),
                     Some(Op::prompt("after the switch")),
@@ -2168,12 +2164,16 @@ mod tests {
             for (action, busy, sent) in [
                 (
                     Action::Submit("/delete abcd".to_owned()),
-                    Status::Searching,
+                    Activity::Searching,
                     Op::FindSaved {
                         prefix: "abcd".to_owned(),
                     },
                 ),
-                (Action::Op(delete.clone()), Status::Deleting, delete.clone()),
+                (
+                    Action::Op(delete.clone()),
+                    Activity::Deleting,
+                    delete.clone(),
+                ),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 app.dispatch_action(action);
@@ -2181,7 +2181,7 @@ mod tests {
 
                 app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
 
-                assert_eq!(app.status, busy, "{busy:?}");
+                assert_eq!(activity(&app), Some(&busy), "{busy:?}");
                 assert_eq!(*app.queue.pending(), ["typed meanwhile"], "{busy:?}");
                 assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{busy:?}");
             }
@@ -2223,7 +2223,7 @@ mod tests {
 
             app.dispatch_op(op.clone());
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(*observed.lock().unwrap(), [] as [String; 0]);
             for op in buffered {
                 assert_eq!(rx.try_recv(), Ok(op));
@@ -2232,7 +2232,7 @@ mod tests {
             app.dispatch_op(op.clone());
 
             assert_eq!(rx.try_recv(), Ok(op.clone()));
-            assert_eq!(app.status, Status::Archiving);
+            assert_eq!(activity(&app), Some(&Activity::Archiving));
             let started = r#"started:Prefix("saved")"#;
             assert_eq!(*observed.lock().unwrap(), [started]);
 
@@ -2245,7 +2245,7 @@ mod tests {
                 }),
             });
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             let completed = r#"completed:Prefix("saved"):Archived:Ok(ArchiveUpdate { id: "saved", changed: true })"#;
             assert_eq!(*observed.lock().unwrap(), [started, completed]);
             assert_eq!(
@@ -2269,7 +2269,7 @@ mod tests {
                 }),
             });
 
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(activity(&app), None);
             assert_eq!(
                 app.chat.last_error_text(),
                 Some("/archive: Failed to archive session saved: disk full")
@@ -2279,33 +2279,38 @@ mod tests {
 
         #[test]
         fn drops_an_idle_only_op_while_another_operation_runs() {
-            for (op, busy) in [
+            for (op, running) in [
                 (
                     Op::Resume {
                         target: ResumeTarget::Id("saved".to_owned()),
                     },
-                    Status::Deleting,
+                    Op::DeleteSaved {
+                        session_id: "other".to_owned(),
+                    },
                 ),
                 (
                     Op::SetArchive {
                         target: SavedTarget::Id("saved".to_owned()),
                         state: ArchiveState::Archived,
                     },
-                    Status::Resuming,
+                    Op::Rename {
+                        title: "Renamed".to_owned(),
+                    },
                 ),
                 (
                     Op::DeleteSaved {
                         session_id: "saved".to_owned(),
                     },
-                    Status::Streaming,
+                    Op::prompt("running"),
                 ),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
-                app.set_status(busy.clone());
+                start_op(&mut app, &running);
+                let busy = activity(&app).cloned();
 
                 app.dispatch_op(op.clone());
 
-                assert_eq!(app.status, busy, "{op:?}");
+                assert_eq!(activity(&app).cloned(), busy, "{op:?}");
                 assert_eq!(app.chat.last_error_text(), Some(BUSY_DROPPED), "{op:?}");
                 assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{op:?}");
             }
@@ -2313,60 +2318,78 @@ mod tests {
 
         #[test]
         fn full_channel_preserves_state_until_delivery_can_be_reserved() {
+            let running = Some(Op::prompt("running"));
             for (op, before, after) in [
-                (Op::Interrupt, Status::Streaming, Status::Cancelling),
-                (Op::Clear, Status::Idle, Status::Clearing),
+                (Op::Interrupt, running, Some(Activity::Cancelling)),
+                (Op::Clear, None, Some(Activity::Clearing)),
                 (
                     Op::Resume {
                         target: ResumeTarget::Prefix("saved-session".to_owned()),
                     },
-                    Status::Idle,
-                    Status::Resuming,
+                    None,
+                    Some(Activity::Resuming),
                 ),
                 (
                     Op::Compact {
                         instructions: Some("focus on the API".to_owned()),
                     },
-                    Status::Idle,
-                    Status::Compacting,
+                    None,
+                    Some(Activity::Compacting),
                 ),
-                (Op::Login, Status::Idle, Status::SigningIn),
-                (Op::Logout, Status::Idle, Status::SigningOut),
-                (Op::Archive, Status::Idle, Status::Archiving),
+                (Op::Login, None, Some(Activity::SigningIn)),
+                (Op::Logout, None, Some(Activity::SigningOut)),
+                (Op::Archive, None, Some(Activity::Archiving)),
                 (
                     Op::FindSaved {
                         prefix: "saved".to_owned(),
                     },
-                    Status::Idle,
-                    Status::Searching,
+                    None,
+                    Some(Activity::Searching),
                 ),
                 (
                     Op::DeleteSaved {
                         session_id: "saved".to_owned(),
                     },
-                    Status::Idle,
-                    Status::Deleting,
+                    None,
+                    Some(Activity::Deleting),
                 ),
-                (Op::SetMode(Mode::Plan), Status::Idle, Status::Idle),
+                (
+                    Op::Rename {
+                        title: "Renamed".to_owned(),
+                    },
+                    None,
+                    Some(Activity::Renaming),
+                ),
+                (
+                    Op::SetModel(ConfigPick::Effort(Effort::High)),
+                    None,
+                    Some(Activity::UpdatingModel),
+                ),
+                (Op::SetMode(Mode::Plan), None, None),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
-                app.set_status(before.clone());
+                if let Some(running) = &before {
+                    start_op(&mut app, running);
+                }
+                let before = activity(&app).cloned();
                 app.requested_mode = Mode::Manual;
                 app.queue.push("old session".to_owned());
-                app.queue.mark_switch();
+                app.queue.mark_switch(SwitchTo::Fresh);
                 app.queue.push("current session".to_owned());
+                app.queue.hold();
                 let buffered = fill_channel(&app);
 
                 app.dispatch_op(op.clone());
 
                 assert!(!app.should_quit, "{op:?}");
-                assert_eq!(app.status, before, "{op:?}");
+                assert_eq!(activity(&app).cloned(), before, "{op:?}");
                 assert_eq!(app.requested_mode, Mode::Manual, "{op:?}");
                 assert_eq!(
                     app.chat.last_error_text(),
                     Some("ox is busy, so the request was dropped. Try again."),
                     "{op:?}",
                 );
+                assert!(app.queue.held(), "{op:?}");
                 app.queue.discard_left_behind();
                 assert_eq!(*app.queue.pending(), ["current session"], "{op:?}");
                 for buffered_op in buffered {
@@ -2376,7 +2399,7 @@ mod tests {
 
                 app.dispatch_op(op.clone());
 
-                assert_eq!(app.status, after, "{op:?}");
+                assert_eq!(activity(&app).cloned(), after, "{op:?}");
                 let mode = if let Op::SetMode(mode) = &op {
                     *mode
                 } else {
@@ -2385,6 +2408,50 @@ mod tests {
                 assert_eq!(app.requested_mode, mode, "{op:?}");
                 assert_eq!(rx.try_recv(), Ok(op.clone()), "{op:?}");
                 assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{op:?}");
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_dropped_delete_leaves_the_confirm_modal_taking_y_again() {
+            for full in [false, true] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+                render_app(&mut app, 60, 12);
+                tokio::time::advance(TYPE_AHEAD_GUARD).await;
+                let buffered = if full {
+                    fill_channel(&app)
+                } else {
+                    start_op(&mut app, &Op::Archive);
+                    Vec::new()
+                };
+                let y = key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+
+                app.handle_crossterm_event(&y);
+
+                assert_eq!(
+                    app.chat.last_error_text(),
+                    Some(BUSY_DROPPED),
+                    "full={full}"
+                );
+                for op in buffered {
+                    assert_eq!(rx.try_recv(), Ok(op), "full={full}");
+                }
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "full={full}");
+
+                app.in_flight = None;
+                app.handle_crossterm_event(&y);
+
+                let delete = Op::DeleteSaved {
+                    session_id: "saved".to_owned(),
+                };
+                assert_eq!(rx.try_recv(), Ok(delete), "full={full}");
+                assert_eq!(activity(&app), Some(&Activity::Deleting), "full={full}");
+
+                let entries = app.chat.entry_count();
+                app.handle_crossterm_event(&y);
+
+                assert_eq!(app.chat.entry_count(), entries, "full={full}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "full={full}");
             }
         }
     }
@@ -2451,31 +2518,29 @@ mod tests {
         fn becomes_idle_once_the_window_ends() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-            let Status::ExitArmed { until } = app.status else {
-                panic!("Ctrl+C arms the exit window");
-            };
+            let until = app.exit_armed.expect("Ctrl+C arms the exit window");
             let before = until.checked_sub(Duration::from_millis(1)).unwrap();
 
             let expired_early = app.expire_armed_exit(before);
 
             assert!(!expired_early);
-            assert_eq!(app.status, Status::ExitArmed { until });
+            assert_eq!(app.exit_armed, Some(until));
 
             let expired = app.expire_armed_exit(until);
 
             assert!(expired);
-            assert_eq!(app.status, Status::Idle);
+            assert_eq!(app.exit_armed, None);
         }
 
         #[test]
         fn when_not_armed_leaves_the_status() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.set_status(Status::Streaming);
+            start_op(&mut app, &Op::prompt("running"));
 
             let expired = app.expire_armed_exit(Instant::now());
 
             assert!(!expired);
-            assert_eq!(app.status, Status::Streaming);
+            assert_eq!(activity(&app), Some(&Activity::Streaming));
         }
     }
 
@@ -2594,7 +2659,7 @@ mod tests {
                 rx.try_recv().ok(),
                 Some(Op::LoginCode(SignInCode("auth-code#state".to_owned())))
             );
-            assert_eq!(app.status, Status::SigningIn);
+            assert_eq!(activity(&app), Some(&Activity::SigningIn));
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
             assert_eq!(
                 app.chat.entry_count(),
@@ -2812,6 +2877,7 @@ mod tests {
             for busy in [false, true] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 if busy {
+                    start_op(&mut app, &Op::prompt("running"));
                     app.handle_engine_event(Event::StreamToken("partial".to_owned()));
                 }
 

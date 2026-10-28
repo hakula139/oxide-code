@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::merge::Origins;
 use super::provenance::{Source, Sourced};
 use super::schema::CompactionTable;
-use super::{env_bool, env_number};
+use super::{env_number, resolve_flag};
 use crate::model::ModelSpec;
 use crate::util::path::tildify;
 use crate::util::text::compact_count;
@@ -106,9 +106,11 @@ pub(super) fn resolve(
     model: &ModelSpec,
     max_tokens: u32,
 ) -> Result<Sourced<CompactionConfig>> {
-    let auto_requested = env_bool("OX_COMPACTION_AUTO_ENABLED")?
-        .or_else(|| origins.sourced("client.compaction.auto_enabled", file.enabled))
-        .unwrap_or_else(|| Sourced::fallback(true));
+    let auto_requested = resolve_flag(
+        "OX_COMPACTION_AUTO_ENABLED",
+        origins.sourced("client.compaction.auto_enabled", file.enabled),
+        true,
+    )?;
     // Parsed even when disabled, so a bad value fails the load as it does in a config file.
     let env_tokens = env_number("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", 0..=u32::MAX)?;
     let env_percent = env_number(

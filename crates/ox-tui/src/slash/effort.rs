@@ -139,7 +139,7 @@ mod tests {
         fn run_execute_with_model(model_id: &str, args: &str) -> Result<SlashOutcome, String> {
             let mut info = test_session_info();
             info.config.model = ModelSpec::resolve(model_id);
-            EffortCmd.execute(args, &SlashContext::new(&info, None))
+            EffortCmd.execute(args, &SlashContext::new(&info))
         }
 
         #[test]

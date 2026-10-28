@@ -39,11 +39,7 @@ pub(super) enum FileVerb {
 
 /// Rejects targets the [`FileTracker`](crate::file_tracker::FileTracker) cannot gate, phrasing each
 /// refusal for `verb`.
-pub(super) fn validate_file_target(
-    path: &Path,
-    metadata: &Metadata,
-    verb: FileVerb,
-) -> Result<(), String> {
+fn validate_file_target(path: &Path, metadata: &Metadata, verb: FileVerb) -> Result<(), String> {
     validate_regular_file(metadata, MAX_TRACKED_FILE_SIZE)
         .map_err(|error| file_read_error(path, error, verb))
 }
@@ -86,10 +82,7 @@ pub(super) fn is_binary(bytes: &[u8]) -> bool {
 
 /// Reads a bounded regular file, checking its metadata before opening and through the opened
 /// no-follow handle. Errors name `path` and phrase refusals for `verb`.
-pub(super) async fn read_validated(
-    path: &Path,
-    verb: FileVerb,
-) -> Result<(Metadata, Vec<u8>), String> {
+pub(super) async fn read_validated(path: &Path, verb: FileVerb) -> Result<Vec<u8>, String> {
     let metadata = tokio::fs::metadata(path)
         .await
         .map_err(|e| format!("Failed to access {}: {e}", path.display()))?;
@@ -103,12 +96,6 @@ pub(super) async fn read_validated(
 }
 
 // ── File Writing ──
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WriteMode {
-    CreateNew,
-    Overwrite,
-}
 
 /// Publishes `bytes` after checking the original `expected` bytes and metadata, atomically when a
 /// staged copy can reproduce that metadata. `None` requires a new path. The caller must use the
@@ -196,11 +183,8 @@ mod tests {
             let link = dir.path().join("link.txt");
             symlink_file(&target, &link);
 
-            let (metadata, bytes) = read_validated(&target, FileVerb::Read).await.unwrap();
-            assert_eq!(
-                (metadata.len(), bytes.as_slice()),
-                (8, b"original".as_slice())
-            );
+            let bytes = read_validated(&target, FileVerb::Read).await.unwrap();
+            assert_eq!(bytes, b"original");
             let err = read_validated(&link, FileVerb::Read).await.unwrap_err();
             #[cfg(unix)]
             let cause = std::io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32);
@@ -228,83 +212,6 @@ mod tests {
                     )
                 );
             }
-        }
-    }
-
-    mod write {
-        use super::*;
-
-        #[test]
-        fn overwrite_replaces_a_regular_file() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("file.txt");
-            fs::write(&path, "a much longer original").unwrap();
-
-            let result = commit::write(&path, b"short", Some(b"a much longer original"));
-
-            result.unwrap();
-            assert_eq!(fs::read_to_string(&path).unwrap(), "short");
-        }
-
-        #[test]
-        fn create_new_refuses_existing_entries_and_dangling_links() {
-            let identity = |path: &Path| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt as _;
-
-                    let metadata = fs::symlink_metadata(path).unwrap();
-                    (metadata.dev(), metadata.ino())
-                }
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::OpenOptionsExt as _;
-
-                    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-
-                    let file = fs::OpenOptions::new()
-                        .read(true)
-                        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                        .open(path)
-                        .unwrap();
-                    crate::util::fs::file_id(&file).unwrap()
-                }
-            };
-            let dir = tempfile::tempdir().unwrap();
-            let existing = dir.path().join("existing.txt");
-            fs::write(&existing, "original").unwrap();
-            let target = dir.path().join("target.txt");
-            let link = dir.path().join("link.txt");
-            symlink_file(&target, &link);
-            let attempt = crate::tool::local_testing::WorkspaceWrite::new(&existing);
-
-            for path in [&existing, &link] {
-                let before = identity(path);
-
-                let error = commit::write(path, b"x", None).unwrap_err();
-
-                assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-                assert_eq!(identity(path), before);
-                attempt.assert_unchanged();
-                assert_eq!(fs::read_link(&link).unwrap(), target);
-                assert!(!target.exists(), "the link target must not be created");
-            }
-        }
-
-        #[test]
-        fn overwrite_refuses_a_symlink() {
-            let dir = tempfile::tempdir().unwrap();
-            let target = dir.path().join("target.txt");
-            fs::write(&target, "original").unwrap();
-            let link = dir.path().join("link.txt");
-            symlink_file(&target, &link);
-
-            let err = commit::write(&link, b"x", Some(b"original")).unwrap_err();
-            #[cfg(unix)]
-            assert_eq!(err.raw_os_error(), Some(nix::errno::Errno::ELOOP as i32));
-            #[cfg(windows)]
-            assert_eq!(err.to_string(), "the final path component is a symlink");
-            assert_eq!(fs::read_to_string(&target).unwrap(), "original");
         }
     }
 
@@ -354,7 +261,7 @@ mod tests {
                 String::from_utf8_lossy(&compact.stdout)
             );
 
-            let (_, bytes) = read_validated(&path, FileVerb::Read).await.unwrap();
+            let bytes = read_validated(&path, FileVerb::Read).await.unwrap();
             assert_eq!(bytes, content.as_bytes());
             commit::write(&path, b"rewritten", Some(content.as_bytes())).unwrap();
             assert_eq!(fs::read(&path).unwrap(), b"rewritten");

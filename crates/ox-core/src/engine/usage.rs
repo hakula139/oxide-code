@@ -9,7 +9,7 @@ use super::compaction::AutoCompactFailures;
 use super::turn::TurnReport;
 use crate::model::{self, TokenUsage};
 use crate::protocol::{Event, EventSink, UsageSnapshot};
-use crate::session::entry::UsageRecord;
+use crate::session::store::UsageRecord;
 
 /// The live session's billing, its context usage, and the failures that pause auto compaction. The
 /// engine replaces it whole when it adopts another session's transcript.
@@ -64,14 +64,14 @@ impl Engine {
         let records: Vec<_> = requests
             .iter()
             .map(|&tokens| UsageRecord {
-                model: self.client.model().id().to_owned(),
-                cache_ttl: self.client.prompt_cache_ttl(),
+                model: self.settings.model().id().to_owned(),
+                cache_ttl: self.settings.prompt_cache_ttl(),
                 tokens,
             })
             .collect();
         self.usage.total_estimated_cost_usd += estimate_cost_usd(&records);
-        let failure = self.transcript.record_usage(records).await;
-        sink.session_write_error(failure.as_deref());
+        let report = self.transcript.record_usage(records).await;
+        sink.session_write(&report);
     }
 
     /// Forgets the usage and auto-compaction failures of a transcript the session no longer sends.
@@ -94,7 +94,7 @@ impl Engine {
         sink.emit(
             Event::UsageUpdated(UsageSnapshot {
                 context_tokens: self.usage.displayed_usage.map(TokenUsage::context_tokens),
-                context_window: self.client.model().context_window(),
+                context_window: self.settings.model().context_window(),
                 estimated_cost_usd,
             }),
             "usage-updated",

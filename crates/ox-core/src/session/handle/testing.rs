@@ -7,13 +7,16 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::{Checkpoint, CompactOutcome, Outcome, RecordOutcome, SessionHandle, SharedState};
+use super::{
+    Checkpoint, CompactBoundary, CompactOutcome, RecordOutcome, SessionHandle, SharedState,
+    WriteReport,
+};
 use crate::file_tracker::FileTracker;
 use crate::file_tracker::testing::record_tracked_file;
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SessionContext;
 use crate::session::actor::{Record, SessionCmd};
-use crate::session::entry::{CompactBoundary, CompactRecord};
+use crate::session::store::CompactRecord;
 
 /// A `/compact` boundary for `summary` with no focus or task list.
 pub(crate) fn boundary(summary: &str) -> CompactBoundary {
@@ -92,7 +95,7 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                     _ = ack.send(RecordOutcome {
                         checkpoint: None,
                         ai_title_seed: None,
-                        failure: None,
+                        report: WriteReport::default(),
                     });
                 }
                 SessionCmd::Rewind { ack, .. }
@@ -102,7 +105,7 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                 | SessionCmd::SetManualTitle { ack, .. }
                 | SessionCmd::Archive { ack }
                 | SessionCmd::Finish { ack, .. } => {
-                    _ = ack.send(Outcome { failure: None });
+                    _ = ack.send(WriteReport::default());
                 }
                 SessionCmd::Compact { ack, .. } => {
                     _ = ack.send(CompactOutcome {
@@ -112,7 +115,7 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                             message_count: 1,
                             first_user_prompt_seen: true,
                         }),
-                        failure: None,
+                        report: WriteReport::default(),
                     });
                 }
                 SessionCmd::Shutdown { .. } => unreachable!("filtered above"),
@@ -123,7 +126,7 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
     handle(session_id, cmd_tx, Some(join))
 }
 
-/// A handle on a stand-in session with no file, whose artifact directory is in the temp directory.
+/// A handle on a stand-in session with no store, whose artifact directory is in the temp directory.
 fn handle(
     session_id: &str,
     cmd_tx: mpsc::Sender<SessionCmd>,
@@ -131,9 +134,11 @@ fn handle(
 ) -> SessionHandle {
     SessionHandle {
         cmd_tx,
-        session_id: Arc::from(session_id),
-        artifact_dir: std::env::temp_dir().join(session_id).into(),
-        shared: Arc::new(SharedState::default()),
+        shared: Arc::new(SharedState::new(
+            session_id,
+            std::env::temp_dir().join(session_id),
+            false,
+        )),
         actor_join: Arc::new(Mutex::new(join)),
         title_task: Arc::default(),
     }

@@ -28,15 +28,15 @@ use super::{Exit, decode_input, shutdown_signal};
 const STDIN_NOTICE_DELAY: Duration = Duration::from_secs(3);
 
 /// Runs `prompt` as a single turn, printed in `format`. An incomplete turn or failed output exits
-/// with failure, and a signal exits with its own status. If the engine panics, the panic is returned
-/// after the failed result is printed.
+/// with failure, and a signal exits with its own status. An engine panic is returned after the
+/// failed result prints.
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,
     prompt: &str,
     format: OutputFormat,
 ) -> Result<Exit, EnginePanic> {
-    let session_id = engine.session_id().to_owned();
+    let session_id = engine.session_id();
     let printer = Printer::new(
         format,
         show_thinking,
@@ -140,8 +140,8 @@ where
     };
     let finished = handle.shutdown().await;
     let session_failure = finished.as_ref().ok().and_then(Option::as_deref);
+    renderer.session_write_error(session_failure);
     if let Some(failure) = session_failure {
-        renderer.session_write_error(Some(failure));
         printer.record_session_write_error(failure);
     }
     let output = renderer.finish().and(printer.finish(end));
@@ -212,11 +212,10 @@ pub(crate) enum OutputFormat {
 
 // ── Printer ──
 
-/// [`EventSink`] that prints a headless run in its [`OutputFormat`]. Progress, tool calls, and
-/// errors go to stderr as text in every format, so stdout carries only the reply or the JSON.
+/// Prints a headless run in its [`OutputFormat`]. Progress, tool calls, and errors go to stderr as
+/// text in every format, so stdout carries only the reply or the JSON.
 struct Printer<O, E> {
     format: OutputFormat,
-    session_id: String,
     stdio: StdioSink,
     output: Mutex<Output<O, E>>,
 }
@@ -224,6 +223,8 @@ struct Printer<O, E> {
 struct Output<O, E> {
     stdout: O,
     stderr: E,
+    /// The run's session, which a fork replaces.
+    session_id: String,
     /// Reply text since the last tool call, which the result reports as the final message.
     message: String,
     error: Option<String>,
@@ -241,13 +242,13 @@ impl<O: Write, E: Write> Printer<O, E> {
     ) -> Self {
         Self {
             format,
-            session_id,
             // Thinking renders on stdout, so the JSON formats leave it off, which also keeps the
             // progress notes it would replace on stderr.
             stdio: StdioSink::new(show_thinking && format == OutputFormat::Text),
             output: Mutex::new(Output {
                 stdout,
                 stderr,
+                session_id,
                 message: String::new(),
                 error: None,
                 session_write_error: None,
@@ -264,19 +265,20 @@ impl<O: Write, E: Write> Printer<O, E> {
         }
         let Output {
             stdout,
+            session_id,
             message,
             error,
             session_write_error,
             usage,
             ..
         } = &mut *output;
-        let line = Line::Result(RunResult {
+        let line = wire::HeadlessEvent::Result(wire::RunResult {
             stop_reason,
             error: error.as_deref(),
             session_write_error: session_write_error.as_deref(),
             message: (stop_reason == TurnEnd::Completed).then_some(message.as_str()),
             usage: usage.as_ref(),
-            session_id: &self.session_id,
+            session_id,
         });
         write_json_line(stdout, &line)
     }
@@ -324,12 +326,6 @@ impl<O: Write, E: Write> Printer<O, E> {
 
     fn lock(&self) -> MutexGuard<'_, Output<O, E>> {
         lock_or_recover(&self.output, "headless output")
-    }
-}
-
-impl<O: Write + Send, E: Write + Send> EventSink for Printer<O, E> {
-    fn send(&self, event: Event) -> Result<()> {
-        self.print(event).into_result()
     }
 }
 
@@ -382,31 +378,10 @@ impl<O, E> Output<O, E> {
             Event::ToolCallStart(_) => self.message.clear(),
             Event::TurnFailed(error) => self.error = Some(error.clone()),
             Event::UsageUpdated(usage) => self.usage = Some(*usage),
+            Event::SessionForked { id, .. } => id.clone_into(&mut self.session_id),
             _ => {}
         }
     }
-}
-
-/// The line that ends a JSON-format run, tagged like an [`Event`] line.
-#[derive(Serialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
-enum Line<'a> {
-    Result(RunResult<'a>),
-}
-
-/// How a headless run ended.
-#[derive(Serialize)]
-struct RunResult<'a> {
-    stop_reason: TurnEnd,
-    /// Why the turn failed.
-    error: Option<&'a str>,
-    /// Why the session could not be saved, which leaves its run missing from the transcript.
-    session_write_error: Option<&'a str>,
-    /// The reply after the last tool call, kept only when the turn completed.
-    message: Option<&'a str>,
-    /// The latest usage snapshot any request reported.
-    usage: Option<&'a UsageSnapshot>,
-    session_id: &'a str,
 }
 
 fn write_json_line(out: &mut impl Write, value: &impl Serialize) -> Result<()> {
@@ -486,29 +461,21 @@ mod tests {
         }
 
         #[tokio::test(start_paused = true)]
-        async fn reads_a_closed_stdin_without_a_notice() {
-            let input: &[u8] = b"+fix\n";
-            let mut notice = Vec::new();
+        async fn reads_a_closed_stdin_without_a_notice_and_replaces_invalid_utf8() {
+            for (input, expected) in [
+                (&b"+fix\n"[..], "+fix\n"),
+                (b"caf\xe9 log line\n", "caf\u{FFFD} log line\n"),
+            ] {
+                let mut notice = Vec::new();
 
-            let text = read_input(input, &mut notice, Duration::from_secs(3)).await;
+                let text = read_input(input, &mut notice, Duration::from_secs(3)).await;
 
-            assert_eq!(
-                (text.unwrap().as_str(), notice.as_slice()),
-                ("+fix\n", &b""[..])
-            );
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn replaces_invalid_utf8_and_keeps_the_text() {
-            let input: &[u8] = b"caf\xe9 log line\n";
-            let mut notice = Vec::new();
-
-            let text = read_input(input, &mut notice, Duration::from_secs(3)).await;
-
-            assert_eq!(
-                (text.unwrap().as_str(), notice.as_slice()),
-                ("caf\u{FFFD} log line\n", &b""[..])
-            );
+                assert_eq!(
+                    (text.unwrap().as_str(), notice.as_slice()),
+                    (expected, &b""[..]),
+                    "{input:?}",
+                );
+            }
         }
     }
 
@@ -594,7 +561,7 @@ mod tests {
                         .await
                         .with_tools(tools)
                         .unattended();
-                    let session_id = engine.session_id().to_owned();
+                    let session_id = engine.session_id();
                     let printer =
                         Printer::new(format, false, session_id.clone(), Vec::new(), Vec::new());
 
@@ -910,7 +877,9 @@ mod tests {
                     };
                     let printer =
                         Printer::new(format, false, SESSION_ID.to_owned(), stdout, Vec::new());
-                    let renderer = Renderer::new(&printer);
+                    let (ops, _ops_rx) = mpsc::channel(1);
+                    let sink = InterruptOnClosedStdout::new(&printer, &ops);
+                    let renderer = Renderer::new(&sink);
 
                     for event in [
                         Event::StreamToken("lost".to_owned()),
@@ -973,7 +942,7 @@ mod tests {
                     Event::UsageUpdated(usage(2_000)),
                     Event::TurnComplete,
                 ] {
-                    printer.send(event).unwrap();
+                    printer.print(event).into_result().unwrap();
                 }
 
                 printer.finish(TurnEnd::Completed).unwrap();
@@ -1001,7 +970,8 @@ mod tests {
             fn ends_the_open_reply_line_in_the_text_format() {
                 let printer = printer(OutputFormat::Text);
                 printer
-                    .send(Event::StreamToken("partial reply".to_owned()))
+                    .print(Event::StreamToken("partial reply".to_owned()))
+                    .into_result()
                     .unwrap();
 
                 printer.finish(TurnEnd::Shutdown).unwrap();
@@ -1017,7 +987,8 @@ mod tests {
             fn reports_a_session_write_failure_beside_the_completed_turn() {
                 let printer = printer(OutputFormat::Json);
                 printer
-                    .send(Event::StreamToken("reply".to_owned()))
+                    .print(Event::StreamToken("reply".to_owned()))
+                    .into_result()
                     .unwrap();
                 printer.record_session_write_error("disk full");
 
@@ -1028,6 +999,31 @@ mod tests {
                 assert_eq!(result["message"], "reply");
                 assert_eq!(result["session_write_error"], "disk full");
             }
+
+            #[test]
+            fn reports_the_fork_the_run_continued_in() {
+                let printer = printer(OutputFormat::Json);
+                printer
+                    .print(Event::SessionForked {
+                        id: "fork-session-id".to_owned(),
+                        from: SESSION_ID.to_owned(),
+                    })
+                    .into_result()
+                    .unwrap();
+
+                printer.finish(TurnEnd::Completed).unwrap();
+
+                let stdout = String::from_utf8(printed(printer).0).unwrap();
+                assert_eq!(
+                    stdout.lines().count(),
+                    1,
+                    "the notice stays off the wire: {stdout}"
+                );
+                assert_eq!(
+                    result_data(stdout.as_bytes())["session_id"],
+                    "fork-session-id"
+                );
+            }
         }
 
         mod break_line {
@@ -1037,7 +1033,8 @@ mod tests {
             fn ends_an_open_reply_line_once() {
                 let printer = printer(OutputFormat::Text);
                 printer
-                    .send(Event::StreamToken("partial".to_owned()))
+                    .print(Event::StreamToken("partial".to_owned()))
+                    .into_result()
                     .unwrap();
 
                 printer.break_line().unwrap();
@@ -1047,7 +1044,7 @@ mod tests {
             }
         }
 
-        mod send {
+        mod print {
             use super::*;
 
             #[test]
@@ -1063,7 +1060,7 @@ mod tests {
                     Event::ThinkingToken("Hmm.".to_owned()),
                     Event::ProgressUpdate("Checking the loader.".to_owned()),
                 ] {
-                    printer.send(event).unwrap();
+                    printer.print(event).into_result().unwrap();
                 }
 
                 assert_eq!(
@@ -1082,7 +1079,7 @@ mod tests {
                     Vec::new(),
                 );
 
-                let sent = printer.send(Event::Error("boom".to_owned()));
+                let sent = printer.print(Event::Error("boom".to_owned())).into_result();
 
                 assert!(is_broken_pipe(&sent.unwrap_err()));
                 assert_eq!(printed(printer).1, "Error: boom\n");

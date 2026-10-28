@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::RangeInclusive;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -18,7 +18,7 @@ use crate::permission::defaults::Shipped;
 use crate::permission::rule::Rule;
 use crate::permission::{Mode, PermissionClass, Tier};
 use crate::util::env::whole_number_in;
-use crate::util::path::expand_user;
+use crate::util::path::expand_absolute;
 
 /// One config file, or several merged. Every key is optional.
 #[derive(Debug, Default, Deserialize)]
@@ -109,17 +109,9 @@ impl TryFrom<AuthValueTable> for AuthValue {
     fn try_from(table: AuthValueTable) -> Result<Self> {
         match (table.value, table.file) {
             (Some(value), None) => Ok(Self::Value(inline_secret("client.auth.value", value)?)),
-            (None, Some(file)) => {
-                let path = expand_user(&file).map_err(|_| {
-                    anyhow!("invalid client.auth.file: cannot expand ~ without a home directory")
-                })?;
-                ensure!(
-                    path.is_absolute()
-                        && (Path::new(&file).is_absolute() || file.starts_with("~/")),
-                    "client.auth.file must be an absolute or ~/ path"
-                );
-                Ok(Self::File(path))
-            }
+            (None, Some(file)) => expand_absolute(&file)
+                .map(Self::File)
+                .map_err(|e| anyhow!("invalid client.auth.file: {e:#}")),
             _ => bail!("client.auth requires exactly one of value or file"),
         }
     }

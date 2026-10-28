@@ -283,7 +283,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use ox_core::config::auth::AuthSource;
+    use ox_core::auth::AuthSource;
     use ox_core::model::Effort;
 
     use super::*;

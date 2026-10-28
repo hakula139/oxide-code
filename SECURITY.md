@@ -38,7 +38,7 @@ A gap in these properties is a vulnerability:
 - In `manual` mode, a `bash` command runs without approval only if the gate recognizes all of its syntax, every simple command in it, including those inside a substitution or a literal `sh -c` or `eval` script, is allowed by a rule or is a known-safe read, and every file it redirects output to is inside the working directory or an extra root, or allowed by an `edit` rule.
 - A path `deny` rule, built-in or configured, and a configured path `ask` rule hold for the read, grep, glob, edit, and write tools in every mode, and a built-in path `ask` rule and a protected path hold for them in every mode except `yolo`, since the gate resolves the path and the tool opens the path it checked. The exception is a symlink swapped into a parent directory after the check, which `openat`-style traversal or an OS-level sandbox ([#133](https://github.com/hakula139/oxide-code/issues/133)) would close.
 
-Edit and Write recheck the original file's identity and content, and the staged bytes, before publishing. Linux publishes with an atomic rename when a staged copy reproduces the original's metadata and writes through the checked handle on every other file, while macOS and Windows always write in place. Concurrent writers can still modify either file during those checks or before publication, and an in-place write does not promise crash atomicity. The [file mutation contract](docs/design/file-mutation.md) defines metadata preservation, both strategies, and the precommit refusals.
+Edit and Write recheck the file before publishing, but concurrent writers can still modify the file or its staged copy during those checks or before publication, and an in-place write, which macOS and Windows always use, does not promise crash atomicity. The [file mutation contract](docs/design/file-mutation.md) defines metadata preservation, both publication strategies, and the precommit refusals.
 
 To run untrusted work without watching it, run `ox` inside a sandbox or container, since `yolo` mode runs whatever the guardrails miss and every call that only a built-in `ask` rule or protected path holds.
 
@@ -48,7 +48,7 @@ In scope:
 - A `bash` command that runs without approval in `manual` mode although it breaks the `manual` property above
 - Approval prompts that misrepresent a call, or allow rules that match commands or paths excluded by their documented grammar
 - Repository content, such as a project `.ox/config.toml`, that widens permissions, redirects credentials, extends the TLS trust store, or reads files outside the permission gate
-- `ox` writing your API key or OAuth token to logs, session files, or files accessible to other users, passing it to a `bash` command or a `git` or `gh` process, or sending it to any endpoint other than the configured endpoint or Anthropic's OAuth token endpoint
+- `ox` writing your API key or OAuth token to logs, the session store or its exports, or files accessible to other users, passing it to a `bash` command or a `git` or `gh` process, or sending it to any endpoint other than the configured endpoint or Anthropic's OAuth token endpoint
 - Flaws in the release workflow, the Homebrew formula, the Nix flake, or the `cargo install --git` path that let someone other than the maintainer change what you install
 
 Out of scope:

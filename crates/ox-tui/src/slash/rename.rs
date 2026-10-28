@@ -50,7 +50,9 @@ impl SlashCommand for RenameCmd {
 
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         if args.is_empty() {
-            return Ok(SlashOutcome::Modal(Box::new(RenameModal::new(ctx.title))));
+            return Ok(SlashOutcome::Modal(Box::new(RenameModal::new(
+                ctx.info.title.as_deref(),
+            ))));
         }
         Ok(SlashOutcome::Forward(Action::Op(command::rename(args)?)))
     }
@@ -112,6 +114,10 @@ impl Modal for RenameModal {
     fn binds_modified_key(&self, event: &KeyEvent) -> bool {
         LineEditor::binds_modified_key(event)
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -165,9 +171,10 @@ mod tests {
 
         #[test]
         fn bare_form_opens_modal_pre_filled_with_current_title() {
-            let info = test_session_info();
+            let mut info = test_session_info();
+            info.set_title(Some("Existing title".to_owned()));
             let mut modal = RenameCmd
-                .execute("", &SlashContext::new(&info, Some("Existing title")))
+                .execute("", &SlashContext::new(&info))
                 .unwrap()
                 .into_modal();
             let result = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
@@ -199,9 +206,8 @@ mod tests {
             #[test]
             fn lays_out_title_prompt_and_footer_in_order() {
                 let mut modal = RenameModal::new(Some("Fix auth"));
-                let rows = render_modal(&mut modal, 40);
+                let rows = render_modal(&mut modal, 40, u16::MAX);
 
-                let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
                 assert_eq!(
                     rows,
                     [
@@ -218,10 +224,9 @@ mod tests {
             fn scrolls_a_title_wider_than_the_row_to_its_tail() {
                 let long = format!("{}tail", "x".repeat(60));
                 let mut modal = RenameModal::new(Some(&long));
-                let rows = render_modal(&mut modal, 20);
+                let rows = render_modal(&mut modal, 20, u16::MAX);
 
-                let input = &rows[2];
-                assert_eq!(input.trim_end(), format!("/ {}tail", "x".repeat(13)));
+                assert_eq!(rows[2], format!("/ {}tail", "x".repeat(13)));
             }
 
             #[test]
@@ -343,6 +348,15 @@ mod tests {
                     matches!(outcome, ModalKey::Consumed),
                     "all-whitespace Enter must not submit, got {outcome:?}",
                 );
+            }
+        }
+
+        mod sends_idle_only_ops {
+            use super::*;
+
+            #[test]
+            fn holds_the_queue_head_for_the_rename() {
+                assert!(RenameModal::new(None).sends_idle_only_ops());
             }
         }
     }

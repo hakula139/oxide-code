@@ -1,0 +1,14 @@
+---
+source: crates/ox-tui/src/app/events.rs
+expression: "render_app(&mut app, 80, 10)"
+---
+"  ID: f0f0f0f0                                                                  "
+"────────────────────────────────────────────────────────────────────────────────"
+"▎ Another ox process wrote to session test-ses, so this conversation continues  "
+"▎ as session f0f0f0f0                                                           "
+"                                                                                "
+"                                                                                "
+"────────────────────────────────────────────────────────────────────────────────"
+"❯                                                                               "
+"────────────────────────────────────────────────────────────────────────────────"
+"  Tab to plan · Enter to send · Shift+Enter to add a line · / to show commands  "

@@ -13,7 +13,7 @@ use tokio::io::AsyncReadExt as _;
 use tracing::debug;
 
 use super::text::truncate_to_width;
-use crate::config::auth::withhold_secrets;
+use crate::config::credentials::withhold_secrets;
 
 // ── Repository ──
 
@@ -420,7 +420,7 @@ mod tests {
     use super::local_testing::init_fixture_repo;
     use super::testing::{isolated_git, with_isolated_git_env_async};
     use super::*;
-    use crate::config::auth::secret_env_vars;
+    use crate::config::credentials::secret_env_vars;
     use crate::util::log::testing::LogCapture;
 
     mod current_branch {

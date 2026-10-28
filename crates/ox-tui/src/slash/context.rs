@@ -7,12 +7,10 @@ use crate::session_info::LiveSessionInfo;
 /// their effects through the returned [`super::registry::SlashOutcome`].
 pub(crate) struct SlashContext<'a> {
     pub(crate) info: &'a LiveSessionInfo,
-    /// Live session title, which `/rename` pre-fills its modal from. `None` until seeded.
-    pub(crate) title: Option<&'a str>,
 }
 
 impl<'a> SlashContext<'a> {
-    pub(crate) fn new(info: &'a LiveSessionInfo, title: Option<&'a str>) -> Self {
-        Self { info, title }
+    pub(crate) fn new(info: &'a LiveSessionInfo) -> Self {
+        Self { info }
     }
 }

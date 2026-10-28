@@ -134,20 +134,10 @@ pub(super) fn tracked_paths(engine: &Engine) -> Vec<PathBuf> {
     paths
 }
 
-/// IDs of the sessions `store` lists.
-pub(super) fn session_ids(store: &SessionStore) -> Vec<String> {
-    store
-        .list()
-        .unwrap()
-        .into_iter()
-        .map(|info| info.session_id)
-        .collect()
-}
-
 /// Records one exchange in a new session in `store` and finishes it, returning its ID.
 pub(super) async fn finished_session(store: &SessionStore) -> String {
     let session = handle::start(store, MODEL, None);
-    let id = session.session_id().to_owned();
+    let id = session.session_id();
     session
         .record_message(Message::user("earlier prompt"))
         .await;

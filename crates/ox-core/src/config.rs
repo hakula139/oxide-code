@@ -2,16 +2,14 @@
 //!
 //! Precedence (highest wins): env > project `.ox/config.toml` > user `config.d/*.toml` drop-ins >
 //! user `~/.config/ox/config.toml` > defaults. Auth stops at the first source that resolves, in
-//! [`auth::AuthSource`] order.
+//! [`AuthSource`] order.
 
-pub mod auth;
 mod base_url;
 pub mod compaction;
+pub(crate) mod credentials;
 pub mod gateway;
 pub mod load;
-pub(crate) mod login;
 mod merge;
-pub(crate) mod oauth;
 pub mod provenance;
 mod schema;
 #[cfg(any(test, feature = "testing"))]
@@ -22,26 +20,27 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr, VariantArray};
 use tracing::warn;
 
-use self::auth::{Auth, AuthSource, CredentialError, LoginUnavailable, PendingAuth};
 pub(crate) use self::base_url::BaseUrl;
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
+use self::credentials::{AuthState, CredentialError};
 use self::gateway::{GatewayCompat, GatewaySnapshot, ResolvedGateway};
 use self::load::Loaded;
 use self::merge::Origins;
-use self::oauth::ClaudeCodeKeychain;
 use self::provenance::{Provenance, Source, Sourced, TierPattern};
 use self::schema::{ClientAuth, FileConfig, PermissionTable, ThemeTable, TierTable, TuiTable};
-use crate::model::{Effort, ModelSpec, PromptCacheTtl};
+use crate::auth::oauth::ClaudeCodeKeychain;
+use crate::auth::{self, AuthSource, LoginUnavailable};
+use crate::model::{Effort, ModelSettings, ModelSpec, PromptCacheTtl};
 use crate::permission::defaults::Shipped;
 use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
 use crate::util::git::project_root;
-use crate::util::path::{expand_user, tildify};
+use crate::util::path::{expand_absolute, expand_user, tildify};
 use crate::util::tls::{PlatformTrust, load_extra_ca_certs};
 use crate::util::variant;
 
@@ -211,12 +210,7 @@ pub struct Config {
     pub model: ModelSpec,
     /// `None` for models outside the catalog.
     pub(crate) effort: Option<Effort>,
-    /// `None` until [`Config::resolve_auth`] loads a credential file or stored login, and while
-    /// signed out, which only a session that can run `/login` starts in.
-    pub(crate) auth: Option<Auth>,
-    pending_auth: Option<PendingAuth>,
-    /// Why the session started signed out.
-    pub(crate) signed_out: Option<LoginUnavailable>,
+    pub(crate) auth: AuthState,
     pub(crate) base_url: BaseUrl,
     /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the client
     /// trusts only the platform roots.
@@ -286,8 +280,7 @@ impl Config {
             check_ca_bundle,
         )?;
 
-        let (auth, pending_auth) =
-            resolve_explicit_auth(client.auth, &origins, &base_url.value, &gateway)?;
+        let auth = resolve_explicit_auth(client.auth, &origins, &base_url.value, &gateway)?;
 
         let model_id = env_string("OX_MODEL")
             .or_else(|| origins.sourced("client.model", client.model))
@@ -349,8 +342,6 @@ impl Config {
             model,
             effort: effort.value,
             auth: auth.value,
-            pending_auth,
-            signed_out: None,
             base_url: base_url.value,
             extra_ca_certs: extra_ca_certs.value,
             gateway: GatewayCompat {
@@ -377,23 +368,34 @@ impl Config {
     /// `can_sign_in` may start signed out against the first-party API. Other sessions and gateways
     /// require credentials.
     pub async fn resolve_auth(&mut self, can_sign_in: bool) -> Result<()> {
-        if let Some(pending) = &self.pending_auth {
-            self.auth = Some(pending.load()?);
-            self.pending_auth = None;
-        }
-        if self.auth.is_some() {
+        let AuthState::Unresolved(pending) = &self.auth else {
+            return Ok(());
+        };
+        if let Some(pending) = pending {
+            self.auth = AuthState::Ready(pending.load()?);
             return Ok(());
         }
         let trust = PlatformTrust(self.extra_ca_certs.clone());
         let stored = auth::stored_login(ClaudeCodeKeychain::SYSTEM, &trust);
-        match auth::fallback(&self.base_url, stored).await {
-            Ok(auth) => self.auth = Some(auth),
+        self.auth = match credentials::fallback(&self.base_url, stored).await {
+            Ok(auth) => AuthState::Ready(auth),
             Err(CredentialError::SignedOut { cause, .. }) if can_sign_in => {
-                self.signed_out = Some(LoginUnavailable::new(&cause));
+                AuthState::SignedOut(LoginUnavailable::new(&cause))
             }
             Err(e) => return Err(e.into()),
-        }
+        };
         Ok(())
+    }
+
+    /// The model settings a session built from this config starts with.
+    pub(crate) fn model_settings(&self) -> ModelSettings {
+        ModelSettings::new(
+            self.model.clone(),
+            self.effort,
+            self.max_tokens,
+            self.prompt_cache_ttl,
+            self.show_thinking,
+        )
     }
 
     /// Startup notices: an unsupported model, then why the session is signed out.
@@ -401,11 +403,10 @@ impl Config {
         self.model
             .unsupported_notice()
             .into_iter()
-            .chain(
-                self.signed_out
-                    .as_ref()
-                    .map(|signed_out| signed_out.notice.clone()),
-            )
+            .chain(match &self.auth {
+                AuthState::SignedOut(unavailable) => Some(unavailable.notice.clone()),
+                AuthState::Unresolved(_) | AuthState::Ready(_) => None,
+            })
             .collect()
     }
 
@@ -426,7 +427,7 @@ impl Config {
         ConfigSnapshot {
             model: self.model.clone(),
             effort: self.effort,
-            auth: self.auth.as_ref().map(Auth::source),
+            auth: self.auth.source(),
             base_url: self.base_url.to_string(),
             extra_ca_certs: self.extra_ca_certs.clone(),
             gateway: self.gateway.snapshot(),
@@ -456,16 +457,13 @@ fn resolve_extra_ca_certs(
         .map(|raw| ("OX_EXTRA_CA_CERTS", raw))
         .or(file.map(|raw| ("client.extra_ca_certs", raw)));
     if let Some((key, raw)) = explicit {
-        let from_file = matches!(raw.source, Source::File(_));
-        let path = expand_user(&raw.value)
-            .and_then(|path| {
-                ensure!(
-                    !from_file || path.is_absolute(),
-                    "must be an absolute or ~/ path"
-                );
-                check_ca_bundle(&path).map(|()| path)
-            })
-            .with_context(|| format!("invalid {key}"))?;
+        let path = if matches!(raw.source, Source::File(_)) {
+            expand_absolute(&raw.value)
+        } else {
+            expand_user(&raw.value)
+        }
+        .and_then(|path| check_ca_bundle(&path).map(|()| path))
+        .with_context(|| format!("invalid {key}"))?;
         return Ok(Sourced::new(Some(path), raw.source));
     }
 
@@ -504,13 +502,13 @@ fn resolve_explicit_auth(
     origins: &Origins,
     base_url: &BaseUrl,
     gateway: &ResolvedGateway,
-) -> Result<(Sourced<Option<Auth>>, Option<PendingAuth>)> {
-    let config = match file_auth {
-        Some(file_auth) => auth::configured_auth(file_auth)?,
-        None => None,
-    };
-    let explicit = auth::first_explicit(config)?;
-    let explicit_source = explicit.as_ref().map(auth::ExplicitAuth::source);
+) -> Result<Sourced<AuthState>> {
+    let config = file_auth
+        .map(credentials::configured_auth)
+        .transpose()?
+        .flatten();
+    let explicit = credentials::first_explicit(config)?;
+    let explicit_source = explicit.as_ref().map(credentials::ExplicitAuth::source);
     if explicit_source.is_some() || base_url.is_first_party() {
         gateway.check_credential_header(explicit_source)?;
     }
@@ -521,12 +519,12 @@ fn resolve_explicit_auth(
         }
         source => source.env_var().map_or(Source::Default, Source::Env),
     };
-    let (auth, pending) = match explicit {
-        Some(auth::ExplicitAuth::Inline(auth)) => (Some(auth), None),
-        Some(auth::ExplicitAuth::File(pending)) => (None, Some(pending)),
-        None => (None, None),
+    let state = match explicit {
+        Some(credentials::ExplicitAuth::Inline(auth)) => AuthState::Ready(auth),
+        Some(credentials::ExplicitAuth::File(pending)) => AuthState::Unresolved(Some(pending)),
+        None => AuthState::Unresolved(None),
     };
-    Ok((Sourced::new(auth, source), pending))
+    Ok(Sourced::new(state, source))
 }
 
 /// The effort the model takes. A pick the model ignores leaves the source at the default.
@@ -760,11 +758,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::compaction::testing::WINDOW_1M_THRESHOLD;
-    use super::oauth::LoginError;
-    use super::oauth::testing::{creds_json, write_creds};
     use super::provenance::Layer;
     use super::testing::test_config;
     use super::*;
+    use crate::auth::Auth;
+    use crate::auth::oauth::LoginError;
+    use crate::auth::oauth::testing::{creds_json, write_creds};
     use crate::permission::{Access, Decision, PermissionClass};
     use crate::util::fs::testing::deny_read_access;
     use crate::util::path::testing::HOME_VAR;
@@ -1011,9 +1010,14 @@ mod tests {
         }
 
         fn assert_auth(config: &Config, source: AuthSource, secret: &str) {
-            let auth = config.auth.as_ref().expect("the session must be signed in");
-            assert_eq!(auth.source(), source);
-            assert_eq!(auth.secret(), secret);
+            assert!(
+                matches!(
+                    &config.auth,
+                    AuthState::Ready(auth) if auth.source() == source && auth.secret() == secret
+                ),
+                "{:?} must send {secret} from {source:?}",
+                config.auth,
+            );
         }
 
         /// Env with no explicit credential and an oxide-code login under `data` that expires at
@@ -1282,7 +1286,11 @@ mod tests {
 
         #[tokio::test]
         async fn boolean_env_errors_name_the_variable_and_values() {
-            for var in ["OX_SHOW_THINKING", "OX_SHOW_WELCOME"] {
+            for var in [
+                "OX_COMPACTION_AUTO_ENABLED",
+                "OX_SHOW_THINKING",
+                "OX_SHOW_WELCOME",
+            ] {
                 let dir = tempfile::tempdir().unwrap();
 
                 let err = load_with(&dir, &[(var, "maybe")])
@@ -1532,7 +1540,7 @@ mod tests {
 
             assert_eq!(
                 format!("{err:#}"),
-                "invalid client.extra_ca_certs: must be an absolute or ~/ path",
+                "invalid client.extra_ca_certs: expected an absolute or `~/` path",
             );
         }
 
@@ -1548,37 +1556,6 @@ mod tests {
             );
             let config = load_with(&dir, &[("OX_EXTRA_CA_CERTS", "")]).await.unwrap();
             assert_eq!(config.extra_ca_certs, Some(PathBuf::from(TEST_CA_PATH)),);
-        }
-
-        #[tokio::test]
-        async fn env_api_key_beats_file_api_key() {
-            let dir = tempfile::tempdir().unwrap();
-            write_user_config(
-                dir.path(),
-                indoc! {r#"
-                    [client]
-                    auth = { type = "api-key", value = "sk-from-file" }
-                "#},
-            );
-            let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "sk-from-env")])
-                .await
-                .unwrap();
-            assert_auth(&config, AuthSource::ApiKeyEnv, "sk-from-env");
-        }
-
-        #[tokio::test]
-        async fn file_api_key_used_when_env_is_empty() {
-            let dir = tempfile::tempdir().unwrap();
-            let user = write_user_config(
-                dir.path(),
-                indoc! {r#"
-                    [client]
-                    auth = { type = "api-key", value = "sk-from-file" }
-                "#},
-            );
-            let config = load_with(&dir, &[("ANTHROPIC_API_KEY", "")]).await.unwrap();
-            assert_auth(&config, AuthSource::ClientApiKey, "sk-from-file");
-            assert_eq!(config.provenance.auth, Source::File(user));
         }
 
         #[tokio::test]
@@ -1618,6 +1595,32 @@ mod tests {
             assert!(message.contains("client.auth.file"), "{message}");
             assert!(message.contains(&token.display().to_string()), "{message}");
             assert!(!message.contains("private-token-sentinel"), "{message}");
+        }
+
+        #[tokio::test]
+        async fn native_auth_rejects_a_relative_credential_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let user = write_user_config(
+                dir.path(),
+                indoc! {"
+                    [client.auth]
+                    type = 'bearer'
+                    file = 'secrets/token'
+                "},
+            );
+
+            let err = load_with(&dir, &[])
+                .await
+                .expect_err("a relative credential file depends on the working directory");
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid config at {}: line 1, column 1, in `client.auth`: \
+                     invalid client.auth.file: expected an absolute or `~/` path",
+                    user.path().display(),
+                ),
+            );
         }
 
         #[tokio::test]
@@ -1739,35 +1742,63 @@ mod tests {
 
         #[tokio::test]
         async fn resolves_credentials_in_precedence_order() {
-            // Each row drops the previous winner. `ANTHROPIC_API_KEY` stays unset throughout.
-            for (auth_token, file_key, winner, secret) in [
+            // Each row drops the previous winner, and an empty `ANTHROPIC_API_KEY` counts as unset.
+            for (auth_token, api_key, file_key, winner, secret, variable) in [
                 (
                     Some("gateway-token"),
+                    Some("sk-from-env"),
                     true,
                     AuthSource::AuthTokenEnv,
                     "gateway-token",
+                    Some("ANTHROPIC_AUTH_TOKEN"),
                 ),
-                (None, true, AuthSource::ClientApiKey, "sk-from-file"),
-                (None, false, AuthSource::OAuthTokenEnv, "oauth-token"),
+                (
+                    None,
+                    Some("sk-from-env"),
+                    true,
+                    AuthSource::ApiKeyEnv,
+                    "sk-from-env",
+                    Some("ANTHROPIC_API_KEY"),
+                ),
+                (
+                    None,
+                    Some(""),
+                    true,
+                    AuthSource::ClientApiKey,
+                    "sk-from-file",
+                    None,
+                ),
+                (
+                    None,
+                    None,
+                    false,
+                    AuthSource::OAuthTokenEnv,
+                    "oauth-token",
+                    Some("CLAUDE_CODE_OAUTH_TOKEN"),
+                ),
             ] {
                 let dir = tempfile::tempdir().unwrap();
-                if file_key {
+                let user = file_key.then(|| {
                     write_user_config(
                         dir.path(),
                         indoc! {r#"
                             [client]
                             auth = { type = "api-key", value = "sk-from-file" }
                         "#},
-                    );
-                }
+                    )
+                });
                 let vars = env_vars(vec![
                     xdg(&dir),
-                    ("ANTHROPIC_API_KEY", None),
+                    ("ANTHROPIC_API_KEY", api_key.map(str::to_owned)),
                     ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
                     env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
                 ]);
+
                 let config = load_in(&dir, vars, false).await.unwrap();
+
                 assert_auth(&config, winner, secret);
+                let source = variable.map_or_else(|| Source::File(user.unwrap()), Source::Env);
+                assert_eq!(config.provenance.auth, source, "{winner:?}");
             }
         }
 
@@ -1778,7 +1809,6 @@ mod tests {
             let config = load_in(&dir, vars, false).await.unwrap();
             assert_auth(&config, AuthSource::OxLogin, "ox-token");
             assert_eq!(config.provenance.auth, Source::Default);
-            assert!(config.signed_out.is_none());
         }
 
         #[tokio::test]
@@ -1788,14 +1818,16 @@ mod tests {
             let can_sign_in = load_in(&dir, vars.clone(), true).await;
             let cannot_sign_in = load_in(&dir, vars, false).await;
 
-            let can_sign_in = can_sign_in.unwrap();
-            assert!(can_sign_in.auth.is_none());
-            let signed_out = can_sign_in.signed_out.expect("signed out");
-            assert_eq!(
-                signed_out.notice,
-                "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
+            let auth = can_sign_in.unwrap().auth;
+            assert!(
+                matches!(
+                    &auth,
+                    AuthState::SignedOut(LoginUnavailable { notice, retry: false })
+                        if notice == "Not signed in: oxide-code login has expired. \
+                                      Run `/login` to sign in again."
+                ),
+                "an expired login signs out until a new sign-in: {auth:?}",
             );
-            assert!(!signed_out.retry, "an expired login needs a new sign-in");
             assert_eq!(
                 format!(
                     "{:#}",
@@ -1815,18 +1847,22 @@ mod tests {
 
             let config = load_in(&dir, vars, true).await.unwrap();
 
-            let signed_out = config.signed_out.expect("signed out");
-            assert_eq!(
-                signed_out.notice,
-                format!(
-                    "Not signed in: failed to refresh the expired oxide-code login: \
-                     another process held {} for over 20 s. \
-                     Try again in a moment. \
-                     The next prompt tries the stored login again.",
-                    store.join("credentials.lock").display(),
-                ),
+            let expected = format!(
+                "Not signed in: failed to refresh the expired oxide-code login: \
+                 another process held {} for over 20 s. \
+                 Try again in a moment. \
+                 The next prompt tries the stored login again.",
+                store.join("credentials.lock").display(),
             );
-            assert!(signed_out.retry);
+            assert!(
+                matches!(
+                    &config.auth,
+                    AuthState::SignedOut(LoginUnavailable { notice, retry: true })
+                        if *notice == expected
+                ),
+                "{:?}",
+                config.auth,
+            );
         }
 
         #[tokio::test]
@@ -1841,13 +1877,13 @@ mod tests {
 
             let (loaded, resolved) = temp_env::async_with_vars(vars, async {
                 let mut config = Config::load(dir.path()).expect("load reads no credential");
-                let loaded = (config.auth.is_none(), config.signed_out.is_none());
+                let loaded = matches!(config.auth, AuthState::Unresolved(None));
                 (loaded, config.resolve_auth(true).await)
             })
             .await;
             let err = resolved.expect_err("a gateway gets no stored login");
 
-            assert_eq!(loaded, (true, true));
+            assert!(loaded, "the load leaves the stored login unread");
             assert_eq!(
                 format!("{err:#}"),
                 "no credentials for https://gateway.example.com. \
@@ -2707,14 +2743,32 @@ mod tests {
         }
     }
 
+    mod model_settings {
+        use super::*;
+
+        #[test]
+        fn carries_the_model_request_settings() {
+            let mut cfg = sample_config();
+            cfg.model = ModelSpec::resolve("claude-opus-5-5");
+            cfg.max_tokens = Some(2_048);
+
+            let settings = cfg.model_settings();
+
+            assert_eq!(settings.model().id(), "claude-opus-5-5");
+            assert_eq!(settings.effort(), Some(Effort::Xhigh));
+            assert_eq!(settings.max_tokens(), 2_048);
+            assert_eq!(settings.prompt_cache_ttl(), PromptCacheTtl::FiveMin);
+            assert!(settings.show_thinking());
+        }
+    }
+
     mod notices {
         use super::*;
 
         #[test]
         fn list_an_unsupported_model_then_why_the_session_is_signed_out() {
             let mut cfg = sample_config();
-            cfg.auth = None;
-            cfg.signed_out = Some(LoginUnavailable::new(&LoginError::Missing));
+            cfg.auth = AuthState::SignedOut(LoginUnavailable::new(&LoginError::Missing));
 
             let notices = cfg.notices();
 
@@ -2787,6 +2841,18 @@ mod tests {
             );
             assert_eq!(snap.theme_name, "macchiato");
             assert_eq!(snap.provenance, cfg.provenance);
+        }
+
+        #[test]
+        fn names_no_auth_source_until_a_credential_loads() {
+            let mut cfg = sample_config();
+            let signed_out = AuthState::SignedOut(LoginUnavailable::new(&LoginError::Missing));
+
+            for state in [AuthState::Unresolved(None), signed_out] {
+                cfg.auth = state;
+
+                assert_eq!(cfg.snapshot().auth, None, "{:?}", cfg.auth);
+            }
         }
     }
 

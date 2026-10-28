@@ -16,7 +16,7 @@ use ox_core::protocol::{
     ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult, TurnEnd, notice,
 };
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
-use ox_core::session::entry::ArchiveState;
+use ox_core::session::store::listing::ArchiveState;
 use ox_core::tool::tasks::{Progress, Task};
 use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::sync::lock_or_recover;
@@ -185,8 +185,6 @@ struct SinkState {
     line_open: bool,
     /// Whether the last text written to stdout was thinking.
     thinking: bool,
-    /// The started calls awaiting a result, so a result printed after another call's header can
-    /// repeat its own.
     calls: StartedCalls,
 }
 
@@ -265,6 +263,9 @@ impl StdioSink {
             } => {
                 let notice = resumed_notice(&id, title.as_deref(), prior);
                 writeln!(stderr, "{notice}")?;
+            }
+            Event::SessionForked { id, from } => {
+                state.end_reply_then(stdout, stderr, &notice::session_forked(&id, &from))?;
             }
             Event::ConfigChanged { notice, .. } => writeln!(stderr, "{notice}")?,
             Event::ModeChanged(mode) => writeln!(stderr, "{}", notice::mode_changed(mode))?,
@@ -1150,6 +1151,23 @@ mod tests {
                 assert_eq!(
                     stderr,
                     "Compacted 4 messages into a summary (focus: login\\u{1b}[2J)\n"
+                );
+            }
+
+            #[test]
+            fn session_forked_ends_the_reply_line_before_its_notice() {
+                let screen = render_on_screen([
+                    Event::StreamToken("Working".to_owned()),
+                    Event::SessionForked {
+                        id: "fork-session-id".to_owned(),
+                        from: "source-session-id".to_owned(),
+                    },
+                ]);
+
+                assert_eq!(
+                    screen,
+                    "Working\nAnother ox process wrote to session source-s, so this conversation \
+                     continues as session fork-ses\n"
                 );
             }
 

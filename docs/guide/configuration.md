@@ -123,7 +123,7 @@ base_url = "https://gw.llm.corp.example/anthropic"
 extra_ca_certs = "~/.config/ox/corp-cachain.pem"
 ```
 
-The path must be absolute or `~`-rooted, and `ox` rejects a relative one, which would depend on the directory it starts in. `OX_EXTRA_CA_CERTS` wins over this field, and `NODE_EXTRA_CA_CERTS` applies only when neither is set. Both variables may hold a relative path, which resolves from the working directory as in Node (see [LLM gateways](authentication.md#llm-gateways)).
+The path must be absolute or start with `~/`, and `ox` rejects a relative one, which would depend on the directory it starts in. `OX_EXTRA_CA_CERTS` wins over this field, and `NODE_EXTRA_CA_CERTS` applies only when neither is set. Both variables may hold a relative path, which resolves from the working directory as in Node (see [LLM gateways](authentication.md#llm-gateways)).
 
 On macOS, a server certificate valid for longer than Apple's 825-day limit is accepted when it chains to a CA in the bundle, even one already installed system-wide, unless that CA is one of Apple's built-in roots.
 
@@ -139,17 +139,17 @@ Auto-compaction is enabled by default for the supported models, and `auto_enable
 
 For other model IDs, the default and percent-based automatic triggers stay off. An explicit token threshold still works, snapped to the `50000` floor when set lower.
 
-Automatic compaction runs before a prompt and between the tool rounds of a long turn, which then continues from the summary on its own. If the compaction before a prompt fails, oxide-code does not send the prompt, and the TUI puts it back in the input. Sending it again retries the compaction. If the compaction between tool rounds fails, the turn stops, so run `/compact`, then send a message to continue. After 3 failures in a row, automatic compaction pauses, so the next prompt goes out without it, and `/status` shows it as paused. A successful `/compact`, a `/model` or `/effort` change, `/clear`, `/archive`, or `/resume` turns it back on.
+[Compaction](slash-commands.md#compaction) covers when automatic compaction runs and what happens when it fails.
 
 ### `[tui]`: Terminal UI
 
 `show_thinking = true` opts the request into `thinking.display = "summarized"`, so the API streams reasoning text. The chat shows it as it arrives, then collapses it to a `Thought` header that **Ctrl+O** or a click expands.
 
-With the default `false`, reasoning stays hidden. The chat still shows the progress notes the model writes before each tool call on every supported model except Haiku 5.5. Haiku 5.5 writes none, so its requests ask for `thinking.display = "omitted"` and the chat shows no reasoning.
+With the default `false`, reasoning stays hidden. The chat still shows the progress notes the model writes before each tool call, since requests to every supported model except Haiku 5.5 ask for `thinking.display = "updates"`. Haiku 5.5 writes none, so its requests ask for `thinking.display = "omitted"` and the chat shows no reasoning.
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
-`status_line` lists segments from the table below in display order and must contain at least one. Add, remove, or reorder any segment, including `permission-mode`, to control its presence and position. When unset, it is the list in the [example](#config-file): `current-dir`, `git-branch`, `pull-request`, `model-with-effort`, `context-used`, `session-cost`, `permission-mode`, `run-state`, and `thread-title`.
+`status_line` lists segments from the table below in display order and must contain at least one. Add, remove, or reorder any segment, including `permission-mode`, to control its presence and position. When unset, it is the list in the [example](#config-file).
 
 Segments with no data, such as a missing git branch, an unopened pull request, context usage before the first completed turn, or usage limits under an API key, are omitted. The three pull request segments shell out to `gh pr view`, so they require the GitHub CLI on `PATH`. Click one of them to open the PR, its checks, or its changed files, and terminals that open links on **Ctrl+click** or **Cmd+click** do the same. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
 

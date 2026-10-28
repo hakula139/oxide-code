@@ -7,6 +7,7 @@ use serde::Deserialize;
 use super::transport::{post_messages, with_retry};
 use super::wire::{ContentBlockInfo, OutputConfig, OutputFormat, RequestMessages};
 use super::{Client, RequestKind, RequestSpec};
+use crate::auth::Auth;
 use crate::message::Message;
 use crate::model::{Effort, ModelSpec, TokenUsage};
 
@@ -14,6 +15,9 @@ use crate::model::{Effort, ModelSpec, TokenUsage};
 
 /// One side request: a single user message under its own system prompt and output settings.
 pub(crate) struct SideQuery<'a> {
+    /// The live session the request is attributed to.
+    pub(crate) session_id: &'a str,
+    pub(crate) auth: &'a Auth,
     pub(crate) model: ModelSpec,
     pub(crate) system: &'a str,
     pub(crate) user: &'a str,
@@ -26,15 +30,16 @@ pub(crate) struct SideQuery<'a> {
 // ── Client::complete ──
 
 impl Client {
-    /// Sends `query` for the live session `session_id` without streaming and returns the
-    /// concatenated assistant text, dropping tool-use and thinking blocks, with the usage the
-    /// response reported. The request carries no agentic betas or `context_management` directive.
+    /// Sends `query` without streaming and returns the concatenated assistant text, dropping
+    /// tool-use and thinking blocks, with the usage the response reported. The request carries no
+    /// agentic betas or `context_management` directive.
     pub(crate) async fn complete(
         &self,
-        session_id: &str,
         query: SideQuery<'_>,
     ) -> Result<(String, Option<TokenUsage>)> {
         let SideQuery {
+            session_id,
+            auth,
             model,
             system,
             user,
@@ -46,6 +51,7 @@ impl Client {
         let request = &self.prepare(RequestSpec {
             kind: RequestKind::SideQuery,
             session_id,
+            auth,
             model: &model,
             thinking: None,
             max_tokens,
@@ -116,9 +122,11 @@ mod tests {
 
             const HAIKU: &str = "claude-haiku-5-5";
 
-            /// A Haiku side query for `user` under `system`, capped at 40 tokens.
-            fn query<'a>(system: &'a str, user: &'a str) -> SideQuery<'a> {
+            /// A Haiku side query for `user` under `system` with `auth`, capped at 40 tokens.
+            fn query<'a>(auth: &'a Auth, system: &'a str, user: &'a str) -> SideQuery<'a> {
                 SideQuery {
+                    session_id: SESSION_ID,
+                    auth,
                     model: ModelSpec::resolve(HAIKU),
                     system,
                     user,
@@ -128,9 +136,9 @@ mod tests {
                 }
             }
 
-            async fn complete_err(client: &Client) -> String {
+            async fn complete_err(client: &Client, auth: &Auth) -> String {
                 let err = client
-                    .complete(SESSION_ID, query("", "u"))
+                    .complete(query(auth, "", "u"))
                     .await
                     .expect_err("the request must fail");
                 format!("{err:#}")
@@ -142,10 +150,10 @@ mod tests {
                     ResponseTemplate::new(200).set_body_string(completion_body("Fix login bug")),
                 ])
                 .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri());
 
                 let (text, usage) = client
-                    .complete(SESSION_ID, query("sys", "user input"))
+                    .complete(query(&api_key(), "sys", "user input"))
                     .await
                     .unwrap();
 
@@ -164,7 +172,7 @@ mod tests {
                 let client = client_for(&config);
 
                 client
-                    .complete(SESSION_ID, query("sys", "Fix login"))
+                    .complete(query(&api_key(), "sys", "Fix login"))
                     .await
                     .unwrap();
 
@@ -198,9 +206,15 @@ mod tests {
                     .expect(1)
                     .mount(&server)
                     .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri());
 
-                client.complete("sid-live", query("", "u")).await.unwrap();
+                client
+                    .complete(SideQuery {
+                        session_id: "sid-live",
+                        ..query(&api_key(), "", "u")
+                    })
+                    .await
+                    .unwrap();
             }
 
             #[tokio::test]
@@ -218,17 +232,18 @@ mod tests {
                         ResponseTemplate::new(200).set_body_string(completion_body("ok")),
                     ])
                     .await;
-                    let mut config = test_config(server.uri(), oauth(), HAIKU);
+                    let mut config = test_config(server.uri(), api_key(), HAIKU);
                     config.gateway.structured_outputs = structured_outputs;
                     let client = client_for(&config);
 
+                    let auth = oauth();
                     let query = SideQuery {
                         effort: Some(Effort::Low),
                         output_format: Some(&fmt),
-                        ..query("sys", "prompt")
+                        ..query(&auth, "sys", "prompt")
                     };
 
-                    client.complete(SESSION_ID, query).await.unwrap();
+                    client.complete(query).await.unwrap();
 
                     let received = server.received_requests().await.expect("recorded requests");
                     let body: serde_json::Value =
@@ -260,11 +275,11 @@ mod tests {
                     ])
                     .await;
                     let kind = auth.kind();
-                    let mut config = test_config(server.uri(), auth, HAIKU);
+                    let mut config = test_config(server.uri(), api_key(), HAIKU);
                     config.gateway.attribution = attribution;
 
                     client_for(&config)
-                        .complete(SESSION_ID, query("sys", "Fix login"))
+                        .complete(query(&auth, "sys", "Fix login"))
                         .await
                         .unwrap();
 
@@ -290,10 +305,10 @@ mod tests {
                     ResponseTemplate::new(200).set_body_string(completion_body("Fix login bug")),
                 ])
                 .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri());
 
                 let (text, _) = client
-                    .complete(SESSION_ID, query("sys", "user input"))
+                    .complete(query(&api_key(), "sys", "user input"))
                     .await
                     .unwrap();
 
@@ -302,25 +317,14 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn while_signed_out_fails_without_a_request() {
-                let mut config = test_config("https://example.invalid", api_key(), HAIKU);
-                config.auth = None;
-                let client = client_for(&config);
-
-                let err = complete_err(&client).await;
-
-                assert_eq!(err, "not signed in");
-            }
-
-            #[tokio::test]
             async fn http_error_propagates_status_and_body() {
                 let server = serve(vec![ResponseTemplate::new(400).set_body_string(
                     r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: must be positive"}}"#,
                 )])
                 .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri());
 
-                let err = complete_err(&client).await;
+                let err = complete_err(&client, &api_key()).await;
 
                 assert_eq!(
                     err,
@@ -338,9 +342,9 @@ mod tests {
                         ),
                 ])
                 .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri());
 
-                let err = complete_err(&client).await;
+                let err = complete_err(&client, &api_key()).await;
 
                 assert_eq!(
                     err,
@@ -354,9 +358,9 @@ mod tests {
                     ResponseTemplate::new(401).set_body_string("unauthorized"),
                 ])
                 .await;
-                let client = test_client(server.uri(), auth_token(), HAIKU);
+                let client = test_client(server.uri());
 
-                let err = complete_err(&client).await;
+                let err = complete_err(&client, &auth_token()).await;
 
                 assert_eq!(
                     err,
@@ -372,10 +376,10 @@ mod tests {
                     ResponseTemplate::new(200).set_body_string("<not json>"),
                 ])
                 .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri());
 
                 let err = client
-                    .complete(SESSION_ID, query("", "u"))
+                    .complete(query(&api_key(), "", "u"))
                     .await
                     .expect_err("the request must fail");
 

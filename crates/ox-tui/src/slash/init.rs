@@ -137,12 +137,16 @@ impl Modal for InitPicker {
         self.list.navigate(event);
         ModalKey::Consumed
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modal::testing::render_rows;
+    use crate::modal::testing::render_modal;
     use crate::session_info::testing::test_session_info;
 
     /// The action the picker submits to start the turn creating `file` at `root`.
@@ -207,7 +211,7 @@ mod tests {
         fn execute_in(project_root: &Path, args: &str) -> Result<SlashOutcome, String> {
             let mut info = test_session_info();
             info.project_root = project_root.to_owned();
-            InitCmd.execute(args, &SlashContext::new(&info, None))
+            InitCmd.execute(args, &SlashContext::new(&info))
         }
 
         #[test]
@@ -255,11 +259,8 @@ mod tests {
             #[test]
             fn lists_both_files_with_who_else_reads_them() {
                 let mut picker = InitPicker::new(Path::new("/repo"));
-                let height = picker.height(80, 20);
+                let rows = render_modal(&mut picker, 80, 20);
 
-                let rows = render_rows(&mut picker, 80, height);
-
-                let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
                 assert_eq!(
                     rows,
                     [
@@ -306,6 +307,15 @@ mod tests {
                     press(&mut picker, KeyCode::Enter),
                     Some(create_action(root, "AGENTS.md"))
                 );
+            }
+        }
+
+        mod sends_idle_only_ops {
+            use super::*;
+
+            #[test]
+            fn holds_the_queue_head_for_the_init_turn() {
+                assert!(InitPicker::new(Path::new("/repo")).sends_idle_only_ops());
             }
         }
     }

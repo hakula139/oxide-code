@@ -13,11 +13,11 @@ use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
 use ox_core::client::{RateLimitWindow, RateLimits};
-use ox_core::model::ModelSpec;
 use ox_core::protocol::{Event, Op};
-use ox_core::session::entry::ArchiveState;
+use ox_core::session::store::listing::ArchiveState;
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
+use super::operation::{Activity, InFlight};
 use super::{App, AppHistory};
 use crate::clipboard::{self, Clipboard, Environment};
 use crate::git_probes::GitProbes;
@@ -25,7 +25,7 @@ use crate::modal::approval::ApprovalModal;
 use crate::modal::{Modal, ModalKey};
 use crate::now;
 use crate::session_info::LiveSessionInfo;
-use crate::session_info::testing::test_session_info;
+use crate::session_info::testing::unknown_model_session_info;
 use crate::testing::buffer_rows;
 use crate::theme::{Theme, ThemeOverrides};
 
@@ -73,12 +73,15 @@ pub(super) fn test_app_with(
     (app, op_rx, event_tx)
 }
 
-/// The shared session fixture on `test-model`, an unknown ID whose display name falls back to the
-/// literal ID, keeping insta snapshots stable.
-pub(super) fn unknown_model_session_info() -> LiveSessionInfo {
-    let mut info = test_session_info();
-    info.config.model = ModelSpec::resolve("test-model");
-    info
+/// Puts `op` in flight with no other local effect of [`App::dispatch_op`], such as the queue marks
+/// a compaction or session switch sets.
+pub(super) fn start_op(app: &mut App, op: &Op) {
+    app.in_flight = InFlight::new(op);
+}
+
+/// What the in-flight operation does, or `None` while idle.
+pub(super) fn activity(app: &App) -> Option<&Activity> {
+    app.in_flight.as_ref().map(InFlight::activity)
 }
 
 /// A five-hour window 42% spent that resets in 2100.
@@ -175,7 +178,7 @@ pub(super) fn push_answerable_approval(app: &mut App, command: &str) {
         None,
         None,
     );
-    crate::modal::testing::render_modal(&mut modal, 60);
+    crate::modal::testing::render_modal(&mut modal, 60, u16::MAX);
     modal.expire_guard();
     app.push_modal(Box::new(modal));
 }

@@ -3,12 +3,13 @@
 #[cfg(target_os = "linux")]
 mod metadata;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
 use tempfile::NamedTempFile;
 
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
@@ -34,7 +35,7 @@ fn write_with(
     mut checkpoint: impl FnMut(Phase, &File) -> io::Result<()>,
 ) -> io::Result<()> {
     let Some(expected) = expected else {
-        return create(path, bytes, &mut checkpoint);
+        return create(path, bytes);
     };
     let mut original = Original::open(path, expected)?;
     #[cfg(target_os = "linux")]
@@ -44,41 +45,27 @@ fn write_with(
     write_in_place(path, bytes, expected, &mut original, &mut checkpoint)
 }
 
-/// Creates `path` from a staged copy, so an existing entry is never replaced and a partial write
-/// never reaches the destination name.
-fn create(
-    path: &Path,
-    bytes: &[u8],
-    checkpoint: &mut impl FnMut(Phase, &File) -> io::Result<()>,
-) -> io::Result<()> {
+/// Creates `path` with an exclusive open, which never replaces an existing entry, including a
+/// dangling symlink, and leaves the new file's mode to the umask and any default ACL. A failed
+/// write leaves the partial file at `path`.
+fn create(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if requires_directory(path) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "a new file path has a directory suffix",
         ));
     }
-    let parent = path
-        .parent()
-        .expect("prepare resolves an absolute file path");
-    let mut staged = staged_file(parent)?;
-    checkpoint(Phase::Prepared, staged.as_file())?;
-    staged.as_file_mut().write_all(bytes)?;
-    checkpoint(Phase::Written, staged.as_file())?;
-    #[cfg(unix)]
-    staged.as_file().set_permissions(creation_mode(parent)?)?;
-    staged.as_file().sync_all()?;
-    checkpoint(Phase::Synced, staged.as_file())?;
-    if !bytes_match(staged.as_file_mut(), bytes)? {
-        return Err(io::Error::other(
-            "the prepared file changed before publication",
-        ));
-    }
-    checkpoint(Phase::Validated, staged.as_file())?;
-    verify_name(staged.as_file(), staged.path())?;
-    staged
-        .persist_noclobber(path)
-        .map(|_| ())
-        .map_err(|error| error.error)
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| left_partial_file(&error))
+}
+
+fn left_partial_file(error: &io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("{error}. A partial file remains. Read it before writing again."),
+    )
 }
 
 /// Replaces `path` with a staged copy when a rename preserves every piece of metadata, which is
@@ -113,15 +100,7 @@ fn replace_atomically(
     if metadata::Snapshot::capture(staged.as_file())? != original.snapshot {
         return Ok(false);
     }
-    staged.as_file().sync_all()?;
-    checkpoint(Phase::Synced, staged.as_file())?;
-    if !bytes_match(staged.as_file_mut(), bytes)? {
-        return Err(io::Error::other(
-            "the prepared file changed before publication",
-        ));
-    }
-    checkpoint(Phase::Validated, staged.as_file())?;
-    verify_name(staged.as_file(), staged.path())?;
+    seal(&mut staged, bytes, checkpoint)?;
     original.verify(path, expected)?;
     fs::rename(staged.path(), path).map(|()| true)
 }
@@ -147,28 +126,32 @@ fn write_in_place(
     checkpoint(Phase::Validated, &original.file)
 }
 
-fn staged_file(parent: &Path) -> io::Result<NamedTempFile> {
-    let mut builder = tempfile::Builder::new();
-    builder.prefix(".ox-write.");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        builder.permissions(fs::Permissions::from_mode(0o600));
+/// Syncs the staged copy, then checks that it still holds `bytes` under its own name.
+#[cfg(target_os = "linux")]
+fn seal(
+    staged: &mut NamedTempFile,
+    bytes: &[u8],
+    checkpoint: &mut impl FnMut(Phase, &File) -> io::Result<()>,
+) -> io::Result<()> {
+    staged.as_file().sync_all()?;
+    checkpoint(Phase::Synced, staged.as_file())?;
+    if !bytes_match(staged.as_file_mut(), bytes)? {
+        return Err(io::Error::other(
+            "the prepared file changed before publication",
+        ));
     }
-    builder.tempfile_in(parent)
+    checkpoint(Phase::Validated, staged.as_file())?;
+    verify_name(staged.as_file(), staged.path())
 }
 
-/// The mode a new file in `parent` receives from the umask, read from a temporary probe.
-#[cfg(unix)]
-fn creation_mode(parent: &Path) -> io::Result<fs::Permissions> {
+#[cfg(target_os = "linux")]
+fn staged_file(parent: &Path) -> io::Result<NamedTempFile> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let probe = tempfile::Builder::new()
-        .prefix(".ox-mode.")
-        .permissions(fs::Permissions::from_mode(0o666))
-        .tempfile_in(parent)?;
-    Ok(probe.as_file().metadata()?.permissions())
+    tempfile::Builder::new()
+        .prefix(".ox-write.")
+        .permissions(fs::Permissions::from_mode(0o600))
+        .tempfile_in(parent)
 }
 
 struct Original {
@@ -266,6 +249,7 @@ fn identity(file: &File) -> io::Result<(u64, [u8; 16])> {
 
 /// Checks that `path` still names `file`, reopening without following a symlink so a stage
 /// replaced by another file, a symlink, or a directory is refused.
+#[cfg(target_os = "linux")]
 fn verify_name(file: &File, path: &Path) -> io::Result<()> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -286,8 +270,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-
-    use crate::tool::local_testing::WorkspaceWrite;
+    use crate::util::fs::testing::symlink_file;
 
     fn entries(path: &Path) -> Vec<std::ffi::OsString> {
         let mut names: Vec<_> = fs::read_dir(path)
@@ -357,6 +340,82 @@ mod tests {
             assert_eq!(identity_of(&path), before);
             assert_eq!(fs::read(&path).unwrap(), b"new");
             assert_eq!(fs::read(&alias).unwrap(), b"new");
+        }
+
+        #[test]
+        fn create_new_refuses_existing_entries_and_dangling_links() {
+            let identity = |path: &Path| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+
+                    let metadata = fs::symlink_metadata(path).unwrap();
+                    (metadata.dev(), metadata.ino())
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt as _;
+
+                    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+                    let file = fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                        .open(path)
+                        .unwrap();
+                    crate::util::fs::file_id(&file).unwrap()
+                }
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let existing = dir.path().join("existing.txt");
+            fs::write(&existing, "original").unwrap();
+            let target = dir.path().join("target.txt");
+            let link = dir.path().join("link.txt");
+            symlink_file(&target, &link);
+            let before_entries = entries(dir.path());
+
+            for path in [&existing, &link] {
+                let before = identity(path);
+
+                let error = write(path, b"x", None).unwrap_err();
+
+                assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+                assert_eq!(identity(path), before);
+                assert_eq!(fs::read(&existing).unwrap(), b"original");
+                assert_eq!(entries(dir.path()), before_entries);
+                assert_eq!(fs::read_link(&link).unwrap(), target);
+                assert!(!target.exists(), "the link target must not be created");
+            }
+        }
+
+        #[test]
+        fn overwrite_refuses_a_symlink() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("target.txt");
+            fs::write(&target, "original").unwrap();
+            let link = dir.path().join("link.txt");
+            symlink_file(&target, &link);
+
+            let err = write(&link, b"x", Some(b"original")).unwrap_err();
+            #[cfg(unix)]
+            assert_eq!(err.raw_os_error(), Some(nix::errno::Errno::ELOOP as i32));
+            #[cfg(windows)]
+            assert_eq!(err.to_string(), "the final path component is a symlink");
+            assert_eq!(fs::read_to_string(&target).unwrap(), "original");
+        }
+
+        #[test]
+        fn refuses_directory_suffixed_new_paths() {
+            for name in ["missing/", "missing/."] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join(name);
+
+                let error = write(&path, b"new", None).unwrap_err();
+
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name}");
+                assert_eq!(error.to_string(), "a new file path has a directory suffix");
+                assert_eq!(entries(dir.path()), [] as [std::ffi::OsString; 0], "{name}");
+            }
         }
 
         #[cfg(target_os = "linux")]
@@ -513,13 +572,13 @@ mod tests {
 
             let dir = tempfile::tempdir().unwrap();
             let ordinary = dir.path().join("ordinary");
-            let staged = dir.path().join("staged");
+            let created = dir.path().join("created");
             fs::write(&ordinary, b"").unwrap();
 
-            write(&staged, b"content", None).unwrap();
+            write(&created, b"content", None).unwrap();
 
             assert_eq!(
-                fs::metadata(&staged).unwrap().permissions().mode(),
+                fs::metadata(&created).unwrap().permissions().mode(),
                 fs::metadata(&ordinary).unwrap().permissions().mode()
             );
         }
@@ -595,78 +654,10 @@ mod tests {
         }
 
         #[test]
-        fn refuses_directory_suffixed_new_paths_before_preparation() {
-            for name in ["missing/", "missing/."] {
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join(name);
-
-                let error = write_with(&path, b"new", None, |_, _| {
-                    unreachable!("refused before preparation");
-                })
-                .unwrap_err();
-
-                assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name}");
-                assert_eq!(error.to_string(), "a new file path has a directory suffix");
-                assert_eq!(entries(dir.path()), [] as [std::ffi::OsString; 0], "{name}");
-            }
-        }
-
-        #[test]
-        fn refuses_stage_content_changes_after_original_validation() {
-            // Off Linux a replacement checkpoints the original file's handle, so only a new file
-            // has a staged copy whose content can change there.
-            let targets: &[bool] = if cfg!(target_os = "linux") {
-                &[false, true]
-            } else {
-                &[false]
-            };
-            for &existing in targets {
-                for changed in [b"".as_slice(), b"OURS", b"ours-extra"] {
-                    let dir = tempfile::tempdir().unwrap();
-                    let path = dir.path().join("target");
-                    if existing {
-                        fs::write(&path, b"original").unwrap();
-                    }
-                    let before = entries(dir.path());
-                    let mut visited = Vec::new();
-
-                    let error = write_with(
-                        &path,
-                        b"ours",
-                        existing.then_some(b"original".as_slice()),
-                        |phase, mut staged| {
-                            visited.push(phase);
-                            if phase == Phase::Synced {
-                                staged.set_len(0)?;
-                                staged.rewind()?;
-                                staged.write_all(changed)?;
-                            }
-                            Ok(())
-                        },
-                    )
-                    .unwrap_err();
-
-                    assert!(
-                        error.to_string().contains("prepared file changed"),
-                        "{error}"
-                    );
-                    assert_eq!(visited.last(), Some(&Phase::Synced));
-                    assert_eq!(entries(dir.path()), before);
-                    if existing {
-                        assert_eq!(fs::read(&path).unwrap(), b"original");
-                    } else {
-                        assert!(!path.exists());
-                    }
-                }
-            }
-        }
-
-        #[test]
         fn refuses_stale_expected_bytes() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("target");
             fs::write(&path, b"original").unwrap();
-            let attempt = WorkspaceWrite::new(&path);
 
             let error = write(&path, b"new", Some(b"stale")).unwrap_err();
 
@@ -676,7 +667,6 @@ mod tests {
             );
             assert_eq!(fs::read(&path).unwrap(), b"original");
             assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-            attempt.assert_unchanged();
         }
 
         #[test]
@@ -722,103 +712,102 @@ mod tests {
             }
         }
 
+        #[cfg(target_os = "linux")]
         #[test]
-        fn concurrent_create_is_never_replaced() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("target");
-            let mut visited = Vec::new();
+        fn refuses_stage_content_changes_after_original_validation() {
+            for changed in [b"".as_slice(), b"OURS", b"ours-extra"] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                fs::write(&path, b"original").unwrap();
+                let mut visited = Vec::new();
 
-            let result = write_with(&path, b"ours", None, |phase, _| {
-                visited.push(phase);
-                if phase == Phase::Validated {
-                    fs::write(&path, b"theirs")?;
-                }
-                Ok(())
-            });
+                let error = write_with(&path, b"ours", Some(b"original"), |phase, mut staged| {
+                    visited.push(phase);
+                    if phase == Phase::Synced {
+                        staged.set_len(0)?;
+                        staged.rewind()?;
+                        staged.write_all(changed)?;
+                    }
+                    Ok(())
+                })
+                .unwrap_err();
 
-            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
-            assert_eq!(visited.last(), Some(&Phase::Validated));
-            assert_eq!(fs::read(&path).unwrap(), b"theirs");
-            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+                assert!(
+                    error.to_string().contains("prepared file changed"),
+                    "{error}"
+                );
+                assert_eq!(visited.last(), Some(&Phase::Synced));
+                assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+                assert_eq!(fs::read(&path).unwrap(), b"original");
+            }
         }
 
+        #[cfg(target_os = "linux")]
         #[test]
         fn refuses_substituted_stage_names() {
-            use crate::util::fs::testing::symlink_file;
+            for replacement in ["content", "symlink"] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                let victim = dir.path().join("victim");
+                fs::write(&path, b"original").unwrap();
+                fs::write(&victim, b"victim").unwrap();
+                let parent = dir.path().to_owned();
+                let target = victim.clone();
 
-            // Off Linux a replacement checkpoints the original file's handle, so only a new file
-            // has a staged copy whose name can change there.
-            let targets: &[bool] = if cfg!(target_os = "linux") {
-                &[false, true]
-            } else {
-                &[false]
-            };
-            for &existing in targets {
-                for replacement in ["content", "symlink"] {
-                    let case = format!("existing={existing} {replacement}");
-                    let dir = tempfile::tempdir().unwrap();
-                    let path = dir.path().join("target");
-                    let victim = dir.path().join("victim");
-                    if existing {
-                        fs::write(&path, b"original").unwrap();
-                    }
-                    fs::write(&victim, b"victim").unwrap();
-                    let destination = path.clone();
-                    let target = victim.clone();
-
-                    let error = write_with(
-                        &destination,
-                        b"ours",
-                        existing.then_some(b"original".as_slice()),
-                        |phase, _| {
-                            if phase == Phase::Validated {
-                                let staged = fs::read_dir(destination.parent().unwrap())?
-                                    .map(Result::unwrap)
-                                    .map(|entry| entry.path())
-                                    .find(|candidate| {
-                                        candidate
-                                            .file_name()
-                                            .unwrap()
-                                            .to_string_lossy()
-                                            .starts_with(".ox-write.")
-                                    })
-                                    .expect("the call staged a file");
-                                fs::remove_file(&staged)?;
-                                if replacement == "content" {
-                                    fs::write(&staged, b"substituted")?;
-                                } else {
-                                    symlink_file(&target, &staged);
-                                }
-                            }
-                            Ok(())
-                        },
-                    )
-                    .unwrap_err();
-
-                    assert!(
-                        error.to_string().contains("pathname changed"),
-                        "{case}: {error}"
-                    );
-                    if existing {
-                        assert_eq!(fs::read(&path).unwrap(), b"original", "{case}");
-                    } else {
-                        assert!(!path.exists(), "{case}");
-                    }
-                    assert_eq!(fs::read(&victim).unwrap(), b"victim", "{case}");
-                    assert_eq!(
-                        entries(dir.path()),
-                        if existing {
-                            vec![
-                                std::ffi::OsString::from("target"),
-                                std::ffi::OsString::from("victim"),
-                            ]
+                let error = write_with(&path, b"ours", Some(b"original"), |phase, _| {
+                    if phase == Phase::Validated {
+                        let staged = fs::read_dir(&parent)?
+                            .map(Result::unwrap)
+                            .map(|entry| entry.path())
+                            .find(|candidate| {
+                                candidate
+                                    .file_name()
+                                    .unwrap()
+                                    .to_string_lossy()
+                                    .starts_with(".ox-write.")
+                            })
+                            .expect("the call staged a file");
+                        fs::remove_file(&staged)?;
+                        if replacement == "content" {
+                            fs::write(&staged, b"substituted")?;
                         } else {
-                            vec![std::ffi::OsString::from("victim")]
-                        },
-                        "{case}"
-                    );
-                }
+                            symlink_file(&target, &staged);
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap_err();
+
+                assert!(
+                    error.to_string().contains("pathname changed"),
+                    "{replacement}: {error}"
+                );
+                assert_eq!(fs::read(&path).unwrap(), b"original", "{replacement}");
+                assert_eq!(fs::read(&victim).unwrap(), b"victim", "{replacement}");
+                assert_eq!(
+                    entries(dir.path()),
+                    [
+                        std::ffi::OsString::from("target"),
+                        std::ffi::OsString::from("victim"),
+                    ],
+                    "{replacement}"
+                );
             }
+        }
+    }
+
+    mod left_partial_file {
+        use super::*;
+
+        #[test]
+        fn tells_the_model_to_read_the_partial_file_and_keeps_the_kind() {
+            let error = left_partial_file(&io::Error::new(io::ErrorKind::StorageFull, "disk full"));
+
+            assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+            assert_eq!(
+                error.to_string(),
+                "disk full. A partial file remains. Read it before writing again."
+            );
         }
     }
 

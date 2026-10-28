@@ -121,6 +121,24 @@
 
           shellcheck.enable = true;
 
+          comment-width = {
+            enable = true;
+            entry = pkgs.lib.getExe (
+              pkgs.writeShellApplication {
+                name = "check-comment-width";
+                runtimeInputs = [ pkgs.gawk ];
+                text = builtins.readFile ./scripts/check-comment-width.sh;
+              }
+            );
+            types_or = [
+              "nix"
+              "rust"
+              "shell"
+              "toml"
+              "yaml"
+            ];
+          };
+
           rustfmt = {
             enable = true;
             packageOverrides = {
@@ -210,6 +228,7 @@
             git-cliff
             nodejs
             pnpm
+            sqlite
           ]);
 
           # git-hooks.nix sets a hooks path relative to the main checkout, which linked worktrees

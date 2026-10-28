@@ -113,8 +113,9 @@ impl EffortSlider {
     }
 
     fn line_footer(theme: &Theme) -> Line<'static> {
-        let confirm = CONFIRM_HINTS.join(HINT_SEPARATOR);
-        let hints = [hint(KEY_LEFT_RIGHT, "change effort"), confirm].join(HINT_SEPARATOR);
+        let [confirm, cancel] = CONFIRM_HINTS;
+        let adjust = hint(KEY_LEFT_RIGHT, "change effort");
+        let hints = [adjust.as_str(), confirm, cancel].join(HINT_SEPARATOR);
         Line::from(Span::styled(hints, theme.dim()))
     }
 }
@@ -159,6 +160,10 @@ impl Modal for EffortSlider {
             }
             _ => ModalKey::Consumed,
         }
+    }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
     }
 }
 
@@ -228,9 +233,8 @@ mod tests {
         fn centers_the_track_between_title_and_footer() {
             let mut s = slider_for("claude-opus-5-5", Some(Effort::High));
 
-            let rows = render_modal(&mut s, 80);
+            let rows = render_modal(&mut s, 80, u16::MAX);
 
-            let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
             assert_eq!(
                 rows,
                 [
@@ -327,6 +331,15 @@ mod tests {
                 );
                 assert_eq!(s.selected, before, "{code:?} must not move the cursor");
             }
+        }
+    }
+
+    mod sends_idle_only_ops {
+        use super::*;
+
+        #[test]
+        fn holds_the_queue_head_for_the_effort_change() {
+            assert!(slider_for("claude-opus-5-5", Some(Effort::High)).sends_idle_only_ops());
         }
     }
 

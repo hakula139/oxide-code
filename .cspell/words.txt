@@ -6,7 +6,6 @@ ALPN
 anthropics
 APFS
 arboard
-atuin
 cachain
 cachix
 catppuccin
@@ -48,11 +47,12 @@ fpats
 fprint
 fprintf
 fsmonitor
+fullfsync
 getpgid
 Ghostty
-gitui
 GOARCH
 GOEXPERIMENT
+gsub
 hakula
 idna
 illumos
@@ -94,6 +94,7 @@ noclobber
 nohup
 nonewline
 noprefix
+NOTADB
 nptu
 NTFS
 numtide
@@ -123,9 +124,9 @@ rollup
 rposition
 rrggbb
 rsplit
+rusqlite
 rustc
 rustls
-screenful
 serde
 serie
 sess
@@ -170,4 +171,3 @@ XPRESS
 Xresources
 xtrace
 xxhash
-yazi

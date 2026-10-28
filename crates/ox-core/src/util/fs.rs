@@ -23,16 +23,12 @@ pub(crate) enum FileReadError {
 
 /// Reads a regular file through a no-follow handle, consuming at most `limit + 1` bytes and
 /// rejecting overflow even if the file grew after its metadata was checked.
-pub(crate) fn read_regular_file(
-    path: &Path,
-    limit: u64,
-) -> Result<(Metadata, Vec<u8>), FileReadError> {
+pub(crate) fn read_regular_file(path: &Path, limit: u64) -> Result<Vec<u8>, FileReadError> {
     let mut options = OpenOptions::new();
     options.read(true);
     let file = open_no_follow(path, options)?;
     let metadata = file.metadata()?;
-    let bytes = read_regular_contents(file, &metadata, limit)?;
-    Ok((metadata, bytes))
+    read_regular_contents(file, &metadata, limit)
 }
 
 fn read_regular_contents(
@@ -141,13 +137,30 @@ pub(crate) fn file_id(file: impl std::os::windows::io::AsHandle) -> io::Result<(
 
 // ── File Locking ──
 
-/// An exclusive file lock whose release does not wait for inherited handles to close.
+/// A lock on a whole file whose release does not wait for inherited handles to close. Two handles
+/// conflict even within one process, under both `flock` and `LockFileEx`.
 pub(crate) struct FileLock(File);
 
 impl FileLock {
+    /// Waits for an exclusive lock on `file`.
     pub(crate) fn lock(file: File) -> io::Result<Self> {
         file.lock()?;
         Ok(Self(file))
+    }
+
+    /// Waits for a shared lock on `file`, which other shared locks may hold too.
+    pub(crate) fn shared(file: File) -> io::Result<Self> {
+        file.lock_shared()?;
+        Ok(Self(file))
+    }
+
+    /// Takes an exclusive lock on `file`, or returns `None` while another handle holds any lock.
+    pub(crate) fn try_exclusive(file: File) -> io::Result<Option<Self>> {
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self(file))),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(e)) => Err(e),
+        }
     }
 }
 
@@ -214,8 +227,9 @@ pub(super) fn open_private_append(path: &Path) -> io::Result<File> {
     open_private(path, &mut options)
 }
 
-/// Opens a lockable coordination file without truncating it, enforcing `0600` perms on Unix.
-pub(super) fn open_private_lock(path: &Path) -> io::Result<File> {
+/// Opens `path` for reading and writing without truncating it, with `0600` perms on Unix, also
+/// tightening an existing file's mode.
+pub(crate) fn open_private_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     open_private(path, &mut options)
@@ -425,9 +439,8 @@ mod tests {
             for (name, content, limit) in cases {
                 fs::write(&path, content).unwrap();
 
-                let (metadata, bytes) = read_regular_file(&path, limit).unwrap();
+                let bytes = read_regular_file(&path, limit).unwrap();
 
-                assert_eq!(metadata.len(), content.len() as u64, "{name}");
                 assert_eq!(bytes, content, "{name}");
             }
         }
@@ -632,6 +645,49 @@ mod tests {
 
     mod file_lock {
         use super::*;
+
+        /// Opens a fresh handle on `path` for a lock attempt.
+        fn reopen(path: &Path) -> File {
+            File::options().read(true).write(true).open(path).unwrap()
+        }
+
+        mod shared {
+            use super::*;
+
+            #[test]
+            fn coexists_with_another_shared_lock_and_blocks_an_exclusive_one() {
+                let dir = tempdir().unwrap();
+                let path = dir.path().join("session.lock");
+                File::create_new(&path).unwrap();
+
+                let first = FileLock::shared(reopen(&path)).unwrap();
+                let second = FileLock::shared(reopen(&path)).unwrap();
+
+                assert!(FileLock::try_exclusive(reopen(&path)).unwrap().is_none());
+                drop(first);
+                assert!(FileLock::try_exclusive(reopen(&path)).unwrap().is_none());
+                drop(second);
+                assert!(FileLock::try_exclusive(reopen(&path)).unwrap().is_some());
+            }
+        }
+
+        mod try_exclusive {
+            use super::*;
+
+            #[test]
+            fn holds_off_a_shared_lock_until_released() {
+                let dir = tempdir().unwrap();
+                let path = dir.path().join("session.lock");
+                File::create_new(&path).unwrap();
+                let exclusive = FileLock::try_exclusive(reopen(&path)).unwrap().unwrap();
+
+                let competing = reopen(&path).try_lock_shared();
+
+                assert!(matches!(competing, Err(fs::TryLockError::WouldBlock)));
+                drop(exclusive);
+                FileLock::shared(reopen(&path)).unwrap();
+            }
+        }
 
         mod drop {
             use super::*;
@@ -852,7 +908,7 @@ mod tests {
         }
     }
 
-    mod open_private_lock {
+    mod open_private_file {
         use super::*;
 
         #[test]
@@ -861,7 +917,7 @@ mod tests {
             let path = dir.path().join("writer.lock");
             fs::write(&path, b"existing").unwrap();
 
-            let file = open_private_lock(&path).unwrap();
+            let file = open_private_file(&path).unwrap();
             let lock = FileLock::lock(file).unwrap();
             drop(lock);
 

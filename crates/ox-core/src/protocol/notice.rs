@@ -6,6 +6,7 @@ use super::ConfigPick;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{Effort, ModelSpec};
 use crate::permission::Mode;
+use crate::session::display::id_prefix;
 use crate::util::text::{join_sentences, plural};
 
 /// The error a frontend reports when the engine ends before the op it waits on.
@@ -95,6 +96,15 @@ fn effort_unapplied(requested: Effort) -> String {
 /// The message that reports a session-writer failure.
 pub fn session_write_failed(failure: &str) -> String {
     format!("Session write failed: {failure}")
+}
+
+/// The message that reports the fork from session `from` to session `id`.
+pub fn session_forked(id: &str, from: &str) -> String {
+    format!(
+        "Another ox process wrote to session {}, so this conversation continues as session {}",
+        id_prefix(from),
+        id_prefix(id),
+    )
 }
 
 #[cfg(test)]
@@ -387,6 +397,19 @@ mod tests {
                      {CUSTOM_NOTICE}",
                     compact_count(WINDOW_1M_THRESHOLD),
                 ),
+            );
+        }
+    }
+
+    mod session_forked {
+        use super::*;
+
+        #[test]
+        fn names_both_sessions_by_their_short_ids() {
+            assert_eq!(
+                session_forked("fork-session-id", "source-session-id"),
+                "Another ox process wrote to session source-s, \
+                 so this conversation continues as session fork-ses",
             );
         }
     }

@@ -11,8 +11,8 @@ ox -c -p "Run the tests again"                      # Continue the latest sessio
 ```
 
 - **Input**: When stdin is not a terminal, `ox -p` reads it to the end and attaches it after the prompt in a `<stdin>` block, so the model can tell your instruction from the data. Piped stdin without a prompt, as in `ox -p < task.md`, is the prompt itself, and a run with neither fails with status `2`. A prompt that is exactly a slash command's name also fails with status `2`, so pass `--` before the word to send it. Bytes that are not valid UTF-8 are replaced with U+FFFD, so a stray byte in a diff or log does not end the run. A script or program that runs `ox` with an open stdin it never closes, such as a pipe it never writes to, leaves `ox` waiting, and after 3 seconds `ox` says so on stderr. Redirect stdin from `/dev/null` to keep it away from `ox`.
-- **Sessions**: Each run starts and saves a new session, unless `-c` continues the latest one or `-r <id-prefix>` names one. Resume a run's session later with `ox -r <id-prefix>`, in the TUI or with another `-p`.
-- **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied. The denial names the user config change that would permit the call when one would, such as an allow pattern, turning off a built-in rule, or both, and otherwise the rule that made it ask. Add `allow` patterns for the calls your script needs, as described in [Rules](permissions.md#rules). Pass `--mode plan` to keep a run read-only, or `--mode yolo` to run every tool call that no deny rule or ask rule of yours holds. In `manual`, a `bash` command that uses shell syntax `ox` cannot analyze is denied, and its denial names the construct and asks the model to rewrite it as plain commands. Since `yolo` runs whatever an `exec` pattern misses, run untrusted work inside a sandbox or container, as [Modes](permissions.md#modes) explains.
+- **Sessions**: Each run starts and saves a new session, unless `-c` continues the latest one or `-r` names one by ID prefix or [export](sessions.md#moving-a-session-between-machines) path. Resume a run's session later with `ox -r <id-prefix>`, in the TUI or with another `-p`. A run that continues a session another `ox` process wrote to in the meantime continues in a [fork](sessions.md#several-processes-on-one-session) of it.
+- **Approvals**: No one can respond to approval prompts during a headless run, so calls that require approval are denied, and the denial tells the model what [Approval Prompt](permissions.md#approval-prompt) describes. Add `allow` patterns for the calls your script needs, as described in [Rules](permissions.md#rules). Pass `--mode plan` to keep a run read-only, or `--mode yolo` to run every tool call that no deny rule or ask rule of yours holds. In `manual`, a `bash` command that uses shell syntax `ox` cannot analyze is denied, and its denial names the construct and asks the model to rewrite it as plain commands. Since `yolo` runs whatever an `exec` pattern misses, run untrusted work inside a sandbox or container, as [Modes](permissions.md#modes) explains.
 
 ## Output Formats
 
@@ -69,7 +69,7 @@ The `json` and `stream-json` formats emit this result shape:
 | `session_write_error` | Why the session could not be saved, which leaves part of the run missing from its transcript, or `null`                              |
 | `message`             | The text the model wrote after its last tool call, or `null` unless the turn completed                                               |
 | `usage`               | The latest usage, or `null` when no request reported any                                                                             |
-| `session_id`          | The run's session, which `ox -r <id-prefix>` resumes                                                                                 |
+| `session_id`          | The run's session, or the fork it continued in, which `ox -r <id-prefix>` resumes                                                    |
 
 `usage` contains the following fields, each set to `null` when unknown:
 
@@ -139,7 +139,7 @@ A run that lists files and then attempts `cargo test`, which needs approval, str
 {"type":"stream_token","data":"Done."}
 {"type":"usage_updated","data":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018}}
 {"type":"turn_complete"}
-{"type":"result","data":{"stop_reason":"completed","error":null,"message":"Done.","usage":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018},"session_id":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"}}
+{"type":"result","data":{"stop_reason":"completed","error":null,"session_write_error":null,"message":"Done.","usage":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018},"session_id":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"}}
 ```
 
 The run cannot ask, so the `cargo test` call ends with a `tool_call_end` whose `is_error` is `true` and whose `content` tells the model the call was denied, naming the allow pattern that would permit it when one can.

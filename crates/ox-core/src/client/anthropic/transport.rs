@@ -15,8 +15,8 @@ use tracing::debug;
 
 use super::Client;
 use super::wire::{ApiError, ErrorResponse};
+use crate::auth::{self, Auth, AuthSource, Credential};
 use crate::client::{PromptTooLong, RateLimitWindow, RateLimits};
-use crate::config::auth::{self, Auth, AuthSource, Credential};
 use crate::util::response::{self, condense, http_status};
 use crate::util::text::join_sentences;
 use crate::util::tls::Trust;
@@ -37,6 +37,8 @@ const MAX_RETRY_AFTER: Duration = Duration::from_mins(1);
 const OVERLOADED: &str = "Anthropic API overloaded";
 /// Headline of a server failure, reported as a 5xx status or an in-band `api_error`.
 const SERVER_ERROR: &str = "Anthropic API server error";
+/// Headline of a transport failure, where no response arrived.
+const CONNECTION_FAILED: &str = "Anthropic API connection failed";
 /// Advice for an overload or a server failure, both of which usually pass.
 const TRANSIENT_ADVICE: &str = "Retry in a few seconds.";
 /// Advice for a transport failure, which a wrong base URL or proxy often causes.
@@ -134,9 +136,9 @@ async fn send(
                 AttemptError::Fatal(e.into())
             } else {
                 AttemptError::retryable(
-                    "Anthropic API connection failed",
+                    CONNECTION_FAILED,
                     anyhow!(with_details(
-                        "Anthropic API connection failed",
+                        CONNECTION_FAILED,
                         Some(&format!("{:#}", anyhow::Error::new(e))),
                         Some(CONNECTION_ADVICE),
                     )),
@@ -492,10 +494,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::auth::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
     use crate::client::anthropic::local_testing::{
         SESSION_ID, messages_request, plain_http, retry_counts, serve,
     };
-    use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
 
     mod post_messages {
         use super::*;

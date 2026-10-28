@@ -121,13 +121,6 @@ pub(crate) fn classify(parsed: &Parsed) -> Option<SlashKind> {
 #[cfg(test)]
 pub(crate) mod testing {
     pub(crate) use super::diff::testing::{added, context, removed};
-
-    /// Marks the file at `path` read-only, so appending to it fails on every platform.
-    pub(super) fn make_read_only(path: &std::path::Path) {
-        let mut permissions = std::fs::metadata(path).unwrap().permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(path, permissions).unwrap();
-    }
 }
 
 #[cfg(test)]
@@ -176,7 +169,7 @@ mod tests {
 
         fn run_dispatch(name: &str) -> Result<SlashOutcome, String> {
             let parsed = parsed(name, "");
-            dispatch(&parsed, &SlashContext::new(&test_session_info(), None))
+            dispatch(&parsed, &SlashContext::new(&test_session_info()))
         }
 
         #[test]
@@ -201,7 +194,7 @@ mod tests {
                     ..FakeCmd::DEFAULT
                 }],
                 &parsed,
-                &SlashContext::new(&info, None),
+                &SlashContext::new(&info),
             )
             .unwrap_err()
         }
@@ -230,7 +223,7 @@ mod tests {
                 ("clear", "/clear: Explicit failure."),
                 ("reset", "/reset: Explicit failure."),
             ] {
-                let ctx = SlashContext::new(&info, None);
+                let ctx = SlashContext::new(&info);
                 let task = dispatch_with(&[&cmd], &parsed(typed, ""), &ctx)
                     .unwrap()
                     .into_background();

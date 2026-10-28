@@ -145,7 +145,7 @@ The API supports prompt caching via `cache_control` on `TextBlockParam` blocks. 
 
 The `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker separates cacheable from non-cacheable content. Effective caching requires the static prefix to be identical across requests.
 
-oxide-code ships `scope: "global"` only when the configured base URL points at the first-party API. On any other host the static prefix still gets ephemeral caching at org scope. The dynamic sections and block order are identical in both modes.
+[Client](../../design/client.md) covers which hosts oxide-code sends the global scope to.
 
 ## System Block Layout
 

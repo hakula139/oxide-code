@@ -1,4 +1,4 @@
-//! Store access, messages, and metadata lines for the commands that act on saved sessions.
+//! Messages and metadata lines for the commands that act on saved sessions.
 
 use std::fmt::Write as _;
 
@@ -6,20 +6,9 @@ use time::OffsetDateTime;
 
 use ox_core::protocol::SavedTarget;
 use ox_core::session::display::{archive_notice, id_prefix};
-use ox_core::session::entry::ArchiveState;
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
-use ox_core::session::store::SessionStore;
+use ox_core::session::store::listing::ArchiveState;
 use ox_core::util::text::{capitalize_first, plural};
-
-use crate::session_info::LiveSessionInfo;
-
-// ── Store ──
-
-/// Opens the store scoped to the session's project.
-pub(super) fn open_store(info: &LiveSessionInfo) -> Result<SessionStore, String> {
-    SessionStore::open(&info.cwd, &info.project_root)
-        .map_err(|e| format!("Session store unavailable: {e:#}"))
-}
 
 // ── Messages ──
 
@@ -27,13 +16,13 @@ pub(crate) const CLEAR_THEN_DELETE_HINT: &str = "Run `/clear` to start a new one
 
 pub(super) const BARE_ARCHIVE_HINT: &str = "Use bare `/archive` to archive it and start a new one.";
 
-/// Phrases `error` as a sentence, ending a refusal of the live session with `live_recovery` when
-/// given.
-pub(crate) fn saved_error_message(error: &SavedError, live_recovery: Option<&str>) -> String {
+/// Phrases `error` as a sentence, ending a refusal of the live session with `live_recovery`.
+pub(crate) fn saved_error_message(error: &SavedError, live_recovery: &str) -> String {
     let sentence = capitalize_first(&error.to_string());
-    match live_recovery {
-        Some(recovery) if error.is_live() => format!("{sentence}. {recovery}"),
-        _ => sentence,
+    if error.is_live() {
+        format!("{sentence}. {live_recovery}")
+    } else {
+        sentence
     }
 }
 
@@ -58,7 +47,7 @@ pub(crate) fn archive_message(
             Ok("The live session is not archived".to_owned())
         }
         Err(error) => {
-            let message = saved_error_message(error, Some(BARE_ARCHIVE_HINT));
+            let message = saved_error_message(error, BARE_ARCHIVE_HINT);
             Err(match (target, state) {
                 (SavedTarget::Id(_), _) => message,
                 (SavedTarget::Prefix(_), ArchiveState::Archived) => format!("/archive: {message}"),
@@ -72,7 +61,7 @@ pub(crate) fn archive_message(
 pub(crate) fn delete_lookup_error(error: &SavedError) -> String {
     format!(
         "/delete: {}",
-        saved_error_message(error, Some(CLEAR_THEN_DELETE_HINT))
+        saved_error_message(error, CLEAR_THEN_DELETE_HINT)
     )
 }
 
@@ -159,31 +148,6 @@ mod tests {
     use ox_core::session::saved::SavedAction;
 
     use super::*;
-    use crate::session_info::testing::test_session_info;
-
-    mod open_store {
-        use super::*;
-
-        #[test]
-        fn reports_a_data_dir_it_cannot_create() {
-            let dir = tempfile::tempdir().unwrap();
-            let data_home = dir.path().join("data");
-            std::fs::write(&data_home, "").unwrap();
-            let sessions_dir = data_home.join("ox").join("sessions");
-            let cause = std::fs::create_dir_all(&sessions_dir).unwrap_err();
-
-            let err = temp_env::with_var("XDG_DATA_HOME", Some(data_home.as_os_str()), || {
-                open_store(&test_session_info()).err().unwrap()
-            });
-            assert_eq!(
-                err,
-                format!(
-                    "Session store unavailable: failed to create {}: {cause}",
-                    sessions_dir.display(),
-                ),
-            );
-        }
-    }
 
     mod saved_error_message {
         use super::*;
@@ -195,14 +159,14 @@ mod tests {
                     SavedError::Resolve(ResolveError::NoMatch {
                         prefix: "zz".to_owned(),
                     }),
-                    Some(CLEAR_THEN_DELETE_HINT),
+                    CLEAR_THEN_DELETE_HINT,
                     "No session matching `zz`",
                 ),
                 (
                     SavedError::Resolve(ResolveError::Live {
                         prefix: "test-".to_owned(),
                     }),
-                    Some(BARE_ARCHIVE_HINT),
+                    BARE_ARCHIVE_HINT,
                     "Session prefix `test-` matches the live session. \
                      Use bare `/archive` to archive it and start a new one.",
                 ),
@@ -210,16 +174,9 @@ mod tests {
                     SavedError::Live {
                         id: "test-ses".to_owned(),
                     },
-                    Some(CLEAR_THEN_DELETE_HINT),
+                    CLEAR_THEN_DELETE_HINT,
                     "Session test-ses is the live session. \
                      Run `/clear` to start a new one, then delete it.",
-                ),
-                (
-                    SavedError::Live {
-                        id: "test-ses".to_owned(),
-                    },
-                    None,
-                    "Session test-ses is the live session",
                 ),
                 (
                     SavedError::Resolve(ResolveError::Ambiguous {
@@ -227,7 +184,7 @@ mod tests {
                         count: 7,
                         preview: "ab1, ab2, ab3, ab4, ab5, and 2 more".to_owned(),
                     }),
-                    None,
+                    CLEAR_THEN_DELETE_HINT,
                     "Ambiguous prefix `ab` matches 7 sessions: ab1, ab2, ab3, ab4, ab5, and 2 more",
                 ),
                 (
@@ -235,7 +192,7 @@ mod tests {
                         scope: "all projects",
                         cause: "disk unavailable".to_owned(),
                     }),
-                    None,
+                    CLEAR_THEN_DELETE_HINT,
                     "Failed to list sessions in all projects: disk unavailable",
                 ),
             ] {

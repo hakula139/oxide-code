@@ -37,7 +37,7 @@ These rules apply to unit-test modules (`mod tests`), while the integration test
 
 Every test must run and pass wherever the suite runs: on each supported OS, in CI, and in the Nix build sandbox, which has no network access or system services such as macOS trustd. Never skip, `#[ignore]`, retry, or `cfg`-gate a test to get it past its environment. Restructure tests that depend on their environment until they pass everywhere. For example, move the dependency behind a trait fake, as `util::tls` does for the Security framework, or pin what the test reads. Use a platform `cfg` gate only for a test of code that exists only on that platform.
 
-Run the suite as a non-root user, an environment requirement like having `git` installed. Root ignores the access denials and read-only files that `util::fs::testing::deny_read_access`, `deny_subdir_creation`, and `make_read_only` and `ox-tui`'s `slash::testing::make_read_only` set up, so the tests built on them fail.
+Run the suite as a non-root user, an environment requirement like having `git` installed. Root ignores the access denials and read-only files that `util::fs::testing::deny_read_access`, `deny_subdir_creation`, and `make_read_only` set up, so the tests built on them fail.
 
 The [live tests](#live-tests) are the sole exception because they send paid requests to a real endpoint.
 
@@ -57,11 +57,11 @@ The [live tests](#live-tests) are the sole exception because they send paid requ
 
 ## Snapshots
 
-`insta` snapshot tests compare TUI renders, session JSONL, and headless output against baselines in the module's `snapshots/` directory. When output changes, the test fails and writes a `.snap.new` file beside the baseline. Review and accept the difference with `cargo insta review`, then commit the updated `.snap`.
+`insta` snapshot tests compare TUI renders, the session store's SQL dump and export, and headless output against baselines in the module's `snapshots/` directory. When output changes, the test fails and writes a `.snap.new` file beside the baseline. Review and accept the difference with `cargo insta review`, then commit the updated `.snap`.
 
 A baseline's file name consists of the test's `module_path!()`, which starts with the crate name, such as `ox_core`, `ox_tui`, or `ox`, followed by the snapshot name, with `__` replacing each `::`, as in `ox__driver__headless__tests__drive__stderr.snap`. An unnamed assertion takes the test's name, where insta strips a leading `test_` and appends `-2`, `-3`, and so on to each further unnamed snapshot in the same test. A `snapshot_suffix` setting appends `@<suffix>`. An explicit name drops the function prefix just as a test name does, so `drive_stderr` becomes `stderr` inside `mod drive`. Moving a test to another module renames every baseline it writes, while renaming a test renames only its unnamed ones. Rename each `.snap` file to match, and delete baselines left behind by removed tests. `cargo insta test --unreferenced=reject` fails whenever any baseline is left without a test.
 
-The session fixtures in `crates/ox-core/src/session/fixtures/` are frozen release output, with one fixture per stable release starting at `v0.1.0`. Never edit them. A changed `session_format::resumes_from_every_release_fixture@<tag>` snapshot means an older release's sessions now resume differently, so accept it only as [Compatibility](../design/persistence.md#compatibility) allows.
+The session fixtures in `crates/ox-core/src/session/fixtures/` are frozen release output, with a SQL dump and an export per stable release starting at `v0.1.0`. Never edit them. A changed `session_format::resumes_from_every_release_fixture@<tag>` snapshot means an older release's sessions now resume differently, so accept it only as [Compatibility](../design/persistence.md#compatibility) allows.
 
 ## Coverage
 
@@ -91,7 +91,7 @@ OX_LIVE=1 cargo live
 
 Each test runs `ox` with a scratch directory as its home and for its config, sessions, and logs. `ox` loads no global instructions, config file, or stored login there, so the endpoint and credentials come only from the [environment variables](../guide/configuration.md#environment-variables), and one credential variable must be set. The harness also drops inherited `OX_*` settings other than `OX_EXTRA_CA_CERTS`, so they cannot change what the tests observe. `OX_LIVE_MODEL` picks the model, `claude-haiku-5-5` by default, and `OX_LIVE_THINKING_MODEL` picks the one for the thinking test, `claude-opus-5-5` by default.
 
-After each run, a test fails when the value of `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN`, or an `ANTHROPIC_CUSTOM_HEADERS` value of 8 or more characters, appears in the run's output or in any file under the scratch directory. The failure names the variable without printing the value.
+After each run, a test fails when the value of `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN`, or an `ANTHROPIC_CUSTOM_HEADERS` value of 8 or more characters, appears in the run's output, in any file under the scratch directory, or in the `ox export` of the session it saved, which also holds the database values a file scan can miss when SQLite splits them across pages. The failure names the variable without printing the value.
 
 Run the suite once against the Anthropic API, where the billing header carries a live `cch` hash, and once through each Anthropic-compatible gateway you support.
 
@@ -99,8 +99,8 @@ Run the suite once against the Anthropic API, where the billing header carries a
 
 The tests drive headless and REPL runs. Check the TUI-only paths by hand in a scratch session on Haiku, switching models where a step says so:
 
-1. **`/compact`**: Read a few files, run `/compact`, then ask about them. The reply still knows the files, and in the session file the usage record after the `compact` entry reads the earlier prefix from the cache.
+1. **`/compact`**: Read a few files, run `/compact`, then ask about them. The reply still knows the files, and in the session's `ox export`, the first usage record after the compaction root's `created_at` reads the earlier prefix from the cache.
 2. **`/model` swap**: Send a prompt on Opus, switch to Haiku with `/model`, and send another. Then switch back to Opus and send a third. Every reply succeeds and remembers the earlier exchanges.
 3. **Cancellation**: Press Esc while a long reply streams, and check that the stream stops within a second. Then send a new prompt and verify that the reply answers only that prompt.
 4. **Scrolling and the mouse**: In a bare terminal, inside tmux with `mouse on`, and over SSH, wheel-scroll the chat and check that tmux stays out of copy mode. Press PageUp until the jump-to-bottom pill appears, then press Ctrl+End and check that the chat follows the tail again. Drag-select a region and paste it elsewhere, double-click a word, triple-click a row, and hold a drag past the top edge until the chat scrolls. Press Ctrl+C on a selection and check that it copies without interrupting, then hold the bypass modifier and check that native selection still works. Click a `... +N lines` footer and a `Thought` header, and check that only that block expands. Click each pull request segment, then Ctrl+click it (Cmd+click in iTerm2 and Terminal.app), and check that each opens its page once. Quit, and check that the terminal screen is restored.
-5. **Leak check**: Run `scripts/check-leaks.sh` in the environment the sessions used. It searches the logs and session files for each credential the live tests check and prints only the names of the variables whose values it finds.
+5. **Leak check**: Run `scripts/check-leaks.sh` in the environment the sessions used. It searches the logs, a SQL dump of the session store, and the saved tool output for each credential the live tests check and prints only the names of the variables whose values it finds.

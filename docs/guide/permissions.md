@@ -6,13 +6,13 @@ Every tool call passes a permission check before running. In the default `manual
 
 - **`manual`**, the default, asks before tool calls that no permission rule allows or denies.
 - **`plan`** is read-only, so it denies every edit, `exec`, and `net` call, including read-only commands such as `ls`. Reads behave as in `manual`, and the `tasks`, `bash_output`, and `bash_stop` tools count as reads, so they still run.
-- **`yolo`** runs tool calls without asking unless a deny rule or one of your ask rules holds them. A deny rule, built-in or yours, denies the call, and an ask rule you configured still asks. The [built-in rules](#built-in-rules) that ask don't apply, so `yolo` edits `.git/hooks` and runs `rm -rf build` without asking. A `bash` command that uses shell syntax `ox` cannot analyze, such as arithmetic or a statement that sets `PATH`, runs unless a deny pattern or one of your ask patterns matches what `ox` can read of it. In `manual`, such a command asks, and rewriting it as plain commands avoids the prompt. A headless run denies the calls that would ask.
+- **`yolo`** runs tool calls without asking unless a deny rule or one of your ask rules holds them. A deny rule, built-in or yours, denies the call, and an ask rule you configured still asks. The [built-in rules](#built-in-rules) that ask don't apply, so `yolo` edits `.git/hooks` and runs `rm -rf build` without asking. A `bash` command that uses shell syntax `ox` [cannot analyze](#commands-that-always-ask), such as arithmetic or a statement that sets `PATH`, runs unless a deny pattern or one of your ask patterns matches what `ox` can read of it. A headless run denies the calls that would ask.
 
 In every mode, an `exec` deny or ask pattern is a guardrail against mistakes, since no pattern sees what a program runs or writes once it starts. A `read` or `edit` deny or ask pattern does hold for the file tools in every mode where it applies. [SECURITY.md](../../SECURITY.md#trust-model) covers the limits of each kind of rule and when to run untrusted work in a sandbox.
 
 Set the mode with `mode` under `[permission]` in your user config. The environment variable `OX_PERMISSION_MODE` overrides `mode`, and `ox --mode <mode>` overrides both for one run.
 
-During a session, `/mode` opens a picker of the three modes, and `/mode <mode>` switches directly. **Tab** cycles forward through `manual` → `plan` → `yolo` → `manual`, and **Shift+Tab** steps backward through the same order and wraps from `manual` to `yolo`. The first **Tab** press from the default `manual` reaches read-only `plan`. The input footer names the mode **Tab** selects next. **Tab** completes a selection while the command popup is open. A switch during a turn takes effect with the turn's next tool call. A command already running in the foreground or as a background shell continues after the switch to `plan`. The default status line includes the `permission-mode` [segment](configuration.md#tui-terminal-ui), which displays `manual`, `plan`, or `yolo`. To display the mode in a custom `status_line`, include `permission-mode`. Restarting restores the configured mode.
+During a session, `/mode` opens a picker of the three modes, and `/mode <mode>` switches directly. **Tab** cycles forward through `manual` → `plan` → `yolo` → `manual`, and **Shift+Tab** steps backward through the same order and wraps from `manual` to `yolo`. The first **Tab** press from the default `manual` reaches read-only `plan`. The input footer names the mode **Tab** selects next. A switch during a turn takes effect with the turn's next tool call. A command already running in the foreground or as a background shell continues after the switch to `plan`. The default status line includes the `permission-mode` [segment](configuration.md#tui-terminal-ui), which displays `manual`, `plan`, or `yolo`. To display the mode in a custom `status_line`, include `permission-mode`. Restarting restores the configured mode.
 
 ## Approval Prompt
 
@@ -31,23 +31,13 @@ Session rules live in memory until you exit, `/clear`, `/archive`, or `/resume` 
 
 ## Settings
 
-Set `mode`, `extra_roots`, the `deny`, `ask`, and `allow` rule tables, and `defaults` under `[permission]` in `~/.config/ox/config.toml` or a drop-in. A project's `.ox/config.toml` accepts only `deny` and `ask`, as [Project Config](configuration.md#project-config) explains. [Config Keys](configuration.md#config-keys) lists each key with its type and default.
+Set `mode`, `extra_roots`, the `deny`, `ask`, and `allow` rule tables, and `defaults` under `[permission]` in `~/.config/ox/config.toml` or a drop-in. A project's `.ox/config.toml` accepts only `deny` and `ask`, as [Project Config](configuration.md#project-config) explains. [Config Keys](configuration.md#config-keys) lists each key with its type and default, and the [Pattern Cookbook](#pattern-cookbook) shows common rules.
 
 ```toml
 # ~/.config/ox/config.toml
 [permission]
 mode = "manual"
 extra_roots = ["~/src/shared-lib"]
-
-[permission.deny]
-read = ["~/.aws/**", "/**/.env"]
-
-[permission.ask]
-exec = ["git push *"]
-
-[permission.allow]
-exec = ["cargo test *", "git status"]
-edit = ["~/notes/**"]
 ```
 
 ## Pattern Cookbook
@@ -59,7 +49,7 @@ edit = ["~/notes/**"]
 exec = ["cargo test *"]
 ```
 
-The trailing `*` covers `cargo test` and `cargo test --all`, but not `cargo test && rm -rf build`, which needs a pattern for each part.
+The trailing `*` covers bare `cargo test` and any arguments after it, while a [chained command](#chained-commands-and-redirections) needs a pattern for each part.
 
 ### Deny a Secret File
 
@@ -68,7 +58,7 @@ The trailing `*` covers `cargo test` and `cargo test --all`, but not `cargo test
 read = ["/**/.env"]
 ```
 
-A pattern with no `/`, such as `.env`, matches that name below the working directory and each extra root, while `/**/.env` matches it anywhere on disk. A denied file also stays hidden from `grep` and `glob`, which count it without naming it.
+`/**/.env` matches the name anywhere on disk, and [Path Patterns](#path-patterns) covers the other forms.
 
 ### Ask Before a Push
 
@@ -77,7 +67,7 @@ A pattern with no `/`, such as `.env`, matches that name below the working direc
 exec = ["git push *"]
 ```
 
-An ask pattern wins over an allow pattern, so the push asks even when a broader allow rule covers it.
+The push asks even when a broader allow pattern covers it, since [ask wins over allow](#rule-tables).
 
 ## Rules
 
@@ -109,11 +99,11 @@ A command chained with `;`, `&&`, `||`, or `|` is allowed only when every part i
 
 A deny or ask pattern matches when any part of a chained command matches, including a quoted, full-path, or differently cased command name such as `/bin/rm` or `RM`, and the command a wrapper runs, so `deny.exec = ["rm *"]` denies `sudo rm x`, `xargs rm`, and `find . -exec rm {} +` in every mode. Its words after the first need only appear in order, with any words between them, so `ask.exec = ["git push *"]` also asks for `git -c a=b push`. A word that expands or globs, such as `$X`, `${X:-push}`, or `pu*`, matches any word of a deny or ask pattern, since it may become that word when the command runs.
 
-A `bash` command that reads files also faces the `read` deny and ask patterns, and a recursive reader compares its search roots with each rule's leading path. Any other program can open whatever files it likes once it runs, so an `exec` allow pattern such as `python3 *` can run its command on files the `read` patterns hold. Keep such programs out of your allow patterns where `read` patterns guard files, since an `exec` deny pattern for them is only a guardrail. [SECURITY.md](../../SECURITY.md#trust-model) covers which files those checks see and where they stop.
+A `bash` command that reads files also faces the `read` deny and ask patterns, and a recursive reader compares its search roots with each rule's leading path. Any other program can open whatever files it likes once it runs, so an `exec` allow pattern such as `python3 *` can run its command on files the `read` patterns hold. Keep such programs out of your allow patterns where `read` patterns guard files. [SECURITY.md](../../SECURITY.md#trust-model) covers which files those checks see and where they stop.
 
 #### Commands That Always Ask
 
-A command that uses shell syntax `ox` cannot analyze, such as arithmetic, a function definition, or a statement that sets `PATH` or another uppercase variable, is never allowed by a pattern, so it asks in `manual`, naming the construct, unless a deny pattern matches. A command that changes directory and then names a relative path as a program, a file to read, or a redirection target, such as `cd sub && ./run.sh`, also asks, since the path may name a different file from the one the check resolved. So does one that runs anything after a `cd` that may leave the working directory and extra roots, such as `cd /tmp/x && make` or `cd $DIR && make`, since the program may then read another directory's files.
+A command that uses shell syntax `ox` cannot analyze, such as arithmetic, a function definition, or a statement that sets `PATH` or another uppercase variable, is never allowed by a pattern, so it asks in `manual`, naming the construct, unless a deny pattern matches. Rewriting it as plain commands avoids the prompt. A command that changes directory and then names a relative path as a program, a file to read, or a redirection target, such as `cd sub && ./run.sh`, also asks, since the path may name a different file from the one the check resolved. So does one that runs anything after a `cd` that may leave the working directory and extra roots, such as `cd /tmp/x && make` or `cd $DIR && make`, since the program may then read another directory's files.
 
 Deny and ask patterns see inside the wrappers above, `find -exec` and its variants, and a literal `sh -c` or `eval` script, but not inside other programs that run a command, such as `watch`, `fd -x`, `make`, or `python3 -c`. In `yolo`, such a command runs unless a pattern names the runner itself.
 

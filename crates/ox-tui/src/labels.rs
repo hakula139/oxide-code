@@ -1,6 +1,6 @@
 //! Labels for the resolved settings that `/status`, `/config`, and the welcome screen show.
 
-use ox_core::config::auth::AuthSource;
+use ox_core::auth::AuthSource;
 use ox_core::model::Effort;
 
 /// The credential label while signed out.

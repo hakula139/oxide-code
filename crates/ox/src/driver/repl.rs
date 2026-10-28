@@ -24,8 +24,8 @@ const HELP: &str = "help";
 
 /// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session.
 /// EOF after an operation failed, a command was rejected, or output failed exits with failure. An
-/// attended `engine` asks its approvals on stdin, while an unattended one asks none, so a piped line
-/// is never taken as an answer. In an attended run, SIGINT interrupts the running operation or
+/// attended `engine` asks its approvals on stdin, while an unattended one asks none, so a piped
+/// line is never taken as an answer. In an attended run, SIGINT interrupts the running operation or
 /// discards the line at the prompt, as shells do. Every other signal ends the run. `first`, when
 /// given, runs as the first input line.
 pub(crate) async fn run(
@@ -56,8 +56,8 @@ pub(crate) async fn run(
     .await
 }
 
-/// Runs the REPL over `first`, then `prompter`'s input. Each `signal` call waits for the next signal
-/// and reports whether its line break succeeded.
+/// Runs the REPL over `first`, then `prompter`'s input. Each `signal` call waits for the next
+/// signal and reports whether its line break succeeded.
 async fn drive<R, W>(
     mut handle: EngineHandle,
     project_root: &Path,
@@ -172,15 +172,8 @@ fn repl_command_list() -> String {
     names.push(HELP);
     names.sort_unstable();
     names
-        .iter()
-        .map(|name| {
-            let aliases = command::aliases(name);
-            if aliases.is_empty() {
-                format!("/{name}")
-            } else {
-                format!("/{name} ({})", aliases.join(", "))
-            }
-        })
+        .into_iter()
+        .map(command::label)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -378,7 +371,7 @@ mod tests {
     use ox_core::permission::testing::exec_grant;
     use ox_core::permission::{Mode, PermissionClass, Tier};
     use ox_core::protocol::testing::CapturingSink;
-    use ox_core::session::store::testing::{saved_message_count, test_store};
+    use ox_core::session::store::testing::{saved_message_count, saved_messages, test_store};
     use ox_core::tool::testing::{bash_preview, bash_registry};
     use ox_core::tool::view::{DiffChunk, NumberedLine};
 
@@ -562,7 +555,7 @@ mod tests {
                     let dir = tempfile::tempdir().unwrap();
                     let store = test_store(dir.path());
                     let engine = engine(server.uri(), &store, dir.path()).await;
-                    let session_id = engine.session_id().to_owned();
+                    let session_id = engine.session_id();
                     let sink = CapturingSink::default();
                     let mut out = FailingOutput::new(failure);
                     let input: &[u8] = b"hello\n/exit\n";
@@ -589,17 +582,9 @@ mod tests {
                         sink.events()
                             .contains(&Event::StreamToken("reply".to_owned()))
                     );
-                    let transcript = fs::read_to_string(store.saved_file(&session_id)).unwrap();
-                    let text: Vec<String> = transcript
-                        .lines()
-                        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-                        .filter(|entry| entry["type"] == "message")
-                        .map(|entry| {
-                            entry["message"]["content"][0]["text"]
-                                .as_str()
-                                .unwrap()
-                                .to_owned()
-                        })
+                    let text: Vec<String> = saved_messages(&store, &session_id)
+                        .iter()
+                        .map(|message| message["content"][0]["text"].as_str().unwrap().to_owned())
                         .collect();
                     assert_eq!(text, ["hello", "reply"], "{failure:?}");
                 }
@@ -623,7 +608,7 @@ mod tests {
                 fs::write(&instructions, b"\xff\xfe").unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let session_id = engine.session_id().to_owned();
+                let session_id = engine.session_id();
                 let sink = CapturingSink::default();
                 let input: &[u8] = indoc! {b"
                     first
@@ -692,7 +677,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let session_id = engine.session_id().to_owned();
+                let session_id = engine.session_id();
                 let sink = LostToken::default();
                 let input: &[u8] = b"first\nsecond\n";
 
@@ -721,13 +706,7 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(replies, ["reply"]);
-                let transcript = fs::read_to_string(store.saved_file(&session_id)).unwrap();
-                let messages: Vec<serde_json::Value> = transcript
-                    .lines()
-                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-                    .filter(|entry| entry["type"] == "message")
-                    .map(|entry| entry["message"].clone())
-                    .collect();
+                let messages = saved_messages(&store, &session_id);
                 let expected: Vec<serde_json::Value> = [
                     ("user", "first"),
                     ("assistant", "reply"),
@@ -754,7 +733,7 @@ mod tests {
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let first_id = engine.session_id().to_owned();
+                let first_id = engine.session_id();
                 let sink = CapturingSink::default();
                 let log = (1..=150)
                     .map(|n| format!("request {n} served in 12 ms."))
@@ -820,8 +799,7 @@ mod tests {
                     [
                         "compacted with Some(\"focus on login\")",
                         "renamed to Fix login",
-                        "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · \
-                         effort high (model default)",
+                        "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort medium",
                         "Effort set to low",
                         "rolled",
                         resumed.as_str(),
@@ -916,7 +894,7 @@ mod tests {
                     .list()
                     .unwrap()
                     .into_iter()
-                    .filter_map(|info| info.title.map(|title| title.title))
+                    .filter_map(|info| info.title)
                     .collect();
                 assert_eq!(titles, ["/init CLAUDE.md"]);
             })
@@ -1100,7 +1078,7 @@ mod tests {
                     let engine = engine(server.uri(), &store, dir.path())
                         .await
                         .with_tools(bash_registry(Vec::new()));
-                    let session_id = engine.session_id().to_owned();
+                    let session_id = engine.session_id();
                     let sink = CapturingSink::default();
                     let mut out = FailingOutput::new(failure);
                     let input: &[u8] = b"/exit\n";
@@ -1134,13 +1112,7 @@ mod tests {
                         .collect();
                     assert_eq!(approved, [], "{failure:?}");
                     assert_eq!(request_bodies(&server).await.len(), 1, "{failure:?}");
-                    let transcript = fs::read_to_string(store.saved_file(&session_id)).unwrap();
-                    let messages: Vec<serde_json::Value> = transcript
-                        .lines()
-                        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-                        .filter(|entry| entry["type"] == "message")
-                        .map(|entry| entry["message"].clone())
-                        .collect();
+                    let messages = saved_messages(&store, &session_id);
                     assert_eq!(messages[0]["content"][0]["text"], "push it", "{failure:?}");
                     assert_eq!(messages[1]["content"][0]["id"], "call-1", "{failure:?}");
                     assert_eq!(
@@ -1162,7 +1134,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let session_id = engine.session_id().to_owned();
+                let session_id = engine.session_id();
                 let sink = LostToken::default();
                 let input: &[u8] = indoc! {b"
                     first

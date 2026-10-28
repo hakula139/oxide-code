@@ -10,6 +10,10 @@ Every request goes to `<base_url>/v1/messages?beta=true` with `anthropic-version
 
 Agentic turns on the supported models send the sequence Claude Code sends for them, captured from `claude -p` with an API key, so it includes betas for features this client leaves unused. Fable 5.1, which that capture lacks, sends the Opus 5.5 sequence. Haiku 5.5 moves the `claude-code-20250219` tag later in the sequence. On other model IDs, an agentic turn sends `claude-code-20250219`, `oauth-2025-04-20` under OAuth, and `prompt-caching-scope-2026-01-05`, and adds no effort, thinking, or context-management betas. Side queries, such as session titles, carry at most the `claude-code-20250219` tag and the OAuth extension. The thinking betas derive from the request body's `thinking` field, so the header and the body cannot disagree.
 
+## Thinking Display
+
+Every request sends `thinking.display`, since an upstream's default can differ from the API's. `show_thinking` selects `"summarized"`, and otherwise the supported models that write progress notes ask for `"updates"`, which adds the `thinking-display-updates-2026-08-18` beta, while Haiku 5.5 asks for `"omitted"`. The stream keeps thinking text only when the request asked for it, so an upstream that sends text anyway shows none, and a resumed session reads no progress notes from the reasoning of a catalog model that writes none.
+
 ## Cache Breakpoints
 
 A request carries two ephemeral breakpoints, both with the configured [`prompt_cache_ttl`](../guide/configuration.md#prompt_cache_ttl-cache-duration):
@@ -17,7 +21,7 @@ A request carries two ephemeral breakpoints, both with the configured [`prompt_c
 - **The static prefix.** The first breakpoint sits on the static system-prompt prefix block, and it carries `scope: "global"` only on a first-party base URL.
 - **The conversation tail.** The second sits on the last content block of the final message without a scope, so each turn reads the previous turn's transcript from cache.
 
-Invalidation follows the API's order, `tools` then `system` then `messages`, so the prompt context is built once per session and the tools and system blocks stay stable from turn to turn. A compaction summary is a one-off request that no later request extends, so it skips the second breakpoint.
+Invalidation follows the API's order, `tools` then `system` then `messages`, so the prompt context is built once per session and the tools and system blocks stay stable from turn to turn. The caller decides the second breakpoint through `Request::cache_tail`, which `conversation_request` sets for every conversation round. The first compaction summary request reuses that request, so it reads the conversation's cache. An overflow retry sends a trimmed prefix that no later request extends, so it clears `cache_tail`.
 
 ## Base-URL Gating
 
@@ -45,9 +49,10 @@ The attribution block follows the same split. A first-party request carries the 
 
 ## Sources
 
+- `crates/ox-core/src/client.rs`: `Request`, the conversation request a wire sends, and its `cache_tail` flag.
 - `crates/ox-core/src/client/anthropic.rs`: `Client`, `CLAUDE_CLI_VERSION`, the request builder, and the identity and attribution blocks.
 - `crates/ox-core/src/client/anthropic/betas.rs`: `compute_betas` and the beta header constants.
 - `crates/ox-core/src/client/anthropic/transport.rs`: `with_retry`, `retry_delay`, and the failure classification.
-- `crates/ox-core/src/client/anthropic/wire.rs`: `CacheControl`, `static_prefix`, and `conversation`.
+- `crates/ox-core/src/client/anthropic/wire.rs`: `CacheControl`, `static_prefix`, `conversation`, and `ThinkingConfig::asks_for_text`.
 - `crates/ox-core/src/config.rs`: the prompt-cache TTL.
 - `crates/ox-core/src/config/base_url.rs`: `BaseUrl::is_first_party`, the gate on the host-based cache scope.

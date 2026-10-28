@@ -1,6 +1,7 @@
 //! The agent core that every `ox` frontend drives: configuration, the model client, tools,
 //! permissions, sessions, and the [`engine::Engine`] behind the [`protocol`] contract.
 
+pub mod auth;
 pub mod client;
 pub mod command;
 pub mod config;

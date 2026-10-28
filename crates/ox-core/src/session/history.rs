@@ -1,4 +1,4 @@
-//! Display projection of a loaded transcript. JSONL batches all `ToolUse` blocks then all
+//! Display projection of a loaded transcript. A transcript batches all `ToolUse` blocks then all
 //! `ToolResult` blocks per turn. Live rendering pairs each call with its result inline.
 //! [`interactions`] reorders into the live shape, merges adjacent text blocks, and resolves each
 //! tool call's presentation, so a frontend renders the result without a tool registry.
@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::entry::CompactInfo;
+use super::store::CompactInfo;
 use crate::message::{ContentBlock, Message, Role, TextOrigin, progress_note};
 use crate::model::lacks_progress_updates;
 use crate::protocol::{Interaction, ToolCall, ToolResult};
@@ -205,8 +205,8 @@ mod tests {
     use super::*;
     use crate::message::{INTERRUPTION_MARKER, Replay};
     use crate::protocol::{CompactTrigger, testing};
-    use crate::session::entry::{CompactInfo, CompactRecord};
     use crate::session::post_compact::synthesize_post_compact_message;
+    use crate::session::store::CompactRecord;
     use crate::tool::DEFAULT_TOOL_ICON;
     use crate::tool::StoredView;
     use crate::tool::edit::EditTool;

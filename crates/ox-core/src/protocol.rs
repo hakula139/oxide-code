@@ -11,18 +11,19 @@ use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::error;
 
+use crate::auth::AuthSource;
 use crate::client::RateLimits;
-use crate::config::auth::AuthSource;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{Effort, ModelSpec, ResolvedModelId};
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, Mode, SessionGrant};
-use crate::session::entry::{ArchiveState, SessionInfo};
+use crate::session::handle::WriteReport;
 use crate::session::saved::{ArchiveUpdate, SavedError};
+use crate::session::store::listing::{ArchiveState, SessionInfo};
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 use crate::tool::view::{ApprovalPreview, ToolResultView};
@@ -134,8 +135,7 @@ impl Op {
 
 /// The `code#state` an [`Op::LoginCode`] carries, as the user pasted it. `Debug` leaves it out, so
 /// a logged op never records the code.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SignInCode(pub String);
 
 impl fmt::Debug for SignInCode {
@@ -147,7 +147,7 @@ impl fmt::Debug for SignInCode {
 /// The session an [`Op::Resume`] or `ox --resume` continues.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeTarget {
-    /// The session file at this path, which need not be in the session store.
+    /// The session that the export at this path holds, imported into the store first.
     Path(PathBuf),
     /// The saved session with this ID.
     Id(String),
@@ -167,8 +167,7 @@ pub enum SavedTarget {
 }
 
 /// The answer to an [`Event::ApprovalRequested`], carried back on [`Op::Resolve`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalDecision {
     Approve,
     /// Approve, and allow every later call `rule` matches for the rest of the session. The engine
@@ -187,8 +186,7 @@ pub enum ApprovalDecision {
 
 /// The model, the effort, or both that an [`Op::SetModel`] picks. An omitted model keeps its
 /// current value, and an omitted effort carries over where the new model supports it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigPick {
     /// A model, with the effort to use on it when one was picked alongside.
     Model {
@@ -212,7 +210,7 @@ impl ConfigPick {
 // ── Events ──
 
 /// Token and cost snapshot for status-line rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct UsageSnapshot {
     /// Input tokens of the latest request, cache writes and reads included. `None` after a
     /// compaction, manual or automatic, until the next request reports usage, which hides the
@@ -222,7 +220,7 @@ pub struct UsageSnapshot {
     pub context_window: Option<u32>,
     /// Running session cost in USD, accumulated across every request, summaries and the AI title
     /// included, and positive when present. A roll starts it over, and a resume restores it from
-    /// the session file. `None` hides the cost segment.
+    /// the session's usage records. `None` hides the cost segment.
     pub estimated_cost_usd: Option<f64>,
 }
 
@@ -241,7 +239,8 @@ pub struct UsageSnapshot {
 /// - [`Op::Clear`] ends with `SessionReady`.
 /// - [`Op::Login`] ends with [`Self::SignedIn`], `TurnFailed`, or `Cancelled`.
 /// - [`Op::Logout`] ends with [`Self::SignedOut`] or `TurnFailed`.
-/// - [`Op::Rename`] ends with [`Self::SessionTitleUpdated`] or [`Self::RenameFailed`].
+/// - [`Op::Rename`] ends with [`Self::SessionTitleUpdated`] carrying its title, or
+///   [`Self::RenameFailed`].
 /// - [`Op::SetModel`] ends with [`Self::ConfigChanged`].
 /// - [`Op::SetMode`] ends with [`Self::ModeChanged`].
 ///
@@ -337,6 +336,10 @@ pub enum Event {
         prior: ArchiveState,
         history: Vec<Interaction>,
     },
+    /// Another process wrote to session `from` since this one last saw it, so the conversation
+    /// continues as session `id`, a fork holding what this process saw. Leaves any in-flight
+    /// operation running, and frontends show [`notice::session_forked`].
+    SessionForked { id: String, from: String },
     /// Compaction replaced the transcript with a synthetic continuation. The frontend clears its
     /// chat and shows the summary boundary. Automatic compaction leaves the frontend busy while the
     /// pending prompt or turn continues.
@@ -408,7 +411,7 @@ pub enum Event {
 }
 
 /// What started a compaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactTrigger {
     /// The user ran `/compact`.
@@ -461,11 +464,16 @@ impl TurnEnd {
                 Op::Compact { .. } | Op::Clear | Op::Archive | Op::Resume { .. },
                 Event::SessionReady,
             )
-            | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
             | (Op::Login, Event::SignedIn { .. })
             | (Op::Logout, Event::SignedOut { .. })
             | (Op::SetModel(_), Event::ConfigChanged { .. })
             | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
+            // A background title may land mid-rename, so only the requested title ends it.
+            (Op::Rename { title: requested }, Event::SessionTitleUpdated { title, .. })
+                if title == requested =>
+            {
+                Some(Self::Completed)
+            }
             (Op::Prompt { .. } | Op::Compact { .. } | Op::Login, Event::Cancelled) => {
                 Some(Self::Cancelled)
             }
@@ -483,7 +491,7 @@ impl TurnEnd {
 /// A tool call as the row a frontend shows for it, live in [`Event::ToolCallStart`] and resumed in
 /// [`Interaction::ToolCall`]. `input` carries the model's raw arguments for consumers of the
 /// serialized protocol, and `icon` / `label` are their display form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -495,7 +503,7 @@ pub struct ToolCall {
 /// A tool call's result, live in [`Event::ToolCallEnd`] and resumed in [`Interaction::ToolResult`].
 /// `content` is what the model sees, `title` the tool's own header for the result, and `view` its
 /// structured body.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolResult {
     pub id: String,
     pub content: String,
@@ -507,8 +515,7 @@ pub struct ToolResult {
 // ── History ──
 
 /// A unit of a resumed transcript as a frontend shows it, in display order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Interaction {
     /// The boundary a compaction left, which the rest of the transcript continues from. Renders
     /// like a live [`Event::SessionCompacted`].
@@ -546,12 +553,22 @@ pub trait EventSink: Send + Sync {
         }
     }
 
-    /// Surfaces a session-writer failure, if any, as one [`Event::Error`].
-    fn session_write_error(&self, failure: Option<&str>) {
-        if let Some(failure) = failure {
+    /// Surfaces a session write's failure as [`Event::Error`] and its fork as
+    /// [`Event::SessionForked`], each when present.
+    fn session_write(&self, report: &WriteReport) {
+        if let Some(failure) = &report.failure {
             self.emit(
                 Event::Error(notice::session_write_failed(failure)),
                 "session-write-failed",
+            );
+        }
+        if let Some(fork) = &report.fork {
+            self.emit(
+                Event::SessionForked {
+                    id: fork.to.clone(),
+                    from: fork.from.clone(),
+                },
+                "session-forked",
             );
         }
     }
@@ -757,6 +774,10 @@ mod tests {
                 };
                 let notice = Event::Error("Session write failed".to_owned());
                 let failed = Event::TurnFailed("failure".to_owned());
+                let titled = |title: &str| Event::SessionTitleUpdated {
+                    id: "live".to_owned(),
+                    title: title.to_owned(),
+                };
 
                 for (op, event, end) in [
                     (&prompt, Event::TurnComplete, Some(TurnEnd::Completed)),
@@ -783,14 +804,8 @@ mod tests {
                     (&Op::Clear, notice.clone(), None),
                     (&Op::Clear, rolled.clone(), None),
                     (&Op::Clear, Event::SessionReady, Some(TurnEnd::Completed)),
-                    (
-                        &rename,
-                        Event::SessionTitleUpdated {
-                            id: "live".to_owned(),
-                            title: "Fix login".to_owned(),
-                        },
-                        Some(TurnEnd::Completed),
-                    ),
+                    (&rename, titled("Fix login"), Some(TurnEnd::Completed)),
+                    (&rename, titled("Generated title"), None),
                     (&rename, notice.clone(), None),
                     (
                         &rename,

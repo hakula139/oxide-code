@@ -92,4 +92,4 @@ Keep each `tracing` message a constant phrase and pass variable data as fields, 
 
 - Pin each dependency version in the root `Cargo.toml` under `[workspace.dependencies]`, then reference it from member crates with `dep.workspace = true`.
 - Add dependencies to the workspace only when a change first requires them, and prefer crates with few transitive dependencies.
-- Declare platform-specific dependencies in the crate's `Cargo.toml` under `[target.'cfg(unix)'.dependencies]`, `[target.'cfg(windows)'.dependencies]`, or `[target.'cfg(target_os = "macos")'.dependencies]`.
+- Declare a platform-specific dependency in the crate's `Cargo.toml` under the narrowest `[target.'cfg(...)'.dependencies]` table that covers every use.

@@ -11,10 +11,10 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer};
 
 use super::{Engine, EngineHandle, EnginePanic, EngineTask, SessionParts};
+use crate::auth::oauth::ClaudeCodeKeychain;
 use crate::client::anthropic::testing::{
     DEVICE_ID, api_key, sse_response, text_stream_body, tool_use_stream_body,
 };
-use crate::config::oauth::ClaudeCodeKeychain;
 use crate::config::testing::test_config;
 use crate::permission::Workspace;
 use crate::protocol::Event;

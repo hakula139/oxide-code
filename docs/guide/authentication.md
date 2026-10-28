@@ -48,7 +48,7 @@ Commands the assistant runs with `bash` cannot access `ANTHROPIC_AUTH_TOKEN`, `A
 
 ## LLM Gateways
 
-User configuration supports `client.headers` as a map of header names to string values, `client.attribution` (default `true`), and `client.structured_outputs` (default `true`). These settings, authentication, the endpoint, and CA trust are user-only. A project config cannot set them.
+User configuration supports `client.headers` as a map of header names to string values, `client.attribution` (default `true`), and `client.structured_outputs` (default `true`). A [project config](configuration.md#project-config) cannot set them.
 
 oxide-code reads the gateway variables Claude Code uses, which override the corresponding file settings:
 
@@ -62,7 +62,7 @@ export NODE_EXTRA_CA_CERTS=~/.config/ox/corp-cachain.pem
 
 - **`ANTHROPIC_AUTH_TOKEN`** authenticates with `Authorization: Bearer` and otherwise keeps the API-key request shape, without the OAuth beta.
 - **`ANTHROPIC_CUSTOM_HEADERS`** takes one `Name: value` per line and skips blank lines. The headers go on every API request after the built-in ones, so they can replace defaults such as `User-Agent`. oxide-code owns `anthropic-beta`, `anthropic-version`, `content-type`, `x-claude-code-session-id`, and the header that carries the active credential (`x-api-key` for an API key, `Authorization` otherwise), so naming any of them is an error. The other credential header stays free, so a gateway can take its own `Authorization` alongside an API key. A line without a colon, an invalid name or value, a reserved name, or a repeated name stops startup with an error that gives the line number and never prints the value. `/config` lists the header names only.
-- **`NODE_EXTRA_CA_CERTS`** works like [`extra_ca_certs`](configuration.md#extra_ca_certs-corporate-trust-anchors) and ranks last, after `OX_EXTRA_CA_CERTS` and `client.extra_ca_certs`. Shells often export it for npm, so like Node, oxide-code logs a warning and skips the bundle when it cannot read it.
+- **`NODE_EXTRA_CA_CERTS`** works like [`extra_ca_certs`](configuration.md#extra_ca_certs-corporate-trust-anchors), which gives its precedence. Shells often export it for npm, so like Node, oxide-code logs a warning and skips the bundle when it cannot read it.
 - **`CLAUDE_CODE_ATTRIBUTION_HEADER=0`** drops the `x-anthropic-billing-header` attribution block from the system prompt. By default, every request carries it, whatever the credential, since some gateways check it to recognize Claude Code requests. As in Claude Code, the block on a custom base URL omits the per-request `cch` hash, so it stays the same from request to request.
 - **`CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS=1`** drops `output_config.format` from session-title requests, for gateways whose upstream rejects it. Titles then rely on the prompt alone to return JSON.
 

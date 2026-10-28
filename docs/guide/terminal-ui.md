@@ -10,7 +10,7 @@ Running `ox` opens the terminal UI, which shows the status line across the top r
 - **Alt keys on macOS**: Terminal.app, iTerm2, and VS Code send Alt shortcuts only once the Option key is set to act as Meta in their settings.
 - **Move between lines**: **Up** and **Down** move the cursor through a multi-line prompt. Where the cursor cannot move further, they scroll the chat.
 - **Slash commands**: Typing `/` at the start of the input opens the command popup. [Slash Commands](slash-commands.md) lists the commands and the popup keys.
-- **Switch modes**: Press **Tab** or **Shift+Tab** to change the [permission mode](permissions.md#modes), and the footer names the mode **Tab** selects next. **Tab** completes a selection while the command popup is open.
+- **Switch modes**: Press **Tab** or **Shift+Tab** to step through the [permission modes](permissions.md#modes). While the command popup is open, **Tab** completes the selection.
 
 The footer below the input shows the available shortcuts, switching to completion keys while the command popup is open. It drops trailing hints on narrow terminals and hides when there is no spare row.
 

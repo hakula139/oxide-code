@@ -1,14 +1,11 @@
-//! Session persistence: JSONL transcripts under `$XDG_DATA_HOME/ox/sessions/`, with resume,
-//! listing, and background AI titles. [`handle::SessionHandle`] fronts the actor task that owns the
-//! file and appends each batch of commands in one write.
+//! Session persistence: one SQLite store at `$XDG_DATA_HOME/ox/sessions.db`, with resume, listing,
+//! JSONL export and import, and background AI titles. [`handle::SessionHandle`] fronts the actor
+//! task that owns the session's state and commits each batch of commands as one transaction.
 
 mod actor;
-mod chain;
 pub mod display;
-pub mod entry;
 pub mod handle;
 pub(crate) mod history;
-mod path;
 pub(crate) mod post_compact;
 pub mod resolver;
 mod sanitize;

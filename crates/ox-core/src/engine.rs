@@ -22,14 +22,17 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 
 use self::abort::{Inbox, TurnAbort};
+use self::login::SignIn;
 use self::transcript::{LiveTranscript, TranscriptStart};
 use self::turn::{TurnContext, TurnOutcome, TurnReport, TurnStop};
 use self::usage::UsageLedger;
+use crate::auth::Auth;
+use crate::auth::oauth::{self, ClaudeCodeKeychain};
 use crate::client::anthropic::Client;
 use crate::config::Config;
 use crate::config::compaction::CompactionConfig;
-use crate::config::oauth::{self, ClaudeCodeKeychain};
 use crate::message::{ContentBlock, Message, TextOrigin};
+use crate::model::ModelSettings;
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::UserContext;
 use crate::protocol::notice::{self, ConfigSettings};
@@ -105,13 +108,14 @@ pub struct SessionParts {
 /// The live session with its transcript, prompt, and usage accounting.
 pub struct Engine {
     client: Client,
+    /// What each request asks the model for, which `/model` and `/effort` swap.
+    settings: ModelSettings,
     /// Where `/login` exchanges its authorization code, a mock server in tests.
     oauth_token_url: String,
     /// The Keychain `/logout` checks for the Claude Code login before its file, none in tests.
     claude_code_keychain: ClaudeCodeKeychain,
-    /// Whether the next prompt or compaction loads the stored login again, since a transient
-    /// failure signed the session out.
-    retry_login: bool,
+    /// The credential requests send, or whether a signed-out session loads the stored login again.
+    sign_in: SignIn,
     tools: Arc<ToolRegistry>,
     store: SessionStore,
     /// The live session, its transcript, and what the model has seen of the prompt.
@@ -138,7 +142,8 @@ pub struct Engine {
 
 impl Engine {
     /// Continues `session` with a client built from `config` and `trust`, and the built-in tools
-    /// and agent settings from `config`. Fails when the client cannot be built.
+    /// and agent settings from `config`. Fails when the client cannot be built or when `config`
+    /// has not resolved its credential.
     pub async fn new(
         config: &Config,
         trust: impl Trust + 'static,
@@ -152,21 +157,21 @@ impl Engine {
             transcript,
         } = session;
         let client = Client::new(config, trust, device_id)?;
+        let sign_in = SignIn::try_from(&config.auth)?;
+        let settings = config.model_settings();
         let shells = Arc::new(BackgroundShells::default());
         let read_filter = config.permission.read_filter();
         let tools = Arc::new(ToolRegistry::built_in(&read_filter, &shells));
         let workspace = Arc::new(config.workspace.clone());
         let (transcript, usage, instruction_warnings) =
-            LiveTranscript::load(handle, transcript, client.model(), workspace.cwd()).await;
+            LiveTranscript::load(handle, transcript, settings.model(), workspace.cwd()).await;
         let context_estimate = transcript.request_estimate(&tools.definitions());
         Ok(Self {
             client,
+            settings,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
             claude_code_keychain: ClaudeCodeKeychain::SYSTEM,
-            retry_login: config
-                .signed_out
-                .as_ref()
-                .is_some_and(|signed_out| signed_out.retry),
+            sign_in,
             tools,
             store,
             transcript,
@@ -182,7 +187,8 @@ impl Engine {
         })
     }
 
-    pub fn session_id(&self) -> &str {
+    /// The live session's ID, which a fork replaces.
+    pub fn session_id(&self) -> String {
         self.transcript.session().session_id()
     }
 
@@ -193,6 +199,11 @@ impl Engine {
     /// The project the session store is scoped to, where `/init` writes instruction files.
     pub fn project_root(&self) -> &Path {
         self.store.project_root()
+    }
+
+    /// The process's session store, which frontends list saved sessions from without reopening it.
+    pub fn store(&self) -> &SessionStore {
+        &self.store
     }
 
     /// Whether a person can answer an approval request in this run, which
@@ -300,11 +311,14 @@ impl Engine {
         S: EventSink + Clone + 'static,
     {
         let mut inbox = Inbox::default();
-        if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
-            self.adopt_mode(&mut inbox);
-            return report_unsent(sink, abort, "turn-failed");
-        }
-        let compacted = self.auto_compact(sink, ops, &mut inbox).await;
+        let auth = match self.ensure_signed_in(sink, ops, &mut inbox).await {
+            Ok(auth) => auth,
+            Err(abort) => {
+                self.adopt_mode(&mut inbox);
+                return report_unsent(sink, abort, "turn-failed");
+            }
+        };
+        let compacted = self.auto_compact(&auth, sink, ops, &mut inbox).await;
         self.adopt_mode(&mut inbox);
         if let Err(abort) = compacted {
             return report_unsent(sink, abort, "auto-compact-failed");
@@ -320,7 +334,7 @@ impl Engine {
             ));
         }
         let outcome = self.transcript.record_prompt(user_msg, title).await;
-        sink.session_write_error(outcome.failure.as_deref());
+        sink.session_write(&outcome.report);
         turn::record_drained_prompts(inbox.prompts.drain(..), &mut self.transcript, sink).await;
 
         if self.generates_titles
@@ -328,6 +342,8 @@ impl Engine {
         {
             self.usage.title_usage = Some(title_generator::spawn(
                 self.client.clone(),
+                auth.clone(),
+                self.settings.prompt_cache_ttl(),
                 self.transcript.session().clone(),
                 sink.clone(),
                 seed,
@@ -337,8 +353,9 @@ impl Engine {
         let mut checkpoint = outcome.checkpoint;
         let mut rounds_run = 0;
         let result = loop {
-            let TurnOutcome { mut report, result } =
-                self.run_turn(sink, ops, &mut inbox, rounds_run).await;
+            let TurnOutcome { mut report, result } = self
+                .run_turn(&auth, sink, ops, &mut inbox, rounds_run)
+                .await;
             if let Err(TurnAbort::Refused(notice)) = result {
                 self.roll_back(sink, start, checkpoint, &report).await;
                 break Err(TurnAbort::Refused(notice));
@@ -351,7 +368,7 @@ impl Engine {
                 break result;
             };
 
-            let compacted = self.compact_mid_turn(sink, ops, &mut inbox).await;
+            let compacted = self.compact_mid_turn(&auth, sink, ops, &mut inbox).await;
             self.adopt_mode(&mut inbox);
             match compacted {
                 Ok(summary) => checkpoint = Some(summary),
@@ -374,6 +391,7 @@ impl Engine {
     /// mode switch the turn received.
     async fn run_turn(
         &mut self,
+        auth: &Auth,
         sink: &dyn EventSink,
         ops: &mut mpsc::Receiver<Op>,
         inbox: &mut Inbox,
@@ -389,6 +407,8 @@ impl Engine {
         let outcome = turn::agent_turn(
             TurnContext {
                 client: &self.client,
+                auth,
+                settings: &self.settings,
                 tools: &self.tools,
                 sink,
                 max_tool_rounds: self.max_tool_rounds,
@@ -415,10 +435,9 @@ impl Engine {
         checkpoint: Option<Checkpoint>,
         report: &TurnReport,
     ) {
-        self.transcript.file_tracker.drain_writes().await;
         self.bill(sink, &report.billable_rounds).await;
-        let failure = self.transcript.roll_back(start, checkpoint).await;
-        sink.session_write_error(failure.as_deref());
+        let written = self.transcript.roll_back(start, checkpoint).await;
+        sink.session_write(&written);
         if report.tasks.is_some() {
             let tasks = self.transcript.tasks.clone();
             sink.emit(Event::TasksUpdated(tasks), "tasks-rolled-back");
@@ -429,7 +448,7 @@ impl Engine {
 
     /// Reads the user context afresh with [`Self::show_instruction_warnings`].
     async fn load_user_context(&mut self, sink: &dyn EventSink) -> UserContext {
-        let (context, warnings) = UserContext::load(self.cwd(), self.client.model()).await;
+        let (context, warnings) = UserContext::load(self.cwd(), self.settings.model()).await;
         self.show_instruction_warnings(sink, warnings);
         context
     }
@@ -448,24 +467,24 @@ impl Engine {
     /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
     fn set_model(&mut self, sink: &dyn EventSink, pick: ConfigPick) {
         let before = ConfigSettings {
-            model: self.client.model().clone(),
-            effort: self.client.effort(),
+            model: self.settings.model().clone(),
+            effort: self.settings.effort(),
             auto_compaction: self.compaction.auto,
         };
         if let ConfigPick::Model { id, .. } = &pick {
-            self.client.set_model(id.clone().into_inner());
+            self.settings.set_model(id.clone().into_inner());
             self.compaction = self
                 .compaction
-                .for_model(self.client.model(), self.client.max_tokens());
+                .for_model(self.settings.model(), self.settings.max_tokens());
         }
         let resolved = match pick.effort() {
-            Some(effort) => self.client.set_effort(effort),
-            None => self.client.effort(),
+            Some(effort) => self.settings.set_effort(effort),
+            None => self.settings.effort(),
         };
         self.usage.auto_compaction_failures.reset(sink);
         self.emit_usage_update(sink);
         let after = ConfigSettings {
-            model: self.client.model().clone(),
+            model: self.settings.model().clone(),
             effort: resolved,
             auto_compaction: self.compaction.auto,
         };
@@ -500,13 +519,12 @@ impl Engine {
         }
     }
 
-    /// Settles workspace writes, ends background shells, and closes the live session, then waits
+    /// Ends background shells, settles workspace writes, and closes the live session, then waits
     /// for stored-login reloads still in flight so exiting cannot cancel their write-back.
     /// Returns the session's write failure, if any.
     async fn finalize(self) -> Option<String> {
-        self.transcript.file_tracker.drain_writes().await;
         self.shells.stop_all().await;
-        let failure = self.transcript.finalize().await;
+        let failure = self.transcript.finalize().await.failure;
         self.client.finish_reloads().await;
         failure
     }
@@ -561,7 +579,7 @@ mod tests {
 
     use super::local_testing::{
         TITLE_MODEL, dead_test_session, finished_session, greeting_title, inert_ops, login_urls,
-        mount_title, next_matching, service_log, session_ids, submit, system_prompt, texts,
+        mount_title, next_matching, service_log, submit, system_prompt, texts,
         tool_heavy_transcript, tracked_paths, turn_events, write_unreadable_instructions,
     };
     use super::sessions::format_drift_warning;
@@ -570,17 +588,19 @@ mod tests {
         mount_tool_call_once, panic_message, request_bodies, until_requested, with_pinned_home,
     };
     use super::*;
-    use crate::client::anthropic::local_testing::{COMPLETION_USAGE, client_for};
+    use crate::auth::{AuthSource, LoginUnavailable};
+    use crate::client::anthropic::local_testing::COMPLETION_USAGE;
     use crate::client::anthropic::testing::{
         DEVICE_ID, api_key, sse_body, sse_response, text_stream_body,
     };
-    use crate::config::auth::{AuthSource, LoginUnavailable};
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
+    use crate::config::credentials::AuthState;
     use crate::config::testing::test_config;
     use crate::engine::compaction::AutoCompactFailures;
     use crate::file_tracker::testing::{
-        assert_writes_draining, blocked_write, record_tracked_file, seed_full_read,
+        assert_writes_draining, blocked_write, poll_until_draining, record_tracked_file,
+        seed_full_read,
     };
     use crate::file_tracker::{FileSnapshot, FileTracker, GateError, GatePurpose};
     use crate::message::{Replay, Role};
@@ -590,12 +610,15 @@ mod tests {
     use crate::permission::rule::Rule;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{CompactTrigger, ResumeTarget, SavedTarget, UsageSnapshot};
-    use crate::session::entry::{ArchiveState, UsageRecord};
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::saved::ArchiveUpdate;
-    use crate::session::store::testing::{WriterBarrier, seed_test_session, test_store};
+    use crate::session::store::UsageRecord;
+    use crate::session::store::listing::ArchiveState;
+    use crate::session::store::testing::{
+        WriterBarrier, listed_ids, seed_test_session, test_store,
+    };
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
     use crate::tool::bash::background::testing::shell;
@@ -759,7 +782,7 @@ mod tests {
                 config.compaction = CompactionConfig::with_threshold(50_000);
                 config.permission.set_mode(Mode::Plan);
                 config.workspace = Workspace::new(dir.path());
-                config.signed_out = Some(LoginUnavailable {
+                config.auth = AuthState::SignedOut(LoginUnavailable {
                     notice: "Not signed in. Run `/login` to sign in.".to_owned(),
                     retry: true,
                 });
@@ -786,7 +809,11 @@ mod tests {
                     engine.startup_notices,
                     ["Not signed in. Run `/login` to sign in."],
                 );
-                assert!(engine.retry_login);
+                assert!(
+                    matches!(engine.sign_in, SignIn::SignedOut { retry: true }),
+                    "{:?}",
+                    engine.sign_in,
+                );
             })
             .await;
         }
@@ -988,7 +1015,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let session_id = engine.session_id().to_owned();
+                let session_id = engine.session_id();
                 let mut handle = engine.spawn();
 
                 let events = submit(&mut handle, "hello").await;
@@ -1024,7 +1051,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.generates_titles = true;
-                let live_id = engine.session_id().to_owned();
+                let live_id = engine.session_id();
                 let mut handle = engine.spawn();
 
                 handle.ops.send(Op::prompt("hello")).await.unwrap();
@@ -1067,8 +1094,9 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 let client = engine.client.clone();
+                let cache_ttl = engine.settings.prompt_cache_ttl();
                 let session = engine.transcript.session().clone();
-                let session_id = engine.session_id().to_owned();
+                let session_id = engine.session_id();
                 let (billed, usage) = oneshot::channel();
                 engine.usage.title_usage = Some(usage);
                 let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
@@ -1078,7 +1106,14 @@ mod tests {
 
                 let first = submit(&mut handle, "hello").await;
                 assert!(matches!(first.last(), Some(Event::TurnComplete)));
-                let title = title_generator::spawn(client, session, sink, "hello".to_owned());
+                let title = title_generator::spawn(
+                    client,
+                    api_key(),
+                    cache_ttl,
+                    session,
+                    sink,
+                    "hello".to_owned(),
+                );
                 billed.send(title.await.unwrap()).unwrap();
                 let late = tokio::time::timeout(Duration::from_secs(5), async {
                     let (mut title, mut usage) = (None, None);
@@ -1105,7 +1140,7 @@ mod tests {
                 let expected =
                     request_cost(MODEL, REPLY_USAGE) + request_cost(TITLE_MODEL, COMPLETION_USAGE);
                 assert!((usage.estimated_cost_usd.unwrap() - expected).abs() < 1e-12);
-                assert_eq!(persisted.title.unwrap().title, "Greeting");
+                assert_eq!(persisted.title.unwrap(), "Greeting");
                 assert!((usage::estimate_cost_usd(&persisted.usage) - expected).abs() < 1e-12);
                 let costs: Vec<_> = second
                     .iter()
@@ -1161,8 +1196,10 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.generates_titles = true;
-                let session_id = engine.session_id().to_owned();
-                let cache_ttl = engine.client.prompt_cache_ttl();
+                let mut config = test_config(server.uri(), api_key(), MODEL);
+                config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
+                engine.settings = config.model_settings();
+                let session_id = engine.session_id();
                 let mut handle = engine.spawn();
 
                 handle.ops.send(Op::prompt("hello")).await.unwrap();
@@ -1172,7 +1209,7 @@ mod tests {
                     matches!(event, Event::SessionReady).then_some(())
                 })
                 .await;
-                let target = ResumeTarget::Path(store.find_session_path(&session_id).unwrap());
+                let target = ResumeTarget::Id(session_id.clone());
                 handle.ops.send(Op::Resume { target }).await.unwrap();
                 next_matching(&mut handle.events, |event| {
                     matches!(event, Event::SessionResumed { .. }).then_some(())
@@ -1203,7 +1240,7 @@ mod tests {
                     title_usage,
                     [&UsageRecord {
                         model: TITLE_MODEL.to_owned(),
-                        cache_ttl,
+                        cache_ttl: PromptCacheTtl::FiveMin,
                         tokens: COMPLETION_USAGE,
                     }]
                 );
@@ -1271,7 +1308,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let session_id = engine.session_id().to_owned();
+                let session_id = engine.session_id();
                 let mut handle = engine.spawn();
 
                 submit(&mut handle, &pasted_logs()).await;
@@ -1372,7 +1409,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let live_id = engine.session_id().to_owned();
+                let live_id = engine.session_id();
                 let mut handle = engine.spawn();
 
                 submit(&mut handle, "first").await;
@@ -1408,7 +1445,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let session_id = engine.session_id().to_owned();
+                let session_id = engine.session_id();
                 let mut handle = engine.spawn();
 
                 submit(&mut handle, &pasted_logs()).await;
@@ -1429,7 +1466,7 @@ mod tests {
                 })
                 .await;
                 let fresh = submit(&mut handle, "fresh").await;
-                let target = ResumeTarget::Path(store.find_session_path(&session_id).unwrap());
+                let target = ResumeTarget::Id(session_id.clone());
                 handle.ops.send(Op::Resume { target }).await.unwrap();
                 next_matching(&mut handle.events, |event| {
                     matches!(event, Event::SessionResumed { .. }).then_some(())
@@ -1475,7 +1512,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let archived_id = engine.transcript.session().session_id().to_owned();
+                let archived_id = engine.transcript.session().session_id();
                 let mut handle = engine.spawn();
 
                 submit(&mut handle, "first").await;
@@ -1493,7 +1530,7 @@ mod tests {
                     ArchiveState::Archived,
                 );
 
-                let target = ResumeTarget::Path(store.find_session_path(&archived_id).unwrap());
+                let target = ResumeTarget::Id(archived_id.clone());
                 handle.ops.send(Op::Resume { target }).await.unwrap();
                 let resumed = next_matching(&mut handle.events, |event| match event {
                     Event::SessionResumed { id, prior, .. } => Some((id, prior)),
@@ -1521,12 +1558,11 @@ mod tests {
                     &store,
                     "saved",
                     Some("Saved"),
-                    Some(1),
+                    1,
                     time::macros::datetime!(2026-04-18 09:00:00 UTC),
                 );
-                let path = store.find_session_path("saved").unwrap();
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let barrier = WriterBarrier::hold(&path);
+                let barrier = WriterBarrier::hold(&store);
                 let mut handle = engine.spawn();
 
                 handle
@@ -1597,10 +1633,9 @@ mod tests {
                     &store,
                     "saved-session",
                     Some("Saved"),
-                    Some(1),
+                    1,
                     time::macros::datetime!(2026-04-18 09:00:00 UTC),
                 );
-                let path = store.find_session_path("saved-session").unwrap();
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let mut handle = engine.spawn();
 
@@ -1621,7 +1656,10 @@ mod tests {
                     matches!(&found, Event::SavedFound(Ok(info)) if info.session_id == "saved-session"),
                     "{found:?}"
                 );
-                assert!(path.exists(), "a lookup leaves the session in place");
+                assert!(
+                    store.find("saved-session").unwrap().is_some(),
+                    "a lookup leaves the session in place"
+                );
 
                 handle
                     .ops
@@ -1644,7 +1682,7 @@ mod tests {
                         result: Ok(()),
                     }
                 );
-                assert!(!path.exists());
+                assert_eq!(store.find("saved-session").unwrap(), None);
             })
             .await;
         }
@@ -1669,7 +1707,7 @@ mod tests {
                         time::macros::datetime!(2026-04-18 10:00:00 UTC),
                     ),
                 ] {
-                    seed_test_session(store, id, Some(id), Some(1), at);
+                    seed_test_session(store, id, Some(id), 1, at);
                 }
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let mut handle = engine.spawn();
@@ -1700,7 +1738,7 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let live_id = engine.session_id().to_owned();
+                let live_id = engine.session_id();
                 let EngineHandle {
                     ops,
                     mut events,
@@ -1756,7 +1794,7 @@ mod tests {
                 handle.ops.send(Op::Shutdown).await.unwrap();
                 assert_eq!(handle.task.join().await.unwrap(), None);
 
-                assert_eq!(session_ids(&store), [] as [String; 0]);
+                assert_eq!(listed_ids(&store, ArchiveState::Active), [] as [String; 0]);
             })
             .await;
         }
@@ -1795,7 +1833,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let live_id = engine.session_id().to_owned();
+                let live_id = engine.session_id();
                 let mut handle = engine.spawn();
 
                 let mut cancelled = Vec::new();
@@ -1873,7 +1911,7 @@ mod tests {
                     "the prompt never reaches the model"
                 );
                 assert_eq!(
-                    session_ids(&store),
+                    listed_ids(&store, ArchiveState::Active),
                     [] as [String; 0],
                     "neither the prompt nor an interruption marker is recorded",
                 );
@@ -1925,7 +1963,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let live_id = engine.session_id().to_owned();
+                let live_id = engine.session_id();
                 let read_path = dir.path().join("read.txt");
                 std::fs::write(&read_path, "contents").unwrap();
                 seed_full_read(&engine.transcript.file_tracker, &read_path);
@@ -2086,7 +2124,7 @@ mod tests {
             let dir = canonical_tempdir();
             let store = test_store(dir.path());
             let mut engine = engine(server.uri(), &store, dir.path()).await;
-            let session_id = engine.session_id().to_owned();
+            let session_id = engine.session_id();
             let parent = dir.path().join("nested");
             let path = parent.join("notes.txt");
             let tracker = Arc::clone(&engine.transcript.file_tracker);
@@ -2181,6 +2219,9 @@ mod tests {
         #[derive(Default)]
         struct SessionProbeTool {
             seen: Arc<Mutex<Vec<(String, PathBuf)>>>,
+            /// The store through which the first call moves its session's head from a second
+            /// handle, as another process would.
+            moves_head: Option<SessionStore>,
         }
 
         impl Tool for SessionProbeTool {
@@ -2201,11 +2242,24 @@ mod tests {
                 _prepared: Prepared,
                 ctx: &'a ToolCtx,
             ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-                self.seen
-                    .lock()
-                    .unwrap()
-                    .push((ctx.session_id.clone(), ctx.artifact_dir.to_path_buf()));
-                Box::pin(async { ToolOutput::success("probed") })
+                let first = {
+                    let mut seen = self.seen.lock().unwrap();
+                    seen.push((ctx.session_id.clone(), ctx.artifact_dir.to_path_buf()));
+                    seen.len() == 1
+                };
+                let mover = self.moves_head.as_ref().filter(|_| first);
+                let target = ResumeTarget::Id(ctx.session_id.clone());
+                Box::pin(async move {
+                    if let Some(store) = mover {
+                        let mut other = handle::start(store, MODEL, None);
+                        handle::roll_into(&mut other, store, Vec::new(), target, MODEL)
+                            .await
+                            .unwrap();
+                        other.record_message(Message::user("elsewhere")).await;
+                        other.shutdown().await;
+                    }
+                    ToolOutput::success("probed")
+                })
             }
         }
 
@@ -2223,10 +2277,7 @@ mod tests {
                 let sink = CapturingSink::default();
                 let live = |engine: &Engine| {
                     let session = engine.transcript.session();
-                    (
-                        session.session_id().to_owned(),
-                        session.artifact_dir().to_path_buf(),
-                    )
+                    (session.session_id(), session.artifact_dir().to_path_buf())
                 };
                 mount_tool_call_once(&server, "toolu_1", "probe", "{}").await;
                 mount_tool_call_once(&server, "toolu_2", "probe", "{}").await;
@@ -2246,6 +2297,163 @@ mod tests {
 
                 assert_ne!(first, cleared);
                 assert_eq!(*seen.lock().unwrap(), [first.clone(), first, cleared]);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn continues_in_a_fork_once_another_engine_moves_the_session() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let probe = SessionProbeTool::default();
+                let seen = Arc::clone(&probe.seen);
+                let mut stale = engine(server.uri(), &store, dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![Box::new(probe)]));
+                let mut other = engine(server.uri(), &store, dir.path()).await;
+                let sink = CapturingSink::default();
+                let prompts = |session_id: &str| -> Vec<String> {
+                    store
+                        .load_session_data(session_id)
+                        .unwrap()
+                        .messages
+                        .iter()
+                        .filter(|message| message.role == Role::User)
+                        .filter_map(|message| message.content.first()?.as_text().map(str::to_owned))
+                        .collect()
+                };
+                mount_reply_once(&server, "reply").await;
+                stale
+                    .submit_prompt("first", None, &sink, &mut inert_ops())
+                    .await;
+                let source = stale.session_id();
+                other.resume(&sink, ResumeTarget::Id(source.clone())).await;
+                mount_reply_once(&server, "reply").await;
+                other
+                    .submit_prompt("elsewhere", None, &sink, &mut inert_ops())
+                    .await;
+                server.reset().await;
+                mount_tool_call_once(&server, "toolu_1", "probe", "{}").await;
+                mount_reply_once(&server, "done").await;
+                let before = sink.events().len();
+
+                stale
+                    .submit_prompt("probe", None, &sink, &mut inert_ops())
+                    .await;
+
+                let forks: Vec<(String, String)> = sink.events()[before..]
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::SessionForked { id, from } => Some((id.clone(), from.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                let [(fork, from)] = &forks[..] else {
+                    panic!("one fork: {forks:?}");
+                };
+                assert_eq!(from, &source);
+                assert_eq!(&stale.session_id(), fork);
+                let sent: Vec<String> = server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|request| {
+                        request.headers["x-claude-code-session-id"]
+                            .to_str()
+                            .unwrap()
+                            .to_owned()
+                    })
+                    .collect();
+                assert_eq!(sent, [fork.clone(), fork.clone()]);
+                assert_eq!(
+                    *seen.lock().unwrap(),
+                    [(fork.clone(), store.artifact_dir(fork))]
+                );
+                assert_eq!(prompts(fork), ["first", "probe"]);
+                assert_eq!(prompts(&source), ["first", "elsewhere"]);
+                assert_eq!(stale.finalize().await, None);
+                assert_eq!(other.finalize().await, None);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn sends_the_rounds_and_summary_after_a_mid_turn_fork_from_the_fork() {
+            with_pinned_home(async {
+                for (name, compacts, after_fork) in [
+                    (
+                        "next round",
+                        false,
+                        ["the second round", "the reply"].as_slice(),
+                    ),
+                    (
+                        "summary",
+                        true,
+                        ["the summary", "the second round", "the reply"].as_slice(),
+                    ),
+                ] {
+                    let server = MockServer::start().await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = test_store(dir.path());
+                    let probe = SessionProbeTool {
+                        moves_head: Some(store.clone()),
+                        ..SessionProbeTool::default()
+                    };
+                    let seen = Arc::clone(&probe.seen);
+                    let mut engine = engine(server.uri(), &store, dir.path())
+                        .await
+                        .with_tools(ToolRegistry::new(vec![Box::new(probe)]));
+                    let source = engine.session_id();
+                    if compacts {
+                        engine.compaction = CompactionConfig::with_threshold(50_000);
+                        engine.transcript.set_messages(tool_heavy_transcript());
+                        mount_heavy_call_once(&server, "probe", &serde_json::json!({})).await;
+                        mount_reply_once(&server, "mid-turn summary").await;
+                    } else {
+                        mount_tool_call_once(&server, "toolu_1", "probe", "{}").await;
+                    }
+                    mount_tool_call_once(&server, "toolu_2", "probe", "{}").await;
+                    mount_reply(&server, "done").await;
+                    let sink = CapturingSink::default();
+
+                    let end = engine
+                        .submit_prompt("probe", None, &sink, &mut inert_ops())
+                        .await;
+
+                    assert_eq!(end, TurnEnd::Completed, "{name}");
+                    let fork = engine.session_id();
+                    assert_ne!(fork, source, "{name}");
+                    let sent: Vec<String> = server
+                        .received_requests()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .map(|request| {
+                            request.headers["x-claude-code-session-id"]
+                                .to_str()
+                                .unwrap()
+                                .to_owned()
+                        })
+                        .collect();
+                    let expected: Vec<&str> = std::iter::once(source.as_str())
+                        .chain(after_fork.iter().map(|_| fork.as_str()))
+                        .collect();
+                    assert_eq!(
+                        sent, expected,
+                        "{name}: the forked round, then {after_fork:?}"
+                    );
+                    assert_eq!(
+                        *seen.lock().unwrap(),
+                        [
+                            (source.clone(), store.artifact_dir(&source)),
+                            (fork.clone(), store.artifact_dir(&fork)),
+                        ],
+                        "{name}"
+                    );
+                }
             })
             .await;
         }
@@ -2280,13 +2488,13 @@ mod tests {
                 .await;
         }
 
-        /// Answers the next Messages request with a `tasks` call that sets [`plan`], billed at
+        /// Answers the next Messages request with a call to tool `name` with `input`, billed at
         /// 60,000 input tokens.
-        async fn mount_heavy_tasks_call_once(server: &MockServer) {
-            let input = serde_json::json!({ "tasks": plan() }).to_string();
+        async fn mount_heavy_call_once(server: &MockServer, name: &str, input: &serde_json::Value) {
+            let input = input.to_string();
             let frames = [
                 serde_json::json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": 60_000, "output_tokens": 0}}}),
-                serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call-1", "name": "tasks"}}),
+                serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call-1", "name": name}}),
                 serde_json::json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": input}}),
                 serde_json::json!({"type": "content_block_stop", "index": 0}),
                 serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 100}}),
@@ -2298,6 +2506,13 @@ mod tests {
                 .up_to_n_times(1)
                 .mount(server)
                 .await;
+        }
+
+        /// Answers the next Messages request with a `tasks` call that sets [`plan`], billed at
+        /// 60,000 input tokens.
+        async fn mount_heavy_tasks_call_once(server: &MockServer) {
+            let input = serde_json::json!({ "tasks": plan() });
+            mount_heavy_call_once(server, "tasks", &input).await;
         }
 
         /// Answers the next Messages request with `text` after `delay`, so an op sent meanwhile
@@ -2361,6 +2576,7 @@ mod tests {
                 Event::SavedDeleted { .. } => "saved_deleted",
                 Event::SessionRolled { .. } => "session_rolled",
                 Event::SessionResumed { .. } => "session_resumed",
+                Event::SessionForked { .. } => "session_forked",
                 Event::SessionCompacted { .. } => "session_compacted",
                 Event::SessionReady => "session_ready",
                 Event::ConfigChanged { .. } => "config_changed",
@@ -2421,7 +2637,7 @@ mod tests {
                 );
                 assert!(!reminder.contains("# CLAUDE.md"), "{reminder}");
 
-                let id = engine.transcript.session().session_id().to_owned();
+                let id = engine.transcript.session().session_id();
                 let expected = engine.transcript.prompt().session_context();
                 engine.finalize().await;
                 let data = store.load_session_data(&id).unwrap();
@@ -2514,11 +2730,13 @@ mod tests {
                     let dir = tempfile::tempdir().unwrap();
                     let store = test_store(dir.path());
                     let mut engine = engine(server.uri(), &store, dir.path()).await;
-                    let session_id = engine.session_id().to_owned();
-                    let cache_ttl = engine.client.prompt_cache_ttl();
+                    let session_id = engine.session_id();
+                    let cache_ttl = engine.settings.prompt_cache_ttl();
                     let sink = CapturingSink::default();
                     let title = title_generator::spawn(
                         engine.client.clone(),
+                        api_key(),
+                        cache_ttl,
                         engine.transcript.session().clone(),
                         sink.clone(),
                         "hello".to_owned(),
@@ -2649,7 +2867,7 @@ mod tests {
                     let dir = tempfile::tempdir().unwrap();
                     let store = test_store(dir.path());
                     let mut original = engine(refused_server.uri(), &store, dir.path()).await;
-                    let session_id = original.session_id().to_owned();
+                    let session_id = original.session_id();
                     assert_eq!(
                         original
                             .submit_prompt(
@@ -2677,7 +2895,7 @@ mod tests {
                     resumed
                         .resume(
                             &CapturingSink::default(),
-                            ResumeTarget::Path(store.find_session_path(&session_id).unwrap()),
+                            ResumeTarget::Id(session_id.clone()),
                         )
                         .await;
                     resumed.generates_titles = true;
@@ -2712,12 +2930,7 @@ mod tests {
                         .collect();
                     assert_eq!(title_requests.len(), usize::from(!manual));
                     assert_eq!(
-                        store
-                            .load_session_data(&session_id)
-                            .unwrap()
-                            .title
-                            .unwrap()
-                            .title,
+                        store.load_session_data(&session_id).unwrap().title.unwrap(),
                         if manual { "Manual title" } else { "Greeting" }
                     );
                 }
@@ -2832,7 +3045,7 @@ mod tests {
                     "the rolled-back reminder is sent again: {reminder}"
                 );
 
-                let id = engine.transcript.session().session_id().to_owned();
+                let id = engine.transcript.session().session_id();
                 let expected = engine.transcript.prompt().session_context();
                 engine.finalize().await;
                 let data = store.load_session_data(&id).unwrap();
@@ -3015,7 +3228,7 @@ mod tests {
                 assert!(resumed[1].contains("Preserve the pasted service log investigation."));
                 assert_eq!(resumed.last(), Some(&"continue the investigation"));
                 assert!(!resumed.contains(&oversized.as_str()));
-                let saved = store.load_session_data(engine.session_id()).unwrap();
+                let saved = store.load_session_data(&engine.session_id()).unwrap();
                 assert_eq!(saved.messages, engine.transcript.messages());
                 assert_eq!(
                     saved.messages.last(),
@@ -3063,8 +3276,11 @@ mod tests {
                     1,
                     "only the summary request goes out"
                 );
-                let data = store.load_session_data(engine.session_id()).unwrap();
-                assert_eq!(data.messages, [] as [Message; 0]);
+                assert_eq!(
+                    store.find(&engine.session_id()).unwrap(),
+                    None,
+                    "the unsent prompt saves no session"
+                );
                 let events = sink.events();
                 assert!(
                     matches!(
@@ -3116,7 +3332,7 @@ mod tests {
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.client.set_auth(None);
+                engine.sign_in = SignIn::SignedOut { retry: false };
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
@@ -3156,7 +3372,7 @@ mod tests {
                 assert_eq!(end, TurnEnd::Completed);
                 let transcript = [mid_turn_summary(), Message::assistant("done")];
                 assert_eq!(engine.transcript.messages(), transcript);
-                let data = store.load_session_data(engine.session_id()).unwrap();
+                let data = store.load_session_data(&engine.session_id()).unwrap();
                 assert_eq!(data.messages, transcript);
                 let requests = request_bodies(&server).await;
                 assert_eq!(requests.len(), 3);
@@ -3294,7 +3510,7 @@ mod tests {
                     !engine.transcript.prompt_unrecorded(),
                     "the summary recorded the prompt"
                 );
-                let data = store.load_session_data(engine.session_id()).unwrap();
+                let data = store.load_session_data(&engine.session_id()).unwrap();
                 assert_eq!(data.messages, [mid_turn_summary()]);
                 assert_eq!(
                     data.context,
@@ -3379,7 +3595,7 @@ mod tests {
                         engine.transcript.messages().len(),
                         tool_heavy_transcript().len() + 4
                     );
-                    let data = store.load_session_data(engine.session_id()).unwrap();
+                    let data = store.load_session_data(&engine.session_id()).unwrap();
                     assert_eq!(
                         data.messages.last(),
                         Some(&Message::interruption()),
@@ -3472,7 +3688,7 @@ mod tests {
                 let report = TurnReport::default();
                 let mut rollback = std::pin::pin!(engine.roll_back(&sink, start, None, &report));
 
-                assert!(futures::poll!(rollback.as_mut()).is_pending());
+                poll_until_draining(&tracker, rollback.as_mut()).await;
                 assert_writes_draining(&tracker);
                 assert_eq!(std::fs::read(&path).unwrap(), b"original");
                 assert_eq!(tracker.snapshot_all(), snapshots);
@@ -3515,10 +3731,10 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.client.set_effort(Effort::High);
+                engine.settings.set_effort(Effort::High);
                 let opus = ModelSpec::resolve(MODEL);
                 engine.compaction =
-                    CompactionConfig::with_default_policy(&opus, engine.client.max_tokens());
+                    CompactionConfig::with_default_policy(&opus, engine.settings.max_tokens());
                 let sink = CapturingSink::default();
 
                 for id in ["custom-model", MODEL] {
@@ -3661,7 +3877,7 @@ mod tests {
                     (Some(8_000), unwindowed, 979_000),
                 ] {
                     config.max_tokens = max_tokens;
-                    engine.client = client_for(&config);
+                    engine.settings = config.model_settings();
                     engine.compaction = configured;
 
                     engine.set_model(&sink, sonnet_pick());
@@ -3790,7 +4006,7 @@ mod tests {
                 let dir = canonical_tempdir();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let session_id = engine.session_id().to_owned();
+                let session_id = engine.session_id();
                 let path = dir.path().join("notes.txt");
                 record_write_call(
                     engine.transcript.session(),
@@ -3805,7 +4021,7 @@ mod tests {
                 let release = blocked_write(&tracker, &path, b"committed", "toolu_write").await;
                 let mut finalization = std::pin::pin!(engine.finalize());
 
-                assert!(futures::poll!(finalization.as_mut()).is_pending());
+                poll_until_draining(&tracker, finalization.as_mut()).await;
                 assert_writes_draining(&tracker);
                 assert_eq!(std::fs::read(&path).unwrap(), b"alpha");
                 assert_eq!(tracker.snapshot_all(), previous);

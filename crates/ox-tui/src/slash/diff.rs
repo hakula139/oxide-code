@@ -251,7 +251,7 @@ mod tests {
             let mut info = test_session_info();
             info.project_root = project_root.to_owned();
             let task = DiffCmd
-                .execute("", &SlashContext::new(&info, None))
+                .execute("", &SlashContext::new(&info))
                 .expect("/diff defers its failures to the task")
                 .into_background();
             with_isolated_git_env_async(task).await

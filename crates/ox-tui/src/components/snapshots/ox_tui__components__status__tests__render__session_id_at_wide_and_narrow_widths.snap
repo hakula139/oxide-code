@@ -1,6 +1,6 @@
 ---
 source: crates/ox-tui/src/components/status.rs
-expression: render_wide_and_narrow(&mut bar)
+expression: scene.wide_and_narrow()
 ---
 "  ~/projects/demo │ ID: 3f2a9c1e │ Opus 5.5 (xhigh) │ Ready                                         "
 "────────────────────────────────────────────────────────────────────────────────────────────────────"
