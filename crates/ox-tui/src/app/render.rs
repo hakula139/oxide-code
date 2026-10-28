@@ -12,7 +12,7 @@ use ox_core::util::text::{center_truncate_to_width, truncate_to_width};
 use super::App;
 use crate::action::next_mode;
 use crate::components::overflow_count;
-use crate::components::status::{RunLabel, RunTone, StatusBar};
+use crate::components::status::{RunLabel, RunTone, StatusBar, StatusView};
 use crate::components::welcome;
 use crate::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::keymap::{CTRL_END, hint};
@@ -107,17 +107,13 @@ impl App {
         ])
         .areas(area);
 
-        self.status_bar
-            .set_queued_prompts(self.queue.pending().len());
-        self.status_bar.set_task_progress(self.tasks.progress());
-        self.status_bar.set_run_label(self.run_label());
-        self.status_bar
-            .set_session_id(&self.session_info.session_id);
-        self.status_bar
-            .set_theme_name(&self.session_info.config.theme_name);
-        self.status_bar
-            .set_permission_mode(self.session_info.config.permission_mode);
-        self.status_bar.render(frame, status, &self.theme);
+        let view = StatusView {
+            session: &self.session_info,
+            run: self.run_label(),
+            queued_prompts: self.queue.pending().len(),
+            task_progress: self.tasks.progress(),
+        };
+        self.status_bar.render(frame, status, &self.theme, view);
         if self.chat.is_empty() && self.session_info.config.show_welcome {
             welcome::paint(frame, chat, &self.theme, &self.session_info);
         } else {
@@ -322,7 +318,6 @@ mod tests {
     };
     use crate::clipboard::CopyError;
     use crate::components::status::StatusBar;
-    use crate::components::status::testing::status_bar_init;
     use crate::git_probes::GitUpdate;
     use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::now;
@@ -840,12 +835,15 @@ mod tests {
         #[test]
         fn shows_rate_limits_and_app_state_in_opt_in_segments() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.status_bar = StatusBar::new(status_bar_init(vec![
-                StatusLineSegment::QueuedPrompts,
-                StatusLineSegment::FiveHourLimit,
-                StatusLineSegment::SessionId,
-                StatusLineSegment::Theme,
-            ]));
+            app.status_bar = StatusBar::new(
+                vec![
+                    StatusLineSegment::QueuedPrompts,
+                    StatusLineSegment::FiveHourLimit,
+                    StatusLineSegment::SessionId,
+                    StatusLineSegment::Theme,
+                ],
+                None,
+            );
             app.queue.push("next".to_owned());
 
             app.handle_engine_event(Event::RateLimitsUpdated(five_hour_limit()));
@@ -1068,10 +1066,10 @@ mod tests {
         #[test]
         fn task_panel_sits_above_the_preview_and_feeds_the_status_progress() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.status_bar = StatusBar::new(status_bar_init(vec![
-                StatusLineSegment::Model,
-                StatusLineSegment::TaskProgress,
-            ]));
+            app.status_bar = StatusBar::new(
+                vec![StatusLineSegment::Model, StatusLineSegment::TaskProgress],
+                None,
+            );
             app.dispatch_action(Action::Submit("active".to_owned()));
             push_ls_call(&mut app);
             app.queue.push("queued 0".to_owned());

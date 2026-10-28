@@ -76,7 +76,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 3. **Typed result delivery via `ModalAction`, no callbacks.** Modal emits `ModalKey::Submitted(ModalAction)` and the manager dispatches. Boxed `FnOnce` callbacks were rejected for the lifetime / `Send` complexity and because they hide the dispatch graph.
 
-4. **Commands build modals from read-only App state.** `SlashContext` supplies the current `&LiveSessionInfo` and title when a command runs. The App clears every modal on resume and after manual or pre-turn compaction. Mid-turn compaction preserves open modals and their live previews, since the user may open one at any point during a long turn.
+4. **Commands build modals from read-only App state.** `SlashContext` supplies the current `&LiveSessionInfo`, title included, when a command runs. The App clears every modal on resume and after manual or pre-turn compaction. Mid-turn compaction preserves open modals and their live previews, since the user may open one at any point during a long turn.
 
 5. **Layout band sized by `ModalStack::height(width, max_height)`.** When the stack is empty, the band takes no rows. When active, it shifts the chat upward, just like the slash popup. The App caps the band so the status bar and one chat row stay visible, and sizes it before the queued-prompt preview, which takes the rows left over. Pickers and `KvOverview` fit the cap by scrolling their bodies between a pinned header and footer, and the stack clips any fixed-size modal that still runs taller.
 

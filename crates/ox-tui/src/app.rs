@@ -18,6 +18,7 @@ use anyhow::{Context as _, Result};
 use crossterm::event::{Event as CrosstermEvent, EventStream};
 use futures::{Stream, StreamExt as _};
 use ratatui::Terminal;
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -31,7 +32,7 @@ use self::queue::PromptQueue;
 use crate::clipboard::{Clipboard, Environment};
 use crate::components::chat::ChatView;
 use crate::components::input::InputArea;
-use crate::components::status::{StatusBar, StatusBarInit, StatusHyperlink};
+use crate::components::status::{StatusBar, StatusHyperlink};
 use crate::components::tasks::TaskPanel;
 use crate::git_probes::GitProbes;
 use crate::modal::{Modal, ModalStack};
@@ -113,7 +114,7 @@ impl App {
     pub(crate) fn new(
         theme: Theme,
         theme_overrides: ThemeOverrides,
-        session_info: LiveSessionInfo,
+        mut session_info: LiveSessionInfo,
         git_branch: Option<String>,
         events: mpsc::UnboundedReceiver<Event>,
         ops: mpsc::Sender<Op>,
@@ -127,14 +128,8 @@ impl App {
                 ArchiveState::Active,
             ));
         }
-        let mut status_bar = StatusBar::new(StatusBarInit {
-            segments: session_info.config.status_line.clone(),
-            model: session_info.config.model.short_display_name().to_owned(),
-            effort: session_info.config.effort,
-            cwd: session_info.display_cwd.clone(),
-            git_branch,
-        });
-        status_bar.set_title(history.title);
+        session_info.set_title(history.title);
+        let status_bar = StatusBar::new(session_info.config.status_line.clone(), git_branch);
         let git_probes = GitProbes::new(
             session_info.cwd.clone(),
             &session_info.config.status_line,
@@ -223,12 +218,7 @@ impl App {
                 () = sleep_until(next_tick) => {
                     let now = now();
                     last_tick = now;
-                    self.git_probes.poll(now);
-                    self.dirty |= self.status_bar.tick(now);
-                    self.dirty |= self.expire_armed_exit(now);
-                    self.dirty |= self.chat.tick_selection(now);
-                    self.dirty |= self.expire_copy_notice(now);
-                    self.dirty |= self.modals.tick(now);
+                    self.dirty |= self.tick(now);
                     if self.dirty {
                         self.render(terminal)?;
                         self.dirty = false;
@@ -244,6 +234,20 @@ impl App {
         Ok(())
     }
 
+    /// Advances every timed component to `now`. Returns whether anything shown changed.
+    fn tick(&mut self, now: Instant) -> bool {
+        self.git_probes.poll(now);
+        let mut dirty = self.status_bar.tick(now);
+        dirty |= self
+            .session_info
+            .expire_rate_limits(OffsetDateTime::now_utc().unix_timestamp());
+        dirty |= self.expire_armed_exit(now);
+        dirty |= self.chat.tick_selection(now);
+        dirty |= self.expire_copy_notice(now);
+        dirty |= self.modals.tick(now);
+        dirty
+    }
+
     /// When the loop next ticks: one frame after `last_tick` while a redraw is pending, and
     /// otherwise at the earliest deadline a component reports, never sooner than that frame. `None`
     /// when only an event can change what the app shows.
@@ -256,6 +260,8 @@ impl App {
         [
             self.git_probes.next_poll(),
             self.status_bar.next_tick(now),
+            self.session_info
+                .next_rate_limit_reset(now, OffsetDateTime::now_utc().unix_timestamp()),
             self.exit_armed,
             self.chat.next_selection_tick(now),
             self.copy_notice.as_ref().map(|notice| notice.until),
@@ -284,18 +290,17 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
+    use ox_core::client::{RateLimitWindow, RateLimits};
     use ox_core::config::StatusLineSegment;
 
-    use super::testing::{
-        long_chat_block, render_app, rendered_text, start_op, test_app, unknown_model_session_info,
-    };
+    use super::testing::{long_chat_block, render_app, rendered_text, start_op, test_app};
     use super::*;
     use crate::components::status::SPINNER_FRAME_INTERVAL;
-    use crate::components::status::testing::status_bar_init;
     use crate::git_probes::GitUpdate;
     use crate::glyphs::SPINNER_FRAMES;
     use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
+    use crate::session_info::testing::unknown_model_session_info;
     use crate::terminal::testing::capture_terminal;
     use crate::testing::{buffer_rows, key_event, mouse_event, mouse_event_at};
 
@@ -318,10 +323,10 @@ mod tests {
         }
 
         #[test]
-        fn plumbs_resumed_title_and_branch_into_status_bar() {
+        fn plumbs_resumed_title_and_branch() {
             let (app, _rx, _event_tx) = test_app(Some("Resumed title"));
 
-            assert_eq!(app.status_bar.title(), Some("Resumed title"));
+            assert_eq!(app.session_info.title.as_deref(), Some("Resumed title"));
             assert_eq!(app.status_bar.git_branch(), Some("main"));
             assert!(app.in_flight.is_none());
             assert_eq!(app.chat.entry_count(), 0);
@@ -333,15 +338,14 @@ mod tests {
         fn without_title_leaves_slot_unset() {
             let (app, _rx, _event_tx) = test_app(None);
 
-            assert!(app.status_bar.title().is_none());
+            assert!(app.session_info.title.is_none());
         }
 
         #[test]
-        fn whitespace_title_is_filtered_by_status_bar() {
-            // The status bar drops whitespace-only titles, so a blank resumed title leaves no slot.
+        fn drops_a_blank_resumed_title() {
             let (app, _rx, _event_tx) = test_app(Some("   \n "));
 
-            assert!(app.status_bar.title().is_none());
+            assert!(app.session_info.title.is_none());
         }
 
         #[test]
@@ -553,13 +557,44 @@ mod tests {
         }
     }
 
+    mod tick {
+        use super::*;
+
+        #[test]
+        fn drops_a_usage_limit_window_once_it_resets() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let unix_now = OffsetDateTime::now_utc().unix_timestamp();
+            let window = |resets_at| {
+                Some(RateLimitWindow {
+                    utilization: 0.97,
+                    resets_at,
+                })
+            };
+            app.session_info.rate_limits = Some(RateLimits {
+                five_hour: window(unix_now - 1),
+                seven_day: window(unix_now + 3600),
+            });
+
+            let dirty = app.tick(now());
+
+            assert!(dirty, "the bar loses the reset window");
+            assert_eq!(
+                app.session_info.rate_limits,
+                Some(RateLimits {
+                    five_hour: None,
+                    seven_day: window(unix_now + 3600),
+                }),
+            );
+        }
+    }
+
     mod next_tick {
         use super::*;
 
         /// An idle app with no clock segment and nothing to redraw.
         fn settled_app() -> App {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.status_bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::RunState]));
+            app.status_bar = StatusBar::new(vec![StatusLineSegment::RunState], None);
             app.dirty = false;
             app
         }
@@ -606,6 +641,29 @@ mod tests {
             assert_eq!(
                 app.next_tick(last_tick),
                 Some(last_tick + SPINNER_FRAME_INTERVAL)
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn wakes_when_a_usage_limit_window_resets() {
+            let last_tick = now();
+            let mut app = settled_app();
+            app.session_info.rate_limits = Some(RateLimits {
+                five_hour: Some(RateLimitWindow {
+                    utilization: 0.5,
+                    resets_at: OffsetDateTime::now_utc().unix_timestamp() + 60,
+                }),
+                seven_day: None,
+            });
+
+            let due = app.next_tick(last_tick).unwrap();
+
+            assert!(
+                [59, 60]
+                    .map(|secs| last_tick + Duration::from_secs(secs))
+                    .contains(&due),
+                "{:?} after the last tick",
+                due - last_tick,
             );
         }
 
