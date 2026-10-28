@@ -235,7 +235,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn y_sends_the_delete_once_the_engine_accepts_it() {
+        fn y_sends_the_delete_and_ignores_another_once_it_starts() {
             for event in [
                 KeyEvent::from(KeyCode::Char('y')),
                 KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),

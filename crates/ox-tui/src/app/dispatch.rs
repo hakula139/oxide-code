@@ -2430,6 +2430,12 @@ mod tests {
                 };
                 assert_eq!(rx.try_recv(), Ok(delete), "full={full}");
                 assert_eq!(app.status, Status::Deleting, "full={full}");
+
+                let entries = app.chat.entry_count();
+                app.handle_crossterm_event(&y);
+
+                assert_eq!(app.chat.entry_count(), entries, "full={full}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "full={full}");
             }
         }
     }

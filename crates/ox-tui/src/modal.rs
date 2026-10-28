@@ -177,6 +177,12 @@ impl ModalStack {
         }
     }
 
+    pub(crate) fn delete_started(&mut self, id: &str) {
+        for modal in &mut self.stack {
+            modal.delete_started(id);
+        }
+    }
+
     pub(crate) fn archive_updated(
         &mut self,
         target: &SavedTarget,
@@ -185,12 +191,6 @@ impl ModalStack {
     ) {
         for modal in &mut self.stack {
             modal.archive_updated(target, state, result);
-        }
-    }
-
-    pub(crate) fn delete_started(&mut self, id: &str) {
-        for modal in &mut self.stack {
-            modal.delete_started(id);
         }
     }
 
@@ -622,6 +622,23 @@ mod tests {
         }
     }
 
+    mod delete_started {
+        use super::*;
+
+        #[test]
+        fn reaches_a_modal_below_the_top() {
+            let mut stack = ModalStack::default();
+            let below = ScriptedModal::new(ModalAction::Dispatch(Action::Op(Op::Clear)));
+            let observed = Arc::clone(&below.saved_events);
+            stack.push(Box::new(below));
+            stack.push(Box::new(BareModal));
+
+            stack.delete_started("saved");
+
+            assert_eq!(*observed.lock().unwrap(), ["deleting:saved"]);
+        }
+    }
+
     mod archive_updated {
         use super::*;
 
@@ -657,23 +674,6 @@ mod tests {
                 stack.handle_key(&KeyEvent::from(KeyCode::Esc)),
                 Some(ModalAction::Cancelled)
             ));
-        }
-    }
-
-    mod delete_started {
-        use super::*;
-
-        #[test]
-        fn reaches_a_modal_below_the_top() {
-            let mut stack = ModalStack::default();
-            let below = ScriptedModal::new(ModalAction::Dispatch(Action::Op(Op::Clear)));
-            let observed = Arc::clone(&below.saved_events);
-            stack.push(Box::new(below));
-            stack.push(Box::new(BareModal));
-
-            stack.delete_started("saved");
-
-            assert_eq!(*observed.lock().unwrap(), ["deleting:saved"]);
         }
     }
 
