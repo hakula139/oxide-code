@@ -29,7 +29,11 @@ impl Tool for ReadTool {
         ToolSpec {
             definition: ToolDefinition {
                 name: "read".to_owned(),
-                description: "Read the contents of a file with line numbers.".to_owned(),
+                description: format!(
+                    "Read a text file as rows of a line number, a tab, \
+                     and the line's text, up to {DEFAULT_LINE_LIMIT} lines from offset. \
+                     Page through a longer file with offset and limit."
+                ),
                 input_schema: input_schema(),
             },
             class: PermissionClass::Read,

@@ -34,9 +34,12 @@ impl Tool for GlobTool {
         ToolSpec {
             definition: ToolDefinition {
                 name: "glob".to_owned(),
-                description: "Find files matching a glob pattern. \
-                              Returns paths sorted by modification time (newest first)."
-                    .to_owned(),
+                description: format!(
+                    "Find files matching a glob pattern, \
+                     including hidden files and skipping VCS directories \
+                     and files that `.gitignore` excludes. \
+                     Returns at most {MAX_RESULTS} paths, newest first."
+                ),
                 input_schema: input_schema(),
             },
             class: PermissionClass::Read,

@@ -4,7 +4,7 @@ The client turns one conversation request into the wire shape the Anthropic API 
 
 ## Request Shape
 
-Every request goes to `<base_url>/v1/messages?beta=true` with `anthropic-version: 2023-06-01`, the `anthropic-beta` list, `x-app: cli`, the Stainless telemetry headers, a `User-Agent` of `claude-cli/<version> (external, cli)`, and the credential header. The system prompt is an array of text blocks, where the identity prefix and the attribution block each occupy their own block before the rest of the prompt. The API validates the first non-attribution block, so folding the identity text into the body changes the request the server sees.
+Every request goes to `<base_url>/v1/messages?beta=true` with `anthropic-version: 2023-06-01`, the `anthropic-beta` list, `x-app: cli`, the Stainless telemetry headers, a `User-Agent` of `claude-cli/<version> (external, cli)`, and the credential header. The system prompt is an array of text blocks, where the identity prefix and the attribution block each occupy their own block before the rest of the prompt, which [System Prompt](prompt.md) covers. The API validates the first non-attribution block, so folding the identity text into the body changes the request the server sees.
 
 ## Beta Sets
 

@@ -47,7 +47,13 @@ impl Tool for GrepTool {
         ToolSpec {
             definition: ToolDefinition {
                 name: "grep".to_owned(),
-                description: "Search file contents using a regular expression.".to_owned(),
+                description: format!(
+                    "Search file contents with a Rust `regex` pattern, \
+                     which supports no lookaround or backreferences. \
+                     A directory search includes hidden files and skips VCS directories, \
+                     files that `.gitignore` excludes, and files over {}.",
+                    format_size(MAX_WALK_FILE_SIZE),
+                ),
                 input_schema: input_schema(),
             },
             class: PermissionClass::Read,

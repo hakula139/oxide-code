@@ -92,11 +92,10 @@ Resume derives the first-prompt title opportunity from what it read: the opportu
 
 ### Prompt Context
 
-A session records its prompt context: the environment section, the first message's rendered instructions, date, model identity, and what the model has seen of them.
+A session records its prompt context: the environment section, the first message's rendered instructions, date, model identity, and what the model has seen of them. [System Prompt](prompt.md) covers what the context holds and how later changes reach the model.
 
 - **Record with the carrying message.** The context is stored on the row of the first user message that carries it. A compaction records the refreshed context on its synthetic root the same way.
 - **Replay the resolved branch.** On resume, the newest context on the chain is replayed verbatim, so the request sends the same cached system prompt and first message.
-- **Refresh changed context.** If the session resumes in another directory, the environment section is redetected. Any later instruction, date, or model change, including a `/model` swap, is attached to the next user message as a `<system-reminder>` block, which transcript displays omit, so the system prompt stays byte-identical across a swap.
 
 ### Task List
 

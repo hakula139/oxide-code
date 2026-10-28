@@ -74,7 +74,15 @@ impl Tool for BashTool {
         ToolSpec {
             definition: ToolDefinition {
                 name: "bash".to_owned(),
-                description: "Execute a shell command and return its output. \
+                description: "Run a command with `bash -c` in the session's working directory \
+                              and return its output. \
+                              Each call starts a new shell, \
+                              so a `cd`, variable, or function from an earlier call is gone. \
+                              Chain dependent steps in one call with `&&`. \
+                              Commands read no stdin, \
+                              and `EDITOR`, `VISUAL`, and `GIT_EDITOR` are set to `true`, \
+                              so pass messages inline, as in `git commit -m`, \
+                              and avoid commands that prompt for input, such as a password. \
                               For a dev server, a watcher, or a long build, set run_in_background, \
                               without a trailing `&`: the call returns a shell ID at once. \
                               You are not notified when the command finishes, \

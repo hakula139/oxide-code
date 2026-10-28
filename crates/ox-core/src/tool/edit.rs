@@ -24,6 +24,8 @@ impl Tool for EditTool {
                 description: "Perform exact string replacement in a file. \
                               The old_string must be unique in the file \
                               unless replace_all is true. \
+                              Copy it from the text after the tab in `read` output, \
+                              without the line number or the tab. \
                               Read the file with the `read` tool in this session \
                               before editing it. \
                               A `read` of the lines being changed is enough. \
