@@ -137,6 +137,9 @@ pub enum ResolveError {
         scope: &'static str,
         cause: anyhow::Error,
     },
+    /// The blocking task that ran the lookup panicked.
+    #[error("session lookup task failed: {0}")]
+    Task(String),
 }
 
 /// Matches `prefix` against session IDs other than `live_id`, first in the current project, then in
@@ -150,6 +153,18 @@ fn resolve_prefix_to_info(
         return Ok(Some(info));
     }
     match_in_scope(store, prefix, live_id, ProjectScope::Every)
+}
+
+/// [`resolve_saved_prefix`] on the blocking pool, so an async caller never stalls its task on a
+/// listing walk.
+pub async fn resolve_saved_prefix_blocking(
+    store: SessionStore,
+    prefix: String,
+    live_id: String,
+) -> Result<SessionInfo, ResolveError> {
+    tokio::task::spawn_blocking(move || resolve_saved_prefix(&store, &prefix, &live_id))
+        .await
+        .unwrap_or_else(|error| Err(ResolveError::Task(error.to_string())))
 }
 
 /// [`resolve_prefix_to_info`] for commands that act on a saved session, telling a prefix that

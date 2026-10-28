@@ -9,6 +9,15 @@ pub const ELLIPSIS: &str = "...";
 pub(crate) const ELLIPSIS_WIDTH: usize = ELLIPSIS.len();
 const HORIZONTAL_ELLIPSIS: char = '\u{2026}';
 
+/// Returns `s` with its first character uppercased, for a headline shown as its own sentence.
+pub fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// `singular` when `count` is one, `plural` otherwise.
 pub fn plural<'a, N: Copy + PartialEq + From<u8>>(
     count: N,
@@ -407,6 +416,17 @@ mod tests {
                 escape_hidden("a\tb\r\nc\u{1b}[2K\u{200b}d 中"),
                 "a\tb\\r\\nc\\u{1b}[2K\\u{200b}d 中",
             );
+        }
+    }
+
+    mod capitalize_first {
+        use super::*;
+
+        #[test]
+        fn uppercases_the_first_character_and_leaves_the_rest() {
+            assert_eq!(capitalize_first("failed to open x"), "Failed to open x");
+            assert_eq!(capitalize_first("\u{e9}"), "\u{c9}");
+            assert_eq!(capitalize_first(""), "");
         }
     }
 }

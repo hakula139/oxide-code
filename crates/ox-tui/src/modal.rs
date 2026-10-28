@@ -18,6 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use ox_core::session::entry::ArchiveState;
+use ox_core::session::saved::SavedError;
 
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
@@ -49,7 +50,7 @@ pub(crate) trait Modal: Send {
     fn archive_started(&mut self, _id: &str) {}
 
     /// Receives a saved-session archive result while this modal remains on the stack.
-    fn archive_updated(&mut self, _id: &str, _result: &Result<ArchiveState, String>) {}
+    fn archive_updated(&mut self, _id: &str, _result: &Result<ArchiveState, SavedError>) {}
 
     /// Fires when this modal returns to the top of the stack after a nested modal pops. Default
     /// no-op. Pickers override it to refresh state the nested modal changed.
@@ -153,7 +154,7 @@ impl ModalStack {
         }
     }
 
-    pub(crate) fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, String>) {
+    pub(crate) fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, SavedError>) {
         for modal in &mut self.stack {
             modal.archive_updated(id, result);
         }
@@ -378,7 +379,7 @@ pub(crate) mod testing {
                 .push(format!("started:{id}"));
         }
 
-        fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, String>) {
+        fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, SavedError>) {
             self.archive_events
                 .lock()
                 .unwrap()

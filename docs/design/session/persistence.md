@@ -171,6 +171,7 @@ Listings sort rows and render them as follows:
 
 - `crates/ox-core/src/engine/sessions.rs`: `adopt_session`, which sums the session cost from the resumed `usage` entries.
 - `crates/ox-core/src/engine/turn.rs`: the joined writes that put a tool round's records in one batch.
+- `crates/ox-core/src/message.rs`: the message and content-block types that the entry schema stores.
 - `crates/ox-core/src/session/actor.rs`: the actor that owns the session state and flushes each wakeup's commands through a blocking operation.
 - `crates/ox-core/src/session/chain.rs`: message chain reconstruction from the `parent_uuid` DAG.
 - `crates/ox-core/src/session/display.rs`: the session ID and title formatting that listings use.
@@ -178,6 +179,7 @@ Listings sort rows and render them as follows:
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle`, the public API that sends each write to the actor and surfaces the first write failure of each kind.
 - `crates/ox-core/src/session/history.rs`: the resumed transcript, whose tool results take their views from `ToolRegistry::result_view`.
 - `crates/ox-core/src/session/path.rs`: the sanitized per-project subdirectory names.
+- `crates/ox-core/src/session/post_compact.rs`: the synthetic post-compact root and the origin restore on resume.
 - `crates/ox-core/src/session/resolver.rs`: the `--continue` argument and session-ID prefix resolution.
 - `crates/ox-core/src/session/sanitize.rs`: resume-time transcript repair.
 - `crates/ox-core/src/session/saved.rs`: archiving and deleting saved sessions.

@@ -103,7 +103,8 @@ The stdio driver's `StdioSink` prints the same header on stderr, which `protocol
 - `crates/ox-core/src/session/chain.rs`: `ChainBuilder`, whose `resolve` walks back from the latest tail leaf.
 - `crates/ox-core/src/session/entry.rs`: `Entry::Compact` variant.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle::compact`, `CompactOutcome`.
-- `crates/ox-core/src/session/post_compact.rs`: `SUMMARY_PREFIX`, `synthesize_post_compact_message` and its `task_reminder` and `shell_reminder` blocks, plus `strip_post_compact_summary`, which removes the generated summary block when the compaction boundary already displays it.
+- `crates/ox-core/src/session/history.rs`: `TranscriptWalker::push_message`, which skips the generated summary block when the compaction boundary already displays it.
+- `crates/ox-core/src/session/post_compact.rs`: `SUMMARY_PREFIX`, `synthesize_post_compact_message` and its `task_reminder` and `shell_reminder` blocks.
 - `crates/ox-core/src/session/sanitize.rs`: `sanitize_resumed_messages`, which treats the synthetic continuation as an ordinary user message.
 - `crates/ox-core/src/session/state.rs`: `compact_entries` and `commit_compact` (chain reset).
 - `crates/ox-core/src/session/store.rs`: resume loader compact boundary reset, tail filtering, and `CompactInfo`.

@@ -472,7 +472,6 @@ pub(super) enum Delta {
 pub(super) struct MessageDeltaBody {
     pub(super) stop_reason: Option<StopReason>,
     /// Populated only on `refusal`.
-    #[serde(default)]
     pub(super) stop_details: Option<StopDetails>,
 }
 

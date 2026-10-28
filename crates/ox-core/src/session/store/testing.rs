@@ -1,6 +1,7 @@
 //! Session fixtures and ID-keyed lookups, shared with other crates' tests.
 
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
@@ -147,6 +148,20 @@ pub fn with_isolated_xdg<R>(f: impl FnOnce(&Path) -> R) -> R {
     })
 }
 
+/// [`with_isolated_xdg`] that holds the isolated `XDG_DATA_HOME` across awaited work.
+pub async fn with_isolated_xdg_async<F, Fut, R>(f: F) -> R
+where
+    F: FnOnce(&Path) -> Fut,
+    Fut: Future<Output = R>,
+{
+    let dir = tempfile::tempdir().expect("a temp dir is created");
+    temp_env::async_with_vars(
+        [("XDG_DATA_HOME", Some(dir.path().as_os_str()))],
+        f(dir.path()),
+    )
+    .await
+}
+
 /// Session `session_id` as a listing reports it: in the [`test_store`] project, last active at
 /// 2026-04-18 09:00 UTC, untitled, unarchived, and never finalized.
 pub fn listed_session(session_id: &str) -> SessionInfo {
@@ -159,7 +174,7 @@ pub fn listed_session(session_id: &str) -> SessionInfo {
         title: None,
         exit: None,
         git_branch: None,
-        archived: false,
+        archive_state: ArchiveState::Active,
     }
 }
 

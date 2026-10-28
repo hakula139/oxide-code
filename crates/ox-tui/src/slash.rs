@@ -30,7 +30,7 @@ mod theme;
 pub(crate) use self::context::SlashContext;
 pub(crate) use self::diff::{DiffRow, WorkingTreeDiff};
 pub(crate) use self::matcher::MatchedCommand;
-pub(crate) use self::registry::{ArgCompletion, ChatOutput, SlashKind, SlashOutcome};
+pub(crate) use self::registry::{ArgCompletion, SlashKind, SlashOutcome};
 pub use self::resume::ResumePicker;
 
 use futures::TryFutureExt as _;

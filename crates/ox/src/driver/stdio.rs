@@ -20,7 +20,7 @@ use ox_core::session::entry::ArchiveState;
 use ox_core::tool::tasks::{Progress, Task};
 use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::sync::lock_or_recover;
-use ox_core::util::text::{escape_controls, escape_line};
+use ox_core::util::text::{capitalize_first, escape_controls, escape_line};
 use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 
 // ── Turn Rendering ──
@@ -296,8 +296,12 @@ impl StdioSink {
                 state.end_reply_then(stdout, stderr, &line)?;
             }
             Event::ArchiveUpdated { id, result } => match result {
-                Ok(archive) => writeln!(stderr, "{}", archive_notice(&id, archive))?,
-                Err(message) => writeln!(stderr, "Error: {}", escape_controls(&message))?,
+                Ok(state) => writeln!(stderr, "{}", archive_notice(&id, state))?,
+                Err(error) => writeln!(
+                    stderr,
+                    "Error: {}",
+                    escape_controls(&capitalize_first(&error.to_string()))
+                )?,
             },
             Event::Error(msg) | Event::RenameFailed(msg) => {
                 writeln!(stderr, "Error: {}", escape_controls(&msg))?;
@@ -452,6 +456,7 @@ mod tests {
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::{CapturingSink, FailingSink, ls_call, text_result};
     use ox_core::protocol::{CompactTrigger, ConfigPick};
+    use ox_core::session::saved::{SavedAction, SavedError};
     use ox_core::session::store::testing::test_store;
     use ox_core::tool::bash::background::testing::shells_in_each_state;
     use ox_core::tool::tasks::TaskStatus;
@@ -1228,8 +1233,12 @@ mod tests {
                 for (result, expected) in [
                     (Ok(ArchiveState::Active), "Unarchived session saved\n"),
                     (
-                        Err("Disk unavailable".to_owned()),
-                        "Error: Disk unavailable\n",
+                        Err(SavedError::Failed {
+                            action: SavedAction::Archive,
+                            id: "saved".to_owned(),
+                            cause: "disk unavailable".to_owned(),
+                        }),
+                        "Error: Failed to archive session saved: disk unavailable\n",
                     ),
                 ] {
                     let (stdout, stderr) = render_one(

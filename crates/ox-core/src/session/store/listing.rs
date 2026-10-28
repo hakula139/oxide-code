@@ -100,7 +100,7 @@ impl SessionWalk {
         while !stop() {
             let (path, modified) = self.paths.next()?;
             if let Some(info) = read_readable(&path, modified, self.project.as_ref())
-                && info.archive_state() == self.archive
+                && info.archive_state == self.archive
             {
                 return Some(info);
             }
@@ -291,7 +291,7 @@ fn read_session_info(
 
     let mut title: Option<TitleInfo> = None;
     let mut exit: Option<ExitInfo> = None;
-    let mut archived = false;
+    let mut archive_state = ArchiveState::default();
     while let Some((_, line)) = lines.next_line()? {
         if line.starts_with(TITLE_LINE_PREFIX)
             && let Ok(Entry::Title(record)) = serde_json::from_str(line)
@@ -306,7 +306,7 @@ fn read_session_info(
                 archived: state, ..
             }) = serde_json::from_str(line)
         {
-            archived = state;
+            archive_state = state.into();
         }
     }
 
@@ -319,7 +319,7 @@ fn read_session_info(
         title,
         exit,
         git_branch,
-        archived,
+        archive_state,
     }))
 }
 
