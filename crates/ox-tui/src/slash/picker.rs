@@ -15,6 +15,7 @@ use ox_core::protocol::{ConfigPick, Op};
 use super::effort_slider::step_level;
 use crate::action::Action;
 use crate::glyphs::RADIO_SELECTED;
+use crate::keymap::hint;
 use crate::modal::chrome::{
     CONFIRM_HINTS, FOOTER_HEIGHT, KEY_LEFT_RIGHT, above, height_above, render_footer,
 };
@@ -153,7 +154,7 @@ impl ModelEffortPicker {
                 format!("{level} effort{suffix}"),
                 style.add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {KEY_LEFT_RIGHT} to adjust"), theme.dim()),
+            Span::styled(format!("  {}", hint(KEY_LEFT_RIGHT, "adjust")), theme.dim()),
         ])
     }
 }
@@ -198,7 +199,7 @@ mod tests {
     use ox_core::model::ModelSpec;
 
     use super::*;
-    use crate::modal::testing::render_rows;
+    use crate::modal::testing::{render_modal, render_rows};
     use crate::session_info::testing::test_session_info;
 
     /// `test_session_info` ships Opus 5.5 active at `high`.
@@ -261,11 +262,8 @@ mod tests {
         #[test]
         fn lists_models_above_the_effort_row_and_footer() {
             let mut p = picker();
-            let height = p.height(80, 20);
+            let rows = render_modal(&mut p, 80, 20);
 
-            let rows = render_rows(&mut p, 80, height);
-
-            let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
             assert_eq!(
                 rows,
                 [

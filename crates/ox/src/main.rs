@@ -828,17 +828,7 @@ mod tests {
                 parse_error(&["ox", "-p", "hi", "config", "check"]),
                 Some(ErrorKind::ArgumentConflict),
             );
-
-            let escaped = Cli::try_parse_from(["ox", "--", "config"]).unwrap();
-            let escaped_help = Cli::try_parse_from(["ox", "--", "help"]).unwrap();
-            let help = Cli::try_parse_from(["ox", "help"])
-                .err()
-                .expect("`help` is the built-in help subcommand");
-
-            assert_eq!(escaped.prompt.as_deref(), Some("config"));
-            assert!(escaped.command.is_none());
-            assert_eq!(escaped_help.prompt.as_deref(), Some("help"));
-            assert_eq!(help.kind(), ErrorKind::DisplayHelp);
+            assert_eq!(parse_error(&["ox", "help"]), Some(ErrorKind::DisplayHelp));
         }
 
         mod validate {

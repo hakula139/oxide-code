@@ -172,7 +172,7 @@ impl Modal for ThemePicker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modal::testing::render_rows;
+    use crate::modal::testing::render_modal;
     use crate::slash::registry::testing::run_execute;
 
     mod classify {
@@ -313,11 +313,8 @@ mod tests {
             #[test]
             fn lists_themes_above_the_footer() {
                 let mut p = ThemePicker::new("latte");
-                let height = p.height(80, 20);
+                let rows = render_modal(&mut p, 80, 20);
 
-                let rows = render_rows(&mut p, 80, height);
-
-                let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
                 assert_eq!(
                     rows,
                     [

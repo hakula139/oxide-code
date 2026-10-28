@@ -203,7 +203,7 @@ impl App {
                     .push_system_message(format!("Deleted session {}", id_prefix(id))),
                 Err(error) => self.chat.push_error(&slash::saved_error_message(
                     error,
-                    Some(slash::CLEAR_THEN_DELETE_HINT),
+                    slash::CLEAR_THEN_DELETE_HINT,
                 )),
             },
         }

@@ -17,7 +17,7 @@ use ox_core::protocol::{Interaction, ToolCall, ToolResult};
 
 use self::blocks::{
     AssistantText, AssistantThinking, ChatBlock, CompactedBlock, ErrorBlock, GitDiffBlock,
-    InterruptedMarker, MarkdownCache, NoticeBlock, ProgressUpdate, RenderCtx, StreamingAssistant,
+    InterruptedMarker, LiveMarkdown, NoticeBlock, ProgressUpdate, RenderCtx, StreamingAssistant,
     SystemMessageBlock, ToolCallBlock, ToolResultBlock, UserMessage,
 };
 use self::selection::{ClickCounter, Selection};
@@ -36,11 +36,9 @@ pub(crate) struct ChatView {
     blocks: Vec<CachedBlock>,
 
     streaming: Option<StreamingAssistant>,
-    thinking_buffer: String,
+    thinking: LiveMarkdown,
     /// The compaction summary streaming in, which shows below the chat until compaction ends.
-    summary_buffer: String,
-    thinking_cache: MarkdownCache,
-    summary_cache: MarkdownCache,
+    summary: LiveMarkdown,
 
     /// Top row of the last paint.
     scroll_offset: usize,
@@ -114,10 +112,8 @@ impl ChatView {
             },
             blocks: Vec::new(),
             streaming: None,
-            thinking_buffer: String::new(),
-            summary_buffer: String::new(),
-            thinking_cache: MarkdownCache::default(),
-            summary_cache: MarkdownCache::default(),
+            thinking: LiveMarkdown::default(),
+            summary: LiveMarkdown::default(),
             scroll_offset: 0,
             max_offset: 0,
             pending_scroll: 0,
@@ -142,8 +138,8 @@ impl ChatView {
         if let Some(s) = &mut self.streaming {
             s.invalidate_cache();
         }
-        self.thinking_cache.invalidate();
-        self.summary_cache.invalidate();
+        self.thinking.invalidate();
+        self.summary.invalidate();
     }
 
     /// Sets the spinner frame the next paint heads streaming thinking with.
@@ -214,30 +210,29 @@ impl ChatView {
     /// Pending thinking is committed first so a `Thinking → Text` boundary always lands at a block
     /// split. Auto-scroll only follows the tail when the user hasn't manually scrolled up.
     pub(crate) fn append_stream_token(&mut self, token: &str) {
-        self.commit_thinking_buffer();
+        self.commit_thinking();
         if self.streaming.is_none() {
             self.bump_paused_counter();
         }
         self.streaming
             .get_or_insert_with(StreamingAssistant::default)
             .append(token);
-        self.advance_streaming_cache();
     }
 
     /// Appends a thinking token to the live thinking display buffer.
     pub(crate) fn append_thinking_token(&mut self, token: &str) {
-        if self.thinking_buffer.is_empty() {
+        if self.thinking.is_empty() {
             self.bump_paused_counter();
         }
-        self.thinking_buffer.push_str(token);
+        self.thinking.push_str(token);
     }
 
     /// Appends a token to the compaction summary in flight.
     pub(crate) fn append_summary_token(&mut self, token: &str) {
-        if self.summary_buffer.is_empty() {
+        if self.summary.is_empty() {
             self.summary_counted = self.bump_paused_counter();
         }
-        self.summary_buffer.push_str(token);
+        self.summary.push_str(token);
     }
 
     /// Drops the compaction summary in flight, which then no longer counts as new content.
@@ -245,8 +240,7 @@ impl ChatView {
         if std::mem::take(&mut self.summary_counted) {
             self.new_content_since_pause = self.new_content_since_pause.saturating_sub(1);
         }
-        self.summary_buffer.clear();
-        self.summary_cache.invalidate();
+        self.summary.clear();
     }
 
     /// Finalizes the streaming buffer into a committed block.
@@ -254,21 +248,20 @@ impl ChatView {
     /// Pending thinking is flushed first so a turn that produced only thinking still leaves an
     /// `AssistantThinking` block in the transcript.
     pub(crate) fn commit_streaming(&mut self) {
-        self.commit_thinking_buffer();
+        self.commit_thinking();
         if let Some(streaming) = self.streaming.take() {
-            let text = streaming.into_buffer();
+            let text = streaming.into_text();
             if !text.is_empty() {
                 self.push_block(AssistantText::new(text));
             }
         }
     }
 
-    fn commit_thinking_buffer(&mut self) {
-        if self.thinking_buffer.is_empty() {
+    fn commit_thinking(&mut self) {
+        if self.thinking.is_empty() {
             return;
         }
-        let text = std::mem::take(&mut self.thinking_buffer);
-        self.thinking_cache.invalidate();
+        let text = self.thinking.take();
         self.push_block(AssistantThinking::new(text));
     }
 
@@ -352,10 +345,8 @@ impl ChatView {
     pub(crate) fn clear_history(&mut self) {
         self.blocks.clear();
         self.streaming = None;
-        self.thinking_buffer.clear();
-        self.summary_buffer.clear();
-        self.thinking_cache.invalidate();
-        self.summary_cache.invalidate();
+        self.thinking.clear();
+        self.summary.clear();
         self.scroll_offset = 0;
         self.max_offset = 0;
         self.pending_scroll = 0;
@@ -370,8 +361,8 @@ impl ChatView {
     pub(crate) fn is_empty(&self) -> bool {
         self.blocks.is_empty()
             && self.streaming.is_none()
-            && self.thinking_buffer.is_empty()
-            && self.summary_buffer.is_empty()
+            && self.thinking.is_empty()
+            && self.summary.is_empty()
     }
 
     /// Number of committed chat blocks.
@@ -456,39 +447,31 @@ impl ChatView {
         }
     }
 
-    /// Adopts the chat area. A width change drops the streaming prefix cache and the selection,
-    /// whose columns no longer match the rewrapped rows.
+    /// Adopts the chat area. A width change drops the selection, whose columns no longer match the
+    /// rewrapped rows.
     fn set_viewport(&mut self, area: Rect) {
         if area.width != self.viewport.width {
             self.drop_selection();
         }
         self.viewport = area;
-        if let Some(s) = &mut self.streaming {
-            s.invalidate_cache_for_width(area.width);
-        }
     }
 
     fn render_live(&mut self, width: u16) -> LiveLines {
         let continues_turn = self.streaming_continues_turn();
         let ctx = self.settings.ctx(width);
-        let thinking = if self.settings.show_thinking && !self.thinking_buffer.is_empty() {
-            AssistantThinking::render_streaming(
-                &self.thinking_buffer,
-                self.spinner,
-                &ctx,
-                &mut self.thinking_cache,
-            )
+        let thinking = if self.settings.show_thinking && !self.thinking.is_empty() {
+            AssistantThinking::render_streaming(&mut self.thinking, self.spinner, &ctx)
         } else {
             Vec::new()
         };
-        let streaming_tail = self
-            .streaming
-            .as_ref()
-            .map_or_else(Vec::new, |s| s.render_tail(&ctx, continues_turn));
-        let summary = if self.summary_buffer.is_empty() {
+        let streaming_tail = self.streaming.as_mut().map_or_else(Vec::new, |s| {
+            s.advance_cache(&ctx, continues_turn);
+            s.render_tail(&ctx, continues_turn)
+        });
+        let summary = if self.summary.is_empty() {
             Vec::new()
         } else {
-            CompactedBlock::render_streaming(&self.summary_buffer, &ctx, &mut self.summary_cache)
+            CompactedBlock::render_streaming(&mut self.summary, &ctx)
         };
         LiveLines {
             thinking,
@@ -516,13 +499,6 @@ impl ChatView {
 
         stack.push_separated(&live.summary);
         stack
-    }
-
-    fn advance_streaming_cache(&mut self) {
-        let continues = self.streaming_continues_turn();
-        if let Some(s) = &mut self.streaming {
-            s.advance_cache(&self.settings.ctx(self.viewport.width), continues);
-        }
     }
 
     /// Returns whether streaming tokens continue the last committed assistant turn.
@@ -660,6 +636,16 @@ mod tests {
     /// Stacks every row at `width` as plain text.
     fn all_rows(chat: &mut ChatView, width: u16) -> Vec<String> {
         all_lines(chat, width)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// The rows `summary` renders at width 80 while it streams in.
+    fn streaming_summary_rows(chat: &ChatView, summary: &str) -> Vec<String> {
+        let mut text = LiveMarkdown::default();
+        text.push_str(summary);
+        CompactedBlock::render_streaming(&mut text, &chat.settings.ctx(80))
             .iter()
             .map(ToString::to_string)
             .collect()
@@ -1097,7 +1083,7 @@ mod tests {
 
             chat.append_stream_token("reply text");
 
-            assert_eq!(chat.thinking_buffer, "");
+            assert_eq!(chat.thinking.text(), "");
             assert_eq!(chat.blocks.len(), 1);
             chat.toggle_expanded();
             assert_eq!(
@@ -1259,15 +1245,7 @@ mod tests {
             chat.append_summary_token("Fixed ");
             chat.append_summary_token("the bug.");
 
-            let ctx = chat.settings.ctx(80);
-            let summary: Vec<String> = CompactedBlock::render_streaming(
-                "Fixed the bug.",
-                &ctx,
-                &mut MarkdownCache::default(),
-            )
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+            let summary = streaming_summary_rows(&chat, "Fixed the bug.");
             assert_eq!(
                 all_rows(&mut chat, 80),
                 [chat_rows, vec![String::new()], summary].concat(),
@@ -1294,15 +1272,7 @@ mod tests {
             assert_eq!(all_rows(&mut chat, 80), chat_rows);
 
             chat.append_summary_token("Second attempt.");
-            let ctx = chat.settings.ctx(80);
-            let summary: Vec<String> = CompactedBlock::render_streaming(
-                "Second attempt.",
-                &ctx,
-                &mut MarkdownCache::default(),
-            )
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+            let summary = streaming_summary_rows(&chat, "Second attempt.");
             assert_eq!(
                 all_rows(&mut chat, 80),
                 [chat_rows, vec![String::new()], summary].concat(),
@@ -1387,7 +1357,7 @@ mod tests {
 
             chat.commit_streaming();
 
-            assert_eq!(chat.thinking_buffer, "");
+            assert_eq!(chat.thinking.text(), "");
             chat.toggle_expanded();
             assert_eq!(
                 all_rows(&mut chat, 80),
@@ -1659,8 +1629,8 @@ mod tests {
             assert_eq!(chat.entry_count(), 0);
             assert_eq!(chat.pending_call_count(), 0);
             assert!(chat.streaming.is_none());
-            assert_eq!(chat.thinking_buffer, "");
-            assert_eq!(chat.summary_buffer, "");
+            assert_eq!(chat.thinking.text(), "");
+            assert_eq!(chat.summary.text(), "");
             assert_eq!((chat.scroll_offset, chat.pending_scroll), (0, 0));
             assert_eq!(chat.painted, SlotTops::default());
             assert_eq!(chat.painted_rows, Vec::<Line<'static>>::new());
@@ -2265,26 +2235,20 @@ mod tests {
         }
     }
 
-    mod set_viewport {
+    mod render_live {
         use super::*;
 
         #[test]
-        fn adopts_area_and_drops_streaming_cache_on_width_change() {
+        fn caches_the_reply_at_the_rendered_width() {
             let mut chat = test_chat();
-            chat.set_viewport(Rect::new(0, 0, 80, 24));
-            assert_eq!((chat.viewport.width, chat.viewport.height), (80, 24));
             chat.append_stream_token("a complete paragraph\n\nnext\n");
+            assert_eq!(cached_rows(&chat), [] as [String; 0]);
+
+            all_rows(&mut chat, 80);
             assert_eq!(cached_rows(&chat), ["◉ a complete paragraph"]);
 
-            chat.set_viewport(Rect::new(0, 0, 80, 10));
-            assert_eq!(
-                cached_rows(&chat),
-                ["◉ a complete paragraph"],
-                "a height-only change keeps the cache",
-            );
-
-            chat.set_viewport(Rect::new(0, 0, 40, 24));
-            assert_eq!(cached_rows(&chat), [] as [String; 0]);
+            all_rows(&mut chat, 14);
+            assert_eq!(cached_rows(&chat), ["◉ a complete ", "  paragraph"]);
         }
     }
 
@@ -2317,22 +2281,6 @@ mod tests {
             assert!(text.contains("python -c 'print(2+2)'"));
             assert!(text.contains("You're welcome"));
             assert_eq!(text.matches('❯').count(), 2);
-        }
-    }
-
-    mod advance_streaming_cache {
-        use super::*;
-
-        #[test]
-        fn defers_until_viewport_measured() {
-            let mut chat = test_chat();
-            chat.append_stream_token("first paragraph\n\n");
-            assert_eq!(cached_rows(&chat), [] as [String; 0]);
-
-            chat.set_viewport(Rect::new(0, 0, 80, 24));
-            chat.append_stream_token("second paragraph\n\n");
-
-            assert_eq!(cached_rows(&chat), ["◉ first paragraph"]);
         }
     }
 

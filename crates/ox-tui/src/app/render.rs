@@ -290,7 +290,7 @@ mod tests {
     use ox_core::protocol::{ApprovalDecision, CompactTrigger, Event, Op};
     use ox_core::tool::tasks::testing::plan;
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
-    use ox_core::util::git::PullRequest;
+    use ox_core::util::git::testing::pull_request;
 
     use super::*;
     use crate::action::Action;
@@ -331,12 +331,7 @@ mod tests {
         #[test]
         fn replays_status_hyperlinks_over_the_frame_inside_the_synchronized_update() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.apply_git_update(GitUpdate::PullRequest(Some(PullRequest {
-                number: 7,
-                url: "https://example.com/pull/7".to_owned(),
-                checks: None,
-                review: None,
-            })));
+            app.apply_git_update(GitUpdate::PullRequest(Some(pull_request(7))));
             let mut terminal = capture_terminal(120, 8);
 
             app.render(&mut terminal).unwrap();
@@ -346,7 +341,7 @@ mod tests {
                 .iter()
                 .map(|link| link.url.as_str())
                 .collect();
-            assert_eq!(urls, ["https://example.com/pull/7"]);
+            assert_eq!(urls, ["https://github.com/o/r/pull/7"]);
             let mut envelope = Vec::new();
             write_status_hyperlinks(&mut envelope, &app.status_links).unwrap();
             assert_eq!(

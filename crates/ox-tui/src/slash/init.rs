@@ -142,7 +142,7 @@ impl Modal for InitPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modal::testing::render_rows;
+    use crate::modal::testing::render_modal;
     use crate::session_info::testing::test_session_info;
 
     /// The action the picker submits to start the turn creating `file` at `root`.
@@ -255,11 +255,8 @@ mod tests {
             #[test]
             fn lists_both_files_with_who_else_reads_them() {
                 let mut picker = InitPicker::new(Path::new("/repo"));
-                let height = picker.height(80, 20);
+                let rows = render_modal(&mut picker, 80, 20);
 
-                let rows = render_rows(&mut picker, 80, height);
-
-                let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
                 assert_eq!(
                     rows,
                     [

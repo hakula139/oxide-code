@@ -5,7 +5,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use super::rows::prefixed_row;
 use super::{
-    BlockRows, ChatBlock, MarkdownCache, RenderCtx, SectionStyles, bar_section,
+    BlockRows, ChatBlock, LiveMarkdown, RenderCtx, SectionStyles, bar_section,
     prepend_markdown_prefix, streaming_bar_section,
 };
 use crate::glyphs::{ASSISTANT_CONT, ASSISTANT_PREFIX, THINKING_PREFIX};
@@ -82,22 +82,14 @@ impl AssistantThinking {
     }
 
     /// Renders thinking still streaming in, headed by `spinner` and `Thinking`, with its body in
-    /// either view. `cache` holds the rendered blocks the body has already closed.
+    /// either view.
     pub(crate) fn render_streaming(
-        text: &str,
+        text: &mut LiveMarkdown,
         spinner: char,
         ctx: &RenderCtx<'_>,
-        cache: &mut MarkdownCache,
     ) -> Vec<Line<'static>> {
         let header = format!("{spinner} {THINKING_LABEL}");
-        streaming_bar_section(
-            ctx,
-            THINKING_PREFIX,
-            &thinking_styles(ctx),
-            &header,
-            text,
-            cache,
-        )
+        streaming_bar_section(ctx, THINKING_PREFIX, &thinking_styles(ctx), &header, text)
     }
 }
 
@@ -217,8 +209,10 @@ mod tests {
             let style = theme.thinking();
 
             for ctx in [RenderCtx::new(60, &theme), expanded_at(60, &theme)] {
-                let mut cache = MarkdownCache::default();
-                let lines = AssistantThinking::render_streaming("hello", '⣷', &ctx, &mut cache);
+                let mut text = LiveMarkdown::default();
+                text.push_str("hello");
+
+                let lines = AssistantThinking::render_streaming(&mut text, '⣷', &ctx);
 
                 assert_eq!(
                     lines,
@@ -258,12 +252,13 @@ mod tests {
             "};
             let theme = Theme::default();
             let ctx = expanded_at(60, &theme);
-            let mut cache = MarkdownCache::default();
-            for (i, ch) in body.char_indices() {
-                let prefix = &body[..i + ch.len_utf8()];
+            let mut text = LiveMarkdown::default();
+            for ch in body.chars() {
+                text.push_str(ch.encode_utf8(&mut [0; 4]));
+                let prefix = text.text().to_owned();
 
-                let streaming = AssistantThinking::render_streaming(prefix, '⣷', &ctx, &mut cache);
-                let committed = AssistantThinking::new(prefix).render(&ctx);
+                let streaming = AssistantThinking::render_streaming(&mut text, '⣷', &ctx);
+                let committed = AssistantThinking::new(prefix.as_str()).render(&ctx);
 
                 assert_eq!(streaming[1..], committed[1..], "after {prefix:?}");
             }

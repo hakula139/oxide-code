@@ -199,9 +199,8 @@ mod tests {
             #[test]
             fn lays_out_title_prompt_and_footer_in_order() {
                 let mut modal = RenameModal::new(Some("Fix auth"));
-                let rows = render_modal(&mut modal, 40);
+                let rows = render_modal(&mut modal, 40, u16::MAX);
 
-                let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
                 assert_eq!(
                     rows,
                     [
@@ -218,10 +217,9 @@ mod tests {
             fn scrolls_a_title_wider_than_the_row_to_its_tail() {
                 let long = format!("{}tail", "x".repeat(60));
                 let mut modal = RenameModal::new(Some(&long));
-                let rows = render_modal(&mut modal, 20);
+                let rows = render_modal(&mut modal, 20, u16::MAX);
 
-                let input = &rows[2];
-                assert_eq!(input.trim_end(), format!("/ {}tail", "x".repeat(13)));
+                assert_eq!(rows[2], format!("/ {}tail", "x".repeat(13)));
             }
 
             #[test]

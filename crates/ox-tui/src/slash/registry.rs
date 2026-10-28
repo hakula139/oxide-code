@@ -422,10 +422,8 @@ mod tests {
             let racing: Vec<String> = forms
                 .iter()
                 .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
-                    Ok(SlashOutcome::Forward(
-                        Action::SwapTheme(_) | Action::Op(Op::SetMode(_) | Op::Shutdown),
-                    ))
-                    | Err(_) => None,
+                    Ok(SlashOutcome::Forward(Action::SwapTheme(_))) | Err(_) => None,
+                    Ok(SlashOutcome::Forward(Action::Op(op))) if !op.is_idle_only() => None,
                     other => Some(format!("/{} {args} forwards {other:?}", cmd.name())),
                 })
                 .collect();

@@ -1,7 +1,5 @@
 //! `/help` opens a read-only [`KvOverview`] of every registered command.
 
-use std::fmt::Write as _;
-
 use ox_core::command;
 
 use super::context::SlashContext;
@@ -70,11 +68,7 @@ fn build_modal() -> KvOverview {
 
 /// `/name (aliases) <usage>`, where the aliases and usage are optional.
 fn display_label(cmd: &dyn SlashCommand) -> String {
-    let mut out = format!("/{}", cmd.name());
-    let aliases = command::aliases(cmd.name());
-    if !aliases.is_empty() {
-        _ = write!(out, " ({})", aliases.join(", "));
-    }
+    let mut out = command::label(cmd.name());
     if let Some(usage) = cmd.usage() {
         out.push(' ');
         out.push_str(usage);
@@ -94,7 +88,7 @@ mod tests {
         fn lists_every_built_in_with_its_aliases_usage_and_description() {
             let mut modal = build_modal();
 
-            insta::assert_debug_snapshot!(render_modal(&mut modal, 100));
+            insta::assert_debug_snapshot!(render_modal(&mut modal, 100, u16::MAX));
         }
     }
 }

@@ -125,7 +125,7 @@ impl Modal for ConfirmDeleteSessionModal {
                 self.display_title,
             ))),
             Err(error) => {
-                self.error = Some(saved_error_message(error, Some(CLEAR_THEN_DELETE_HINT)));
+                self.error = Some(saved_error_message(error, CLEAR_THEN_DELETE_HINT));
                 DeleteReply::Shown
             }
         }
@@ -164,7 +164,7 @@ mod tests {
 
     /// Renders `modal` in full so its acceptance arms, then lets the type-ahead guard lapse.
     fn show_and_arm(modal: &mut ConfirmDeleteSessionModal) {
-        render_modal(modal, 60);
+        render_modal(modal, 60, u16::MAX);
         modal.acceptance.expire();
     }
 
@@ -180,18 +180,11 @@ mod tests {
     mod render {
         use super::*;
 
-        fn rendered_rows(modal: &mut ConfirmDeleteSessionModal, width: u16) -> Vec<String> {
-            render_modal(modal, width)
-                .into_iter()
-                .map(|row| row.trim_end().to_owned())
-                .collect()
-        }
-
         #[test]
         fn names_the_session_by_title_above_the_metadata_that_carries_its_id() {
             let mut modal = modal(0xab, "Fix auth flow");
 
-            let rows = rendered_rows(&mut modal, 60);
+            let rows = render_modal(&mut modal, 60, u16::MAX);
 
             assert_eq!(
                 rows,
@@ -211,7 +204,7 @@ mod tests {
             let mut modal = modal(0xab, "Fix auth flow");
             modal.error = Some("permission denied".to_owned());
 
-            let rows = rendered_rows(&mut modal, 60);
+            let rows = render_modal(&mut modal, 60, u16::MAX);
 
             assert_eq!(
                 rows[3..],
@@ -228,7 +221,7 @@ mod tests {
         fn does_not_panic_at_minimum_widths() {
             let mut modal = modal(0xab, "T");
             for width in [4_u16, 8, 20] {
-                rendered_rows(&mut modal, width);
+                render_modal(&mut modal, width, u16::MAX);
             }
         }
     }

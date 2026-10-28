@@ -104,6 +104,14 @@ pub fn aliases(name: &str) -> &'static [&'static str] {
         .map_or(&[], |command| command.aliases)
 }
 
+/// `/name (aliases)` for the command whose canonical name is `name`, or `/name` when it has none.
+pub fn label(name: &str) -> String {
+    match aliases(name) {
+        [] => format!("/{name}"),
+        aliases => format!("/{name} ({})", aliases.join(", ")),
+    }
+}
+
 /// `/compact [<instructions>]`, where trailing text focuses the summary.
 pub fn compact(args: &str) -> Op {
     let instructions = args.trim();
@@ -384,6 +392,21 @@ mod tests {
             assert_eq!(aliases("resume"), ["continue"]);
             for name in ["help", "new", "no-such-thing"] {
                 assert_eq!(aliases(name), [] as [&str; 0], "{name}");
+            }
+        }
+    }
+
+    mod label {
+        use super::*;
+
+        #[test]
+        fn follows_the_name_with_its_aliases() {
+            for (name, expected) in [
+                ("clear", "/clear (new, reset)"),
+                ("resume", "/resume (continue)"),
+                ("compact", "/compact"),
+            ] {
+                assert_eq!(label(name), expected, "{name}");
             }
         }
     }

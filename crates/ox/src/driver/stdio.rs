@@ -185,8 +185,6 @@ struct SinkState {
     line_open: bool,
     /// Whether the last text written to stdout was thinking.
     thinking: bool,
-    /// The started calls awaiting a result, so a result printed after another call's header can
-    /// repeat its own.
     calls: StartedCalls,
 }
 

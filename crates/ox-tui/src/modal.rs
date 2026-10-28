@@ -340,10 +340,14 @@ pub(crate) mod testing {
         render_rows(modal, width, height).join("\n")
     }
 
-    /// [`rendered_text`] as rows.
-    pub(crate) fn render_modal(modal: &mut dyn Modal, width: u16) -> Vec<String> {
-        let height = modal.height(width, u16::MAX);
+    /// Renders `modal` at `width` and the height it requests within `max_height`, returning each
+    /// row without its trailing spaces.
+    pub(crate) fn render_modal(modal: &mut dyn Modal, width: u16, max_height: u16) -> Vec<String> {
+        let height = modal.height(width, max_height);
         render_rows(modal, width, height)
+            .into_iter()
+            .map(|row| row.trim_end().to_owned())
+            .collect()
     }
 
     /// Renders `modal` into a `width` x `height` buffer and returns each row as displayed.

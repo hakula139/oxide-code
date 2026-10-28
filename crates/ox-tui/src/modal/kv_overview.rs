@@ -306,19 +306,13 @@ impl Modal for KvOverview {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modal::testing::render_rows;
+    use crate::modal::testing::{render_modal, render_rows};
 
     fn trimmed_rows(modal: &mut KvOverview, width: u16, height: u16) -> Vec<String> {
         render_rows(modal, width, height)
             .into_iter()
             .map(|row| row.trim_end().to_owned())
             .collect()
-    }
-
-    /// [`trimmed_rows`] at the height the modal asks for within `max_height`.
-    fn rendered(modal: &mut KvOverview, width: u16, max_height: u16) -> Vec<String> {
-        let height = modal.height(width, max_height);
-        trimmed_rows(modal, width, height)
     }
 
     fn row(k: &str, v: &str) -> (String, String) {
@@ -495,7 +489,7 @@ mod tests {
         fn lays_out_every_row_with_a_close_hint_when_it_fits() {
             let mut m = flat_overview();
 
-            let rows = rendered(&mut m, 40, 40);
+            let rows = render_modal(&mut m, 40, 40);
 
             assert_eq!(
                 rows,
@@ -535,7 +529,7 @@ mod tests {
             // 35 columns is exactly label + gap + value + gap + note for this fixture.
             let mut m = annotated_overview();
 
-            let rows = rendered(&mut m, 35, 40);
+            let rows = render_modal(&mut m, 35, 40);
 
             assert_eq!(
                 rows[2..6],
@@ -552,7 +546,7 @@ mod tests {
         fn puts_notes_after_their_values_when_the_column_would_overflow() {
             let mut m = annotated_overview();
 
-            let rows = rendered(&mut m, 34, 40);
+            let rows = render_modal(&mut m, 34, 40);
 
             assert_eq!(
                 rows[2..4],
@@ -575,7 +569,7 @@ mod tests {
                 ])],
             );
 
-            let rows = rendered(&mut m, 44, 40);
+            let rows = render_modal(&mut m, 44, 40);
 
             assert_eq!(
                 rows[2..5],
@@ -591,7 +585,7 @@ mod tests {
         fn separates_headed_sections_with_blank_rows() {
             let mut m = sectioned_overview();
 
-            let rows = rendered(&mut m, 40, 40);
+            let rows = render_modal(&mut m, 40, 40);
 
             assert_eq!(
                 rows,
