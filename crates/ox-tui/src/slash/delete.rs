@@ -110,9 +110,7 @@ mod tests {
     use crate::slash::registry::testing::run_background;
 
     #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(DeleteCmd.name(), "delete");
-        assert_ne!(DeleteCmd.description(), "");
+    fn requires_an_id_prefix() {
         assert_eq!(DeleteCmd.usage(), Some("<id-prefix>"));
     }
 

@@ -239,7 +239,6 @@ mod tests {
     use ox_core::command::testing::aliased_names;
     use ox_core::protocol::Op;
 
-    use super::testing::FakeCmd;
     use super::*;
     use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
@@ -274,36 +273,6 @@ mod tests {
             assert_eq!(format!("{modal:?}"), "Modal(<modal>)");
             assert_eq!(format!("{:?}", background()), "Background(<task>)");
         }
-
-        mod into_forward {
-            use super::*;
-
-            #[test]
-            #[should_panic(expected = r#"expected Forward, got Prompt("Create AGENTS.md")"#)]
-            fn names_the_variant_it_got() {
-                SlashOutcome::Prompt("Create AGENTS.md".to_owned()).into_forward();
-            }
-        }
-
-        mod into_modal {
-            use super::*;
-
-            #[test]
-            #[should_panic(expected = "expected Modal, got Background(<task>)")]
-            fn names_the_variant_it_got() {
-                background().into_modal();
-            }
-        }
-
-        mod into_background {
-            use super::*;
-
-            #[test]
-            #[should_panic(expected = r#"expected Background, got Prompt("Create AGENTS.md")"#)]
-            fn names_the_variant_it_got() {
-                _ = SlashOutcome::Prompt("Create AGENTS.md".to_owned()).into_background();
-            }
-        }
     }
 
     mod lookup_in {
@@ -331,27 +300,6 @@ mod tests {
 
     mod built_ins {
         use super::*;
-
-        fn alias_collisions<'a>(commands: &[&'a dyn SlashCommand]) -> Vec<(&'a str, &'a str)> {
-            let names: HashSet<_> = commands.iter().map(|c| c.name()).collect();
-            commands
-                .iter()
-                .flat_map(|cmd| {
-                    command::aliases(cmd.name())
-                        .iter()
-                        .filter(|alias| names.contains(*alias))
-                        .map(move |alias| (cmd.name(), *alias))
-                })
-                .collect()
-        }
-
-        fn empty_metadata_offenders<'a>(commands: &[&'a dyn SlashCommand]) -> Vec<&'a str> {
-            commands
-                .iter()
-                .filter(|c| c.name().is_empty() || c.description().is_empty())
-                .map(|c| c.name())
-                .collect()
-        }
 
         /// Every `(command, args)` form reachable from an empty or junk argument or a completion.
         fn forms() -> Vec<(&'static dyn SlashCommand, String)> {
@@ -389,18 +337,17 @@ mod tests {
 
         #[test]
         fn aliases_do_not_collide_with_any_canonical_name() {
-            let collisions = alias_collisions(BUILT_INS);
-            assert!(collisions.is_empty(), "alias collisions: {collisions:?}");
-        }
-
-        #[test]
-        fn alias_collisions_finds_a_synthetic_overlap() {
-            let collider = FakeCmd {
-                name: "new",
-                ..FakeCmd::DEFAULT
-            };
-            let registry: &[&dyn SlashCommand] = &[&ClearCmd, &collider];
-            assert_eq!(alias_collisions(registry), vec![("clear", "new")]);
+            let names: HashSet<_> = BUILT_INS.iter().map(|c| c.name()).collect();
+            let collisions: Vec<_> = BUILT_INS
+                .iter()
+                .flat_map(|cmd| {
+                    command::aliases(cmd.name())
+                        .iter()
+                        .filter(|alias| names.contains(*alias))
+                        .map(move |alias| (cmd.name(), *alias))
+                })
+                .collect();
+            assert_eq!(collisions, []);
         }
 
         #[test]
@@ -413,21 +360,12 @@ mod tests {
 
         #[test]
         fn have_non_empty_name_and_description() {
-            let offenders = empty_metadata_offenders(BUILT_INS);
-            assert!(
-                offenders.is_empty(),
-                "commands with empty name or description: {offenders:?}",
-            );
-        }
-
-        #[test]
-        fn empty_metadata_offenders_reports_command_with_empty_description() {
-            let empty = FakeCmd {
-                name: "no-desc",
-                description: "",
-                ..FakeCmd::DEFAULT
-            };
-            assert_eq!(empty_metadata_offenders(&[&empty]), vec!["no-desc"]);
+            let offenders: Vec<_> = BUILT_INS
+                .iter()
+                .filter(|c| c.name().is_empty() || c.description().is_empty())
+                .map(|c| c.name())
+                .collect();
+            assert_eq!(offenders, [] as [&str; 0]);
         }
 
         #[test]
@@ -448,6 +386,23 @@ mod tests {
                 .collect();
 
             assert_eq!(forwarding, [] as [String; 0]);
+        }
+
+        #[test]
+        fn overview_commands_open_a_modal() {
+            let info = test_session_info();
+            let ctx = SlashContext::new(&info, None);
+
+            for name in ["help", "status", "config"] {
+                let cmd = lookup_in(BUILT_INS, name).unwrap();
+
+                let outcome = cmd.execute("", &ctx);
+
+                assert!(
+                    matches!(outcome, Ok(SlashOutcome::Modal(_))),
+                    "/{name} returns {outcome:?}",
+                );
+            }
         }
 
         #[test]

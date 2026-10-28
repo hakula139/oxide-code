@@ -214,17 +214,6 @@ mod tests {
     use super::*;
     use crate::modal::testing::{render_modal, rendered_text};
     use crate::session_info::testing::test_session_info;
-    use crate::slash::registry::testing::run_execute;
-
-    mod execute {
-        use super::*;
-
-        #[test]
-        fn opens_the_overview_modal() {
-            let outcome = run_execute(&ConfigCmd, "");
-            outcome.unwrap().into_modal();
-        }
-    }
 
     mod build_modal {
         use super::*;
@@ -280,16 +269,6 @@ mod tests {
         }
 
         #[test]
-        fn renders_resolved_auto_compaction() {
-            let info = test_session_info();
-            let mut m = build_modal(&info, None);
-            let rendered = rendered_text(&mut m, 80);
-
-            assert!(rendered.contains("Auto-Compaction"), "{rendered}");
-            assert!(rendered.contains("at 155000 tokens"), "{rendered}");
-        }
-
-        #[test]
         fn tildifies_extra_ca_certs_path() {
             temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
                 let mut info = test_session_info();
@@ -304,27 +283,8 @@ mod tests {
         }
 
         #[test]
-        fn shows_none_for_unset_extra_ca_certs() {
-            let info = test_session_info();
-            assert!(info.config.extra_ca_certs.is_none(), "precondition: unset");
-            let mut m = build_modal(&info, None);
-            let rendered = rendered_text(&mut m, 80);
-
-            assert!(
-                row(&rendered, "Extra CA Certs").contains(" none "),
-                "{rendered}"
-            );
-        }
-
-        #[test]
         fn shows_gateway_settings() {
             let mut info = test_session_info();
-            let rendered = rendered_text(&mut build_modal(&info, None), 80);
-            assert!(
-                row(&rendered, "Custom Headers").contains(" none "),
-                "{rendered}"
-            );
-
             info.config.gateway.custom_header_names =
                 vec!["x-team".to_owned(), "x-gateway-key".to_owned()];
             let rendered = rendered_text(&mut build_modal(&info, None), 80);

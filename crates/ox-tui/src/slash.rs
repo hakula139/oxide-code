@@ -176,11 +176,6 @@ mod tests {
         }
 
         #[test]
-        fn known_command_runs_its_command() {
-            run_dispatch("help").unwrap().into_modal();
-        }
-
-        #[test]
         fn unknown_command_lists_every_built_in() {
             let msg = run_dispatch("etc").expect_err("unknown command must error");
             for cmd in registry::BUILT_INS {

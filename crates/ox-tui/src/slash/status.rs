@@ -99,23 +99,6 @@ mod tests {
     use super::*;
     use crate::modal::testing::{render_modal, rendered_text};
     use crate::session_info::testing::test_session_info;
-    use crate::slash::registry::testing::run_execute;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(StatusCmd.name(), "status");
-        assert_ne!(StatusCmd.description(), "");
-    }
-
-    mod execute {
-        use super::*;
-
-        #[test]
-        fn opens_the_overview_modal() {
-            let outcome = run_execute(&StatusCmd, "");
-            outcome.unwrap().into_modal();
-        }
-    }
 
     mod build_modal {
         use super::*;

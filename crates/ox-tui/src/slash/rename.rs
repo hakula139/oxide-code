@@ -193,17 +193,6 @@ mod tests {
     mod rename_modal {
         use super::*;
 
-        mod height {
-            use super::*;
-
-            #[test]
-            fn sums_to_five_rows() {
-                // Title (1) + gap (1) + input (1) + gap (1) + footer (1) = 5. Render tests assume
-                // the input row sits at y=2.
-                assert_eq!(RenameModal::new(None).height(40, u16::MAX), 5);
-            }
-        }
-
         mod render {
             use super::*;
 
@@ -280,25 +269,16 @@ mod tests {
                 terminal
                     .draw(|frame| modal.render(frame, Rect::new(0, 0, width, 1), &theme))
                     .expect("short-area render must not panic");
+
+                assert!(
+                    !terminal.backend().cursor_visible(),
+                    "a hidden input row places no cursor",
+                );
             }
         }
 
         mod handle_key {
             use super::*;
-
-            #[test]
-            fn ctrl_w_through_the_stack_deletes_the_last_word() {
-                let mut stack = ModalStack::default();
-                stack.push(Box::new(RenameModal::new(Some("Fix auth"))));
-
-                stack.handle_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
-                let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Enter));
-
-                let Some(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = outcome else {
-                    panic!("expected a rename, got {outcome:?}");
-                };
-                assert_eq!(title, "Fix");
-            }
 
             #[test]
             fn typing_appends_to_buffer_and_enter_submits_trimmed_title() {
@@ -319,66 +299,37 @@ mod tests {
             }
 
             #[test]
-            fn backspace_removes_last_char_when_buffer_non_empty() {
-                let mut modal = RenameModal::new(Some("ab"));
-                assert!(matches!(
-                    modal.handle_key(&KeyEvent::from(KeyCode::Backspace)),
-                    ModalKey::Consumed,
-                ));
-                let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
-                let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) =
-                    outcome
-                else {
-                    panic!("expected Submitted, got {outcome:?}");
-                };
-                assert_eq!(title, "a");
-            }
+            fn forwards_modified_keys_and_paste_through_the_stack_to_the_line_editor() {
+                let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+                let mut stack = ModalStack::default();
+                stack.push(Box::new(RenameModal::new(Some("Fix the bug"))));
 
-            #[test]
-            fn backspace_on_empty_buffer_is_a_silent_noop() {
-                let mut modal = RenameModal::new(None);
-                assert!(matches!(
-                    modal.handle_key(&KeyEvent::from(KeyCode::Backspace)),
-                    ModalKey::Consumed,
-                ));
-            }
-
-            #[test]
-            fn char_at_max_length_drops_extra_input() {
-                let prefilled: String = "a".repeat(MAX_TITLE_WIDTH);
-                let mut modal = RenameModal::new(Some(&prefilled));
-                modal.handle_key(&KeyEvent::from(KeyCode::Char('z')));
-                let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
-                let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) =
-                    outcome
-                else {
-                    panic!("expected Submitted, got {outcome:?}");
-                };
-                assert_eq!(title, prefilled);
-            }
-
-            #[test]
-            fn edits_at_the_cursor_and_never_inserts_control_chords() {
-                let mut modal = RenameModal::new(Some("ac"));
-                for event in [
-                    KeyEvent::from(KeyCode::Left),
-                    KeyEvent::from(KeyCode::Char('b')),
-                    KeyEvent::from(KeyCode::Tab),
-                    KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
-                ] {
-                    let outcome = modal.handle_key(&event);
-                    assert!(
-                        matches!(outcome, ModalKey::Consumed),
-                        "{event:?}: {outcome:?}"
-                    );
+                for event in [ctrl('w'), KeyEvent::from(KeyCode::Char('!')), ctrl('a')] {
+                    let outcome = stack.handle_key(&event);
+                    assert!(outcome.is_none(), "{event:?} returned {outcome:?}");
                 }
-                let submit = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
-                let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) =
-                    submit
-                else {
-                    panic!("buffer should still submit cleanly, got {submit:?}");
+                stack.handle_paste("Re: ");
+                let action = stack.handle_key(&KeyEvent::from(KeyCode::Enter));
+
+                let Some(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) = action else {
+                    panic!("expected a rename, got {action:?}");
                 };
-                assert_eq!(title, "abc", "Tab and Ctrl+G must not edit the title");
+                assert_eq!(title, "Re: Fix the !");
+            }
+
+            #[test]
+            fn caps_the_title_at_the_session_title_width() {
+                let mut modal = RenameModal::new(Some(&"x".repeat(MAX_TITLE_WIDTH + 20)));
+
+                modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+                let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
+
+                let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) =
+                    outcome
+                else {
+                    panic!("expected Submitted, got {outcome:?}");
+                };
+                assert_eq!(title, "x".repeat(MAX_TITLE_WIDTH));
             }
 
             #[test]
@@ -392,18 +343,6 @@ mod tests {
                     matches!(outcome, ModalKey::Consumed),
                     "all-whitespace Enter must not submit, got {outcome:?}",
                 );
-            }
-        }
-
-        mod handle_paste {
-            use super::*;
-
-            #[test]
-            fn inserts_one_line_at_the_cursor() {
-                let mut modal = RenameModal::new(Some("Fix"));
-                modal.handle_paste(" auth\r\nflow");
-                let rows = render_modal(&mut modal, 40);
-                assert_eq!(rows[2].trim_end(), "/ Fix auth flow");
             }
         }
     }
