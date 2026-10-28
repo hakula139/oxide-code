@@ -344,7 +344,7 @@ impl<'r> Dispatcher<'r, '_> {
         id: &str,
         prepared: &Prepared,
     ) -> AbortResult<Option<ToolOutput>> {
-        let name = spec.name.as_str();
+        let name = spec.definition.name.as_str();
         let class = spec.class;
         if let Some(mode) = self.inbox.mode.take() {
             self.dispatch_ctx.policy.set_mode(mode);
@@ -377,7 +377,7 @@ impl<'r> Dispatcher<'r, '_> {
                     .policy
                     .session_grant(class, &prepared.access);
                 let preview = tool
-                    .approval_preview(name, &prepared.input, self.dispatch_ctx.workspace.cwd())
+                    .approval_preview(name, prepared, self.dispatch_ctx.workspace.cwd())
                     .await;
                 if self
                     .sink
@@ -545,6 +545,7 @@ mod tests {
     use crate::permission::testing::exec_grant;
     use crate::permission::{Mode, PermissionClass, Tier};
     use crate::protocol::testing::{CapturingSink, FailingSink};
+    use crate::tool::ToolDefinition;
     #[cfg(unix)]
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
@@ -594,9 +595,11 @@ mod tests {
 
         fn parallel_spec(name: &str, class: PermissionClass) -> ToolSpec {
             ToolSpec {
-                name: name.to_owned(),
-                description: format!("the {name} fixture"),
-                input_schema: json!({"type": "object"}),
+                definition: ToolDefinition {
+                    name: name.to_owned(),
+                    description: format!("the {name} fixture"),
+                    input_schema: json!({"type": "object"}),
+                },
                 class,
                 parallel_safe: true,
             }

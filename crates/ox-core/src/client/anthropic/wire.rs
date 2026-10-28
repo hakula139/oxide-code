@@ -21,7 +21,7 @@ pub(super) struct CreateMessageRequest<'a> {
     /// `cch=00000`, which must be the billing placeholder even when user content echoes it.
     pub(super) system: Vec<SystemBlock<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) tools: Option<&'a [ToolDefinition]>,
+    pub(super) tools: Option<&'a [&'a ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) thinking: Option<&'a ThinkingConfig>,
     /// A side query's JSON-schema `format` and the `effort`.

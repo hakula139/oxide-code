@@ -205,6 +205,7 @@ mod tests {
     use crate::protocol::{CompactTrigger, testing};
     use crate::session::post_compact::synthesize_post_compact_message;
     use crate::tool::DEFAULT_TOOL_ICON;
+    use crate::tool::StoredView;
     use crate::tool::edit::EditTool;
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_registry;
@@ -545,8 +546,7 @@ mod tests {
                 "e1".to_owned(),
                 ToolMetadata {
                     title: Some("Edited f.rs".to_owned()),
-                    diff: Some(diff.clone()),
-                    ..ToolMetadata::default()
+                    result_view: Some(StoredView::View(ToolResultView::Diff(diff.clone()))),
                 },
             )]);
 
@@ -605,7 +605,7 @@ mod tests {
                 "missing".to_owned(),
                 ToolMetadata {
                     title: Some("Ran build".to_owned()),
-                    ..ToolMetadata::default()
+                    result_view: None,
                 },
             )]);
 

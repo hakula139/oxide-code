@@ -392,7 +392,7 @@ pub(super) fn auto_compaction_due(
 async fn request_summary(
     client: &dyn Wire,
     prompt: &PromptParts,
-    tools: &[ToolDefinition],
+    tools: &[&ToolDefinition],
     transcript: &[Message],
     instructions: Option<&str>,
     sink: &dyn EventSink,
@@ -636,7 +636,7 @@ fn without_thinking(message: &Message) -> Option<Message> {
 /// usage on.
 pub(super) fn request_tokens(
     prompt: &PromptParts,
-    tools: &[ToolDefinition],
+    tools: &[&ToolDefinition],
     transcript: &[Message],
 ) -> u32 {
     let system = &prompt.system;
@@ -1819,7 +1819,7 @@ mod tests {
                 _messages: &[Message],
                 _system: &SystemPrompt,
                 _user_context: Option<&str>,
-                _tools: &[ToolDefinition],
+                _tools: &[&ToolDefinition],
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
                 Ok(self.0.lock().unwrap().take().expect("one request"))
             }
@@ -1889,7 +1889,7 @@ mod tests {
             mount_summary(&server, streamed_summary_body("done")).await;
             let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
             let prompt = parent_prompt();
-            let tools = [ToolDefinition {
+            let tools = [&ToolDefinition {
                 name: "read".to_owned(),
                 description: "Read a file.".to_owned(),
                 input_schema: json!({"type": "object"}),
@@ -2508,7 +2508,7 @@ mod tests {
             prompt.system.stable = "s".repeat(4_000);
             prompt.system.dynamic = "d".repeat(400);
             prompt.user_context = "u".repeat(4_000);
-            let tools = [ToolDefinition {
+            let tools = [&ToolDefinition {
                 name: "read".to_owned(),
                 description: "r".repeat(3_948),
                 input_schema: json!({}),

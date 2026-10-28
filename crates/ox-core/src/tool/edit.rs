@@ -1,7 +1,7 @@
 //! Exact string replacement tool for file editing.
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use serde::Deserialize;
@@ -10,7 +10,7 @@ use super::file::FileVerb;
 use super::view::{
     ApprovalBody, ApprovalPreview, DiffChunk, EditDiff, NumberedLine, ToolResultView,
 };
-use super::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolSpec, extract_input_field};
+use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field};
 use crate::file_tracker::{GatePurpose, LastView};
 use crate::permission::PermissionClass;
 
@@ -19,15 +19,19 @@ pub(crate) struct EditTool;
 impl Tool for EditTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "edit".to_owned(),
-            description: "Perform exact string replacement in a file. \
-                          The old_string must be unique in the file unless replace_all is true. \
-                          Read the file with the `read` tool in this session before editing it. \
-                          A `read` of the lines being changed is enough. \
-                          An edit also fails for a file that changed externally \
-                          since the last `read`."
-                .to_owned(),
-            input_schema: input_schema(),
+            definition: ToolDefinition {
+                name: "edit".to_owned(),
+                description: "Perform exact string replacement in a file. \
+                              The old_string must be unique in the file \
+                              unless replace_all is true. \
+                              Read the file with the `read` tool in this session \
+                              before editing it. \
+                              A `read` of the lines being changed is enough. \
+                              An edit also fails for a file that changed externally \
+                              since the last `read`."
+                    .to_owned(),
+                input_schema: input_schema(),
+            },
             class: PermissionClass::Edit,
             parallel_safe: false,
         }
@@ -41,31 +45,16 @@ impl Tool for EditTool {
         "✎"
     }
 
-    fn result_view(
-        &self,
-        input: &serde_json::Value,
-        _content: &str,
-        metadata: &ToolMetadata,
-        _cwd: &Path,
-    ) -> Option<ToolResultView> {
-        if let Some(diff) = &metadata.diff {
-            return Some(ToolResultView::Diff(diff.clone()));
-        }
-        let old = input.get("old_string")?.as_str()?;
-        let new = input.get("new_string")?.as_str()?;
-        Some(ToolResultView::Diff(synthesize_diff(old, new)))
-    }
-
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
-        input: &'a serde_json::Value,
+        prepared: &'a Prepared,
         cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
-        let old = extract_input_field(input, "old_string").unwrap_or_default();
-        let new = extract_input_field(input, "new_string").unwrap_or_default();
+        let old = extract_input_field(&prepared.input, "old_string").unwrap_or_default();
+        let new = extract_input_field(&prepared.input, "new_string").unwrap_or_default();
         Box::pin(std::future::ready(ApprovalPreview {
-            title: self.summarize_call(name, input, cwd),
+            title: self.summarize_call(name, &prepared.input, cwd),
             body: ApprovalBody::Diff(synthesize_chunk(old, new)),
         }))
     }
@@ -75,7 +64,7 @@ impl Tool for EditTool {
         prepared: Prepared,
         ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(run(prepared.input, ctx))
+        Box::pin(run(prepared, ctx))
     }
 }
 
@@ -109,7 +98,6 @@ fn input_schema() -> serde_json::Value {
 
 #[derive(Deserialize)]
 struct Input {
-    file_path: String,
     old_string: String,
     new_string: String,
     #[serde(default)]
@@ -118,15 +106,14 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
-    let input: Input = match super::parse_input(raw) {
+async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
+    let (input, path): (Input, _) = match prepared.into_path_input() {
         Ok(v) => v,
         Err(msg) => return ToolOutput::error(msg),
     };
 
-    let path = &input.file_path;
     match edit_file(
-        path,
+        &path,
         &input.old_string,
         &input.new_string,
         input.replace_all,
@@ -137,26 +124,27 @@ async fn run(raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
         Ok(Edited {
             replacements, diff, ..
         }) => {
+            let shown = path.display().to_string();
             let content = match replacements {
-                1 => format!("Successfully edited {path}."),
-                n => format!("Replaced {n} occurrences in {path}."),
+                1 => format!("Successfully edited {shown}."),
+                n => format!("Replaced {n} occurrences in {shown}."),
             };
             ToolOutput::success(content)
-                .with_title(format!("Edited {}", super::file_name(path)))
-                .with_diff(diff)
+                .with_title(format!("Edited {}", super::file_name(&shown)))
+                .with_result_view(ToolResultView::Diff(diff))
         }
         Err(msg) => ToolOutput::error(msg),
     }
 }
 
-/// Replaces `old_string` in the file at `path`, resolved against the context's cwd.
+/// Replaces `old_string` in the file at `path`, which `prepare` resolved.
 ///
-/// - `old_string` must occur verbatim, and exactly once without `replace_all`, so the model cannot
-///   edit the wrong site.
+/// - `old_string` must occur once without `replace_all`, and each line break in it matches either
+///   ending, so the model cannot edit the wrong site.
 /// - The Read-before-Edit gate refuses a file whose current content has not been read.
-/// - Matching runs on LF-normalized text, and the write restores the file's dominant line ending.
+/// - Only the matched spans change, and a replacement takes the ending of the span it replaces.
 async fn edit_file(
-    path: &str,
+    path: &Path,
     old_string: &str,
     new_string: &str,
     replace_all: bool,
@@ -170,15 +158,14 @@ async fn edit_file(
         return Err("old_string and new_string are identical. No changes to make.".to_owned());
     }
 
-    let file_path = ctx.cwd().join(path);
-    let (_, content_bytes) = super::file::read_validated(&file_path, path, FileVerb::Edit).await?;
-    let key = super::file::tracker_key(&file_path).await;
+    let (_, content_bytes) = super::file::read_validated(path, FileVerb::Edit).await?;
+    let key = super::file::tracker_key(path).await;
     ctx.tracker
         .verify_current_content(&key, &content_bytes, GatePurpose::Edit)
         .map_err(|e| e.to_string())?;
 
     let replacement = Replacement {
-        path: path.to_owned(),
+        path: path.to_path_buf(),
         old_string: old_string.to_owned(),
         new_string: new_string.to_owned(),
         replace_all,
@@ -193,12 +180,7 @@ async fn edit_file(
         .write_and_record(
             &ctx.tool_use_id,
             view,
-            super::file::write_file(
-                file_path,
-                path.to_owned(),
-                updated.into_bytes(),
-                Some(expected),
-            ),
+            super::file::write_file(path.to_owned(), updated.into_bytes(), Some(expected)),
         )
         .await
         .map_err(|error| format!("{error:#}"))?;
@@ -215,8 +197,8 @@ struct Edited {
 /// One edit call's replacement, which runs on the blocking pool since a `replace_all` over a large
 /// file is CPU-bound.
 struct Replacement {
-    /// The path as the call gave it, for error messages.
-    path: String,
+    /// The resolved file path, for error messages.
+    path: PathBuf,
     old_string: String,
     new_string: String,
     replace_all: bool,
@@ -226,16 +208,17 @@ impl Replacement {
     /// The file's updated text, what changed, and the written-line view the tracker records, given
     /// its current `content`.
     fn apply(&self, content: &[u8]) -> Result<(String, Edited, LastView), String> {
-        let path = &self.path;
-        let content =
-            std::str::from_utf8(content).map_err(|e| format!("Failed to read {path}: {e}"))?;
+        let path = self.path.display();
+        let content = std::str::from_utf8(content).map_err(|_| {
+            format!(
+                "{path} is not valid UTF-8, so edit cannot change it. Use the bash tool to edit it."
+            )
+        })?;
 
-        let eol = dominant_eol(content);
-        let content = normalize_eol(content);
         let old_string = normalize_eol(&self.old_string);
         let new_string = normalize_eol(&self.new_string);
-
-        let replacements = content.matches(old_string.as_ref()).count();
+        let ranges = match_ranges(content, &old_string)?;
+        let replacements = ranges.len();
         if replacements == 0 {
             return Err(format!(
                 "Found no occurrence of old_string in {path}. \
@@ -251,22 +234,89 @@ impl Replacement {
             ));
         }
 
-        let (diff, written) = build_diff(&content, &old_string, &new_string);
-        let updated = content.replace(old_string.as_ref(), new_string.as_ref());
+        let (diff, written) = build_diff(content, &old_string, &new_string, &ranges);
+        let updated = splice(content, &ranges, &new_string);
         let view = LastView::from_ranges(written, updated.lines().count());
-        Ok((apply_eol(updated, eol), Edited { replacements, diff }, view))
+        Ok((updated, Edited { replacements, diff }, view))
     }
+}
+
+/// The byte ranges in `content` that match `old`, whose line breaks match either `\n` or `\r\n`.
+/// A match never overlaps the one before it. Reports the error the model reads when `old` is too
+/// large to compile.
+fn match_ranges(content: &str, old: &str) -> Result<Vec<(usize, usize)>, String> {
+    let pattern = old
+        .split('\n')
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join("\r?\n");
+    let regex = regex::RegexBuilder::new(&pattern)
+        .size_limit(MATCH_SIZE_LIMIT)
+        .dfa_size_limit(MATCH_SIZE_LIMIT)
+        .build()
+        .map_err(|_| {
+            "old_string is too large to match. Split the edit into smaller replacements.".to_owned()
+        })?;
+    Ok(regex
+        .find_iter(content)
+        .map(|found| (found.start(), found.end()))
+        .collect())
+}
+
+/// The compiled size a match pattern may take. Each literal byte emits about 32 bytes of NFA
+/// state, so an `old_string` over roughly 1 MiB that spans lines exceeds this.
+const MATCH_SIZE_LIMIT: usize = 32 * 1024 * 1024;
+
+/// `content` with each range in `ranges` replaced by `new_string`, converting its line breaks to
+/// the ending found in the matched region, or to the dominant ending when the match has none.
+fn splice(content: &str, ranges: &[(usize, usize)], new_string: &str) -> String {
+    let dominant = dominant_eol(content);
+    let mut converted: [Option<String>; 2] = [None, None];
+    let mut updated = String::with_capacity(content.len());
+    let mut last = 0;
+    for &(start, end) in ranges {
+        updated.push_str(&content[last..start]);
+        let eol = region_eol(&content[start..end]).unwrap_or(dominant);
+        let slot = usize::from(eol == "\r\n");
+        let replacement =
+            converted[slot].get_or_insert_with(|| apply_eol(new_string.to_owned(), eol));
+        updated.push_str(replacement);
+        last = end;
+    }
+    updated.push_str(&content[last..]);
+    updated
+}
+
+/// The line ending of the first line break in `text`.
+fn region_eol(text: &str) -> Option<&'static str> {
+    let lf = text.find('\n')?;
+    Some(if text[..lf].ends_with('\r') {
+        "\r\n"
+    } else {
+        "\n"
+    })
 }
 
 // ── Diff Production ──
 
-/// The diff of replacing every `old_string` in `original` with `new_string`, counted in one pass
-/// over `original`, and the new-content lines each replacement writes. Old-side numbers count lines
-/// of `original`, and new-side numbers count lines of the edited text.
+/// The boundary-trimmed hunk of replacing `old` with `new`, numbered from line 1 on both sides.
+pub(super) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
+    let mut chunk = DiffChunk {
+        old: split_into_diff_lines(old, 1),
+        new: split_into_diff_lines(new, 1),
+    };
+    trim_chunk(&mut chunk);
+    chunk
+}
+
+/// The diff of replacing every range in `ranges` of `original` with `new_string`, and the
+/// new-content lines each replacement writes. Old-side numbers count lines of `original`, and
+/// new-side numbers count lines of the edited text.
 fn build_diff(
     original: &str,
     old_string: &str,
     new_string: &str,
+    ranges: &[(usize, usize)],
 ) -> (EditDiff, Vec<(usize, usize)>) {
     let hunk = synthesize_chunk(old_string, new_string);
     let old_breaks = old_string.matches('\n').count();
@@ -278,8 +328,8 @@ fn build_diff(
     let mut locations = Vec::new();
     let mut written = Vec::new();
     let (mut old_line, mut new_line, mut scanned) = (1, 1, 0);
-    for (pos, _) in original.match_indices(old_string) {
-        let breaks = original[scanned..pos].matches('\n').count();
+    for &(start, end) in ranges {
+        let breaks = original[scanned..start].matches('\n').count();
         old_line += breaks;
         new_line += breaks;
 
@@ -291,7 +341,7 @@ fn build_diff(
 
         old_line += old_breaks;
         new_line += new_breaks;
-        scanned = pos + old_string.len();
+        scanned = end;
     }
 
     let (old_line, new_line) = first.unwrap_or((1, 1));
@@ -306,7 +356,7 @@ fn build_diff(
 
 /// The first removed line, or first added line for an insertion, offset from the hunk's 1-based
 /// numbering by `old_line` or `new_line`. `None` for an empty hunk.
-fn anchor_line(hunk: &DiffChunk, old_line: usize, new_line: usize) -> Option<usize> {
+pub(super) fn anchor_line(hunk: &DiffChunk, old_line: usize, new_line: usize) -> Option<usize> {
     let old = hunk.old.first().map(|line| line.number + old_line - 1);
     old.or_else(|| hunk.new.first().map(|line| line.number + new_line - 1))
 }
@@ -379,25 +429,6 @@ fn apply_eol(content: String, eol: &str) -> String {
     }
 }
 
-// ── Result View ──
-
-/// The diff of replacing `old` with `new`, numbered from line 1, for a call that recorded none.
-pub(super) fn synthesize_diff(old: &str, new: &str) -> EditDiff {
-    let chunk = synthesize_chunk(old, new);
-    let locations = anchor_line(&chunk, 1, 1).into_iter().collect();
-    EditDiff { chunk, locations }
-}
-
-/// The boundary-trimmed hunk of replacing `old` with `new`, numbered from line 1 on both sides.
-pub(super) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
-    let mut chunk = DiffChunk {
-        old: split_into_diff_lines(old, 1),
-        new: split_into_diff_lines(new, 1),
-    };
-    trim_chunk(&mut chunk);
-    chunk
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -423,88 +454,6 @@ mod tests {
         }
     }
 
-    mod result_view {
-        use super::*;
-
-        #[test]
-        fn prefers_the_recorded_diff() {
-            let input = serde_json::json!({
-                "file_path": "/tmp/f.rs",
-                "old_string": "a",
-                "new_string": "b",
-                "replace_all": true,
-            });
-            let diff = EditDiff {
-                chunk: DiffChunk {
-                    old: vec![line(12, "a")],
-                    new: vec![line(12, "b")],
-                },
-                locations: vec![12, 47],
-            };
-            let metadata = ToolMetadata {
-                diff: Some(diff.clone()),
-                ..ToolMetadata::default()
-            };
-
-            let view = EditTool.result_view(
-                &input,
-                "Replaced 2 occurrences in /tmp/f.rs.",
-                &metadata,
-                Path::new("/repo"),
-            );
-
-            assert_eq!(view, Some(ToolResultView::Diff(diff)));
-        }
-
-        #[test]
-        fn without_a_recorded_diff_synthesizes_one_from_the_input() {
-            let input = serde_json::json!({
-                "file_path": "/tmp/f.rs",
-                "old_string": "fn foo()",
-                "new_string": "fn bar()",
-            });
-
-            let view = EditTool.result_view(
-                &input,
-                "Successfully edited /tmp/f.rs.",
-                &ToolMetadata::default(),
-                Path::new("/repo"),
-            );
-
-            assert_eq!(
-                view,
-                Some(ToolResultView::Diff(EditDiff {
-                    chunk: DiffChunk {
-                        old: vec![line(1, "fn foo()")],
-                        new: vec![line(1, "fn bar()")],
-                    },
-                    locations: vec![1],
-                })),
-            );
-        }
-
-        #[test]
-        fn missing_or_mistyped_required_inputs_uses_plain_output() {
-            for input in [
-                serde_json::json!({"old_string": "x"}),
-                serde_json::json!({"file_path": "/tmp/x"}),
-                serde_json::json!({"file_path": "/tmp/x", "old_string": 42, "new_string": "b"}),
-                serde_json::json!({"file_path": "/tmp/x", "old_string": "a", "new_string": 42}),
-            ] {
-                assert_eq!(
-                    EditTool.result_view(
-                        &input,
-                        "edited",
-                        &ToolMetadata::default(),
-                        Path::new("/repo")
-                    ),
-                    None,
-                    "{input}",
-                );
-            }
-        }
-    }
-
     mod approval_preview {
         use super::*;
 
@@ -514,11 +463,11 @@ mod tests {
             let preview = tool
                 .approval_preview(
                     "edit",
-                    &serde_json::json!({
+                    &crate::tool::local_testing::prepared(serde_json::json!({
                         "file_path": "/repo/src/main.rs",
                         "old_string": "let a = 1;",
                         "new_string": "let a = 2;",
-                    }),
+                    })),
                     Path::new("/repo"),
                 )
                 .await;
@@ -578,7 +527,7 @@ mod tests {
             });
             let ctx = seeded_ctx(&path);
 
-            let output = run(input, &ctx).await;
+            let output = local_testing::run(&EditTool, input, &ctx).await;
 
             assert!(!output.is_error);
             assert_eq!(
@@ -601,7 +550,7 @@ mod tests {
             });
             let ctx = seeded_ctx(&path);
 
-            let output = run(input, &ctx).await;
+            let output = local_testing::run(&EditTool, input, &ctx).await;
 
             assert!(!output.is_error);
             assert_eq!(
@@ -611,9 +560,48 @@ mod tests {
             assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
         }
 
+        #[cfg(target_os = "linux")]
+        #[tokio::test]
+        async fn edits_a_target_under_a_non_utf8_working_directory() {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let dir = canonical_tempdir();
+            let cwd = dir
+                .path()
+                .join(std::ffi::OsString::from_vec(b"caf\xe9".to_vec()));
+            fs::create_dir(&cwd).unwrap();
+            let path = cwd.join("notes.txt");
+            fs::write(&path, "old\n").unwrap();
+            let ctx = ctx_with(&cwd, tracker_seeded(&path));
+
+            let output = local_testing::run(
+                &EditTool,
+                serde_json::json!({
+                    "file_path": "notes.txt",
+                    "old_string": "old",
+                    "new_string": "new",
+                }),
+                &ctx,
+            )
+            .await;
+
+            assert!(!output.is_error, "{}", output.content);
+            assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+            let entries: Vec<_> = fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(
+                entries,
+                [cwd.file_name().unwrap()],
+                "the edit must not touch the lossy spelling",
+            );
+        }
+
         #[tokio::test]
         async fn missing_required_fields_reports_input_error() {
-            let output = run(
+            let output = local_testing::run(
+                &EditTool,
                 serde_json::json!({
                     "file_path": "/tmp/x",
                     "old_string": "a"
@@ -632,7 +620,8 @@ mod tests {
             let path = dir.path().join("test.txt");
             fs::write(&path, "hello world").unwrap();
 
-            let output = run(
+            let output = local_testing::run(
+                &EditTool,
                 serde_json::json!({
                     "file_path": path.to_str().unwrap(),
                     "old_string": "not present",
@@ -663,7 +652,7 @@ mod tests {
             let ctx = seeded_ctx(&path);
             let before = ctx.tracker.snapshot_all();
 
-            let error = edit_file(path.to_str().unwrap(), "original", "changed", false, &ctx)
+            let error = edit_file(&path, "original", "changed", false, &ctx)
                 .await
                 .unwrap_err();
 
@@ -687,7 +676,7 @@ mod tests {
 
             let detour = dir.path().join("sub").join("..").join("test.txt");
 
-            let result = edit_file(detour.to_str().unwrap(), "hello", "goodbye", false, &ctx).await;
+            let result = edit_file(&detour, "hello", "goodbye", false, &ctx).await;
 
             result.unwrap();
             assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
@@ -703,7 +692,7 @@ mod tests {
             ctx.tracker
                 .record_read(&path, &bytes, LastView::lines(1, 1, 2), "toolu_test");
 
-            let result = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx).await;
+            let result = edit_file(&path, "hello", "goodbye", false, &ctx).await;
 
             result.unwrap();
             assert_eq!(
@@ -802,7 +791,7 @@ mod tests {
             let path = dir.path().join("test.txt");
             fs::write(&path, "hello").unwrap();
 
-            let err = edit_file(path.to_str().unwrap(), "", "x", false, &temp_ctx())
+            let err = edit_file(&path, "", "x", false, &temp_ctx())
                 .await
                 .unwrap_err();
 
@@ -816,7 +805,7 @@ mod tests {
             let path = dir.path().join("test.txt");
             fs::write(&path, "hello").unwrap();
 
-            let err = edit_file(path.to_str().unwrap(), "hello", "hello", false, &temp_ctx())
+            let err = edit_file(&path, "hello", "hello", false, &temp_ctx())
                 .await
                 .unwrap_err();
 
@@ -833,7 +822,7 @@ mod tests {
             fs::write(&path, "hello world").unwrap();
 
             let err = edit_file(
-                path.to_str().unwrap(),
+                &path,
                 "nonexistent",
                 "replacement",
                 false,
@@ -857,15 +846,9 @@ mod tests {
             let path = dir.path().join("test.txt");
             fs::write(&path, "hello world").unwrap();
 
-            let err = edit_file(
-                path.to_str().unwrap(),
-                "hello",
-                "goodbye",
-                false,
-                &temp_ctx(),
-            )
-            .await
-            .unwrap_err();
+            let err = edit_file(&path, "hello", "goodbye", false, &temp_ctx())
+                .await
+                .unwrap_err();
 
             assert_eq!(
                 err,
@@ -885,7 +868,7 @@ mod tests {
             let ctx = seeded_ctx(&path);
             fs::write(&path, "external edit").unwrap();
 
-            let err = edit_file(path.to_str().unwrap(), "external", "ours", false, &ctx)
+            let err = edit_file(&path, "external", "ours", false, &ctx)
                 .await
                 .unwrap_err();
 
@@ -903,7 +886,7 @@ mod tests {
         async fn rejects_nonexistent_file() {
             let path = "/nonexistent/file.txt";
 
-            let err = edit_file(path, "a", "b", false, &temp_ctx())
+            let err = edit_file(Path::new(path), "a", "b", false, &temp_ctx())
                 .await
                 .unwrap_err();
 
@@ -921,12 +904,16 @@ mod tests {
             ctx.tracker
                 .record_read(&path, &bytes, LastView::Full, "toolu_test");
 
-            let err = edit_file(path.to_str().unwrap(), "a", "b", false, &ctx)
-                .await
-                .unwrap_err();
+            let err = edit_file(&path, "a", "b", false, &ctx).await.unwrap_err();
 
-            let cause = String::from_utf8(bytes.to_vec()).unwrap_err();
-            assert_eq!(err, format!("Failed to read {}: {cause}", path.display()));
+            assert_eq!(
+                err,
+                format!(
+                    "{} is not valid UTF-8, so edit cannot change it. \
+                     Use the bash tool to edit it.",
+                    path.display()
+                ),
+            );
         }
 
         #[tokio::test]
@@ -935,15 +922,9 @@ mod tests {
             let path = dir.path().join("test.txt");
             fs::write(&path, "aaa bbb aaa").unwrap();
 
-            let err = edit_file(
-                path.to_str().unwrap(),
-                "aaa",
-                "ccc",
-                false,
-                &seeded_ctx(&path),
-            )
-            .await
-            .unwrap_err();
+            let err = edit_file(&path, "aaa", "ccc", false, &seeded_ctx(&path))
+                .await
+                .unwrap_err();
             assert_eq!(
                 err,
                 format!(
@@ -960,7 +941,7 @@ mod tests {
             let dir = canonical_tempdir();
             let path = dir.path().to_str().unwrap();
 
-            let err = edit_file(path, "a", "b", false, &temp_ctx())
+            let err = edit_file(Path::new(path), "a", "b", false, &temp_ctx())
                 .await
                 .unwrap_err();
 
@@ -974,7 +955,7 @@ mod tests {
             let f = fs::File::create(&path).unwrap();
             f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
-            let err = edit_file(path.to_str().unwrap(), "a", "b", false, &temp_ctx())
+            let err = edit_file(&path, "a", "b", false, &temp_ctx())
                 .await
                 .unwrap_err();
 
@@ -992,7 +973,7 @@ mod tests {
             let ctx = seeded_ctx(&path);
             local_testing::make_read_only(&path);
 
-            let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx)
+            let err = edit_file(&path, "hello", "goodbye", false, &ctx)
                 .await
                 .unwrap_err();
 
@@ -1017,7 +998,7 @@ mod tests {
                     .await;
             assert!(!read.is_error, "{}", read.content);
 
-            let result = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &ctx).await;
+            let result = edit_file(&path, "hello", "goodbye", false, &ctx).await;
 
             result.unwrap();
             assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
@@ -1030,7 +1011,7 @@ mod tests {
             let path = dir.path().join("socket");
             let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
-            let err = edit_file(path.to_str().unwrap(), "a", "b", false, &temp_ctx())
+            let err = edit_file(&path, "a", "b", false, &temp_ctx())
                 .await
                 .unwrap_err();
 
@@ -1051,7 +1032,7 @@ mod tests {
             use super::*;
 
             #[test]
-            fn preserves_dominant_line_endings_without_doubling_crlf() {
+            fn preserves_every_ending_outside_the_replaced_span() {
                 for (name, content, old, new, expected) in [
                     (
                         "unique",
@@ -1079,18 +1060,25 @@ mod tests {
                         "aaa\nbbb\r\nreplace_me\r\n",
                         "replace_me",
                         "replaced",
-                        "aaa\r\nbbb\r\nreplaced\r\n",
+                        "aaa\nbbb\r\nreplaced\r\n",
                     ),
                     (
                         "mixed multiline",
                         "foo\nbar\r\nbaz\r\n",
                         "foo\nbar",
                         "a\nb",
-                        "a\r\nb\r\nbaz\r\n",
+                        "a\nb\r\nbaz\r\n",
+                    ),
+                    (
+                        "stray crlf",
+                        "aaa\nbbb\r\nccc\n",
+                        "bbb",
+                        "BBB",
+                        "aaa\nBBB\r\nccc\n",
                     ),
                 ] {
                     let replacement = Replacement {
-                        path: "test.txt".to_owned(),
+                        path: PathBuf::from("test.txt"),
                         old_string: old.to_owned(),
                         new_string: new.to_owned(),
                         replace_all: false,
@@ -1106,7 +1094,7 @@ mod tests {
             #[test]
             fn replace_all_numbers_the_first_hunk_and_lists_every_location() {
                 let replacement = Replacement {
-                    path: "grow.txt".to_owned(),
+                    path: PathBuf::from("grow.txt"),
                     old_string: "B".to_owned(),
                     new_string: "X\nY".to_owned(),
                     replace_all: true,
@@ -1140,12 +1128,58 @@ mod tests {
         }
     }
 
-    mod build_diff {
+    mod match_ranges {
         use super::*;
 
         #[test]
+        fn matches_each_occurrence_with_either_line_ending() {
+            for (case, content, old, expected) in [
+                ("one line", "a\nb\na\n", "a", vec![(0, 1), (4, 5)]),
+                ("several lines", "a\nb\nc\n", "a\nb", vec![(0, 3)]),
+                ("leading break", "a\nb\nc\n", "\nb", vec![(1, 3)]),
+                ("lone break", "a\nb\n", "\n", vec![(1, 2), (3, 4)]),
+                ("crlf match", "a\r\nb\r\n", "a\nb", vec![(0, 4)]),
+                (
+                    "leading break before crlf",
+                    "a\r\nb\r\nc",
+                    "\nb",
+                    vec![(1, 4)],
+                ),
+                (
+                    "resumes past a mismatch",
+                    "a\nc\na\nb",
+                    "a\nb",
+                    vec![(4, 7)],
+                ),
+            ] {
+                assert_eq!(match_ranges(content, old).unwrap(), expected, "{case}");
+            }
+        }
+
+        #[test]
+        fn reports_an_old_string_too_large_to_match() {
+            let old = format!("{}\n{}", "a".repeat(700_000), "b".repeat(700_000));
+
+            assert_eq!(
+                match_ranges("", &old),
+                Err(
+                    "old_string is too large to match. Split the edit into smaller replacements."
+                        .to_owned()
+                ),
+            );
+        }
+    }
+
+    mod build_diff {
+        use super::*;
+
+        fn diff_of(original: &str, old: &str, new: &str) -> EditDiff {
+            build_diff(original, old, new, &match_ranges(original, old).unwrap()).0
+        }
+
+        #[test]
         fn numbers_the_hunk_by_its_lines_in_the_file() {
-            let (diff, _) = build_diff("A\nB\nC\n", "B", "X");
+            let diff = diff_of("A\nB\nC\n", "B", "X");
 
             assert_eq!(
                 diff,
@@ -1161,7 +1195,7 @@ mod tests {
 
         #[test]
         fn locates_each_replacement_by_its_first_removed_line() {
-            let (diff, _) = build_diff("X\nY\nA\nX\nY\nB\nX\nY\nC\n", "X\nY", "Z");
+            let diff = diff_of("X\nY\nA\nX\nY\nB\nX\nY\nC\n", "X\nY", "Z");
 
             assert_eq!(
                 diff,
@@ -1177,7 +1211,7 @@ mod tests {
 
         #[test]
         fn locates_each_insertion_by_its_line_after_the_earlier_ones() {
-            let (diff, _) = build_diff("fn foo()\nx\nfn foo()\n", "fn foo()", "fn foo()\n    body");
+            let diff = diff_of("fn foo()\nx\nfn foo()\n", "fn foo()", "fn foo()\n    body");
 
             assert_eq!(
                 diff,
@@ -1193,7 +1227,7 @@ mod tests {
 
         #[test]
         fn a_hunk_that_trims_to_nothing_has_no_locations() {
-            let (diff, _) = build_diff("a b\n", "a", "a\n");
+            let diff = diff_of("a b\n", "a", "a\n");
 
             assert_eq!(
                 diff,
@@ -1243,7 +1277,8 @@ mod tests {
                 ("deleted text", "a\nb\na\n", "a\n", "", vec![]),
                 ("crlf", "a\r\nb\r\na\r\n", "a", "x", vec![(1, 1), (3, 3)]),
             ] {
-                let (_, written) = build_diff(content, old, new);
+                let (_, written) =
+                    build_diff(content, old, new, &match_ranges(content, old).unwrap());
 
                 assert_eq!(written, expected, "{case}");
             }
