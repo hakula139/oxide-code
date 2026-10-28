@@ -7,7 +7,7 @@ use ox_core::protocol::{Op, SavedTarget};
 use ox_core::session::store::listing::ArchiveState;
 
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{SlashCommand, SlashOutcome};
 use crate::action::Action;
 
 // ── ArchiveCmd ──
@@ -23,8 +23,8 @@ impl SlashCommand for ArchiveCmd {
         "Archive this session or a saved one"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        SlashKind::Mutating
+    fn idle_only(&self) -> bool {
+        true
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -52,8 +52,8 @@ impl SlashCommand for UnarchiveCmd {
         "Unarchive a saved session"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        SlashKind::Mutating
+    fn idle_only(&self) -> bool {
+        true
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -92,16 +92,6 @@ fn set_archive(prefix: &str, state: ArchiveState) -> SlashOutcome {
 mod tests {
     use super::*;
     use crate::slash::registry::testing::run_execute;
-
-    mod classify {
-        use super::*;
-
-        #[test]
-        fn is_always_mutating() {
-            assert_eq!(ArchiveCmd.classify(""), SlashKind::Mutating);
-            assert_eq!(ArchiveCmd.classify("ab"), SlashKind::Mutating);
-        }
-    }
 
     mod execute {
         use super::*;
@@ -144,15 +134,6 @@ mod tests {
             fn only_with_a_prefix() {
                 assert!(UnarchiveCmd.echoes_input("ab"));
                 assert!(!UnarchiveCmd.echoes_input(""), "bare form stands alone");
-            }
-        }
-
-        mod classify {
-            use super::*;
-
-            #[test]
-            fn is_mutating() {
-                assert_eq!(UnarchiveCmd.classify("ab"), SlashKind::Mutating);
             }
         }
 

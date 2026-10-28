@@ -81,19 +81,6 @@ impl SlashOutcome {
     }
 }
 
-/// Drives busy-gating: while a stream is in flight, the App runs `ReadOnly` and `Steering` forms
-/// and refuses `Mutating` ones.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SlashKind {
-    /// Pure local read (chat output / modal open).
-    ReadOnly,
-    /// Forwards an action that applies mid-turn: a TUI-only change, such as a theme swap, or an op
-    /// the engine applies to the in-flight turn, such as a permission mode switch.
-    Steering,
-    /// Touches session state or forwards an op that races the in-flight client.
-    Mutating,
-}
-
 /// One row in the typed-arg autocomplete popup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ArgCompletion {
@@ -108,9 +95,11 @@ pub(super) trait SlashCommand: Sync {
 
     fn description(&self) -> &'static str;
 
-    /// The [`SlashKind`] of the form `args`, which decides whether it may run mid-turn.
-    fn classify(&self, _args: &str) -> SlashKind {
-        SlashKind::ReadOnly
+    /// Whether the command waits for an idle App, because any of its forms builds a prompt or sends
+    /// an op that [`ox_core::protocol::Op::is_idle_only`] holds for, directly or from the modal it
+    /// opens. The App runs every other command mid-turn.
+    fn idle_only(&self) -> bool {
+        false
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -155,6 +144,22 @@ pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
     &ThemeCmd,
     &UnarchiveCmd,
 ];
+
+/// Forwards the op [`command::typed_form`] parses for `name`, so the TUI runs each form it shares
+/// with the bare REPL as the REPL does.
+///
+/// # Panics
+///
+/// If `name` has no typed form in [`command`].
+pub(super) fn typed_form(
+    name: &str,
+    args: &str,
+    ctx: &SlashContext<'_>,
+) -> Result<SlashOutcome, String> {
+    let op = command::typed_form(name, args, &ctx.info.project_root)
+        .unwrap_or_else(|| panic!("/{name} has no typed form"))?;
+    Ok(SlashOutcome::Forward(Action::Op(op)))
+}
 
 /// Resolves `name` to the command it names, canonically or as one of its [`command::aliases`].
 pub(super) fn lookup_in<'a>(
@@ -221,7 +226,6 @@ pub(super) mod testing {
 mod tests {
     use std::collections::HashSet;
 
-    use ox_core::command::testing::aliased_names;
     use ox_core::protocol::Op;
 
     use super::*;
@@ -303,13 +307,6 @@ mod tests {
                 .collect()
         }
 
-        fn forms_of_kind(kind: SlashKind) -> Vec<(&'static dyn SlashCommand, String)> {
-            forms()
-                .into_iter()
-                .filter(|(cmd, args)| cmd.classify(args) == kind)
-                .collect()
-        }
-
         #[test]
         fn have_unique_canonical_names() {
             let names: HashSet<_> = BUILT_INS.iter().map(|c| c.name()).collect();
@@ -336,8 +333,8 @@ mod tests {
         }
 
         #[test]
-        fn include_every_command_the_shared_table_aliases() {
-            for name in aliased_names() {
+        fn include_every_command_with_a_typed_form() {
+            for name in command::names() {
                 let found = lookup_in(BUILT_INS, name).map(SlashCommand::name);
                 assert_eq!(found, Some(name));
             }
@@ -354,23 +351,39 @@ mod tests {
         }
 
         #[test]
-        fn read_only_forms_never_forward_or_prompt() {
+        fn forms_that_run_mid_turn_never_start_a_turn_or_send_an_idle_only_op() {
             let info = test_session_info();
             let ctx = SlashContext::new(&info);
-            let forms = forms_of_kind(SlashKind::ReadOnly);
-            assert!(!forms.is_empty(), "no built-in form is read-only");
+            let forms: Vec<_> = forms()
+                .into_iter()
+                .filter(|(cmd, _)| !cmd.idle_only())
+                .collect();
+            assert!(
+                forms.iter().any(|(cmd, args)| matches!(
+                    cmd.execute(args, &ctx),
+                    Ok(SlashOutcome::Forward(Action::Op(_)))
+                )),
+                "no mid-turn form sends an op",
+            );
 
-            let forwarding: Vec<String> = forms
+            let racing: Vec<String> = forms
                 .iter()
-                .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
-                    Ok(outcome @ (SlashOutcome::Forward(_) | SlashOutcome::Prompt(_))) => {
-                        Some(format!("/{} {args} returns {outcome:?}", cmd.name()))
-                    }
-                    _ => None,
+                .filter_map(|(cmd, args)| {
+                    let outcome = cmd.execute(args, &ctx);
+                    let races = match &outcome {
+                        Ok(SlashOutcome::Forward(Action::Op(op))) => op.is_idle_only(),
+                        Ok(SlashOutcome::Modal(modal)) => modal.sends_idle_only_ops(),
+                        other => matches!(
+                            other,
+                            Ok(SlashOutcome::Prompt(_)
+                                | SlashOutcome::Forward(Action::SlashPrompt { .. }))
+                        ),
+                    };
+                    races.then(|| format!("/{} {args} returns {outcome:?}", cmd.name()))
                 })
                 .collect();
 
-            assert_eq!(forwarding, [] as [String; 0]);
+            assert_eq!(racing, [] as [String; 0]);
         }
 
         #[test]
@@ -410,25 +423,6 @@ mod tests {
                 .collect();
 
             assert_eq!(offenders, [] as [String; 0]);
-        }
-
-        #[test]
-        fn steering_forms_forward_only_ops_the_engine_takes_mid_turn() {
-            let info = test_session_info();
-            let ctx = SlashContext::new(&info);
-            let forms = forms_of_kind(SlashKind::Steering);
-            assert!(!forms.is_empty(), "no built-in form steers");
-
-            let racing: Vec<String> = forms
-                .iter()
-                .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
-                    Ok(SlashOutcome::Forward(Action::SwapTheme(_))) | Err(_) => None,
-                    Ok(SlashOutcome::Forward(Action::Op(op))) if !op.is_idle_only() => None,
-                    other => Some(format!("/{} {args} forwards {other:?}", cmd.name())),
-                })
-                .collect();
-
-            assert_eq!(racing, [] as [String; 0]);
         }
     }
 }

@@ -16,7 +16,6 @@ use ratatui::text::{Line, Span};
 use strum::VariantArray;
 use time::OffsetDateTime;
 
-use ox_core::command;
 use ox_core::protocol::{Op, ResumeTarget, SavedTarget};
 use ox_core::session::display::{DisplayTitle, ID_PREFIX_WIDTH, id_prefix};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
@@ -32,7 +31,7 @@ use ox_core::util::time::now_local;
 
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{SlashCommand, SlashOutcome, typed_form};
 use super::sessions::{
     BARE_ARCHIVE_HINT, SHORT_RELATIVE_TIME_WIDTH, format_metadata_line, format_short_relative_time,
     saved_error_message,
@@ -85,9 +84,8 @@ impl SlashCommand for ResumeCmd {
         "Resume a previous session"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        // Both forms send a `Resume` op, which the engine drops mid-turn, so both wait for idle.
-        SlashKind::Mutating
+    fn idle_only(&self) -> bool {
+        true
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -100,7 +98,7 @@ impl SlashCommand for ResumeCmd {
 
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         if !args.is_empty() {
-            return Ok(SlashOutcome::Forward(Action::Op(command::resume(args)?)));
+            return typed_form(self.name(), args, ctx);
         }
         Ok(SlashOutcome::Modal(Box::new(ResumePicker::new(
             ctx.info.store.clone(),
@@ -972,16 +970,6 @@ mod tests {
 
     mod resume_cmd {
         use super::*;
-
-        mod classify {
-            use super::*;
-
-            #[test]
-            fn is_always_mutating() {
-                assert_eq!(ResumeCmd.classify(""), SlashKind::Mutating);
-                assert_eq!(ResumeCmd.classify("ab"), SlashKind::Mutating);
-            }
-        }
 
         mod echoes_input {
             use super::*;
