@@ -277,7 +277,10 @@ impl App {
                 self.queue.mark_switch();
                 self.set_status(Status::Resuming);
             }
-            Op::Compact { .. } => self.set_status(Status::Compacting),
+            Op::Compact { .. } => {
+                self.queue.mark_compacting();
+                self.set_status(Status::Compacting);
+            }
             Op::Login => self.set_status(Status::SigningIn),
             Op::Logout => self.set_status(Status::SigningOut),
             Op::Archive => {
