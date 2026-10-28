@@ -193,7 +193,7 @@ pub mod testing {
 
     /// Variables for `temp_env` that point the home directory at `home` and unset `XDG_CONFIG_HOME`
     /// and `CLAUDE_CONFIG_DIR`, so user-level config and instructions resolve under `home` alone.
-    pub fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 3] {
+    pub(crate) fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 3] {
         [
             (HOME_VAR, Some(home)),
             ("XDG_CONFIG_HOME", None),
