@@ -106,7 +106,7 @@ impl Engine {
         let git_branch = current_branch(self.cwd()).await;
         let outcome = self
             .transcript
-            .roll(&self.store, self.client.model().id(), git_branch)
+            .roll(&self.store, self.settings.model().id(), git_branch)
             .await;
         self.adopt_session(sink, LoadedTranscript::default()).await;
         sink.emit(
@@ -155,7 +155,7 @@ impl Engine {
         self.shells.stop_all().await;
         let (usage, warnings) = self
             .transcript
-            .adopt(transcript, self.client.model(), self.workspace.cwd())
+            .adopt(transcript, self.settings.model(), self.workspace.cwd())
             .await;
         self.instruction_warnings = warnings;
         self.policy.clear_session_allow();

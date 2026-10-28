@@ -21,7 +21,7 @@ A request carries two ephemeral breakpoints, both with the configured [`prompt_c
 - **The static prefix.** The first breakpoint sits on the static system-prompt prefix block, and it carries `scope: "global"` only on a first-party base URL.
 - **The conversation tail.** The second sits on the last content block of the final message without a scope, so each turn reads the previous turn's transcript from cache.
 
-Invalidation follows the API's order, `tools` then `system` then `messages`, so the prompt context is built once per session and the tools and system blocks stay stable from turn to turn. The first compaction summary request keeps both breakpoints, so it reads the conversation's cache. An overflow retry sends a trimmed prefix that no later request extends, so it skips the second.
+Invalidation follows the API's order, `tools` then `system` then `messages`, so the prompt context is built once per session and the tools and system blocks stay stable from turn to turn. The caller decides the second breakpoint through `Request::cache_tail`, which `conversation_request` sets for every conversation round. The first compaction summary request reuses that request, so it reads the conversation's cache. An overflow retry sends a trimmed prefix that no later request extends, so it clears `cache_tail`.
 
 ## Base-URL Gating
 
@@ -49,6 +49,7 @@ The attribution block follows the same split. A first-party request carries the 
 
 ## Sources
 
+- `crates/ox-core/src/client.rs`: `Request`, the conversation request a wire sends, and its `cache_tail` flag.
 - `crates/ox-core/src/client/anthropic.rs`: `Client`, `CLAUDE_CLI_VERSION`, the request builder, and the identity and attribution blocks.
 - `crates/ox-core/src/client/anthropic/betas.rs`: `compute_betas` and the beta header constants.
 - `crates/ox-core/src/client/anthropic/transport.rs`: `with_retry`, `retry_delay`, and the failure classification.
