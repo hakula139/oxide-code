@@ -39,7 +39,7 @@ use crate::model::{Effort, ModelSettings, ModelSpec, PromptCacheTtl};
 use crate::permission::defaults::Shipped;
 use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
-use crate::util::git::project_root;
+use crate::util::path::project_root;
 use crate::util::path::{expand_absolute, expand_user, tildify};
 use crate::util::tls::{PlatformTrust, load_extra_ca_certs};
 use crate::util::variant;

@@ -82,9 +82,10 @@ The status line retains the highest-priority segment, truncating it if needed, t
 - `crates/ox-core/src/model/usage.rs`: `TokenUsage`, the token counts one request reports.
 - `crates/ox-core/src/session/store.rs`: `UsageRecord`, the per-request record a resume prices.
 - `crates/ox-core/src/session/title_generator.rs`: `spawn`, which records the title request's usage and hands it to the engine.
-- `crates/ox-core/src/util/git.rs`: `current_branch` and `current_pull_request` probes, and the checks summary.
+- `crates/ox-core/src/git.rs`: the `current_branch` probe.
 - `crates/ox-tui/src/app/render.rs`: `App::draw_frame`, which builds the `StatusView` the status bar renders.
 - `crates/ox-tui/src/components/status.rs`: `StatusBar`, `StatusView`, and `RunLabel`, the run-state segment's text and tone.
 - `crates/ox-tui/src/components/status/line.rs`: `StatusLine` segment rendering and width fitting.
 - `crates/ox-tui/src/git_probes.rs`: `GitProbes` background branch and pull-request polling, at the detail the roster needs.
+- `crates/ox-tui/src/git_probes/pull_request.rs`: the `current_pull_request` probe and the checks summary.
 - `crates/ox-tui/src/session_info.rs`: `LiveSessionInfo`, which holds the title, usage, and usage limits the bar shows and drops a usage-limit window once it resets.

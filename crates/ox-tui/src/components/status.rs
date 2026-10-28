@@ -14,10 +14,10 @@ use time::{OffsetDateTime, Time};
 
 use ox_core::config::StatusLineSegment;
 use ox_core::tool::tasks::Progress;
-use ox_core::util::git;
 use ox_core::util::time::now_local;
 
 use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
+use crate::git_probes::pull_request::PullRequest;
 use crate::glyphs::SPINNER_FRAMES;
 use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
@@ -84,7 +84,7 @@ pub(crate) struct StatusBar {
     /// Minute of the local day the current-time segment shows, or `None` when the line has none.
     current_minute: Option<u16>,
     git_branch: Option<String>,
-    pull_request: Option<git::PullRequest>,
+    pull_request: Option<PullRequest>,
     /// The run state of the last render, which drives the spinner.
     run: RunLabel,
     spinner_frame: usize,
@@ -124,7 +124,7 @@ impl StatusBar {
     }
 
     /// Returns `true` when the pull request changed and the caller should repaint.
-    pub(crate) fn set_pull_request(&mut self, pull_request: Option<git::PullRequest>) -> bool {
+    pub(crate) fn set_pull_request(&mut self, pull_request: Option<PullRequest>) -> bool {
         if pull_request == self.pull_request {
             return false;
         }
@@ -143,7 +143,7 @@ impl StatusBar {
     }
 
     #[cfg(test)]
-    pub(crate) fn pull_request(&self) -> Option<&git::PullRequest> {
+    pub(crate) fn pull_request(&self) -> Option<&PullRequest> {
         self.pull_request.as_ref()
     }
 
@@ -309,9 +309,10 @@ mod tests {
     use ox_core::client::{RateLimitWindow, RateLimits};
     use ox_core::model::{Effort, ModelSpec};
     use ox_core::protocol::UsageSnapshot;
-    use ox_core::util::git::testing::pull_request;
 
     use super::*;
+    use crate::git_probes::pull_request::testing::pull_request;
+    use crate::git_probes::pull_request::{Checks, ReviewDecision};
     use crate::session_info::testing::unknown_model_session_info;
 
     /// A bar and the App state it renders.
@@ -653,8 +654,8 @@ mod tests {
         #[test]
         fn pull_request_checks_at_wide_and_narrow_widths() {
             let mut scene = Scene::segment(StatusLineSegment::PullRequestChecks);
-            scene.bar.set_pull_request(Some(git::PullRequest {
-                checks: Some(git::Checks::Failing(2)),
+            scene.bar.set_pull_request(Some(PullRequest {
+                checks: Some(Checks::Failing(2)),
                 ..pull_request(86)
             }));
             insta::assert_snapshot!(scene.wide_and_narrow());
@@ -663,8 +664,8 @@ mod tests {
         #[test]
         fn pull_request_review_at_wide_and_narrow_widths() {
             let mut scene = Scene::segment(StatusLineSegment::PullRequestReview);
-            scene.bar.set_pull_request(Some(git::PullRequest {
-                review: Some(git::ReviewDecision::ChangesRequested),
+            scene.bar.set_pull_request(Some(PullRequest {
+                review: Some(ReviewDecision::ChangesRequested),
                 ..pull_request(86)
             }));
             insta::assert_snapshot!(scene.wide_and_narrow());

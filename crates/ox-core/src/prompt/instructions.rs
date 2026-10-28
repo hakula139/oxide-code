@@ -7,7 +7,7 @@ use std::{fs, io, iter};
 use indoc::{formatdoc, indoc};
 
 use crate::permission::project::{ProjectFileError, resolve_project_file};
-use crate::util::git::project_root;
+use crate::util::path::project_root;
 use crate::util::path::{XdgBase, app_dir, claude_dir};
 
 /// The cross-agent instruction file, which takes precedence wherever it is read.
