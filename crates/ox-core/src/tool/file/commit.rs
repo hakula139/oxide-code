@@ -43,7 +43,7 @@ fn write_with(
     }
     let parent = path
         .parent()
-        .ok_or_else(|| io::Error::other("the file has no parent"))?;
+        .expect("prepare resolves an absolute file path");
     let original = expected
         .map(|bytes| Original::open(path, bytes))
         .transpose()?;
@@ -257,7 +257,7 @@ impl Drop for TemporaryFile {
 mod tests {
     use super::*;
 
-    mod write {
+    mod write_with {
         use super::*;
 
         fn entries(path: &Path) -> Vec<std::ffi::OsString> {

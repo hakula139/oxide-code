@@ -21,7 +21,7 @@ use crate::permission::{Mode, PermissionClass, Policy, Workspace};
 use crate::protocol::{Event, Op};
 use crate::session::handle::{self, SessionHandle};
 use crate::session::store::SessionStore;
-use crate::tool::{Prepared, Tool, ToolCtx, ToolOutput, ToolSpec};
+use crate::tool::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
 
 // ── Engine ──
 
@@ -183,9 +183,11 @@ pub(super) struct EchoTool;
 impl Tool for EchoTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "echo".to_owned(),
-            description: "echo the input".to_owned(),
-            input_schema: json!({"type": "object"}),
+            definition: ToolDefinition {
+                name: "echo".to_owned(),
+                description: "echo the input".to_owned(),
+                input_schema: json!({"type": "object"}),
+            },
             class: PermissionClass::Exec,
             parallel_safe: false,
         }

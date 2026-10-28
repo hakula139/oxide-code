@@ -48,7 +48,7 @@ impl TurnReport {
     pub(super) fn context_estimate(
         &self,
         prompt: &PromptParts,
-        tools: &[ToolDefinition],
+        tools: &[&ToolDefinition],
         messages: &[Message],
     ) -> u32 {
         self.usage().map_or_else(
@@ -443,7 +443,7 @@ pub(super) async fn record_drained_prompts(
 async fn stream_response(
     client: &dyn Wire,
     transcript: &LiveTranscript,
-    tools: &[ToolDefinition],
+    tools: &[&ToolDefinition],
     sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
 ) -> Result<Response> {
@@ -514,8 +514,7 @@ mod tests {
     use crate::session::store::testing::test_store;
     use crate::tool::view::{NumberedLine, ToolResultView};
     use crate::tool::{
-        DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry,
-        ToolSpec,
+        DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec,
     };
     use crate::util::path::local_testing::canonical_tempdir;
 
@@ -565,7 +564,7 @@ mod tests {
                 messages: &[Message],
                 _system: &SystemPrompt,
                 _user_context: Option<&str>,
-                _tools: &[ToolDefinition],
+                _tools: &[&ToolDefinition],
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
                 self.requests.lock().unwrap().push(messages.to_vec());
                 let events = self
@@ -664,15 +663,17 @@ mod tests {
             events
         }
 
-        /// Path tool whose result view shows the input and metadata it was resolved from.
+        /// Path tool whose result view shows the input it was resolved from.
         struct PathViewTool;
 
         impl Tool for PathViewTool {
             fn spec(&self) -> ToolSpec {
                 ToolSpec {
-                    name: "path_view".to_owned(),
-                    description: "view a path".to_owned(),
-                    input_schema: json!({"type": "object"}),
+                    definition: ToolDefinition {
+                        name: "path_view".to_owned(),
+                        description: "view a path".to_owned(),
+                        input_schema: json!({"type": "object"}),
+                    },
                     class: crate::permission::PermissionClass::Read,
                     parallel_safe: true,
                 }
@@ -701,14 +702,13 @@ mod tests {
                 &self,
                 input: &serde_json::Value,
                 _content: &str,
-                metadata: &ToolMetadata,
                 _cwd: &Path,
             ) -> Option<ToolResultView> {
                 Some(ToolResultView::ReadExcerpt {
                     path: input["file_path"].as_str().unwrap_or_default().to_owned(),
                     lines: vec![NumberedLine {
                         number: 1,
-                        text: metadata.title.clone().unwrap_or_default(),
+                        text: "viewed".to_owned(),
                     }],
                     total_lines: 1,
                 })
@@ -724,7 +724,7 @@ mod tests {
                 _messages: &[Message],
                 _system: &SystemPrompt,
                 _user_context: Option<&str>,
-                _tools: &[ToolDefinition],
+                _tools: &[&ToolDefinition],
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
                 let (tx, rx) = mpsc::channel(1);
                 tx.try_send(Ok(ResponseEvent::Text(self.0.to_owned())))
@@ -742,9 +742,11 @@ mod tests {
         impl Tool for GateTool {
             fn spec(&self) -> ToolSpec {
                 ToolSpec {
-                    name: "gate".to_owned(),
-                    description: "blocks until the turn is cancelled".to_owned(),
-                    input_schema: json!({"type": "object"}),
+                    definition: ToolDefinition {
+                        name: "gate".to_owned(),
+                        description: "blocks until the turn is cancelled".to_owned(),
+                        input_schema: json!({"type": "object"}),
+                    },
                     class: crate::permission::PermissionClass::Exec,
                     parallel_safe: false,
                 }
@@ -1096,7 +1098,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn resolves_result_views_from_the_unpinned_input_and_tool_metadata() {
+        async fn resolves_result_views_from_the_unpinned_input() {
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());
             let cwd = canonical_tempdir();
@@ -1140,7 +1142,7 @@ mod tests {
                             path: "notes.txt".to_owned(),
                             lines: vec![NumberedLine {
                                 number: 1,
-                                text: "Viewed notes".to_owned(),
+                                text: "viewed".to_owned(),
                             }],
                             total_lines: 1,
                         },
@@ -2992,7 +2994,7 @@ mod tests {
                 _messages: &[Message],
                 _system: &SystemPrompt,
                 _user_context: Option<&str>,
-                _tools: &[ToolDefinition],
+                _tools: &[&ToolDefinition],
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
                 bail!("the API refused the request")
             }

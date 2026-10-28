@@ -69,7 +69,7 @@ After you approve access, oxide-code stores the login in `$XDG_DATA_HOME/ox/cred
 
 `/logout` deletes that file. A session using it switches to the Claude Code login if one is available. Otherwise, it stays open signed out until the next `/login`. If the Claude Code login exists but cannot be used, for example because it expired, `/logout` explains why.
 
-Both commands end by naming the credential that requests will now use. An environment variable or `client.api_key` takes precedence over either login, and `/login` tells you when one of them keeps the session on that credential and how to remove it so the new login takes over after a restart. See [Authentication](configuration.md#authentication) for the full order.
+Both commands end by naming the credential that requests will now use. An environment variable or `[client.auth]` takes precedence over either login, and `/login` tells you when one of them keeps the session on that credential and how to remove it so the new login takes over after a restart. See [Authentication](configuration.md#authentication) for the full order.
 
 ## Sessions
 

@@ -59,7 +59,6 @@ impl AuthKind {
 pub enum AuthSource {
     AuthTokenEnv,
     ApiKeyEnv,
-    ApiKeyFile,
     ClientBearer,
     ClientApiKey,
     ClientOAuth,
@@ -72,20 +71,29 @@ pub enum AuthSource {
     ClaudeCodeLogin,
 }
 
+/// One slot in [`AuthSource::EXPLICIT`].
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Explicit {
+    /// A credential environment variable.
+    Env(AuthSource),
+    /// The `[client.auth]` credential, whichever type it selects.
+    Config,
+}
+
 impl AuthSource {
-    /// The env and config sources, in the precedence order they win over each other and over the
-    /// stored logins.
-    const EXPLICIT: [Self; 4] = [
-        Self::AuthTokenEnv,
-        Self::ApiKeyEnv,
-        Self::ApiKeyFile,
-        Self::OAuthTokenEnv,
+    /// The explicit credential slots in the order they win over each other and over the stored
+    /// logins: the environment variables around the one config slot.
+    pub(super) const EXPLICIT: [Explicit; 4] = [
+        Explicit::Env(Self::AuthTokenEnv),
+        Explicit::Env(Self::ApiKeyEnv),
+        Explicit::Config,
+        Explicit::Env(Self::OAuthTokenEnv),
     ];
 
     pub const fn kind(self) -> AuthKind {
         match self {
             Self::AuthTokenEnv | Self::ClientBearer => AuthKind::AuthToken,
-            Self::ApiKeyEnv | Self::ApiKeyFile | Self::ClientApiKey => AuthKind::ApiKey,
+            Self::ApiKeyEnv | Self::ClientApiKey => AuthKind::ApiKey,
             Self::OAuthTokenEnv | Self::ClientOAuth | Self::OxLogin | Self::ClaudeCodeLogin => {
                 AuthKind::OAuth
             }
@@ -94,21 +102,7 @@ impl AuthSource {
 
     /// Returns whether the credential is a stored login, which `/login` and `/logout` can replace.
     pub(crate) const fn is_stored_login(self) -> bool {
-        self.login().is_some()
-    }
-
-    const fn login(self) -> Option<Login> {
-        match self {
-            Self::OxLogin => Some(Login::Ox),
-            Self::ClaudeCodeLogin => Some(Login::ClaudeCode),
-            Self::AuthTokenEnv
-            | Self::ApiKeyEnv
-            | Self::ApiKeyFile
-            | Self::OAuthTokenEnv
-            | Self::ClientBearer
-            | Self::ClientApiKey
-            | Self::ClientOAuth => None,
-        }
+        matches!(self, Self::OxLogin | Self::ClaudeCodeLogin)
     }
 
     /// The env var the credential was read from, `None` for the config file or a stored login.
@@ -117,8 +111,7 @@ impl AuthSource {
             Self::AuthTokenEnv => Some("ANTHROPIC_AUTH_TOKEN"),
             Self::ApiKeyEnv => Some("ANTHROPIC_API_KEY"),
             Self::OAuthTokenEnv => Some("CLAUDE_CODE_OAUTH_TOKEN"),
-            Self::ApiKeyFile
-            | Self::ClientBearer
+            Self::ClientBearer
             | Self::ClientApiKey
             | Self::ClientOAuth
             | Self::OxLogin
@@ -128,15 +121,14 @@ impl AuthSource {
 
     /// The env var, config key, or store the credential was read from.
     fn origin(self) -> &'static str {
-        if matches!(
-            self,
-            Self::ClientBearer | Self::ClientApiKey | Self::ClientOAuth
-        ) {
-            return "client.auth";
+        match self {
+            Self::AuthTokenEnv => "ANTHROPIC_AUTH_TOKEN",
+            Self::ApiKeyEnv => "ANTHROPIC_API_KEY",
+            Self::OAuthTokenEnv => "CLAUDE_CODE_OAUTH_TOKEN",
+            Self::ClientBearer | Self::ClientApiKey | Self::ClientOAuth => "client.auth",
+            Self::OxLogin => Login::Ox.name(),
+            Self::ClaudeCodeLogin => Login::ClaudeCode.name(),
         }
-        self.env_var()
-            .or(self.login().map(Login::name))
-            .unwrap_or("client.api_key")
     }
 
     /// Recovery step shown when the API rejects the credential with HTTP 401.
@@ -144,9 +136,6 @@ impl AuthSource {
         match self {
             Self::AuthTokenEnv => "Check ANTHROPIC_AUTH_TOKEN.",
             Self::ApiKeyEnv => "Check ANTHROPIC_API_KEY.",
-            Self::ApiKeyFile => {
-                "Check client.api_key in your user config. `/config` shows which file sets it."
-            }
             Self::ClientBearer | Self::ClientApiKey | Self::ClientOAuth => {
                 "Check client.auth in your user config. `/config` shows which file sets it."
             }
@@ -188,23 +177,34 @@ pub(crate) struct Auth {
 
 #[derive(Clone)]
 enum Secret {
-    Fixed(String),
+    Fixed(Credential),
     Stored(Arc<SessionLogin>),
 }
 
 impl Auth {
     /// A credential sent unchanged for the whole session, as env vars and the config file supply.
-    pub(crate) fn new(source: AuthSource, secret: impl Into<String>) -> Self {
-        Self {
-            source,
-            secret: Secret::Fixed(secret.into()),
-        }
+    /// Fails when `secret` cannot travel in an HTTP header.
+    pub(crate) fn new(source: AuthSource, secret: impl Into<String>) -> Result<Self> {
+        Ok(Self::fixed(source, Credential::new(source, secret.into())?))
+    }
+
+    /// [`Self::new`] for a fixture secret that is known to be header-safe.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn test(source: AuthSource, secret: &str) -> Self {
+        Self::new(source, secret).expect("test secret is a header-safe value")
     }
 
     pub(super) fn stored(login: SessionLogin) -> Self {
         Self {
             source: login.login().into(),
             secret: Secret::Stored(Arc::new(login)),
+        }
+    }
+
+    fn fixed(source: AuthSource, credential: Credential) -> Self {
+        Self {
+            source,
+            secret: Secret::Fixed(credential),
         }
     }
 
@@ -219,7 +219,7 @@ impl Auth {
     #[cfg(test)]
     pub(crate) fn secret(&self) -> String {
         match &self.secret {
-            Secret::Fixed(secret) => secret.clone(),
+            Secret::Fixed(credential) => credential.secret.clone(),
             Secret::Stored(login) => login.cached_token(),
         }
     }
@@ -232,11 +232,13 @@ impl Auth {
         trust: &Arc<dyn Trust>,
         reloads: &TaskTracker,
     ) -> Result<Credential> {
-        let secret = match &self.secret {
-            Secret::Fixed(secret) => secret.clone(),
-            Secret::Stored(login) => login.access_token(trust, reloads).await?,
-        };
-        Credential::new(self.source, secret)
+        match &self.secret {
+            Secret::Fixed(credential) => Ok(credential.clone()),
+            Secret::Stored(login) => {
+                let secret = login.access_token(trust, reloads).await?;
+                Credential::new(self.source, secret)
+            }
+        }
     }
 
     /// The credential to resend a request with after the API rejected `rejected` with HTTP 401: a
@@ -286,6 +288,7 @@ pub(crate) fn is_transient(error: &anyhow::Error) -> bool {
 // ── Credential ──
 
 /// A credential as one request sends it.
+#[derive(Clone)]
 pub(crate) struct Credential {
     secret: String,
     name: HeaderName,
@@ -336,25 +339,23 @@ impl PendingAuth {
             "client.auth.file at {} is empty",
             self.path.display()
         );
-        Credential::new(self.source, secret.to_owned())
+        let credential = Credential::new(self.source, secret.to_owned())
             .with_context(|| format!("invalid client.auth.file at {}", self.path.display()))?;
-        Ok(Auth::new(self.source, secret))
+        Ok(Auth::fixed(self.source, credential))
     }
 }
 
-pub(super) fn configured_auth(auth: ClientAuth) -> Result<(Option<Auth>, Option<PendingAuth>)> {
-    let (source, AuthValue { value, file }) = match auth {
+pub(super) fn configured_auth(auth: ClientAuth) -> Result<Option<ExplicitAuth>> {
+    let (source, value) = match auth {
         ClientAuth::Bearer(value) => (AuthSource::ClientBearer, value),
         ClientAuth::ApiKey(value) => (AuthSource::ClientApiKey, value),
         ClientAuth::Oauth(value) => (AuthSource::ClientOAuth, value),
-        ClientAuth::Login {} => return Ok((None, None)),
+        ClientAuth::Login(_) => return Ok(None),
     };
-    if let Some(secret) = value {
-        Credential::new(source, secret.clone())?;
-        return Ok((Some(Auth::new(source, secret)), None));
+    match value {
+        AuthValue::Value(secret) => Ok(Some(ExplicitAuth::Inline(Auth::new(source, secret)?))),
+        AuthValue::File(path) => Ok(Some(ExplicitAuth::File(PendingAuth { source, path }))),
     }
-    let path = crate::util::path::expand_user(&file.expect("validated auth has a source"))?;
-    Ok((None, Some(PendingAuth { source, path })))
 }
 
 /// Credential resolution failure. Messages capture config paths when the error is constructed
@@ -375,7 +376,7 @@ impl CredentialError {
         let message = format!(
             "no credentials for {base_url}. \
              Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
-             or add `api_key` to {config}. \
+             or add a credential under `[client.auth]` in {config}. \
              Stored logins are sent only to the Anthropic API.",
             config = user_config_hint(),
         );
@@ -388,7 +389,8 @@ impl CredentialError {
                 "no credentials found: no API key or token is set, no oxide-code login is stored, \
                  and no Claude Code login is in {stores}. \
                  Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
-                 add `api_key` to {config}, or sign in with `/login` in the `ox` TUI.",
+                 add a credential under `[client.auth]` in {config}, \
+                 or sign in with `/login` in the `ox` TUI.",
                 stores = login_stores(),
                 config = user_config_hint(),
             ),
@@ -436,17 +438,21 @@ pub(crate) async fn retry_stored_login(
         .map_err(|e| LoginUnavailable::new(&e))
 }
 
-/// Explicit credentials in precedence order: env and config values, before the stored logins.
-pub(super) fn explicit_credentials(
-    mut file_api_key: Option<String>,
-) -> [(AuthSource, Option<String>); 4] {
-    AuthSource::EXPLICIT.map(|source| {
-        let secret = match source.env_var() {
-            Some(var) => env::string(var),
-            None => file_api_key.take(),
-        };
-        (source, secret)
-    })
+/// An explicit credential: one ready to send, or a `[client.auth]` file whose secret loads in
+/// [`Config::resolve_auth`](crate::config::Config::resolve_auth).
+#[derive(Debug)]
+pub(super) enum ExplicitAuth {
+    Inline(Auth),
+    File(PendingAuth),
+}
+
+impl ExplicitAuth {
+    pub(super) fn source(&self) -> AuthSource {
+        match self {
+            Self::Inline(auth) => auth.source(),
+            Self::File(pending) => pending.source,
+        }
+    }
 }
 
 /// The env vars that can carry a secret ox authenticates with: each credential variable, and
@@ -455,17 +461,33 @@ pub(super) fn explicit_credentials(
 pub(crate) fn secret_env_vars() -> impl Iterator<Item = &'static str> {
     AuthSource::EXPLICIT
         .into_iter()
-        .filter_map(AuthSource::env_var)
+        .filter_map(|slot| match slot {
+            Explicit::Env(source) => source.env_var(),
+            Explicit::Config => None,
+        })
         .chain([CUSTOM_HEADERS_VAR])
 }
 
-/// The first credential set in `explicit`, which [`explicit_credentials`] lists by precedence.
-pub(super) fn first_explicit(
-    explicit: impl IntoIterator<Item = (AuthSource, Option<String>)>,
-) -> Option<Auth> {
-    explicit
-        .into_iter()
-        .find_map(|(source, value)| value.map(|secret| Auth::new(source, secret)))
+/// The first explicit credential in [`AuthSource::EXPLICIT`] order. `config` occupies the config
+/// slot, where a file credential wins over later env sources even though its secret loads during
+/// [`Config::resolve_auth`](crate::config::Config::resolve_auth). Fails when the winning secret
+/// cannot travel in a header.
+pub(super) fn first_explicit(config: Option<ExplicitAuth>) -> Result<Option<ExplicitAuth>> {
+    for slot in AuthSource::EXPLICIT {
+        match slot {
+            Explicit::Env(source) => {
+                if let Some(secret) = source.env_var().and_then(env::string) {
+                    return Auth::new(source, secret).map(|auth| Some(ExplicitAuth::Inline(auth)));
+                }
+            }
+            Explicit::Config => {
+                if config.is_some() {
+                    return Ok(config);
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// The stored login a session falls back on without an explicit credential. `stored` is awaited
@@ -532,7 +554,7 @@ async fn load_login(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use strum::VariantArray as _;
     use tracing::instrument::WithSubscriber as _;
@@ -549,7 +571,7 @@ mod tests {
     #[test]
     fn debug_omits_secret() {
         for source in AuthSource::VARIANTS {
-            let debug = format!("{:?}", Auth::new(*source, "sk-must-not-leak"));
+            let debug = format!("{:?}", Auth::test(*source, "sk-must-not-leak"));
 
             assert!(!debug.contains("sk-must-not-leak"), "{debug}");
             assert!(debug.contains(&format!("{source:?}")), "{debug}");
@@ -572,7 +594,6 @@ mod tests {
                 [
                     "Auth token (ANTHROPIC_AUTH_TOKEN)",
                     "API key (ANTHROPIC_API_KEY)",
-                    "API key (client.api_key)",
                     "Auth token (client.auth)",
                     "API key (client.auth)",
                     "OAuth (client.auth)",
@@ -594,7 +615,6 @@ mod tests {
                     [
                         AuthKind::AuthToken,
                         AuthKind::ApiKey,
-                        AuthKind::ApiKey,
                         AuthKind::AuthToken,
                         AuthKind::ApiKey,
                         AuthKind::OAuth,
@@ -613,7 +633,7 @@ mod tests {
             fn holds_only_for_the_two_logins() {
                 assert_eq!(
                     each_source(AuthSource::is_stored_login),
-                    [false, false, false, false, false, false, false, true, true],
+                    [false, false, false, false, false, false, true, true],
                 );
             }
         }
@@ -628,7 +648,6 @@ mod tests {
                     [
                         Some("ANTHROPIC_AUTH_TOKEN"),
                         Some("ANTHROPIC_API_KEY"),
-                        None,
                         None,
                         None,
                         None,
@@ -650,8 +669,6 @@ mod tests {
                     [
                         "Check ANTHROPIC_AUTH_TOKEN.",
                         "Check ANTHROPIC_API_KEY.",
-                        "Check client.api_key in your user config. \
-                         `/config` shows which file sets it.",
                         "Check client.auth in your user config. \
                          `/config` shows which file sets it.",
                         "Check client.auth in your user config. \
@@ -697,7 +714,7 @@ mod tests {
                     "Bearer secret-value",
                 ),
             ] {
-                let credential = Auth::new(source, "secret-value")
+                let credential = Auth::test(source, "secret-value")
                     .credential(&no_roots(), &TaskTracker::new())
                     .await
                     .unwrap();
@@ -717,7 +734,7 @@ mod tests {
         async fn gives_up_on_env_credentials_and_unreadable_logins() {
             let dir = tempfile::tempdir().unwrap();
             for auth in [
-                Auth::new(AuthSource::OAuthTokenEnv, "env-token"),
+                Auth::test(AuthSource::OAuthTokenEnv, "env-token"),
                 ox_login_in(
                     &dir.path().join("missing.json"),
                     "http://unused",
@@ -825,30 +842,6 @@ mod tests {
         }
     }
 
-    mod explicit_credentials {
-        use super::*;
-
-        #[test]
-        fn reads_env_in_precedence_order_with_file_key_third() {
-            let vars = [
-                ("ANTHROPIC_AUTH_TOKEN", Some("bearer")),
-                ("ANTHROPIC_API_KEY", None),
-                ("CLAUDE_CODE_OAUTH_TOKEN", Some("oauth")),
-            ];
-            let got =
-                temp_env::with_vars(vars, || explicit_credentials(Some("file-key".to_owned())));
-            assert_eq!(
-                got,
-                [
-                    (AuthSource::AuthTokenEnv, Some("bearer".to_owned())),
-                    (AuthSource::ApiKeyEnv, None),
-                    (AuthSource::ApiKeyFile, Some("file-key".to_owned())),
-                    (AuthSource::OAuthTokenEnv, Some("oauth".to_owned())),
-                ],
-            );
-        }
-    }
-
     mod secret_env_vars {
         use super::*;
 
@@ -869,37 +862,93 @@ mod tests {
     mod first_explicit {
         use super::*;
 
-        fn explicit(present: &[AuthSource]) -> Vec<(AuthSource, Option<String>)> {
-            AuthSource::EXPLICIT
-                .iter()
-                .map(|&source| {
-                    let value = present
-                        .contains(&source)
-                        .then(|| format!("{source:?}-secret"));
-                    (source, value)
-                })
-                .collect()
+        const VARS: [&str; 3] = [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ];
+
+        fn resolve(
+            set: &[(&'static str, &'static str)],
+            config: Option<ExplicitAuth>,
+        ) -> Result<Option<ExplicitAuth>> {
+            let vars = VARS.map(|var| {
+                let value = set.iter().find(|(k, _)| *k == var).map(|(_, v)| *v);
+                (var, value)
+            });
+            temp_env::with_vars(vars, || first_explicit(config))
+        }
+
+        fn inline() -> ExplicitAuth {
+            ExplicitAuth::Inline(Auth::test(AuthSource::ClientApiKey, "config-secret"))
+        }
+
+        fn pending() -> ExplicitAuth {
+            ExplicitAuth::File(PendingAuth {
+                source: AuthSource::ClientApiKey,
+                path: PathBuf::from("/token"),
+            })
         }
 
         #[test]
-        fn picks_the_highest_precedence_credential() {
-            // Each row drops the previous winner, so every adjacent precedence pair is exercised.
-            for (present, winner) in [
-                (&AuthSource::EXPLICIT[..], AuthSource::AuthTokenEnv),
-                (&AuthSource::EXPLICIT[1..], AuthSource::ApiKeyEnv),
-                (&AuthSource::EXPLICIT[2..], AuthSource::ApiKeyFile),
-                (&AuthSource::EXPLICIT[3..], AuthSource::OAuthTokenEnv),
+        fn a_higher_env_source_beats_the_config_slot() {
+            for (var, winner) in [
+                ("ANTHROPIC_AUTH_TOKEN", AuthSource::AuthTokenEnv),
+                ("ANTHROPIC_API_KEY", AuthSource::ApiKeyEnv),
             ] {
-                let auth = first_explicit(explicit(present)).unwrap();
+                for config in [Some(inline()), Some(pending())] {
+                    let picked = resolve(&[(var, "env-secret")], config).unwrap().unwrap();
 
-                assert_eq!(auth.source(), winner);
-                assert_eq!(auth.secret(), format!("{winner:?}-secret"));
+                    assert!(
+                        matches!(&picked, ExplicitAuth::Inline(auth)
+                            if auth.source() == winner && auth.secret() == "env-secret"),
+                        "{var}: {picked:?}",
+                    );
+                }
             }
         }
 
         #[test]
+        fn the_config_slot_wins_over_the_oauth_token_variable() {
+            let picked = resolve(&[("CLAUDE_CODE_OAUTH_TOKEN", "oauth")], Some(inline()))
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(&picked, ExplicitAuth::Inline(auth) if auth.source() == AuthSource::ClientApiKey),
+                "{picked:?}",
+            );
+
+            let oauth_set = [("CLAUDE_CODE_OAUTH_TOKEN", "oauth")];
+            let picked = resolve(&oauth_set, Some(pending())).unwrap().unwrap();
+            assert!(
+                matches!(picked, ExplicitAuth::File(_)),
+                "a file credential stops the search: {picked:?}",
+            );
+        }
+
+        #[test]
         fn finds_none_when_nothing_is_set() {
-            assert!(first_explicit(explicit(&[])).is_none());
+            assert!(resolve(&[], None).unwrap().is_none());
+        }
+
+        #[test]
+        fn rejects_a_winning_secret_no_header_can_carry() {
+            for (var, config, expected) in [
+                (
+                    "ANTHROPIC_API_KEY",
+                    Some(inline()),
+                    "API key (ANTHROPIC_API_KEY) is not a valid HTTP header value",
+                ),
+                (
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    None,
+                    "OAuth (CLAUDE_CODE_OAUTH_TOKEN) is not a valid HTTP header value",
+                ),
+            ] {
+                let err = resolve(&[(var, "bad\nkey")], config).unwrap_err();
+
+                assert_eq!(err.to_string(), expected, "{var}");
+            }
         }
     }
 
@@ -914,7 +963,7 @@ mod tests {
         }
 
         fn stored_ox_login() -> std::future::Ready<Result<Auth, LoginError>> {
-            std::future::ready(Ok(Auth::new(AuthSource::OxLogin, "stored-token")))
+            std::future::ready(Ok(Auth::test(AuthSource::OxLogin, "stored-token")))
         }
 
         #[tokio::test]
@@ -943,7 +992,7 @@ mod tests {
                 format!(
                     "no credentials for {GATEWAY}. \
                      Set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN, \
-                     or add `api_key` to {file}. \
+                     or add a credential under `[client.auth]` in {file}. \
                      Stored logins are sent only to the Anthropic API.",
                     file = Path::new(&config).join("ox").join("config.toml").display(),
                 ),
@@ -982,7 +1031,7 @@ mod tests {
                      no API key or token is set, no oxide-code login is stored, \
                      and no Claude Code login is in {keychain}{file}. \
                      Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, \
-                     add `api_key` to {config_file}, \
+                     add a credential under `[client.auth]` in {config_file}, \
                      or sign in with `/login` in the `ox` TUI.",
                     keychain = if cfg!(target_os = "macos") {
                         "the macOS Keychain or "

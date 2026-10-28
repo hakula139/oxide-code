@@ -233,7 +233,7 @@ impl Client {
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
-        tools: &[ToolDefinition],
+        tools: &[&ToolDefinition],
         breakpoint: Option<CacheControl>,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let prefix_cache = CacheControl::static_prefix(self.is_first_party, self.prompt_cache_ttl);
@@ -277,7 +277,7 @@ impl Wire for Client {
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
-        tools: &[ToolDefinition],
+        tools: &[&ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let breakpoint = CacheControl::conversation(self.prompt_cache_ttl);
         self.stream(messages, system, user_context, tools, Some(breakpoint))
@@ -288,7 +288,7 @@ impl Wire for Client {
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
-        tools: &[ToolDefinition],
+        tools: &[&ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         self.stream(messages, system, user_context, tools, None)
     }
@@ -400,7 +400,7 @@ struct RequestSpec<'a> {
     max_tokens: u32,
     /// The text after the identity block, each with its `cache_control`. Empty text is left out.
     system: &'a [(&'a str, Option<CacheControl>)],
-    tools: Option<&'a [ToolDefinition]>,
+    tools: Option<&'a [&'a ToolDefinition]>,
     output_config: Option<OutputConfig<'a>>,
     messages: RequestMessages<'a>,
 }
@@ -847,7 +847,7 @@ mod tests {
             async fn sends_the_new_credential_and_signing_out_stops_requests() {
                 let mut client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
 
-                client.set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                client.set_auth(Some(Auth::test(AuthSource::OxLogin, "ox-token")));
                 let request = capture_stream_request(client.clone()).await;
                 client.set_auth(None);
                 let signed_out = client
@@ -886,7 +886,7 @@ mod tests {
                             async move { transport::post_messages(&http, &request, 0).await }
                         })
                         .await;
-                    client.set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                    client.set_auth(Some(Auth::test(AuthSource::OxLogin, "ox-token")));
                     refresh.release();
                     client.finish_reloads().await;
 
@@ -984,17 +984,17 @@ mod tests {
                 let mut betas = Vec::new();
                 for (auth, api_key, bearer) in [
                     (
-                        Auth::new(AuthSource::ApiKeyEnv, "sk-env"),
+                        Auth::test(AuthSource::ApiKeyEnv, "sk-env"),
                         Some("sk-env"),
                         None,
                     ),
                     (
-                        Auth::new(AuthSource::AuthTokenEnv, "gw-token"),
+                        Auth::test(AuthSource::AuthTokenEnv, "gw-token"),
                         None,
                         Some("Bearer gw-token"),
                     ),
                     (
-                        Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
+                        Auth::test(AuthSource::OAuthTokenEnv, "oat-env"),
                         None,
                         Some("Bearer oat-env"),
                     ),
@@ -1321,7 +1321,7 @@ mod tests {
                 .await;
                 let client = test_client(
                     server.uri(),
-                    Auth::new(AuthSource::OAuthTokenEnv, "oat-env"),
+                    Auth::test(AuthSource::OAuthTokenEnv, "oat-env"),
                     TEST_MODEL,
                 );
 
@@ -1354,30 +1354,6 @@ mod tests {
                     "Anthropic API rate limited (HTTP 429): Too many requests. Retry after 120 s.",
                 );
                 assert_eq!(request_count(&server).await, 1);
-            }
-
-            #[tokio::test]
-            async fn rejects_a_credential_no_header_can_carry() {
-                // `HeaderValue::from_str` rejects control chars, which both auth arms must report.
-                for auth in [
-                    Auth::new(AuthSource::ApiKeyEnv, "bad\nkey"),
-                    Auth::new(AuthSource::OAuthTokenEnv, "bad\rtoken"),
-                ] {
-                    let source = auth.source();
-                    let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
-
-                    let err = stream_hi(&client).await.unwrap_err();
-
-                    let msg = format!("{err:#}");
-                    assert!(
-                        msg.starts_with(&format!("{source} is not a valid HTTP header value")),
-                        "error names the credential source: {msg}",
-                    );
-                    assert!(
-                        !msg.contains("bad"),
-                        "error must not echo the secret: {msg}"
-                    );
-                }
             }
 
             #[tokio::test]

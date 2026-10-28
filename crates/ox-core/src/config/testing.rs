@@ -55,7 +55,7 @@ pub(crate) fn test_config(url: impl AsRef<str>, auth: Auth, model: &str) -> Conf
 pub fn test_snapshot() -> ConfigSnapshot {
     test_config(
         "https://api.test.invalid",
-        Auth::new(AuthSource::ApiKeyEnv, "sk-test"),
+        Auth::test(AuthSource::ApiKeyEnv, "sk-test"),
         "claude-opus-5-5",
     )
     .snapshot()

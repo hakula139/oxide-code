@@ -121,9 +121,9 @@ pub(crate) fn completion_body(text: &str) -> String {
 }
 
 pub(super) fn auth_token() -> Auth {
-    Auth::new(AuthSource::AuthTokenEnv, "g")
+    Auth::test(AuthSource::AuthTokenEnv, "g")
 }
 
 pub(super) fn oauth() -> Auth {
-    Auth::new(AuthSource::ClaudeCodeLogin, "t")
+    Auth::test(AuthSource::ClaudeCodeLogin, "t")
 }

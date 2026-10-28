@@ -70,7 +70,7 @@ impl LiveTranscript {
             tasks,
             file_snapshots,
         } = transcript;
-        let (file_tracker, drifted) = FileTracker::restored(file_snapshots);
+        let (file_tracker, drifted) = FileTracker::restored(file_snapshots).await;
         let prompt_unrecorded = context.is_none();
         let (prompt, warnings) = session_prompt(context, model, cwd).await;
         let live = Self {
@@ -114,7 +114,7 @@ impl LiveTranscript {
     }
 
     /// The context the parts of the next request fill, which stands in until a turn reports usage.
-    pub(super) fn request_estimate(&self, tools: &[ToolDefinition]) -> u32 {
+    pub(super) fn request_estimate(&self, tools: &[&ToolDefinition]) -> u32 {
         request_tokens(&self.prompt, tools, &self.messages)
     }
 

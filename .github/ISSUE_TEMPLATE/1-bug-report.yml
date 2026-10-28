@@ -34,9 +34,11 @@ body:
       description: Credential source shown by `/status` in the TUI.
       options:
         - Auth token (ANTHROPIC_AUTH_TOKEN)
+        - Auth token (client.auth)
         - API key (ANTHROPIC_API_KEY)
-        - API key (client.api_key)
+        - API key (client.auth)
         - OAuth (CLAUDE_CODE_OAUTH_TOKEN)
+        - OAuth (client.auth)
         - OAuth (oxide-code login)
         - OAuth (Claude Code login)
         - Not signed in

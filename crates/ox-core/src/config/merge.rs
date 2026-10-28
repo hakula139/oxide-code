@@ -19,13 +19,10 @@ const REPLACED_TABLES: &[&str] = &["client.auth", "client.headers"];
 
 /// Keys under one table that replace each other: a layer that sets any of them clears the rest from
 /// lower layers, so a project's percent threshold takes precedence over a user's token threshold.
-const EXCLUSIVE: &[(&str, &[&str])] = &[
-    ("client", &["api_key", "auth"]),
-    (
-        "client.compaction",
-        &["auto_threshold_tokens", "auto_threshold_percent"],
-    ),
-];
+const EXCLUSIVE: &[(&str, &[&str])] = &[(
+    "client.compaction",
+    &["auto_threshold_tokens", "auto_threshold_percent"],
+)];
 
 // ── Origins ──
 
