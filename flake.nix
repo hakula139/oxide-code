@@ -119,7 +119,10 @@
           statix.enable = true;
 
           shellcheck.enable = true;
+        };
 
+        # The flake check leaves rustfmt to CI's Rust job, so it never fetches the pinned toolchain.
+        rustHooks = {
           rustfmt = {
             enable = true;
             packageOverrides = {
@@ -176,7 +179,7 @@
 
         preCommit = git-hooks-nix.lib.${system}.run {
           src = ./.;
-          hooks = hooks // nodeHooks;
+          hooks = hooks // rustHooks // nodeHooks;
         };
 
         preCommitCheck = git-hooks-nix.lib.${system}.run {
@@ -189,7 +192,7 @@
       in
       {
         # ------------------------------------------------------------------------------------------
-        # Dev Shell
+        # Dev Shells
         # ------------------------------------------------------------------------------------------
         devShells.default = pkgs.mkShell {
           name = "oxide-code-dev";
@@ -226,6 +229,20 @@
               ) 9>"$common/git-hooks.lock"
             fi
           '';
+        };
+
+        # CI's Lint job runs in this shell, which leaves out the pinned toolchain so that every tool
+        # comes from the nixpkgs binary cache. `cargo deny` needs only `cargo metadata`, which
+        # nixpkgs' cargo serves for this workspace.
+        devShells.lint = pkgs.mkShell {
+          name = "oxide-code-lint";
+
+          packages = with pkgs; [
+            cargo
+            cargo-deny
+            nodejs_24
+            pnpm
+          ];
         };
 
         # ------------------------------------------------------------------------------------------

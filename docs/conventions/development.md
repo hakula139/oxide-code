@@ -8,7 +8,7 @@ The Nix flake provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `
 
 ```bash
 nix develop                                        # Dev shell with the toolchain, hooks, and Node tools
-nix flake check                                    # Run pre-commit hooks and the Home Manager module tests
+nix flake check                                    # Run most hooks and the Home Manager module tests
 nix build                                          # Build ox from source
 ```
 
@@ -20,7 +20,7 @@ Entering the dev shell in this repository installs a [pre-commit](https://pre-co
 
 The hook runs the compile-free subset of the [verification](../../AGENTS.md#verification) checks on staged files: file hygiene, Nix formatting and lints, ShellCheck, `rustfmt`, Prettier and Taplo formatting, `markdownlint`, and `cspell`. Hooks that fix files in place fail the commit if they make changes, so stage the fixes and commit again. Checks that compile the workspace are excluded because their build cost would gate every commit.
 
-The Node-based hooks run tools pinned in `node_modules`, which pnpm installs before running them whenever it is missing or out of date with the lockfile. `nix flake check` runs only the other hooks because its sandbox cannot install `node_modules`, while CI's Lint job runs the Node tools. Run `pnpm format`, `pnpm lint`, and `pnpm spellcheck` directly when changing documentation, comments, or config files.
+The Node-based hooks run tools pinned in `node_modules`, which pnpm installs before running them whenever it is missing or out of date with the lockfile. `nix flake check` leaves them out because its sandbox cannot install `node_modules`, and it leaves out `rustfmt` so that it never fetches the pinned toolchain. CI's Lint job runs the Node tools, and its Rust (Linux) job runs `cargo fmt --check`. Run `pnpm format`, `pnpm lint`, and `pnpm spellcheck` directly when changing documentation, comments, or config files.
 
 ## Toolchain
 
@@ -69,12 +69,12 @@ Dev and test builds include line tables for the workspace crates and no debug in
 
 CI runs on pushes to `main`, pull requests, and manual dispatch, and the release workflow calls it again for each tag before publishing:
 
-| Job                          | Checks                                                                                                                                                                                 |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Lint                         | `nix flake check`, which runs the pre-commit hooks without the Node ones and the Home Manager module tests, then `pnpm format`, `pnpm lint`, `pnpm spellcheck`, and `cargo deny check` |
-| Rust (Linux, macOS, Windows) | `cargo clippy --all-targets`, `cargo clippy`, `cargo doc --no-deps`, and the test suite under `cargo llvm-cov`, uploaded to Codecov                                                    |
-| MSRV                         | `cargo hack check --rust-version` against `rust-version`                                                                                                                               |
-| Nix (Linux, macOS)           | The package build, which runs the tests, `ox --version`, and installed license notice checks                                                                                           |
+| Job                          | Checks                                                                                                                                                                 |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lint                         | `pnpm format`, `pnpm lint`, `pnpm spellcheck`, and `cargo deny check` in the flake's `lint` shell, which leaves out the pinned toolchain                               |
+| Rust (Linux, macOS, Windows) | `cargo fmt --check` on Linux, then `cargo clippy --all-targets`, `cargo clippy`, `cargo doc --no-deps`, and the test suite under `cargo llvm-cov`, uploaded to Codecov |
+| MSRV                         | `cargo hack check --rust-version` against `rust-version`                                                                                                               |
+| Nix (Linux, macOS)           | `nix flake check`, then the package build, which runs the tests, `ox --version`, and installed license notice checks                                                   |
 
 Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result reads every job of the current run attempt from the Actions API and fails when any job of the CI workflow, including each matrix leg, concludes anything other than success or skipped. That catches a leg cancelled before a runner picks it up, which the `needs` results of a matrix job omit. CI Result runs once the jobs in its `needs` finish and counts any unfinished job as a failure, so list each new job there.
 

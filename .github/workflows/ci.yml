@@ -31,24 +31,20 @@ jobs:
         with:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: Run flake check
-        run: nix flake check
-
       - name: Format
-        if: ${{ !cancelled() }}
-        run: nix develop -c pnpm format
+        run: nix develop .#lint -c pnpm format
 
       - name: Lint Markdown
         if: ${{ !cancelled() }}
-        run: nix develop -c pnpm lint
+        run: nix develop .#lint -c pnpm lint
 
       - name: Spell check
         if: ${{ !cancelled() }}
-        run: nix develop -c pnpm spellcheck
+        run: nix develop .#lint -c pnpm spellcheck
 
       - name: Check dependencies
         if: ${{ !cancelled() }}
-        run: nix develop -c cargo deny --locked check
+        run: nix develop .#lint -c cargo deny --locked check
 
   rust:
     name: Rust (${{ matrix.os }})
@@ -70,6 +66,10 @@ jobs:
 
       - name: Set up Rust
         run: rustup toolchain install
+
+      - name: Format
+        if: ${{ matrix.os == 'Linux' }}
+        run: cargo fmt --check
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -147,7 +147,11 @@ jobs:
         with:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
+      - name: Run flake check
+        run: nix flake check --print-build-logs
+
       - name: Build package
+        if: ${{ !cancelled() }}
         run: nix build --no-link --print-build-logs
 
   result:
