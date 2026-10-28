@@ -578,7 +578,8 @@ mod tests {
     use crate::config::testing::test_config;
     use crate::engine::compaction::AutoCompactFailures;
     use crate::file_tracker::testing::{
-        assert_writes_draining, blocked_write, record_tracked_file, seed_full_read,
+        assert_writes_draining, blocked_write, poll_until_draining, record_tracked_file,
+        seed_full_read,
     };
     use crate::file_tracker::{FileSnapshot, FileTracker, GateError, GatePurpose};
     use crate::message::{Replay, Role};
@@ -3472,7 +3473,7 @@ mod tests {
                 let report = TurnReport::default();
                 let mut rollback = std::pin::pin!(engine.roll_back(&sink, start, None, &report));
 
-                assert!(futures::poll!(rollback.as_mut()).is_pending());
+                poll_until_draining(&tracker, rollback.as_mut()).await;
                 assert_writes_draining(&tracker);
                 assert_eq!(std::fs::read(&path).unwrap(), b"original");
                 assert_eq!(tracker.snapshot_all(), snapshots);
@@ -3805,7 +3806,7 @@ mod tests {
                 let release = blocked_write(&tracker, &path, b"committed", "toolu_write").await;
                 let mut finalization = std::pin::pin!(engine.finalize());
 
-                assert!(futures::poll!(finalization.as_mut()).is_pending());
+                poll_until_draining(&tracker, finalization.as_mut()).await;
                 assert_writes_draining(&tracker);
                 assert_eq!(std::fs::read(&path).unwrap(), b"alpha");
                 assert_eq!(tracker.snapshot_all(), previous);

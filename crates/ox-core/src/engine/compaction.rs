@@ -720,7 +720,9 @@ mod tests {
     use crate::engine::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, request_bodies, with_pinned_home,
     };
-    use crate::file_tracker::testing::{assert_writes_draining, blocked_write, seed_full_read};
+    use crate::file_tracker::testing::{
+        assert_writes_draining, blocked_write, poll_until_draining, seed_full_read,
+    };
     use crate::message::Replay;
     use crate::permission::Mode;
     use crate::prompt::{SessionContext, SystemPrompt};
@@ -1523,7 +1525,7 @@ mod tests {
                             boundary(plan()),
                             trigger
                         ));
-                        assert!(futures::poll!(compact.as_mut()).is_pending(), "{trigger:?}");
+                        poll_until_draining(&tracker, compact.as_mut()).await;
                         assert_writes_draining(&tracker);
                         assert_eq!(std::fs::read(&read).unwrap(), b"read", "{trigger:?}");
                         assert_eq!(tracker.snapshot_all(), previous, "{trigger:?}");

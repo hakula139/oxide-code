@@ -477,9 +477,9 @@ pub(crate) mod testing {
     }
 
     /// Polls `operation` until it waits on `tracker`'s writes, panicking if it finishes instead.
-    pub(crate) async fn poll_until_draining(
+    pub(crate) async fn poll_until_draining<F: Future + ?Sized>(
         tracker: &FileTracker,
-        mut operation: Pin<&mut dyn Future<Output = ()>>,
+        mut operation: Pin<&mut F>,
     ) {
         std::future::poll_fn(|cx| {
             let finished = operation.as_mut().poll(cx).is_ready();

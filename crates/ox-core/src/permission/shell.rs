@@ -11,7 +11,6 @@ use std::sync::LazyLock;
 
 use anyhow::{Result, bail, ensure};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser, Tree};
 
 use super::{Access, PathResolver, Target, Workspace, Zone, fold_name};
@@ -336,7 +335,7 @@ static SAFE_SED_SCRIPT: LazyLock<Regex> = LazyLock::new(|| {
 // ── Command Target ──
 
 /// A `bash` call's command and what the analysis found in it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandTarget {
     /// Each simple command it runs, including those inside substitutions and literal `sh -c` or
     /// `eval` scripts.
@@ -421,7 +420,7 @@ impl CommandTarget {
 }
 
 /// One simple command.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Segment {
     /// The words an allow rule must name, without redirections. Leading assignments of
     /// [`SAFE_VARIABLES`] and wrappers allow rules see through are left out, up to the first
@@ -503,7 +502,7 @@ impl Segment {
 }
 
 /// A reader's path and whether it may traverse the tree beneath it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct ReaderPath<T> {
     pub(super) path: T,
     pub(super) recursive: bool,
@@ -546,7 +545,7 @@ pub(super) fn bare_program(program: &[ShellWord]) -> Option<Vec<ShellWord>> {
 }
 
 /// One word of a simple command as rules compare it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ShellWord {
     /// The word unquoted, or as written where part of it expands at run time.
     text: String,

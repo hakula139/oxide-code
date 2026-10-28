@@ -225,8 +225,7 @@ pub(crate) fn extra_root(raw: &str) -> Result<PathBuf> {
 // ── Target ──
 
 /// Whether a path target sits where an edit needs no rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Zone {
     /// Inside a [`Workspace`] root, so an edit allows without a rule unless a protected name or an
     /// ask rule holds it.
@@ -258,8 +257,7 @@ pub(crate) enum Target<'a> {
 /// What a tool call accesses, which [`crate::tool::Tool::prepare`] resolves from its input once so
 /// the gate checks and the run acts on the same values. The borrowing [`Self::as_target`] feeds the
 /// allocation-free matcher. Owned because a resolved path is not a substring of the input.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum Access {
     /// No extractable target, so only a `*` rule matches.
     #[default]
@@ -272,7 +270,6 @@ pub(crate) enum Access {
         canonical: String,
         /// `canonical` as the file system names it, kept only when a name in it is not valid UTF-8,
         /// which `canonical` spells with replacement characters.
-        #[serde(skip)]
         exact: Option<PathBuf>,
         /// `canonical` under the resolved cwd, set only while it sits inside it.
         relative: Option<String>,
@@ -290,6 +287,10 @@ pub(crate) enum Access {
         protected: Vec<Shipped>,
     },
     /// A network host or an MCP `server/tool` name.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no network or MCP tool builds a name target yet")
+    )]
     Name(String),
 }
 

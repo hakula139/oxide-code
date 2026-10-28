@@ -103,8 +103,8 @@ pub fn expand_user(raw: &str) -> Result<PathBuf> {
     Ok(home.join(tail.trim_start_matches(std::path::is_separator)))
 }
 
-/// Expands `raw` like [`expand_user`] and requires the result to be absolute, so a configured path
-/// cannot depend on the working directory. Errors never quote `raw`, which may hold a pasted secret.
+/// Expands `raw` like [`expand_user`] and requires an absolute result, so a configured path cannot
+/// depend on the working directory. Errors never quote `raw`, which may hold a pasted secret.
 pub(crate) fn expand_absolute(raw: &str) -> Result<PathBuf> {
     let path =
         expand_user(raw).map_err(|_| anyhow!("cannot expand `~` without a home directory"))?;

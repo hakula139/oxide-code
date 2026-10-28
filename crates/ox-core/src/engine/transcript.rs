@@ -23,7 +23,8 @@ use crate::tool::{ToolDefinition, ToolMetadata};
 
 /// The live session and the transcript it holds. Only its methods write either one, so the
 /// in-memory messages always match what the session recorded, and a resumed session reads what the
-/// turn showed.
+/// turn showed. Methods that snapshot, reset, or close the tracked files first wait for pending
+/// workspace writes.
 pub(super) struct LiveTranscript {
     session: SessionHandle,
     messages: Vec<Message>,
@@ -129,8 +130,8 @@ impl LiveTranscript {
         }
     }
 
-    /// Returns the transcript and the session to `start` and `checkpoint` once pending writes settle,
-    /// dropping what the turn after them added. Returns the session's write failure.
+    /// Returns the transcript and the session to `start` and `checkpoint`, dropping what the turn
+    /// after them added. Returns the session's write failure.
     pub(super) async fn roll_back(
         &mut self,
         start: TranscriptStart,
@@ -214,7 +215,7 @@ impl LiveTranscript {
     }
 
     /// Saves `boundary` and swaps the transcript to `synthetic`, which adopts the boundary's
-    /// prompt context. Clears the tracked files with the transcript once pending writes settle.
+    /// prompt context. Clears the tracked files with the transcript.
     pub(super) async fn compact(
         &mut self,
         boundary: CompactBoundary,
@@ -267,8 +268,8 @@ impl LiveTranscript {
         .await
     }
 
-    /// Closes the session with a snapshot of the files the transcript read once pending writes
-    /// settle. Returns the session's write failure.
+    /// Closes the session with a snapshot of the files the transcript read. Returns the session's
+    /// write failure.
     pub(super) async fn finalize(self) -> Option<String> {
         self.file_tracker.drain_writes().await;
         self.session
