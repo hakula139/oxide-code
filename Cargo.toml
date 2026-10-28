@@ -118,7 +118,11 @@ tree-sitter = "0.27"
 tree-sitter-bash = "0.25"
 unicode-normalization = "0.1"
 unicode-segmentation = "1"
-unicode-width = "0.2"
+# ratatui-core 0.1.2 adds a cell to each halfwidth katakana sound mark (U+FF9E, U+FF9F) because
+# older unicode-width releases count it as zero-width. From 0.2.3, unicode-width counts it as one
+# cell, so ratatui lays the mark out over two cells while terminals draw it in one.
+# `.github/renovate.json` holds Renovate to the same bound.
+unicode-width = ">=0.2, <0.2.3"
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 winapi-util = "0.1"
