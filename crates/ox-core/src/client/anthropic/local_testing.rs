@@ -19,7 +19,7 @@ use crate::util::tls::testing::NoRoots;
 
 /// The session ID that client tests send, which their `x-claude-code-session-id` and
 /// `metadata.user_id` assertions expect.
-pub(crate) const SESSION_ID: &str = "sid";
+pub(super) const SESSION_ID: &str = "sid";
 
 /// [`client_for`] on [`test_config`].
 pub(crate) fn test_client(base_url: impl AsRef<str>, auth: Auth, model: &str) -> Client {

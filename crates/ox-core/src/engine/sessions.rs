@@ -333,6 +333,22 @@ mod tests {
         engine.session_id().to_owned()
     }
 
+    /// The `x-claude-code-session-id` of each request `server` received, in order.
+    async fn session_ids_sent(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .iter()
+            .map(|request| {
+                request.headers["x-claude-code-session-id"]
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
     /// The names of the spill files in `artifact_dir`, sorted.
     fn spill_names(artifact_dir: &Path) -> Vec<String> {
         let mut names: Vec<_> = std::fs::read_dir(artifact_dir.join("tool-results"))
@@ -463,51 +479,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_and_resume_send_later_requests_as_the_adopted_session() {
+    async fn clear_sends_later_requests_as_the_new_session() {
         with_pinned_home(async {
-            for resume in [false, true] {
-                let server = MockServer::start().await;
-                mount_reply(&server, "done").await;
-                let dir = tempfile::tempdir().unwrap();
-                let store = test_store(dir.path());
-                let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let target_id = finished_session(&store).await;
-                let sink = CapturingSink::default();
-                engine
-                    .submit_prompt("before", None, &sink, &mut inert_ops())
-                    .await;
-                let old_id = engine.session_id().to_owned();
+            let server = MockServer::start().await;
+            mount_reply(&server, "done").await;
+            let dir = tempfile::tempdir().unwrap();
+            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let sink = CapturingSink::default();
+            engine
+                .submit_prompt("before", None, &sink, &mut inert_ops())
+                .await;
+            let old_id = engine.session_id().to_owned();
 
-                if resume {
-                    engine
-                        .resume(&sink, ResumeTarget::Id(target_id.clone()))
-                        .await;
-                } else {
-                    engine.clear(&sink).await;
-                }
-                engine
-                    .submit_prompt("after", None, &sink, &mut inert_ops())
-                    .await;
+            engine.clear(&sink).await;
+            engine
+                .submit_prompt("after", None, &sink, &mut inert_ops())
+                .await;
 
-                let live_id = engine.session_id().to_owned();
-                assert_ne!(live_id, old_id, "resume={resume}");
-                if resume {
-                    assert_eq!(live_id, target_id);
-                }
-                let sent: Vec<_> = server
-                    .received_requests()
-                    .await
-                    .expect("recorded requests")
-                    .iter()
-                    .map(|request| {
-                        request.headers["x-claude-code-session-id"]
-                            .to_str()
-                            .unwrap()
-                            .to_owned()
-                    })
-                    .collect();
-                assert_eq!(sent, [old_id, live_id], "resume={resume}");
-            }
+            let new_id = engine.session_id().to_owned();
+            assert_ne!(new_id, old_id);
+            assert_eq!(session_ids_sent(&server).await, [old_id, new_id]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resume_sends_later_requests_as_the_resumed_session() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_reply(&server, "done").await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
+            let target_id = finished_session(&store).await;
+            let sink = CapturingSink::default();
+            engine
+                .submit_prompt("before", None, &sink, &mut inert_ops())
+                .await;
+            let old_id = engine.session_id().to_owned();
+
+            engine
+                .resume(&sink, ResumeTarget::Id(target_id.clone()))
+                .await;
+            engine
+                .submit_prompt("after", None, &sink, &mut inert_ops())
+                .await;
+
+            assert_eq!(engine.session_id(), target_id);
+            assert_eq!(session_ids_sent(&server).await, [old_id, target_id]);
         })
         .await;
     }

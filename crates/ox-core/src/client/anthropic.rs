@@ -64,7 +64,7 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 
 // ── Client ──
 
-/// Anthropic client, which each request attributes to the session its caller names. Clones share
+/// Anthropic client, which attributes each request to the session its caller names. Clones share
 /// the connection pool and stored-login token.
 #[derive(Clone)]
 pub(crate) struct Client {

@@ -234,8 +234,7 @@ pub(super) fn dispatch_with(
     DispatchContext {
         policy,
         workspace,
-        session_id: "test-session".to_owned(),
-        artifact_dir: Arc::from(cwd.join("session")),
+        session: handle::testing::dead("test-session"),
         tracker: tracker(),
     }
 }
