@@ -1,5 +1,6 @@
-//! How an operation in flight stops early: the [`TurnAbort`] reasons, and the [`Mailbox`] that
-//! races its futures against the cancel and shutdown ops, or against an op the caller takes.
+//! The ops an operation in flight takes in: the [`Mailbox`] that races its futures against them,
+//! keeping queued prompts and mode switches and stopping on a cancel or shutdown, and the
+//! [`TurnAbort`] reasons it stops with.
 
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -48,7 +49,7 @@ impl<'a> Mailbox<'a> {
         self.race_or(fut, sink, |op| {
             // A `Resolve` here is a stale reply for an already-resolved call, and a `LoginCode` a
             // paste that arrived once the sign-in had its code.
-            warn!(?op, "dropped mid-turn op");
+            warn!(?op, "dropped mid-operation op");
             None
         })
         .await
@@ -136,16 +137,12 @@ mod tests {
                 assert_eq!(mailbox.drain_prompts().collect::<Vec<_>>(), ["next"]);
                 assert_eq!(mailbox.take_mode(), Some(Mode::Yolo));
                 assert_eq!(mailbox.take_mode(), None, "taking the switch clears it");
-                assert!(
-                    matches!(
-                        sink.events().as_slice(),
-                        [
-                            Event::ModeChanged(Mode::Plan),
-                            Event::ModeChanged(Mode::Yolo)
-                        ]
-                    ),
-                    "{:?}",
+                assert_eq!(
                     sink.events(),
+                    [
+                        Event::ModeChanged(Mode::Plan),
+                        Event::ModeChanged(Mode::Yolo)
+                    ]
                 );
                 drop(tx);
             }

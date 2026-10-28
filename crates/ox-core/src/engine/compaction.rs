@@ -709,7 +709,6 @@ mod tests {
 
     use serde_json::json;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tokio::sync::mpsc;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request as HttpRequest, ResponseTemplate};
 

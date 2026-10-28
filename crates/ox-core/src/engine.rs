@@ -295,9 +295,9 @@ impl Engine {
             Op::SetMode(mode) => self.set_mode(sink, mode),
             Op::Login => end = Some(self.login(sink, &mut mailbox).await),
             Op::Logout => self.logout(sink).await,
-            // A `Queue` here arrived after its turn ended, and the frontend still submits it.
-            // An interrupt or approval only matters mid-turn, where `agent_turn` consumes it,
-            // and a sign-in code only while `login` waits for one.
+            // A `Queue` here arrived after its turn ended, and the frontend still submits it. An
+            // interrupt, approval, or sign-in code only matters mid-operation, where the
+            // operation's `Mailbox` consumes it.
             Op::Queue(_) | Op::Interrupt | Op::Resolve { .. } | Op::LoginCode(_) => {}
             Op::Shutdown => return ControlFlow::Break(()),
         }
@@ -2036,12 +2036,31 @@ mod tests {
 
                 assert_eq!(flow, ControlFlow::Continue(()));
                 assert_eq!(engine.policy.mode(), Mode::Plan);
-                assert!(
-                    matches!(sink.events().first(), Some(Event::ModeChanged(Mode::Plan))),
-                    "{:?}",
-                    sink.events()
-                );
+                assert_eq!(sink.events().first(), Some(&Event::ModeChanged(Mode::Plan)));
                 drop(tx);
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn keeps_a_mode_switch_sent_before_a_cancel() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.transcript.set_messages(tool_heavy_transcript());
+                let sink = CapturingSink::default();
+                let (tx, mut ops) = mpsc::channel(2);
+                tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+                tx.try_send(Op::Interrupt).unwrap();
+
+                let flow = engine
+                    .serve(Op::Compact { instructions: None }, &sink, &mut ops)
+                    .await;
+
+                assert_eq!(flow, ControlFlow::Continue(()));
+                assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert_eq!(sink.events().last(), Some(&Event::Cancelled));
             })
             .await;
         }
