@@ -61,6 +61,7 @@ pub(super) struct MessagesRequest {
 impl Client {
     pub(super) fn messages_request(
         &self,
+        session_id: &str,
         betas: String,
         body: String,
         auth: &Auth,
@@ -68,7 +69,7 @@ impl Client {
         MessagesRequest {
             url: self.messages_url.clone(),
             betas,
-            session_id: self.session_id.clone(),
+            session_id: session_id.to_owned(),
             body: body.into(),
             auth: auth.clone(),
             trust: Arc::clone(&self.trust),

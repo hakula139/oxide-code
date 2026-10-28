@@ -20,10 +20,12 @@ use crate::tool::ToolDefinition;
 /// Streams model responses over one provider's API. A wire retries a failed attempt only before it
 /// streams any text, thinking, or progress, since a consumer cannot retract what it showed.
 pub(crate) trait Wire: Send + Sync {
-    /// Streams a conversation request. The receiver yields [`ResponseEvent`]s ending in one
-    /// [`ResponseEvent::Completed`], or a final `Err` when the request fails.
+    /// Streams a conversation request for the live session `session_id`. The receiver yields
+    /// [`ResponseEvent`]s ending in one [`ResponseEvent::Completed`], or a final `Err` when the
+    /// request fails.
     fn stream_message(
         &self,
+        session_id: &str,
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
@@ -34,12 +36,13 @@ pub(crate) trait Wire: Send + Sync {
     /// write premium. Defaults to [`Self::stream_message`] for wires that do no caching.
     fn stream_one_shot(
         &self,
+        session_id: &str,
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
         tools: &[&ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        self.stream_message(messages, system, user_context, tools)
+        self.stream_message(session_id, messages, system, user_context, tools)
     }
 }
 

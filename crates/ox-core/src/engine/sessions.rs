@@ -165,8 +165,6 @@ impl Engine {
             .transcript
             .adopt(transcript, self.client.model(), self.workspace.cwd())
             .await;
-        self.client
-            .set_session_id(self.transcript.session().session_id().to_owned());
         self.instruction_warnings = warnings;
         self.policy.clear_session_allow();
         self.usage.auto_compaction_failures.reset(sink);
@@ -446,10 +444,6 @@ mod tests {
                     .user_context
                     .contains("# Current date")
             );
-            assert_eq!(
-                engine.client.session_id(),
-                engine.transcript.session().session_id()
-            );
 
             SESSION_CONTEXT.clone_into(&mut engine.transcript.prompt_mut().user_context);
             engine.usage.total_estimated_cost_usd = 1.23;
@@ -458,13 +452,62 @@ mod tests {
             engine.resume(&sink, ResumeTarget::Path(target_path)).await;
             assert_eq!(engine.policy.session_allow(), []);
             assert_eq!(engine.transcript.session().session_id(), target_id);
-            assert_eq!(engine.client.session_id(), target_id);
             assert_eq!(engine.transcript.messages().len(), 2);
             assert_ne!(engine.transcript.prompt().user_context, SESSION_CONTEXT);
             assert!(
                 engine.usage.total_estimated_cost_usd.abs() < f64::EPSILON,
                 "a session that recorded no usage resumes at zero"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn clear_and_resume_send_later_requests_as_the_adopted_session() {
+        with_pinned_home(async {
+            for resume in [false, true] {
+                let server = MockServer::start().await;
+                mount_reply(&server, "done").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let target_id = finished_session(&store).await;
+                let sink = CapturingSink::default();
+                engine
+                    .submit_prompt("before", None, &sink, &mut inert_ops())
+                    .await;
+                let old_id = engine.session_id().to_owned();
+
+                if resume {
+                    engine
+                        .resume(&sink, ResumeTarget::Id(target_id.clone()))
+                        .await;
+                } else {
+                    engine.clear(&sink).await;
+                }
+                engine
+                    .submit_prompt("after", None, &sink, &mut inert_ops())
+                    .await;
+
+                let live_id = engine.session_id().to_owned();
+                assert_ne!(live_id, old_id, "resume={resume}");
+                if resume {
+                    assert_eq!(live_id, target_id);
+                }
+                let sent: Vec<_> = server
+                    .received_requests()
+                    .await
+                    .expect("recorded requests")
+                    .iter()
+                    .map(|request| {
+                        request.headers["x-claude-code-session-id"]
+                            .to_str()
+                            .unwrap()
+                            .to_owned()
+                    })
+                    .collect();
+                assert_eq!(sent, [old_id, live_id], "resume={resume}");
+            }
         })
         .await;
     }

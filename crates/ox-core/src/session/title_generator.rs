@@ -10,6 +10,7 @@ use super::display::fit_title;
 use super::entry::UsageRecord;
 use super::handle::SessionHandle;
 use crate::client::anthropic::Client;
+use crate::client::anthropic::completion::SideQuery;
 use crate::client::anthropic::wire::OutputFormat;
 use crate::model::{Effort, ModelSpec};
 use crate::protocol::{Event, EventSink};
@@ -92,15 +93,17 @@ async fn generate_and_record(
     billed: oneshot::Sender<UsageRecord>,
 ) -> Result<()> {
     let output_format = title_output_format();
+    let user = title_request(first_prompt);
+    let query = SideQuery {
+        model: ModelSpec::resolve(HAIKU_MODEL),
+        system: SYSTEM_PROMPT,
+        user: &user,
+        max_tokens: MAX_TOKENS,
+        effort: Some(Effort::Low),
+        output_format: Some(&output_format),
+    };
     let (raw, usage) = client
-        .complete(
-            &ModelSpec::resolve(HAIKU_MODEL),
-            SYSTEM_PROMPT,
-            &title_request(first_prompt),
-            MAX_TOKENS,
-            Some(Effort::Low),
-            Some(&output_format),
-        )
+        .complete(session.session_id(), query)
         .await
         .context("Haiku completion failed")?;
 
@@ -236,7 +239,7 @@ struct TitleEnvelope {
 mod tests {
     use std::path::Path;
 
-    use wiremock::matchers::{body_partial_json, method, path as wm_path};
+    use wiremock::matchers::{body_partial_json, header, method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -276,19 +279,19 @@ mod tests {
 
         #[tokio::test]
         async fn success_notifies_sink_and_delivers_the_request_usage() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = prepared_session(dir.path()).await;
+            let session_id = session.session_id().to_owned();
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(wm_path("/v1/messages"))
+                .and(header("x-claude-code-session-id", session_id.as_str()))
                 .respond_with(
                     ResponseTemplate::new(200)
                         .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
                 )
                 .mount(&server)
                 .await;
-
-            let dir = tempfile::tempdir().unwrap();
-            let session = prepared_session(dir.path()).await;
-            let session_id = session.session_id().to_owned();
             let client = title_client(server.uri());
             let billed = title_record(&client);
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

@@ -151,12 +151,7 @@ impl Engine {
             handle,
             transcript,
         } = session;
-        let client = Client::new(
-            config,
-            trust,
-            Some(handle.session_id().to_owned()),
-            device_id,
-        )?;
+        let client = Client::new(config, trust, device_id)?;
         let shells = Arc::new(BackgroundShells::default());
         let read_filter = config.permission.read_filter();
         let tools = Arc::new(ToolRegistry::built_in(&read_filter, &shells));
@@ -755,11 +750,10 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn takes_the_agent_settings_from_config_and_binds_the_client_to_the_session() {
+        async fn takes_the_agent_settings_from_config() {
             with_pinned_home(async {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
-                let session = handle::start(&store, MODEL, None);
                 let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
                 config.max_tool_rounds = Some(3);
                 config.compaction = CompactionConfig::with_threshold(50_000);
@@ -776,7 +770,7 @@ mod tests {
                     DEVICE_ID.to_owned(),
                     SessionParts {
                         store: store.clone(),
-                        handle: session.clone(),
+                        handle: handle::start(&store, MODEL, None),
                         transcript: LoadedTranscript::default(),
                     },
                     false,
@@ -793,7 +787,6 @@ mod tests {
                     ["Not signed in. Run `/login` to sign in."],
                 );
                 assert!(engine.retry_login);
-                assert_eq!(engine.client.session_id(), session.session_id());
             })
             .await;
         }

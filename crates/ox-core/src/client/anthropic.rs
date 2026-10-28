@@ -9,7 +9,7 @@
 mod accumulator;
 mod betas;
 mod billing;
-mod completion;
+pub(crate) mod completion;
 pub mod identity;
 #[cfg(test)]
 pub(crate) mod local_testing;
@@ -28,7 +28,6 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::task::TaskTracker;
 use tracing::debug;
-use uuid::Uuid;
 
 use self::accumulator::ReplySpec;
 use self::betas::compute_betas;
@@ -65,7 +64,8 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 
 // ── Client ──
 
-/// Per-session Anthropic client. Clones share the connection pool and stored-login token.
+/// Anthropic client, which each request attributes to the session its caller names. Clones share
+/// the connection pool and stored-login token.
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
@@ -88,7 +88,6 @@ pub(crate) struct Client {
     prompt_cache_ttl: PromptCacheTtl,
     /// Whether adaptive thinking opts into summarized text.
     show_thinking: bool,
-    session_id: String,
     device_id: String,
 }
 
@@ -98,7 +97,6 @@ impl Client {
     pub(crate) fn new(
         config: &Config,
         trust: impl Trust + 'static,
-        session_id: Option<String>,
         device_id: String,
     ) -> Result<Self> {
         let Config {
@@ -125,7 +123,6 @@ impl Client {
             max_tokens: *max_tokens,
             prompt_cache_ttl: *prompt_cache_ttl,
             show_thinking: *show_thinking,
-            session_id: session_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
             device_id,
         })
     }
@@ -160,20 +157,6 @@ impl Client {
     /// The credential used by requests, or an error while signed out.
     pub(crate) fn auth(&self) -> Result<&Auth> {
         self.auth.as_ref().context("not signed in")
-    }
-
-    #[cfg(test)]
-    pub(crate) fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    /// Replaces the id used for `x-claude-code-session-id` and `metadata.user_id`.
-    pub(crate) fn set_session_id(&mut self, id: String) {
-        debug_assert!(
-            HeaderValue::from_str(&id).is_ok(),
-            "session id must be a legal HTTP header value: {id:?}",
-        );
-        self.session_id = id;
     }
 
     /// Swaps the active model and re-resolves effort. Thinking, betas, context management, and the
@@ -230,6 +213,7 @@ impl Client {
     /// the `system` parameter.
     fn stream(
         &self,
+        session_id: &str,
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
@@ -240,6 +224,7 @@ impl Client {
         let thinking = ThinkingConfig::for_model(&self.model, self.show_thinking);
         let request = self.prepare(RequestSpec {
             kind: RequestKind::Agentic,
+            session_id,
             model: &self.model,
             thinking: thinking.as_ref(),
             max_tokens: self.max_tokens(),
@@ -274,23 +259,32 @@ impl Wire for Client {
     /// conversation reads the whole transcript from cache.
     fn stream_message(
         &self,
+        session_id: &str,
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
         tools: &[&ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let breakpoint = CacheControl::conversation(self.prompt_cache_ttl);
-        self.stream(messages, system, user_context, tools, Some(breakpoint))
+        self.stream(
+            session_id,
+            messages,
+            system,
+            user_context,
+            tools,
+            Some(breakpoint),
+        )
     }
 
     fn stream_one_shot(
         &self,
+        session_id: &str,
         messages: &[Message],
         system: &SystemPrompt,
         user_context: Option<&str>,
         tools: &[&ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        self.stream(messages, system, user_context, tools, None)
+        self.stream(session_id, messages, system, user_context, tools, None)
     }
 }
 
@@ -395,6 +389,8 @@ enum RequestKind {
 /// What a caller of [`Client::prepare`] sets in a request body.
 struct RequestSpec<'a> {
     kind: RequestKind,
+    /// The live session's ID, sent as `x-claude-code-session-id` and in `metadata.user_id`.
+    session_id: &'a str,
     model: &'a ModelSpec,
     thinking: Option<&'a ThinkingConfig>,
     max_tokens: u32,
@@ -410,6 +406,7 @@ impl Client {
     fn prepare(&self, spec: RequestSpec<'_>) -> Result<MessagesRequest> {
         let RequestSpec {
             kind,
+            session_id,
             model,
             thinking,
             max_tokens,
@@ -430,7 +427,7 @@ impl Client {
             model: model.id(),
             max_tokens,
             stream: agentic,
-            metadata: build_metadata(&self.device_id, &self.session_id),
+            metadata: build_metadata(&self.device_id, session_id),
             system: build_system_blocks(attribution.as_deref(), system),
             tools,
             thinking,
@@ -452,7 +449,7 @@ impl Client {
             "sending API request"
         );
         let betas = compute_betas(model, thinking, auth.kind(), kind).join(",");
-        Ok(self.messages_request(betas, body, auth))
+        Ok(self.messages_request(session_id, betas, body, auth))
     }
 }
 
@@ -529,8 +526,9 @@ mod tests {
     use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+    use super::completion::SideQuery;
     use super::local_testing::{
-        client_for, completion_body, oauth, request_count, serve, test_client,
+        SESSION_ID, client_for, completion_body, oauth, request_count, serve, test_client,
     };
     use super::testing::{DEVICE_ID, api_key, sse_body, sse_response, text_stream_body};
     use super::*;
@@ -539,7 +537,7 @@ mod tests {
     use crate::config::testing::{base_url, test_config};
     use crate::model::TokenUsage;
     use crate::util::tls::PlatformTrust;
-    use crate::util::tls::testing::{NoRoots, TEST_CA_PATH};
+    use crate::util::tls::testing::TEST_CA_PATH;
 
     mod client {
         use super::*;
@@ -561,6 +559,7 @@ mod tests {
         /// Streams one `hi` turn through `client` and collects its events.
         async fn stream_hi(client: &Client) -> Result<Vec<ResponseEvent>> {
             let rx = client.stream_message(
+                SESSION_ID,
                 &[Message::user("hi")],
                 &SystemPrompt::default(),
                 None,
@@ -581,7 +580,7 @@ mod tests {
             client.messages_url = base_url(server.uri()).messages_url();
             collect_events(
                 client
-                    .stream_message(messages, system, user_context, &[])
+                    .stream_message(SESSION_ID, messages, system, user_context, &[])
                     .unwrap(),
             )
             .await
@@ -642,29 +641,6 @@ mod tests {
                 assert_eq!(client.prompt_cache_ttl(), PromptCacheTtl::FiveMin);
             }
 
-            #[test]
-            fn without_a_session_id_generates_uuid_v4() {
-                let config = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
-
-                let client = Client::new(&config, NoRoots, None, DEVICE_ID.to_owned()).unwrap();
-
-                let sid = client.session_id();
-                let parsed = Uuid::parse_str(sid)
-                    .unwrap_or_else(|_| panic!("auto-generated session_id is not a UUID: {sid:?}"));
-                assert_eq!(parsed.get_version_num(), 4);
-            }
-
-            #[test]
-            fn preserves_explicit_session_id() {
-                let sid = "11111111-2222-4333-8444-555555555555".to_owned();
-                let config = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
-
-                let client =
-                    Client::new(&config, NoRoots, Some(sid.clone()), DEVICE_ID.to_owned()).unwrap();
-
-                assert_eq!(client.session_id(), sid);
-            }
-
             #[tokio::test]
             async fn joins_the_messages_path_under_a_base_url_with_a_trailing_slash() {
                 let server = MockServer::start().await;
@@ -688,7 +664,7 @@ mod tests {
                 let cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
                 let trust = PlatformTrust(Some(TEST_CA_PATH.into()));
 
-                Client::new(&cfg, trust, None, DEVICE_ID.to_owned())
+                Client::new(&cfg, trust, DEVICE_ID.to_owned())
                     .expect("valid CA bundle must build a client");
             }
 
@@ -697,7 +673,7 @@ mod tests {
                 let cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
                 let trust = PlatformTrust(Some("/no/such/bundle.pem".into()));
 
-                let err = Client::new(&cfg, trust, None, DEVICE_ID.to_owned())
+                let err = Client::new(&cfg, trust, DEVICE_ID.to_owned())
                     .err()
                     .expect("missing CA must error");
 
@@ -721,28 +697,6 @@ mod tests {
 
                 assert_eq!(client.max_tokens(), 4_096);
                 assert_eq!(body["max_tokens"], 4_096);
-            }
-        }
-
-        mod set_session_id {
-            use super::*;
-
-            #[tokio::test]
-            async fn propagates_to_header_and_metadata_user_id() {
-                let mut client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
-
-                client.set_session_id("sid-rolled".to_owned());
-                let request = capture_stream_request(client).await;
-
-                assert_eq!(
-                    request_header(&request, "x-claude-code-session-id"),
-                    Some("sid-rolled"),
-                );
-                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-                assert_eq!(
-                    body["metadata"]["user_id"],
-                    build_metadata(DEVICE_ID, "sid-rolled").user_id,
-                );
             }
         }
 
@@ -851,7 +805,13 @@ mod tests {
                 let request = capture_stream_request(client.clone()).await;
                 client.set_auth(None);
                 let signed_out = client
-                    .stream_message(&[Message::user("hi")], &SystemPrompt::default(), None, &[])
+                    .stream_message(
+                        SESSION_ID,
+                        &[Message::user("hi")],
+                        &SystemPrompt::default(),
+                        None,
+                        &[],
+                    )
                     .expect_err("a signed-out client must not send");
 
                 assert_eq!(
@@ -881,8 +841,12 @@ mod tests {
                     refresh
                         .abort_mid_refresh({
                             let http = client.http.clone();
-                            let request =
-                                client.messages_request(String::new(), "{}".to_owned(), &replaced);
+                            let request = client.messages_request(
+                                SESSION_ID,
+                                String::new(),
+                                "{}".to_owned(),
+                                &replaced,
+                            );
                             async move { transport::post_messages(&http, &request, 0).await }
                         })
                         .await;
@@ -944,6 +908,34 @@ mod tests {
                             ..Response::default()
                         }),
                     ],
+                );
+            }
+
+            #[tokio::test]
+            async fn attributes_the_request_to_the_caller_session() {
+                let server = serve(vec![sse_response(text_stream_body("", "Hi"))]).await;
+                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+
+                let rx = client
+                    .stream_message(
+                        "sid-live",
+                        &[Message::user("hi")],
+                        &SystemPrompt::default(),
+                        None,
+                        &[],
+                    )
+                    .unwrap();
+                collect_events(rx).await.unwrap();
+
+                let received = server.received_requests().await.expect("recorded requests");
+                assert_eq!(
+                    request_header(&received[0], "x-claude-code-session-id"),
+                    Some("sid-live"),
+                );
+                let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+                assert_eq!(
+                    body["metadata"]["user_id"],
+                    build_metadata(DEVICE_ID, "sid-live").user_id,
                 );
             }
 
@@ -1010,7 +1002,7 @@ mod tests {
                     );
                     assert_eq!(
                         request_header(&request, "x-claude-code-session-id"),
-                        Some("sid")
+                        Some(SESSION_ID)
                     );
                     betas.push(
                         request_header(&request, "anthropic-beta")
@@ -1399,12 +1391,15 @@ mod tests {
                 let stored: serde_json::Value =
                     serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
                 std::fs::remove_file(&file).unwrap();
-                let haiku = ModelSpec::resolve("claude-haiku-5-5");
-                let (title, _) = client
-                    .clone()
-                    .complete(&haiku, "", "u", 40, None, None)
-                    .await
-                    .unwrap();
+                let query = SideQuery {
+                    model: ModelSpec::resolve("claude-haiku-5-5"),
+                    system: "",
+                    user: "u",
+                    max_tokens: 40,
+                    effort: None,
+                    output_format: None,
+                };
+                let (title, _) = client.clone().complete(SESSION_ID, query).await.unwrap();
 
                 assert_eq!(stored["claudeAiOauth"]["accessToken"], "fresh-access");
                 assert_eq!(stored["claudeAiOauth"]["refreshToken"], "fresh-refresh");
@@ -1544,6 +1539,7 @@ mod tests {
                         let request = client
                             .prepare(RequestSpec {
                                 kind,
+                                session_id: SESSION_ID,
                                 model: client.model(),
                                 thinking: None,
                                 max_tokens: 40,

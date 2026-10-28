@@ -449,6 +449,7 @@ async fn stream_response(
 ) -> Result<Response> {
     let prompt = transcript.prompt();
     let rx = client.stream_message(
+        transcript.session().session_id(),
         transcript.messages(),
         &prompt.system,
         Some(&prompt.user_context),
@@ -563,6 +564,7 @@ mod tests {
         impl Wire for FakeClient {
             fn stream_message(
                 &self,
+                _session_id: &str,
                 messages: &[Message],
                 _system: &SystemPrompt,
                 _user_context: Option<&str>,
@@ -723,6 +725,7 @@ mod tests {
         impl Wire for StalledClient {
             fn stream_message(
                 &self,
+                _session_id: &str,
                 _messages: &[Message],
                 _system: &SystemPrompt,
                 _user_context: Option<&str>,
@@ -2998,6 +3001,7 @@ mod tests {
         impl Wire for RefusingWire {
             fn stream_message(
                 &self,
+                _session_id: &str,
                 _messages: &[Message],
                 _system: &SystemPrompt,
                 _user_context: Option<&str>,
