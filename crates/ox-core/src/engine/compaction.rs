@@ -409,9 +409,8 @@ async fn request_summary(
 
     let rubric = Message::user(build_user_message(instructions));
     let forked: Vec<Message> = transcript.iter().chain([&rubric]).cloned().collect();
-    // The fork keeps the tail breakpoint, which reads the conversation's cached prefix. A trimmed
-    // retry matches no cached prefix, so it skips the write.
     let stream = SummaryStream::new(sink);
+    // The fork keeps the tail breakpoint, which reads the conversation's cached prefix.
     let mut rx = client.stream(Request {
         messages: &forked,
         ..conversation
@@ -1933,6 +1932,16 @@ mod tests {
                 .collect();
             assert_eq!(session_ids, [conversation.session().session_id(); 2]);
             let mut bodies = request_bodies(&server).await;
+            let last_block = |body: &serde_json::Value| {
+                let messages = body["messages"].as_array().unwrap();
+                let content = messages.last().unwrap()["content"].as_array().unwrap();
+                content.last().unwrap()["cache_control"].clone()
+            };
+            assert_eq!(
+                last_block(&bodies[1]),
+                json!({"type": "ephemeral", "ttl": "1h"}),
+                "the fork marks its tail to read the conversation's cached prefix",
+            );
             bodies.iter_mut().for_each(strip_cache_control);
             let [parent, fork] = bodies.as_slice() else {
                 panic!("expected two requests, got {}", bodies.len());

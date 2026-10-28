@@ -3009,6 +3009,40 @@ mod tests {
         }
     }
 
+    mod conversation_request {
+        use super::*;
+
+        #[test]
+        fn sends_the_transcript_under_its_prompt_and_caches_the_tail() {
+            let session = dead_test_session();
+            let mut transcript = LiveTranscript::with_messages(&session, vec![Message::user("hi")]);
+            let prompt = transcript.prompt_mut();
+            "stable".clone_into(&mut prompt.system.stable);
+            "dynamic".clone_into(&mut prompt.system.dynamic);
+            "context".clone_into(&mut prompt.user_context);
+            let settings = ModelSettings::test("claude-sonnet-5-5");
+            let tools = [&ToolDefinition {
+                name: "read".to_owned(),
+                description: "Read a file.".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }];
+
+            let request = conversation_request(&settings, &transcript, &tools);
+
+            assert_eq!(request.session_id, session.session_id());
+            assert!(std::ptr::eq(request.settings, &raw const settings));
+            assert_eq!(
+                [&request.system.stable, &request.system.dynamic],
+                ["stable", "dynamic"]
+            );
+            assert_eq!(request.user_context, Some("context"));
+            assert_eq!(request.messages, [Message::user("hi")]);
+            assert_eq!(request.tools.len(), 1);
+            assert_eq!(request.tools[0].name, "read");
+            assert!(request.cache_tail, "the next round extends this request");
+        }
+    }
+
     mod stream_response {
         use super::*;
 

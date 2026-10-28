@@ -1171,8 +1171,10 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.generates_titles = true;
+                let mut config = test_config(server.uri(), api_key(), MODEL);
+                config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
+                engine.settings = config.model_settings();
                 let session_id = engine.session_id().to_owned();
-                let cache_ttl = engine.settings.prompt_cache_ttl();
                 let mut handle = engine.spawn();
 
                 handle.ops.send(Op::prompt("hello")).await.unwrap();
@@ -1213,7 +1215,7 @@ mod tests {
                     title_usage,
                     [&UsageRecord {
                         model: TITLE_MODEL.to_owned(),
-                        cache_ttl,
+                        cache_ttl: PromptCacheTtl::FiveMin,
                         tokens: COMPLETION_USAGE,
                     }]
                 );

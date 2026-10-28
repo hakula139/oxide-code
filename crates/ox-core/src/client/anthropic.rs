@@ -83,8 +83,7 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    /// Builds a client for the endpoint and credential in `config`, using `trust` to verify
-    /// servers.
+    /// Builds a client for the endpoint and credential in `config`, verifying servers with `trust`.
     pub(crate) fn new(
         config: &Config,
         trust: impl Trust + 'static,
@@ -522,8 +521,7 @@ mod tests {
             received.remove(0)
         }
 
-        /// [`capture_stream`] for one `hi` turn under `settings` without a system prompt or user
-        /// context.
+        /// [`capture_stream`] for one `hi` turn under `settings`, without system prompt or context.
         async fn capture_stream_request(client: Client, settings: &ModelSettings) -> HttpRequest {
             let messages = [Message::user("hi")];
             let system = SystemPrompt::default();
@@ -534,8 +532,7 @@ mod tests {
             request.headers.get(name).map(|v| v.to_str().unwrap())
         }
 
-        /// Body and `anthropic-beta` header of one streamed turn under `settings` sent through
-        /// `client`.
+        /// Body and `anthropic-beta` header of one `hi` turn under `settings` through `client`.
         async fn capture_stream_turn(
             client: Client,
             settings: &ModelSettings,
@@ -1001,33 +998,43 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn without_cache_tail_marks_only_the_static_prefix() {
-                let client = test_client(OFFLINE_URL, api_key());
-                let settings = settings_for(TEST_MODEL);
+            async fn without_cache_tail_marks_only_the_static_prefix_with_the_settings_ttl() {
                 let messages = [Message::user("question"), Message::assistant("answer")];
                 let system = system_prompt("static", "");
+                for (ttl, prefix) in [
+                    (
+                        PromptCacheTtl::OneHour,
+                        serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
+                    ),
+                    (
+                        PromptCacheTtl::FiveMin,
+                        serde_json::json!({"type": "ephemeral"}),
+                    ),
+                ] {
+                    let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
+                    cfg.prompt_cache_ttl = ttl;
+                    let settings = cfg.model_settings();
 
-                let request = capture_stream(
-                    client,
-                    Request {
-                        cache_tail: false,
-                        ..request(&settings, &messages, &system, None)
-                    },
-                )
-                .await;
+                    let request = capture_stream(
+                        client_for(&cfg),
+                        Request {
+                            cache_tail: false,
+                            ..request(&settings, &messages, &system, None)
+                        },
+                    )
+                    .await;
 
-                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-                assert_eq!(
-                    body["system"][2]["cache_control"],
-                    serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
-                );
-                assert_eq!(
-                    body["messages"],
-                    serde_json::json!([
-                        {"role": "user", "content": [{"type": "text", "text": "question"}]},
-                        {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
-                    ]),
-                );
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    assert_eq!(body["system"][2]["cache_control"], prefix, "{ttl:?}");
+                    assert_eq!(
+                        body["messages"],
+                        serde_json::json!([
+                            {"role": "user", "content": [{"type": "text", "text": "question"}]},
+                            {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
+                        ]),
+                        "{ttl:?}",
+                    );
+                }
             }
 
             #[tokio::test]

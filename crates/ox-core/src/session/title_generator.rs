@@ -262,7 +262,7 @@ mod tests {
     }
 
     /// The cache TTL of the session every title request in these tests runs for.
-    const CACHE_TTL: PromptCacheTtl = PromptCacheTtl::OneHour;
+    const CACHE_TTL: PromptCacheTtl = PromptCacheTtl::FiveMin;
 
     /// The usage record of one title request.
     fn title_record() -> UsageRecord {

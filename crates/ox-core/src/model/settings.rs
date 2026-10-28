@@ -89,11 +89,13 @@ mod tests {
     use super::*;
 
     fn settings(model: &str, effort: Option<Effort>) -> ModelSettings {
-        let mut settings = ModelSettings::test(model);
-        if let Some(effort) = effort {
-            settings.set_effort(effort);
-        }
-        settings
+        ModelSettings::new(
+            ModelSpec::resolve(model),
+            effort,
+            None,
+            PromptCacheTtl::OneHour,
+            false,
+        )
     }
 
     mod new {

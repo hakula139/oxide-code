@@ -1,5 +1,6 @@
-//! Model client contract: the [`Wire`] streaming trait and the wire-neutral events, reply, and
-//! rate limits it reports. [`anthropic`] implements it for the Anthropic Messages API.
+//! Model client contract: the [`Wire`] streaming trait, the [`Request`] it takes, and the
+//! wire-neutral events, reply, and rate limits it reports. [`anthropic`] implements it for the
+//! Anthropic Messages API.
 
 pub mod anthropic;
 
@@ -37,8 +38,10 @@ pub(crate) struct Request<'a> {
     pub(crate) user_context: Option<&'a str>,
     pub(crate) messages: &'a [Message],
     pub(crate) tools: &'a [&'a ToolDefinition],
-    /// Whether to cache the transcript tail for a later request that extends this one. A request
-    /// no later request extends skips it, since a cache write costs more than plain input.
+    /// Whether to mark the transcript tail, which reads the longest cached prefix of `messages` and
+    /// caches the rest for a later request. Clear it only for a transcript that extends no cached
+    /// prefix and that no later request extends, such as a trimmed retry, since the write premium
+    /// then buys nothing.
     pub(crate) cache_tail: bool,
 }
 
