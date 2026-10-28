@@ -35,17 +35,7 @@ The 20k summary reserve mirrors Claude Code's p99 summary-output headroom and ke
 
 ## Configuration
 
-```toml
-[client.compaction]
-auto_enabled = true
-auto_threshold_tokens = 400000
-# or:
-auto_threshold_percent = 40
-```
-
-The environment variables `OX_COMPACTION_AUTO_ENABLED`, `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`, and `OX_COMPACTION_AUTO_THRESHOLD_PERCENT` override the same settings. They control only whether and where automatic compaction triggers, and manual `/compact` ignores them. Token and percent thresholds are mutually exclusive, so the resolved trigger stays obvious.
-
-Explicit thresholds snap into a usable range. Token values below `50_000` rise to that floor, and for models with known context windows, values above the model-derived safe trigger drop to it. Percent thresholds must be 1-100 and snap the same way once resolved to tokens. The floor exists because a lower threshold would summarize again and again long before context pressure exists.
+[`[client.compaction]`](../guide/configuration.md#clientcompaction-context-compression) lists the settings and how explicit thresholds snap into a usable range. They control only whether and where automatic compaction triggers, and manual `/compact` ignores them. Token and percent thresholds are mutually exclusive, so the resolved trigger stays obvious, and the `50_000` floor exists because a lower threshold would summarize again and again long before context pressure exists.
 
 ## Summarizer
 

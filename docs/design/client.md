@@ -21,7 +21,7 @@ A request carries two ephemeral breakpoints, both with the configured [`prompt_c
 - **The static prefix.** The first breakpoint sits on the static system-prompt prefix block, and it carries `scope: "global"` only on a first-party base URL.
 - **The conversation tail.** The second sits on the last content block of the final message without a scope, so each turn reads the previous turn's transcript from cache.
 
-Invalidation follows the API's order, `tools` then `system` then `messages`, so the prompt context is built once per session and the tools and system blocks stay stable from turn to turn. A compaction summary is a one-off request that no later request extends, so it skips the second breakpoint.
+Invalidation follows the API's order, `tools` then `system` then `messages`, so the prompt context is built once per session and the tools and system blocks stay stable from turn to turn. The first compaction summary request keeps both breakpoints, so it reads the conversation's cache. An overflow retry sends a trimmed prefix that no later request extends, so it skips the second.
 
 ## Base-URL Gating
 
