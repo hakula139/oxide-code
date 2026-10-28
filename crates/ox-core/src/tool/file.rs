@@ -110,8 +110,9 @@ pub(super) enum WriteMode {
     Overwrite,
 }
 
-/// Atomically publishes `bytes` after checking the original `expected` bytes and metadata.
-/// `None` requires a new path. The caller must use the tracker's owned write operation.
+/// Publishes `bytes` after checking the original `expected` bytes and metadata, atomically when a
+/// staged copy can reproduce that metadata. `None` requires a new path. The caller must use the
+/// tracker's owned write operation.
 pub(super) async fn write_file(
     path: PathBuf,
     bytes: Vec<u8>,
