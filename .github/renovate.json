@@ -7,6 +7,12 @@
       "groupName": "flake inputs",
       "semanticCommitScope": "flake",
       "automerge": true
+    },
+    {
+      "description": "Matches the unicode-width bound in Cargo.toml, which explains it.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["unicode-width"],
+      "allowedVersions": "<0.2.3"
     }
   ]
 }
