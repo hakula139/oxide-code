@@ -6,9 +6,10 @@ use tracing::warn;
 
 use super::abort::{AbortResult, Inbox, TurnAbort};
 use super::{Engine, TurnEnd, abort, report_abort};
-use crate::config::auth::{self, Auth, AuthSource, AuthState};
-use crate::config::login::{Grant, PendingLogin};
-use crate::config::oauth;
+use crate::auth::oauth;
+use crate::auth::oauth::login::{Grant, PendingLogin};
+use crate::auth::{self, Auth, AuthSource};
+use crate::config::credentials::AuthState;
 use crate::protocol::{Event, EventSink, Op, SignInCode};
 use crate::util::text::join_sentences;
 
@@ -224,7 +225,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::config::oauth::testing::write_creds;
+    use crate::auth::LoginUnavailable;
+    use crate::auth::oauth::testing::write_creds;
     use crate::engine::local_testing::{inert_ops, login_urls, submit, tool_heavy_transcript};
     use crate::engine::testing::{engine, mount_reply, with_pinned_home};
     use crate::permission::Mode;
@@ -241,7 +243,6 @@ mod tests {
 
     mod try_from {
         use super::*;
-        use crate::config::auth::LoginUnavailable;
 
         #[test]
         fn signs_in_with_a_ready_credential() {

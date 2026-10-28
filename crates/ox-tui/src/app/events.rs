@@ -6,14 +6,14 @@ use indoc::formatdoc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, warn};
 
-use ox_core::config::auth::AuthSource;
+use ox_core::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::{Effort, ModelSpec};
 use ox_core::permission::{Basis, Mode, SessionGrant};
 use ox_core::protocol::{CompactTrigger, Event, Interaction, SavedTarget, TurnEnd, notice};
 use ox_core::session::display::{archive_notice, id_prefix};
-use ox_core::session::entry::{ArchiveState, SessionInfo};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
+use ox_core::session::store::listing::{ArchiveState, SessionInfo};
 use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::plural;
 
@@ -63,8 +63,8 @@ impl App {
             Event::TurnComplete | Event::Cancelled | Event::SessionReady => {}
             Event::TurnRolledBack => self.queue.mark_rolled_back(),
             Event::PromptUnsent => self.queue.mark_unsent(),
-            Event::UsageUpdated(usage) => self.status_bar.set_usage(Some(usage)),
-            Event::RateLimitsUpdated(limits) => self.status_bar.set_rate_limits(Some(limits)),
+            Event::UsageUpdated(usage) => self.session_info.usage = Some(usage),
+            Event::RateLimitsUpdated(limits) => self.session_info.rate_limits = Some(limits),
             Event::AutoCompactionStarted => {
                 self.queue.mark_compacting();
                 self.set_activity(Activity::Compacting);
@@ -77,7 +77,7 @@ impl App {
             Event::SummaryDiscarded => self.chat.discard_summary(),
             Event::SessionTitleUpdated { id, title } => {
                 if id == self.session_info.session_id {
-                    self.status_bar.set_title(Some(title));
+                    self.session_info.set_title(Some(title));
                 }
             }
             Event::ArchiveUpdated {
@@ -94,6 +94,7 @@ impl App {
                 prior,
                 history,
             } => self.apply_session_resumed(id, title, prior, history),
+            Event::SessionForked { id, from } => self.apply_session_forked(id, &from),
             Event::SessionCompacted {
                 summary,
                 pre_count,
@@ -141,8 +142,9 @@ impl App {
     }
 
     /// Ends the in-flight operation as `end` reports, then starts the queue head. A cancel or a
-    /// failure that holds the queue holds it until the user next submits a prompt. An operation
-    /// that ran no turn defers the head while a modal that may send the next operation is open.
+    /// failure that holds the queue holds it until the user submits a prompt or starts a session
+    /// switch, and a cancel also leaves the prompts a failed switch kept for its retry to the user.
+    /// An operation's end defers the head while a modal that may send the next operation is open.
     fn end_operation(&mut self, ended: &InFlight, end: TurnEnd) {
         self.chat.commit_streaming();
         let goes_on = match end {
@@ -159,7 +161,9 @@ impl App {
         };
         self.queue.end_turn();
         self.chat.clear_pending_calls();
-        if !goes_on || ended.cancelling() {
+        if ended.cancelling() {
+            self.queue.leave_to_user();
+        } else if !goes_on {
             self.queue.hold();
         }
         self.head_awaits_modal = self.modals.sends_idle_only_ops();
@@ -265,6 +269,13 @@ impl App {
         self.discard_queue();
     }
 
+    /// Continues the conversation in the fork session `id`, keeping the chat.
+    fn apply_session_forked(&mut self, id: String, from: &str) {
+        self.chat
+            .push_system_message(notice::session_forked(&id, from));
+        self.session_info.session_id = id;
+    }
+
     /// Mid-session resume: rebinds the session and rebuilds chat from the target transcript.
     fn apply_session_resumed(
         &mut self,
@@ -308,8 +319,8 @@ impl App {
         self.session_info.background_shells.clear();
         self.tasks.clear();
         self.slash_tasks = JoinSet::new();
-        self.status_bar.set_title(title);
-        self.status_bar.set_usage(None);
+        self.session_info.set_title(title);
+        self.session_info.usage = None;
         self.chat.clear_history();
         self.queue.clear_active();
         old_id
@@ -326,7 +337,7 @@ impl App {
         trigger: CompactTrigger,
     ) {
         self.chat.clear_history();
-        self.status_bar.set_usage(None);
+        self.session_info.usage = None;
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
         self.queue.mark_compacted();
@@ -350,11 +361,6 @@ impl App {
         auto_compaction: AutoCompactionConfig,
         notice: String,
     ) {
-        if model.id() != self.session_info.config.model.id() {
-            self.status_bar
-                .set_model(model.short_display_name().to_owned());
-        }
-        self.status_bar.set_effort(effort);
         self.session_info
             .config
             .apply_swap(model, effort, requested_effort, auto_compaction);
@@ -388,7 +394,7 @@ impl App {
 
     fn apply_signed_in(&mut self, auth: AuthSource) {
         self.session_info.config.auth = Some(auth);
-        self.status_bar.set_rate_limits(None);
+        self.session_info.rate_limits = None;
         let recovery = match auth {
             AuthSource::OxLogin | AuthSource::ClaudeCodeLogin => None,
             AuthSource::ClientBearer | AuthSource::ClientApiKey | AuthSource::ClientOAuth => {
@@ -409,7 +415,7 @@ impl App {
 
     fn apply_login_restored(&mut self, auth: AuthSource) {
         self.session_info.config.auth = Some(auth);
-        self.status_bar.set_rate_limits(None);
+        self.session_info.rate_limits = None;
         self.chat
             .push_system_message(format!("Signed in. Requests now use {auth}."));
     }
@@ -421,7 +427,7 @@ impl App {
         fallback_error: Option<String>,
     ) {
         self.session_info.config.auth = auth;
-        self.status_bar.set_rate_limits(None);
+        self.session_info.rate_limits = None;
         let outcome = if removed {
             "Signed out of oxide-code."
         } else {
@@ -528,7 +534,6 @@ mod tests {
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::text_result;
     use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
-    use ox_core::session::entry::TitleInfo;
     use ox_core::session::resolver::ResolveError;
     use ox_core::session::saved::SavedAction;
     use ox_core::session::store::testing::{
@@ -544,12 +549,14 @@ mod tests {
     use super::*;
     use crate::action::Action;
     use crate::app::testing::{
-        FakeModal, activity, five_hour_limit, rendered_text, start_op, test_app,
+        FakeModal, activity, five_hour_limit, render_app, rendered_text, start_op, test_app,
+        test_app_with,
     };
     use crate::clipboard::CopyError;
     use crate::glyphs::INTERRUPTED_MARKER;
     use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
+    use crate::session_info::testing::unknown_model_session_info;
     use crate::slash::{ResumePicker, SlashOutcome, WorkingTreeDiff};
     use crate::theme::builtin;
 
@@ -1231,13 +1238,13 @@ mod tests {
         }
 
         #[test]
-        fn usage_updated_sets_status_bar_usage() {
+        fn usage_updated_records_the_session_usage() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let usage = usage_snapshot();
 
             app.handle_engine_event(Event::UsageUpdated(usage));
 
-            assert_eq!(app.status_bar.usage(), Some(usage));
+            assert_eq!(app.session_info.usage, Some(usage));
             assert!(app.dirty);
         }
 
@@ -1373,7 +1380,7 @@ mod tests {
                 title: "AI-generated".to_owned(),
             });
 
-            assert_eq!(app.status_bar.title(), Some("AI-generated"));
+            assert_eq!(app.session_info.title.as_deref(), Some("AI-generated"));
             assert!(app.dirty);
         }
 
@@ -1389,7 +1396,7 @@ mod tests {
             });
 
             assert_eq!(
-                app.status_bar.title(),
+                app.session_info.title.as_deref(),
                 Some("First prompt"),
                 "current-session title must survive a stale event",
             );
@@ -1400,7 +1407,7 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(Some("Old session title"));
             app.chat.push_user_message("old prompt".to_owned());
             let original_id = app.session_info.session_id.clone();
-            app.status_bar.set_usage(Some(usage_snapshot()));
+            app.session_info.usage = Some(usage_snapshot());
             app.session_info.session_allow =
                 vec![Rule::parse(PermissionClass::Exec, "ls").unwrap()];
             app.session_info.background_shells = shells_in_each_state();
@@ -1417,11 +1424,11 @@ mod tests {
             );
             assert_ne!(app.session_info.session_id, original_id);
             assert!(
-                app.status_bar.title().is_none(),
+                app.session_info.title.is_none(),
                 "stale AI title must be cleared on roll",
             );
             assert!(
-                app.status_bar.usage().is_none(),
+                app.session_info.usage.is_none(),
                 "stale usage must be cleared on roll",
             );
             assert_eq!(app.session_info.session_allow, []);
@@ -1493,7 +1500,7 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(Some("Old"));
             app.session_info.config.model = ModelSpec::resolve("claude-opus-5-5");
             app.chat.push_user_message("live prompt".to_owned());
-            app.status_bar.set_usage(Some(usage_snapshot()));
+            app.session_info.usage = Some(usage_snapshot());
             app.queue.push("queued-a".to_owned());
             app.queue.push("queued-b".to_owned());
             app.handle_engine_event(bash_call_start("pending-1", "ls"));
@@ -1515,9 +1522,9 @@ mod tests {
 
             assert_eq!(app.session_info.session_id, "resumed-session");
             assert_ne!(app.session_info.session_id, original_id);
-            assert_eq!(app.status_bar.title(), Some("Resumed title"));
+            assert_eq!(app.session_info.title.as_deref(), Some("Resumed title"));
             assert!(
-                app.status_bar.usage().is_none(),
+                app.session_info.usage.is_none(),
                 "stale usage must be cleared on resume",
             );
             assert_eq!(app.session_info.session_allow, []);
@@ -1543,6 +1550,21 @@ mod tests {
                 "queued prompts must drop on resume"
             );
             assert!(app.dirty);
+        }
+
+        #[test]
+        fn session_forked_notes_the_fork_and_moves_the_status_bar_to_it() {
+            let mut info = unknown_model_session_info();
+            info.config.status_line = vec![StatusLineSegment::SessionId];
+            let (mut app, _rx, _event_tx) = test_app_with(info, None);
+
+            app.handle_engine_event(Event::SessionForked {
+                id: stamped_id(0xf0),
+                from: app.session_info.session_id.clone(),
+            });
+
+            assert_eq!(app.session_info.session_id, stamped_id(0xf0));
+            insta::assert_snapshot!(render_app(&mut app, 80, 10));
         }
 
         #[test]
@@ -1620,7 +1642,7 @@ mod tests {
             });
 
             assert!(
-                app.status_bar.title().is_none(),
+                app.session_info.title.is_none(),
                 "Some(None) title must clear the chrome",
             );
             assert!(app.chat.is_empty());
@@ -1652,7 +1674,7 @@ mod tests {
         fn session_compacted_replays_summary_and_clears_pending_calls() {
             let (mut app, _rx, _event_tx) = test_app(Some("Pre-compact"));
             app.chat.push_user_message("pre-compact prompt".to_owned());
-            app.status_bar.set_usage(Some(usage_snapshot()));
+            app.session_info.usage = Some(usage_snapshot());
             app.handle_engine_event(bash_call_start("pending-1", "ls"));
             app.tasks.set(plan());
 
@@ -1674,7 +1696,7 @@ mod tests {
                 "pending tool calls must drop on compact",
             );
             assert!(
-                app.status_bar.usage().is_none(),
+                app.session_info.usage.is_none(),
                 "stale usage must be cleared on compact",
             );
             assert_eq!(
@@ -1931,7 +1953,12 @@ mod tests {
 
             assert_eq!(app.session_info.config.model.id(), "claude-sonnet-5-5");
             assert_eq!(app.session_info.config.effort, Some(Effort::High),);
-            assert_eq!(app.status_bar.model(), "Sonnet 5.5");
+            let text = rendered_text(&mut app, 120, 10);
+            let status = text.lines().next().unwrap();
+            assert!(
+                status.contains("Sonnet 5.5 (high)") && !status.contains("test-model"),
+                "the status bar shows the new model: {status}",
+            );
             assert_eq!(
                 app.session_info.config.compaction.auto.threshold_tokens,
                 Some(WINDOW_1M_THRESHOLD),
@@ -1940,25 +1967,6 @@ mod tests {
                 app.chat.last_system_text(),
                 Some("Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high"),
             );
-            assert!(app.dirty);
-        }
-
-        #[test]
-        fn config_changed_effort_only_keeps_status_bar_model_label() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            let original_model = app.status_bar.model().to_owned();
-
-            app.handle_engine_event(Event::ConfigChanged {
-                model: app.session_info.config.model.clone(),
-                effort: Some(Effort::Xhigh),
-                requested: ConfigPick::Effort(Effort::Xhigh),
-                auto_compaction: app.session_info.config.compaction.auto,
-                notice: "Effort set to xhigh".to_owned(),
-            });
-
-            assert_eq!(app.session_info.config.effort, Some(Effort::Xhigh),);
-            assert_eq!(app.status_bar.model(), original_model);
-            assert_eq!(app.chat.last_system_text(), Some("Effort set to xhigh"));
             assert!(app.dirty);
         }
 
@@ -2204,7 +2212,7 @@ mod tests {
 
                 app.handle_engine_event(event);
 
-                assert_eq!(app.status_bar.rate_limits(), None, "{label}");
+                assert_eq!(app.session_info.rate_limits, None, "{label}");
             }
         }
 
@@ -2220,7 +2228,7 @@ mod tests {
                 app.chat.last_error_text(),
                 Some("Session write failed: disk full")
             );
-            assert_eq!(app.status_bar.title(), Some("First prompt"));
+            assert_eq!(app.session_info.title.as_deref(), Some("First prompt"));
             assert!(app.in_flight.is_none());
         }
 
@@ -2515,6 +2523,96 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_failed_switch_passes_its_prompt_only_to_the_same_kind_of_session() {
+            let rolled = || Event::SessionRolled {
+                id: "fresh".to_owned(),
+                old_session: ArchiveState::Active,
+            };
+            for (case, failed, retry, landed, kept) in [
+                (
+                    "/resume",
+                    Op::Resume {
+                        target: ResumeTarget::Id("missing".to_owned()),
+                    },
+                    Op::Resume {
+                        target: ResumeTarget::Id("abcd".to_owned()),
+                    },
+                    Event::SessionResumed {
+                        id: "abcd".to_owned(),
+                        title: None,
+                        prior: ArchiveState::Active,
+                        history: Vec::new(),
+                    },
+                    true,
+                ),
+                (
+                    "/clear after /archive",
+                    Op::Archive,
+                    Op::Clear,
+                    rolled(),
+                    true,
+                ),
+                (
+                    "/clear after /resume",
+                    Op::Resume {
+                        target: ResumeTarget::Id("missing".to_owned()),
+                    },
+                    Op::Clear,
+                    rolled(),
+                    false,
+                ),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.queue.push("for the old session".to_owned());
+                app.queue.hold();
+                app.dispatch_op(failed);
+                rx.try_recv().expect("switch forwarded");
+                app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+                app.handle_engine_event(Event::TurnFailed("Switch failed".to_owned()));
+                app.dispatch_op(retry);
+                rx.try_recv().expect("retry forwarded");
+
+                app.handle_engine_event(landed);
+                app.handle_engine_event(Event::SessionReady);
+
+                assert_eq!(
+                    rx.try_recv().ok(),
+                    kept.then(|| Op::prompt("typed meanwhile")),
+                    "{case}"
+                );
+                assert_eq!(*app.queue.pending(), [] as [&str; 0], "{case}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_cancel_during_a_failed_resume_leaves_its_prompts_to_the_retry_discard() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Resume {
+                target: ResumeTarget::Id("missing".to_owned()),
+            });
+            rx.try_recv().expect("resume forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.handle_esc();
+            assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
+            app.handle_engine_event(Event::TurnFailed("No session matches".to_owned()));
+            app.dispatch_op(Op::Resume {
+                target: ResumeTarget::Id("abcd".to_owned()),
+            });
+            rx.try_recv().expect("retry forwarded");
+
+            app.handle_engine_event(Event::SessionResumed {
+                id: "abcd".to_owned(),
+                title: None,
+                prior: ArchiveState::Active,
+                history: Vec::new(),
+            });
+            app.handle_engine_event(Event::SessionReady);
+
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+            assert_eq!(*app.queue.pending(), [] as [&str; 0]);
+        }
+
+        #[tokio::test]
         async fn a_cancel_holds_the_queue_past_an_archive() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             start_op(&mut app, &Op::prompt("running"));
@@ -2588,7 +2686,7 @@ mod tests {
                         &store,
                         id,
                         Some(id),
-                        Some(1),
+                        1,
                         time::macros::datetime!(2026-04-18 09:00:00 UTC)
                             + time::Duration::seconds(second),
                     );
@@ -2713,10 +2811,7 @@ mod tests {
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);
                 let info = SessionInfo {
-                    title: Some(TitleInfo {
-                        title: "Old work".to_owned(),
-                        updated_at: time::macros::datetime!(2026-04-18 09:00:00 UTC),
-                    }),
+                    title: Some("Old work".to_owned()),
                     ..listed_session("saved")
                 };
                 app.handle_engine_event(Event::SavedFound(Ok(Box::new(info))));

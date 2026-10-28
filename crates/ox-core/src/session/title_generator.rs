@@ -7,12 +7,12 @@ use tokio::sync::oneshot;
 use tracing::warn;
 
 use super::display::fit_title;
-use super::entry::UsageRecord;
 use super::handle::SessionHandle;
+use super::store::UsageRecord;
+use crate::auth::Auth;
 use crate::client::anthropic::Client;
 use crate::client::anthropic::completion::SideQuery;
 use crate::client::anthropic::wire::OutputFormat;
-use crate::config::auth::Auth;
 use crate::model::{Effort, ModelSpec, PromptCacheTtl};
 use crate::protocol::{Event, EventSink};
 use crate::util::text::ELLIPSIS;
@@ -109,8 +109,9 @@ async fn generate_and_record(
 ) -> Result<()> {
     let output_format = title_output_format();
     let user = title_request(first_prompt);
+    let session_id = session.session_id();
     let query = SideQuery {
-        session_id: session.session_id(),
+        session_id: &session_id,
         auth,
         model: ModelSpec::resolve(HAIKU_MODEL),
         system: SYSTEM_PROMPT,
@@ -131,8 +132,8 @@ async fn generate_and_record(
             tokens,
         };
         _ = billed.send(record.clone());
-        let outcome = session.record_usage(vec![record]).await;
-        sink.session_write_error(outcome.failure.as_deref());
+        let report = session.record_usage(vec![record]).await;
+        sink.session_write(&report);
     }
 
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
@@ -140,12 +141,12 @@ async fn generate_and_record(
     if session.manual_title_set() {
         return Ok(());
     }
-    let outcome = session.append_ai_title(title.clone()).await;
-    sink.session_write_error(outcome.failure.as_deref());
+    let report = session.append_ai_title(title.clone()).await;
+    sink.session_write(&report);
 
     sink.emit(
         Event::SessionTitleUpdated {
-            id: session.session_id().to_owned(),
+            id: session.session_id(),
             title,
         },
         "session-title-updated",
@@ -301,7 +302,7 @@ mod tests {
         async fn success_notifies_sink_and_delivers_the_request_usage() {
             let dir = tempfile::tempdir().unwrap();
             let session = prepared_session(dir.path()).await;
-            let session_id = session.session_id().to_owned();
+            let session_id = session.session_id();
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(wm_path("/v1/messages"))
@@ -513,7 +514,7 @@ mod tests {
             );
             assert_eq!(usage.await.unwrap(), title_record());
             let data = test_store(dir.path())
-                .load_session_data(session.session_id())
+                .load_session_data(&session.session_id())
                 .unwrap();
             assert_eq!(data.usage, [title_record()]);
         }
@@ -591,13 +592,13 @@ mod tests {
             assert_eq!(
                 sink.events(),
                 [Event::SessionTitleUpdated {
-                    id: session.session_id().to_owned(),
+                    id: session.session_id(),
                     title: "Fix auth".to_owned(),
                 }],
             );
             assert!(usage.await.is_err(), "no usage, no record");
             let data = test_store(dir.path())
-                .load_session_data(session.session_id())
+                .load_session_data(&session.session_id())
                 .unwrap();
             assert_eq!(data.usage, []);
         }
@@ -641,7 +642,7 @@ mod tests {
             );
             assert_eq!(usage.await.unwrap(), title_record());
             let data = test_store(dir.path())
-                .load_session_data(session.session_id())
+                .load_session_data(&session.session_id())
                 .unwrap();
             assert_eq!(data.usage, [title_record()]);
         }

@@ -1,11 +1,13 @@
 //! Conversation message types shared by the client, engine, session transcript, and tools.
 
 use serde::{Deserialize, Serialize};
+use strum::{EnumString, IntoStaticStr};
 
 // ── Role ──
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, IntoStaticStr)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub(crate) enum Role {
     User,
     Assistant,
@@ -14,7 +16,7 @@ pub(crate) enum Role {
 // ── ContentBlock ──
 
 /// One entry in a [`Message::content`] vector. Variants follow the Anthropic Messages API
-/// content-block taxonomy, in the shape session files store. Each wire sends blocks in its own
+/// content-block taxonomy, in the shape the session store keeps. Each wire sends blocks in its own
 /// request shape, and a reasoning block carries a [`Replay`] that only its own wire reads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

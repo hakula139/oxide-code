@@ -1,350 +1,357 @@
-//! In-memory session state owned by the actor. It uses no tokio, so lifecycle transitions test
-//! without a runtime.
+//! In-memory session state owned by the actor, which turns absorbed commands into the records of
+//! the next [`Commit`]. It uses no tokio, so lifecycle transitions test without a runtime.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-use anyhow::{Result, bail};
-use time::OffsetDateTime;
+use anyhow::{Result, anyhow};
+use rusqlite::Connection;
 use uuid::Uuid;
 
 use super::display::fit_title;
-use super::entry::{
-    CURRENT_VERSION, CompactBoundary, CompactInfo, Entry, ExitInfo, Header, TitleInfo,
+use super::handle::{Checkpoint, CompactBoundary, Fork};
+use super::store::commit::{
+    self, Commit, Head, Landed, MessageRow, Record, Saved, SessionRow, UsageRow,
 };
-use super::handle::Checkpoint;
-use super::store::{SessionStore, SessionWriter, artifact_dir, encode_lines};
+use super::store::load::SessionData;
+use super::store::{CompactInfo, SessionStore, UsageRecord, now_millis};
 use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
+use crate::prompt::SessionContext;
+use crate::tool::ToolMetadata;
+use crate::util::fs::FileLock;
 
-/// Retry-queue size in MiB past which a failed flush stops persistence for the rest of the session.
-const MAX_UNWRITTEN_MIB: usize = 8;
-pub(super) const MAX_UNWRITTEN_BYTES: usize = MAX_UNWRITTEN_MIB << 20;
-
-fn stop_message() -> String {
-    format!(
-        "session persistence stopped \
-         after more than {MAX_UNWRITTEN_MIB} MiB of entries failed to write"
-    )
-}
+/// What every batch after a failed commit reports, since nothing is written once one fails.
+pub(super) const STOPPED: &str = "session persistence stopped after an earlier write failed";
 
 // ── SessionState ──
 
-/// Session lifecycle that [`super::actor::run`] drives, with all I/O going through the
-/// [`SessionWriter`] in [`WriterStatus`].
+/// Session lifecycle that [`super::actor::run`] drives. The session row exists once the first
+/// message commits, and each commit writes the records absorbed since the last one.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool tracks an independent part of the session lifecycle"
+)]
 pub(super) struct SessionState {
-    pub(super) session_id: Arc<str>,
-    /// The [`artifact_dir`] beside the session file, the one a fresh session will create.
-    pub(super) artifact_dir: Arc<Path>,
     store: SessionStore,
-    writer_status: WriterStatus,
-    /// Unwritten entries, retried ahead of the next batch so no message precedes its parent.
-    unwritten: Vec<Entry>,
-    last_message_uuid: Option<Uuid>,
-    /// Loaded count on resume (`0` for fresh). `finish_entries` skips the summary when unchanged.
-    initial_message_count: u32,
+    /// Opened by the first commit.
+    conn: Option<Connection>,
+    row: SessionRow,
+    /// `None` until the row exists.
+    saved: Option<SavedAt>,
+    /// The message the next one chains from.
+    tip: Option<Uuid>,
     message_count: u32,
     /// Whether an earlier prompt or manual title consumed the first-prompt title opportunity.
     first_user_prompt_seen: bool,
+    /// Records absorbed since the last commit.
+    records: Vec<Record>,
+    /// Whether a record since the last commit moved the head.
+    head_moved: bool,
     finished: bool,
-    persistence_stopped: bool,
+    stopped: bool,
 }
 
-/// Writer lifecycle. `Pending` defers file creation until the first non-empty flush.
-enum WriterStatus {
-    Pending {
-        header: Header,
-        deferred_title: Option<String>,
-    },
-    Active(SessionWriter),
+/// A saved session: the head this process last committed or loaded, and the liveness lock it holds
+/// while the session is open.
+struct SavedAt {
+    base: Option<Uuid>,
+    _lock: FileLock,
 }
 
 impl SessionState {
+    /// A session on `git_branch` with no row, which its first message commit creates.
     pub(super) fn fresh(store: SessionStore, model: &str, git_branch: Option<String>) -> Self {
-        let created_at = OffsetDateTime::now_utc();
-        let header = new_header(&store, model, git_branch, created_at);
-        let session_file = store.session_file(&header.session_id, created_at);
-        Self {
-            artifact_dir: artifact_dir(&session_file, &header.session_id).into(),
-            session_id: Arc::from(header.session_id.as_str()),
-            store,
-            writer_status: WriterStatus::Pending {
-                header,
-                deferred_title: None,
-            },
-            unwritten: Vec::new(),
-            last_message_uuid: None,
-            initial_message_count: 0,
-            message_count: 0,
-            first_user_prompt_seen: false,
-            finished: false,
-            persistence_stopped: false,
-        }
+        let project = store.project();
+        let row = SessionRow {
+            id: Uuid::new_v4().to_string(),
+            forked_from: None,
+            cwd: project.cwd.clone(),
+            project_root: project.root.clone(),
+            git_branch,
+            model: model.to_owned(),
+            created_at: now_millis(),
+            title: None,
+            title_manual: false,
+        };
+        Self::new(store, row, None, None, 0, false)
     }
 
-    /// A resumed session, writing through `writer` at once, with title eligibility restored from
-    /// the saved records and resolved message chain.
+    /// The saved session `data` loaded, holding `lock`, whose branch keeps `message_count` messages
+    /// after sanitizing. A fork records this process's directories and `model`.
     pub(super) fn resumed(
         store: SessionStore,
-        session_id: String,
-        writer: SessionWriter,
-        last_message_uuid: Option<Uuid>,
-        initial_message_count: u32,
+        data: &SessionData,
+        message_count: u32,
+        model: &str,
+        lock: FileLock,
+    ) -> Self {
+        let project = store.project();
+        let row = SessionRow {
+            id: data.session_id.clone(),
+            forked_from: data.forked_from.clone(),
+            cwd: project.cwd.clone(),
+            project_root: project.root.clone(),
+            git_branch: data.git_branch.clone(),
+            model: model.to_owned(),
+            created_at: data.created_at,
+            title: data.title.clone(),
+            title_manual: data.title_manual,
+        };
+        let saved = SavedAt {
+            base: data.head,
+            _lock: lock,
+        };
+        Self::new(
+            store,
+            row,
+            Some(saved),
+            data.head,
+            message_count,
+            data.first_user_prompt_seen,
+        )
+    }
+
+    fn new(
+        store: SessionStore,
+        row: SessionRow,
+        saved: Option<SavedAt>,
+        tip: Option<Uuid>,
+        message_count: u32,
         first_user_prompt_seen: bool,
     ) -> Self {
         Self {
-            artifact_dir: artifact_dir(writer.path(), &session_id).into(),
-            session_id: Arc::from(session_id),
             store,
-            writer_status: WriterStatus::Active(writer),
-            unwritten: Vec::new(),
-            last_message_uuid,
-            initial_message_count,
-            message_count: initial_message_count,
+            conn: None,
+            row,
+            saved,
+            tip,
+            message_count,
             first_user_prompt_seen,
+            records: Vec::new(),
+            head_moved: false,
             finished: false,
-            persistence_stopped: false,
+            stopped: false,
         }
     }
 
-    /// Parks `title` for the flush that creates the file, or hands it back once the file exists.
-    pub(super) fn try_defer_title(&mut self, title: String) -> Option<String> {
-        let WriterStatus::Pending { deferred_title, .. } = &mut self.writer_status else {
-            return Some(title);
-        };
-        *deferred_title = Some(title);
-        None
+    pub(super) fn session_id(&self) -> &str {
+        &self.row.id
     }
 
-    /// Builds entries for one message and returns the AI-title seed on first user text. The
-    /// first-prompt title is `title`, or else that text. `manual_title_set` skips both the
-    /// first-prompt title and the AI-title seed.
-    pub(super) fn queue_message_entries(
-        &mut self,
-        message: &Message,
-        title: Option<&str>,
-        now: OffsetDateTime,
-        manual_title_set: bool,
-    ) -> (Vec<Entry>, Option<String>) {
-        let mut entries: Vec<Entry> = Vec::with_capacity(2);
-        let mut ai_title_seed: Option<String> = None;
+    /// The directory the session's artifacts go to, which follows a fork.
+    pub(super) fn artifact_dir(&self) -> PathBuf {
+        self.store.artifact_dir(&self.row.id)
+    }
 
+    /// Queues `message` with the prompt state it is the first to carry and the metadata of its tool
+    /// results, and returns the AI-title seed on the first user text. The first-prompt title is
+    /// `title`, or else that text. `manual_title_set` skips both the first-prompt title and the
+    /// AI-title seed.
+    pub(super) fn queue_message(
+        &mut self,
+        message: Message,
+        context: Option<SessionContext>,
+        tool_metadata: BTreeMap<String, ToolMetadata>,
+        title: Option<&str>,
+        manual_title_set: bool,
+    ) -> Option<String> {
+        let mut ai_title_seed = None;
         if !self.first_user_prompt_seen
-            && let Some(text) = extract_user_text(message)
+            && let Some(text) = extract_user_text(&message)
         {
-            // Latch before queueing anything. A flush failure must not replay this branch.
             self.first_user_prompt_seen = true;
             if !manual_title_set {
                 ai_title_seed = Some(text.to_owned());
-                entries.push(Entry::Title(TitleInfo {
-                    title: fit_title(title.unwrap_or(text)),
-                    updated_at: now,
-                }));
+                let title = fit_title(title.unwrap_or(text));
+                self.set_title(title, false);
             }
         }
-
-        let uuid = Uuid::new_v4();
-        entries.push(Entry::Message {
-            uuid,
-            parent_uuid: self.last_message_uuid,
-            message: message.clone(),
-            timestamp: now,
+        let parent_id = self.tip;
+        self.push_message(MessageRow {
+            id: Uuid::new_v4(),
+            parent_id,
+            message,
+            context,
+            compact: None,
+            tool_metadata,
+            created_at: now_millis(),
         });
-        self.last_message_uuid = Some(uuid);
         self.message_count = self.message_count.saturating_add(1);
-
-        (entries, ai_title_seed)
+        ai_title_seed
     }
 
     /// The branch point the next message chains from.
     pub(super) fn checkpoint(&self) -> Checkpoint {
         Checkpoint {
-            tip: self.last_message_uuid,
+            tip: self.tip,
             message_count: self.message_count,
             first_user_prompt_seen: self.first_user_prompt_seen,
         }
     }
 
-    /// Moves the chain anchor back to `checkpoint`, returning the entry that records the move. A
-    /// rewind to before the first user prompt lets the next one title the session again.
-    pub(super) fn rewind_entry(
-        &mut self,
-        checkpoint: Checkpoint,
-        manual_title_set: bool,
-        now: OffsetDateTime,
-    ) -> Entry {
-        self.last_message_uuid = checkpoint.tip;
+    /// Moves the head back to `checkpoint`. A rewind to before the first user prompt lets the next
+    /// one title the session again.
+    pub(super) fn rewind(&mut self, checkpoint: Checkpoint, manual_title_set: bool) {
+        self.tip = checkpoint.tip;
         self.message_count = checkpoint.message_count;
         self.first_user_prompt_seen = checkpoint.first_user_prompt_seen || manual_title_set;
-        Entry::Rewind {
-            tip: checkpoint.tip,
-            first_user_prompt_seen: Some(self.first_user_prompt_seen),
-            timestamp: now,
-        }
+        self.head_moved = true;
     }
 
-    /// Builds the compaction boundary, the refreshed context entry, and the synthetic post-compact
-    /// root message.
-    pub(super) fn compact_entries(
-        &self,
-        boundary: CompactBoundary,
-        synthetic_message: Message,
-        now: OffsetDateTime,
-    ) -> (Vec<Entry>, Uuid) {
+    /// Queues the compaction root `synthetic_message`, which opens a new chain carrying `boundary`,
+    /// and returns the message count it replaces. The compaction takes effect in memory whether or
+    /// not its commit lands.
+    pub(super) fn compact(&mut self, boundary: CompactBoundary, synthetic_message: Message) -> u32 {
         let CompactBoundary { record, context } = boundary;
-        let synthetic_uuid = Uuid::new_v4();
-        let entries = vec![
-            Entry::Compact {
-                info: CompactInfo {
-                    record,
-                    pre_message_count: self.message_count,
-                },
-                timestamp: now,
-            },
-            Entry::Context {
-                context: Box::new(context),
-                timestamp: now,
-            },
-            Entry::Message {
-                uuid: synthetic_uuid,
-                parent_uuid: None,
-                message: synthetic_message,
-                timestamp: now,
-            },
-        ];
-        (entries, synthetic_uuid)
-    }
-
-    /// Anchors future messages to the post-compact root once its entries are on disk.
-    pub(super) fn commit_compact(&mut self, synthetic_uuid: Uuid) {
-        self.last_message_uuid = Some(synthetic_uuid);
+        let pre_message_count = self.message_count;
+        self.push_message(MessageRow {
+            id: Uuid::new_v4(),
+            parent_id: None,
+            message: synthetic_message,
+            context: Some(context),
+            compact: Some(CompactInfo {
+                record,
+                pre_message_count,
+            }),
+            tool_metadata: BTreeMap::new(),
+            created_at: now_millis(),
+        });
         self.message_count = 1;
-        // The compacted tail is a fresh chain, so finish must write its own closing Summary.
-        self.initial_message_count = 0;
         // The synthetic root is user-role but must not seed a duplicate first-prompt title.
         self.first_user_prompt_seen = true;
+        pre_message_count
     }
 
-    /// Unqueues a failed compact so a retry cannot persist a compaction the agent abandoned.
-    pub(super) fn abandon_compact(&mut self) {
-        self.truncate_from_last(|entry| matches!(entry, Entry::Compact { .. }));
+    fn push_message(&mut self, row: MessageRow) {
+        self.tip = Some(row.id);
+        self.head_moved = true;
+        self.records.push(Record::Message(Box::new(row)));
     }
 
-    /// Unqueues a failed archive so a retry cannot hide the session the user stayed in.
-    pub(super) fn abandon_archive(&mut self) {
-        self.truncate_from_last(|entry| matches!(entry, Entry::Archive { .. }));
-    }
-
-    /// Drops the queue from the last entry matching `starts_batch`.
-    fn truncate_from_last(&mut self, starts_batch: impl Fn(&Entry) -> bool) {
-        if let Some(start) = self.unwritten.iter().rposition(starts_batch) {
-            self.unwritten.truncate(start);
-        }
-    }
-
-    pub(super) fn message_count(&self) -> u32 {
-        self.message_count
-    }
-
-    pub(super) fn persistence_stopped(&self) -> bool {
-        self.persistence_stopped
-    }
-
-    /// Builds the snapshot and summary entries that close the session, once, and none when it
-    /// recorded no new messages.
-    pub(super) fn finish_entries(
-        &mut self,
-        snapshots: Vec<FileSnapshot>,
-        now: OffsetDateTime,
-    ) -> Vec<Entry> {
-        if self.finished {
-            return Vec::new();
-        }
-        self.finished = true;
-        // Writer may still be Pending in a batched Finish. Key off message_count instead.
-        if self.message_count == 0 {
-            return Vec::new();
-        }
-        if self.initial_message_count > 0 && self.message_count == self.initial_message_count {
-            return Vec::new();
-        }
-        let mut entries: Vec<Entry> = snapshots
-            .into_iter()
-            .map(|snapshot| Entry::FileSnapshot { snapshot })
-            .collect();
-        entries.push(Entry::Summary(ExitInfo {
-            message_count: self.message_count,
-            updated_at: now,
+    pub(super) fn queue_usage(&mut self, records: Vec<UsageRecord>) {
+        let created_at = now_millis();
+        self.records.extend(records.into_iter().map(|record| {
+            Record::Usage(UsageRow {
+                id: Uuid::new_v4(),
+                record,
+                created_at,
+            })
         }));
-        entries
     }
 
-    /// Writes the retry queue, then `entries`, in one append and keeps them all queued on failure.
-    /// The flush that creates the file writes the header and any deferred title first. A failure
-    /// with more than [`MAX_UNWRITTEN_BYTES`] to write drops the queue and stops persistence.
-    pub(super) fn flush_entries(&mut self, entries: Vec<Entry>) -> Result<()> {
-        if self.persistence_stopped {
-            if entries.is_empty() {
-                return Ok(());
-            }
-            bail!("{}", stop_message());
-        }
-        self.unwritten.extend(entries);
-        if self.unwritten.is_empty() {
-            return Ok(());
-        }
-
-        let deferred_title = match &self.writer_status {
-            WriterStatus::Pending {
-                deferred_title: Some(title),
-                ..
-            } => Some(Entry::Title(TitleInfo {
+    /// Titles the session. A fresh session's row takes the title when its first message commits.
+    pub(super) fn set_title(&mut self, title: String, manual: bool) {
+        if self.saved.is_some() {
+            self.records.push(Record::Title {
                 title: title.clone(),
-                updated_at: OffsetDateTime::now_utc(),
-            })),
-            _ => None,
-        };
-        let lines = encode_lines(deferred_title.iter().chain(&self.unwritten))?;
-        let result = match &mut self.writer_status {
-            WriterStatus::Active(writer) => writer.append_lines(&lines),
-            WriterStatus::Pending { header, .. } => self
-                .store
-                .create(header, &lines)
-                .map(|writer| self.writer_status = WriterStatus::Active(writer)),
-        };
-
-        if let Err(e) = result {
-            if lines.len() > MAX_UNWRITTEN_BYTES {
-                self.persistence_stopped = true;
-                self.unwritten = Vec::new();
-                return Err(e.context(stop_message()));
-            }
-            return Err(e);
+                manual,
+            });
         }
-        self.unwritten.clear();
-        Ok(())
+        self.row.title = Some(title);
+        self.row.title_manual = manual;
+    }
+
+    pub(super) fn queue_archive(&mut self) {
+        self.records.push(Record::Archive);
+    }
+
+    /// Queues the file tracker `snapshots` that close the session, once.
+    pub(super) fn finish(&mut self, snapshots: Vec<FileSnapshot>) {
+        if !std::mem::replace(&mut self.finished, true) {
+            self.records.push(Record::FileSnapshots(snapshots));
+        }
+    }
+
+    /// Commits the records absorbed since the last commit, returning the fork it made. A fresh
+    /// session keeps its records until a message creates its row. The first failure stops
+    /// persistence for good, and every later batch with records fails with [`STOPPED`].
+    pub(super) fn flush(&mut self) -> Result<Option<Fork>> {
+        if self.stopped {
+            if self.records.is_empty() && !self.head_moved {
+                return Ok(None);
+            }
+            self.records.clear();
+            self.head_moved = false;
+            return Err(anyhow!(STOPPED));
+        }
+        let materializes = self
+            .records
+            .iter()
+            .any(|record| matches!(record, Record::Message(_)));
+        if self.saved.is_none() && !materializes
+            || self.saved.is_some() && self.records.is_empty() && !self.head_moved
+        {
+            return Ok(None);
+        }
+
+        let result = self.commit();
+        self.records.clear();
+        self.head_moved = false;
+        match result {
+            Ok(forked) => Ok(forked),
+            Err(e) => {
+                self.stopped = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn commit(&mut self) -> Result<Option<Fork>> {
+        let conn = match &mut self.conn {
+            Some(conn) => conn,
+            conn => conn.insert(self.store.connect()?),
+        };
+        let head = self.head_moved.then_some(Head {
+            id: self.tip,
+            message_count: self.message_count,
+        });
+        let saved = match &self.saved {
+            Some(saved) => Saved::At { base: saved.base },
+            None => Saved::Fresh,
+        };
+        let landed = commit::commit(
+            conn,
+            &self.store,
+            &Commit {
+                session: &self.row,
+                saved,
+                records: &self.records,
+                head,
+            },
+        )?;
+        let base = match &self.saved {
+            Some(saved) if head.is_none() => saved.base,
+            _ => self.tip,
+        };
+        let (lock, forked) = match landed {
+            Landed::InPlace => {
+                if let Some(saved) = &mut self.saved {
+                    saved.base = base;
+                }
+                return Ok(None);
+            }
+            Landed::Created(lock) => (lock, None),
+            Landed::Forked {
+                id,
+                lock,
+                title,
+                title_manual,
+            } => {
+                let from = std::mem::replace(&mut self.row.id, id);
+                self.row.forked_from = Some(from.clone());
+                self.row.title = title;
+                self.row.title_manual = title_manual;
+                let to = self.row.id.clone();
+                (lock, Some(Fork { from, to }))
+            }
+        };
+        self.saved = Some(SavedAt { base, _lock: lock });
+        Ok(forked)
     }
 }
 
 // ── Helpers ──
-
-fn new_header(
-    store: &SessionStore,
-    model: &str,
-    git_branch: Option<String>,
-    created_at: OffsetDateTime,
-) -> Header {
-    let project = store.project();
-    Header {
-        session_id: Uuid::new_v4().to_string(),
-        cwd: project.cwd.clone(),
-        project_root: Some(project.root.clone()),
-        model: model.to_owned(),
-        created_at,
-        version: CURRENT_VERSION,
-        git_branch,
-    }
-}
 
 /// Extracts the first nonempty ordinary text from a user message.
 pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
@@ -363,14 +370,88 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use crate::file_tracker::{FileTracker, LastView};
-    use crate::session::entry::CompactRecord;
+    use crate::file_tracker::{FileSource, FileState, LastView};
     use crate::session::handle::testing::boundary;
-    use crate::session::store::local_testing::test_session_file;
-    use crate::session::store::testing::{isolated_store, test_project_dir, test_store};
-    use crate::session::store::{load_session_data_from_path, open_append_at};
-    use crate::tool::tasks::testing::plan;
+    use crate::session::store::local_testing::{fail_writes, message_row, save};
+    use crate::session::store::testing::isolated_store;
+    use crate::tool::StoredView;
+
+    /// The first text of each message in `messages`.
+    fn texts(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|message| match message.content.first() {
+                Some(ContentBlock::Text { text, .. }) => text.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// The texts of the chain session `session_id` resumes.
+    fn chain(store: &SessionStore, session_id: &str) -> Vec<String> {
+        texts(&store.load_session_data(session_id).unwrap().messages)
+    }
+
+    /// Every message ID session `session_id` holds, in insertion order.
+    fn row_ids(store: &SessionStore, session_id: &str) -> Vec<Uuid> {
+        let conn = store.connect().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id FROM messages WHERE session_id = ?1 ORDER BY seq")
+            .unwrap();
+        stmt.query_map([session_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|id| Uuid::parse_str(&id.unwrap()).unwrap())
+            .collect()
+    }
+
+    fn usage_rows(store: &SessionStore, session_id: &str) -> i64 {
+        store
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM usage WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn usage() -> UsageRecord {
+        serde_json::from_value(serde_json::json!({
+            "model": "claude-sonnet-5-5",
+            "cache_ttl": "5m",
+            "input_tokens": 1,
+            "output_tokens": 2,
+        }))
+        .unwrap()
+    }
+
+    fn queue_user(state: &mut SessionState, text: &str) -> Option<String> {
+        state.queue_message(Message::user(text), None, BTreeMap::new(), None, false)
+    }
+
+    fn queue_assistant(state: &mut SessionState, text: &str) {
+        state.queue_message(Message::assistant(text), None, BTreeMap::new(), None, false);
+    }
+
+    /// Resumes the saved session `session_id` as another process would, recording `model`.
+    fn open(store: &SessionStore, session_id: &str, model: &str) -> SessionState {
+        let lock = store.hold(session_id).unwrap();
+        let data = store.load_session_data(session_id).unwrap();
+        let count = u32::try_from(data.messages.len()).unwrap();
+        SessionState::resumed(store.clone(), &data, count, model, lock)
+    }
+
+    /// A saved session holding the user prompt `text`.
+    fn saved_session(store: &SessionStore, text: &str) -> String {
+        let mut state = SessionState::fresh(store.clone(), "m", None);
+        queue_user(&mut state, text);
+        state.flush().unwrap();
+        state.session_id().to_owned()
+    }
 
     mod fresh {
         use super::*;
@@ -381,604 +462,465 @@ mod tests {
 
             let state = SessionState::fresh(store, "m", None);
 
-            let id = Uuid::parse_str(&state.session_id).unwrap();
+            let id = Uuid::parse_str(state.session_id()).unwrap();
             assert_eq!(id.get_version_num(), 4, "{id}");
         }
     }
 
-    mod try_defer_title {
+    mod queue_message {
         use super::*;
 
         #[test]
-        fn pending_accepts_and_overwrites_previous_value() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
+        fn titles_and_seeds_only_on_the_first_user_text() {
+            for (name, title, manual_title_set, expected_title, expected_seed) in [
+                (
+                    "plain",
+                    None,
+                    false,
+                    Some("Fix the auth bug"),
+                    Some("Fix the auth bug"),
+                ),
+                (
+                    "given title",
+                    Some("/init AGENTS.md"),
+                    false,
+                    Some("/init AGENTS.md"),
+                    Some("Fix the auth bug"),
+                ),
+                ("manual title", None, true, None, None),
+            ] {
+                let (_dir, store) = isolated_store();
+                let mut state = SessionState::fresh(store, "m", None);
+                state.queue_message(
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::tool_result("t1", "output", false)],
+                    },
+                    None,
+                    BTreeMap::new(),
+                    None,
+                    manual_title_set,
+                );
+                queue_assistant(&mut state, "reply");
 
-            assert!(state.try_defer_title("first".to_owned()).is_none());
-            assert!(state.try_defer_title("second".to_owned()).is_none());
+                let seed = state.queue_message(
+                    Message::user("Fix the auth bug"),
+                    None,
+                    BTreeMap::new(),
+                    title,
+                    manual_title_set,
+                );
+                let again = queue_user(&mut state, "follow up");
 
-            let WriterStatus::Pending {
-                deferred_title: Some(slot),
-                ..
-            } = &state.writer_status
-            else {
-                panic!("expected Pending with last-wins deferred title");
-            };
-            assert_eq!(slot, "second", "later defer overwrites the earlier one");
-        }
-
-        #[test]
-        fn active_rejects_with_title() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-            let (entries, _) =
-                state.queue_message_entries(&Message::user("first"), None, now, false);
-            state.flush_entries(entries).unwrap();
-            assert!(matches!(state.writer_status, WriterStatus::Active(_)));
-
-            let rejected = state.try_defer_title("Manual title".to_owned());
-            assert_eq!(rejected.as_deref(), Some("Manual title"));
+                assert_eq!(seed.as_deref(), expected_seed, "{name}");
+                assert_eq!(again, None, "{name}");
+                assert_eq!(state.row.title.as_deref(), expected_title, "{name}");
+                assert_eq!(state.message_count, 4, "{name}");
+            }
         }
     }
 
-    mod queue_message_entries {
+    mod flush {
         use super::*;
 
         #[test]
-        fn seeds_ai_title_on_first_user_text() {
+        fn creates_the_row_with_the_first_message_and_what_preceded_it() {
             let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
+            let mut state = SessionState::fresh(store.clone(), "m", Some("main".to_owned()));
+            let id = state.session_id().to_owned();
+            state.set_title("Named".to_owned(), true);
+            state.queue_usage(vec![usage()]);
 
-            let (entries, seed) =
-                state.queue_message_entries(&Message::user("Fix the auth bug"), None, now, false);
+            assert_eq!(state.flush().unwrap(), None);
+            assert_eq!(store.find(&id).unwrap(), None, "no message, no row");
+            state.queue_message(Message::user("hello"), None, BTreeMap::new(), None, true);
+            assert_eq!(state.flush().unwrap(), None);
 
-            assert_eq!(entries.len(), 2, "title + message");
-            assert!(matches!(
-                &entries[0],
-                Entry::Title(TitleInfo { title, .. }) if title == "Fix the auth bug",
-            ));
-            assert!(matches!(&entries[1], Entry::Message { .. }));
-            assert_eq!(seed.as_deref(), Some("Fix the auth bug"));
-            assert!(state.first_user_prompt_seen);
-            assert_eq!(state.message_count, 1);
-            assert!(state.last_message_uuid.is_some());
+            let info = store.find(&id).unwrap().unwrap();
+            assert_eq!(info.title.as_deref(), Some("Named"));
+            assert_eq!(info.message_count, 1);
+            assert_eq!(info.git_branch.as_deref(), Some("main"));
+            let data = store.load_session_data(&id).unwrap();
+            assert!(data.title_manual);
+            assert_eq!(data.head, Some(row_ids(&store, &id)[0]));
+            assert_eq!(texts(&data.messages), ["hello"]);
+            assert_eq!(usage_rows(&store, &id), 1);
         }
 
         #[test]
-        fn titles_the_session_after_a_given_title_and_seeds_the_ai_title_with_the_text() {
+        fn writes_a_round_in_order_with_the_results_metadata() {
             let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-
-            let (entries, seed) = state.queue_message_entries(
-                &Message::user("Create AGENTS.md for this project."),
-                Some("/init AGENTS.md"),
-                now,
+            let mut state = SessionState::fresh(store.clone(), "m", None);
+            let id = state.session_id().to_owned();
+            let metadata = ToolMetadata {
+                title: Some("Read f.rs".to_owned()),
+                result_view: Some(StoredView::Text),
+            };
+            queue_user(&mut state, "read it");
+            queue_assistant(&mut state, "reading");
+            state.queue_message(
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::tool_result("t1", "fn main() {}", false)],
+                },
+                None,
+                BTreeMap::from([("t1".to_owned(), metadata.clone())]),
+                None,
                 false,
             );
 
-            assert!(matches!(
-                &entries[0],
-                Entry::Title(TitleInfo { title, .. }) if title == "/init AGENTS.md",
-            ));
-            assert_eq!(seed.as_deref(), Some("Create AGENTS.md for this project."));
-        }
+            state.flush().unwrap();
 
-        #[test]
-        fn subsequent_user_message_skips_title_and_chains_uuid() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-            _ = state.queue_message_entries(&Message::user("first"), None, now, false);
-            let first_tip = state.last_message_uuid.unwrap();
-
-            let (entries, seed) =
-                state.queue_message_entries(&Message::user("second"), None, now, false);
-
-            assert_eq!(entries.len(), 1, "no second title");
-            let Entry::Message {
-                parent_uuid, uuid, ..
-            } = &entries[0]
-            else {
-                panic!("expected Message, got {:?}", entries[0]);
-            };
-            assert_eq!(*parent_uuid, Some(first_tip), "chains to previous tip");
-            assert_eq!(state.last_message_uuid, Some(*uuid));
-            assert!(seed.is_none(), "seed only fires once per session");
-            assert_eq!(state.message_count, 2);
-        }
-
-        #[test]
-        fn tool_result_only_user_does_not_seed_title() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-            let msg = Message {
-                role: Role::User,
-                content: vec![ContentBlock::tool_result("t", "out", false)],
-            };
-
-            let (entries, seed) = state.queue_message_entries(&msg, None, now, false);
-
-            assert_eq!(entries.len(), 1, "message only");
-            assert!(matches!(&entries[0], Entry::Message { .. }));
-            assert!(seed.is_none());
-            assert!(
-                !state.first_user_prompt_seen,
-                "tool-result-only does not consume the first-prompt slot",
-            );
-        }
-
-        #[test]
-        fn assistant_message_skips_title() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-
-            let (entries, seed) =
-                state.queue_message_entries(&Message::assistant("hi"), None, now, false);
-
-            assert_eq!(entries.len(), 1);
-            assert!(seed.is_none());
-            assert!(!state.first_user_prompt_seen);
-        }
-    }
-
-    mod rewind_entry {
-        use super::*;
-
-        #[test]
-        fn chains_the_next_message_to_the_checkpoint_tip() {
-            let dir = tempfile::tempdir().unwrap();
-            let mut state = SessionState::fresh(test_store(dir.path()), "m", None);
-            let now = OffsetDateTime::now_utc();
-            _ = state.queue_message_entries(&Message::user("first"), None, now, false);
-            let checkpoint = state.checkpoint();
-            _ = state.queue_message_entries(&Message::user("refused"), None, now, false);
-
-            let entry = state.rewind_entry(checkpoint, false, now);
-            let (entries, _) =
-                state.queue_message_entries(&Message::user("next"), None, now, false);
-
-            let first = checkpoint.tip.expect("the first message is the tip");
-            assert!(matches!(entry, Entry::Rewind { tip: Some(tip), .. } if tip == first));
-            assert!(matches!(
-                &entries[..],
-                [Entry::Message { parent_uuid: Some(parent), .. }] if *parent == first,
-            ));
-            assert_eq!(state.message_count, 2);
-        }
-
-        #[test]
-        fn to_before_the_first_prompt_lets_the_next_one_title_the_session() {
-            let dir = tempfile::tempdir().unwrap();
-            let mut state = SessionState::fresh(test_store(dir.path()), "m", None);
-            let now = OffsetDateTime::now_utc();
-            let checkpoint = state.checkpoint();
-            _ = state.queue_message_entries(&Message::user("refused"), None, now, false);
-
-            _ = state.rewind_entry(checkpoint, false, now);
-            let (entries, seed) =
-                state.queue_message_entries(&Message::user("next"), None, now, false);
-
-            assert!(
-                matches!(&entries[0], Entry::Title(TitleInfo { title, .. }) if title == "next")
-            );
-            assert_eq!(seed.as_deref(), Some("next"));
-        }
-    }
-
-    mod compact_entries {
-        use super::*;
-        use crate::prompt::SessionContext;
-
-        #[test]
-        fn writes_boundary_and_synthetic_message_without_committing() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-            let (rec, _) = state.queue_message_entries(&Message::user("first"), None, now, false);
-            state.flush_entries(rec).unwrap();
-            let (rec, _) =
-                state.queue_message_entries(&Message::assistant("reply"), None, now, false);
-            state.flush_entries(rec).unwrap();
-            assert_eq!(state.message_count(), 2);
-
-            let (entries, synthetic_uuid) = state.compact_entries(
-                CompactBoundary {
-                    record: CompactRecord {
-                        summary: "summary body".to_owned(),
-                        instructions: Some("focus on auth".to_owned()),
-                        tasks: plan(),
-                    },
-                    context: SessionContext::default(),
-                },
-                Message::user("post-compact"),
-                now,
-            );
-
-            assert_eq!(entries.len(), 3);
-            assert!(
-                matches!(
-                    &entries[0],
-                    Entry::Compact {
-                        info:
-                            CompactInfo {
-                                record:
-                                    CompactRecord {
-                                        summary,
-                                        instructions: Some(i),
-                                        tasks,
-                                    },
-                                pre_message_count: 2,
-                            },
-                        ..
-                    } if summary == "summary body" && i == "focus on auth" && *tasks == plan()
-                ),
-                "boundary entry must carry summary, pre-count, instructions, and tasks \
-                 verbatim: {:?}",
-                entries[0],
-            );
-            assert!(
-                matches!(
-                    &entries[1],
-                    Entry::Context { context, timestamp }
-                        if **context == SessionContext::default() && *timestamp == now
-                ),
-                "the context binds to the synthetic message through its timestamp: {:?}",
-                entries[1],
-            );
-            assert!(
-                matches!(
-                    &entries[2],
-                    Entry::Message {
-                        uuid,
-                        parent_uuid: None,
-                        ..
-                    } if *uuid == synthetic_uuid
-                ),
-                "synthetic post-compact message must reset the parent chain: {:?}",
-                entries[2],
-            );
+            let data = store.load_session_data(&id).unwrap();
+            assert_eq!(data.messages.len(), 3);
+            assert_eq!(data.messages[1], Message::assistant("reading"));
             assert_eq!(
-                state.message_count(),
-                2,
-                "pre-flush count must remain until commit"
+                data.tool_metadata,
+                HashMap::from([("t1".to_owned(), metadata)])
             );
-            assert_ne!(state.last_message_uuid, Some(synthetic_uuid));
         }
 
         #[test]
-        fn omits_absent_instructions() {
+        fn compaction_saves_a_root_with_its_boundary_and_moves_the_head() {
             let (_dir, store) = isolated_store();
-            let state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
+            let mut state = SessionState::fresh(store.clone(), "m", None);
+            let id = state.session_id().to_owned();
+            queue_user(&mut state, "a");
+            queue_assistant(&mut state, "b");
+            state.flush().unwrap();
 
-            let (entries, _) = state.compact_entries(boundary("s"), Message::user("synth"), now);
+            let pre_count = state.compact(boundary("summary"), Message::user("synthetic"));
+            state.flush().unwrap();
 
-            assert!(matches!(
-                &entries[0],
-                Entry::Compact {
-                    info: CompactInfo {
-                        record: CompactRecord {
-                            instructions: None,
-                            ..
-                        },
-                        ..
-                    },
-                    ..
+            assert_eq!(pre_count, 2);
+            let data = store.load_session_data(&id).unwrap();
+            assert_eq!(texts(&data.messages), ["synthetic"]);
+            let compact = data.compact.unwrap();
+            assert_eq!(compact.pre_message_count, 2);
+            assert_eq!(compact.record.summary, "summary");
+            assert_eq!(data.context, Some(SessionContext::default()));
+            assert_eq!(data.head, row_ids(&store, &id).last().copied());
+            assert_eq!(store.find(&id).unwrap().unwrap().message_count, 1);
+            assert_eq!(row_ids(&store, &id).len(), 3, "pre-compact rows stay");
+        }
+
+        #[test]
+        fn rewind_moves_the_head_and_keeps_every_row() {
+            let (_dir, store) = isolated_store();
+            let mut state = SessionState::fresh(store.clone(), "m", None);
+            let id = state.session_id().to_owned();
+            queue_user(&mut state, "kept");
+            let checkpoint = state.checkpoint();
+            queue_user(&mut state, "refused");
+            state.flush().unwrap();
+
+            state.rewind(checkpoint, false);
+            state.flush().unwrap();
+            queue_user(&mut state, "next");
+            state.flush().unwrap();
+
+            assert_eq!(chain(&store, &id), ["kept", "next"]);
+            assert_eq!(row_ids(&store, &id).len(), 3);
+            assert_eq!(store.find(&id).unwrap().unwrap().message_count, 2);
+        }
+
+        #[test]
+        fn a_failed_commit_stops_persistence_for_good() {
+            let (_dir, store) = isolated_store();
+            let mut state = SessionState::fresh(store.clone(), "m", None);
+            let id = state.session_id().to_owned();
+            fail_writes(&store);
+            queue_user(&mut state, "lost");
+
+            let first = state.flush().unwrap_err();
+            queue_user(&mut state, "dropped");
+            let later = state.flush().unwrap_err();
+            let empty = state.flush();
+
+            assert!(format!("{first:#}").contains("disk full"), "{first:#}");
+            assert_eq!(later.to_string(), STOPPED);
+            assert_eq!(
+                empty.unwrap(),
+                None,
+                "a batch with no records reports nothing"
+            );
+            assert_eq!(store.find(&id).unwrap(), None);
+        }
+
+        #[test]
+        fn saves_the_finish_snapshots_once() {
+            let (_dir, store) = isolated_store();
+            let mut state = SessionState::fresh(store.clone(), "m", None);
+            let id = state.session_id().to_owned();
+            queue_user(&mut state, "read f.rs");
+            state.flush().unwrap();
+
+            state.finish(vec![snapshot("/repo/f.rs")]);
+            state.finish(vec![snapshot("/repo/g.rs")]);
+            state.flush().unwrap();
+
+            let paths: Vec<_> = store
+                .load_session_data(&id)
+                .unwrap()
+                .file_snapshots
+                .into_iter()
+                .map(|snapshot| snapshot.path)
+                .collect();
+            assert_eq!(paths, [PathBuf::from("/repo/f.rs")]);
+        }
+
+        #[test]
+        fn leaves_no_row_for_a_session_without_messages() {
+            let (_dir, store) = isolated_store();
+            let mut state = SessionState::fresh(store.clone(), "m", None);
+            state.queue_usage(vec![usage()]);
+            state.finish(Vec::new());
+
+            assert_eq!(state.flush().unwrap(), None);
+
+            assert_eq!(store.list().unwrap(), []);
+        }
+    }
+
+    mod lazy_fork {
+        use super::*;
+
+        /// What a writer in the scenario table does on the saved session.
+        #[derive(Debug, Clone, Copy)]
+        enum Step {
+            Open(usize),
+            Write(usize, &'static str),
+            /// Moves the head back to before the writer's last write.
+            Rewind(usize),
+            Rename(usize),
+            Archive(usize),
+            Close(usize),
+        }
+
+        use Step::{Archive, Close, Open, Rename, Rewind, Write};
+
+        #[test]
+        fn forks_only_a_writer_whose_view_another_writer_moved() {
+            for (name, steps, a_forks, source_chain, a_chain) in [
+                (
+                    "A and B open S, only B writes",
+                    vec![Open(0), Open(1), Write(1, "b")],
+                    false,
+                    vec!["start", "b"],
+                    vec!["start", "b"],
+                ),
+                (
+                    "A and B open S, B writes, then A writes",
+                    vec![Open(0), Open(1), Write(1, "b"), Write(0, "a")],
+                    true,
+                    vec!["start", "b"],
+                    vec!["start", "a"],
+                ),
+                (
+                    "A writes, B opens S and writes, then A writes again",
+                    vec![
+                        Open(0),
+                        Write(0, "a1"),
+                        Open(1),
+                        Write(1, "b"),
+                        Write(0, "a2"),
+                    ],
+                    true,
+                    vec!["start", "a1", "b"],
+                    vec!["start", "a1", "a2"],
+                ),
+                (
+                    "B writes and exits, then A writes from its older view",
+                    vec![Open(0), Open(1), Write(1, "b"), Close(1), Write(0, "a")],
+                    true,
+                    vec!["start", "b"],
+                    vec!["start", "a"],
+                ),
+                (
+                    "B renames and archives S, then A writes",
+                    vec![Open(0), Open(1), Rename(1), Archive(1), Write(0, "a")],
+                    false,
+                    vec!["start", "a"],
+                    vec!["start", "a"],
+                ),
+                (
+                    "B rewinds S to exactly the head A last saw, then A writes",
+                    vec![Open(0), Open(1), Write(1, "b"), Rewind(1), Write(0, "a")],
+                    false,
+                    vec!["start", "a"],
+                    vec!["start", "a"],
+                ),
+            ] {
+                let (_dir, store) = isolated_store();
+                let source = saved_session(&store, "start");
+                let mut writers: [Option<SessionState>; 2] = [None, None];
+                let mut checkpoints: [Option<Checkpoint>; 2] = [None, None];
+                let mut forks = Vec::new();
+
+                for step in steps {
+                    match step {
+                        Open(who) => writers[who] = Some(open(&store, &source, "m")),
+                        Write(who, text) => {
+                            let state = writers[who].as_mut().unwrap();
+                            checkpoints[who] = Some(state.checkpoint());
+                            queue_user(state, text);
+                            forks.extend(state.flush().unwrap().map(|fork| (who, fork)));
+                        }
+                        Rewind(who) => {
+                            let state = writers[who].as_mut().unwrap();
+                            state.rewind(checkpoints[who].unwrap(), false);
+                            state.flush().unwrap();
+                        }
+                        Rename(who) => {
+                            let state = writers[who].as_mut().unwrap();
+                            state.set_title("Renamed".to_owned(), true);
+                            state.flush().unwrap();
+                        }
+                        Archive(who) => {
+                            let state = writers[who].as_mut().unwrap();
+                            state.queue_archive();
+                            state.flush().unwrap();
+                        }
+                        Close(who) => writers[who] = None,
+                    }
                 }
-            ));
-        }
-    }
 
-    mod commit_compact {
-        use super::*;
-
-        #[test]
-        fn resets_chain_and_message_count() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-            let (rec, _) = state.queue_message_entries(&Message::user("first"), None, now, false);
-            state.flush_entries(rec).unwrap();
-            let (rec, _) =
-                state.queue_message_entries(&Message::assistant("reply"), None, now, false);
-            state.flush_entries(rec).unwrap();
-
-            let (_, synthetic_uuid) =
-                state.compact_entries(boundary("s"), Message::user("synth"), now);
-            state.commit_compact(synthetic_uuid);
-
-            assert_eq!(state.last_message_uuid, Some(synthetic_uuid));
-            assert_eq!(state.message_count(), 1);
-        }
-
-        #[test]
-        fn marks_first_user_prompt_seen_so_post_compact_record_skips_title() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-
-            let (_, synthetic_uuid) =
-                state.compact_entries(boundary("s"), Message::user("synth"), now);
-            state.commit_compact(synthetic_uuid);
-
-            assert!(state.first_user_prompt_seen);
-            let (_, seed) = state.queue_message_entries(&Message::user("after"), None, now, false);
-            assert!(seed.is_none());
-        }
-
-        #[test]
-        fn clears_resume_anchor_so_finish_writes_summary() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            state.initial_message_count = 5;
-            state.message_count = 5;
-            let now = OffsetDateTime::now_utc();
-
-            let (_, synthetic_uuid) =
-                state.compact_entries(boundary("s"), Message::user("synth"), now);
-            state.commit_compact(synthetic_uuid);
-
-            assert_eq!(state.initial_message_count, 0);
-            assert_eq!(state.message_count, 1);
-        }
-    }
-
-    mod finish_entries {
-        use super::*;
-
-        #[test]
-        fn after_record_produces_summary_with_count() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-            let (entries, _) =
-                state.queue_message_entries(&Message::user("hello"), None, now, false);
-            state.flush_entries(entries).unwrap();
-
-            let entries = state.finish_entries(Vec::new(), now);
-            let Some(Entry::Summary(ExitInfo { message_count, .. })) = entries.last() else {
-                panic!("expected trailing Summary, got {entries:?}");
-            };
-            assert_eq!(*message_count, 1);
-        }
-
-        #[test]
-        fn pending_writer_is_empty_and_marks_finished() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-
-            let entries = state.finish_entries(Vec::new(), OffsetDateTime::now_utc());
-
-            assert!(entries.is_empty());
-            assert!(state.finished);
-        }
-
-        #[test]
-        fn emits_one_file_snapshot_per_tracked_file() {
-            let (_dir, store) = isolated_store();
-            let tracker = FileTracker::default();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-            let (msgs, _) = state.queue_message_entries(&Message::user("hi"), None, now, false);
-            state.flush_entries(msgs).unwrap();
-
-            for name in ["/tmp/a", "/tmp/b", "/tmp/c"] {
-                _ = tracker.record_read(
-                    std::path::Path::new(name),
-                    name.as_bytes(),
-                    LastView::Full,
-                    "toolu_test",
-                );
+                let a_id = writers[0].as_ref().unwrap().session_id().to_owned();
+                assert_eq!(a_id != source, a_forks, "{name}");
+                let expected_forks: Vec<_> = a_forks
+                    .then(|| {
+                        (
+                            0,
+                            Fork {
+                                from: source.clone(),
+                                to: a_id.clone(),
+                            },
+                        )
+                    })
+                    .into_iter()
+                    .collect();
+                assert_eq!(forks, expected_forks, "{name}");
+                assert_eq!(chain(&store, &source), source_chain, "{name}");
+                assert_eq!(chain(&store, &a_id), a_chain, "{name}");
             }
-
-            let entries = state.finish_entries(tracker.snapshot_all(), now);
-            let snapshot_count = entries
-                .iter()
-                .filter(|e| matches!(e, Entry::FileSnapshot { .. }))
-                .count();
-            assert_eq!(snapshot_count, 3);
-            assert!(
-                matches!(entries.last(), Some(Entry::Summary(_))),
-                "summary must come after every snapshot",
-            );
         }
 
         #[test]
-        fn is_idempotent() {
-            let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-            let (entries, _) = state.queue_message_entries(&Message::user("hi"), None, now, false);
-            state.flush_entries(entries).unwrap();
-            let _first = state.finish_entries(Vec::new(), now);
-
-            let second = state.finish_entries(Vec::new(), now);
-
-            assert!(second.is_empty(), "second call short-circuits");
-            assert!(state.finished);
-        }
-
-        #[test]
-        fn skips_summary_on_empty_resume() {
-            let (_dir, store) = isolated_store();
+        fn copies_the_base_chain_since_the_last_compaction_into_a_fork_of_its_own() {
+            let (dir, store) = isolated_store();
             let mut original = SessionState::fresh(store.clone(), "m", None);
-            let now = OffsetDateTime::now_utc();
-            let (entries, _) =
-                original.queue_message_entries(&Message::user("hi"), None, now, false);
-            original.flush_entries(entries).unwrap();
-            let parent = original.last_message_uuid;
-            let session_id = original.session_id.to_string();
+            let source = original.session_id().to_owned();
+            queue_user(&mut original, "before compaction");
+            original.compact(boundary("summary"), Message::user("root"));
+            queue_user(&mut original, "kept");
+            let checkpoint = original.checkpoint();
+            queue_user(&mut original, "abandoned");
+            original.rewind(checkpoint, false);
+            original.queue_usage(vec![usage()]);
+            original.set_title("Manual".to_owned(), true);
+            original.flush().unwrap();
             drop(original);
+            let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+            let mut stale = open(&other, &source, "stale-model");
+            let mut writer = open(&store, &source, "m");
+            queue_user(&mut writer, "other process");
+            writer.flush().unwrap();
+            drop(writer);
+            let source_rows = row_ids(&store, &source);
+            let before_fork = now_millis();
 
-            let writer = store.open_append(&session_id).unwrap();
-            let mut resumed = SessionState::resumed(store, session_id, writer, parent, 1, true);
+            queue_user(&mut stale, "forked");
+            let fork = stale.flush().unwrap().expect("the stale write forks");
+            queue_user(&mut stale, "after the fork");
+            let later = stale.flush().unwrap();
 
-            let entries = resumed.finish_entries(Vec::new(), now);
-
-            assert!(entries.is_empty(), "no new messages → no summary");
-        }
-    }
-
-    mod flush_entries {
-        use super::*;
-
-        #[test]
-        fn failed_write_retries_queued_entries_at_the_writer_path() {
-            let source = tempfile::tempdir().unwrap();
-            let elsewhere = tempfile::tempdir().unwrap();
-            let now = OffsetDateTime::now_utc();
-            let mut original = SessionState::fresh(test_store(source.path()), "m", None);
-            let (entries, _) =
-                original.queue_message_entries(&Message::user("first"), None, now, false);
-            original.flush_entries(entries).unwrap();
-            let session_id = original.session_id.to_string();
-            let copied = elsewhere.path().join("copied.jsonl");
-            std::fs::copy(test_session_file(source.path(), &session_id), &copied).unwrap();
-
-            let empty_store = tempfile::tempdir().unwrap();
-            let writer = open_append_at(&copied).unwrap();
-            let saved = elsewhere.path().join("saved.jsonl");
-            std::fs::rename(&copied, &saved).unwrap();
-            std::fs::create_dir(&copied).unwrap();
-            let mut state = SessionState::resumed(
-                test_store(empty_store.path()),
-                session_id,
-                writer,
-                original.last_message_uuid,
-                1,
-                true,
-            );
-            let (entries, _) =
-                state.queue_message_entries(&Message::user("second"), None, now, false);
-            let err = state.flush_entries(entries).unwrap_err();
+            let fork_id = stale.session_id().to_owned();
+            assert_eq!(fork.from, source);
+            assert_eq!(fork.to, fork_id);
+            assert_eq!(later, None, "the fork reports once");
             assert_eq!(
-                err.to_string(),
-                format!("failed to open {}", copied.display())
+                chain(&store, &fork_id),
+                ["root", "kept", "forked", "after the fork"]
             );
-            std::fs::remove_dir(&copied).unwrap();
-            std::fs::rename(&saved, &copied).unwrap();
-            let (entries, _) =
-                state.queue_message_entries(&Message::assistant("third"), None, now, false);
-            state.flush_entries(entries).unwrap();
-
-            let data = load_session_data_from_path(&copied).unwrap();
             assert_eq!(
-                data.messages,
-                [
-                    Message::user("first"),
-                    Message::user("second"),
-                    Message::assistant("third"),
-                ]
+                row_ids(&store, &fork_id)[..2],
+                source_rows[1..3],
+                "the copied rows keep their IDs"
             );
-            assert_eq!(data.last_uuid, state.last_message_uuid);
+            assert_eq!(usage_rows(&store, &fork_id), 0);
+            assert_eq!(
+                row_ids(&store, &source),
+                source_rows,
+                "the source is untouched"
+            );
+            assert_eq!(chain(&store, &source), ["root", "kept", "other process"]);
+            let info = store.find(&fork_id).unwrap().unwrap();
+            assert_eq!(info.forked_from.as_deref(), Some(source.as_str()));
+            assert_eq!(info.title.as_deref(), Some("Manual"));
+            assert_eq!(info.project_root, "/work/other-project");
+            assert_eq!(info.message_count, 4);
+            let data = store.load_session_data(&fork_id).unwrap();
+            assert!(data.title_manual);
+            let (model, created_at): (String, i64) = store
+                .connect()
+                .unwrap()
+                .query_row(
+                    "SELECT model, created_at FROM sessions WHERE id = ?1",
+                    [&fork_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(model, "stale-model");
+            assert!(created_at >= before_fork, "the fork starts when it forks");
+            store
+                .delete(&source)
+                .expect("the forking process released the source's lock");
+            assert!(store.delete(&fork_id).is_err(), "the fork's lock is held");
         }
 
         #[test]
-        fn pending_create_failure_keeps_entries_and_deferred_title() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let mut state = SessionState::fresh(store, "m", None);
-            let now = OffsetDateTime::now_utc();
-            let session_id = state.session_id.to_string();
-            assert!(
-                state
-                    .try_defer_title("Survives rollback".to_owned())
-                    .is_none(),
-                "fresh state must accept defer",
-            );
-
-            let project_dir = test_project_dir(dir.path());
-            std::fs::remove_dir_all(&project_dir).unwrap();
-            let (entries, _) =
-                state.queue_message_entries(&Message::user("first"), None, now, false);
-            let err = state.flush_entries(entries).unwrap_err();
-
-            let WriterStatus::Pending {
-                header,
-                deferred_title: Some(restored),
-            } = &state.writer_status
-            else {
-                panic!("create failure must leave Pending with deferred title intact");
-            };
-            let path = state.store.session_file(&session_id, header.created_at);
-            assert_eq!(
-                err.to_string(),
-                format!("failed to create {}", path.display())
-            );
-            assert_eq!(restored, "Survives rollback");
-
-            std::fs::create_dir_all(&project_dir).unwrap();
-            let (entries, _) =
-                state.queue_message_entries(&Message::assistant("second"), None, now, false);
-            state.flush_entries(entries).unwrap();
-
-            let data =
-                load_session_data_from_path(&test_session_file(dir.path(), &session_id)).unwrap();
-            assert_eq!(
-                data.messages,
-                [Message::user("first"), Message::assistant("second")]
-            );
-            assert_eq!(
-                data.title.map(|t| t.title).as_deref(),
-                Some("Survives rollback"),
-            );
-        }
-
-        #[test]
-        fn an_empty_batch_succeeds_after_persistence_stops() {
+        fn forks_without_copying_a_chain_when_the_writer_left_its_branch_empty() {
             let (_dir, store) = isolated_store();
-            let mut state = SessionState::fresh(store, "m", None);
-            state.persistence_stopped = true;
+            let mut stale = SessionState::fresh(store.clone(), "m", None);
+            let source = stale.session_id().to_owned();
+            let checkpoint = stale.checkpoint();
+            queue_user(&mut stale, "refused");
+            stale.flush().unwrap();
+            stale.rewind(checkpoint, false);
+            stale.flush().unwrap();
+            let elsewhere = message_row(9, None, Message::user("elsewhere"));
+            save(&store, &source, vec![elsewhere], Vec::new(), Some(9));
 
-            assert!(state.flush_entries(Vec::new()).is_ok());
+            queue_user(&mut stale, "next");
+            let fork = stale.flush().unwrap().expect("the stale write forks");
+
+            assert_eq!(fork.from, source);
+            assert_eq!(chain(&store, &fork.to), ["next"]);
+            assert_eq!(chain(&store, &source), ["elsewhere"]);
         }
 
         #[test]
-        fn failure_over_the_cap_stops_persistence_for_good() {
-            let dir = tempfile::tempdir().unwrap();
-            let now = OffsetDateTime::now_utc();
-            let mut original = SessionState::fresh(test_store(dir.path()), "m", None);
-            let (entries, _) =
-                original.queue_message_entries(&Message::user("first"), None, now, false);
-            original.flush_entries(entries).unwrap();
-            let session_id = original.session_id.to_string();
-            let path = test_session_file(dir.path(), &session_id);
-            let before = std::fs::read(&path).unwrap();
+        fn a_stale_finish_leaves_the_source_snapshots_alone() {
+            let (_dir, store) = isolated_store();
+            let source = saved_session(&store, "start");
+            let mut stale = open(&store, &source, "m");
+            let mut writer = open(&store, &source, "m");
+            queue_user(&mut writer, "moved");
+            writer.finish(vec![snapshot("/repo/current.rs")]);
+            writer.flush().unwrap();
 
-            let writer = open_append_at(&path).unwrap();
-            let saved = dir.path().join("saved.jsonl");
-            std::fs::rename(&path, &saved).unwrap();
-            std::fs::create_dir(&path).unwrap();
-            let mut state = SessionState::resumed(
-                test_store(dir.path()),
-                session_id,
-                writer,
-                original.last_message_uuid,
-                1,
-                true,
-            );
-            let huge = Message::user("x".repeat(MAX_UNWRITTEN_BYTES));
-            let (entries, _) = state.queue_message_entries(&huge, None, now, false);
-            let err = state.flush_entries(entries).unwrap_err();
-            assert!(format!("{err:#}").contains(&stop_message()), "got: {err:#}");
-            std::fs::remove_dir(&path).unwrap();
-            std::fs::rename(&saved, &path).unwrap();
-            let (entries, _) =
-                state.queue_message_entries(&Message::assistant("after"), None, now, false);
-            let err = state.flush_entries(entries).unwrap_err();
+            stale.finish(vec![snapshot("/repo/stale.rs")]);
+            assert_eq!(stale.flush().unwrap(), None, "a finish moves no head");
 
-            assert_eq!(err.to_string(), stop_message());
-            assert!(state.persistence_stopped());
-            assert_eq!(
-                std::fs::read(&path).unwrap(),
-                before,
-                "a stopped session writes nothing"
-            );
+            let paths: Vec<_> = store
+                .load_session_data(&source)
+                .unwrap()
+                .file_snapshots
+                .into_iter()
+                .map(|snapshot| snapshot.path)
+                .collect();
+            assert_eq!(paths, [PathBuf::from("/repo/current.rs")]);
+            assert_eq!(stale.session_id(), source);
         }
     }
 
@@ -1031,6 +973,19 @@ mod tests {
                 extract_user_text(&user_with_text_after_tool_result),
                 Some("follow-up"),
             );
+        }
+    }
+
+    fn snapshot(path: &str) -> FileSnapshot {
+        FileSnapshot {
+            path: PathBuf::from(path),
+            state: FileState {
+                content_hash: 42,
+                last_view: LastView::Full,
+                source: FileSource::Read,
+                recorded_at: time::macros::datetime!(2026-01-01 00:00:01 UTC),
+                tool_use_id: "t1".to_owned(),
+            },
         }
     }
 }

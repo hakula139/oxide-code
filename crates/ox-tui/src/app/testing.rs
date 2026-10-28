@@ -13,9 +13,8 @@ use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
 use ox_core::client::{RateLimitWindow, RateLimits};
-use ox_core::model::ModelSpec;
 use ox_core::protocol::{Event, Op};
-use ox_core::session::entry::ArchiveState;
+use ox_core::session::store::listing::ArchiveState;
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
 use super::operation::{Activity, InFlight};
@@ -26,7 +25,7 @@ use crate::modal::approval::ApprovalModal;
 use crate::modal::{Modal, ModalKey};
 use crate::now;
 use crate::session_info::LiveSessionInfo;
-use crate::session_info::testing::test_session_info;
+use crate::session_info::testing::unknown_model_session_info;
 use crate::testing::buffer_rows;
 use crate::theme::{Theme, ThemeOverrides};
 
@@ -83,14 +82,6 @@ pub(super) fn start_op(app: &mut App, op: &Op) {
 /// What the in-flight operation does, or `None` while idle.
 pub(super) fn activity(app: &App) -> Option<&Activity> {
     app.in_flight.as_ref().map(InFlight::activity)
-}
-
-/// The shared session fixture on `test-model`, an unknown ID whose display name falls back to the
-/// literal ID, keeping insta snapshots stable.
-pub(super) fn unknown_model_session_info() -> LiveSessionInfo {
-    let mut info = test_session_info();
-    info.config.model = ModelSpec::resolve("test-model");
-    info
 }
 
 /// A five-hour window 42% spent that resets in 2100.

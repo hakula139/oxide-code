@@ -176,7 +176,7 @@ pub(super) mod testing {
 
     /// Runs `cmd` with `args` against [`test_session_info`] and no session title.
     pub(crate) fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
-        cmd.execute(args, &SlashContext::new(&test_session_info(), None))
+        cmd.execute(args, &SlashContext::new(&test_session_info()))
     }
 
     /// A command that fails with `error`, answering to the aliases the shared table gives `name`.
@@ -356,7 +356,7 @@ mod tests {
         #[test]
         fn read_only_forms_never_forward_or_prompt() {
             let info = test_session_info();
-            let ctx = SlashContext::new(&info, None);
+            let ctx = SlashContext::new(&info);
             let forms = forms_of_kind(SlashKind::ReadOnly);
             assert!(!forms.is_empty(), "no built-in form is read-only");
 
@@ -376,7 +376,7 @@ mod tests {
         #[test]
         fn overview_commands_open_a_modal() {
             let info = test_session_info();
-            let ctx = SlashContext::new(&info, None);
+            let ctx = SlashContext::new(&info);
 
             for name in ["help", "status", "config"] {
                 let cmd = lookup_in(BUILT_INS, name).unwrap();
@@ -393,7 +393,7 @@ mod tests {
         #[test]
         fn turns_start_only_from_prompts_whose_line_is_echoed() {
             let info = test_session_info();
-            let ctx = SlashContext::new(&info, None);
+            let ctx = SlashContext::new(&info);
 
             let offenders: Vec<String> = forms()
                 .iter()
@@ -415,7 +415,7 @@ mod tests {
         #[test]
         fn steering_forms_forward_only_ops_the_engine_takes_mid_turn() {
             let info = test_session_info();
-            let ctx = SlashContext::new(&info, None);
+            let ctx = SlashContext::new(&info);
             let forms = forms_of_kind(SlashKind::Steering);
             assert!(!forms.is_empty(), "no built-in form steers");
 

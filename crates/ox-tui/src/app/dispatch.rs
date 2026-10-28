@@ -15,7 +15,7 @@ use ox_core::command::{self, Parsed};
 use ox_core::protocol::{Op, SignInCode};
 
 use super::operation::InFlight;
-use super::queue::QueuedPrompt;
+use super::queue::{QueuedPrompt, SwitchTo};
 use super::{App, EXIT_WINDOW, SlashTask};
 use crate::action::{APP_KEYMAP, Action, AppAction, next_mode};
 use crate::components::input::InputOutcome;
@@ -278,7 +278,8 @@ impl App {
                     in_flight.cancel();
                 }
             }
-            Op::Clear | Op::Archive | Op::Resume { .. } => self.queue.mark_switch(),
+            Op::Clear | Op::Archive => self.queue.mark_switch(SwitchTo::Fresh),
+            Op::Resume { .. } => self.queue.mark_switch(SwitchTo::Saved),
             Op::Compact { .. } => self.queue.mark_compacting(),
             Op::SetArchive { target, .. } => self.modals.archive_started(target),
             Op::DeleteSaved { session_id } => self.modals.delete_started(session_id),
@@ -486,7 +487,7 @@ impl App {
     /// Runs `parsed`, the command the user typed as `line`, and applies its outcome, returning the
     /// action it asks the caller to route.
     fn run_slash(&mut self, parsed: &Parsed, line: &str) -> Option<Action> {
-        let ctx = SlashContext::new(&self.session_info, self.status_bar.title());
+        let ctx = SlashContext::new(&self.session_info);
         let outcome = slash::dispatch(parsed, &ctx);
         self.apply_slash_outcome(outcome, line)
     }
@@ -567,8 +568,8 @@ mod tests {
     use ox_core::protocol::{
         ApprovalDecision, CompactTrigger, ConfigPick, Event, ResumeTarget, SavedTarget,
     };
-    use ox_core::session::entry::ArchiveState;
     use ox_core::session::saved::{ArchiveUpdate, SavedAction, SavedError};
+    use ox_core::session::store::listing::ArchiveState;
     use ox_core::session::store::testing::{listed_session, stamped_id};
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
@@ -1757,7 +1758,7 @@ mod tests {
         #[tokio::test]
         async fn clear_during_busy_refuses_with_system_message_no_dispatch() {
             // State-mutating commands refuse mid-turn, since rolling while `messages` is still
-            // draining would race the in-flight turn into the wrong JSONL.
+            // draining would race the in-flight turn into the wrong session.
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             rx.try_recv().expect("active submit forwarded");
@@ -2373,8 +2374,9 @@ mod tests {
                 let before = activity(&app).cloned();
                 app.requested_mode = Mode::Manual;
                 app.queue.push("old session".to_owned());
-                app.queue.mark_switch();
+                app.queue.mark_switch(SwitchTo::Fresh);
                 app.queue.push("current session".to_owned());
+                app.queue.hold();
                 let buffered = fill_channel(&app);
 
                 app.dispatch_op(op.clone());
@@ -2387,6 +2389,7 @@ mod tests {
                     Some("ox is busy, so the request was dropped. Try again."),
                     "{op:?}",
                 );
+                assert!(app.queue.held(), "{op:?}");
                 app.queue.discard_left_behind();
                 assert_eq!(*app.queue.pending(), ["current session"], "{op:?}");
                 for buffered_op in buffered {

@@ -34,7 +34,7 @@ An exported `CDPATH` makes `cd sub` try each of its entries before the working d
 
 Every command runs without `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_CUSTOM_HEADERS`, which carries gateway keys. `secret_env_vars` derives the list from the order in which credentials are resolved, so ox withholds each new credential variable as soon as it reads it. ox reads these variables from its own environment, which this does not change.
 
-A [known-safe command](permissions.md#command-targets) never expands a variable, but any command the user approves or an allow rule admits can, such as a build script run by an allowed `cargo test`, and its output reaches the session file and the model's context. Withholding these variables keeps ox's own credentials off every such path. A script that needs its own Anthropic key, such as a test suite that calls the API, has to read it from another variable or a file. Other secrets in ox's environment, such as cloud or GitHub tokens, still reach every command.
+A [known-safe command](permissions.md#command-targets) never expands a variable, but any command the user approves or an allow rule admits can, such as a build script run by an allowed `cargo test`, and its output reaches the session store and the model's context. Withholding these variables keeps ox's own credentials off every such path. A script that needs its own Anthropic key, such as a test suite that calls the API, has to read it from another variable or a file. Other secrets in ox's environment, such as cloud or GitHub tokens, still reach every command.
 
 ## Design Decisions
 
@@ -47,7 +47,7 @@ A [known-safe command](permissions.md#command-targets) never expands a variable,
 
 ## Sources
 
-- `crates/ox-core/src/config/auth.rs`: `secret_env_vars`, derived from `AuthSource::EXPLICIT` and `CUSTOM_HEADERS_VAR`, and `withhold_secrets`, which removes them from a child's environment.
+- `crates/ox-core/src/config/credentials.rs`: `secret_env_vars`, derived from `EXPLICIT` and `CUSTOM_HEADERS_VAR`, and `withhold_secrets`, which removes them from a child's environment.
 - `crates/ox-core/src/tool/bash.rs`: `ShellTree`, `SESSION_ID_VAR`, `EDITOR_VARS`, `CDPATH_VAR`, `bash`, which finds Git Bash on Windows, and `Bash::ready`, which waits for the MSYS runtime before a shell starts.
 - `crates/ox-core/src/tool/bash/background.rs`: `BackgroundShells::start`, which spawns a background shell through the same `ShellTree`.
 - `crates/ox-core/src/tool/bash/msys.rs`: `MsysRuntime`, which holds the MSYS runtime.

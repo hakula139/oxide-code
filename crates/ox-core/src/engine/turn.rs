@@ -10,8 +10,8 @@ use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use super::compaction::{auto_compaction_due, request_tokens, transcript_tokens};
 use super::dispatch::{self, DispatchContext};
 use super::transcript::LiveTranscript;
+use crate::auth::Auth;
 use crate::client::{Request, Response, ResponseEvent, StopDetails, StopReason, Wire};
-use crate::config::auth::Auth;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::{ModelSettings, TokenUsage};
@@ -164,7 +164,10 @@ pub(super) async fn agent_turn(
         let stream = await_unless_aborted(
             stream_response(
                 client,
-                conversation_request(auth, settings, transcript, &tool_defs),
+                auth,
+                settings,
+                transcript,
+                &tool_defs,
                 sink,
                 &mut round_usage,
             ),
@@ -202,10 +205,6 @@ pub(super) async fn agent_turn(
             notify_if_interrupted(transcript.messages(), sink);
             return TurnOutcome::stopped(report, TurnStop::Replied);
         }
-        let assistant_msg = Message {
-            role: Role::Assistant,
-            content: blocks,
-        };
 
         let round = dispatch::run_tool_round(
             tools,
@@ -221,14 +220,7 @@ pub(super) async fn agent_turn(
             report.tasks = round.tasks;
         }
         // Calls that finished before an abort already took effect, so the model must see them.
-        commit_round(
-            transcript,
-            sink,
-            assistant_msg,
-            round.results,
-            round.sidecars,
-        )
-        .await;
+        commit_round(transcript, sink, blocks, round.results, round.sidecars).await;
         ran_tools = true;
         if let Some(abort) = round.abort {
             return interrupt_turn(transcript, sink, report, abort).await;
@@ -308,8 +300,8 @@ async fn commit_assistant_message(
         role: Role::Assistant,
         content,
     };
-    let failure = transcript.record_message(message).await;
-    sink.session_write_error(failure.as_deref());
+    let report = transcript.record_message(message).await;
+    sink.session_write(&report);
 }
 
 /// Ends a turn on a user abort with [`record_interruption`].
@@ -326,8 +318,8 @@ async fn interrupt_turn(
 /// Records and appends [`Message::interruption`] after whatever an aborted turn committed, so later
 /// requests leave the abandoned prompts unanswered.
 pub(super) async fn record_interruption(transcript: &mut LiveTranscript, sink: &dyn EventSink) {
-    let failure = transcript.record_message(Message::interruption()).await;
-    sink.session_write_error(failure.as_deref());
+    let report = transcript.record_message(Message::interruption()).await;
+    sink.session_write(&report);
 }
 
 /// User-facing notice for a `refusal` stop, naming the policy category and explanation when the API
@@ -418,22 +410,27 @@ fn ends_on_interrupted_work(blocks: &[ContentBlock]) -> bool {
     )
 }
 
-/// Persists one tool round, then appends it to the live transcript.
+/// Persists one tool round, the assistant's reply and the `results` answering its calls, then
+/// appends it to the live transcript.
 async fn commit_round(
     transcript: &mut LiveTranscript,
     sink: &dyn EventSink,
-    assistant_msg: Message,
+    content: Vec<ContentBlock>,
     results: Vec<ContentBlock>,
     sidecars: Vec<(String, ToolMetadata)>,
 ) {
+    let assistant_msg = Message {
+        role: Role::Assistant,
+        content,
+    };
     let tool_result_msg = Message {
         role: Role::User,
         content: results,
     };
-    let failure = transcript
+    let report = transcript
         .record_round(assistant_msg, tool_result_msg, sidecars)
         .await;
-    sink.session_write_error(failure.as_deref());
+    sink.session_write(&report);
 }
 
 /// Records and appends each queued prompt, then confirms it with [`Event::PromptDrained`].
@@ -443,8 +440,8 @@ pub(super) async fn record_drained_prompts(
     sink: &dyn EventSink,
 ) {
     for text in texts {
-        let failure = transcript.record_message(Message::user(text.clone())).await;
-        sink.session_write_error(failure.as_deref());
+        let report = transcript.record_message(Message::user(text.clone())).await;
+        sink.session_write(&report);
         sink.emit(Event::PromptDrained(text), "prompt-drained");
     }
 }
@@ -452,8 +449,10 @@ pub(super) async fn record_drained_prompts(
 // ── Stream Processing ──
 
 /// The request for the conversation's next round: `transcript` under its prompt, `settings`, and
-/// `tools`, sent with `auth` and caching its tail for the round after it.
+/// `tools`, attributed to `session_id`, sent with `auth`, and caching its tail for the round after
+/// it.
 pub(super) fn conversation_request<'a>(
+    session_id: &'a str,
     auth: &'a Auth,
     settings: &'a ModelSettings,
     transcript: &'a LiveTranscript,
@@ -461,7 +460,7 @@ pub(super) fn conversation_request<'a>(
 ) -> Request<'a> {
     let prompt = transcript.prompt();
     Request {
-        session_id: transcript.session().session_id(),
+        session_id,
         auth,
         settings,
         system: &prompt.system,
@@ -472,13 +471,19 @@ pub(super) fn conversation_request<'a>(
     }
 }
 
-/// Streams `request` and collects its reply with [`collect_response`].
+/// Streams the conversation's next round and collects its reply with [`collect_response`]. The
+/// request carries the session's live ID, which a fork can change between rounds.
 async fn stream_response(
     client: &dyn Wire,
-    request: Request<'_>,
+    auth: &Auth,
+    settings: &ModelSettings,
+    transcript: &LiveTranscript,
+    tools: &[&ToolDefinition],
     sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
 ) -> Result<Response> {
+    let session_id = transcript.session().session_id();
+    let request = conversation_request(&session_id, auth, settings, transcript, tools);
     let rx = client.stream(request)?;
     collect_response(rx, sink, usage).await
 }
@@ -1478,7 +1483,7 @@ mod tests {
                 Op::Archive,
                 Op::SetArchive {
                     target: SavedTarget::Id("other".to_owned()),
-                    state: crate::session::entry::ArchiveState::Archived,
+                    state: crate::session::store::listing::ArchiveState::Archived,
                 },
                 Op::FindSaved {
                     prefix: "other".to_owned(),
@@ -2969,7 +2974,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             let session = handle::start(&store, "claude-sonnet-5-5", None);
-            let sid = session.session_id().to_owned();
+            let sid = session.session_id();
             session.record_message(Message::user("prompt")).await;
             let sink = CapturingSink::default();
             let mut transcript =
@@ -2983,7 +2988,7 @@ mod tests {
             commit_round(
                 &mut transcript,
                 &sink,
-                Message::assistant("answer"),
+                vec![ContentBlock::text("answer")],
                 vec![ContentBlock::tool_result("tool_1", "ok", false)],
                 vec![(
                     "tool_1".to_owned(),
@@ -3010,7 +3015,7 @@ mod tests {
                 "a resumed session reads the assistant turn before its results",
             );
             assert_eq!(
-                data.tool_result_metadata.get("tool_1"),
+                data.tool_metadata.get("tool_1"),
                 Some(&ToolMetadata {
                     title: Some("Edited a.rs".to_owned()),
                     ..ToolMetadata::default()
@@ -3038,9 +3043,9 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object"}),
             }];
 
-            let request = conversation_request(&auth, &settings, &transcript, &tools);
+            let request = conversation_request("session", &auth, &settings, &transcript, &tools);
 
-            assert_eq!(request.session_id, session.session_id());
+            assert_eq!(request.session_id, "session");
             assert!(std::ptr::eq(request.auth, &raw const auth));
             assert!(std::ptr::eq(request.settings, &raw const settings));
             assert_eq!(
@@ -3079,12 +3084,10 @@ mod tests {
 
             let result = stream_response(
                 &RefusingWire,
-                conversation_request(
-                    &api_key(),
-                    &ModelSettings::test("claude-sonnet-5-5"),
-                    &transcript,
-                    &[],
-                ),
+                &api_key(),
+                &ModelSettings::test("claude-sonnet-5-5"),
+                &transcript,
+                &[],
                 &sink,
                 &mut usage,
             )

@@ -23,10 +23,10 @@ use ox_core::config::Config;
 use ox_core::engine::{Engine, EnginePanic, SessionParts};
 use ox_core::permission::Mode;
 use ox_core::session::display::archive_notice;
-use ox_core::session::entry::ArchiveState;
 use ox_core::session::handle::ResumedSession;
-use ox_core::session::resolver::{SessionTarget, resolve_session};
+use ox_core::session::resolver::{SessionTarget, export_session, resolve_session};
 use ox_core::session::store::SessionStore;
+use ox_core::session::store::listing::ArchiveState;
 use ox_core::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope, ProjectScope};
 use ox_core::util;
 use ox_core::util::path::tildify;
@@ -145,8 +145,8 @@ struct Cli {
     #[arg(short, long)]
     print: bool,
 
-    /// Resume the session with this ID prefix or session file, or pick one from a list without a
-    /// value.
+    /// Resume the session with this ID prefix or in this `ox export` file, or pick one from a list
+    /// without a value.
     #[expect(
         clippy::option_option,
         reason = "encodes three CLI states: \
@@ -374,6 +374,12 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Print a saved session as JSON lines, which `ox -r <file>` imports on any machine.
+    Export {
+        /// The session's ID prefix, matched in this project first and then in every project.
+        #[arg(value_name = "SESSION", value_parser = non_blank)]
+        session: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -414,11 +420,12 @@ fn try_main() -> Result<ExitCode> {
 
 async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let cli = Cli::parse_valid();
-    if let Some(Command::Config {
-        action: ConfigAction::Check,
-    }) = cli.command
-    {
-        return check_config();
+    match &cli.command {
+        Some(Command::Config {
+            action: ConfigAction::Check,
+        }) => return check_config(),
+        Some(Command::Export { session }) => return export(session),
+        None => {}
     }
 
     let tui_mode = cli.tui_mode(io::stdin().is_terminal(), io::stdout().is_terminal())?;
@@ -467,16 +474,12 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         _ = writeln!(
             io::stderr(),
             "{}",
-            archive_notice(handle.session_id(), ArchiveState::Active)
+            archive_notice(&handle.session_id(), ArchiveState::Active)
         );
     }
-    let picker = cli.opens_picker().then(|| {
-        ResumePicker::at_startup(
-            store.clone(),
-            handle.session_id().to_owned(),
-            cli.projects(),
-        )
-    });
+    let picker = cli
+        .opens_picker()
+        .then(|| ResumePicker::at_startup(store.clone(), handle.session_id(), cli.projects()));
 
     let generates_titles = tui_mode;
     let engine = Engine::new(
@@ -536,6 +539,14 @@ fn check_config() -> Result<Exit> {
         writeln!(stdout, "Loaded {}", tildify(file))?;
     }
     writeln!(stdout, "Config is valid")?;
+    Ok(Exit::Success)
+}
+
+fn export(prefix: &str) -> Result<Exit> {
+    _ = util::log::init_tracing(false)?;
+    let cwd = env::current_dir().context("failed to read the current working directory")?;
+    let store = SessionStore::open(&cwd, &util::git::project_root(&cwd))?;
+    export_session(&store, prefix, &mut io::BufWriter::new(io::stdout().lock()))?;
     Ok(Exit::Success)
 }
 

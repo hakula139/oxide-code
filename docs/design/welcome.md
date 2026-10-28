@@ -61,7 +61,7 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 8. **Body lines pad to one shared column width, while the ribbon centers independently.** `Paragraph::alignment(Center)` centers each line separately, so padding env / cwd / starters / tip to one width is what gives the body a shared left edge.
 9. **`[tui] show_welcome = true` (default) + `OX_SHOW_WELCOME` env override.** Mirrors the existing `show_thinking` knob shape: TOML option + env, empty-is-absent. When false, the chat region is blank and the input field anchors the empty session.
 10. **`/clear` re-shows the welcome automatically.** `/clear` clears `chat.blocks`, which restores `is_empty()` → welcome paints on next frame. No special re-emission path is needed.
-11. **Resume never shows the welcome.** Resume populates `chat.blocks` from the JSONL transcript, so `is_empty()` returns false on first paint. No special-casing needed.
+11. **Resume never shows the welcome.** Resume populates `chat.blocks` from the stored transcript, so `is_empty()` returns false on first paint. No special-casing needed.
 
 ## Out of Scope
 

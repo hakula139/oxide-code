@@ -24,7 +24,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/help`**: Opens a [`KvOverview`](modals.md) listing every registered command with its description.
 
-- **`/init`**: Returns `Prompt(..)` with the prompt `command::init::resolve` builds. With an instruction file at the project root or in its `.claude/` directory, the body asks the model to propose its changes as a diff before it edits. With none, `/init <file>` sends the prompt that creates that file, and bare `/init` opens a picker whose choice sends the same prompt. The expanded body is invisible in the live session but recorded in JSONL for resume. Full design: [init.md](init.md).
+- **`/init`**: Returns `Prompt(..)` with the prompt `command::init::resolve` builds. With an instruction file at the project root or in its `.claude/` directory, the body asks the model to propose its changes as a diff before it edits. With none, `/init <file>` sends the prompt that creates that file, and bare `/init` opens a picker whose choice sends the same prompt. The expanded body is invisible in the live session but stored for resume. Full design: [init.md](init.md).
 
 - **`/login`** / **`/logout`**: Forward `Op::Login` and `Op::Logout`. The engine runs the browser sign-in and swaps the credential requests send, and the TUI opens the browser and reports the credential requests use afterward. Both are `Mutating`. Full design: [login.md](login.md).
 
@@ -64,7 +64,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 11. **One trait return carries every effect: `SlashOutcome`.** `Forward(Action)` hands a state-mutating action back to the App, which applies a TUI-only action locally and sends an op to the engine. `Prompt(String)` starts a turn with a prompt the command built, which the chat and the prompt queue show as the typed line, the line a fresh session also takes as its first-prompt title. `SystemMessage(String)` prints into chat, `GitDiff(WorkingTreeDiff)` appends a diff block, and `Modal(_)` opens a modal. `Background` carries a future for a command whose work is slow I/O, which the App runs in a `JoinSet` off the event loop. The future resolves to the `SlashOutcome` to apply, which takes the same path as a typed outcome, so it can forward an op or open a modal. A session switch drops the future unfinished, so its output never lands in the next session's chat. A failure returns `Err(String)`, which the dispatcher prefixes with the typed command name, and it wraps a background future so that future's failure gets the same prefix.
 
-12. **Commands read a borrowed `SlashContext` and write nothing.** The context carries `LiveSessionInfo` and the live session title. The App applies the returned outcome in one place on both the idle and busy paths, so no command reaches into `ChatView` or the modal stack. See [modals.md](modals.md) for the full modal design.
+12. **Commands read a borrowed `SlashContext` and write nothing.** The context carries `LiveSessionInfo`, which includes the live session title. The App applies the returned outcome in one place on both the idle and busy paths, so no command reaches into `ChatView` or the modal stack. See [modals.md](modals.md) for the full modal design.
 
 13. **A command suppresses its echo when its response stands alone.** `SlashCommand::echoes_input(args) -> bool` defaults to true. Modal-only forms (`/status`, `/config`, and `/help`, which open a read-only [`KvOverview`](modals.md#modals), plus bare `/effort`, `/mode`, `/model`, `/rename`, `/resume`, and `/theme`) override it to false because the modal is the response, and the typed `/foo` line would be orphaned in history once the modal closes. Bare `/unarchive` and `/delete` also override it to false so the error explaining the missing argument stands alone. Typed forms keep echoing, so chat records the command, usually followed by a confirmation such as `Switched to plan mode`. Bare `/init` echoes too, although it opens a picker when the project has no instruction file, because it usually sends its prompt at once, and the line then heads the turn it starts.
 
@@ -83,7 +83,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-core/src/session/display.rs`: shared `id_prefix` and `display_title`, `archive_notice`, and the `MAX_TITLE_WIDTH` cap that `fit_title` applies to every title.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_prefix` checks the current project first, widens the search on a miss, reports a live-only match as `ResolveError::Live`, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_id` looks up a whole ID in every project.
 - `crates/ox-core/src/session/saved.rs`: `find`, `set_archived`, and `delete`, which the engine runs for the typed commands and the `/resume` picker, refuse the live session, and return a typed `SavedError`.
-- `crates/ox-core/src/session/store.rs`: `SessionStore::set_archived` and `SessionStore::delete`, the ID-keyed file operations behind `saved`, and `find_session_path`, which maps an ID to its file.
+- `crates/ox-core/src/session/store.rs`: `SessionStore::set_archived` and `SessionStore::delete`, the ID-keyed store operations behind `saved`.
 - `crates/ox-tui/src/action.rs`: `Action`, which slash commands forward.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, `allows_mutating`, modal gate, echo gate.
 - `crates/ox-tui/src/app/events.rs`: `apply_slash_task`, which applies a finished `Background` outcome through the dispatch path, `apply_session_rolled`, which clears the chat when the roll lands, and the `ArchiveUpdated`, `SavedFound`, and `SavedDeleted` handlers.
@@ -100,7 +100,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/compact.rs`: `CompactCmd`.
 - `crates/ox-tui/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview` constructor.
 - `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` (destructive-action gate, inline error kept until a retry or close).
-- `crates/ox-tui/src/slash/context.rs`: `SlashContext` (the App's `LiveSessionInfo` plus the live title).
+- `crates/ox-tui/src/slash/context.rs`: `SlashContext`, which borrows the App's `LiveSessionInfo`.
 - `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd`, which forwards `Op::FindSaved`, and `confirm_modal`, which builds the confirm-delete modal for the session the engine found.
 - `crates/ox-tui/src/slash/diff.rs`: `DiffCmd` and the git calls it makes from the work tree root.
 - `crates/ox-tui/src/slash/diff/view.rs`: `WorkingTreeDiff`, the typed rows parsed from git's output within the 64 KiB cap.
@@ -117,7 +117,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, and the `SlashCommand` trait.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see [Resume](resume.md)).
-- `crates/ox-tui/src/slash/sessions.rs`: `open_store` for the picker, `saved_error_message`, `archive_message`, and the live-session recovery hints, shared by the session commands, plus `format_metadata_line` for the delete confirm modal.
+- `crates/ox-tui/src/slash/sessions.rs`: `saved_error_message`, `archive_message`, and the live-session recovery hints, shared by the session commands, plus `format_metadata_line` for the delete confirm modal.
 - `crates/ox-tui/src/slash/status.rs`: `/status` row builder plus `KvOverview` constructor.
 - `crates/ox-tui/src/slash/theme.rs`: `ThemeCmd`, picker open plus typed-arg validator.
 - `crates/ox/src/driver/repl.rs`: `command_op`, which runs typed slash commands in the bare REPL.

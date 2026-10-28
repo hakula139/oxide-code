@@ -7,11 +7,11 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize as _;
 use serde::de::{self, Deserializer};
 
-use super::auth::AuthSource;
 use super::merge::Origins;
 use super::provenance::{Source, Sourced};
 use super::schema::ClientTable;
 use super::{env_bool, env_string, resolve_flag};
+use crate::auth::AuthSource;
 
 /// The env var holding extra request headers, which gateways also use to carry their keys.
 pub(super) const CUSTOM_HEADERS_VAR: &str = "ANTHROPIC_CUSTOM_HEADERS";

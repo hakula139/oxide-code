@@ -30,7 +30,7 @@ use tracing::{debug, warn};
 
 use ox_core::config::ConfigSnapshot;
 use ox_core::engine::{Engine, EngineHandle};
-use ox_core::session::entry::ArchiveState;
+use ox_core::session::store::listing::ArchiveState;
 use ox_core::util::path::tildify;
 
 use self::action::Action;
@@ -80,11 +80,15 @@ pub async fn run<S: Debug>(
     } = theme;
     let cwd = engine.cwd();
     let session_info = LiveSessionInfo {
+        store: engine.store().clone(),
         cwd: cwd.to_owned(),
         display_cwd: tildify(cwd),
         project_root: engine.project_root().to_owned(),
         version: env!("CARGO_PKG_VERSION"),
-        session_id: engine.session_id().to_owned(),
+        session_id: engine.session_id(),
+        title: None,
+        usage: None,
+        rate_limits: None,
         session_allow: Vec::new(),
         auto_compaction_paused_after: None,
         background_shells: Vec::new(),

@@ -211,7 +211,7 @@ mod tests {
         fn execute_in(project_root: &Path, args: &str) -> Result<SlashOutcome, String> {
             let mut info = test_session_info();
             info.project_root = project_root.to_owned();
-            InitCmd.execute(args, &SlashContext::new(&info, None))
+            InitCmd.execute(args, &SlashContext::new(&info))
         }
 
         #[test]

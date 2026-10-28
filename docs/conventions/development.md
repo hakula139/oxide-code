@@ -4,7 +4,7 @@ Conventions for the dev shell, pre-commit hooks, toolchain, Nix and config file 
 
 ## Dev Shell
 
-The Nix flake provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `cargo-llvm-cov`, `cargo-mutants`, `git-cliff`, Node.js, and pnpm:
+The Nix flake provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `cargo-llvm-cov`, `cargo-mutants`, `git-cliff`, Node.js, pnpm, and the `sqlite3` shell:
 
 ```bash
 nix develop                                        # Dev shell with the toolchain, hooks, and Node tools

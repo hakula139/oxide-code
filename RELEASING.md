@@ -18,7 +18,7 @@ Within a minor version, stable releases keep these compatible:
 - CLI flags, subcommands, and exit codes
 - Config keys and file locations, plus environment variables
 - The flake's `packages`, `overlays.default`, and `homeModules.default` outputs, and the module's options
-- Persisted formats: session JSONL, versioned by its header entry, and theme TOML
+- Persisted formats: the session store, versioned by its schema revision and each session's content format, the session export that `ox export` writes, and theme TOML
 - Output from headless mode (`-p`), as defined in the [compatibility notes](docs/guide/headless.md#compatibility)
 - Release asset names, which install scripts and the Homebrew formula depend on
 
@@ -66,14 +66,14 @@ The draft lists PR titles, which are too short to explain each change to users. 
 
 3. Pin the install snippets to the tag by setting the `VERSION=` line in `docs/guide/install.md` to `VERSION=vX.Y.Z`.
 
-4. For a stable tag, add the release's [session resume fixture](docs/design/persistence.md#compatibility), which is the byte-compatibility snapshot with its insta header deleted by `sed` from the first line through the second `---` line. `INSTA_UPDATE=unseen` then records how the new fixture resumes, while still failing if an earlier release's fixture now resumes differently:
+4. For a stable tag, add the release's two [session resume fixtures](docs/design/persistence.md#compatibility), the SQL dump and the export snapshots with their insta headers deleted by `sed` from the first line through the second `---` line. `INSTA_UPDATE=unseen` then records how the new fixtures resume, while still failing if an earlier release's fixture now resumes differently:
 
    ```bash
    session=crates/ox-core/src/session
+   snapshot="$session/snapshots/ox_core__session__handle__tests__session_format"
    mkdir -p "$session/fixtures"
-   sed '1,/^---$/d' \
-     "$session/snapshots/ox_core__session__handle__tests__session_format__writes_every_entry_type_as_byte_compatible_jsonl.snap" \
-     >"$session/fixtures/vX.Y.Z.jsonl"
+   sed '1,/^---$/d' "${snapshot}__writes_every_row_kind.snap" >"$session/fixtures/vX.Y.Z.sql"
+   sed '1,/^---$/d' "${snapshot}__exports_every_row_kind.snap" >"$session/fixtures/vX.Y.Z.jsonl"
    INSTA_UPDATE=unseen cargo test -p ox-core --lib session_format::resumes_from_every_release_fixture
    ```
 
@@ -103,7 +103,7 @@ The draft lists PR titles, which are too short to explain each change to users. 
 
 8. Run the [verification block](AGENTS.md#verification). Because `cspell` scans `CHANGELOG.md`, add any unknown words from the section to `.cspell/words.txt`.
 
-9. Commit, then open a PR titled `chore(release): vX.Y.Z`, whose title becomes the squash commit title on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `docs/guide/install.md`, and possibly `.cspell/words.txt`, plus, for a stable tag, the new fixture under `crates/ox-core/src/session/fixtures/` and its snapshot.
+9. Commit, then open a PR titled `chore(release): vX.Y.Z`, whose title becomes the squash commit title on `main`. Record the checks in the PR's Test plan. The diff should touch only `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `docs/guide/install.md`, and possibly `.cspell/words.txt`, plus, for a stable tag, the two new fixtures under `crates/ox-core/src/session/fixtures/` and their snapshots.
 
 10. Merge after CI passes and the review is approved. If another PR merges first, recreate the branch from `main` and repeat the steps before curation, because updating the branch leaves a section that misses the new commit. Carry the curated entries over from the old branch, then curate the new ones.
 
@@ -147,7 +147,7 @@ Before tagging `v0.1.0-rc.1`:
 - The [`v0.1.0` milestone](https://github.com/hakula139/oxide-code/milestone/1) holds no open issue except the release work for these gates.
 - CI on `main` passes the full test suite on Linux, macOS, and Windows ([#127](https://github.com/hakula139/oxide-code/issues/127)).
 - Each auth mode works live in a TUI turn that calls a tool, a `-p` run, and a `--no-tui` run: Claude Code OAuth login, a long-lived OAuth token ([#121](https://github.com/hakula139/oxide-code/issues/121)), an API key, and a gateway with a bearer token and custom headers ([#122](https://github.com/hakula139/oxide-code/issues/122)). Every Claude 5.5 model answers at least one turn. Record the matrix in the rc PR's Test plan.
-- The persisted formats are documented: session JSONL in [`docs/design/persistence.md`](docs/design/persistence.md), config keys in [`docs/guide/configuration.md`](docs/guide/configuration.md) and [`docs/guide/permissions.md`](docs/guide/permissions.md), and the theme TOML in [`docs/guide/theming.md`](docs/guide/theming.md).
+- The persisted formats are documented: the session store and export in [`docs/design/persistence.md`](docs/design/persistence.md), config keys in [`docs/guide/configuration.md`](docs/guide/configuration.md) and [`docs/guide/permissions.md`](docs/guide/permissions.md), and the theme TOML in [`docs/guide/theming.md`](docs/guide/theming.md).
 - `SECURITY.md` exists ([#200](https://github.com/hakula139/oxide-code/issues/200)), and every archive ships `THIRD-PARTY-NOTICES` ([#207](https://github.com/hakula139/oxide-code/issues/207)).
 
 Before tagging `v0.1.0`:
@@ -156,7 +156,7 @@ Before tagging `v0.1.0`:
 - A whole-repo review at the rc commit has no open findings. Fix each finding or file it into the milestone.
 - The rc serves as the daily driver for the full soak without a new bug.
 
-The `v0.1.0` release PR also switches the install snippets to `releases/latest/download/`, then removes the `VERSION=` lines and the [Prepare a Release](#prepare-a-release) step that pins them. Because it adds the first session resume fixture, it also drops `allow_empty_glob` from the fixture test in `crates/ox-core/src/session/handle.rs`, so the test fails again when no fixture matches.
+The `v0.1.0` release PR also switches the install snippets to `releases/latest/download/`, then removes the `VERSION=` lines and the [Prepare a Release](#prepare-a-release) step that pins them. Because it adds the first session resume fixtures, it also drops `allow_empty_glob` from the fixture test in `crates/ox-core/src/session/handle.rs`, so the test fails again when no fixture matches.
 
 ## Targets
 

@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, oneshot};
 use tracing::warn;
 
-use crate::config::auth::withhold_secrets;
+use crate::config::credentials::withhold_secrets;
 
 /// The runtime of the bash every shell starts with.
 #[cfg(windows)]
@@ -134,7 +134,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::config::auth::secret_env_vars;
+    use crate::config::credentials::secret_env_vars;
     use crate::tool::bash::bash;
 
     /// A bash that runs `script`.

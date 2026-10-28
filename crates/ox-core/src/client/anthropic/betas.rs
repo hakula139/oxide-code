@@ -2,7 +2,7 @@
 
 use super::RequestKind;
 use super::wire::{ThinkingConfig, ThinkingDisplay};
-use crate::config::auth::AuthKind;
+use crate::auth::AuthKind;
 use crate::model::{Family, ModelSpec};
 
 const ADVISOR_TOOL_BETA_HEADER: &str = "advisor-tool-2026-03-01";

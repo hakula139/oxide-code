@@ -18,8 +18,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use ox_core::protocol::SavedTarget;
-use ox_core::session::entry::ArchiveState;
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
+use ox_core::session::store::listing::ArchiveState;
 
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
