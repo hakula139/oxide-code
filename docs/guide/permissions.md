@@ -161,7 +161,7 @@ cargo = false
 
 Each `extra_roots` entry is an absolute or `~/` path, such as `"~/src/shared-lib"`, and the user config and drop-ins add to one list. Symlinks in it resolve at startup, and a relative entry, `/`, your home directory, or a parent of it fails the config load. Protected paths inside an extra root still need approval outside `yolo`.
 
-Launching from `/`, your home directory, or a parent of it turns off the auto-allow for every edit, `extra_roots` included, so those edits need an allow pattern or an approval. Edit and Write refuse files with more than one hard link even after approval.
+Launching from `/`, your home directory, or a parent of it turns off the auto-allow for every edit, `extra_roots` included, so those edits need an allow pattern or an approval. A file with more than one hard link is never auto-allowed, since another link can sit outside every root; an allow pattern or an approval still writes it in place, so every link sees the new content.
 
 ## Commands the Assistant Runs
 

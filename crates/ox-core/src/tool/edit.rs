@@ -643,26 +643,6 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn a_hard_link_refusal_keeps_content_and_tracker_unchanged() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("original.txt");
-            let alias = dir.path().join("alias.txt");
-            fs::write(&path, "original").unwrap();
-            fs::hard_link(&path, &alias).unwrap();
-            let ctx = seeded_ctx(&path);
-            let before = ctx.tracker.snapshot_all();
-
-            let error = edit_file(&path, "original", "changed", false, &ctx)
-                .await
-                .unwrap_err();
-
-            assert!(error.contains("hard links"), "{error}");
-            assert_eq!(fs::read_to_string(&path).unwrap(), "original");
-            assert_eq!(fs::read_to_string(&alias).unwrap(), "original");
-            assert_eq!(ctx.tracker.snapshot_all(), before);
-        }
-
-        #[tokio::test]
         async fn accepts_a_read_under_another_spelling_of_the_path() {
             let dir = canonical_tempdir();
             fs::create_dir(dir.path().join("sub")).unwrap();

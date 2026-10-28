@@ -1,119 +1,31 @@
-//! Access policy and visible metadata retained by workspace replacement.
+//! The metadata a Linux rename must reproduce to preserve the original file.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io;
+use std::os::unix::fs::MetadataExt as _;
 
-#[cfg(unix)]
-use std::collections::BTreeMap;
-#[cfg(unix)]
-use std::ffi::OsString;
-#[cfg(unix)]
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
-#[cfg(unix)]
 use xattr::FileExt as _;
-
-#[cfg(any(target_os = "macos", windows))]
-use super::native;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Snapshot {
-    #[cfg(unix)]
     owner: (u32, u32),
-    #[cfg(unix)]
-    mode: u32,
-    #[cfg(unix)]
+    pub(super) mode: u32,
     attributes: BTreeMap<OsString, Vec<u8>>,
-    #[cfg(target_os = "macos")]
-    acl: Vec<u8>,
-    #[cfg(target_os = "macos")]
-    flags: u32,
-    #[cfg(windows)]
-    security: native::Security,
 }
 
 impl Snapshot {
     pub(super) fn capture(file: &File) -> io::Result<Self> {
-        #[cfg(unix)]
-        {
-            let metadata = file.metadata()?;
-            let mode = metadata.mode() & 0o7777;
-            validate_mode(mode)?;
-            Ok(Self {
-                owner: (metadata.uid(), metadata.gid()),
-                mode,
-                attributes: attributes(file)?,
-                #[cfg(target_os = "macos")]
-                acl: native::acl(file)?,
-                #[cfg(target_os = "macos")]
-                flags: std::os::macos::fs::MetadataExt::st_flags(&metadata) & !0x20,
-            })
-        }
-        #[cfg(windows)]
-        {
-            Ok(Self {
-                security: native::Security::capture(file)?,
-            })
-        }
-    }
-
-    pub(super) fn apply(&self, file: &File) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            let metadata = file.metadata()?;
-            if (metadata.uid(), metadata.gid()) != self.owner {
-                nix::unistd::fchown(
-                    file,
-                    Some(nix::unistd::Uid::from_raw(self.owner.0)),
-                    Some(nix::unistd::Gid::from_raw(self.owner.1)),
-                )?;
-            }
-            file.set_permissions(std::fs::Permissions::from_mode(self.mode))?;
-            #[cfg(target_os = "macos")]
-            native::set_acl(file, &self.acl)?;
-            for name in attributes(file)?.keys() {
-                if !self.attributes.contains_key(name) {
-                    file.remove_xattr(name)?;
-                }
-            }
-            for (name, value) in &self.attributes {
-                if file.get_xattr(name)?.as_ref() != Some(value) {
-                    file.set_xattr(name, value)?;
-                }
-            }
-            #[cfg(target_os = "macos")]
-            native::set_flags(file, self.flags)?;
-            Ok(())
-        }
-        #[cfg(windows)]
-        {
-            self.security.apply(file)
-        }
-    }
-
-    pub(super) fn verify(&self, file: &File) -> io::Result<()> {
-        if &Self::capture(file)? == self {
-            Ok(())
-        } else {
-            Err(io::Error::other(
-                "the file's access policy or metadata could not be preserved",
-            ))
-        }
+        let metadata = file.metadata()?;
+        Ok(Self {
+            owner: (metadata.uid(), metadata.gid()),
+            mode: metadata.mode() & 0o7777,
+            attributes: attributes(file)?,
+        })
     }
 }
 
-#[cfg(unix)]
-fn validate_mode(mode: u32) -> io::Result<()> {
-    if mode & 0o6000 != 0 {
-        Err(io::Error::other(
-            "refusing to replace a file with set-ID permissions",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
 fn attributes(file: &File) -> io::Result<BTreeMap<OsString, Vec<u8>>> {
     let names = match file.list_xattr() {
         Ok(names) => Some(names),
@@ -130,40 +42,31 @@ fn attributes(file: &File) -> io::Result<BTreeMap<OsString, Vec<u8>>> {
             ));
         }
     }
-    #[cfg(target_os = "linux")]
-    {
-        for name in ["system.posix_acl_access", "security.selinux"] {
-            if let Some(value) = supported_attribute(file, name)? {
-                attributes.insert(name.into(), value);
-            }
-        }
-        for name in [
-            "security.capability",
-            "security.ima",
-            "security.evm",
-            "system.nfs4_acl",
-        ] {
-            if supported_attribute(file, name)?.is_some() {
-                return Err(io::Error::other(format!(
-                    "refusing to replace a file with unsupported access metadata {name:?}"
-                )));
-            }
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::macos::fs::MetadataExt as _;
-
-        if file.metadata()?.st_flags() & 0x20 != 0 {
-            // Transparent compression owns these attributes and removes them on a content write.
-            attributes.remove(std::ffi::OsStr::new("com.apple.decmpfs"));
-            attributes.remove(std::ffi::OsStr::new("com.apple.ResourceFork"));
+    for name in ["system.posix_acl_access", "security.selinux"] {
+        if let Some(value) = supported_attribute(file, name)? {
+            attributes.insert(name.into(), value);
         }
     }
     Ok(attributes)
 }
 
-#[cfg(target_os = "linux")]
+/// Whether a staged copy can reproduce every attribute the file carries. Attributes that
+/// `list_xattr` leaves out, such as a capability or an `NFSv4` ACL, are invisible to [`Snapshot`],
+/// so a rename would drop them and the file has to be written in place instead.
+pub(super) fn reproducible(file: &File) -> io::Result<bool> {
+    for name in [
+        "security.capability",
+        "security.ima",
+        "security.evm",
+        "system.nfs4_acl",
+    ] {
+        if supported_attribute(file, name)?.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn supported_attribute(file: &File, name: &str) -> io::Result<Option<Vec<u8>>> {
     match file.get_xattr(name) {
         Err(error) if error.raw_os_error() == Some(nix::libc::EOPNOTSUPP) => Ok(None),
@@ -171,118 +74,67 @@ fn supported_attribute(file: &File, name: &str) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::tool::local_testing::WorkspaceWrite;
 
-    mod apply {
-        use super::*;
+    #[test]
+    fn capture_reads_the_owner_mode_and_available_attributes() {
+        use std::os::unix::fs::PermissionsExt as _;
 
-        #[test]
-        fn restores_available_attributes_and_ignores_unavailable_storage() {
-            use super::super::super::{Phase, native, write_with};
-
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("source");
-            std::fs::write(&path, b"original").unwrap();
-            let source = File::open(&path).unwrap();
-            let attributes_supported = match source.set_xattr("user.ox.value", b"\x00\xff") {
-                Ok(()) => {
-                    source.set_xattr("user.ox.empty", b"").unwrap();
-                    true
-                }
-                Err(error) => {
-                    assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
-                    false
-                }
-            };
-            let snapshot = Snapshot::capture(&source).unwrap();
-            let identity = native::identity(&source).unwrap();
-            let mut visited = Vec::new();
-
-            write_with(&path, b"changed", Some(b"original"), |phase, file| {
-                visited.push(phase);
-                if phase == Phase::Prepared && attributes_supported {
-                    file.set_xattr("user.ox.value", b"incorrect")?;
-                    file.set_xattr("user.ox.extra", b"extra")?;
-                    snapshot.apply(file)?;
-                }
-                Ok(())
-            })
-            .unwrap();
-
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o751)).unwrap();
+        let file = File::open(&path).unwrap();
+        let attempt = WorkspaceWrite::new(&path);
+        let supported = file.set_xattr("user.ox.value", b"\x00\xff").is_ok();
+        if !supported {
             assert_eq!(
-                visited,
-                [
-                    Phase::Prepared,
-                    Phase::Written,
-                    Phase::Metadata,
-                    Phase::Synced,
-                    Phase::Validated,
-                ]
+                file.list_xattr().unwrap_err().raw_os_error(),
+                Some(nix::libc::EOPNOTSUPP),
             );
-            let current = File::open(&path).unwrap();
-            assert_ne!(native::identity(&current).unwrap(), identity);
-            snapshot.verify(&current).unwrap();
-            assert_eq!(std::fs::read(&path).unwrap(), b"changed");
-            if attributes_supported {
-                assert_eq!(
-                    current.get_xattr("user.ox.value").unwrap(),
-                    Some(b"\x00\xff".to_vec())
-                );
-                assert_eq!(
-                    current.get_xattr("user.ox.empty").unwrap(),
-                    Some(Vec::new())
-                );
-                assert_eq!(current.get_xattr("user.ox.extra").unwrap(), None);
-            }
         }
 
-        #[test]
-        fn refuses_an_owner_assignment_the_process_cannot_make() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("source");
-            std::fs::write(&path, b"original").unwrap();
-            let file = File::open(&path).unwrap();
-            let attempt = WorkspaceWrite::new(&path);
-            let original = Snapshot::capture(&file).unwrap();
-            let metadata = file.metadata().unwrap();
-            let desired = Snapshot {
-                owner: (metadata.uid() + 1, metadata.gid()),
-                mode: metadata.mode() & 0o7777,
-                attributes: BTreeMap::new(),
-                #[cfg(target_os = "macos")]
-                acl: native::acl(&file).unwrap(),
-                #[cfg(target_os = "macos")]
-                flags: std::os::macos::fs::MetadataExt::st_flags(&metadata) & !0x20,
-            };
+        let snapshot = Snapshot::capture(&file).unwrap();
 
-            let error = desired.apply(&file).unwrap_err();
-
-            assert!(matches!(
-                error.raw_os_error(),
-                Some(nix::libc::EPERM | nix::libc::EINVAL)
-            ));
-            original.verify(&file).unwrap();
-            attempt.assert_unchanged();
+        let metadata = file.metadata().unwrap();
+        assert_eq!(snapshot.owner, (metadata.uid(), metadata.gid()));
+        assert_eq!(snapshot.mode, 0o751);
+        if supported {
+            assert_eq!(
+                snapshot.attributes.get(&OsString::from("user.ox.value")),
+                Some(&b"\x00\xff".to_vec()),
+            );
+        } else {
+            assert!(snapshot.attributes.is_empty());
         }
+        attempt.assert_unchanged();
     }
 
-    mod validate_mode {
-        use super::*;
+    #[test]
+    fn a_captured_snapshot_matches_only_identical_metadata() {
+        use std::os::unix::fs::PermissionsExt as _;
 
-        #[test]
-        fn accepts_ordinary_permissions_and_refuses_either_set_id_bit() {
-            for mode in [0o600, 0o751, 0o1777] {
-                validate_mode(mode).unwrap();
-            }
-            for mode in [0o4755, 0o2755, 0o6755] {
-                let error = validate_mode(mode).unwrap_err();
-
-                assert!(error.to_string().contains("set-ID"), "mode={mode:o}");
-            }
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        for path in [&first, &second] {
+            std::fs::write(path, b"original").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
+        let mut changed = Snapshot::capture(&File::open(&first).unwrap()).unwrap();
+
+        assert_eq!(
+            changed,
+            Snapshot::capture(&File::open(&second).unwrap()).unwrap()
+        );
+        changed.mode = 0o600;
+        assert_ne!(
+            changed,
+            Snapshot::capture(&File::open(&second).unwrap()).unwrap()
+        );
     }
 }

@@ -43,6 +43,7 @@ esbenp
 ESRCH
 euvx
 fchflags
+fchmod
 fchown
 fcntl
 fcopyfile
