@@ -9,7 +9,7 @@ use ratatui::layout::Rect;
 
 use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
-use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{ArgCompletion, SlashCommand, SlashOutcome};
 use crate::action::Action;
 use crate::modal::chrome::CONFIRM_HINTS;
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
@@ -28,14 +28,6 @@ impl SlashCommand for ThemeCmd {
 
     fn description(&self) -> &'static str {
         "Change the theme"
-    }
-
-    fn classify(&self, args: &str) -> SlashKind {
-        if args.is_empty() {
-            SlashKind::ReadOnly
-        } else {
-            SlashKind::Steering
-        }
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -174,16 +166,6 @@ mod tests {
     use super::*;
     use crate::modal::testing::render_modal;
     use crate::slash::registry::testing::run_execute;
-
-    mod classify {
-        use super::*;
-
-        #[test]
-        fn splits_on_args() {
-            assert_eq!(ThemeCmd.classify(""), SlashKind::ReadOnly);
-            assert_eq!(ThemeCmd.classify("latte"), SlashKind::Steering);
-        }
-    }
 
     mod complete_arg {
         use super::*;

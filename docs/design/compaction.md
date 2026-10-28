@@ -4,7 +4,7 @@ Context compression replaces the visible transcript with a summary so a long ses
 
 ## Triggers
 
-Manual compaction runs only when asked for. `/compact` accepts optional instructions that steer the summary, and the slash registry classifies it as `Mutating`, so a turn in flight finishes first. Auto-compaction is default on and can be disabled independently, and manual `/compact` ignores that setting.
+Manual compaction runs only when asked for. `/compact` accepts optional instructions that steer the summary, and the slash registry marks it idle-only, so a turn in flight finishes first. Auto-compaction is default on and can be disabled independently, and manual `/compact` ignores that setting.
 
 Before recording a new prompt, the engine runs automatic compaction when the previous turn left its estimate over the threshold, whether that turn completed, failed, or was cancelled. Inside a turn, it runs at a round boundary where the next request would cross the threshold, and the turn then continues from the summary. It never interrupts an in-flight stream or tool call. A prompt that arrives during compaction stays queued and drains afterward, unless the compaction fails, in which case the queue waits for the user.
 
@@ -104,7 +104,7 @@ In the bare REPL and headless runs, `driver::stdio::StdioSink` writes `Compactin
 
 5. **Boundary-only compaction.** Compaction runs between persisting a coherent transcript unit and starting the next prompt or the next round of a turn, once every call of the round has its result recorded. It never interrupts a stream or a running tool, so the summarized transcript holds no unresolved call, and session replay matches manual `/compact`. The round boundary is a compaction site because a long tool loop would otherwise fill the context window before its turn ends.
 
-6. **Refuse manual compaction mid-turn.** Claude Code, Codex, and opencode treat manual compaction as a between-turns operation. The `Mutating` classification refuses a `/compact` while a turn is in flight, and the user retries after the reply finishes.
+6. **Refuse manual compaction mid-turn.** Claude Code, Codex, and opencode treat manual compaction as a between-turns operation. The slash dispatcher refuses an idle-only `/compact` while a turn is in flight, and the user retries after the reply finishes.
 
 7. **Same request path as a turn.** The summarization request goes through the same `Wire` and `collect_response` as a turn, so it reuses the live model, effort and thinking settings, credentials, betas, and cache handling. `request_summary` checks the stop reason itself, so a summary cut off by `max_tokens` or stopped early fails before it can replace the transcript.
 
