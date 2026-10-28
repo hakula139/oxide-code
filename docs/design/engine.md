@@ -10,7 +10,7 @@ An `Op` is one of three kinds:
 - **A session operation.** `Compact`, `Clear`, `Archive`, `Resume`, and `Rename` change the session, `SetArchive`, `FindSaved`, and `DeleteSaved` look up or change a saved one, and `SetModel` and `SetMode` change the settings the next turn uses.
 - **Sign-in and shutdown.** `Login`, `LoginCode`, and `Logout` manage the oxide-code login, and `Shutdown` ends the process.
 
-`Prompt`, `SetModel`, `Compact`, `Clear`, `Archive`, `SetArchive`, `FindSaved`, `DeleteSaved`, `Resume`, `Rename`, `Login`, and `Logout` require an idle engine. A frontend waits for the preceding operation's terminal event before sending one, and the engine drops an idle-only op that arrives during another operation without a terminal event, since the frontend still owns it. `Queue`, `Interrupt`, `Resolve`, `LoginCode`, `SetMode`, and `Shutdown` act on the operation in flight, so they arrive on the same channel and race the running stream and tool futures in one biased `select!`.
+`Op::is_idle_only` names the ops that require an idle engine. A frontend waits for the preceding operation's terminal event before sending one, and the engine drops an idle-only op that arrives during another operation without a terminal event, since the frontend still owns it. The other ops act on the operation in flight, so they arrive on the same channel and race the running stream and tool futures in one biased `select!`.
 
 ## Events
 

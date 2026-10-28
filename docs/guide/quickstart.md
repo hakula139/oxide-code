@@ -42,7 +42,7 @@ In the chat:
 
 - **Scroll**: Use the mouse wheel or **PageUp** / **PageDown**, and press **Ctrl+End** to follow new output again.
 - **Expand output**: Press **Ctrl+O** to show long tool output and finished thinking in full, and again to collapse them.
-- **Switch modes**: Press **Tab** or **Shift+Tab** to change the [permission mode](permissions.md#modes), and the footer names the mode **Tab** selects next. **Tab** completes a selection while the command popup is open.
+- **Switch modes**: Press **Tab** or **Shift+Tab** to step through the [permission modes](permissions.md#modes).
 - **Select and copy**: Drag over chat text to select it, and release to copy it to the clipboard.
 - **Interrupt and exit**: Press **Esc** to stop a running turn, and **Ctrl+C** twice, or **Ctrl+D** twice with an empty input, to exit.
 

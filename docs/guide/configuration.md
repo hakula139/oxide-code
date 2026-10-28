@@ -149,7 +149,7 @@ With the default `false`, reasoning stays hidden. The chat still shows the progr
 
 `show_welcome = false` blanks the chat region until you submit a prompt, which is useful when piping or screen-recording.
 
-`status_line` lists segments from the table below in display order and must contain at least one. Add, remove, or reorder any segment, including `permission-mode`, to control its presence and position. When unset, it is the list in the [example](#config-file): `current-dir`, `git-branch`, `pull-request`, `model-with-effort`, `context-used`, `session-cost`, `permission-mode`, `run-state`, and `thread-title`.
+`status_line` lists segments from the table below in display order and must contain at least one. Add, remove, or reorder any segment, including `permission-mode`, to control its presence and position. When unset, it is the list in the [example](#config-file).
 
 Segments with no data, such as a missing git branch, an unopened pull request, context usage before the first completed turn, or usage limits under an API key, are omitted. The three pull request segments shell out to `gh pr view`, so they require the GitHub CLI on `PATH`. Click one of them to open the PR, its checks, or its changed files, and terminals that open links on **Ctrl+click** or **Cmd+click** do the same. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise. The separator takes its style from the active theme's `separator` slot and has no setting of its own.
 

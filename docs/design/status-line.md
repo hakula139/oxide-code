@@ -6,7 +6,7 @@ The status line is the TUI's top row, a user-ordered roster of built-in segments
 
 `StatusLineSegment` in `config.rs` defines the roster. `[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
 
-`StatusBar` keeps component state and delegates segment formatting to `ox_tui::components::status::line`. `App` copies the queued prompt count, the task list's progress, the session ID, the theme name, and the permission mode into it before each frame, since it owns all five.
+`StatusBar` keeps component state and delegates segment formatting to `ox_tui::components::status::line`. `App` copies the queued prompt count, the task list's progress, whether the input is empty, the session ID, the theme name, and the permission mode into it before each frame, since it owns that state.
 
 Segment render rules:
 
@@ -40,21 +40,7 @@ A window renders its utilization floored to a whole percent, after rounding to b
 
 ## Default Order
 
-The default order is:
-
-```toml
-status_line = [
-  "current-dir",
-  "git-branch",
-  "pull-request",
-  "model-with-effort",
-  "context-used",
-  "session-cost",
-  "permission-mode",
-  "run-state",
-  "thread-title",
-]
-```
+The default order is the `status_line` list in the [configuration example](../guide/configuration.md#config-file).
 
 Claude Code's status line is a command you configure, and each line it prints becomes a row. oxide-code renders its built-in segments in one row because Ratatui owns the app chrome.
 

@@ -139,7 +139,7 @@ A run that lists files and then attempts `cargo test`, which needs approval, str
 {"type":"stream_token","data":"Done."}
 {"type":"usage_updated","data":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018}}
 {"type":"turn_complete"}
-{"type":"result","data":{"stop_reason":"completed","error":null,"message":"Done.","usage":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018},"session_id":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"}}
+{"type":"result","data":{"stop_reason":"completed","error":null,"session_write_error":null,"message":"Done.","usage":{"context_tokens":1000,"context_window":1000000,"estimated_cost_usd":0.018},"session_id":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"}}
 ```
 
 The run cannot ask, so the `cargo test` call ends with a `tool_call_end` whose `is_error` is `true` and whose `content` tells the model the call was denied, naming the allow pattern that would permit it when one can.

@@ -27,7 +27,7 @@ The `FileTracker` is shared across a session's tool calls. Read populates its mu
 
 7. **xxh64 for change detection.** Cryptographic integrity isn't required, since the tracker only needs to spot drift, and xxh64 is already used elsewhere in the crate.
 
-8. **No tracker-managed file lock.** One agent runs its edit-class calls one at a time, and only read-only calls share a batch. Edit and Write retain the gated bytes and recheck the original identity and bytes before publishing, atomically when a staged copy reproduces the original's metadata and in place otherwise. An external writer can still change the file during those checks or before publication, and a failed in-place write can leave partial content. Subagents would add concurrent writers within one session ([#136](https://github.com/hakula139/oxide-code/issues/136)).
+8. **No tracker-managed file lock.** One agent runs its edit-class calls one at a time, and only read-only calls share a batch. Edit and Write retain the gated bytes and recheck the original before publishing, which [File Mutation](file-mutation.md) describes along with the window an external writer still has. Subagents would add concurrent writers within one session ([#136](https://github.com/hakula139/oxide-code/issues/136)).
 
 ## Sources
 

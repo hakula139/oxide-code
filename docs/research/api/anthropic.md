@@ -215,8 +215,8 @@ Controls the intelligence-vs-latency level of agentic turns via one of five toke
 
 - **The body field does the work.** Anthropic's [effort docs](https://platform.claude.com/docs/en/build-with-claude/effort) list effort as GA with no beta header, and the `effort-2025-11-24` header alone is a no-op. Claude Code still sends the header, so oxide-code does too.
 - **Levels.** Every supported model accepts all five, per the effort docs on 2026-10-17.
-- **Per-model default.** The API defaults are `medium` on Opus 5.5 and Haiku 5.5 and `high` on Sonnet 5.5 and Fable 5.1, and oxide-code sends them explicitly. Claude Code 2.1.301 sends `medium` on Sonnet 5.5 instead.
-- **`max_tokens`.** Claude Code 2.1.301 sends 128K on the 5.5 models and 64K on Fable 5.1. oxide-code defaults to 64K on the supported models, since effort already steers thinking depth, and to 16K on other IDs.
+- **Per-model default.** The API defaults are `medium` on Opus 5.5 and Haiku 5.5 and `high` on Sonnet 5.5 and Fable 5.1, while Claude Code 2.1.301 sends `medium` on Sonnet 5.5. [Configuration](../../guide/configuration.md#effort-reasoning-effort) lists the defaults oxide-code sends.
+- **`max_tokens`.** Claude Code 2.1.301 sends 128K on the 5.5 models and 64K on Fable 5.1. [Configuration](../../guide/configuration.md#max_tokens-response-ceiling) gives oxide-code's defaults and their rationale.
 
 ### `context_management.edits`
 
@@ -246,7 +246,7 @@ Invalidation order (from the Anthropic caching docs) is `tools → system → me
 
 ### `thinking.display`
 
-See [Extended Thinking § Display modes](extended-thinking.md#display-modes). The default is `"omitted"`. `show_thinking=true` in oxide-code opts into `"summarized"`. With it off, requests on every supported model except Haiku 5.5 use `"updates"`, and Haiku 5.5 sends `"omitted"`.
+See [Extended Thinking § Display modes](extended-thinking.md#display-modes). The default is `"omitted"`.
 
 ## Third-Party Tool Restrictions
 
@@ -298,7 +298,7 @@ For raw HTTP (as in oxide-code), replicate the headers manually. oxide-code mirr
 
 OAuth tokens expire (check `expiresAt` in milliseconds). Claude Code refreshes them automatically with a 5-minute buffer before expiry, using a `POST` to `platform.claude.com/v1/oauth/token` with the `refresh_token`. Cross-process safety is handled via directory-based locking: `proper-lockfile` creates a `.lock` directory beside the real path of the config directory, as in `~/.claude.lock/`, refreshes its mtime every 5 seconds while held, and treats a lock untouched for 10 seconds as stale, its `update` and `stale` defaults.
 
-oxide-code implements the same refresh flow: proactive refresh with the 5-minute buffer, directory-based locking compatible with Claude Code, and credential write-back preserving unknown fields.
+[Login](../../design/login.md) covers oxide-code's refresh flow.
 
 ## Sources
 

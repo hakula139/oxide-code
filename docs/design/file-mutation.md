@@ -8,23 +8,23 @@ Companion docs: [Permissions](permissions.md), [File Tracking](file-tracking.md)
 
 The path gate resolves the target and the tools open it with `open_no_follow`, which refuses a symlink at the final component, with `O_NONBLOCK` so a swapped-in FIFO cannot hang the open. `validate_regular_file` requires a regular file at or below `MAX_TRACKED_FILE_SIZE` (10 MiB), and the tracker's Read-before-Edit gate supplies the bytes the tool expects to replace.
 
-`commit::write` compares the current content with those bytes before changing anything, and `Original::verify` repeats the identity and byte checks immediately before publication. A changed file reports "the file changed while preparing the write. Read it again." and a replaced inode reports "the file was replaced while preparing the write", so the tool never records success for content another writer already replaced. On Unix, a file with set-ID permissions or a capability is refused, because a write can clear either while the tool would still report success.
+`commit::write` compares the current content with those bytes before changing anything, and `Original::verify` repeats the identity and byte checks immediately before publication. A changed file reports "the file changed while preparing the write. Read it again." and a replaced inode reports "the file was replaced while preparing the write", so the tool never records success for content another writer already replaced. A writer with access can still change the file between that last check and publication. On Unix, a file with set-ID permissions or a capability is refused, because a write can clear either while the tool would still report success.
 
 ## Publication
 
 ### Atomic Replacement
 
-On Linux, `replace_atomically` stages a `0600` file in the destination's parent, writes and syncs it, gives it the original's mode, and captures a `Snapshot` of the staged file's owner, group, mode, and extended attributes, including the POSIX access ACL and the SELinux label. When the snapshot equals the original's, the staged file already carries that metadata, so the rename publishes it without recreating any of it. Before the rename, the tool rechecks the staged bytes and name, so a substituted or removed stage cannot be published, and rechecks the original's identity and bytes, so a concurrent change is reported.
+On Linux, `replace_atomically` stages a `0600` file in the destination's parent, writes it, gives it the original's mode, and captures a `Snapshot` of the staged file's owner, group, mode, and extended attributes, including the POSIX access ACL and the SELinux label. When the snapshot equals the original's, the staged file already carries that metadata, so the rename publishes it without recreating any of it. Before the rename, the tool syncs the staged file and rechecks its bytes and name, so a substituted or removed stage cannot be published.
 
 A file with more than one hard link, a parent that refuses a new entry, a different owner or group, or any attribute the staged copy does not inherit takes the in-place path instead. A `Snapshot` comparison leaves the decision to the filesystem: a parent's default ACL, an inherited label, and a filesystem that cannot store an ACL all need no case of their own.
 
 ### In-Place Write
 
-`write_in_place` rewrites through the original's held handle with `set_len(0)`, `write_all`, and `sync_all`. On Unix the inode keeps its owner, group, mode, ACLs, extended attributes, flags, and every hard link without recreating any of them, while the kernel clears set-ID bits and capabilities on a content write, so files carrying either are refused. On Windows the file keeps its owner, DACL, native attributes, and alternate streams, while content-dependent NTFS compression follows native write behavior. A final `Original::verify` confirms that the path still holds the written bytes. macOS and Windows always take this path, since reproducing macOS ACLs and BSD flags or Windows access-control state needs platform calls outside Rust's safe standard library.
+`write_in_place` rewrites through the original's held handle with `set_len(0)`, `write_all`, and `sync_all`. On Unix the inode keeps its owner, group, mode, ACLs, extended attributes, flags, and every hard link without recreating any of them. On Windows the file keeps its owner, DACL, native attributes, and alternate streams, while content-dependent NTFS compression follows native write behavior. A final `Original::verify` confirms that the path still holds the written bytes. macOS and Windows always take this path, since reproducing macOS ACLs and BSD flags or Windows access-control state needs platform calls outside Rust's safe standard library.
 
 ### New Files
 
-`create` stages a file in the parent, writes and syncs it, sets it to the mode a plain creation in that directory receives, which a `0666` probe reports through the umask, verifies the staged name, and publishes it with a no-clobber persist. A no-clobber publish never replaces an existing entry, including a dangling link.
+`create` stages a file in the parent, writes it, sets it to the mode a plain creation in that directory receives, which a `0666` probe reports through the umask, syncs it, rechecks its bytes and name, and publishes it with a no-clobber persist. A no-clobber publish never replaces an existing entry, including a dangling link.
 
 ## Design Decisions
 
