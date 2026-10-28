@@ -39,7 +39,7 @@ use self::wire::{
 };
 use super::{Request, ResponseEvent, Wire};
 use crate::config::Config;
-use crate::config::auth::{self, Auth, AuthSource, LoginUnavailable};
+use crate::config::auth::{self, Auth, LoginUnavailable};
 use crate::config::gateway::GatewayCompat;
 use crate::config::oauth::ClaudeCodeKeychain;
 use crate::message::{ContentBlock, Message, Role};
@@ -64,7 +64,7 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 // ── Client ──
 
 /// Anthropic client, which attributes each request to the session its caller names. Clones share
-/// the connection pool and stored-login token.
+/// the connection pool and the stored-login reload tracker.
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
@@ -74,8 +74,6 @@ pub(crate) struct Client {
     /// as in Claude Code.
     is_first_party: bool,
     gateway: GatewayCompat,
-    /// `None` while signed out.
-    auth: Option<Auth>,
     trust: Arc<dyn Trust>,
     /// Stored-login reloads that outlive their requests, which the session waits for at exit.
     reloads: TaskTracker,
@@ -83,50 +81,29 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    /// Builds a client for the endpoint and credential in `config`, verifying servers with `trust`.
+    /// Builds a client for the endpoint in `config`, verifying servers with `trust`.
     pub(crate) fn new(
         config: &Config,
         trust: impl Trust + 'static,
         device_id: String,
     ) -> Result<Self> {
         let Config {
-            base_url,
-            gateway,
-            auth,
-            ..
+            base_url, gateway, ..
         } = config;
         Ok(Self {
             http: build_http(gateway, &trust)?,
             messages_url: base_url.messages_url(),
             is_first_party: base_url.is_first_party(),
             gateway: gateway.clone(),
-            auth: auth.clone(),
             trust: Arc::new(trust),
             reloads: TaskTracker::new(),
             device_id,
         })
     }
 
-    /// Where the credential came from, `None` while signed out.
-    pub(crate) fn auth_source(&self) -> Option<AuthSource> {
-        self.auth.as_ref().map(Auth::source)
-    }
-
     /// The trust roots used by requests, sign-ins, and stored-login refreshes.
     pub(crate) fn trust(&self) -> &dyn Trust {
         self.trust.as_ref()
-    }
-
-    /// The credential used by requests, or an error while signed out.
-    pub(crate) fn auth(&self) -> Result<&Auth> {
-        self.auth.as_ref().context("not signed in")
-    }
-
-    /// Swaps the credential for later requests, `None` to sign out. Callers install a stored login
-    /// only in place of another stored login or none, and the stored-login fallback accepts one only
-    /// for a first-party base URL.
-    pub(crate) fn set_auth(&mut self, auth: Option<Auth>) {
-        self.auth = auth;
     }
 
     /// Loads the first stored login again on a reload task. Dropping the returned future stops only
@@ -161,6 +138,7 @@ impl Wire for Client {
     fn stream(&self, request: Request<'_>) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
         let Request {
             session_id,
+            auth,
             settings,
             system,
             user_context,
@@ -175,6 +153,7 @@ impl Wire for Client {
         let request = self.prepare(RequestSpec {
             kind: RequestKind::Agentic,
             session_id,
+            auth,
             model,
             thinking: thinking.as_ref(),
             max_tokens: settings.max_tokens(),
@@ -307,6 +286,7 @@ struct RequestSpec<'a> {
     kind: RequestKind,
     /// The live session's ID, sent as `x-claude-code-session-id` and in `metadata.user_id`.
     session_id: &'a str,
+    auth: &'a Auth,
     model: &'a ModelSpec,
     thinking: Option<&'a ThinkingConfig>,
     max_tokens: u32,
@@ -323,6 +303,7 @@ impl Client {
         let RequestSpec {
             kind,
             session_id,
+            auth,
             model,
             thinking,
             max_tokens,
@@ -331,7 +312,6 @@ impl Client {
             output_config,
             messages,
         } = spec;
-        let auth = self.auth()?;
         let agentic = kind == RequestKind::Agentic;
 
         // The fingerprint skips the user context, which Claude Code marks as a meta message.
@@ -437,6 +417,7 @@ fn build_system_blocks<'a>(
 #[cfg(test)]
 mod tests {
     use std::fmt::Write as _;
+    use std::sync::LazyLock;
 
     use indoc::writedoc;
     use wiremock::matchers::{body_partial_json, header, method, path, query_param};
@@ -449,6 +430,7 @@ mod tests {
     use super::testing::{DEVICE_ID, api_key, sse_body, sse_response, text_stream_body};
     use super::*;
     use crate::client::{Response, StopReason};
+    use crate::config::auth::AuthSource;
     use crate::config::oauth::testing::{HeldRefresh, ok_refresh_body, ox_login_in, write_creds};
     use crate::config::testing::{base_url, test_config};
     use crate::model::{Effort, ModelSettings, PromptCacheTtl, TokenUsage};
@@ -478,7 +460,11 @@ mod tests {
             test_config(OFFLINE_URL, api_key(), model).model_settings()
         }
 
-        /// A request for `messages` under `settings` without tools, caching its tail.
+        /// The credential [`request`] sends.
+        static API_KEY: LazyLock<Auth> = LazyLock::new(api_key);
+
+        /// A request for `messages` under `settings` with [`API_KEY`] and without tools, caching
+        /// its tail.
         fn request<'a>(
             settings: &'a ModelSettings,
             messages: &'a [Message],
@@ -487,6 +473,7 @@ mod tests {
         ) -> Request<'a> {
             Request {
                 session_id: SESSION_ID,
+                auth: &API_KEY,
                 settings,
                 system,
                 user_context,
@@ -501,9 +488,21 @@ mod tests {
             client: &Client,
             settings: &ModelSettings,
         ) -> Result<Vec<ResponseEvent>> {
+            stream_hi_as(client, &API_KEY, settings).await
+        }
+
+        /// [`stream_hi`] sent with `auth`.
+        async fn stream_hi_as(
+            client: &Client,
+            auth: &Auth,
+            settings: &ModelSettings,
+        ) -> Result<Vec<ResponseEvent>> {
             let messages = [Message::user("hi")];
             let system = SystemPrompt::default();
-            let rx = client.stream(request(settings, &messages, &system, None))?;
+            let rx = client.stream(Request {
+                auth,
+                ..request(settings, &messages, &system, None)
+            })?;
             collect_events(rx).await
         }
 
@@ -558,7 +557,7 @@ mod tests {
                     .mount(&server)
                     .await;
                 let base_url = format!("{}/anthropic/", server.uri());
-                let client = test_client(base_url, api_key());
+                let client = test_client(base_url);
 
                 stream_hi(&client, &settings_for(TEST_MODEL)).await.unwrap();
             }
@@ -590,44 +589,19 @@ mod tests {
             }
         }
 
-        mod set_auth {
-            use super::*;
-
-            #[tokio::test]
-            async fn sends_the_new_credential_and_signing_out_stops_requests() {
-                let mut client = test_client(OFFLINE_URL, api_key());
-                let settings = settings_for(TEST_MODEL);
-
-                client.set_auth(Some(Auth::test(AuthSource::OxLogin, "ox-token")));
-                let request = capture_stream_request(client.clone(), &settings).await;
-                client.set_auth(None);
-                let signed_out = stream_hi(&client, &settings)
-                    .await
-                    .expect_err("a signed-out client must not send");
-
-                assert_eq!(
-                    request_header(&request, "authorization"),
-                    Some("Bearer ox-token")
-                );
-                assert_eq!(request_header(&request, "x-api-key"), None);
-                assert_eq!(client.auth_source(), None);
-                assert_eq!(signed_out.to_string(), "not signed in");
-            }
-        }
-
         mod finish_reloads {
             use super::*;
 
             #[tokio::test]
-            async fn waits_for_a_refresh_that_a_replaced_login_left_in_flight() {
+            async fn waits_for_a_refresh_an_aborted_request_left_in_flight() {
                 for (token, expires_at) in [("expired", 0), ("rejected", 9_999_999_999_999)] {
                     let server = serve(vec![ResponseTemplate::new(401)]).await;
                     let refresh = HeldRefresh::mount(&server).await;
                     let dir = tempfile::tempdir().unwrap();
                     let creds = dir.path().join("credentials.json");
                     write_creds(&creds, token, Some("old-refresh"), expires_at);
-                    let replaced = ox_login_in(&creds, &server.uri(), token, expires_at);
-                    let mut client = test_client(server.uri(), replaced.clone());
+                    let login = ox_login_in(&creds, &server.uri(), token, expires_at);
+                    let client = test_client(server.uri());
 
                     refresh
                         .abort_mid_refresh({
@@ -636,16 +610,15 @@ mod tests {
                                 SESSION_ID,
                                 String::new(),
                                 "{}".to_owned(),
-                                &replaced,
+                                &login,
                             );
                             async move { transport::post_messages(&http, &request, 0).await }
                         })
                         .await;
-                    client.set_auth(Some(Auth::test(AuthSource::OxLogin, "ox-token")));
                     refresh.release();
                     client.finish_reloads().await;
 
-                    assert_eq!(replaced.secret(), "fresh-access", "{token}");
+                    assert_eq!(login.secret(), "fresh-access", "{token}");
                     server.verify().await;
                 }
             }
@@ -684,7 +657,7 @@ mod tests {
             #[tokio::test]
             async fn streams_usage_and_text_then_completes_the_reply() {
                 let server = serve(vec![sse_response(text_stream_body("", "Hi"))]).await;
-                let client = test_client(server.uri(), api_key());
+                let client = test_client(server.uri());
 
                 let events = stream_hi(&client, &settings_for(TEST_MODEL)).await.unwrap();
 
@@ -706,7 +679,7 @@ mod tests {
             #[tokio::test]
             async fn attributes_the_request_to_the_caller_session() {
                 let server = serve(vec![sse_response(text_stream_body("", "Hi"))]).await;
-                let client = test_client(server.uri(), api_key());
+                let client = test_client(server.uri());
 
                 let settings = settings_for(TEST_MODEL);
                 let messages = [Message::user("hi")];
@@ -748,7 +721,7 @@ mod tests {
                     ("message_stop", r#"{"type":"message_stop"}"#),
                 ]);
                 let server = serve(vec![sse_response(body)]).await;
-                let client = test_client(server.uri(), api_key());
+                let client = test_client(server.uri());
 
                 let events = stream_hi(&client, &settings_for(TEST_MODEL)).await.unwrap();
 
@@ -765,7 +738,11 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn sends_one_credential_header_and_betas_per_auth_kind() {
+            async fn sends_each_request_its_own_credential_header_and_betas() {
+                let client = test_client(OFFLINE_URL);
+                let settings = settings_for(TEST_MODEL);
+                let messages = [Message::user("hi")];
+                let system = SystemPrompt::default();
                 let mut betas = Vec::new();
                 for (auth, api_key, bearer) in [
                     (
@@ -785,8 +762,11 @@ mod tests {
                     ),
                 ] {
                     let source = auth.source();
-                    let client = test_client(OFFLINE_URL, auth);
-                    let request = capture_stream_request(client, &settings_for(TEST_MODEL)).await;
+                    let sent = Request {
+                        auth: &auth,
+                        ..request(&settings, &messages, &system, None)
+                    };
+                    let request = capture_stream(client.clone(), sent).await;
                     assert_eq!(request_header(&request, "x-api-key"), api_key, "{source:?}");
                     assert_eq!(
                         request_header(&request, "authorization"),
@@ -867,7 +847,7 @@ mod tests {
             async fn with_user_context_prepends_it_and_fingerprints_the_prompt() {
                 let prompt = "Say 'hello' and nothing else.";
                 let context = "<system-reminder>CLAUDE.md content here</system-reminder>";
-                let client = test_client(OFFLINE_URL, api_key());
+                let client = test_client(OFFLINE_URL);
                 let settings = settings_for(TEST_MODEL);
                 let messages = [Message::user(prompt)];
                 let system = SystemPrompt::default();
@@ -903,7 +883,7 @@ mod tests {
             async fn third_party_base_url_drops_global_scope_keeps_its_beta() {
                 // As in Claude Code, the beta ships on every base URL, while the body-side
                 // `scope: "global"` goes only to the Anthropic API.
-                let client = test_client(OFFLINE_URL, api_key());
+                let client = test_client(OFFLINE_URL);
                 let settings = settings_for(TEST_MODEL);
                 let messages = [Message::user("hi")];
                 let system = system_prompt("static", "");
@@ -945,7 +925,7 @@ mod tests {
 
             #[tokio::test]
             async fn breakpoints_cover_static_prefix_and_conversation_tail() {
-                let mut client = test_client(OFFLINE_URL, api_key());
+                let mut client = test_client(OFFLINE_URL);
                 // The conversation breakpoint omits `scope` even where the system prefix is global.
                 client.is_first_party = true;
                 let settings = settings_for(TEST_MODEL);
@@ -1102,7 +1082,7 @@ mod tests {
                     ("message_stop", r#"{"type":"message_stop"}"#),
                 ]);
                 let server = serve(vec![sse_response(body)]).await;
-                let client = test_client(server.uri(), api_key());
+                let client = test_client(server.uri());
 
                 let error = stream_hi(&client, &settings_for(TEST_MODEL))
                     .await
@@ -1122,7 +1102,7 @@ mod tests {
                     r#"{"type":"error","error":{"type":"invalid_request_error","message":"Bad block"}}"#,
                 )]);
                 let server = serve(vec![sse_response(body)]).await;
-                let client = test_client(server.uri(), api_key());
+                let client = test_client(server.uri());
 
                 let err = stream_hi(&client, &settings_for(TEST_MODEL))
                     .await
@@ -1148,7 +1128,7 @@ mod tests {
                         format!("{}/v1/messages", elsewhere.uri()),
                     )])
                     .await;
-                let client = test_client(server.uri(), api_key());
+                let client = test_client(server.uri());
 
                 let err = stream_hi(&client, &settings_for(TEST_MODEL))
                     .await
@@ -1187,7 +1167,7 @@ mod tests {
                             .set_body_string(body),
                     ])
                     .await;
-                    let client = test_client(server.uri(), api_key());
+                    let client = test_client(server.uri());
 
                     let err = stream_hi(&client, &settings_for(TEST_MODEL))
                         .await
@@ -1203,12 +1183,10 @@ mod tests {
                     ResponseTemplate::new(401).set_body_string("token revoked"),
                 ])
                 .await;
-                let client = test_client(
-                    server.uri(),
-                    Auth::test(AuthSource::OAuthTokenEnv, "oat-env"),
-                );
+                let client = test_client(server.uri());
+                let auth = Auth::test(AuthSource::OAuthTokenEnv, "oat-env");
 
-                let err = stream_hi(&client, &settings_for(TEST_MODEL))
+                let err = stream_hi_as(&client, &auth, &settings_for(TEST_MODEL))
                     .await
                     .expect_err("expected 401");
 
@@ -1230,7 +1208,7 @@ mod tests {
                         .set_body_string("Too many requests"),
                 ])
                 .await;
-                let client = test_client(server.uri(), api_key());
+                let client = test_client(server.uri());
 
                 let err = stream_hi(&client, &settings_for(TEST_MODEL))
                     .await
@@ -1276,14 +1254,19 @@ mod tests {
                 let file = dir.path().join("credentials.json");
                 write_creds(&file, "expired", Some("old-refresh"), 0);
                 let token_url = format!("{}/token", server.uri());
-                let client =
-                    test_client(server.uri(), ox_login_in(&file, &token_url, "expired", 0));
+                let client = test_client(server.uri());
+                let login = ox_login_in(&file, &token_url, "expired", 0);
 
-                stream_hi(&client, &settings_for(TEST_MODEL)).await.unwrap();
+                stream_hi_as(&client, &login, &settings_for(TEST_MODEL))
+                    .await
+                    .unwrap();
                 let stored: serde_json::Value =
                     serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
                 std::fs::remove_file(&file).unwrap();
+                let clone = login.clone();
                 let query = SideQuery {
+                    session_id: SESSION_ID,
+                    auth: &clone,
                     model: ModelSpec::resolve("claude-haiku-5-5"),
                     system: "",
                     user: "u",
@@ -1291,7 +1274,7 @@ mod tests {
                     effort: None,
                     output_format: None,
                 };
-                let (title, _) = client.clone().complete(SESSION_ID, query).await.unwrap();
+                let (title, _) = client.complete(query).await.unwrap();
 
                 assert_eq!(stored["claudeAiOauth"]["accessToken"], "fresh-access");
                 assert_eq!(stored["claudeAiOauth"]["refreshToken"], "fresh-refresh");
@@ -1348,7 +1331,7 @@ mod tests {
                     ("claude-opus-5-5", "updates", true),
                     ("claude-haiku-5-5", "omitted", false),
                 ] {
-                    let client = test_client(OFFLINE_URL, api_key());
+                    let client = test_client(OFFLINE_URL);
                     let (body, betas) = capture_stream_turn(client, &settings_for(id)).await;
                     assert_eq!(body["thinking"]["display"], display, "{id}");
                     assert_eq!(
@@ -1400,7 +1383,7 @@ mod tests {
             #[tokio::test]
             async fn known_model_drops_stale_thinking_blocks_under_binding_beta() {
                 for info in crate::model::MODELS {
-                    let client = test_client(OFFLINE_URL, api_key());
+                    let client = test_client(OFFLINE_URL);
                     let (body, betas) = capture_stream_turn(client, &settings_for(info.id)).await;
                     assert_eq!(
                         body["thinking"]["block_binding"],
@@ -1427,13 +1410,14 @@ mod tests {
                 let messages = [Message::user("hi")];
                 for kind in [RequestKind::Agentic, RequestKind::SideQuery] {
                     for is_first_party in [true, false] {
-                        let mut client = test_client(OFFLINE_URL, api_key());
+                        let mut client = test_client(OFFLINE_URL);
                         client.is_first_party = is_first_party;
 
                         let request = client
                             .prepare(RequestSpec {
                                 kind,
                                 session_id: SESSION_ID,
+                                auth: &API_KEY,
                                 model: &ModelSpec::resolve(TEST_MODEL),
                                 thinking: None,
                                 max_tokens: 40,

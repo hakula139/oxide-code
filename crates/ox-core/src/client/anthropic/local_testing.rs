@@ -22,8 +22,8 @@ use crate::util::tls::testing::NoRoots;
 pub(super) const SESSION_ID: &str = "sid";
 
 /// [`client_for`] on [`test_config`].
-pub(crate) fn test_client(base_url: impl AsRef<str>, auth: Auth) -> Client {
-    client_for(&test_config(base_url, auth, DEFAULT_MODEL))
+pub(crate) fn test_client(base_url: impl AsRef<str>) -> Client {
+    client_for(&test_config(base_url, api_key(), DEFAULT_MODEL))
 }
 
 pub(crate) fn client_for(config: &Config) -> Client {
