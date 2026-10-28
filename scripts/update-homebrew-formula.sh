@@ -62,6 +62,7 @@ class OxideCode < Formula
 
   def install
     bin.install "ox"
+    doc.install "LICENSE", "THIRD-PARTY-NOTICES"
   end
 
   test do
