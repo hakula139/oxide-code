@@ -2,6 +2,7 @@
 //! travels on the wire.
 
 use std::fmt;
+use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
@@ -456,8 +457,7 @@ impl ExplicitAuth {
 }
 
 /// The env vars that can carry a secret ox authenticates with: each credential variable, and
-/// [`CUSTOM_HEADERS_VAR`], which gateways use for their keys. Commands run for the model and the
-/// git probes do not inherit them.
+/// [`CUSTOM_HEADERS_VAR`], which gateways use for their keys.
 pub(crate) fn secret_env_vars() -> impl Iterator<Item = &'static str> {
     AuthSource::EXPLICIT
         .into_iter()
@@ -466,6 +466,13 @@ pub(crate) fn secret_env_vars() -> impl Iterator<Item = &'static str> {
             Explicit::Config => None,
         })
         .chain([CUSTOM_HEADERS_VAR])
+}
+
+/// Keeps [`secret_env_vars`] out of the environment `cmd` starts its process with.
+pub(crate) fn withhold_secrets(cmd: &mut Command) {
+    for var in secret_env_vars() {
+        cmd.env_remove(var);
+    }
 }
 
 /// The first explicit credential in [`AuthSource::EXPLICIT`] order. `config` occupies the config
@@ -554,6 +561,7 @@ async fn load_login(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
     use strum::VariantArray as _;
@@ -856,6 +864,21 @@ mod tests {
                     "ANTHROPIC_CUSTOM_HEADERS",
                 ],
             );
+        }
+    }
+
+    mod withhold_secrets {
+        use super::*;
+
+        #[test]
+        fn removes_each_secret_env_var() {
+            let mut cmd = Command::new("true");
+
+            withhold_secrets(&mut cmd);
+
+            let removed: BTreeMap<_, _> = cmd.get_envs().collect();
+            let secrets = secret_env_vars().map(|var| (OsStr::new(var), None));
+            assert_eq!(removed, secrets.collect());
         }
     }
 

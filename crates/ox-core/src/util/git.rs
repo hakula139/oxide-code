@@ -13,7 +13,7 @@ use tokio::io::AsyncReadExt as _;
 use tracing::debug;
 
 use super::text::truncate_to_width;
-use crate::config::auth::secret_env_vars;
+use crate::config::auth::withhold_secrets;
 
 // ── Repository ──
 
@@ -222,8 +222,8 @@ fn summarize_checks(mut checks: Vec<CheckView>) -> Option<Checks> {
 // ── Probes ──
 
 /// Runs the `git` or `gh` `program` with `args` in `cwd` on the tokio runtime, with no stdin and
-/// without ox's [`secret_env_vars`], killing the child if the caller drops the future. Git runs
-/// commands a repository's own config names, so it must not hand them ox's credentials.
+/// ox's secrets withheld through [`withhold_secrets`], killing the child if the caller drops the
+/// future. Git runs commands a repository's own config names, so they must not see ox's secrets.
 pub async fn output_async(program: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
     command(program, args, cwd).output().await
 }
@@ -279,9 +279,7 @@ fn command(program: &str, args: &[&str], cwd: &Path) -> tokio::process::Command 
         .current_dir(cwd)
         .stdin(Stdio::null())
         .kill_on_drop(true);
-    for var in secret_env_vars() {
-        command.env_remove(var);
-    }
+    withhold_secrets(command.as_std_mut());
     command
 }
 
@@ -417,6 +415,7 @@ mod tests {
     use super::local_testing::init_fixture_repo;
     use super::testing::{isolated_git, with_isolated_git_env_async};
     use super::*;
+    use crate::config::auth::secret_env_vars;
     use crate::util::log::testing::LogCapture;
 
     mod current_branch {

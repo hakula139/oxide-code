@@ -1,6 +1,8 @@
 //! Shell command execution tool with timeout.
 
 pub mod background;
+#[cfg(any(windows, test))]
+mod msys;
 
 use std::collections::VecDeque;
 use std::io;
@@ -26,7 +28,7 @@ use super::view::{ApprovalBody, ApprovalPreview};
 use super::{
     Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field, pascal_case,
 };
-use crate::config::auth::secret_env_vars;
+use crate::config::auth::withhold_secrets;
 use crate::permission::{Access, PermissionClass};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
@@ -181,7 +183,7 @@ async fn run(shells: &Arc<BackgroundShells>, raw: serde_json::Value, ctx: &ToolC
     };
 
     let mut output = if input.run_in_background {
-        background::start(shells, &input.command, ctx)
+        background::start(shells, &input.command, ctx).await
     } else {
         execute(&input.command, resolve_timeout(input.timeout), ctx).await
     };
@@ -201,7 +203,7 @@ fn resolve_timeout(millis: Option<u64>) -> Duration {
 }
 
 /// Runs `command` in the context's cwd, with [`SESSION_ID_VAR`] set to its session ID, each of the
-/// [`EDITOR_VARS`] set to `true`, and none of ox's [`secret_env_vars`].
+/// [`EDITOR_VARS`] set to `true`, and ox's secrets withheld through [`withhold_secrets`].
 async fn execute(command: &str, timeout: Duration, ctx: &ToolCtx) -> ToolOutput {
     match execute_until(command, tokio::time::sleep(timeout), ctx).await {
         Ok(output) => output,
@@ -221,9 +223,12 @@ async fn execute_until(
     deadline: impl Future<Output = ()>,
     ctx: &ToolCtx,
 ) -> Result<ToolOutput, TimedOut> {
-    let mut shell = match ShellTree::spawn(command, ctx) {
+    let spawned = Bash::ready()
+        .await
+        .and_then(|bash| ShellTree::spawn(bash, command, ctx));
+    let mut shell = match spawned {
         Ok(shell) => shell,
-        Err(message) => return Ok(ToolOutput::error(message)),
+        Err(e) => return Ok(ToolOutput::error(spawn_failure(ctx, &e))),
     };
 
     let (mut stdout, mut stderr) = shell.take_pipes();
@@ -302,7 +307,35 @@ fn exit_footer(status: ExitStatus) -> String {
     format!("({})", ShellState::of(status).describe())
 }
 
+/// The message a tool call reports when its shell fails to start in the context's cwd.
+fn spawn_failure(ctx: &ToolCtx, e: &io::Error) -> String {
+    format!("Failed to execute command in {}: {e}", ctx.cwd().display())
+}
+
 // ── Shell Resolution ──
+
+/// A bash that [`ShellTree::spawn`] may start a shell with. On Windows its MSYS runtime is held
+/// first, so killing the shell leaves the runtime intact.
+#[derive(Clone, Copy)]
+struct Bash(&'static Path);
+
+impl Bash {
+    /// Resolves bash and on Windows waits for its MSYS runtime to be held.
+    #[cfg_attr(
+        not(windows),
+        expect(
+            clippy::unused_async,
+            clippy::unused_async_trait_impl,
+            reason = "shares the Windows signature, which waits for the MSYS runtime"
+        )
+    )]
+    async fn ready() -> io::Result<Self> {
+        let bash = bash()?;
+        #[cfg(windows)]
+        msys::hold_runtime(bash).await;
+        Ok(Self(bash))
+    }
+}
 
 #[cfg(not(windows))]
 #[expect(
@@ -604,13 +637,9 @@ struct ShellTree {
 }
 
 impl ShellTree {
-    /// Spawns `command` in the context's cwd, failing with the message a tool call reports.
-    fn spawn(command: &str, ctx: &ToolCtx) -> Result<Self, String> {
-        let failed = |e: io::Error| {
-            let cwd = ctx.cwd().display();
-            format!("Failed to execute command in {cwd}: {e}")
-        };
-        let mut cmd = CommandWrap::with_new(bash().map_err(failed)?, |cmd| {
+    /// Spawns `command` with `bash` in the context's cwd.
+    fn spawn(bash: Bash, command: &str, ctx: &ToolCtx) -> io::Result<Self> {
+        let mut cmd = CommandWrap::with_new(bash.0, |cmd| {
             cmd.arg("-c")
                 .arg(command)
                 .current_dir(ctx.cwd())
@@ -620,16 +649,14 @@ impl ShellTree {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            for var in secret_env_vars() {
-                cmd.env_remove(var);
-            }
+            withhold_secrets(cmd.as_std_mut());
         });
         #[cfg(unix)]
         cmd.wrap(process_wrap::tokio::ProcessSession);
         #[cfg(windows)]
         cmd.wrap(process_wrap::tokio::JobObject);
         Ok(Self {
-            child: cmd.spawn().map_err(failed)?,
+            child: cmd.spawn()?,
             armed: true,
         })
     }
@@ -798,6 +825,7 @@ mod tests {
 
     use super::testing::{record_pid, until_gone, until_recorded};
     use super::*;
+    use crate::config::auth::secret_env_vars;
     use crate::tool::local_testing::{self, ctx, spill_path, temp_ctx};
     use crate::tool::spill::MAX_OUTPUT_BYTES;
     use crate::tool::testing::bash_preview;
@@ -1646,9 +1674,11 @@ mod tests {
                     .map(|var| format!("echo {var}=${{{var}-unset}}"))
                     .collect::<Vec<_>>()
                     .join("; ");
+                let bash = Bash::ready().await.unwrap();
 
-                let mut tree =
-                    temp_env::with_vars(vars, || ShellTree::spawn(&command, &temp_ctx()).unwrap());
+                let mut tree = temp_env::with_vars(vars, || {
+                    ShellTree::spawn(bash, &command, &temp_ctx()).unwrap()
+                });
                 let (mut stdout, _) = tree.take_pipes();
                 let mut output = String::new();
                 stdout.read_to_string(&mut output).await.unwrap();
@@ -1672,9 +1702,10 @@ mod tests {
                     fs::create_dir_all(cwd.path().join(dir)).unwrap();
                     fs::write(cwd.path().join(dir).join("marker"), marker).unwrap();
                 }
+                let bash = Bash::ready().await.unwrap();
 
                 let mut tree = temp_env::with_var("CDPATH", Some("elsewhere"), || {
-                    ShellTree::spawn("cd sub && cat marker", &ctx(cwd.path())).unwrap()
+                    ShellTree::spawn(bash, "cd sub && cat marker", &ctx(cwd.path())).unwrap()
                 });
                 let (mut stdout, _) = tree.take_pipes();
                 let mut output = String::new();
@@ -1686,7 +1717,9 @@ mod tests {
             #[cfg(unix)]
             #[tokio::test]
             async fn leads_a_new_session_and_process_group() {
-                let tree = ShellTree::spawn("sleep 30", &temp_ctx()).unwrap();
+                let bash = Bash::ready().await.unwrap();
+
+                let tree = ShellTree::spawn(bash, "sleep 30", &temp_ctx()).unwrap();
                 let pid = Pid::from_raw(tree.child.id().unwrap().try_into().unwrap());
 
                 assert_eq!(getsid(Some(pid)), Ok(pid));

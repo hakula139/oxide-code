@@ -14,7 +14,8 @@ use tokio::task::JoinHandle;
 use tracing::error;
 
 use super::{
-    DRAIN_GRACE, MAX_TIMEOUT, PipeCapture, ShellTree, push_footer, read_chunks, render_streams,
+    Bash, DRAIN_GRACE, MAX_TIMEOUT, PipeCapture, ShellTree, push_footer, read_chunks,
+    render_streams, spawn_failure,
 };
 use crate::permission::PermissionClass;
 use crate::protocol::{Event, EventSink};
@@ -117,13 +118,16 @@ impl BackgroundShells {
     }
 
     /// Starts `command` in the context's cwd and returns the ID its shell goes by.
-    fn start(self: &Arc<Self>, command: &str, ctx: &ToolCtx) -> Result<String, String> {
+    async fn start(self: &Arc<Self>, command: &str, ctx: &ToolCtx) -> Result<String, String> {
+        let failed = |e| spawn_failure(ctx, &e);
+        let bash = Bash::ready().await.map_err(failed)?;
+
         let mut registry = self.lock();
         if registry.shells.len() >= MAX_SHELLS {
             return Err(registry.full());
         }
 
-        let tree = ShellTree::spawn(command, ctx)?;
+        let tree = ShellTree::spawn(bash, command, ctx).map_err(failed)?;
         registry.started += 1;
         let id = format!("shell-{}", registry.started);
         let output = Arc::new(ShellOutput::new(ctx.spills()));
@@ -434,8 +438,12 @@ fn push_note(capture: &mut PipeCapture, note: &str) {
 // ── Starting ──
 
 /// Starts `command` as a background shell for the `bash` tool.
-pub(super) fn start(shells: &Arc<BackgroundShells>, command: &str, ctx: &ToolCtx) -> ToolOutput {
-    match shells.start(command, ctx) {
+pub(super) async fn start(
+    shells: &Arc<BackgroundShells>,
+    command: &str,
+    ctx: &ToolCtx,
+) -> ToolOutput {
+    match shells.start(command, ctx).await {
         Ok(id) => ToolOutput::success(format!(
             "Started background shell {id}. \
              You are not notified when it finishes, \
@@ -668,9 +676,10 @@ pub(crate) mod local_testing {
     use crate::tool::local_testing::temp_ctx;
 
     /// Starts `command` as a background shell of `shells` in the temp dir, returning its ID.
-    pub(crate) fn start_shell(shells: &Arc<BackgroundShells>, command: &str) -> String {
+    pub(crate) async fn start_shell(shells: &Arc<BackgroundShells>, command: &str) -> String {
         shells
             .start(command, &temp_ctx())
+            .await
             .expect("the shell starts")
     }
 }

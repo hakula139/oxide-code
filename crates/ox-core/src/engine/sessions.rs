@@ -546,10 +546,10 @@ mod tests {
             let target_id = finished_session(&store).await;
             let target_path = store.find_session_path(&target_id).unwrap();
 
-            start_shell(&engine.shells, "sleep 30");
+            start_shell(&engine.shells, "sleep 30").await;
             engine.clear(&CapturingSink::default()).await;
             let after_clear = engine.shells.list();
-            start_shell(&engine.shells, "sleep 30");
+            start_shell(&engine.shells, "sleep 30").await;
             engine
                 .resume(&CapturingSink::default(), ResumeTarget::Path(target_path))
                 .await;
@@ -1047,7 +1047,7 @@ mod tests {
                 engine.usage.total_estimated_cost_usd = 1.23;
                 let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
                 engine.policy.allow_for_session(rule.clone());
-                start_shell(&engine.shells, "sleep 30");
+                start_shell(&engine.shells, "sleep 30").await;
                 let read = dir.path().join("read.txt");
                 std::fs::write(&read, "read").unwrap();
                 seed_full_read(&engine.transcript.file_tracker, &read);
