@@ -331,9 +331,9 @@ impl PromptQueue {
     /// Notes that a switch to a session of kind `to` starts. The prompts queued so far belong to
     /// the session it leaves, and later ones to the session it reaches, so a failed switch holds
     /// them. A retry that heads for the same kind of session keeps a failed attempt's mark, since
-    /// the prompts typed during it still wait for the session the user is switching to, while a
-    /// switch to the other kind counts them as queued before it. The switch settles an earlier
-    /// hold, so a prompt typed while it runs keeps the mark.
+    /// the user is still leaving for that kind of session, while a switch to the other kind counts
+    /// the prompts typed during the failed attempt as queued before it. The switch settles an
+    /// earlier hold, so a prompt typed while it runs keeps the mark.
     pub(super) fn mark_switch(&mut self, to: SwitchTo) {
         self.held = false;
         if self.switch.is_none_or(|mark| mark.to != to) {

@@ -143,8 +143,7 @@ impl App {
     /// Ends the in-flight operation as `end` reports, then starts the queue head. A cancel or a
     /// failure that holds the queue holds it until the user submits a prompt or starts a session
     /// switch, and a cancel also leaves the prompts a failed switch kept for its retry to the user.
-    /// An operation that ran no turn defers the head while a modal that may send the next operation
-    /// is open.
+    /// An operation's end defers the head while a modal that may send the next operation is open.
     fn end_operation(&mut self, ended: &InFlight, end: TurnEnd) {
         self.chat.commit_streaming();
         let goes_on = match end {
@@ -2519,8 +2518,12 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_retried_switch_runs_the_prompt_typed_during_the_failed_one() {
-            for (case, failed, retry, landed) in [
+        async fn a_failed_switch_passes_its_prompt_only_to_the_same_kind_of_session() {
+            let rolled = || Event::SessionRolled {
+                id: "fresh".to_owned(),
+                old_session: ArchiveState::Active,
+            };
+            for (case, failed, retry, landed, kept) in [
                 (
                     "/resume",
                     Op::Resume {
@@ -2535,15 +2538,23 @@ mod tests {
                         prior: ArchiveState::Active,
                         history: Vec::new(),
                     },
+                    true,
                 ),
                 (
                     "/clear after /archive",
                     Op::Archive,
                     Op::Clear,
-                    Event::SessionRolled {
-                        id: "fresh".to_owned(),
-                        old_session: ArchiveState::Active,
+                    rolled(),
+                    true,
+                ),
+                (
+                    "/clear after /resume",
+                    Op::Resume {
+                        target: ResumeTarget::Id("missing".to_owned()),
                     },
+                    Op::Clear,
+                    rolled(),
+                    false,
                 ),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
@@ -2559,7 +2570,11 @@ mod tests {
                 app.handle_engine_event(landed);
                 app.handle_engine_event(Event::SessionReady);
 
-                assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")), "{case}");
+                assert_eq!(
+                    rx.try_recv().ok(),
+                    kept.then(|| Op::prompt("typed meanwhile")),
+                    "{case}"
+                );
                 assert_eq!(*app.queue.pending(), [] as [&str; 0], "{case}");
             }
         }

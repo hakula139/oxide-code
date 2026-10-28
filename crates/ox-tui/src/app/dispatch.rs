@@ -2376,6 +2376,7 @@ mod tests {
                 app.queue.push("old session".to_owned());
                 app.queue.mark_switch(SwitchTo::Fresh);
                 app.queue.push("current session".to_owned());
+                app.queue.hold();
                 let buffered = fill_channel(&app);
 
                 app.dispatch_op(op.clone());
@@ -2388,6 +2389,7 @@ mod tests {
                     Some("ox is busy, so the request was dropped. Try again."),
                     "{op:?}",
                 );
+                assert!(app.queue.held(), "{op:?}");
                 app.queue.discard_left_behind();
                 assert_eq!(*app.queue.pending(), ["current session"], "{op:?}");
                 for buffered_op in buffered {
