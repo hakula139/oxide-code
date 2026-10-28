@@ -50,7 +50,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 4. **Two-column popup, plain rows.** Name left, description right. Filter ranks name-prefix > alias-prefix > name-substring > alias-substring, alphabetical within each tier. Names accept `:` and `.`, so namespaced names such as `/plugin:cmd` parse. The popup and `parse_slash` split the line with the same `split_slash`, so they agree on every name, and once a space follows the name, the input shows the command's usage as `/help` lists it, dim at the cursor, until an argument starts.
 
-5. **Swap the model and effort mid-session via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(Action::Op(Op::SetModel(pick)))`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. The `ConfigPick` names a model, with an optional effort, or an effort alone, so every pick sets at least one axis. Each request reads the client's active model and effort, so betas and `output_config` pick up the swap. `Engine::set_model` also re-resolves the compaction threshold for the new model. See [modals.md](modals.md).
+5. **Swap the model and effort mid-session in the engine's `ModelSettings`.** Both `/model <id>` and `/effort <level>` return `Forward(Action::Op(Op::SetModel(pick)))`, the same payload both modals emit, so the typed-arg path and the modals share one resolver. The `ConfigPick` names a model, with an optional effort, or an effort alone, so every pick sets at least one axis. Each request carries the engine's current settings, so betas and `output_config` pick up the swap. `Engine::set_model` also re-resolves the compaction threshold for the new model. See [modals.md](modals.md).
 
 6. **Slash commands never write user config files.** State is session-only, so a restart reverts to the configured values. Session commands should feel reversible, and any write that outlives the session requires an explicit user action.
 
@@ -77,6 +77,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-core/src/command/parser.rs`: `parse_slash`, which parses a typed line into a command name and its arguments, `split_slash`, the borrowed split it shares with the popup, and `unescape_literal` for the `//` escape.
 - `crates/ox-core/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, and `Engine::set_model`, which re-resolves the compaction threshold for the new model and words the `ConfigChanged` notice against the settings before the swap.
 - `crates/ox-core/src/engine/sessions.rs`: `Engine::archive`, which waits for the archive entry to reach disk before rolling the session, and `set_archive`, `find_saved`, and `delete_saved`, which run the saved-session operations on the blocking pool.
+- `crates/ox-core/src/model/settings.rs`: `ModelSettings`, whose model swap re-resolves the effort.
 - `crates/ox-core/src/protocol.rs`: `TurnEnd::of`, which maps an op and its terminal event to how the op ended.
 - `crates/ox-core/src/protocol/notice.rs`: `config_changed` and `mode_changed`, the confirmations every frontend shows.
 - `crates/ox-core/src/session/display.rs`: shared `id_prefix` and `display_title`, `archive_notice`, and the `MAX_TITLE_WIDTH` cap that `fit_title` applies to every title.

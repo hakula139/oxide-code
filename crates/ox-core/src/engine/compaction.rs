@@ -11,10 +11,9 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
-use super::transcript::LiveTranscript;
-use super::turn::{collect_response, record_interruption};
+use super::turn::{collect_response, conversation_request, record_interruption};
 use super::{Engine, TurnEnd, report_abort};
-use crate::client::{PromptTooLong, Response, ResponseEvent, StopReason, Wire};
+use crate::client::{PromptTooLong, Request, Response, ResponseEvent, StopReason, Wire};
 use crate::config::compaction::AutoCompactionConfig;
 use crate::message::{ContentBlock, Message, Role, TextOrigin};
 use crate::model::TokenUsage;
@@ -283,8 +282,7 @@ impl Engine {
         let summary = await_unless_aborted(
             request_summary(
                 &self.client,
-                &self.transcript,
-                &tools,
+                conversation_request(&self.settings, &self.transcript, &tools),
                 instructions.as_deref(),
                 sink,
                 &mut spent,
@@ -296,7 +294,7 @@ impl Engine {
         .await;
         let compacted = match summary {
             Ok(Ok(summary)) => {
-                let (fresh, warnings) = UserContext::load(self.cwd(), self.client.model()).await;
+                let (fresh, warnings) = UserContext::load(self.cwd(), self.settings.model()).await;
                 let boundary = CompactBoundary {
                     record: CompactRecord {
                         summary,
@@ -380,9 +378,9 @@ pub(super) fn auto_compaction_due(
 
 // ── Summary Request ──
 
-/// Drives the summarization request for `parent`'s session, prompt, and messages, and returns the
-/// trimmed summary. `tools` must be the ones the conversation's own requests send. `spent` receives
-/// the usage of every request, even when the summary fails or the caller drops the future.
+/// Drives the summarization request that forks `conversation`, the request the conversation's next
+/// round would send, and returns the trimmed summary. `spent` receives the usage of every request,
+/// even when the summary fails or the caller drops the future.
 ///
 /// The summary streams to `sink` as [`Event::SummaryToken`]s. A retry, a failure, or a dropped
 /// future ends them with [`Event::SummaryDiscarded`]. On success the caller must end them with
@@ -392,15 +390,12 @@ pub(super) fn auto_compaction_due(
 /// stops before the summary finishes.
 async fn request_summary(
     client: &dyn Wire,
-    parent: &LiveTranscript,
-    tools: &[&ToolDefinition],
+    conversation: Request<'_>,
     instructions: Option<&str>,
     sink: &dyn EventSink,
     spent: &mut Vec<TokenUsage>,
 ) -> Result<String> {
-    let session_id = parent.session().session_id();
-    let prompt = parent.prompt();
-    let transcript = parent.messages();
+    let transcript = conversation.messages;
     if transcript.is_empty() {
         bail!("the session has no messages yet");
     }
@@ -412,12 +407,14 @@ async fn request_summary(
         );
     }
 
-    let user_context = Some(prompt.user_context.as_str());
     let rubric = Message::user(build_user_message(instructions));
-    let request: Vec<Message> = transcript.iter().chain([&rubric]).cloned().collect();
+    let forked: Vec<Message> = transcript.iter().chain([&rubric]).cloned().collect();
     let stream = SummaryStream::new(sink);
-    let mut rx =
-        client.stream_message(session_id, &request, &prompt.system, user_context, tools)?;
+    // The fork keeps the tail breakpoint, which reads the conversation's cached prefix.
+    let mut rx = client.stream(Request {
+        messages: &forked,
+        ..conversation
+    })?;
     let mut kept = transcript.to_vec();
     let mut retries = 0;
     let response = loop {
@@ -436,8 +433,12 @@ async fn request_summary(
         retries += 1;
         kept = smaller;
         stream.discard();
-        let request = retry_request(&kept, &rubric);
-        rx = client.stream_one_shot(session_id, &request, &prompt.system, user_context, tools)?;
+        let retry = retry_request(&kept, &rubric);
+        rx = client.stream(Request {
+            messages: &retry,
+            cache_tail: false,
+            ..conversation
+        })?;
     };
     match response.stop_reason {
         None | Some(StopReason::EndTurn | StopReason::StopSequence) => {}
@@ -703,12 +704,12 @@ fn build_user_message(instructions: Option<&str>) -> String {
 mod tests {
     use std::path::Path;
     use std::pin::pin;
-    use std::sync::Mutex;
+    use std::sync::{LazyLock, Mutex};
 
     use serde_json::json;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request as HttpRequest, ResponseTemplate};
 
     use super::*;
     use crate::client::anthropic::Client;
@@ -720,12 +721,14 @@ mod tests {
     use crate::engine::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, request_bodies, with_pinned_home,
     };
+    use crate::engine::transcript::LiveTranscript;
     use crate::file_tracker::testing::{
         assert_writes_draining, blocked_write, poll_until_draining, seed_full_read,
     };
     use crate::message::Replay;
+    use crate::model::ModelSettings;
     use crate::permission::Mode;
-    use crate::prompt::{SessionContext, SystemPrompt};
+    use crate::prompt::SessionContext;
     use crate::protocol::notice::session_write_failed;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{ResumeTarget, UsageSnapshot};
@@ -1692,6 +1695,10 @@ mod tests {
                 .await;
         }
 
+        /// The settings every summary request in these tests sends under.
+        static SETTINGS: LazyLock<ModelSettings> =
+            LazyLock::new(|| ModelSettings::test("claude-haiku-5-5"));
+
         /// The conversation a summary forks, holding `messages` under its own system prompt and
         /// user context.
         fn parent(messages: Vec<Message>) -> LiveTranscript {
@@ -1714,8 +1721,7 @@ mod tests {
             let sink = CapturingSink::default();
             let summary = request_summary(
                 client,
-                &parent(transcript.to_vec()),
-                &[],
+                conversation_request(&SETTINGS, &parent(transcript.to_vec()), &[]),
                 None,
                 &sink,
                 &mut Vec::new(),
@@ -1814,7 +1820,7 @@ mod tests {
         }
 
         /// Messages a request sent after its user-context message, without cache breakpoints.
-        fn sent_messages(request: &Request) -> Vec<serde_json::Value> {
+        fn sent_messages(request: &HttpRequest) -> Vec<serde_json::Value> {
             let mut body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
             strip_cache_control(&mut body);
             body["messages"].as_array().unwrap()[1..].to_vec()
@@ -1824,13 +1830,9 @@ mod tests {
         struct HeldStreamClient(Mutex<Option<mpsc::Receiver<Result<ResponseEvent>>>>);
 
         impl Wire for HeldStreamClient {
-            fn stream_message(
+            fn stream(
                 &self,
-                _session_id: &str,
-                _messages: &[Message],
-                _system: &SystemPrompt,
-                _user_context: Option<&str>,
-                _tools: &[&ToolDefinition],
+                _request: Request<'_>,
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
                 Ok(self.0.lock().unwrap().take().expect("one request"))
             }
@@ -1840,7 +1842,7 @@ mod tests {
         async fn trims_the_whitespace_around_the_summary() {
             let server = MockServer::start().await;
             mount_summary(&server, streamed_summary_body("  fixed login bug  \n")).await;
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
 
             let summary = summarize(&client, &tool_heavy_transcript()).await.unwrap();
 
@@ -1855,7 +1857,7 @@ mod tests {
                 summary_stream("  fixed", " login bug  \n", "end_turn", true),
             )
             .await;
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
 
             let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
 
@@ -1886,7 +1888,7 @@ mod tests {
                 ]),
             )
             .await;
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
 
             let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
 
@@ -1898,29 +1900,20 @@ mod tests {
         async fn request_forks_the_conversation_prefix() {
             let server = MockServer::start().await;
             mount_summary(&server, streamed_summary_body("done")).await;
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
             let conversation = parent(tool_heavy_transcript());
-            let prompt = conversation.prompt();
             let tools = [&ToolDefinition {
                 name: "read".to_owned(),
                 description: "Read a file.".to_owned(),
                 input_schema: json!({"type": "object"}),
             }];
+            let next_round = conversation_request(&SETTINGS, &conversation, &tools);
 
-            let mut rx = client
-                .stream_message(
-                    conversation.session().session_id(),
-                    conversation.messages(),
-                    &prompt.system,
-                    Some(&prompt.user_context),
-                    &tools,
-                )
-                .unwrap();
+            let mut rx = client.stream(next_round).unwrap();
             while rx.recv().await.is_some() {}
             request_summary(
                 &client,
-                &conversation,
-                &tools,
+                next_round,
                 Some("focus on auth"),
                 &CapturingSink::default(),
                 &mut Vec::new(),
@@ -1939,6 +1932,16 @@ mod tests {
                 .collect();
             assert_eq!(session_ids, [conversation.session().session_id(); 2]);
             let mut bodies = request_bodies(&server).await;
+            let last_block = |body: &serde_json::Value| {
+                let messages = body["messages"].as_array().unwrap();
+                let content = messages.last().unwrap()["content"].as_array().unwrap();
+                content.last().unwrap()["cache_control"].clone()
+            };
+            assert_eq!(
+                last_block(&bodies[1]),
+                json!({"type": "ephemeral", "ttl": "1h"}),
+                "the fork marks its tail to read the conversation's cached prefix",
+            );
             bodies.iter_mut().for_each(strip_cache_control);
             let [parent, fork] = bodies.as_slice() else {
                 panic!("expected two requests, got {}", bodies.len());
@@ -1967,14 +1970,20 @@ mod tests {
         async fn retries_an_overflow_without_the_oldest_rounds_or_thinking() {
             let server = MockServer::start().await;
             mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
             let sink = CapturingSink::default();
             let mut spent = Vec::new();
             let conversation = parent(overflowing_transcript());
 
-            let summary = request_summary(&client, &conversation, &[], None, &sink, &mut spent)
-                .await
-                .unwrap();
+            let summary = request_summary(
+                &client,
+                conversation_request(&SETTINGS, &conversation, &[]),
+                None,
+                &sink,
+                &mut spent,
+            )
+            .await
+            .unwrap();
 
             assert_eq!(summary, "trimmed summary");
             assert_eq!(
@@ -2023,7 +2032,7 @@ mod tests {
                 .mount(&server)
                 .await;
             mount_summary(&server, streamed_summary_body("trimmed summary")).await;
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
             let transcript = heavy_rounds(4);
 
             let (summary, events) = summarize_streaming(&client, &transcript).await;
@@ -2062,7 +2071,7 @@ mod tests {
             for interrupted in [false, true] {
                 let server = MockServer::start().await;
                 mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
-                let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+                let client = test_client(server.uri(), api_key());
                 let mut transcript = vec![
                     Message::user("a".repeat(100_000)),
                     Message::assistant("reply 0"),
@@ -2118,14 +2127,13 @@ mod tests {
                 summary_stream("", "partial", "model_context_window_exceeded", true),
             )
             .await;
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
             let sink = CapturingSink::default();
             let mut spent = Vec::new();
 
             let err = request_summary(
                 &client,
-                &parent(overflowing_transcript()),
-                &[],
+                conversation_request(&SETTINGS, &parent(overflowing_transcript()), &[]),
                 None,
                 &sink,
                 &mut spent,
@@ -2165,7 +2173,7 @@ mod tests {
             prompt_too_long("prompt is too long: 200001 tokens > 200000 maximum")
                 .mount(&server)
                 .await;
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
 
             let err = summarize(&client, &heavy_rounds(8))
                 .await
@@ -2182,7 +2190,7 @@ mod tests {
         #[tokio::test]
         async fn refuses_an_empty_or_short_session_without_a_request() {
             let server = MockServer::start().await;
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
             let short = vec![
                 Message::user("fix the bug"),
                 Message::assistant("looking now"),
@@ -2210,7 +2218,7 @@ mod tests {
         async fn rejects_an_empty_summary() {
             let server = MockServer::start().await;
             mount_summary(&server, streamed_summary_body("   \n  ")).await;
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
 
             let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
 
@@ -2251,14 +2259,13 @@ mod tests {
                     summary_stream("", "partial", stop_reason, finished),
                 )
                 .await;
-                let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+                let client = test_client(server.uri(), api_key());
                 let sink = CapturingSink::default();
                 let mut spent = Vec::new();
 
                 let err = request_summary(
                     &client,
-                    &parent(tool_heavy_transcript()),
-                    &[],
+                    conversation_request(&SETTINGS, &parent(tool_heavy_transcript()), &[]),
                     None,
                     &sink,
                     &mut spent,
@@ -2290,8 +2297,7 @@ mod tests {
             {
                 let mut compaction = pin!(request_summary(
                     &client,
-                    &conversation,
-                    &[],
+                    conversation_request(&SETTINGS, &conversation, &[]),
                     None,
                     &sink,
                     &mut spent,
@@ -2324,8 +2330,7 @@ mod tests {
 
             let summary = request_summary(
                 &client,
-                &parent(tool_heavy_transcript()),
-                &[],
+                conversation_request(&SETTINGS, &parent(tool_heavy_transcript()), &[]),
                 None,
                 &sink,
                 &mut Vec::new(),
@@ -2356,7 +2361,7 @@ mod tests {
             )
             .await;
 
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
             let err = summarize(&client, &tool_heavy_transcript())
                 .await
                 .expect_err("in-band error must propagate");
@@ -2377,7 +2382,7 @@ mod tests {
                 .mount(&server)
                 .await;
 
-            let client = test_client(server.uri(), api_key(), "claude-haiku-5-5");
+            let client = test_client(server.uri(), api_key());
             let err = summarize(&client, &tool_heavy_transcript())
                 .await
                 .expect_err("expected error");

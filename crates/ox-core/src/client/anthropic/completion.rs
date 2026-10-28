@@ -142,7 +142,7 @@ mod tests {
                     ResponseTemplate::new(200).set_body_string(completion_body("Fix login bug")),
                 ])
                 .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri(), api_key());
 
                 let (text, usage) = client
                     .complete(SESSION_ID, query("sys", "user input"))
@@ -198,7 +198,7 @@ mod tests {
                     .expect(1)
                     .mount(&server)
                     .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri(), api_key());
 
                 client.complete("sid-live", query("", "u")).await.unwrap();
             }
@@ -290,7 +290,7 @@ mod tests {
                     ResponseTemplate::new(200).set_body_string(completion_body("Fix login bug")),
                 ])
                 .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri(), api_key());
 
                 let (text, _) = client
                     .complete(SESSION_ID, query("sys", "user input"))
@@ -318,7 +318,7 @@ mod tests {
                     r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: must be positive"}}"#,
                 )])
                 .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri(), api_key());
 
                 let err = complete_err(&client).await;
 
@@ -338,7 +338,7 @@ mod tests {
                         ),
                 ])
                 .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri(), api_key());
 
                 let err = complete_err(&client).await;
 
@@ -354,7 +354,7 @@ mod tests {
                     ResponseTemplate::new(401).set_body_string("unauthorized"),
                 ])
                 .await;
-                let client = test_client(server.uri(), auth_token(), HAIKU);
+                let client = test_client(server.uri(), auth_token());
 
                 let err = complete_err(&client).await;
 
@@ -372,7 +372,7 @@ mod tests {
                     ResponseTemplate::new(200).set_body_string("<not json>"),
                 ])
                 .await;
-                let client = test_client(server.uri(), api_key(), HAIKU);
+                let client = test_client(server.uri(), api_key());
 
                 let err = client
                     .complete(SESSION_ID, query("", "u"))
