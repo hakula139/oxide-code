@@ -12,22 +12,16 @@ use tokio_util::sync::CancellationToken;
 
 use super::spill::MAX_SPILL_BYTES;
 use super::view::{GrepFileGroup, GrepMatchLine};
-use super::{StoredView, ToolCtx, ToolOutput, display_path, tool_path};
-use crate::permission::{Access, WalkFilter, Workspace};
+use super::{StoredView, ToolOutput, display_path, tool_path};
+use crate::permission::{WalkFilter, Workspace};
 use crate::util::text::{ELLIPSIS, format_size, plural};
 
 // ── Search Root ──
 
-/// What a search tool's call accesses: its `path` argument, the cwd by default, as the root the
-/// gate checks and the walk covers.
-pub(super) fn root_access(path: Option<&str>, ctx: &ToolCtx) -> Access {
-    Access::for_path(search_path(path), &ctx.workspace)
-}
-
-/// Resolves the search root through [`tool_path`], defaulting to cwd. Shared by the gate and the
-/// walk so both use the same spelling.
-pub(super) fn search_path(path: Option<&str>) -> PathBuf {
-    tool_path(path.unwrap_or("."))
+/// The root a search call's `path` names, the cwd by default. The gate resolves it, and the walk
+/// matches each hit's rules against its spelling.
+pub(super) fn search_arg(path: Option<&str>) -> &str {
+    path.unwrap_or(".")
 }
 
 /// Where a search tool's walk starts, which its prepared call resolved.
@@ -37,36 +31,29 @@ pub(super) struct SearchRoot {
     /// The root as the call spells it with `~` expanded, for the read deny and ask rules each found
     /// file faces.
     pub(super) spelled: PathBuf,
-    /// The canonical working directory, so hits under the canonical base render relative to it.
+    /// The resolved working directory, so hits under the resolved base render relative to it.
     pub(super) cwd: PathBuf,
     /// The session's workspace, whose anchor directories those rules apply below.
     pub(super) workspace: Arc<Workspace>,
 }
 
 impl SearchRoot {
-    /// The root `access` resolved for a search in `workspace` whose call spells it as `path`, the
-    /// cwd by default. The root must exist.
+    /// The resolved `base` of a search in `workspace` whose call spells its root as `path`, the cwd
+    /// by default. The root must exist.
     pub(super) fn new(
-        access: &Access,
+        base: PathBuf,
         path: Option<&str>,
         workspace: Arc<Workspace>,
     ) -> Result<Self, String> {
-        let cwd = workspace.cwd();
-        let spelled = search_path(path);
-        let Some(base) = access.resolved() else {
-            return Err(format!(
-                "Failed to access {}: the search root was not resolved.",
-                display_path(&spelled, cwd)
-            ));
-        };
+        let spelled = tool_path(search_arg(path));
         if let Err(e) = std::fs::metadata(&base) {
+            let cwd = workspace.cwd();
             return Err(format!(
                 "Failed to access {}: {e}",
                 display_path(&cwd.join(&spelled), cwd)
             ));
         }
-        let cwd = dunce::canonicalize(cwd)
-            .map_err(|e| format!("Failed to get working directory: {e}"))?;
+        let cwd = workspace.resolved_cwd().to_path_buf();
         Ok(Self {
             base,
             spelled,
@@ -457,18 +444,6 @@ mod tests {
 
                 let cause = fs::metadata(dir.path().join("missing")).unwrap_err();
                 assert_eq!(err, format!("Failed to access missing: {cause}"));
-            }
-
-            #[test]
-            fn refuses_an_access_that_is_not_a_path() {
-                let workspace = Arc::new(Workspace::new(Path::new("/repo")));
-                let err = SearchRoot::new(&Access::None, Some("src"), workspace)
-                    .err()
-                    .unwrap();
-                assert_eq!(
-                    err,
-                    "Failed to access src: the search root was not resolved."
-                );
             }
 
             #[cfg(unix)]

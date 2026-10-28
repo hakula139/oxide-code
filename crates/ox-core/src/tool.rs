@@ -33,7 +33,7 @@ use self::tasks::{Task, TasksTool};
 use self::view::{ApprovalBody, ApprovalPreview, ToolResultView};
 use self::write::WriteTool;
 use crate::file_tracker::FileTracker;
-use crate::permission::{Access, PermissionClass, ReadFilter, Workspace};
+use crate::permission::{Access, PathTarget, PermissionClass, ReadFilter, Workspace};
 use crate::util::path::{expand_user, slash_separated};
 use crate::util::text::capitalize_first;
 
@@ -88,7 +88,8 @@ impl ToolCtx {
         Spills::new(&self.artifact_dir, &self.tool_use_id)
     }
 
-    /// What a call naming the file `path` accesses, with a leading `~` read as the home directory.
+    /// What a call naming the file or directory `path` accesses, with a leading `~` read as the
+    /// home directory.
     fn path_access(&self, path: &str) -> Access {
         Access::for_path(tool_path(path), &self.workspace)
     }
@@ -122,12 +123,27 @@ impl Prepared {
         T::deserialize(&self.input).expect(VALIDATED)
     }
 
-    /// The `Name(path)` title of a file tool's call, with its resolved path relative to `cwd`.
+    /// The `Name(path)` title of a path tool's call: its resolved path relative to the resolved cwd
+    /// when it lies below it, and the cwd's own name for the cwd. Any other path shows through
+    /// [`display_path`] against `cwd`, so an outside path shows in full, while a path that cannot
+    /// resolve, such as one below a file, shows relative to `cwd`.
     fn path_title(&self, name: &str, cwd: &Path) -> String {
-        call_label(name, Some(&display_path(&self.path(), cwd)))
+        let path = self.path();
+        let shown = match &self.access {
+            Access::Path(PathTarget {
+                relative: Some(relative),
+                ..
+            }) if relative.is_empty() => file_name(&path).into_owned(),
+            Access::Path(PathTarget {
+                relative: Some(relative),
+                ..
+            }) => slash_separated(Path::new(relative)),
+            _ => display_path(&path, cwd),
+        };
+        call_label(name, Some(&shown))
     }
 
-    /// The parsed input and resolved `file_path` of a file tool.
+    /// The parsed input and resolved path of a path tool.
     fn into_path_input<T: DeserializeOwned>(self) -> (T, PathBuf) {
         let path = self.path();
         (self.into_input(), path)
@@ -135,22 +151,14 @@ impl Prepared {
 
     /// The input as the `T` that [`Self::parse`] validated it as.
     fn into_input<T: DeserializeOwned>(self) -> T {
-        self.into_parts().0
+        serde_json::from_value(self.input).expect(VALIDATED)
     }
 
-    /// The input as the `T` that [`Self::parse`] validated it as, with what the call accesses.
-    fn into_parts<T: DeserializeOwned>(self) -> (T, Access) {
-        (
-            serde_json::from_value(self.input).expect(VALIDATED),
-            self.access,
-        )
-    }
-
-    /// The resolved `file_path` of a file tool.
+    /// The resolved path of a path tool.
     fn path(&self) -> PathBuf {
         self.access
             .resolved()
-            .expect("a file tool's prepare resolves its path")
+            .expect("a path tool's prepare resolves its path")
     }
 }
 
@@ -490,12 +498,12 @@ pub(crate) mod local_testing {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::search::{SearchRoot, search_path};
+    use super::search::{SearchRoot, search_arg};
     use super::spill::run_capped;
     use super::{Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
     use crate::file_tracker::FileTracker;
     use crate::permission::rule::Rule;
-    use crate::permission::{Access, Mode, PermissionClass, Policy, ReadFilter, Workspace};
+    use crate::permission::{Mode, PermissionClass, Policy, ReadFilter, Workspace};
 
     /// A fresh tracker's context in `cwd`, for call `toolu_test` of session `test-session`, whose
     /// artifact directory is `cwd/session`.
@@ -551,9 +559,9 @@ pub(crate) mod local_testing {
     /// The root a search call in `cwd` that names `path` walks, resolved the way the search tools'
     /// `prepare` resolves it.
     pub(super) fn search_root(cwd: &Path, path: Option<&str>) -> Result<SearchRoot, String> {
-        let workspace = Arc::new(Workspace::new(cwd));
-        let access = Access::for_path(search_path(path), &workspace);
-        SearchRoot::new(&access, path, workspace)
+        let ctx = ctx(cwd);
+        let base = ctx.path_access(search_arg(path)).resolved().unwrap();
+        SearchRoot::new(base, path, ctx.workspace)
     }
 
     impl ToolRegistry {
@@ -627,7 +635,7 @@ mod tests {
     use super::*;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PathTarget, PermissionClass, Policy, Zone};
-    use crate::util::fs::testing::symlink_file;
+    use crate::util::fs::testing::{symlink_dir, symlink_file};
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::testing::HOME_VAR;
 
@@ -1041,6 +1049,41 @@ mod tests {
                 preview.body,
                 ApprovalBody::Command("Read(target.txt)".to_owned())
             );
+        }
+
+        #[tokio::test]
+        async fn default_names_the_resolved_path_from_a_plain_or_symlinked_cwd() {
+            let dir = canonical_tempdir();
+            let (real, outside) = (dir.path().join("real"), dir.path().join("outside"));
+            fs::create_dir_all(real.join("src")).unwrap();
+            fs::create_dir(&outside).unwrap();
+            fs::write(real.join("src/main.rs"), "x").unwrap();
+            fs::write(outside.join("notes.md"), "x").unwrap();
+            symlink_dir(&outside, &real.join("src/out"));
+            let link = dir.path().join("link");
+            symlink_dir(&real, &link);
+            let outside_notes = slash_separated(&outside.join("notes.md"));
+
+            for (cwd_case, cwd) in [("plain", &real), ("symlinked", &link)] {
+                for (target, expected) in [
+                    ("src/main.rs", "src/main.rs"),
+                    ("src/out/notes.md", outside_notes.as_str()),
+                    (".", "real"),
+                    ("src/main.rs/sub", "src/main.rs/sub"),
+                ] {
+                    let prepared = ReadTool
+                        .prepare(serde_json::json!({"file_path": target}), &ctx(cwd))
+                        .unwrap();
+
+                    let preview = ReadTool.approval_preview("read", &prepared, cwd).await;
+
+                    assert_eq!(
+                        preview.body,
+                        ApprovalBody::Command(format!("Read({expected})")),
+                        "{target} from a {cwd_case} cwd"
+                    );
+                }
+            }
         }
     }
 

@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use strum::VariantArray;
 use tokio_util::sync::CancellationToken;
 
-use super::search::{NO_FILES_FOUND, SearchOutput, SearchRoot, SearchRow, SearchRows, Unreadable};
+use super::search::{
+    NO_FILES_FOUND, SearchOutput, SearchRoot, SearchRow, SearchRows, Unreadable, search_arg,
+};
 use super::view::{GrepMatchLine, ToolResultView};
 use super::{
     Prepared, StoredView, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field,
@@ -63,7 +65,7 @@ impl Tool for GrepTool {
 
     fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
         Prepared::parse(input, |input: &Input| {
-            Ok(super::search::root_access(input.path.as_deref(), ctx))
+            Ok(ctx.path_access(search_arg(input.path.as_deref())))
         })
     }
 
@@ -166,15 +168,15 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
             case_insensitive,
             head_limit,
         },
-        access,
-    ) = prepared.into_parts();
+        base,
+    ) = prepared.into_path_input();
 
     let workspace = Arc::clone(&ctx.workspace);
     let cancel = ctx.cancel.clone();
     super::run_blocking(move || {
         grep_files(&GrepParams {
             pattern: &pattern,
-            root: SearchRoot::new(&access, path.as_deref(), workspace)?,
+            root: SearchRoot::new(base, path.as_deref(), workspace)?,
             include_glob: include.as_deref(),
             output_mode,
             context: context.unwrap_or(0),
