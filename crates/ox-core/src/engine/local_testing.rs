@@ -134,13 +134,13 @@ pub(super) fn tracked_paths(engine: &Engine) -> Vec<PathBuf> {
     paths
 }
 
-/// Files of the sessions `store` lists.
-pub(super) fn session_paths(store: &SessionStore) -> Vec<PathBuf> {
+/// IDs of the sessions `store` lists.
+pub(super) fn session_ids(store: &SessionStore) -> Vec<String> {
     store
         .list()
         .unwrap()
         .into_iter()
-        .map(|info| info.path)
+        .map(|info| info.session_id)
         .collect()
 }
 

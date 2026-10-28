@@ -10,12 +10,12 @@ use ox_core::config::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::{Effort, ModelSpec};
 use ox_core::permission::{Basis, Mode, SessionGrant};
-use ox_core::protocol::{CompactTrigger, Event, Interaction, notice};
+use ox_core::protocol::{CompactTrigger, Event, Interaction, SavedTarget, notice};
 use ox_core::session::display::archive_notice;
-use ox_core::session::entry::ArchiveState;
-use ox_core::session::saved::SavedError;
+use ox_core::session::entry::{ArchiveState, SessionInfo};
+use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::tool::view::ApprovalPreview;
-use ox_core::util::text::{capitalize_first, plural};
+use ox_core::util::text::plural;
 
 use super::queue::FailedTurn;
 use super::{App, CopyNotice, SlashTask};
@@ -23,6 +23,7 @@ use crate::clipboard::{CopyReport, Delivery};
 use crate::components::status::Status;
 use crate::git_probes::GitUpdate;
 use crate::modal::approval::ApprovalModal;
+use crate::slash;
 use crate::{NOTICE_DURATION, now};
 
 impl App {
@@ -68,12 +69,14 @@ impl App {
                     self.status_bar.set_title(Some(title));
                 }
             }
-            Event::ArchiveUpdated { id, result } => {
-                self.apply_archive_updated(&id, &result);
-            }
-            Event::SessionRolled { id, old_session } => {
-                self.apply_session_rolled(id, old_session);
-            }
+            Event::ArchiveUpdated {
+                target,
+                state,
+                result,
+            } => self.apply_archive_updated(&target, state, &result),
+            Event::SavedFound(result) => self.apply_saved_found(result),
+            Event::SavedDeleted { id, result } => self.apply_saved_deleted(&id, &result),
+            Event::SessionRolled { id, old_session } => self.apply_session_rolled(id, old_session),
             Event::SessionResumed {
                 id,
                 title,
@@ -161,11 +164,37 @@ impl App {
     }
 
     /// Leaves held prompts queued, since a retained picker can submit another idle-only operation.
-    fn apply_archive_updated(&mut self, id: &str, result: &Result<ArchiveState, SavedError>) {
-        self.modals.archive_updated(id, result);
+    fn apply_archive_updated(
+        &mut self,
+        target: &SavedTarget,
+        state: ArchiveState,
+        result: &Result<ArchiveUpdate, SavedError>,
+    ) {
+        self.modals.archive_updated(target, state, result);
+        match slash::archive_message(state, result) {
+            Ok(note) => self.chat.push_system_message(note),
+            Err(error) => self.chat.push_error(&error),
+        }
+        self.enter_idle();
+    }
+
+    /// Opens the `/delete` confirm modal on the session the engine resolved the prefix to.
+    fn apply_saved_found(&mut self, result: Result<Box<SessionInfo>, SavedError>) {
         match result {
-            Ok(state) => self.chat.push_system_message(archive_notice(id, *state)),
-            Err(error) => self.chat.push_error(&capitalize_first(&error.to_string())),
+            Ok(info) => self.push_modal(slash::delete_confirm_modal(&info)),
+            Err(error) => self.chat.push_error(&slash::saved_error_message(
+                &error,
+                Some(slash::CLEAR_THEN_DELETE_HINT),
+            )),
+        }
+        self.enter_idle();
+    }
+
+    /// Hands a delete result to the confirm modal, which closes with its chat line on success and
+    /// shows the error on failure.
+    fn apply_saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) {
+        for action in self.modals.saved_deleted(id, result) {
+            self.apply_modal_action(action);
         }
         self.enter_idle();
     }
@@ -483,10 +512,7 @@ impl App {
     pub(super) fn apply_slash_task(&mut self, finished: Result<SlashTask, JoinError>) {
         match finished {
             Ok(task) => {
-                if self.allows_mutating(&task.name, task.kind)
-                    && let Some(action) =
-                        self.apply_slash_outcome(task.outcome, &task.name, task.kind, &task.line)
-                {
+                if let Some(action) = self.apply_slash_outcome(task.outcome, &task.line) {
                     self.dispatch_action(action);
                 }
             }
@@ -515,8 +541,10 @@ mod tests {
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::text_result;
     use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
+    use ox_core::session::entry::TitleInfo;
+    use ox_core::session::resolver::ResolveError;
     use ox_core::session::saved::SavedAction;
-    use ox_core::session::store::testing::{isolated_store, seed_test_session};
+    use ox_core::session::store::testing::{isolated_store, listed_session, seed_test_session};
     use ox_core::tool::bash::background::ShellState;
     use ox_core::tool::bash::background::testing::{shell, shells_in_each_state};
     use ox_core::tool::tasks::TaskStatus;
@@ -1390,8 +1418,6 @@ mod tests {
         async fn session_rolled_drops_the_old_session_slash_tasks() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let task = SlashTask {
-                name: "diff".to_owned(),
-                kind: None,
                 line: "/diff".to_owned(),
                 outcome: Ok(SlashOutcome::SystemMessage(
                     "old session's output".to_owned(),
@@ -2259,8 +2285,6 @@ mod tests {
                             + time::Duration::seconds(second),
                     );
                 }
-                let first = store.find_session_path("first").unwrap();
-                let second = store.find_session_path("second").unwrap();
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 app.queue.push("held prompt".to_owned());
                 app.set_status(Status::Cancelling);
@@ -2270,18 +2294,22 @@ mod tests {
 
                 app.handle_crossterm_event(&CrosstermEvent::Key(archive_key));
 
+                let target = SavedTarget::Id("second".to_owned());
                 assert_eq!(
                     rx.try_recv(),
                     Ok(Op::SetArchive {
-                        path: second,
-                        session_id: "second".to_owned(),
+                        target: target.clone(),
                         state: ArchiveState::Archived,
                     })
                 );
 
                 app.handle_engine_event(Event::ArchiveUpdated {
-                    id: "second".to_owned(),
-                    result: Ok(ArchiveState::Archived),
+                    target,
+                    state: ArchiveState::Archived,
+                    result: Ok(ArchiveUpdate {
+                        id: "second".to_owned(),
+                        changed: true,
+                    }),
                 });
 
                 assert_eq!(app.status, Status::Idle, "{next_key:?}");
@@ -2292,13 +2320,12 @@ mod tests {
 
                 let expected = if next_key == archive_key {
                     Op::SetArchive {
-                        path: first,
-                        session_id: "first".to_owned(),
+                        target: SavedTarget::Id("first".to_owned()),
                         state: ArchiveState::Archived,
                     }
                 } else {
                     Op::Resume {
-                        target: ResumeTarget::Path(first),
+                        target: ResumeTarget::Id("first".to_owned()),
                     }
                 };
                 assert_eq!(rx.try_recv(), Ok(expected), "{next_key:?}");
@@ -2310,9 +2337,15 @@ mod tests {
 
         #[test]
         fn completion_keeps_queued_input_for_the_user() {
+            let update = || {
+                Ok(ArchiveUpdate {
+                    id: "saved".to_owned(),
+                    changed: true,
+                })
+            };
             for (status, result) in [
-                (Status::Archiving, Ok(ArchiveState::Archived)),
-                (Status::Cancelling, Ok(ArchiveState::Archived)),
+                (Status::Archiving, update()),
+                (Status::Cancelling, update()),
                 (
                     Status::Archiving,
                     Err(SavedError::Failed {
@@ -2326,7 +2359,11 @@ mod tests {
                 app.queue.push("next prompt".to_owned());
                 app.set_status(status);
 
-                app.apply_archive_updated("saved", &result);
+                app.apply_archive_updated(
+                    &SavedTarget::Prefix("saved".to_owned()),
+                    ArchiveState::Archived,
+                    &result,
+                );
 
                 assert_eq!(app.status, Status::Idle);
                 assert_eq!(*app.queue.pending(), ["next prompt"]);
@@ -2334,6 +2371,79 @@ mod tests {
                     rx.try_recv(),
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty)
                 );
+            }
+        }
+    }
+
+    mod apply_saved_found {
+        use super::*;
+
+        #[test]
+        fn opens_the_confirm_modal_or_reports_why_no_session_matched() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.set_status(Status::Searching);
+
+            app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+
+            assert_eq!(app.status, Status::Idle);
+            assert!(app.modals.is_active(), "the confirm modal opens");
+
+            app.modals.clear();
+            app.set_status(Status::Searching);
+            app.handle_engine_event(Event::SavedFound(Err(SavedError::Resolve(
+                ResolveError::Live {
+                    prefix: "test-".to_owned(),
+                },
+            ))));
+
+            assert_eq!(app.status, Status::Idle);
+            assert!(!app.modals.is_active());
+            assert_eq!(
+                app.chat.last_error_text(),
+                Some(
+                    "Session prefix `test-` matches the live session. \
+                     Run `/clear` to start a new one, then delete it."
+                )
+            );
+        }
+    }
+
+    mod apply_saved_deleted {
+        use super::*;
+
+        #[test]
+        fn a_delete_closes_the_confirm_modal_into_a_chat_note_and_a_failure_keeps_it() {
+            for (result, closes) in [
+                (Ok(()), true),
+                (
+                    Err(SavedError::Failed {
+                        action: SavedAction::Delete,
+                        id: "saved".to_owned(),
+                        cause: "disk full".to_owned(),
+                    }),
+                    false,
+                ),
+            ] {
+                let (mut app, _rx, _event_tx) = test_app(None);
+                let info = SessionInfo {
+                    title: Some(TitleInfo {
+                        title: "Old work".to_owned(),
+                        updated_at: time::macros::datetime!(2026-04-18 09:00:00 UTC),
+                    }),
+                    ..listed_session("saved")
+                };
+                app.handle_engine_event(Event::SavedFound(Ok(Box::new(info))));
+                app.set_status(Status::Deleting);
+
+                app.handle_engine_event(Event::SavedDeleted {
+                    id: "saved".to_owned(),
+                    result: result.clone(),
+                });
+
+                assert_eq!(app.status, Status::Idle, "{result:?}");
+                assert_eq!(app.modals.is_active(), !closes, "{result:?}");
+                let note = closes.then_some("Deleted session saved: Old work");
+                assert_eq!(app.chat.last_system_text(), note, "{result:?}");
             }
         }
     }
@@ -2458,8 +2568,6 @@ mod tests {
         async fn finish(outcome: Result<SlashOutcome, String>) -> Result<SlashTask, JoinError> {
             tokio::spawn(async move {
                 SlashTask {
-                    name: "diff".to_owned(),
-                    kind: None,
                     line: "/diff".to_owned(),
                     outcome,
                 }

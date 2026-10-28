@@ -250,7 +250,7 @@ mod tests {
     use crate::tool::local_testing::{self, ctx, temp_ctx};
     use crate::tool::read::ReadTool;
     use crate::tool::view::{DiffChunk, NumberedLine};
-    use crate::util::fs::testing::{deny_subdir_creation, symlink_file};
+    use crate::util::fs::testing::{deny_subdir_creation, make_read_only, symlink_file};
     use crate::util::path::local_testing::canonical_tempdir;
 
     mod approval_preview {
@@ -770,7 +770,7 @@ mod tests {
             fs::write(&path, "original").unwrap();
             let ctx = temp_ctx();
             seed_full_read(&ctx.tracker, &path);
-            local_testing::make_read_only(&path);
+            make_read_only(&path);
 
             let err = write_file(&path, "overwrite", &ctx).await.unwrap_err();
 

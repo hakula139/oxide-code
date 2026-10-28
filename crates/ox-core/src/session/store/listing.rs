@@ -5,7 +5,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::vec;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use time::OffsetDateTime;
 use tracing::warn;
 
@@ -164,6 +164,14 @@ impl SessionStore {
             .collect())
     }
 
+    /// The readable session `session_id`, in any project.
+    pub(crate) fn find(&self, session_id: &str) -> Result<Option<SessionInfo>> {
+        Ok(self
+            .list_matching(session_id, ProjectScope::Every)?
+            .into_iter()
+            .find(|info| info.session_id == session_id))
+    }
+
     /// The project a walk of the home project keeps, or `None` for every project.
     fn scope_project(&self, projects: ProjectScope) -> Option<Project> {
         (projects == ProjectScope::Current).then(|| self.project.clone())
@@ -270,7 +278,8 @@ const SUMMARY_LINE_PREFIX: &str = r#"{"type":"summary""#;
 
 /// Reads the header, the latest title and summary, and the archive state, or `None` past the header
 /// for a session that `project` does not own. `last_active_at` is the mtime the walk sorted by, so
-/// the listed time matches the order.
+/// the listed time matches the order. Fails when the file name carries another ID than the header,
+/// so every listed ID finds its file through [`SessionStore::find_session_path`].
 fn read_session_info(
     path: &Path,
     last_active_at: OffsetDateTime,
@@ -285,6 +294,9 @@ fn read_session_info(
         git_branch,
         ..
     } = read_header(&mut lines, path)?;
+    if file_session_id(path) != Some(&session_id) {
+        bail!("the file name lacks the header's session ID {session_id:?}");
+    }
     if project.is_some_and(|project| !project.owns(&cwd, project_root.as_deref())) {
         return Ok(None);
     }
@@ -312,7 +324,6 @@ fn read_session_info(
 
     Ok(Some(SessionInfo {
         session_id,
-        path: path.to_owned(),
         cwd,
         project_root,
         last_active_at,
@@ -335,10 +346,9 @@ mod tests {
         sample_header, sample_message_entry, sample_summary_entry, sample_title_entry,
         test_session_file, write_newest_corrupt_session,
     };
-    use crate::session::store::set_archived_at;
     use crate::session::store::testing::{
-        isolated_store, listed_ids, seed_test_session, set_modified, test_header, test_project_dir,
-        test_store,
+        archive_test_session, isolated_store, listed_ids, seed_test_session, set_modified,
+        test_header, test_project_dir, test_store,
     };
     use crate::util::fs::testing::deny_read_access;
     use crate::util::log::testing::LogCapture;
@@ -371,7 +381,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 seed_n_sessions(&store, 3);
-                set_archived_at(&test_session_file(dir.path(), "session-0002"), true).unwrap();
+                archive_test_session(&store, "session-0002");
                 let mut walk = store.walk(ListScope::default()).unwrap();
                 let checks = std::cell::Cell::new(0);
                 let stop_at_second_file = || {
@@ -668,7 +678,30 @@ mod tests {
                 r#"{"type":"message","uuid":"00000000-0000-0000-0000-000000000000","message":{"role":"user","content":[]},"timestamp":"2026-01-01T00:00:00Z"}"#,
             )
             .unwrap();
-            assert!(store.list().unwrap().is_empty());
+            assert_eq!(store.list().unwrap(), [] as [SessionInfo; 0]);
+        }
+
+        #[test]
+        fn skips_a_file_whose_name_lacks_the_header_id() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            seed_test_session(
+                &store,
+                "real-id",
+                None,
+                None,
+                datetime!(2026-04-16 12:00:00 UTC),
+            );
+            let file = test_session_file(dir.path(), "real-id");
+            fs::rename(&file, file.with_file_name("0-renamed.jsonl")).unwrap();
+
+            assert_eq!(store.list().unwrap(), [] as [SessionInfo; 0]);
+            assert_eq!(
+                store
+                    .list_matching("renamed", ProjectScope::Current)
+                    .unwrap(),
+                [] as [SessionInfo; 0]
+            );
         }
 
         #[test]
@@ -780,11 +813,12 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             seed_n_sessions(&store, 4);
-            let path = |id: &str| test_session_file(dir.path(), id);
-            set_archived_at(&path("session-0001"), true).unwrap();
-            set_archived_at(&path("session-0002"), true).unwrap();
-            set_archived_at(&path("session-0003"), true).unwrap();
-            set_archived_at(&path("session-0003"), false).unwrap();
+            archive_test_session(&store, "session-0001");
+            archive_test_session(&store, "session-0002");
+            archive_test_session(&store, "session-0003");
+            store
+                .set_archived("session-0003", ArchiveState::Active)
+                .unwrap();
             let ids = |archive: ArchiveState| -> Vec<String> {
                 let mut ids: Vec<_> = store
                     .list_paged(
@@ -890,7 +924,7 @@ mod tests {
             seed_n_sessions(&store, 3);
 
             let page = store.list_paged(Some(0), ListScope::default()).unwrap();
-            assert!(page.sessions().is_empty());
+            assert_eq!(page.sessions(), [] as [SessionInfo; 0]);
             assert!(page.has_more());
         }
 
@@ -956,10 +990,10 @@ mod tests {
             };
             assert_eq!(latest_id().as_deref(), Some("session-0001"));
 
-            set_archived_at(&test_session_file(dir.path(), "session-0001"), true).unwrap();
+            archive_test_session(&store, "session-0001");
             assert_eq!(latest_id().as_deref(), Some("session-0000"));
 
-            set_archived_at(&test_session_file(dir.path(), "session-0000"), true).unwrap();
+            archive_test_session(&store, "session-0000");
             assert_eq!(latest_id(), None);
         }
     }
@@ -1039,6 +1073,25 @@ mod tests {
                 .map(|s| s.session_id)
                 .collect();
             assert_eq!(ids, ["corrupt-twin"]);
+        }
+    }
+
+    mod find {
+        use super::*;
+
+        #[test]
+        fn finds_only_the_whole_id_in_any_project() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+            for (store, id) in [(&store, "abc-own"), (&other, "abc"), (&other, "abc-older")] {
+                seed_test_session(store, id, None, None, datetime!(2026-04-16 12:00:00 UTC));
+            }
+            let found = |id: &str| store.find(id).unwrap().map(|info| info.session_id);
+
+            assert_eq!(found("abc").as_deref(), Some("abc"));
+            assert_eq!(found("abc-own").as_deref(), Some("abc-own"));
+            assert_eq!(found("ab"), None);
         }
     }
 }

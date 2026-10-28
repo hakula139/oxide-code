@@ -7,10 +7,10 @@
 An `Op` is one of three kinds:
 
 - **A turn.** `Prompt` starts one, `Queue` adds a prompt typed while it runs, `Interrupt` cancels it, and `Resolve` answers an outstanding approval.
-- **A session operation.** `Compact`, `Clear`, `Archive`, `SetArchive`, `Resume`, and `Rename` change the session, and `SetModel` and `SetMode` change the settings the next turn uses.
+- **A session operation.** `Compact`, `Clear`, `Archive`, `Resume`, and `Rename` change the session, `SetArchive`, `FindSaved`, and `DeleteSaved` look up or change a saved one, and `SetModel` and `SetMode` change the settings the next turn uses.
 - **Sign-in and shutdown.** `Login`, `LoginCode`, and `Logout` manage the oxide-code login, and `Shutdown` ends the process.
 
-`Prompt`, `SetModel`, `Compact`, `Clear`, `Archive`, `SetArchive`, `Resume`, `Rename`, `Login`, and `Logout` require an idle engine. A frontend waits for the preceding operation's terminal event before sending one, and the engine drops an idle-only op that arrives during another operation without a terminal event, since the frontend still owns it. `Queue`, `Interrupt`, `Resolve`, `LoginCode`, `SetMode`, and `Shutdown` act on the operation in flight, so they arrive on the same channel and race the running stream and tool futures in one biased `select!`.
+`Prompt`, `SetModel`, `Compact`, `Clear`, `Archive`, `SetArchive`, `FindSaved`, `DeleteSaved`, `Resume`, `Rename`, `Login`, and `Logout` require an idle engine. A frontend waits for the preceding operation's terminal event before sending one, and the engine drops an idle-only op that arrives during another operation without a terminal event, since the frontend still owns it. `Queue`, `Interrupt`, `Resolve`, `LoginCode`, `SetMode`, and `Shutdown` act on the operation in flight, so they arrive on the same channel and race the running stream and tool futures in one biased `select!`.
 
 ## Events
 

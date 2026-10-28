@@ -508,7 +508,9 @@ mod tests {
     use crate::model::{Effort, ResolvedModelId};
     use crate::prompt::SystemPrompt;
     use crate::protocol::testing::CapturingSink;
-    use crate::protocol::{ApprovalDecision, ConfigPick, ResumeTarget, ToolCall, ToolResult};
+    use crate::protocol::{
+        ApprovalDecision, ConfigPick, ResumeTarget, SavedTarget, ToolCall, ToolResult,
+    };
     use crate::session::handle;
     use crate::session::handle::SessionHandle;
     use crate::session::store::testing::test_store;
@@ -1445,9 +1447,14 @@ mod tests {
                 Op::Clear,
                 Op::Archive,
                 Op::SetArchive {
-                    path: "/repo/other.jsonl".into(),
-                    session_id: "other".to_owned(),
+                    target: SavedTarget::Id("other".to_owned()),
                     state: crate::session::entry::ArchiveState::Archived,
+                },
+                Op::FindSaved {
+                    prefix: "other".to_owned(),
+                },
+                Op::DeleteSaved {
+                    session_id: "other".to_owned(),
                 },
                 Op::Resume {
                     target: ResumeTarget::Path("/repo/other.jsonl".into()),

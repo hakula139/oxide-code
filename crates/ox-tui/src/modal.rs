@@ -17,8 +17,9 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use ox_core::protocol::SavedTarget;
 use ox_core::session::entry::ArchiveState;
-use ox_core::session::saved::SavedError;
+use ox_core::session::saved::{ArchiveUpdate, SavedError};
 
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
@@ -46,15 +47,28 @@ pub(crate) trait Modal: Send {
     /// Receives bracketed-paste text. Default no-op, so a paste never answers a prompt.
     fn handle_paste(&mut self, _text: &str) {}
 
-    /// Marks a saved-session archive accepted by the engine.
-    fn archive_started(&mut self, _id: &str) {}
+    /// Marks a saved-session archive of `target` accepted by the engine.
+    fn archive_started(&mut self, _target: &SavedTarget) {}
 
-    /// Receives a saved-session archive result while this modal remains on the stack.
-    fn archive_updated(&mut self, _id: &str, _result: &Result<ArchiveState, SavedError>) {}
+    /// Receives the result of a saved-session archive of `target` to `state` while this modal
+    /// remains on the stack.
+    fn archive_updated(
+        &mut self,
+        _target: &SavedTarget,
+        _state: ArchiveState,
+        _result: &Result<ArchiveUpdate, SavedError>,
+    ) {
+    }
 
-    /// Fires when this modal returns to the top of the stack after a nested modal pops. Default
-    /// no-op. Pickers override it to refresh state the nested modal changed.
-    fn on_focus_regained(&mut self) {}
+    /// Receives the result of deleting saved session `id` while this modal remains on the stack.
+    /// Returns the action that replaces the modal when the result closes it.
+    fn saved_deleted(
+        &mut self,
+        _id: &str,
+        _result: &Result<(), SavedError>,
+    ) -> Option<ModalAction> {
+        None
+    }
 
     /// Fires on frame ticks while the modal is on top, for state that changes with time, such as a
     /// notice that expires or rows loading in the background. Returns whether the modal needs a
@@ -148,16 +162,40 @@ impl ModalStack {
         self.stack.push(modal);
     }
 
-    pub(crate) fn archive_started(&mut self, id: &str) {
+    pub(crate) fn archive_started(&mut self, target: &SavedTarget) {
         for modal in &mut self.stack {
-            modal.archive_started(id);
+            modal.archive_started(target);
         }
     }
 
-    pub(crate) fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, SavedError>) {
+    pub(crate) fn archive_updated(
+        &mut self,
+        target: &SavedTarget,
+        state: ArchiveState,
+        result: &Result<ArchiveUpdate, SavedError>,
+    ) {
         for modal in &mut self.stack {
-            modal.archive_updated(id, result);
+            modal.archive_updated(target, state, result);
         }
+    }
+
+    /// Passes a delete result to every modal, dropping each one the result closes, and returns
+    /// their replacement actions in stack order.
+    pub(crate) fn saved_deleted(
+        &mut self,
+        id: &str,
+        result: &Result<(), SavedError>,
+    ) -> Vec<ModalAction> {
+        let mut actions = Vec::new();
+        self.stack
+            .retain_mut(|modal| match modal.saved_deleted(id, result) {
+                Some(action) => {
+                    actions.push(action);
+                    false
+                }
+                None => true,
+            });
+        actions
     }
 
     /// Drops every modal on the stack, firing each modal's [`Modal::on_cancel`] hook first, and
@@ -226,7 +264,7 @@ impl ModalStack {
             ModalKey::Consumed => None,
             ModalKey::Cancelled => Some(self.pop_cancelled()),
             ModalKey::Submitted(action) => {
-                self.pop_and_notify();
+                self.stack.pop();
                 Some(action)
             }
             ModalKey::Emit(action) => Some(action),
@@ -254,24 +292,11 @@ impl ModalStack {
         self.stack.last()?.next_tick(now)
     }
 
-    /// Pops the top entry and notifies the new top through [`Modal::on_focus_regained`].
-    fn pop_and_notify(&mut self) {
-        self.stack.pop();
-        self.notify_top();
-    }
-
-    /// Pops the top entry for a cancellation, firing its [`Modal::on_cancel`] hook and notifying
-    /// the new top. Returns the hook's action, or [`ModalAction::Cancelled`] for a silent close.
+    /// Pops the top entry for a cancellation, firing its [`Modal::on_cancel`] hook. Returns the
+    /// hook's action, or [`ModalAction::Cancelled`] for a silent close.
     fn pop_cancelled(&mut self) -> ModalAction {
         let action = self.stack.pop().and_then(|mut m| m.on_cancel());
-        self.notify_top();
         action.unwrap_or(ModalAction::Cancelled)
-    }
-
-    fn notify_top(&mut self) {
-        if let Some(top) = self.stack.last_mut() {
-            top.on_focus_regained();
-        }
     }
 }
 
@@ -346,13 +371,15 @@ pub(crate) mod testing {
         /// Whether [`Modal::binds_modified_key`] claims every Ctrl- or Alt-modified key.
         pub(crate) binds_modified_keys: bool,
         pub(crate) declared_height: u16,
-        /// Shared so a test can read the count after the modal moves into the stack.
-        pub(crate) focus_regained_count: Arc<AtomicU32>,
-        /// Ticks received, shared like `focus_regained_count`. Each tick asks for a repaint.
+        /// Ticks received, shared so a test can read the count after the modal moves into the
+        /// stack. Each tick asks for a repaint.
         pub(crate) tick_count: Arc<AtomicU32>,
         /// Deadline returned from [`Modal::next_tick`].
         pub(crate) next_tick: Option<Instant>,
-        pub(crate) archive_events: Arc<std::sync::Mutex<Vec<String>>>,
+        /// Take-once action returned from [`Modal::saved_deleted`], which closes the modal.
+        pub(crate) delete_action: Option<ModalAction>,
+        /// The saved-session results received, shared like `tick_count`.
+        pub(crate) saved_events: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl ScriptedModal {
@@ -369,27 +396,44 @@ pub(crate) mod testing {
                 captures_esc: false,
                 binds_modified_keys: false,
                 declared_height: 3,
-                focus_regained_count: Arc::new(AtomicU32::new(0)),
                 tick_count: Arc::new(AtomicU32::new(0)),
                 next_tick: None,
-                archive_events: Arc::default(),
+                delete_action: None,
+                saved_events: Arc::default(),
             }
         }
     }
 
     impl Modal for ScriptedModal {
-        fn archive_started(&mut self, id: &str) {
-            self.archive_events
+        fn archive_started(&mut self, target: &SavedTarget) {
+            self.saved_events
                 .lock()
                 .unwrap()
-                .push(format!("started:{id}"));
+                .push(format!("started:{target:?}"));
         }
 
-        fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, SavedError>) {
-            self.archive_events
+        fn archive_updated(
+            &mut self,
+            target: &SavedTarget,
+            state: ArchiveState,
+            result: &Result<ArchiveUpdate, SavedError>,
+        ) {
+            self.saved_events
                 .lock()
                 .unwrap()
-                .push(format!("completed:{id}:{result:?}"));
+                .push(format!("completed:{target:?}:{state:?}:{result:?}"));
+        }
+
+        fn saved_deleted(
+            &mut self,
+            id: &str,
+            result: &Result<(), SavedError>,
+        ) -> Option<ModalAction> {
+            self.saved_events
+                .lock()
+                .unwrap()
+                .push(format!("deleted:{id}:{result:?}"));
+            self.delete_action.take()
         }
 
         fn height(&mut self, _width: u16, _max_height: u16) -> u16 {
@@ -417,10 +461,6 @@ pub(crate) mod testing {
                 }
                 _ => ModalKey::Consumed,
             }
-        }
-
-        fn on_focus_regained(&mut self) {
-            self.focus_regained_count.fetch_add(1, Ordering::Relaxed);
         }
 
         fn tick(&mut self, _now: Instant) -> bool {
@@ -560,16 +600,24 @@ mod tests {
         fn completes_a_covered_picker_without_dismissing_the_overlay() {
             let mut stack = ModalStack::default();
             let picker = ScriptedModal::new(ModalAction::Dispatch(Action::Op(Op::Clear)));
-            let observed = Arc::clone(&picker.archive_events);
+            let observed = Arc::clone(&picker.saved_events);
             stack.push(Box::new(picker));
             stack.push(Box::new(BareModal));
+            let target = SavedTarget::Id("saved".to_owned());
+            let update = ArchiveUpdate {
+                id: "saved".to_owned(),
+                changed: true,
+            };
 
-            stack.archive_started("saved");
-            stack.archive_updated("saved", &Ok(ArchiveState::Archived));
+            stack.archive_started(&target);
+            stack.archive_updated(&target, ArchiveState::Archived, &Ok(update));
 
             assert_eq!(
                 *observed.lock().unwrap(),
-                ["started:saved", "completed:saved:Ok(Archived)"]
+                [
+                    r#"started:Id("saved")"#,
+                    r#"completed:Id("saved"):Archived:Ok(ArchiveUpdate { id: "saved", changed: true })"#,
+                ]
             );
             assert!(
                 stack
@@ -580,11 +628,35 @@ mod tests {
                 stack.handle_key(&KeyEvent::from(KeyCode::Esc)),
                 Some(ModalAction::Cancelled)
             ));
-            assert!(matches!(
-                stack.handle_key(&KeyEvent::from(KeyCode::Char('s'))),
-                Some(ModalAction::Dispatch(Action::Op(Op::Clear)))
-            ));
-            assert!(!stack.is_active());
+        }
+    }
+
+    mod saved_deleted {
+        use super::*;
+
+        #[test]
+        fn closes_only_the_modals_the_result_closes_and_returns_their_actions() {
+            let mut stack = ModalStack::default();
+            let picker = ScriptedModal::new(ModalAction::Cancelled);
+            let observed = Arc::clone(&picker.saved_events);
+            let mut confirm = ScriptedModal::new(ModalAction::Cancelled);
+            confirm.declared_height = 5;
+            confirm.delete_action = Some(ModalAction::SystemMessage("Deleted".to_owned()));
+            stack.push(Box::new(picker));
+            stack.push(Box::new(confirm));
+
+            let actions = stack.saved_deleted("saved", &Ok(()));
+
+            assert!(
+                matches!(actions.as_slice(), [ModalAction::SystemMessage(msg)] if msg == "Deleted"),
+                "{actions:?}"
+            );
+            assert_eq!(*observed.lock().unwrap(), ["deleted:saved:Ok(())"]);
+            assert_eq!(
+                stack.height(80, 40),
+                3 + TOP_BORDER_HEIGHT,
+                "the picker is back on top"
+            );
         }
     }
 
@@ -936,40 +1008,6 @@ mod tests {
                 "child becomes top"
             );
         }
-
-        #[test]
-        fn pop_notifies_underlying_top_via_on_focus_regained() {
-            for (label, exit_key) in [
-                ("Esc universal-cancel", KeyEvent::from(KeyCode::Esc)),
-                (
-                    "Ctrl+C universal-cancel",
-                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-                ),
-                ("modal Cancelled", KeyEvent::from(KeyCode::Char('c'))),
-                ("modal Submitted", KeyEvent::from(KeyCode::Char('s'))),
-            ] {
-                let parent = ScriptedModal::new(ModalAction::Cancelled);
-                let counter = Arc::clone(&parent.focus_regained_count);
-                let child = ScriptedModal::new(ModalAction::Cancelled);
-                let mut stack = ModalStack::default();
-                stack.push(Box::new(parent));
-                stack.push(Box::new(child));
-                assert_eq!(
-                    counter.load(Ordering::Relaxed),
-                    0,
-                    "{label}: pre-push baseline"
-                );
-
-                stack.handle_key(&exit_key);
-
-                assert_eq!(
-                    counter.load(Ordering::Relaxed),
-                    1,
-                    "{label}: parent must be notified exactly once after child pops",
-                );
-                assert!(stack.is_active(), "{label}: parent stays on the stack");
-            }
-        }
     }
 
     mod tick {
@@ -1020,7 +1058,7 @@ mod tests {
             stack.push(Box::new(BareModal));
             assert_eq!(stack.next_tick(now), None);
 
-            stack.pop_and_notify();
+            stack.handle_key(&KeyEvent::from(KeyCode::Esc));
 
             assert_eq!(stack.next_tick(now), Some(now + Duration::from_secs(3)));
         }

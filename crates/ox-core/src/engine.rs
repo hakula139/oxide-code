@@ -267,13 +267,9 @@ impl Engine {
                 }
                 Op::Clear => self.clear(&sink).await,
                 Op::Archive => self.archive(&sink).await,
-                Op::SetArchive {
-                    path,
-                    session_id,
-                    state,
-                } => {
-                    self.set_archive(&sink, path, session_id, state).await;
-                }
+                Op::SetArchive { target, state } => self.set_archive(&sink, target, state).await,
+                Op::FindSaved { prefix } => self.find_saved(&sink, prefix).await,
+                Op::DeleteSaved { session_id } => self.delete_saved(&sink, session_id).await,
                 Op::Resume { target } => self.resume(&sink, target).await,
                 Op::Rename { title } => self.rename(&sink, title).await,
                 Op::SetModel(pick) => self.set_model(&sink, pick),
@@ -570,7 +566,7 @@ mod tests {
 
     use super::local_testing::{
         TITLE_MODEL, dead_test_session, finished_session, greeting_title, inert_ops, login_urls,
-        mount_title, next_matching, service_log, session_paths, submit, system_prompt, texts,
+        mount_title, next_matching, service_log, session_ids, submit, system_prompt, texts,
         tool_heavy_transcript, tracked_paths, turn_events, write_unreadable_instructions,
     };
     use super::sessions::format_drift_warning;
@@ -598,11 +594,12 @@ mod tests {
     use crate::permission::PermissionClass;
     use crate::permission::rule::Rule;
     use crate::protocol::testing::CapturingSink;
-    use crate::protocol::{CompactTrigger, ResumeTarget, UsageSnapshot};
+    use crate::protocol::{CompactTrigger, ResumeTarget, SavedTarget, UsageSnapshot};
     use crate::session::entry::{ArchiveState, UsageRecord};
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;
     use crate::session::post_compact::synthesize_post_compact_message;
+    use crate::session::saved::ArchiveUpdate;
     use crate::session::store::testing::{WriterBarrier, seed_test_session, test_store};
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
@@ -1542,8 +1539,7 @@ mod tests {
                 handle
                     .ops
                     .send(Op::SetArchive {
-                        path: path.clone(),
-                        session_id: "saved".to_owned(),
+                        target: SavedTarget::Id("saved".to_owned()),
                         state: ArchiveState::Archived,
                     })
                     .await
@@ -1551,7 +1547,7 @@ mod tests {
                 handle
                     .ops
                     .send(Op::Resume {
-                        target: ResumeTarget::Path(path),
+                        target: ResumeTarget::Id("saved".to_owned()),
                     })
                     .await
                     .unwrap();
@@ -1574,8 +1570,12 @@ mod tests {
                 assert_eq!(
                     archived,
                     Event::ArchiveUpdated {
-                        id: "saved".to_owned(),
-                        result: Ok(ArchiveState::Archived)
+                        target: SavedTarget::Id("saved".to_owned()),
+                        state: ArchiveState::Archived,
+                        result: Ok(ArchiveUpdate {
+                            id: "saved".to_owned(),
+                            changed: true,
+                        }),
                     }
                 );
                 let resumed = next_matching(&mut handle.events, |event| match event {
@@ -1656,7 +1656,7 @@ mod tests {
                 handle.ops.send(Op::Shutdown).await.unwrap();
                 assert_eq!(handle.task.join().await.unwrap(), None);
 
-                assert_eq!(session_paths(&store), [] as [PathBuf; 0]);
+                assert_eq!(session_ids(&store), [] as [String; 0]);
             })
             .await;
         }
@@ -1773,8 +1773,8 @@ mod tests {
                     "the prompt never reaches the model"
                 );
                 assert_eq!(
-                    session_paths(&store),
-                    [] as [PathBuf; 0],
+                    session_ids(&store),
+                    [] as [String; 0],
                     "neither the prompt nor an interruption marker is recorded",
                 );
             })
@@ -2184,6 +2184,8 @@ mod tests {
                 Event::SessionTitleUpdated { .. } => "session_title_updated",
                 Event::RenameFailed(_) => "rename_failed",
                 Event::ArchiveUpdated { .. } => "archive_updated",
+                Event::SavedFound(_) => "saved_found",
+                Event::SavedDeleted { .. } => "saved_deleted",
                 Event::SessionRolled { .. } => "session_rolled",
                 Event::SessionResumed { .. } => "session_resumed",
                 Event::SessionCompacted { .. } => "session_compacted",

@@ -35,7 +35,7 @@ use crate::git_probes::GitProbes;
 use crate::modal::{Modal, ModalStack};
 use crate::now;
 use crate::session_info::LiveSessionInfo;
-use crate::slash::{SlashKind, SlashOutcome};
+use crate::slash::SlashOutcome;
 use crate::terminal::{Tui, TuiBackend};
 use crate::theme::{Theme, ThemeOverrides};
 
@@ -88,11 +88,8 @@ struct CopyNotice {
     until: Instant,
 }
 
-/// What a background slash command yields, with the name and kind its result re-checks the idle
-/// gate against and the typed line a resolved prompt runs under.
+/// What a background slash command yields, with the typed line a resolved prompt runs under.
 struct SlashTask {
-    name: String,
-    kind: Option<SlashKind>,
     line: String,
     outcome: Result<SlashOutcome, String>,
 }

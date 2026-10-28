@@ -13,8 +13,8 @@ A modal is `Send` (App lives on tokio) but not `Sync`, since modals own mutable 
 - **Consumed**: Stay open, key handled internally.
 - **Cancelled**: Close and dispatch the modal's `on_cancel` action, if any.
 - **Submitted**: Close and dispatch an `Action` (an op for the engine or a TUI-only change, or a no-op when the modal already applied its effect locally).
-- **Emit**: Forward an action without closing. Used for live-preview cursor moves like `/theme`, where each Up / Down repaints the chat in the candidate without committing, and for `/resume`'s Ctrl+X archive toggle, which commits while the picker stays open.
-- **Push**: Nest a child modal above the current one. The parent regains focus on pop via `Modal::on_focus_regained` (default no-op).
+- **Emit**: Forward an action without closing. Used for live-preview cursor moves like `/theme`, where each Up / Down repaints the chat in the candidate without committing, and for `/resume`'s Ctrl+X archive toggle and the confirm modal's delete, which commit while the modal stays open.
+- **Push**: Nest a child modal above the current one, which returns focus to the parent when it pops.
 
 The App's frame tick also calls `Modal::tick` on the top modal, which reports whether time-driven state such as an expiring notice or a page loaded in the background needs a repaint. `Modal::next_tick` tells the loop when that state next changes, so an idle modal does not keep the loop awake. Both default to no-ops.
 
@@ -58,7 +58,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **`/resume` picker**: `ResumePicker` wraps `SearchableList<SessionRow>` and adds a footer line. Each row is one line of columns (ID prefix, title, branch, project, message count, relative time), and narrow rows drop the lower-value columns first. Rows load in pages on a worker thread as the cursor nears the end, so search covers sessions not yet shown. Tab toggles current-project ↔ all-projects and Ctrl+A toggles the archived view, each reloading rows while the typed query survives the rebuild. Enter on a focused row submits `Op::Resume`. Enter with no selection stays open so the user can Tab the scope or Esc out. The footer leads with the Enter and Esc hints, then names the scope. Load failures take over the footer so a failure can't disguise itself as an empty list. Ctrl+D on the cursor row pushes `ConfirmDeleteSessionModal`, and Ctrl+X sends `Op::SetArchive` for the cursor row. After admission, the picker waits for `ArchiveUpdated` before allowing another mutation, while navigation and view changes remain available. Completion updates the row and shows a footer notice that expires after 3 seconds. On focus regain the picker drops the rows of deleted sessions and re-seeks the cursor to the previously selected row, or to the row that followed a deleted one.
 
-- **Confirm-delete modal**: `ConfirmDeleteSessionModal` shows the session's title above its `format_metadata_line` row, which leads with the ID prefix. Y runs `session::saved::delete` on the session's file synchronously once the target is visible and the shared type-ahead guard expires. Enter does nothing, and repeated Y events restart the guard. Success submits a `ModalAction::SystemMessage` naming the deleted session by ID prefix and title, so the chat records the deletion. A failure shows an inline error that stays until a retry replaces it or the modal closes, so a stray key can't wipe the diagnostic. N cancels. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D.
+- **Confirm-delete modal**: `ConfirmDeleteSessionModal` shows the session's title above its `format_metadata_line` row, which leads with the ID prefix. Y sends `Op::DeleteSaved` with the session's ID once the target is visible and the shared type-ahead guard expires, then ignores another Y until the engine reports back. Enter does nothing, and repeated Y events restart the guard. The `SavedDeleted` result reaches every open modal through `Modal::saved_deleted`. Success closes this modal into a `ModalAction::SystemMessage` naming the deleted session by ID prefix and title, so the chat records the deletion. A failure shows an inline error that stays until a retry replaces it or the modal closes, so a stray key can't wipe the diagnostic. N cancels. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D.
 
 - **Approval modal**: `ApprovalModal` is the approve-or-deny gate the App pushes when the agent asks to run a gated tool call. It holds the tool-use ID and renders the call summary as its title above the body: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. The body shows at most 16 rows and scrolls when the call runs longer or the band is shorter. Y submits `Op::Resolve` with `Approve` while the first body row is visible and the type-ahead guard has expired, while Enter does nothing. [permissions.md](permissions.md) covers the guard. When the call offers a session grant, A opens a rule editor prefilled with the suggested rule, and Enter submits `AllowForSession` with the edited rule while the whole editor is visible and armed. N submits `Deny`. F opens a feedback editor whose Enter submits `DenyWithFeedback` with the typed text. Esc from the choice, Ctrl+C, and clearing the stack all resolve through `on_cancel` to `Abort`, which ends the turn.
 
@@ -90,7 +90,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 10. **Nested modals use `ModalKey::Push`.** A push outcome keeps `handle_key` returning one value and avoids threading a stack borrow through every modal. `Debug for ModalKey` is hand-rolled because `Box<dyn Modal>` cannot derive it.
 
-11. **Parents refresh through `Modal::on_focus_regained`.** A picker whose sub-modal mutates shared state overrides the no-op default to refresh on pop, as the `/resume` picker does after a delete.
+11. **Modals learn saved-session results from the engine's events.** The engine owns saved-session writes, so `ModalStack` passes `ArchiveUpdated` and `SavedDeleted` to every modal on the stack. A covered `/resume` picker updates its rows from the same result that closes the confirm-delete modal above it, without rereading the store when it regains focus.
 
 ## Out of Scope
 
@@ -123,7 +123,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/ox-tui/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview`.
 - `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`.
 - `crates/ox-tui/src/slash/context.rs`: `SlashContext`, the read-only state each `execute` call receives.
-- `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd`, which resolves its prefix through `ox-core`'s `resolve_saved_prefix_blocking` in a background task that resolves to the confirm-delete modal.
+- `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd`, which forwards `Op::FindSaved`, and `confirm_modal`, which builds the confirm-delete modal for the session the engine found.
 - `crates/ox-tui/src/slash/effort_slider.rs`: `/effort` slider.
 - `crates/ox-tui/src/slash/help.rs`: `/help` row builder plus `KvOverview`.
 - `crates/ox-tui/src/slash/init.rs`: `/init` instruction-file picker (`InitPicker`).

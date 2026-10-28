@@ -83,6 +83,8 @@ pub(super) fn wire(event: &Event) -> Option<HeadlessEvent<'_>> {
         | Event::SessionTitleUpdated { .. }
         | Event::RenameFailed(_)
         | Event::ArchiveUpdated { .. }
+        | Event::SavedFound(_)
+        | Event::SavedDeleted { .. }
         | Event::SessionRolled { .. }
         | Event::SessionResumed { .. }
         | Event::SessionReady

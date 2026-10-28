@@ -8,8 +8,8 @@ use time::OffsetDateTime;
 use time::macros::datetime;
 use uuid::Uuid;
 
-use super::testing::{TEST_PROJECT, find_session_in, set_modified, test_project_dir};
-use super::{SessionStore, SessionWriter, open_append_at};
+use super::testing::{TEST_PROJECT, set_modified, test_project_dir};
+use super::{SessionStore, SessionWriter, find_session_in, open_append_at};
 use crate::message::Message;
 use crate::session::entry::{CURRENT_VERSION, Entry, ExitInfo, Header, TitleInfo};
 

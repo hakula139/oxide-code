@@ -7,13 +7,13 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::Result;
 use time::OffsetDateTime;
 
 use super::listing::{ListScope, ProjectScope};
 use super::{
-    Project, SessionData, SessionStore, SessionWriter, encode_lines, file_session_id,
-    load_session_data_from_path, lock_writer, open_append_file, set_archived_at,
+    Project, SessionData, SessionStore, SessionWriter, encode_lines, load_session_data_from_path,
+    lock_writer, open_append_file,
 };
 use crate::session::entry::{
     ArchiveState, CURRENT_VERSION, Entry, ExitInfo, Header, SessionInfo, TitleInfo,
@@ -48,32 +48,15 @@ impl SessionStore {
         Ok(self.walk(ListScope::default())?.collect())
     }
 
+    /// The file of session `session_id`, which must exist.
+    pub fn saved_file(&self, session_id: &str) -> PathBuf {
+        self.find_session_path(session_id)
+            .expect("the session has a file")
+    }
+
     pub(crate) fn load_session_data(&self, session_id: &str) -> Result<SessionData> {
         load_session_data_from_path(&self.find_session_path(session_id)?)
     }
-
-    /// Finds a session file by the ID in its name, in any project.
-    pub fn find_session_path(&self, session_id: &str) -> Result<PathBuf> {
-        for entry in fs::read_dir(&self.sessions_dir)
-            .with_context(|| format!("failed to read {}", self.sessions_dir.display()))?
-        {
-            let dir = entry?.path();
-            if dir.is_dir()
-                && let Some(path) = find_session_in(&dir, session_id)
-            {
-                return Ok(path);
-            }
-        }
-        bail!("session not found: {session_id}")
-    }
-}
-
-pub(super) fn find_session_in(dir: &Path, session_id: &str) -> Option<PathBuf> {
-    fs::read_dir(dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| file_session_id(path) == Some(session_id))
 }
 
 // ── SessionWriter ──
@@ -167,7 +150,6 @@ where
 pub fn listed_session(session_id: &str) -> SessionInfo {
     SessionInfo {
         session_id: session_id.to_owned(),
-        path: PathBuf::new(),
         cwd: format!("/work/{TEST_PROJECT}"),
         project_root: None,
         last_active_at: time::macros::datetime!(2026-04-18 09:00:00 UTC),
@@ -237,10 +219,9 @@ pub(super) fn test_header(
 
 /// Archives the seeded session `session_id`, keeping the last-active time that orders listings.
 pub fn archive_test_session(store: &SessionStore, session_id: &str) {
-    let path = store
-        .find_session_path(session_id)
-        .expect("the session is seeded");
-    set_archived_at(&path, true).expect("the session archives");
+    store
+        .set_archived(session_id, ArchiveState::Archived)
+        .expect("the seeded session archives");
 }
 
 /// Number of messages that resuming the session `session_id` loads.

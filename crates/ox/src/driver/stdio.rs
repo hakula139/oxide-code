@@ -20,7 +20,7 @@ use ox_core::session::entry::ArchiveState;
 use ox_core::tool::tasks::{Progress, Task};
 use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::sync::lock_or_recover;
-use ox_core::util::text::{capitalize_first, escape_controls, escape_line};
+use ox_core::util::text::{escape_controls, escape_line};
 use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 
 // ── Turn Rendering ──
@@ -283,6 +283,9 @@ impl StdioSink {
             | Event::LoginRestored { .. }
             | Event::SignedOut { .. }
             | Event::ApprovalRequested { .. }
+            | Event::ArchiveUpdated { .. }
+            | Event::SavedFound(_)
+            | Event::SavedDeleted { .. }
             | Event::SessionRulesUpdated(_)
             | Event::BackgroundShellsUpdated(_)
             | Event::SessionReady => {}
@@ -295,14 +298,6 @@ impl StdioSink {
                 let line = format!("Error: {}", escape_controls(&msg));
                 state.end_reply_then(stdout, stderr, &line)?;
             }
-            Event::ArchiveUpdated { id, result } => match result {
-                Ok(state) => writeln!(stderr, "{}", archive_notice(&id, state))?,
-                Err(error) => writeln!(
-                    stderr,
-                    "Error: {}",
-                    escape_controls(&capitalize_first(&error.to_string()))
-                )?,
-            },
             Event::Error(msg) | Event::RenameFailed(msg) => {
                 writeln!(stderr, "Error: {}", escape_controls(&msg))?;
             }
@@ -455,7 +450,7 @@ mod tests {
     use ox_core::permission::Mode;
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::{CapturingSink, FailingSink, ls_call, text_result};
-    use ox_core::protocol::{CompactTrigger, ConfigPick};
+    use ox_core::protocol::{CompactTrigger, ConfigPick, SavedTarget};
     use ox_core::session::saved::{SavedAction, SavedError};
     use ox_core::session::store::testing::test_store;
     use ox_core::tool::bash::background::testing::shells_in_each_state;
@@ -1229,32 +1224,6 @@ mod tests {
             }
 
             #[test]
-            fn saved_archive_reports_its_result_without_replacing_the_transcript() {
-                for (result, expected) in [
-                    (Ok(ArchiveState::Active), "Unarchived session saved\n"),
-                    (
-                        Err(SavedError::Failed {
-                            action: SavedAction::Archive,
-                            id: "saved".to_owned(),
-                            cause: "disk unavailable".to_owned(),
-                        }),
-                        "Error: Failed to archive session saved: disk unavailable\n",
-                    ),
-                ] {
-                    let (stdout, stderr) = render_one(
-                        &test_sink(false),
-                        Event::ArchiveUpdated {
-                            id: "saved".to_owned(),
-                            result,
-                        },
-                    );
-
-                    assert_eq!(stdout, "");
-                    assert_eq!(stderr, expected);
-                }
-            }
-
-            #[test]
             fn tui_only_events_emit_nothing_on_either_stream() {
                 for event in [
                     Event::PromptDrained("queued".to_owned()),
@@ -1270,6 +1239,22 @@ mod tests {
                     Event::AutoCompactionResumed,
                     Event::SummaryToken("Recap".to_owned()),
                     Event::SummaryDiscarded,
+                    Event::ArchiveUpdated {
+                        target: SavedTarget::Prefix("saved".to_owned()),
+                        state: ArchiveState::Archived,
+                        result: Err(SavedError::Failed {
+                            action: SavedAction::Archive,
+                            id: "saved".to_owned(),
+                            cause: "disk unavailable".to_owned(),
+                        }),
+                    },
+                    Event::SavedFound(Err(SavedError::Live {
+                        id: "live-ses".to_owned(),
+                    })),
+                    Event::SavedDeleted {
+                        id: "saved".to_owned(),
+                        result: Ok(()),
+                    },
                     Event::BackgroundShellsUpdated(shells_in_each_state()),
                 ] {
                     let (stdout, stderr) = render_one(&test_sink(false), event);

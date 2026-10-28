@@ -56,6 +56,8 @@ pub(crate) enum Status {
     Clearing,
     Resuming,
     Archiving,
+    Searching,
+    Deleting,
     Cancelling,
     ExitArmed { until: Instant },
 }
@@ -78,6 +80,8 @@ impl Status {
                 | Self::Clearing
                 | Self::Resuming
                 | Self::Archiving
+                | Self::Searching
+                | Self::Deleting
                 | Self::Cancelling,
         )
     }
@@ -95,6 +99,8 @@ impl Status {
             Self::Clearing => "Clearing".into(),
             Self::Resuming => "Resuming".into(),
             Self::Archiving => "Archiving".into(),
+            Self::Searching => "Searching".into(),
+            Self::Deleting => "Deleting".into(),
             Self::Cancelling => "Cancelling".into(),
             Self::ExitArmed { .. } if input_empty => "Press Ctrl+C or Ctrl+D again to exit".into(),
             Self::ExitArmed { .. } => "Press Ctrl+C again to exit".into(),
@@ -1187,6 +1193,8 @@ mod tests {
                 (Status::Clearing, "Clearing"),
                 (Status::Resuming, "Resuming"),
                 (Status::Archiving, "Archiving"),
+                (Status::Searching, "Searching"),
+                (Status::Deleting, "Deleting"),
                 (Status::Cancelling, "Cancelling"),
             ];
             for (status, label) in cases {

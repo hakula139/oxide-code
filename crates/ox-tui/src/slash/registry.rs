@@ -73,13 +73,6 @@ impl SlashOutcome {
         }
     }
 
-    pub(super) fn into_system_message(self) -> String {
-        match self {
-            Self::SystemMessage(text) => text,
-            other => panic!("expected SystemMessage, got {other:?}"),
-        }
-    }
-
     pub(super) fn into_background(self) -> BoxFuture<'static, Result<SlashOutcome, String>> {
         match self {
             Self::Background(task) => task,
@@ -184,14 +177,6 @@ pub(super) mod testing {
     /// Runs `cmd` with `args` against [`test_session_info`] and no session title.
     pub(crate) fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
         cmd.execute(args, &SlashContext::new(&test_session_info(), None))
-    }
-
-    /// [`run_execute`] awaiting the background task a saved-session command returns.
-    pub(crate) async fn run_background(
-        cmd: &dyn SlashCommand,
-        args: &str,
-    ) -> Result<SlashOutcome, String> {
-        run_execute(cmd, args)?.into_background().await
     }
 
     /// A command that fails with `error`, answering to the aliases the shared table gives `name`.

@@ -1,4 +1,4 @@
-//! The engine's session swaps, saved-session archive operations, `/rename`, and what the
+//! The engine's session swaps, saved-session lookup, archive, and delete, `/rename`, and what the
 //! engine shows as it starts on a session.
 
 use std::path::PathBuf;
@@ -8,11 +8,12 @@ use anyhow::Result;
 use super::usage::UsageLedger;
 use super::{Engine, turn};
 use crate::protocol::notice::session_write_failed;
-use crate::protocol::{Event, EventSink, ResumeTarget};
+use crate::protocol::{Event, EventSink, ResumeTarget, SavedTarget};
 use crate::session::display::id_prefix;
 use crate::session::entry::ArchiveState;
 use crate::session::handle::{LoadedTranscript, RollIntoOutcome};
 use crate::session::saved::{self, SavedError};
+use crate::session::store::SessionStore;
 use crate::util::git::current_branch;
 use crate::util::text::plural;
 
@@ -46,18 +47,59 @@ impl Engine {
     pub(super) async fn set_archive(
         &self,
         sink: &dyn EventSink,
-        path: PathBuf,
-        session_id: String,
+        target: SavedTarget,
         state: ArchiveState,
     ) {
-        let id = session_id.clone();
+        let result = self
+            .on_saved({
+                let target = target.clone();
+                move |store, live_id| saved::set_archived(store, &target, state, live_id)
+            })
+            .await;
+        sink.emit(
+            Event::ArchiveUpdated {
+                target,
+                state,
+                result,
+            },
+            "archive-updated",
+        );
+    }
+
+    pub(super) async fn find_saved(&self, sink: &dyn EventSink, prefix: String) {
+        let result = self
+            .on_saved(move |store, live_id| saved::find(store, &prefix, live_id).map(Box::new))
+            .await;
+        sink.emit(Event::SavedFound(result), "saved-found");
+    }
+
+    pub(super) async fn delete_saved(&self, sink: &dyn EventSink, session_id: String) {
+        let result = self
+            .on_saved({
+                let session_id = session_id.clone();
+                move |store, live_id| saved::delete(store, &session_id, live_id)
+            })
+            .await;
+        sink.emit(
+            Event::SavedDeleted {
+                id: session_id,
+                result,
+            },
+            "saved-deleted",
+        );
+    }
+
+    /// Runs `op` on the blocking pool with the store and the live session's ID, since a
+    /// saved-session operation walks and writes session files.
+    async fn on_saved<T: Send + 'static>(
+        &self,
+        op: impl FnOnce(&SessionStore, &str) -> Result<T, SavedError> + Send + 'static,
+    ) -> Result<T, SavedError> {
+        let store = self.store.clone();
         let live_id = self.transcript.session().session_id().to_owned();
-        let result = tokio::task::spawn_blocking(move || {
-            saved::set_archived(&path, &session_id, state, &live_id).map(|()| state)
-        })
-        .await
-        .unwrap_or_else(|error| Err(SavedError::Task(error.to_string())));
-        sink.emit(Event::ArchiveUpdated { id, result }, "archive-updated");
+        tokio::task::spawn_blocking(move || op(&store, &live_id))
+            .await
+            .unwrap_or_else(|error| Err(SavedError::Task(error.to_string())))
     }
 
     async fn roll_session(&mut self, sink: &dyn EventSink, old_session: ArchiveState) {
@@ -234,7 +276,8 @@ mod tests {
     use crate::engine::compaction::{AutoCompactFailures, auto_compaction_due, request_tokens};
     use crate::engine::local_testing::{
         EchoTool, dead_test_session, finished_session, greeting_title, inert_ops, mount_title,
-        next_matching, system_prompt, texts, tracked_paths, write_unreadable_instructions,
+        next_matching, session_ids, system_prompt, texts, tracked_paths,
+        write_unreadable_instructions,
     };
     use crate::engine::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, mount_tool_call_once, request_bodies,
@@ -250,9 +293,10 @@ mod tests {
     use crate::protocol::{Interaction, Op};
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;
+    use crate::session::saved::ArchiveUpdate;
+    use crate::session::store::SessionStore;
     use crate::session::store::local_testing::test_session_file;
     use crate::session::store::testing::{test_project_dir, test_store};
-    use crate::session::store::{SessionStore, delete_at};
     use crate::tool::ToolRegistry;
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
@@ -776,31 +820,104 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn reports_a_failed_write_without_switching_the_live_session() {
+        async fn archives_the_resolved_session_and_echoes_the_request() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
+                let saved_id = finished_session(&store).await;
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let live_id = engine.transcript.session().session_id().to_owned();
-                let path = dir.path().join("missing.jsonl");
+                let target = SavedTarget::Prefix(saved_id[..8].to_owned());
                 let sink = CapturingSink::default();
-                let expected =
-                    saved::set_archived(&path, "saved", ArchiveState::Archived, &live_id)
-                        .unwrap_err();
 
                 engine
-                    .set_archive(&sink, path, "saved".to_owned(), ArchiveState::Archived)
+                    .set_archive(&sink, target.clone(), ArchiveState::Archived)
                     .await;
 
                 assert_eq!(
                     sink.events(),
                     [Event::ArchiveUpdated {
-                        id: "saved".to_owned(),
-                        result: Err(expected)
+                        target,
+                        state: ArchiveState::Archived,
+                        result: Ok(ArchiveUpdate {
+                            id: saved_id.clone(),
+                            changed: true,
+                        }),
                     }]
                 );
+                assert_eq!(
+                    store.load_session_data(&saved_id).unwrap().archive_state,
+                    ArchiveState::Archived,
+                );
                 assert_eq!(engine.transcript.session().session_id(), live_id);
+            })
+            .await;
+        }
+    }
+
+    mod find_saved {
+        use super::*;
+
+        #[tokio::test]
+        async fn reports_the_saved_session_and_refuses_the_live_one() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let saved_id = finished_session(&store).await;
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let live_id = engine.transcript.session().session_id().to_owned();
+                let sink = CapturingSink::default();
+
+                engine.find_saved(&sink, saved_id.clone()).await;
+                engine.find_saved(&sink, live_id.clone()).await;
+
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Event::SavedFound(Ok(info)), Event::SavedFound(Err(err))]
+                            if info.session_id == saved_id && err.is_live()
+                    ),
+                    "{events:?}"
+                );
+            })
+            .await;
+        }
+    }
+
+    mod delete_saved {
+        use super::*;
+
+        #[tokio::test]
+        async fn deletes_a_saved_session_and_keeps_the_live_one() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let saved_id = finished_session(&store).await;
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let live_id = engine.transcript.session().session_id().to_owned();
+                let sink = CapturingSink::default();
+
+                engine.delete_saved(&sink, saved_id.clone()).await;
+                engine.delete_saved(&sink, live_id.clone()).await;
+
+                assert_eq!(
+                    sink.events(),
+                    [
+                        Event::SavedDeleted {
+                            id: saved_id,
+                            result: Ok(()),
+                        },
+                        Event::SavedDeleted {
+                            id: live_id.clone(),
+                            result: Err(SavedError::live(&live_id)),
+                        },
+                    ]
+                );
+                assert_eq!(session_ids(&store), [] as [String; 0]);
             })
             .await;
         }
@@ -979,7 +1096,7 @@ mod tests {
                 engine
                     .resume(
                         &CapturingSink::default(),
-                        ResumeTarget::Path(other_path.clone()),
+                        ResumeTarget::Id(other_id.clone()),
                     )
                     .await;
 
@@ -987,7 +1104,15 @@ mod tests {
                 let beside_file = other_path.with_file_name(&other_id);
                 assert_eq!(spill_names(&beside_file), ["call-1.txt"]);
                 engine.clear(&CapturingSink::default()).await;
-                delete_at(&other_path).unwrap();
+                let sink = CapturingSink::default();
+                engine.delete_saved(&sink, other_id.clone()).await;
+                assert_eq!(
+                    sink.events(),
+                    [Event::SavedDeleted {
+                        id: other_id.clone(),
+                        result: Ok(()),
+                    }]
+                );
 
                 assert!(!beside_file.exists(), "delete removes the spills");
                 assert!(!test_project_dir(dir.path()).join(&other_id).exists());

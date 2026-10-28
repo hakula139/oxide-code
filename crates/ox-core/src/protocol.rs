@@ -21,8 +21,8 @@ use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{Effort, ModelSpec, ResolvedModelId};
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, Mode, SessionGrant};
-use crate::session::entry::ArchiveState;
-use crate::session::saved::SavedError;
+use crate::session::entry::{ArchiveState, SessionInfo};
+use crate::session::saved::{ArchiveUpdate, SavedError};
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 use crate::tool::view::{ApprovalPreview, ToolResultView};
@@ -33,10 +33,10 @@ use crate::tool::view::{ApprovalPreview, ToolResultView};
 /// race them against its in-flight stream and tool futures with one biased `select!`.
 ///
 /// [`Self::Prompt`], [`Self::SetModel`], [`Self::Compact`], [`Self::Clear`], [`Self::Archive`],
-/// [`Self::SetArchive`], [`Self::Resume`], [`Self::Rename`], [`Self::Login`], and [`Self::Logout`]
-/// require an idle engine. Frontends wait for the preceding operation's terminal event before
-/// submitting them. An idle-only op received during another operation is dropped without a
-/// terminal event.
+/// [`Self::SetArchive`], [`Self::FindSaved`], [`Self::DeleteSaved`], [`Self::Resume`],
+/// [`Self::Rename`], [`Self::Login`], and [`Self::Logout`] require an idle engine. Frontends wait
+/// for the preceding operation's terminal event before submitting them. An idle-only op received
+/// during another operation is dropped without a terminal event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     /// Starts a turn with `text`. On a fresh session, `title` supplies the first-prompt title, so a
@@ -66,13 +66,19 @@ pub enum Op {
     Clear,
     /// Archives the live session, then continues in a fresh one like [`Self::Clear`].
     Archive,
-    /// Sets the archive state of the saved session at `path`. `session_id` identifies that file.
-    /// Completion arrives through [`Event::ArchiveUpdated`] before the next idle operation runs.
+    /// Sets the archive state of the saved session `target` names, which the engine resolves and
+    /// reports through [`Event::ArchiveUpdated`].
     SetArchive {
-        path: PathBuf,
-        session_id: String,
+        target: SavedTarget,
         state: ArchiveState,
     },
+    /// Looks up the one saved session other than the live one whose ID starts with `prefix`, as
+    /// [`SavedTarget::Prefix`] does, and reports it through [`Event::SavedFound`], so a frontend
+    /// can confirm a [`Self::DeleteSaved`] against what the engine resolved.
+    FindSaved { prefix: String },
+    /// Deletes saved session `session_id` with its artifacts, which [`Event::SavedDeleted`]
+    /// reports. The live session is refused.
+    DeleteSaved { session_id: String },
     /// Finalizes the live session and continues `target`'s saved session in place, which
     /// [`Event::SessionResumed`] reports.
     Resume { target: ResumeTarget },
@@ -115,13 +121,26 @@ impl fmt::Debug for SignInCode {
     }
 }
 
-/// The saved session an [`Op::Resume`] continues.
+/// The session an [`Op::Resume`] or `ox --resume` continues.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ResumeTarget {
-    /// The session file at this path.
+    /// The session file at this path, which need not be in the session store.
     Path(PathBuf),
-    /// The one saved session other than the live one whose id starts with this prefix, searched for
+    /// The saved session with this ID.
+    Id(String),
+    /// The one saved session other than the live one whose ID starts with this prefix, searched for
+    /// in the current project first and then in every project.
+    Prefix(String),
+}
+
+/// The saved session an [`Op::SetArchive`] acts on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum SavedTarget {
+    /// The saved session with this ID.
+    Id(String),
+    /// The one saved session other than the live one whose ID starts with this prefix, searched for
     /// in the current project first and then in every project.
     Prefix(String),
 }
@@ -196,6 +215,8 @@ pub struct UsageSnapshot {
 /// - [`Op::Compact`] ends with [`Self::SessionReady`], `TurnFailed`, or `Cancelled`.
 /// - [`Op::Resume`] and [`Op::Archive`] end with `SessionReady` or `TurnFailed`.
 /// - [`Op::SetArchive`] ends with [`Self::ArchiveUpdated`].
+/// - [`Op::FindSaved`] ends with [`Self::SavedFound`].
+/// - [`Op::DeleteSaved`] ends with [`Self::SavedDeleted`].
 /// - [`Op::Clear`] ends with `SessionReady`.
 /// - [`Op::Login`] ends with [`Self::SignedIn`], `TurnFailed`, or `Cancelled`.
 /// - [`Op::Logout`] ends with [`Self::SignedOut`] or `TurnFailed`.
@@ -268,10 +289,18 @@ pub enum Event {
     /// An [`Op::Rename`] could not record its title, so the title stays. Ends the rename as
     /// [`Self::SessionTitleUpdated`] does.
     RenameFailed(String),
-    /// The saved session's archive operation completed. Each frontend phrases the typed error.
+    /// An [`Op::SetArchive`] for `target` and `state` completed. Frontends phrase the typed error.
     ArchiveUpdated {
+        target: SavedTarget,
+        state: ArchiveState,
+        result: Result<ArchiveUpdate, SavedError>,
+    },
+    /// An [`Op::FindSaved`] resolved its prefix.
+    SavedFound(Result<Box<SessionInfo>, SavedError>),
+    /// An [`Op::DeleteSaved`] of session `id` completed.
+    SavedDeleted {
         id: String,
-        result: Result<ArchiveState, SavedError>,
+        result: Result<(), SavedError>,
     },
     /// [`Op::Clear`] or [`Op::Archive`] started session `id`. `old_session` reports the prior
     /// session's archive state for the frontend's notice.
@@ -385,11 +414,13 @@ impl TurnEnd {
     /// How `op` ended, if `event` is one of the terminal events [`Event`] lists for it.
     pub fn of(op: &Op, event: &Event) -> Option<Self> {
         match (op, event) {
-            (Op::SetArchive { .. }, Event::ArchiveUpdated { result, .. }) => Some(if result.is_ok() {
-                Self::Completed
-            } else {
-                Self::Failed
-            }),
+            (Op::SetArchive { .. }, Event::ArchiveUpdated { result, .. }) => {
+                Some(Self::settled(result.is_ok()))
+            }
+            (Op::FindSaved { .. }, Event::SavedFound(result)) => Some(Self::settled(result.is_ok())),
+            (Op::DeleteSaved { .. }, Event::SavedDeleted { result, .. }) => {
+                Some(Self::settled(result.is_ok()))
+            }
             (
                 Op::Prompt { .. }
                 | Op::Compact { .. }
@@ -419,6 +450,10 @@ impl TurnEnd {
             }
             _ => None,
         }
+    }
+
+    fn settled(ok: bool) -> Self {
+        if ok { Self::Completed } else { Self::Failed }
     }
 }
 
@@ -585,6 +620,7 @@ mod tests {
     use super::*;
     use crate::config::compaction::CompactionConfig;
     use crate::session::saved::SavedAction;
+    use crate::session::store::testing::listed_session;
 
     mod op {
         use super::*;
@@ -623,34 +659,56 @@ mod tests {
             use super::*;
 
             #[test]
-            fn saved_archive_ends_on_its_completion_result() {
-                let op = Op::SetArchive {
-                    path: "/repo/saved.jsonl".into(),
-                    session_id: "saved".to_owned(),
+            fn saved_session_ops_end_on_their_result() {
+                let failed = || SavedError::Failed {
+                    action: SavedAction::Delete,
+                    id: "saved".to_owned(),
+                    cause: "disk full".to_owned(),
+                };
+                let archive = Op::SetArchive {
+                    target: SavedTarget::Prefix("saved".to_owned()),
                     state: ArchiveState::Archived,
                 };
+                let archived = |result| Event::ArchiveUpdated {
+                    target: SavedTarget::Prefix("saved".to_owned()),
+                    state: ArchiveState::Archived,
+                    result,
+                };
+                let find = Op::FindSaved {
+                    prefix: "saved".to_owned(),
+                };
+                let delete = Op::DeleteSaved {
+                    session_id: "saved".to_owned(),
+                };
+                let deleted = |result| Event::SavedDeleted {
+                    id: "saved".to_owned(),
+                    result,
+                };
+                let update = ArchiveUpdate {
+                    id: "saved".to_owned(),
+                    changed: true,
+                };
 
-                for (result, expected) in [
-                    (Ok(ArchiveState::Archived), TurnEnd::Completed),
+                for (op, event, end) in [
+                    (&archive, archived(Ok(update)), Some(TurnEnd::Completed)),
+                    (&archive, archived(Err(failed())), Some(TurnEnd::Failed)),
+                    (&archive, deleted(Ok(())), None),
                     (
-                        Err(SavedError::Failed {
-                            action: SavedAction::Archive,
-                            id: "saved".to_owned(),
-                            cause: "disk full".to_owned(),
-                        }),
-                        TurnEnd::Failed,
+                        &find,
+                        Event::SavedFound(Ok(Box::new(listed_session("saved")))),
+                        Some(TurnEnd::Completed),
                     ),
+                    (
+                        &find,
+                        Event::SavedFound(Err(failed())),
+                        Some(TurnEnd::Failed),
+                    ),
+                    (&find, deleted(Ok(())), None),
+                    (&delete, deleted(Ok(())), Some(TurnEnd::Completed)),
+                    (&delete, deleted(Err(failed())), Some(TurnEnd::Failed)),
+                    (&delete, Event::SavedFound(Err(failed())), None),
                 ] {
-                    assert_eq!(
-                        TurnEnd::of(
-                            &op,
-                            &Event::ArchiveUpdated {
-                                id: "saved".to_owned(),
-                                result
-                            }
-                        ),
-                        Some(expected)
-                    );
+                    assert_eq!(TurnEnd::of(op, &event), end, "{op:?} on {event:?}");
                 }
             }
 

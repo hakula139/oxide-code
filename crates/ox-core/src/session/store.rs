@@ -119,6 +119,32 @@ impl SessionStore {
         create_written(&path, |mut file| file.write_all(&buf))?;
         Ok(SessionWriter { path })
     }
+
+    /// The file of session `session_id`, found by the ID in its name in any project.
+    pub(crate) fn find_session_path(&self, session_id: &str) -> Result<PathBuf> {
+        for entry in fs::read_dir(&self.sessions_dir)
+            .with_context(|| format!("failed to read {}", self.sessions_dir.display()))?
+        {
+            let dir = entry?.path();
+            if dir.is_dir()
+                && let Some(path) = find_session_in(&dir, session_id)
+            {
+                return Ok(path);
+            }
+        }
+        bail!("session not found: {session_id}")
+    }
+
+    /// Sets the archive state of session `session_id`, keeping its last-active time.
+    pub(super) fn set_archived(&self, session_id: &str, state: ArchiveState) -> Result<()> {
+        let archived = state == ArchiveState::Archived;
+        set_archived_at(&self.find_session_path(session_id)?, archived)
+    }
+
+    /// Deletes session `session_id` with its [`artifact_dir`].
+    pub(super) fn delete(&self, session_id: &str) -> Result<()> {
+        delete_at(&self.find_session_path(session_id)?)
+    }
 }
 
 // ── Path-Keyed Primitives ──
@@ -171,7 +197,7 @@ pub(crate) fn artifact_dir(session_file: &Path, session_id: &str) -> PathBuf {
 
 /// Removes the session file at `path` and the session's [`artifact_dir`], the directory first so a
 /// failure leaves the session listed for another try.
-pub(crate) fn delete_at(path: &Path) -> Result<()> {
+fn delete_at(path: &Path) -> Result<()> {
     let session_id = read_session_id_from_path(path)?;
     let artifact_dir = artifact_dir(path, &session_id);
     if let Err(e) = fs::remove_dir_all(&artifact_dir)
@@ -190,7 +216,7 @@ pub(crate) fn delete_at(path: &Path) -> Result<()> {
 
 /// Sets the archive state of the session file at `path`. The file keeps its mtime, since listings
 /// order sessions by activity and toggling the state is not activity.
-pub(super) fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
+fn set_archived_at(path: &Path, archived: bool) -> Result<()> {
     let _lock = lock_writer(path)?;
     let file = open_append_file(path)?;
     let modified = file
@@ -228,6 +254,15 @@ fn session_filename(session_id: &str, created_at: OffsetDateTime) -> String {
 fn file_session_id(path: &Path) -> Option<&str> {
     let stem = path.file_name()?.to_str()?.strip_suffix(".jsonl")?;
     stem.split_once('-').map(|(_, id)| id)
+}
+
+/// The file in `dir` whose name carries `session_id`.
+fn find_session_in(dir: &Path, session_id: &str) -> Option<PathBuf> {
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| file_session_id(path) == Some(session_id))
 }
 
 // ── SessionWriter ──
