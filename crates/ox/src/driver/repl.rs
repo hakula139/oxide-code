@@ -2,7 +2,6 @@
 
 use std::io::{self, Write};
 use std::path::Path;
-use std::pin::pin;
 
 use anyhow::{Context as _, Result, bail};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader};
@@ -12,80 +11,79 @@ use ox_core::engine::{Engine, EngineHandle};
 use ox_core::permission::rule::Rule;
 use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::notice::ENGINE_STOPPED;
-use ox_core::protocol::{ApprovalDecision, Event, EventSink, Op, TurnEnd};
+use ox_core::protocol::{ApprovalDecision, Event, Op, TurnEnd};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::text::escape_hidden;
 
-use super::stdio::{Approver, Renderer, StdioSink, render_op, render_queued};
+use super::stdio::{Approver, OpEnd, Output, OutputFormat, run_op};
 use super::{Exit, Shutdown, decode_input, shutdown_signal};
 
 /// The command `/help`, which the REPL answers itself.
 const HELP: &str = "help";
 
-/// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session.
-/// EOF after an operation failed, a command was rejected, or output failed exits with failure. An
-/// attended `engine` asks its approvals on stdin, while an unattended one asks none, so a piped
-/// line is never taken as an answer. In an attended run, SIGINT interrupts the running operation or
-/// discards the line at the prompt, as shells do. Every other signal ends the run. `first`, when
-/// given, runs as the first input line.
+/// Reads prompts and slash commands until EOF, `/exit`, a signal, or stdout's reader going away,
+/// then finalizes the session. EOF after an operation failed, a command was rejected, or output
+/// failed exits with failure, as a lost stdout always does. An attended `engine` asks its approvals
+/// on stdin, while an unattended one asks none, so a piped line is never taken as an answer. In an
+/// attended run, SIGINT interrupts the running operation or discards the line at the prompt, as
+/// shells do. Every other signal ends the run. `first`, when given, runs as the first input line.
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,
     first: Option<String>,
 ) -> Result<Exit> {
-    let sink = StdioSink::new(show_thinking);
     let attended = engine.attended();
-    let stdin = BufReader::new(tokio::io::stdin());
     let project_root = engine.project_root().to_owned();
     let handle = engine.spawn();
-    let signal = async || {
-        let caught = shutdown_signal().await;
-        let output = sink.break_line(&mut io::stdout(), &mut io::stderr());
-        (caught, output.map_err(Into::into))
-    };
-    let prompter = Prompter::new(stdin, io::stderr());
+    let mut output = Output::new(
+        OutputFormat::Text,
+        show_thinking,
+        io::stdout(),
+        io::stderr(),
+    );
+    let prompter = Prompter::new(BufReader::new(tokio::io::stdin()), io::stderr());
     drive(
         handle,
         &project_root,
-        &sink,
+        &mut output,
         first,
         prompter,
         attended,
-        signal,
+        &mut shutdown_signal,
     )
     .await
 }
 
-/// Runs the REPL over `first`, then `prompter`'s input. Each `signal` call waits for the next
-/// signal and reports whether its line break succeeded.
-async fn drive<R, W>(
+/// Runs the REPL over `first`, then `prompter`'s input. Each `signal` call awaits the next signal.
+async fn drive<R, W, O, E>(
     mut handle: EngineHandle,
     project_root: &Path,
-    sink: &dyn EventSink,
+    output: &mut Output<O, E>,
     mut first: Option<String>,
     mut prompter: Prompter<R, W>,
     attended: bool,
-    mut signal: impl AsyncFnMut() -> (Shutdown, Result<()>),
+    signal: &mut impl AsyncFnMut() -> Shutdown,
 ) -> Result<Exit>
 where
     R: AsyncBufRead + Unpin,
     W: Write,
+    O: Write,
+    E: Write,
 {
-    let renderer = Renderer::new(sink);
     let mut stopped = None;
     let mut failed = false;
 
     let result: Result<()> = async {
-        'repl: loop {
-            render_queued(&mut handle.events, &renderer);
+        loop {
+            output.render_queued(&mut handle.events);
             let line = if let Some(line) = first.take() {
                 line
             } else {
-                renderer.output(prompter.prompt("> ").map_err(Into::into));
+                output.record(prompter.prompt("> ").map_err(Into::into));
                 let line = tokio::select! {
                     line = prompter.next_line() => line?,
-                    (caught, output) = signal() => {
-                        renderer.output(output);
+                    caught = signal() => {
+                        output.break_line();
                         if attended && caught == Shutdown::Interrupt {
                             continue;
                         }
@@ -105,13 +103,13 @@ where
             }
             let op = match command::parse_slash(input) {
                 Some(parsed) if parsed.name == HELP => {
-                    renderer.render(Event::Notice(repl_help()));
+                    output.render(Event::Notice(repl_help()));
                     continue;
                 }
                 Some(parsed) => match command_op(&parsed, project_root) {
                     Ok(op) => op,
                     Err(message) => {
-                        renderer.render(Event::Error(message));
+                        output.render(Event::Error(message));
                         failed = true;
                         continue;
                     }
@@ -122,33 +120,27 @@ where
                 break;
             }
 
-            // A send fails only once the engine has stopped, which `render_op` then reports.
-            _ = handle.ops.send(op.clone()).await;
-            let mut operation = pin!(render_op(
+            let approver = attended.then_some(&mut prompter);
+            match run_op(
                 &mut handle.events,
-                &renderer,
                 &handle.ops,
-                &op,
-                attended.then_some(&mut prompter)
-            ));
-            let end = loop {
-                tokio::select! {
-                    end = &mut operation => break end,
-                    (caught, output) = signal() => {
-                        renderer.output(output);
-                        if !(attended && caught == Shutdown::Interrupt) {
-                            stopped = Some(caught);
-                            break 'repl;
-                        }
-                        // A send fails only once the engine has stopped, which `operation` reports.
-                        _ = handle.ops.send(Op::Interrupt).await;
-                    }
+                output,
+                signal,
+                op,
+                approver,
+            )
+            .await
+            {
+                OpEnd::Ended(TurnEnd::Failed) => failed = true,
+                OpEnd::Ended(_) => {}
+                OpEnd::EngineStopped => bail!(ENGINE_STOPPED),
+                OpEnd::Signal(caught) => {
+                    stopped = Some(caught);
+                    break;
                 }
-            };
-            match end {
-                Some(TurnEnd::Failed) => failed = true,
-                Some(_) => {}
-                None => bail!(ENGINE_STOPPED),
+            }
+            if output.stdout_lost() {
+                break;
             }
         }
         Ok(())
@@ -156,13 +148,15 @@ where
     .await;
 
     let failure = handle.shutdown().await?;
-    renderer.session_write_error(failure.as_deref());
+    if let Some(failure) = &failure {
+        output.session_write_error(failure);
+    }
     failed |= failure.is_some();
     result?;
     if let Some(signal) = stopped {
         return Ok(Exit::Signal(signal));
     }
-    renderer.finish().context("failed to print output")?;
+    output.finish().context("failed to print output")?;
     Ok(if failed { Exit::Failure } else { Exit::Success })
 }
 
@@ -355,7 +349,6 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
 mod tests {
     use std::fs;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll};
 
     use indoc::{formatdoc, indoc};
@@ -370,85 +363,26 @@ mod tests {
     };
     use ox_core::permission::testing::exec_grant;
     use ox_core::permission::{Mode, PermissionClass, Tier};
-    use ox_core::protocol::testing::CapturingSink;
     use ox_core::session::store::testing::{saved_message_count, saved_messages, test_store};
     use ox_core::tool::testing::{bash_preview, bash_registry};
     use ox_core::tool::view::{DiffChunk, NumberedLine};
+    use ox_tui::glyphs::INTERRUPTED_MARKER;
 
     use super::*;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Failure {
-        Write(&'static str),
-        Flush,
-    }
-
-    impl Failure {
-        fn message(self) -> &'static str {
-            match self {
-                Self::Write(_) => "lost prompt write",
-                Self::Flush => "lost prompt flush",
-            }
-        }
-    }
-
-    struct FailingOutput {
-        output: Vec<u8>,
-        failure: Option<Failure>,
-    }
-
-    impl FailingOutput {
-        fn new(failure: Failure) -> Self {
-            Self {
-                output: Vec::new(),
-                failure: Some(failure),
-            }
-        }
-    }
-
-    impl Write for FailingOutput {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            if let Some(Failure::Write(text)) = self.failure
-                && buf.windows(text.len()).any(|part| part == text.as_bytes())
-            {
-                self.failure = None;
-                return Err(io::Error::other("lost prompt write"));
-            }
-            self.output.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            if self.failure == Some(Failure::Flush) {
-                self.failure = None;
-                return Err(io::Error::other("lost prompt flush"));
-            }
-            Ok(())
-        }
-    }
+    use crate::driver::testing::{ClosedPipe, FailingWriter, Failure, Screen};
 
     mod drive {
         use super::*;
 
-        async fn no_signal() -> (Shutdown, Result<()>) {
+        async fn no_signal() -> Shutdown {
             std::future::pending().await
         }
 
-        #[derive(Default)]
-        struct LostToken {
-            events: CapturingSink,
-            failed: AtomicBool,
-        }
-
-        impl EventSink for LostToken {
-            fn send(&self, event: Event) -> Result<()> {
-                if matches!(event, Event::StreamToken(_))
-                    && !self.failed.swap(true, Ordering::Relaxed)
-                {
-                    bail!("lost reply token");
-                }
-                self.events.send(event)
-            }
+        /// A text output with the screens its stdout and stderr show.
+        fn output() -> (Output<Screen, Screen>, Screen, Screen) {
+            let (stdout, stderr) = (Screen::default(), Screen::default());
+            let output = Output::new(OutputFormat::Text, false, stdout.clone(), stderr.clone());
+            (output, stdout, stderr)
         }
 
         #[tokio::test]
@@ -458,22 +392,23 @@ mod tests {
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let sink = CapturingSink::default();
+                let (mut output, stdout, _) = output();
                 let input: &[u8] = b"\n   \nhello\n";
 
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &sink,
+                    &mut output,
                     None,
                     Prompter::new(input, io::sink()),
                     true,
-                    no_signal,
+                    &mut no_signal,
                 ))
                 .await
                 .unwrap();
 
                 assert_eq!(exit, Exit::Success);
+                assert_eq!(stdout.text(), "reply\n");
                 let requests = request_bodies(&server).await;
                 assert_eq!(requests.len(), 1, "blank lines never reach the model");
                 let last = requests[0]["messages"].as_array().unwrap().last().unwrap();
@@ -485,28 +420,26 @@ mod tests {
         #[tokio::test]
         async fn exits_with_failure_when_the_session_cannot_be_saved() {
             let failure = "session writer task has stopped";
-            let sink = CapturingSink::default();
+            let (mut output, _, stderr) = output();
             let input: &[u8] = b"hello\n";
             let handle = unsaved_session_handle(failure);
 
             let exit = Box::pin(drive(
                 handle,
                 Path::new("/repo"),
-                &sink,
+                &mut output,
                 None,
                 Prompter::new(input, io::sink()),
                 true,
-                no_signal,
+                &mut no_signal,
             ))
             .await
             .unwrap();
 
             assert_eq!(exit, Exit::Failure);
-            assert!(
-                sink.events()
-                    .contains(&Event::Error(format!("Session write failed: {failure}"))),
-                "the failure reaches the sink: {:?}",
-                sink.events(),
+            assert_eq!(
+                stderr.text(),
+                format!("Error: Session write failed: {failure}\n")
             );
         }
 
@@ -523,11 +456,11 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &CapturingSink::default(),
+                    &mut output().0,
                     first,
                     Prompter::new(input, io::sink()),
                     true,
-                    no_signal,
+                    &mut no_signal,
                 ))
                 .await
                 .unwrap();
@@ -556,18 +489,18 @@ mod tests {
                     let store = test_store(dir.path());
                     let engine = engine(server.uri(), &store, dir.path()).await;
                     let session_id = engine.session_id();
-                    let sink = CapturingSink::default();
-                    let mut out = FailingOutput::new(failure);
+                    let (mut output, stdout, _) = output();
+                    let mut out = FailingWriter::new(failure);
                     let input: &[u8] = b"hello\n/exit\n";
 
                     let result = Box::pin(drive(
                         engine.spawn(),
                         dir.path(),
-                        &sink,
+                        &mut output,
                         None,
                         Prompter::new(input, &mut out),
                         true,
-                        no_signal,
+                        &mut no_signal,
                     ))
                     .await;
                     assert_eq!(
@@ -576,15 +509,11 @@ mod tests {
                         "{failure:?}",
                     );
 
-                    assert_eq!(out.failure, None, "{failure:?}");
-                    assert!(out.output.ends_with(b"> "), "{failure:?}: {:?}", out.output);
-                    assert!(
-                        sink.events()
-                            .contains(&Event::StreamToken("reply".to_owned()))
-                    );
-                    let text: Vec<String> = saved_messages(&store, &session_id)
+                    assert!(out.screen.text().ends_with("> "), "{failure:?}");
+                    assert_eq!(stdout.text(), "reply\n", "{failure:?}");
+                    let text: Vec<serde_json::Value> = saved_messages(&store, &session_id)
                         .iter()
-                        .map(|message| message["content"][0]["text"].as_str().unwrap().to_owned())
+                        .map(|message| message["content"][0]["text"].clone())
                         .collect();
                     assert_eq!(text, ["hello", "reply"], "{failure:?}");
                 }
@@ -609,7 +538,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id();
-                let sink = CapturingSink::default();
+                let (mut output, stdout, stderr) = output();
                 let input: &[u8] = indoc! {b"
                     first
                     /resume zzzz
@@ -619,11 +548,11 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &sink,
+                    &mut output,
                     None,
                     Prompter::new(input, io::sink()),
                     true,
-                    no_signal,
+                    &mut no_signal,
                 ))
                 .await
                 .unwrap();
@@ -633,33 +562,18 @@ mod tests {
                 assert_eq!(requests.len(), 2, "/resume must not reach the model");
                 let last = requests[1]["messages"].as_array().unwrap().last().unwrap();
                 assert_eq!(last["content"][0]["text"], "/literal");
-                let reports: Vec<String> = sink
-                    .events()
-                    .into_iter()
-                    .filter_map(|event| match event {
-                        Event::Notice(msg) | Event::Error(msg) | Event::TurnFailed(msg) => {
-                            Some(msg)
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                assert_eq!(reports.len(), 3, "{reports:?}");
                 assert_eq!(
-                    reports[0],
-                    format!(
-                        "Skipped instruction file {}: stream did not contain valid UTF-8",
+                    stderr.text(),
+                    formatdoc! {"
+                        Skipped instruction file {}: stream did not contain valid UTF-8
+                        Error: Anthropic API error (HTTP 400 Bad Request)
+                        Error: Resume failed (still on session {}): no session matching `zzzz`
+                        ",
                         instructions.display(),
-                    ),
-                );
-                assert!(reports[1].contains("HTTP 400"), "{reports:?}");
-                assert_eq!(
-                    reports[2],
-                    format!(
-                        "Resume failed (still on session {}): no session matching `zzzz`",
                         &session_id[..8],
-                    ),
+                    },
                 );
-                assert!(matches!(sink.events().last(), Some(Event::TurnComplete)));
+                assert_eq!(stdout.text(), "reply\n");
                 assert_eq!(
                     saved_message_count(&store, &session_id),
                     3,
@@ -678,35 +592,28 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id();
-                let sink = LostToken::default();
+                let failure = Failure::Write("reply");
+                let stdout = FailingWriter::new(failure);
+                let screen = stdout.screen.clone();
+                let mut output = Output::new(OutputFormat::Text, false, stdout, io::sink());
                 let input: &[u8] = b"first\nsecond\n";
 
                 let result = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &sink,
+                    &mut output,
                     None,
                     Prompter::new(input, io::sink()),
                     true,
-                    no_signal,
+                    &mut no_signal,
                 ))
                 .await;
                 assert_eq!(
                     format!("{:#}", result.unwrap_err()),
-                    "failed to print output: lost reply token",
+                    format!("failed to print output: {}", failure.message()),
                 );
 
-                let replies: Vec<String> = sink
-                    .events
-                    .events()
-                    .into_iter()
-                    .filter_map(|event| match event {
-                        Event::StreamToken(text) => Some(text),
-                        _ => None,
-                    })
-                    .collect();
-                assert_eq!(replies, ["reply"]);
-                let messages = saved_messages(&store, &session_id);
+                assert_eq!(screen.text(), "reply\n", "only the second reply shows");
                 let expected: Vec<serde_json::Value> = [
                     ("user", "first"),
                     ("assistant", "reply"),
@@ -721,7 +628,7 @@ mod tests {
                     })
                 })
                 .collect();
-                assert_eq!(messages, expected);
+                assert_eq!(saved_messages(&store, &session_id), expected);
             })
             .await;
         }
@@ -734,7 +641,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let first_id = engine.session_id();
-                let sink = CapturingSink::default();
+                let (mut output, _, stderr) = output();
                 let log = (1..=150)
                     .map(|n| format!("request {n} served in 12 ms."))
                     .collect::<Vec<_>>()
@@ -754,11 +661,11 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &sink,
+                    &mut output,
                     None,
                     Prompter::new(input.as_bytes(), io::sink()),
                     true,
-                    no_signal,
+                    &mut no_signal,
                 ))
                 .await
                 .unwrap();
@@ -775,36 +682,20 @@ mod tests {
                     "{}",
                     requests[2]
                 );
-                let confirmations: Vec<String> = sink
-                    .events()
-                    .into_iter()
-                    .filter_map(|event| match event {
-                        Event::SessionCompacted { instructions, .. } => {
-                            Some(format!("compacted with {instructions:?}"))
-                        }
-                        Event::SessionTitleUpdated { title, .. } => {
-                            Some(format!("renamed to {title}"))
-                        }
-                        Event::ConfigChanged { notice, .. } => Some(notice),
-                        Event::SessionRolled { .. } => Some("rolled".to_owned()),
-                        Event::SessionResumed { id, title, .. } => {
-                            Some(format!("resumed {id} titled {title:?}"))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                let resumed = format!("resumed {first_id} titled Some(\"Fix login\")");
+                let stderr = stderr.text();
+                let confirmations: Vec<&str> = stderr.lines().collect();
+                let [compacted, renamed, model, effort, rolled, resumed] = confirmations[..] else {
+                    panic!("one confirmation per command: {stderr}");
+                };
+                assert!(compacted.contains("focus on login"), "{compacted}");
+                assert_eq!(renamed, "Renamed the session to Fix login");
                 assert_eq!(
-                    confirmations,
-                    [
-                        "compacted with Some(\"focus on login\")",
-                        "renamed to Fix login",
-                        "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort medium",
-                        "Effort set to low",
-                        "rolled",
-                        resumed.as_str(),
-                    ],
+                    model,
+                    "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort medium",
                 );
+                assert_eq!(effort, "Effort set to low");
+                assert!(rolled.starts_with("Started session "), "{rolled}");
+                assert_eq!(resumed, format!("Resumed session {prefix}: Fix login"));
             })
             .await;
         }
@@ -822,11 +713,11 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &CapturingSink::default(),
+                    &mut output().0,
                     None,
                     Prompter::new(input, io::sink()),
                     true,
-                    no_signal,
+                    &mut no_signal,
                 ))
                 .await
                 .unwrap();
@@ -851,7 +742,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let sink = CapturingSink::default();
+                let (mut output, _, stderr) = output();
                 let input: &[u8] = indoc! {b"
                     /init
                     /init CLAUDE.md
@@ -860,28 +751,20 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &sink,
+                    &mut output,
                     None,
                     Prompter::new(input, io::sink()),
                     true,
-                    no_signal,
+                    &mut no_signal,
                 ))
                 .await
                 .unwrap();
 
                 assert_eq!(exit, Exit::Failure);
-                let errors: Vec<String> = sink
-                    .events()
-                    .into_iter()
-                    .filter_map(|event| match event {
-                        Event::Error(msg) => Some(msg),
-                        _ => None,
-                    })
-                    .collect();
                 assert_eq!(
-                    errors,
-                    ["/init: This project has no AGENTS.md or CLAUDE.md. \
-                      Run `/init AGENTS.md` or `/init CLAUDE.md` to create one."],
+                    stderr.text(),
+                    "Error: /init: This project has no AGENTS.md or CLAUDE.md. \
+                     Run `/init AGENTS.md` or `/init CLAUDE.md` to create one.\n",
                 );
                 let requests = request_bodies(&server).await;
                 assert_eq!(requests.len(), 1, "the bare /init must not reach the model");
@@ -916,11 +799,11 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &CapturingSink::default(),
+                    &mut output().0,
                     None,
                     Prompter::new(input, io::sink()),
                     true,
-                    no_signal,
+                    &mut no_signal,
                 ))
                 .await
                 .unwrap();
@@ -937,7 +820,7 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let sink = CapturingSink::default();
+                let (mut output, _, stderr) = output();
                 let input: &[u8] = indoc! {b"
                     /effort turbo
                     /model
@@ -947,37 +830,31 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &sink,
+                    &mut output,
                     None,
                     Prompter::new(input, io::sink()),
                     true,
-                    no_signal,
+                    &mut no_signal,
                 ))
                 .await
                 .unwrap();
 
                 assert_eq!(exit, Exit::Failure);
                 assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
-                let reports: Vec<String> = sink
-                    .events()
-                    .into_iter()
-                    .filter_map(|event| match event {
-                        Event::Error(msg) => Some(msg),
-                        _ => None,
-                    })
-                    .collect();
+                let stderr = stderr.text();
+                let reports: Vec<&str> = stderr.lines().collect();
                 assert_eq!(reports.len(), 3, "{reports:?}");
                 assert!(
-                    reports[0].starts_with("/effort: Unknown effort: `turbo`."),
+                    reports[0].starts_with("Error: /effort: Unknown effort: `turbo`."),
                     "{reports:?}"
                 );
                 assert_eq!(
                     reports[1],
-                    "/model: Missing model ID. Usage: `/model <id>`."
+                    "Error: /model: Missing model ID. Usage: `/model <id>`."
                 );
                 assert_eq!(
                     reports[2],
-                    "`/theme` is not a REPL command. \
+                    "Error: `/theme` is not a REPL command. \
                      Available: /clear (new, reset), /compact, /effort, /exit (quit), /help, \
                      /init, /mode, /model, /rename, /resume (continue). \
                      Use `//theme` to send the literal text.",
@@ -992,30 +869,28 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let sink = CapturingSink::default();
+                let (mut output, stdout, stderr) = output();
 
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &sink,
+                    &mut output,
                     None,
                     Prompter::new(&b"/help\n"[..], io::sink()),
                     true,
-                    no_signal,
+                    &mut no_signal,
                 ))
                 .await
                 .unwrap();
 
                 assert_eq!(exit, Exit::Success);
                 assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
+                assert_eq!(stdout.text(), "");
                 assert_eq!(
-                    sink.events(),
-                    [Event::Notice(
-                        "Commands: /clear (new, reset), /compact, /effort, /exit (quit), /help, \
-                         /init, /mode, /model, /rename, /resume (continue). \
-                         Use `//text` to send a literal slash."
-                            .to_owned()
-                    )],
+                    stderr.text(),
+                    "Commands: /clear (new, reset), /compact, /effort, /exit (quit), /help, \
+                     /init, /mode, /model, /rename, /resume (continue). \
+                     Use `//text` to send a literal slash.\n",
                 );
             })
             .await;
@@ -1040,11 +915,11 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &CapturingSink::default(),
+                    &mut output().0,
                     None,
                     Prompter::new(input.as_bytes(), io::sink()),
                     true,
-                    no_signal,
+                    &mut no_signal,
                 ))
                 .await
                 .unwrap();
@@ -1079,18 +954,18 @@ mod tests {
                         .await
                         .with_tools(bash_registry(Vec::new()));
                     let session_id = engine.session_id();
-                    let sink = CapturingSink::default();
-                    let mut out = FailingOutput::new(failure);
+                    let (mut output, _, stderr) = output();
+                    let mut out = FailingWriter::new(failure);
                     let input: &[u8] = b"/exit\n";
 
                     let result = Box::pin(drive(
                         engine.spawn(),
                         dir.path(),
-                        &sink,
+                        &mut output,
                         Some("push it".to_owned()),
                         Prompter::new(input, &mut out),
                         true,
-                        no_signal,
+                        &mut no_signal,
                     ))
                     .await;
                     assert_eq!(
@@ -1099,22 +974,25 @@ mod tests {
                         "{failure:?}",
                     );
 
-                    assert!(out.output.ends_with(b"> "), "{failure:?}: {:?}", out.output);
-                    assert!(sink.events().contains(&Event::Cancelled), "{failure:?}");
-                    let approved: Vec<Event> = sink
-                        .events()
-                        .into_iter()
-                        .filter(|event| match event {
-                            Event::ToolCallEnd(result) => !result.is_error,
-                            Event::SessionRulesUpdated(rules) => !rules.is_empty(),
-                            _ => false,
-                        })
-                        .collect();
-                    assert_eq!(approved, [], "{failure:?}");
+                    assert!(out.screen.text().ends_with("> "), "{failure:?}");
+                    assert!(
+                        stderr.text().ends_with(&format!("{INTERRUPTED_MARKER}\n")),
+                        "{failure:?}: {}",
+                        stderr.text(),
+                    );
                     assert_eq!(request_bodies(&server).await.len(), 1, "{failure:?}");
                     let messages = saved_messages(&store, &session_id);
                     assert_eq!(messages[0]["content"][0]["text"], "push it", "{failure:?}");
                     assert_eq!(messages[1]["content"][0]["id"], "call-1", "{failure:?}");
+                    let results: Vec<&serde_json::Value> = messages
+                        .iter()
+                        .flat_map(|message| message["content"].as_array().unwrap())
+                        .filter(|block| block["type"] == "tool_result")
+                        .collect();
+                    assert!(
+                        results.iter().all(|result| result["is_error"] == true),
+                        "{failure:?}: the call never ran: {results:?}",
+                    );
                     assert_eq!(
                         messages.last().unwrap()["content"][0]["text"],
                         "[Request interrupted by user]",
@@ -1135,20 +1013,21 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id();
-                let sink = LostToken::default();
+                let stdout = Screen::default();
+                let failure = Failure::Write("\n");
+                let stderr = FailingWriter::new(failure);
+                let screen = stderr.screen.clone();
+                let mut output = Output::new(OutputFormat::Text, false, stdout.clone(), stderr);
                 let input: &[u8] = indoc! {b"
                     first
                     second
                 "};
                 let mut interrupted = false;
-                let signal = async || {
+                let mut signal = async || {
                     if !interrupted {
                         until_requested(&server, 1).await;
                         interrupted = true;
-                        return (
-                            Shutdown::Interrupt,
-                            Err(anyhow::anyhow!("lost signal line break")),
-                        );
+                        return Shutdown::Interrupt;
                     }
                     std::future::pending().await
                 };
@@ -1156,24 +1035,19 @@ mod tests {
                 let result = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &sink,
+                    &mut output,
                     None,
                     Prompter::new(input, io::sink()),
                     true,
-                    signal,
+                    &mut signal,
                 ))
                 .await;
                 assert_eq!(
                     format!("{:#}", result.unwrap_err()),
-                    "failed to print output: lost signal line break"
+                    format!("failed to print output: {}", failure.message()),
                 );
-                let ends: Vec<Event> = sink
-                    .events
-                    .events()
-                    .into_iter()
-                    .filter(|event| matches!(event, Event::Cancelled | Event::TurnComplete))
-                    .collect();
-                assert_eq!(ends, [Event::Cancelled, Event::TurnComplete]);
+                assert_eq!(screen.text(), format!("{INTERRUPTED_MARKER}\n"));
+                assert_eq!(stdout.text(), "reply\n");
                 let requests = request_bodies(&server).await;
                 assert_eq!(requests.len(), 2, "{requests:?}");
                 let last = requests[1]["messages"].as_array().unwrap().last().unwrap();
@@ -1192,24 +1066,24 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let (writer, reader) = tokio::io::duplex(64);
                 let mut writer = Some(writer);
-                let signal = async || {
+                let mut signal = async || {
                     let Some(mut writer) = writer.take() else {
                         return std::future::pending().await;
                     };
                     tokio::io::AsyncWriteExt::write_all(&mut writer, b"hello\n")
                         .await
                         .unwrap();
-                    (Shutdown::Interrupt, Ok(()))
+                    Shutdown::Interrupt
                 };
 
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &CapturingSink::default(),
+                    &mut output().0,
                     None,
                     Prompter::new(BufReader::new(reader), io::sink()),
                     true,
-                    signal,
+                    &mut signal,
                 ))
                 .await
                 .unwrap();
@@ -1231,27 +1105,19 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let input: &[u8] = b"first\n";
-                let mut interrupted = false;
-                let signal = async || {
-                    if interrupted {
-                        return std::future::pending().await;
-                    }
+                let mut signal = async || {
                     until_requested(&server, 1).await;
-                    interrupted = true;
-                    (
-                        Shutdown::Interrupt,
-                        Err(anyhow::anyhow!("lost signal line break")),
-                    )
+                    Shutdown::Interrupt
                 };
 
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &CapturingSink::default(),
+                    &mut output().0,
                     None,
                     Prompter::new(input, io::sink()),
                     false,
-                    signal,
+                    &mut signal,
                 ))
                 .await
                 .unwrap();
@@ -1269,16 +1135,51 @@ mod tests {
             let result = Box::pin(drive(
                 panicked_engine(),
                 Path::new("/repo"),
-                &CapturingSink::default(),
+                &mut output().0,
                 None,
-                Prompter::new(input, FailingOutput::new(Failure::Write("> "))),
+                Prompter::new(input, FailingWriter::new(Failure::Write("> "))),
                 true,
-                no_signal,
+                &mut no_signal,
             ))
             .await;
 
             let panic = result.unwrap_err().downcast::<EnginePanic>().unwrap();
             assert_eq!(panic_message(panic), "engine bug");
+        }
+
+        #[tokio::test]
+        async fn stops_reading_once_stdout_is_gone() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let mut output = Output::new(OutputFormat::Text, false, ClosedPipe, io::sink());
+                let input: &[u8] = b"first\nsecond\n";
+
+                let result = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &mut output,
+                    None,
+                    Prompter::new(input, io::sink()),
+                    true,
+                    &mut no_signal,
+                ))
+                .await;
+
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error
+                        .root_cause()
+                        .downcast_ref::<io::Error>()
+                        .map(io::Error::kind),
+                    Some(io::ErrorKind::BrokenPipe),
+                    "{error:#}",
+                );
+                assert_eq!(request_bodies(&server).await.len(), 1, "second never runs");
+            })
+            .await;
         }
     }
 
@@ -1430,7 +1331,7 @@ mod tests {
                 ] {
                     for input in ["y\n", "a\n\n"] {
                         let mut prompter =
-                            Prompter::new(input.as_bytes(), FailingOutput::new(failure));
+                            Prompter::new(input.as_bytes(), FailingWriter::new(failure));
 
                         let decision = prompter
                             .decide(
@@ -1462,7 +1363,7 @@ mod tests {
                     (Failure::Write("Rule rejected"), "a\ncargo build\ny\n", "y"),
                     (Failure::Write("Answer with"), "maybe\ny\n", "y"),
                 ] {
-                    let mut prompter = Prompter::new(input.as_bytes(), FailingOutput::new(failure));
+                    let mut prompter = Prompter::new(input.as_bytes(), FailingWriter::new(failure));
 
                     let result = prompter
                         .decide(
@@ -1515,7 +1416,7 @@ mod tests {
                 ];
 
                 for (input, failure) in cases {
-                    let mut prompter = Prompter::new(input, FailingOutput::new(failure));
+                    let mut prompter = Prompter::new(input, FailingWriter::new(failure));
 
                     let result = prompter.ask("Answer: ").await;
 

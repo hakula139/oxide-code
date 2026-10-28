@@ -37,8 +37,7 @@ use ox_tui::slash::is_built_in;
 use ox_tui::terminal;
 use ox_tui::theme::resolve_theme;
 
-use self::driver::Exit;
-use self::driver::headless::OutputFormat;
+use self::driver::{Exit, OutputFormat};
 
 /// The arguments that start or resume a conversation, none of which `--list`, `--archived`, or
 /// `--limit` can accompany.

@@ -7,6 +7,8 @@ mod stdio;
 
 use std::process::ExitCode;
 
+pub(crate) use self::stdio::OutputFormat;
+
 // ── Input ──
 
 /// Decodes stdin bytes, replacing each invalid sequence with U+FFFD, so one stray byte does not
@@ -137,7 +139,61 @@ pub(crate) mod testing {
         }
     }
 
+    /// How a [`FailingWriter`] fails, once.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Failure {
+        /// The first write that contains the text.
+        Write(&'static str),
+        /// The first flush.
+        Flush,
+    }
+
+    impl Failure {
+        pub(super) fn message(self) -> &'static str {
+            match self {
+                Self::Write(_) => "write failed",
+                Self::Flush => "flush failed",
+            }
+        }
+    }
+
+    /// A writer that fails once as its [`Failure`] says and shows every other write on `screen`.
+    pub(super) struct FailingWriter {
+        pub(super) screen: Screen,
+        failure: Option<Failure>,
+    }
+
+    impl FailingWriter {
+        pub(super) fn new(failure: Failure) -> Self {
+            Self {
+                screen: Screen::default(),
+                failure: Some(failure),
+            }
+        }
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if let Some(failure @ Failure::Write(text)) = self.failure
+                && buf.windows(text.len()).any(|part| part == text.as_bytes())
+            {
+                self.failure = None;
+                return Err(io::Error::other(failure.message()));
+            }
+            self.screen.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if let Some(failure @ Failure::Flush) = self.failure {
+                self.failure = None;
+                return Err(io::Error::other(failure.message()));
+            }
+            Ok(())
+        }
+    }
+
     /// A terminal that stdout and stderr both write to, so a test sees the order of their lines.
+    /// Clones show the same screen, so a test keeps one to read what the code under test wrote.
     #[derive(Clone, Default)]
     pub(super) struct Screen(Rc<RefCell<Vec<u8>>>);
 

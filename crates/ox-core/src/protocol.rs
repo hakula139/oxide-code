@@ -664,7 +664,7 @@ mod tests {
 
     use super::*;
     use crate::config::compaction::CompactionConfig;
-    use crate::protocol::testing::FailingSink;
+    use crate::protocol::local_testing::FailingSink;
     use crate::session::saved::SavedAction;
     use crate::session::store::testing::listed_session;
     use crate::util::log::testing::LogCapture;
