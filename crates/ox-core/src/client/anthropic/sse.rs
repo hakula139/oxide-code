@@ -12,10 +12,15 @@ use super::transport::{
 };
 use super::wire::{ApiError, StreamEvent};
 use crate::client::ResponseEvent;
+use crate::util::text::truncate_to_width;
 
 /// Events a stream may queue ahead of its consumer. The SSE pump waits while the queue is full, but
 /// drops a retry notice so the retry never waits on the consumer.
 const STREAM_BUFFER: usize = 64;
+
+/// Display columns, ellipsis included, of a bad frame an error quotes, so the 8 MiB frame cap
+/// cannot fill the message.
+const MAX_QUOTED_DATA: usize = 200;
 
 /// A misbehaving upstream that never ends a frame would otherwise grow until OOM.
 const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -227,19 +232,24 @@ fn parse_sse_frame(frame: &[u8]) -> Result<Option<StreamEvent>> {
         _ => Cow::Owned(data_lines.join("\n")),
     };
 
-    let event: StreamEvent =
-        serde_json::from_str(&data).with_context(|| format!("failed to parse SSE data: {data}"))?;
+    let invalid = || {
+        format!(
+            "failed to parse SSE data: {}",
+            truncate_to_width(&data, MAX_QUOTED_DATA)
+        )
+    };
+    let payload: serde_json::Value = serde_json::from_str(&data).with_context(invalid)?;
 
-    if let Some(name) = event_name.filter(|name| !matches!(*name, "" | "message")) {
-        let payload: serde_json::Value = serde_json::from_str(&data)?;
-        if payload["type"] != name {
-            bail!(
-                "SSE event {name:?} does not match data type {}",
-                payload["type"]
-            );
-        }
+    if let Some(name) = event_name.filter(|name| !matches!(*name, "" | "message"))
+        && payload["type"] != name
+    {
+        bail!(
+            "SSE event {name:?} does not match data type {}",
+            payload["type"]
+        );
     }
 
+    let event: StreamEvent = serde_json::from_value(payload).with_context(invalid)?;
     Ok(Some(event))
 }
 
@@ -261,6 +271,7 @@ mod tests {
     use crate::client::{RateLimitWindow, RateLimits, Response};
     use crate::message::ContentBlock;
     use crate::model::TokenUsage;
+    use crate::util::text::{ELLIPSIS, ELLIPSIS_WIDTH};
 
     const MESSAGE_START: &str = indoc! {r#"
         event: message_start
@@ -919,6 +930,23 @@ mod tests {
             assert_eq!(
                 err.to_string(),
                 "failed to parse SSE data: {not valid json}"
+            );
+        }
+
+        #[test]
+        fn caps_the_frame_quoted_in_an_error() {
+            let data = format!("{{{}}}", "x".repeat(1_000));
+            let frame = format!("data: {data}");
+
+            let err = parse_sse_frame(frame.as_bytes()).unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "failed to parse SSE data: {{{}{}: key must be a string at line 1 column 2",
+                    "x".repeat(MAX_QUOTED_DATA - 1 - ELLIPSIS_WIDTH),
+                    ELLIPSIS,
+                ),
             );
         }
     }

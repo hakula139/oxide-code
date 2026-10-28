@@ -22,7 +22,7 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr, VariantArray};
 use tracing::warn;
@@ -157,7 +157,7 @@ pub enum StatusLineSegment {
 }
 
 impl StatusLineSegment {
-    /// Order rationale documented in `docs/design/tui/status-line.md`.
+    /// Order rationale documented in `docs/design/status-line.md`.
     pub const DEFAULT: &'static [Self] = &[
         Self::CurrentDir,
         Self::GitBranch,
@@ -286,7 +286,8 @@ impl Config {
             check_ca_bundle,
         )?;
 
-        let (auth, pending_auth) = resolve_explicit_auth(client.auth, &origins, &gateway)?;
+        let (auth, pending_auth) =
+            resolve_explicit_auth(client.auth, &origins, &base_url.value, &gateway)?;
 
         let model_id = env_string("OX_MODEL")
             .or_else(|| origins.sourced("client.model", client.model))
@@ -320,6 +321,7 @@ impl Config {
         let tui = resolve_tui(tui, &origins)?;
 
         let provenance = Provenance {
+            layers: origins.into_layers(),
             model: model_id.source,
             effort: effort.source,
             auth: auth.source,
@@ -328,7 +330,6 @@ impl Config {
             custom_headers: gateway.custom_headers.source,
             attribution: gateway.attribution.source,
             structured_outputs: gateway.structured_outputs.source,
-            layers: origins.into_layers(),
             max_tokens: max_tokens.source,
             max_tool_rounds: max_tool_rounds.source,
             prompt_cache_ttl: prompt_cache_ttl.source,
@@ -455,8 +456,15 @@ fn resolve_extra_ca_certs(
         .map(|raw| ("OX_EXTRA_CA_CERTS", raw))
         .or(file.map(|raw| ("client.extra_ca_certs", raw)));
     if let Some((key, raw)) = explicit {
+        let from_file = matches!(raw.source, Source::File(_));
         let path = expand_user(&raw.value)
-            .and_then(|path| check_ca_bundle(&path).map(|()| path))
+            .and_then(|path| {
+                ensure!(
+                    !from_file || path.is_absolute(),
+                    "must be an absolute or ~/ path"
+                );
+                check_ca_bundle(&path).map(|()| path)
+            })
             .with_context(|| format!("invalid {key}"))?;
         return Ok(Sourced::new(Some(path), raw.source));
     }
@@ -489,10 +497,12 @@ fn resolve_base_url(base_url: Sourced<String>) -> Result<Sourced<BaseUrl>> {
 
 /// The explicit credential and its source, rejecting a custom header that would replace it. Without
 /// one, the source is the default, since [`Config::resolve_auth`] falls back to a stored login, and
-/// the header check covers the OAuth header that a stored login or `/login` sends.
+/// on a first-party URL the header check covers the OAuth header that a stored login or `/login`
+/// sends. A gateway never receives a stored login, so there the missing credential reports itself.
 fn resolve_explicit_auth(
     file_auth: Option<ClientAuth>,
     origins: &Origins,
+    base_url: &BaseUrl,
     gateway: &ResolvedGateway,
 ) -> Result<(Sourced<Option<Auth>>, Option<PendingAuth>)> {
     let config = match file_auth {
@@ -500,12 +510,12 @@ fn resolve_explicit_auth(
         None => None,
     };
     let explicit = auth::first_explicit(config)?;
-    let source = explicit
-        .as_ref()
-        .map_or(AuthSource::OxLogin, auth::ExplicitAuth::source);
-    gateway.check_credential_header(source)?;
+    let explicit_source = explicit.as_ref().map(auth::ExplicitAuth::source);
+    if explicit_source.is_some() || base_url.is_first_party() {
+        gateway.check_credential_header(explicit_source)?;
+    }
 
-    let source = match source {
+    let source = match explicit_source.unwrap_or(AuthSource::OxLogin) {
         AuthSource::ClientBearer | AuthSource::ClientApiKey | AuthSource::ClientOAuth => {
             origins.source("client.auth")
         }
@@ -1506,6 +1516,27 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn extra_ca_certs_file_rejects_a_relative_bundle() {
+            let dir = tempfile::tempdir().unwrap();
+            write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [client]
+                    extra_ca_certs = "certs/corp.pem"
+                "#},
+            );
+
+            let err = load_with(&dir, &[])
+                .await
+                .expect_err("a relative bundle depends on the working directory");
+
+            assert_eq!(
+                format!("{err:#}"),
+                "invalid client.extra_ca_certs: must be an absolute or ~/ path",
+            );
+        }
+
+        #[tokio::test]
         async fn extra_ca_certs_file_wins_when_env_is_empty() {
             let dir = tempfile::tempdir().unwrap();
             write_user_config(
@@ -1863,6 +1894,51 @@ mod tests {
                 "invalid ANTHROPIC_CUSTOM_HEADERS: \
                  authorization carries the Auth token (ANTHROPIC_AUTH_TOKEN) credential \
                  and cannot be overridden",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_gateway_custom_authorization_header_defers_to_the_missing_credential() {
+            let dir = tempfile::tempdir().unwrap();
+            let vars = env_vars([
+                xdg(&dir),
+                ("ANTHROPIC_API_KEY", None::<String>),
+                env("ANTHROPIC_BASE_URL", "http://127.0.0.1:8080"),
+                env(
+                    "ANTHROPIC_CUSTOM_HEADERS",
+                    "Authorization: Basic placeholder",
+                ),
+            ]);
+
+            let err = load_in(&dir, vars, false)
+                .await
+                .expect_err("a gateway needs a credential");
+            let message = format!("{err:#}");
+
+            assert!(
+                message.starts_with("no credentials for http://127.0.0.1:8080"),
+                "{message}"
+            );
+            assert!(!message.contains("cannot be overridden"), "{message}");
+        }
+
+        #[tokio::test]
+        async fn a_first_party_custom_authorization_header_names_the_stored_login() {
+            let dir = tempfile::tempdir().unwrap();
+            let vars = env_vars([
+                xdg(&dir),
+                ("ANTHROPIC_API_KEY", None::<String>),
+                env("ANTHROPIC_CUSTOM_HEADERS", "Authorization: Bearer other"),
+            ]);
+
+            let err = load_in(&dir, vars, false)
+                .await
+                .expect_err("a stored login owns the Authorization header");
+
+            assert_eq!(
+                format!("{err:#}"),
+                "invalid ANTHROPIC_CUSTOM_HEADERS: \
+                 authorization carries a stored login and cannot be overridden",
             );
         }
 

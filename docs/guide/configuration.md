@@ -123,7 +123,7 @@ base_url = "https://gw.llm.corp.example/anthropic"
 extra_ca_certs = "~/.config/ox/corp-cachain.pem"
 ```
 
-Use an absolute or `~`-rooted path. Relative paths resolve from the working directory `ox` starts in. Equivalent env var: `OX_EXTRA_CA_CERTS`, which wins over this field. `NODE_EXTRA_CA_CERTS` applies only when neither is set (see [LLM gateways](authentication.md#llm-gateways)).
+The path must be absolute or `~`-rooted, and `ox` rejects a relative one, which would depend on the directory it starts in. `OX_EXTRA_CA_CERTS` wins over this field, and `NODE_EXTRA_CA_CERTS` applies only when neither is set. Both variables may hold a relative path, which resolves from the working directory as in Node (see [LLM gateways](authentication.md#llm-gateways)).
 
 On macOS, a server certificate valid for longer than Apple's 825-day limit is accepted when it chains to a CA in the bundle, even one already installed system-wide, unless that CA is one of Apple's built-in roots.
 
@@ -177,7 +177,7 @@ Segments with no data, such as a missing git branch, an unopened pull request, c
 
 The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears when it resets and remains gone until the next response reports it again. The [theming guide](theming.md#status-line-segments) lists the colors used by the context and usage-limit segments as a window fills.
 
-On a narrow row, lower-priority segments drop first, and the highest-priority segment is truncated if needed. [Status Line](../design/tui/status-line.md#narrow-rows) lists the utility order.
+On a narrow row, lower-priority segments drop first, and the highest-priority segment is truncated if needed. [Status Line](../design/status-line.md#narrow-rows) lists the utility order.
 
 `OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). A value with no segments (`","`), an empty entry between commas (`"model,,run-state"`), or an unknown segment name fails startup with a parse error.
 
