@@ -8,7 +8,7 @@ Every tool call passes a permission check before running. In the default `manual
 - **`plan`** is read-only, so it denies every edit, `exec`, and `net` call, including read-only commands such as `ls`. Reads behave as in `manual`, and the `tasks`, `bash_output`, and `bash_stop` tools count as reads, so they still run.
 - **`yolo`** runs tool calls without asking unless a deny rule or one of your ask rules holds them. A deny rule, built-in or yours, denies the call, and an ask rule you configured still asks. The [built-in rules](#built-in-rules) that ask don't apply, so `yolo` edits `.git/hooks` and runs `rm -rf build` without asking. A `bash` command that uses shell syntax `ox` cannot analyze, such as arithmetic or a statement that sets `PATH`, runs unless a deny pattern or one of your ask patterns matches what `ox` can read of it. In `manual`, such a command asks, and rewriting it as plain commands avoids the prompt. A headless run denies the calls that would ask.
 
-In every mode, an `exec` deny or ask pattern is a guardrail against mistakes and cannot hold back a model that works around it, since a pattern that names a program cannot match a copy of it under another name, as in `cp /bin/rm ./x && ./x -rf ~`, and no pattern sees what a program runs or writes once it starts, such as `python3 -c`, `make`, a build script, or a git alias. This matters most in `yolo`, which runs whatever such a pattern misses. A `read` or `edit` deny or ask pattern does hold for the file tools in every mode where it applies. To run untrusted work unattended, run `ox` inside a sandbox or container.
+In every mode, an `exec` deny or ask pattern is a guardrail against mistakes, since no pattern sees what a program runs or writes once it starts. A `read` or `edit` deny or ask pattern does hold for the file tools in every mode where it applies. [SECURITY.md](../../SECURITY.md#trust-model) covers the limits of each kind of rule and when to run untrusted work in a sandbox.
 
 Set the mode with `mode` under `[permission]` in your user config. The environment variable `OX_PERMISSION_MODE` overrides `mode`, and `ox --mode <mode>` overrides both for one run.
 
@@ -50,6 +50,35 @@ exec = ["cargo test *", "git status"]
 edit = ["~/notes/**"]
 ```
 
+## Pattern Cookbook
+
+### Allow a Command with Any Flags
+
+```toml
+[permission.allow]
+exec = ["cargo test *"]
+```
+
+The trailing `*` covers `cargo test` and `cargo test --all`, but not `cargo test && rm -rf build`, which needs a pattern for each part.
+
+### Deny a Secret File
+
+```toml
+[permission.deny]
+read = ["/**/.env"]
+```
+
+A pattern with no `/`, such as `.env`, matches that name below the working directory and each extra root, while `/**/.env` matches it anywhere on disk. A denied file also stays hidden from `grep` and `glob`, which count it without naming it.
+
+### Ask Before a Push
+
+```toml
+[permission.ask]
+exec = ["git push *"]
+```
+
+An ask pattern wins over an allow pattern, so the push asks even when a broader allow rule covers it.
+
 ## Rules
 
 Allow patterns match narrowly, as written, while deny and ask patterns match broadly, across every spelling of a call. So `allow.exec = ["git status"]` covers `git status` but not `git status -s`, while `deny.exec = ["rm"]` blocks every `rm` command.
@@ -58,19 +87,39 @@ Allow patterns match narrowly, as written, while deny and ask patterns match bro
 
 Each of `deny`, `ask`, and `allow` holds a pattern list per class: `read` (read, grep, glob, tasks, bash_output, and bash_stop tools), `edit` (edit and write), `exec` (bash), `net`, and `mcp`. `bash_output` and `bash_stop` belong to `read` because they act only on shells that an allowed `bash` call started. Inside `[permission]`, the dotted form `ask.exec = ["git push *"]` works too.
 
-Deny wins over ask, and ask wins over allow, the working-directory allow, and session rules, so `ask.exec = ["git push *"]` asks even when an allow pattern covers the push. The pattern `*` matches every call in its class. A path pattern never matches a `tasks`, `bash_output`, or `bash_stop` call, so only `deny.read = ["*"]` blocks them. Under that deny, `bash` can still start background shells, which then run unread until the session ends. `allow.read` has no effect, since reads already run without asking.
+Deny wins over ask, and ask wins over allow, the working-directory allow, and session rules, so `ask.exec = ["docker *"]` asks even when `allow.exec = ["docker ps"]` covers the call. The pattern `*` matches every call in its class. A path pattern never matches a `tasks`, `bash_output`, or `bash_stop` call, so only `deny.read = ["*"]` blocks them. Under that deny, `bash` can still start background shells, which then run unread until the session ends. `allow.read` has no effect, since reads already run without asking.
 
 ### `exec` Patterns
 
-An `exec` pattern is one command, matched word by word after quotes are removed and `$'...'` escapes are decoded. A `*` standing alone as a word is the only wildcard. In an allow pattern, it matches exactly one word before the end of the pattern, or any number of words at the end, so `cargo test *` covers `cargo test` and `cargo test --all`, and `git * --force` covers `git push --force` but misses `git push origin --force`. Quote a word to match it as written, as in `'*'`. A glob inside a word, as in `mkfs*`, fails to load, so write a pattern for each command it should cover, such as `mkfs.ext4 *`. A pattern also fails to load when it is empty, holds more than one command or a redirection, or has a word that expands, such as `$HOME`.
+An `exec` pattern is one command, matched word by word after quotes are removed and `$'...'` escapes are decoded. A `*` standing alone as a word is the only wildcard. A glob inside a word, as in `mkfs*`, fails to load, so write a pattern for each command it should cover, such as `mkfs.ext4 *`. A pattern also fails to load when it is empty, holds more than one command or a redirection, or has a word that expands, such as `$HOME`. These load failures apply to deny and ask patterns too.
+
+#### Allow Patterns
+
+In an allow pattern, a `*` standing alone as a word matches exactly one word before the end of the pattern, or any number of words at the end, so `git * --force` covers `git push --force` but misses `git push origin --force`. Quote a word to match it as written, as in `'*'`.
+
+#### Wrappers and Assignments
 
 A pattern matches one simple command after wrappers such as `env`, `nice`, and `timeout` and redirections are set aside, so `cargo test *` covers `nice cargo test 2>&1`. A wrapper that changes who runs the command or which arguments it gets, which `sudo`, `doas`, `pkexec`, `busybox`, and `xargs` do, stays part of the command for allow patterns, so `rm *` does not allow `sudo rm x`. A wrapper spelled with a directory, such as `./nice`, may be any program, so it stays part of the command as well. A leading `VAR=value` assignment is set aside too when it only changes output, as `RUST_LOG`, `LANG`, and `NO_COLOR` do. Any other assignment stays part of the command, so `CARGO_TARGET_DIR=/tmp cargo test` needs a pattern that names it.
 
-A command chained with `;`, `&&`, `||`, or `|` is allowed only when every part is, and writing a file with `>` also needs that file to be inside the working directory or an extra root, or allowed by an `edit` pattern. A deny or ask pattern matches when any part matches, including a quoted, full-path, or differently cased command name such as `/bin/rm` or `RM`, and the command a wrapper runs, so `deny.exec = ["rm *"]` denies `sudo rm x`, `xargs rm`, and `find . -exec rm {} +` in every mode. Its words after the first need only appear in order, with any words between them, so `ask.exec = ["git push *"]` also asks for `git -c a=b push`. A word that expands or globs, such as `$X`, `${X:-push}`, or `pu*`, matches any word of a deny or ask pattern, since it may become that word when the command runs. Patterns also see the commands inside a `$(...)` substitution and a literal `sh -c` or `eval` script, so `sh -c 'npm test'` needs patterns for both `npm test` and `sh -c *`. A command that uses shell syntax ox cannot analyze, such as arithmetic, a function definition, or a statement that sets `PATH` or another uppercase variable, is never allowed by a pattern, so it asks in `manual`, naming the construct, unless a deny pattern matches. So does a command that changes directory and then names a relative path as a program, a file to read, or a redirection target, such as `cd sub && ./run.sh`, and one that runs anything after a `cd` that may leave the working directory and extra roots, such as `cd /tmp/x && make` or `cd $DIR && make`, since the path may then name another file, and the program may read another directory's files. Deny and ask patterns see inside the wrappers above, `find -exec` and its variants, and a literal `sh -c` or `eval` script, but not inside other programs that run a command, such as `watch`, `fd -x`, `make`, or `python3 -c`. In `yolo`, such a command runs unless a pattern names the runner itself. Read-only commands such as `ls`, `cat`, `grep`, `[ -f x ]`, `find` without `-exec` or `-delete`, and `sed` without `-i` run without asking when the command runs under its bare name, every argument is a literal word without a glob, and nothing in the whole command expands a variable, so `echo $TOKEN` and `cat <<< $TOKEN` ask. A recursive `grep` asks, and so does `cat src/*.rs`, which an allow pattern such as `cat *` covers.
+#### Chained Commands and Redirections
 
-`read` patterns reach a `bash` command in two places. A file read through `<` faces them like a read tool's file, so `deny.read = ["/**/.env"]` denies `sort < .env`. A file reader (`cat`, `find`, `grep`, `head`, `ls`, `sed`, `tail`, or `wc`) asks when a deny or ask `read` pattern matches one of its file arguments or a file one of its globs matches when the call is checked, so `cat ~/.ss*/id_rsa` asks even under `allow.exec = ["cat *"]`. An argument that expands a variable, as in `cat $F`, may name any file, as may the input words of `xargs cat`, the paths of `find . -exec cat {} +`, and a glob `ox` cannot list, so outside `yolo` it asks whenever a deny or ask `read` pattern exists, and the built-in `ssh` rule is one. `yolo` applies the same path checks to deny patterns and your ask patterns, where a leading `~`, `$HOME`, or `${HOME}` names the home directory, and denies the reader when a deny pattern holds it. Any other program can open whatever files it likes once it runs, so an `exec` allow pattern such as `python3 *` can run its command on files the `read` patterns hold. Keep such programs out of your allow patterns where `read` patterns guard files, since an `exec` deny pattern for them is only a guardrail.
+A command chained with `;`, `&&`, `||`, or `|` is allowed only when every part is. Writing a file with `>` also needs that file to be inside the working directory or an extra root, or allowed by an `edit` pattern, so `allow.exec = ["cargo test *", "git status"]` runs `cargo test --all && git status` but still asks about `cargo test --all > /tmp/out.log`. Patterns also see the commands inside a `$(...)` substitution and a literal `sh -c` or `eval` script, so `sh -c 'npm test'` needs patterns for both `npm test` and `sh -c *`.
 
-Recursive readers compare their search roots with each read rule's fixed leading path. This includes recursive `grep`, `find`, and `ls -R`, with the working directory checked when it is the implicit search root. Thus `grep -r PRIVATE ~` asks under the built-in `ssh` rule even when `grep *` is allowed, and `yolo` denies it. The comparison covers aliases of the roots and rule prefixes and can hold the call before a matching descendant exists. It does not discover symlinks below a search root, which can lead a reader into a separate protected tree ([#658](https://github.com/hakula139/oxide-code/issues/658)). Auxiliary files such as `grep -f patterns.txt` and existing regular file operands remain exact reads. When a glob can change which arguments are options, auxiliary files, or search roots, the analysis keeps the possible named reads and asks in `manual` while a deny or ask read rule exists. In `yolo`, named recursive roots still face read rules.
+#### What Deny and Ask Patterns Catch
+
+A deny or ask pattern matches when any part of a chained command matches, including a quoted, full-path, or differently cased command name such as `/bin/rm` or `RM`, and the command a wrapper runs, so `deny.exec = ["rm *"]` denies `sudo rm x`, `xargs rm`, and `find . -exec rm {} +` in every mode. Its words after the first need only appear in order, with any words between them, so `ask.exec = ["git push *"]` also asks for `git -c a=b push`. A word that expands or globs, such as `$X`, `${X:-push}`, or `pu*`, matches any word of a deny or ask pattern, since it may become that word when the command runs.
+
+A `bash` command that reads files also faces the `read` deny and ask patterns, and a recursive reader compares its search roots with each rule's leading path. Any other program can open whatever files it likes once it runs, so an `exec` allow pattern such as `python3 *` can run its command on files the `read` patterns hold. Keep such programs out of your allow patterns where `read` patterns guard files, since an `exec` deny pattern for them is only a guardrail. [SECURITY.md](../../SECURITY.md#trust-model) covers which files those checks see and where they stop.
+
+#### Commands That Always Ask
+
+A command that uses shell syntax `ox` cannot analyze, such as arithmetic, a function definition, or a statement that sets `PATH` or another uppercase variable, is never allowed by a pattern, so it asks in `manual`, naming the construct, unless a deny pattern matches. A command that changes directory and then names a relative path as a program, a file to read, or a redirection target, such as `cd sub && ./run.sh`, also asks, since the path may name a different file from the one the check resolved. So does one that runs anything after a `cd` that may leave the working directory and extra roots, such as `cd /tmp/x && make` or `cd $DIR && make`, since the program may then read another directory's files.
+
+Deny and ask patterns see inside the wrappers above, `find -exec` and its variants, and a literal `sh -c` or `eval` script, but not inside other programs that run a command, such as `watch`, `fd -x`, `make`, or `python3 -c`. In `yolo`, such a command runs unless a pattern names the runner itself.
+
+### Read-Only Commands
+
+Read-only commands such as `ls`, `cat`, `grep`, `[ -f x ]`, `find` without `-exec` or `-delete`, and `sed` without `-i` run without asking when the command runs under its bare name, every argument is a literal word without a glob, and nothing in the whole command expands a variable, so `echo $TOKEN` and `cat <<< $TOKEN` ask. A recursive `grep` asks, and so does `cat src/*.rs`, which an allow pattern such as `cat *` covers.
 
 ### Path Patterns
 
@@ -113,3 +162,7 @@ cargo = false
 Each `extra_roots` entry is an absolute or `~/` path, such as `"~/src/shared-lib"`, and the user config and drop-ins add to one list. Symlinks in it resolve at startup, and a relative entry, `/`, your home directory, or a parent of it fails the config load. Protected paths inside an extra root still need approval outside `yolo`.
 
 Launching from `/`, your home directory, or a parent of it turns off the auto-allow for every edit, `extra_roots` included, so those edits need an allow pattern or an approval. Edit and Write refuse files with more than one hard link even after approval.
+
+## Commands the Assistant Runs
+
+A `bash` call runs in a shell with no controlling terminal, so a command that prompts on `/dev/tty` fails at once. That covers `sudo`, `ssh` with password authentication, and `git push` over HTTPS without a credential helper. `ox` sets `EDITOR`, `VISUAL`, and `GIT_EDITOR` to `true`, so an editor step keeps its default text: `git rebase --continue` keeps the prepared message, while `git commit` without `-m` stops with `Aborting commit due to empty commit message`. It drops `CDPATH`, so a `cd` lands where the permission check resolved it, and each command sees the session's ID in `OX_SESSION_ID`, so a script can tell which session started it. [Authentication](authentication.md#commands-and-credentials) covers the credentials a command cannot see.
