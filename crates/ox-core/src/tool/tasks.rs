@@ -12,7 +12,7 @@ use strum::{Display, VariantArray};
 use super::view::ToolResultView;
 use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, invalid_input};
 use crate::message::{ContentBlock, Message};
-use crate::permission::PermissionClass;
+use crate::permission::{Access, PermissionClass};
 use crate::util::text::plural;
 
 const NAME: &str = "tasks";
@@ -98,6 +98,10 @@ impl Tool for TasksTool {
         }
     }
 
+    fn prepare(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |_: &Input| Access::None)
+    }
+
     fn icon(&self) -> &'static str {
         "≡"
     }
@@ -152,6 +156,7 @@ fn input_schema() -> serde_json::Value {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Input {
     tasks: Vec<Task>,
 }

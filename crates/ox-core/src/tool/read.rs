@@ -43,6 +43,10 @@ impl Tool for ReadTool {
         Some("file_path")
     }
 
+    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |input: &Input| ctx.path_access(&input.file_path))
+    }
+
     fn icon(&self) -> &'static str {
         "→"
     }
@@ -92,7 +96,9 @@ fn input_schema() -> serde_json::Value {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Input {
+    file_path: String,
     offset: Option<usize>,
     limit: Option<usize>,
 }
@@ -100,10 +106,7 @@ struct Input {
 // ── Execution ──
 
 async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
-    let (input, path): (Input, _) = match prepared.into_path_input() {
-        Ok(v) => v,
-        Err(msg) => return ToolOutput::error(msg),
-    };
+    let (input, path): (Input, _) = prepared.into_path_input();
     match read_file(&path, input.offset, input.limit, ctx).await {
         Ok(content) => {
             ToolOutput::success(content).with_title(format!("Read {}", super::file_name(&path)))

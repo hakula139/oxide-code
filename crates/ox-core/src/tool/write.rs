@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use super::file::FileVerb;
 use super::view::{ApprovalBody, ApprovalPreview};
-use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field};
+use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
 use crate::file_tracker::{FileTracker, GatePurpose, LastView};
 use crate::permission::PermissionClass;
 
@@ -39,6 +39,10 @@ impl Tool for WriteTool {
         Some("file_path")
     }
 
+    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |input: &Input| ctx.path_access(&input.file_path))
+    }
+
     fn icon(&self) -> &'static str {
         "←"
     }
@@ -50,14 +54,11 @@ impl Tool for WriteTool {
         cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
         Box::pin(async move {
-            let content = extract_input_field(&prepared.input, "content").unwrap_or_default();
-            let current = match prepared.access.resolved() {
-                Some(path) => current_text(&path).await,
-                None => String::new(),
-            };
+            let input: Input = prepared.parsed();
+            let current = current_text(&prepared.path()).await;
             ApprovalPreview {
-                title: self.summarize_call(name, &prepared.input, cwd),
-                body: ApprovalBody::Diff(super::edit::synthesize_chunk(&current, content)),
+                title: prepared.path_title(name, cwd),
+                body: ApprovalBody::Diff(super::edit::synthesize_chunk(&current, &input.content)),
             }
         })
     }
@@ -100,17 +101,16 @@ fn input_schema() -> serde_json::Value {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Input {
+    file_path: String,
     content: String,
 }
 
 // ── Execution ──
 
 async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
-    let (input, path): (Input, _) = match prepared.into_path_input() {
-        Ok(v) => v,
-        Err(msg) => return ToolOutput::error(msg),
-    };
+    let (input, path): (Input, _) = prepared.into_path_input();
     let shown = path.display();
     let name = super::file_name(&path);
 
@@ -266,7 +266,7 @@ mod tests {
         }
 
         fn prepare(input: serde_json::Value, cwd: &Path) -> Prepared {
-            WriteTool.prepare(input, &ctx(cwd))
+            WriteTool.prepare(input, &ctx(cwd)).unwrap()
         }
 
         #[tokio::test]
@@ -284,17 +284,6 @@ mod tests {
             let preview = WriteTool.approval_preview("write", &prepared, &cwd).await;
 
             assert_eq!(preview.title, "Write(src/new.rs)");
-            assert_eq!(preview.body, added_line("fn main() {}"));
-        }
-
-        #[tokio::test]
-        async fn without_a_file_path_renders_the_content_as_added() {
-            let cwd = Path::new("/repo");
-            let prepared = prepare(serde_json::json!({"content": "fn main() {}"}), cwd);
-
-            let preview = WriteTool.approval_preview("write", &prepared, cwd).await;
-
-            assert_eq!(preview.title, "Write");
             assert_eq!(preview.body, added_line("fn main() {}"));
         }
 

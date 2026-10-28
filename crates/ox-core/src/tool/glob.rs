@@ -45,8 +45,10 @@ impl Tool for GlobTool {
         }
     }
 
-    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
-        super::search::prepare_search_root(input, ctx)
+    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |input: &Input| {
+            super::search::root_access(input.path.as_deref(), ctx)
+        })
     }
 
     fn icon(&self) -> &'static str {
@@ -89,6 +91,7 @@ fn input_schema() -> serde_json::Value {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Input {
     pattern: String,
     path: Option<String>,
@@ -97,13 +100,7 @@ struct Input {
 // ── Execution ──
 
 async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> ToolOutput {
-    let Prepared { input: raw, access } = prepared;
-    let input: Input = match super::parse_input(raw) {
-        Ok(v) => v,
-        Err(msg) => return ToolOutput::error(msg),
-    };
-
-    let Input { pattern, path } = input;
+    let (Input { pattern, path }, access) = prepared.into_parts();
 
     let workspace = Arc::clone(&ctx.workspace);
     let cancel = ctx.cancel.clone();
@@ -245,8 +242,9 @@ mod tests {
             // A deny scoped to the project root must apply when `path` is omitted.
             let dir = canonical_tempdir();
 
-            let prepared =
-                glob_tool().prepare(serde_json::json!({"pattern": "*.rs"}), &ctx(dir.path()));
+            let prepared = glob_tool()
+                .prepare(serde_json::json!({"pattern": "*.rs"}), &ctx(dir.path()))
+                .unwrap();
 
             let Access::Path {
                 canonical,

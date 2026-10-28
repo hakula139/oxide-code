@@ -18,11 +18,11 @@ use super::{
     Bash, DRAIN_GRACE, MAX_TIMEOUT, PipeCapture, ShellTree, push_footer, read_chunks,
     render_output, spawn_failure,
 };
-use crate::permission::PermissionClass;
+use crate::permission::{Access, PermissionClass};
 use crate::protocol::{Event, EventSink};
 use crate::tool::spill::Spills;
 use crate::tool::{
-    Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field, parse_input,
+    Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field,
 };
 use crate::util::sync::lock_or_recover;
 use crate::util::text::ELLIPSIS;
@@ -455,6 +455,10 @@ impl Tool for BashOutputTool {
         }
     }
 
+    fn prepare(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |_: &OutputInput| Access::None)
+    }
+
     fn icon(&self) -> &'static str {
         "»"
     }
@@ -468,7 +472,7 @@ impl Tool for BashOutputTool {
         prepared: Prepared,
         _ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(read(&self.shells, prepared.input))
+        Box::pin(read(&self.shells, prepared.into_input()))
     }
 }
 
@@ -503,6 +507,10 @@ impl Tool for BashStopTool {
         }
     }
 
+    fn prepare(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |_: &StopInput| Access::None)
+    }
+
     fn icon(&self) -> &'static str {
         "■"
     }
@@ -516,7 +524,7 @@ impl Tool for BashStopTool {
         prepared: Prepared,
         _ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(stop(&self.shells, prepared.input))
+        Box::pin(stop(&self.shells, prepared.into_input()))
     }
 }
 
@@ -539,6 +547,7 @@ fn output_input_schema() -> serde_json::Value {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OutputInput {
     shell_id: String,
     timeout: Option<u64>,
@@ -555,6 +564,7 @@ fn stop_input_schema() -> serde_json::Value {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StopInput {
     shell_id: String,
 }
@@ -568,11 +578,7 @@ fn shell_id_property() -> serde_json::Value {
 
 // ── Execution ──
 
-async fn read(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
-    let input: OutputInput = match parse_input(raw) {
-        Ok(input) => input,
-        Err(msg) => return ToolOutput::error(msg),
-    };
+async fn read(shells: &BackgroundShells, input: OutputInput) -> ToolOutput {
     let output = match shells.output(&input.shell_id) {
         Ok(output) => output,
         Err(message) => return ToolOutput::error(message),
@@ -594,11 +600,7 @@ fn wait_limit(millis: Option<u64>) -> Option<Duration> {
         .map(|ms| Duration::from_millis(ms).min(MAX_TIMEOUT))
 }
 
-async fn stop(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
-    let input: StopInput = match parse_input(raw) {
-        Ok(input) => input,
-        Err(msg) => return ToolOutput::error(msg),
-    };
+async fn stop(shells: &BackgroundShells, input: StopInput) -> ToolOutput {
     let Shell {
         output,
         stop,

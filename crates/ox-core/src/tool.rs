@@ -87,10 +87,15 @@ impl ToolCtx {
     fn spills(&self) -> Spills {
         Spills::new(&self.artifact_dir, &self.tool_use_id)
     }
+
+    /// What a call naming the file `path` accesses, with a leading `~` read as the home directory.
+    fn path_access(&self, path: &str) -> Access {
+        Access::for_path(tool_path(path), &self.workspace)
+    }
 }
 
-/// A call resolved for the gate and its run: the input with any path pinned to where it resolves,
-/// and what the call accesses.
+/// A call resolved for the gate and its run: the input its tool's [`Tool::prepare`] validated, and
+/// what the call accesses.
 #[derive(Debug, Clone)]
 pub struct Prepared {
     pub(crate) input: serde_json::Value,
@@ -98,15 +103,57 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// Validates `input` as a `T`, resolving what the call accesses from the parsed input, or
+    /// returns the `Invalid input: ...` message the model reads.
+    fn parse<T: DeserializeOwned>(
+        input: serde_json::Value,
+        access: impl FnOnce(&T) -> Access,
+    ) -> Result<Self, String> {
+        let parsed = T::deserialize(&input).map_err(|e| invalid_input(&e))?;
+        Ok(Self {
+            access: access(&parsed),
+            input,
+        })
+    }
+
+    /// The input as the `T` that [`Self::parse`] validated it as.
+    fn parsed<T: DeserializeOwned>(&self) -> T {
+        T::deserialize(&self.input).expect(VALIDATED)
+    }
+
+    /// The input as the `T` that [`Self::parse`] validated it as, with what the call accesses.
+    fn into_parts<T: DeserializeOwned>(self) -> (T, Access) {
+        (
+            serde_json::from_value(self.input).expect(VALIDATED),
+            self.access,
+        )
+    }
+
+    /// The input as the `T` that [`Self::parse`] validated it as.
+    fn into_input<T: DeserializeOwned>(self) -> T {
+        self.into_parts().0
+    }
+
+    /// The resolved `file_path` of a file tool.
+    fn path(&self) -> PathBuf {
+        self.access
+            .resolved()
+            .expect("a file tool's prepare resolves its path")
+    }
+
     /// The parsed input and resolved `file_path` of a file tool.
-    pub(crate) fn into_path_input<T: DeserializeOwned>(self) -> Result<(T, PathBuf), String> {
-        let input = parse_input(self.input)?;
-        let Some(path) = self.access.resolved() else {
-            return Err("Invalid input: missing field `file_path`".to_owned());
-        };
-        Ok((input, path.clone()))
+    fn into_path_input<T: DeserializeOwned>(self) -> (T, PathBuf) {
+        let path = self.path();
+        (self.into_input(), path)
+    }
+
+    /// The `Name(path)` title of a file tool's call, with its resolved path relative to `cwd`.
+    fn path_title(&self, name: &str, cwd: &Path) -> String {
+        call_label(name, Some(&display_path(&self.path(), cwd)))
     }
 }
+
+const VALIDATED: &str = "prepare validated the input as this type";
 
 // ── Tool Output ──
 
@@ -193,29 +240,21 @@ pub trait Tool: Send + Sync {
     /// permissive one.
     fn spec(&self) -> ToolSpec;
 
-    /// The input field naming the file this call acts on, if any, which the default
-    /// [`Self::prepare`] resolves.
+    /// The input field naming the file a call acts on, if any, which its label shows.
     fn path_field(&self) -> Option<&'static str> {
         None
     }
 
-    /// Resolves what the call accesses from `input`, once, in the context's workspace. The default
-    /// resolves [`Self::path_field`] and pins it in the input to the resolved path, so the tool
-    /// opens what the gate checked, though not past a symlink swapped into an intermediate
-    /// directory afterward. Without a path field the call accesses [`Access::None`], which only a
-    /// class-wide rule matches.
-    fn prepare(&self, mut input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
-        let access = self
-            .path_field()
-            .and_then(|field| extract_input_field(&input, field))
-            .map(|path| Access::for_path(tool_path(path), &ctx.workspace))
-            .unwrap_or_default();
-        if let (Some(field), Access::Path { canonical, .. }) = (self.path_field(), &access)
-            && let Some(value) = input.get_mut(field)
-        {
-            *value = serde_json::Value::String(canonical.clone());
-        }
-        Prepared { input, access }
+    /// Validates `input` and resolves what the call accesses from it, once, in the context's
+    /// workspace, so the gate checks and the run acts on the same values. An error is the message
+    /// the model reads in place of a result, since a call that cannot run needs no approval. The
+    /// default accepts any input and accesses [`Access::None`], which only a class-wide rule
+    /// matches, so every built-in tool overrides it to parse its input.
+    fn prepare(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<Prepared, String> {
+        Ok(Prepared {
+            input,
+            access: Access::None,
+        })
     }
 
     fn icon(&self) -> &'static str {
@@ -232,16 +271,12 @@ pub trait Tool: Send + Sync {
     /// `Name(arg)`, where `arg` is the [`Self::path_field`] relative to `cwd` or else the
     /// [`Self::summarize_input`] argument, and the bare name when the call has neither.
     fn summarize_call(&self, name: &str, input: &serde_json::Value, cwd: &Path) -> String {
-        let label = pascal_case(name);
         let arg = match self.path_field() {
             Some(field) => extract_input_field(input, field)
                 .map(|path| Cow::Owned(display_path(&tool_path(path), cwd))),
             None => self.summarize_input(input).map(Cow::Borrowed),
         };
-        match arg {
-            Some(arg) => format!("{label}({arg})"),
-            None => label,
-        }
+        call_label(name, arg.as_deref())
     }
 
     /// Returns the structured shape of a successful tool result for richer UI rendering, with paths
@@ -291,6 +326,15 @@ fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'
 /// Renders a tool name as the label the UI shows, `bash_output` as `BashOutput`.
 fn pascal_case(name: &str) -> String {
     name.split('_').map(capitalize_first).collect()
+}
+
+/// `Name(arg)` for a call of the tool registered as `name`, or the bare `Name` without an `arg`.
+fn call_label(name: &str, arg: Option<&str>) -> String {
+    let label = pascal_case(name);
+    match arg {
+        Some(arg) => format!("{label}({arg})"),
+        None => label,
+    }
 }
 
 // ── Tool Registry ──
@@ -385,11 +429,7 @@ impl ToolRegistry {
 
 // ── Input Parsing ──
 
-/// Deserializes a tool's typed input, or returns the `Invalid input: ...` message the model reads.
-fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, String> {
-    serde_json::from_value(raw).map_err(|e| invalid_input(&e))
-}
-
+/// The `Invalid input: ...` message the model reads for input that does not parse.
 fn invalid_input(error: &serde_json::Error) -> String {
     format!("Invalid input: {error}")
 }
@@ -506,13 +546,17 @@ pub(crate) mod local_testing {
             .join(format!("toolu_test{suffix}"))
     }
 
-    /// Prepares `input` for `tool` and runs it in `ctx`, the way dispatch does past the gate.
+    /// Prepares `input` for `tool` and runs it in `ctx`, the way dispatch does when the gate allows
+    /// the call, so input that does not prepare ends as its error.
     pub(super) async fn run(
         tool: &dyn Tool,
         input: serde_json::Value,
         ctx: &ToolCtx,
     ) -> ToolOutput {
-        tool.run(tool.prepare(input, ctx), ctx).await
+        match tool.prepare(input, ctx) {
+            Ok(prepared) => tool.run(prepared, ctx).await,
+            Err(message) => ToolOutput::error(message),
+        }
     }
 
     /// The read filter of a policy that denies reading whatever one of `patterns` matches.
@@ -533,7 +577,7 @@ pub(crate) mod local_testing {
     }
 
     impl ToolRegistry {
-        /// [`run`] for the tool registered as `name`, through the output cap.
+        /// [`run`] for valid input to the tool registered as `name`, through the output cap.
         pub(crate) async fn run_input(
             &self,
             name: &str,
@@ -541,7 +585,8 @@ pub(crate) mod local_testing {
             ctx: &ToolCtx,
         ) -> ToolOutput {
             let (_, tool) = self.get(name).expect("tool is registered");
-            run_capped(tool, tool.prepare(input, ctx), ctx).await
+            let prepared = tool.prepare(input, ctx).expect("the input is valid");
+            run_capped(tool, prepared, ctx).await
         }
 
         /// The registered tools with their specs, in registration order.
@@ -696,7 +741,7 @@ mod tests {
             let ctx = ctx(dir.path());
             for (name, input) in &cases {
                 let (spec, t) = tools.get(name).unwrap();
-                let prepared = t.prepare(input.clone(), &ctx);
+                let prepared = t.prepare(input.clone(), &ctx).unwrap();
                 assert_eq!(
                     policy.decide(spec.class, &prepared.access.as_target()),
                     Decision::Deny,
@@ -710,18 +755,25 @@ mod tests {
         use super::*;
 
         #[test]
-        fn resolves_and_pins_the_path_field_of_each_path_tool() {
+        fn resolves_the_path_of_each_file_tool_and_keeps_its_input() {
             let dir = canonical_tempdir();
             let ctx = ctx(dir.path());
             let resolved = dir.path().join("a.rs");
             let tools = built_in();
-            for name in ["read", "edit", "write"] {
+            for (name, input) in [
+                ("read", serde_json::json!({"file_path": "a.rs"})),
+                (
+                    "edit",
+                    serde_json::json!({"file_path": "a.rs", "old_string": "a", "new_string": "b"}),
+                ),
+                (
+                    "write",
+                    serde_json::json!({"file_path": "a.rs", "content": "a"}),
+                ),
+            ] {
                 let (_, t) = tools.get(name).unwrap();
 
-                let prepared = t.prepare(
-                    serde_json::json!({"file_path": "a.rs", "content": "a.rs"}),
-                    &ctx,
-                );
+                let prepared = t.prepare(input.clone(), &ctx).unwrap();
 
                 let Access::Path {
                     canonical,
@@ -735,15 +787,30 @@ mod tests {
                 assert_eq!(canonical, resolved.to_str().unwrap(), "tool {name}");
                 assert_eq!(relative.as_deref(), Some("a.rs"), "tool {name}");
                 assert_eq!(*zone, Zone::Workspace, "tool {name}");
-                assert_eq!(
-                    prepared.input,
-                    serde_json::json!({"file_path": resolved, "content": "a.rs"}),
-                    "tool {name}: only the path field is pinned",
-                );
+                assert_eq!(prepared.input, input, "tool {name}");
 
-                let missing = t.prepare(serde_json::json!({}), &ctx);
-                assert_eq!(missing.access, Access::None, "tool {name}");
-                assert_eq!(missing.input, serde_json::json!({}), "tool {name}");
+                assert_eq!(
+                    t.prepare(serde_json::json!({}), &ctx).unwrap_err(),
+                    "Invalid input: missing field `file_path`",
+                    "tool {name}",
+                );
+            }
+        }
+
+        #[test]
+        fn every_built_in_tool_rejects_a_field_its_schema_lacks() {
+            let ctx = temp_ctx();
+            for (spec, t) in built_in().iter() {
+                let name = &spec.definition.name;
+
+                let error = t
+                    .prepare(serde_json::json!({"unknown": true}), &ctx)
+                    .unwrap_err();
+
+                assert!(
+                    error.starts_with("Invalid input: unknown field `unknown`, expected "),
+                    "tool {name}: {error}",
+                );
             }
         }
 
@@ -768,19 +835,17 @@ mod tests {
                 )
                 .unwrap();
                 let (spec, read) = tools.get("read").unwrap();
-                let prepare =
-                    |path: &str| read.prepare(serde_json::json!({"file_path": path}), &ctx);
+                let prepare = |path: &str| {
+                    read.prepare(serde_json::json!({"file_path": path}), &ctx)
+                        .unwrap()
+                };
 
-                for (path, pinned) in [
+                for (path, resolved) in [
                     ("~/notes.md", home.join("notes.md")),
                     ("~", home.clone()),
                     ("~user/x", cwd.join("~user").join("x")),
                 ] {
-                    assert_eq!(
-                        prepare(path).input,
-                        serde_json::json!({"file_path": pinned}),
-                        "{path}"
-                    );
+                    assert_eq!(prepare(path).access.resolved(), Some(resolved), "{path}");
                 }
                 for path in ["~/.aws/credentials", "~/.ssh/id_ed25519"] {
                     assert_eq!(
@@ -802,7 +867,9 @@ mod tests {
                 let native = fs::read_to_string(dir.path().join(name));
                 let succeeds = native.is_ok();
 
-                let prepared = ReadTool.prepare(serde_json::json!({"file_path": name}), &ctx);
+                let prepared = ReadTool
+                    .prepare(serde_json::json!({"file_path": name}), &ctx)
+                    .unwrap();
                 let Access::Path { zone, .. } = &prepared.access else {
                     panic!("expected a path target, got {prepared:?}");
                 };
@@ -875,8 +942,9 @@ mod tests {
             let dir = canonical_tempdir();
             let input = serde_json::json!({"pattern": "x", "path": "."});
 
-            let prepared =
-                GrepTool::new(ReadFilter::default()).prepare(input.clone(), &ctx(dir.path()));
+            let prepared = GrepTool::new(ReadFilter::default())
+                .prepare(input.clone(), &ctx(dir.path()))
+                .unwrap();
 
             let Access::Path { canonical, .. } = &prepared.access else {
                 panic!("expected a path target, got {prepared:?}");
@@ -896,10 +964,12 @@ mod tests {
             std::os::unix::fs::symlink("../outside/notes.md", cwd.join("notes.md")).unwrap();
             let target = outside.join("notes.md");
 
-            let prepared = WriteTool.prepare(
-                serde_json::json!({"file_path": "notes.md", "content": "x"}),
-                &ctx(&cwd),
-            );
+            let prepared = WriteTool
+                .prepare(
+                    serde_json::json!({"file_path": "notes.md", "content": "x"}),
+                    &ctx(&cwd),
+                )
+                .unwrap();
 
             let Access::Path {
                 canonical,
@@ -913,7 +983,6 @@ mod tests {
             assert_eq!(canonical, target.to_str().unwrap());
             assert_eq!(*relative, None);
             assert_eq!(*zone, Zone::Outside);
-            assert_eq!(prepared.input["file_path"], serde_json::json!(target));
         }
     }
 

@@ -303,8 +303,8 @@ impl Access {
     /// Builds a path target for the location the tool will touch, resolving `path` against the
     /// workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling with
     /// no rooted forms, so it never auto-allows. The tool follows native filesystem behavior. A
-    /// resolved path that is not valid UTF-8 never auto-allows either, since the input a file tool
-    /// opens can only pin its lossy spelling.
+    /// resolved path that is not valid UTF-8 never auto-allows either, since rules match it only by
+    /// its lossy spelling.
     pub(crate) fn for_path(path: impl AsRef<Path>, workspace: &Workspace) -> Self {
         PathResolver::new(workspace).resolve(path)
     }
