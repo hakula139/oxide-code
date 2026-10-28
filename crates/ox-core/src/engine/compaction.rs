@@ -733,7 +733,7 @@ mod tests {
     use crate::client::testing::five_hour_limit;
     use crate::config::compaction::CompactionConfig;
     use crate::engine::local_testing::{dead_test_session, inert_ops, tool_heavy_transcript};
-    use crate::engine::login::Login;
+    use crate::engine::login::SignIn;
     use crate::engine::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, request_bodies, with_pinned_home,
     };
@@ -1368,7 +1368,7 @@ mod tests {
                 mount_reply(&server, "summary").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.login = Login::SignedOut { retry: false };
+                engine.sign_in = SignIn::SignedOut { retry: false };
                 engine.transcript.set_messages(tool_heavy_transcript());
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
@@ -1713,8 +1713,9 @@ mod tests {
                 .await;
         }
 
-        /// The credential and settings every summary request in these tests sends under.
+        /// The credential every summary request in these tests sends.
         static API_KEY: LazyLock<Auth> = LazyLock::new(api_key);
+        /// The settings every summary request in these tests sends under.
         static SETTINGS: LazyLock<ModelSettings> =
             LazyLock::new(|| ModelSettings::test("claude-haiku-5-5"));
 

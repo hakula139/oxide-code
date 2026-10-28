@@ -15,6 +15,9 @@ use crate::model::{Effort, ModelSpec, TokenUsage};
 
 /// One side request: a single user message under its own system prompt and output settings.
 pub(crate) struct SideQuery<'a> {
+    /// The live session the request is attributed to.
+    pub(crate) session_id: &'a str,
+    pub(crate) auth: &'a Auth,
     pub(crate) model: ModelSpec,
     pub(crate) system: &'a str,
     pub(crate) user: &'a str,
@@ -27,16 +30,16 @@ pub(crate) struct SideQuery<'a> {
 // ── Client::complete ──
 
 impl Client {
-    /// Sends `query` for the live session `session_id` with `auth` without streaming and returns the
-    /// concatenated assistant text, dropping tool-use and thinking blocks, with the usage the
-    /// response reported. The request carries no agentic betas or `context_management` directive.
+    /// Sends `query` without streaming and returns the concatenated assistant text, dropping
+    /// tool-use and thinking blocks, with the usage the response reported. The request carries no
+    /// agentic betas or `context_management` directive.
     pub(crate) async fn complete(
         &self,
-        session_id: &str,
-        auth: &Auth,
         query: SideQuery<'_>,
     ) -> Result<(String, Option<TokenUsage>)> {
         let SideQuery {
+            session_id,
+            auth,
             model,
             system,
             user,
@@ -119,9 +122,11 @@ mod tests {
 
             const HAIKU: &str = "claude-haiku-5-5";
 
-            /// A Haiku side query for `user` under `system`, capped at 40 tokens.
-            fn query<'a>(system: &'a str, user: &'a str) -> SideQuery<'a> {
+            /// A Haiku side query for `user` under `system` with `auth`, capped at 40 tokens.
+            fn query<'a>(auth: &'a Auth, system: &'a str, user: &'a str) -> SideQuery<'a> {
                 SideQuery {
+                    session_id: SESSION_ID,
+                    auth,
                     model: ModelSpec::resolve(HAIKU),
                     system,
                     user,
@@ -133,7 +138,7 @@ mod tests {
 
             async fn complete_err(client: &Client, auth: &Auth) -> String {
                 let err = client
-                    .complete(SESSION_ID, auth, query("", "u"))
+                    .complete(query(auth, "", "u"))
                     .await
                     .expect_err("the request must fail");
                 format!("{err:#}")
@@ -148,7 +153,7 @@ mod tests {
                 let client = test_client(server.uri());
 
                 let (text, usage) = client
-                    .complete(SESSION_ID, &api_key(), query("sys", "user input"))
+                    .complete(query(&api_key(), "sys", "user input"))
                     .await
                     .unwrap();
 
@@ -167,7 +172,7 @@ mod tests {
                 let client = client_for(&config);
 
                 client
-                    .complete(SESSION_ID, &api_key(), query("sys", "Fix login"))
+                    .complete(query(&api_key(), "sys", "Fix login"))
                     .await
                     .unwrap();
 
@@ -204,7 +209,10 @@ mod tests {
                 let client = test_client(server.uri());
 
                 client
-                    .complete("sid-live", &api_key(), query("", "u"))
+                    .complete(SideQuery {
+                        session_id: "sid-live",
+                        ..query(&api_key(), "", "u")
+                    })
                     .await
                     .unwrap();
             }
@@ -228,13 +236,14 @@ mod tests {
                     config.gateway.structured_outputs = structured_outputs;
                     let client = client_for(&config);
 
+                    let auth = oauth();
                     let query = SideQuery {
                         effort: Some(Effort::Low),
                         output_format: Some(&fmt),
-                        ..query("sys", "prompt")
+                        ..query(&auth, "sys", "prompt")
                     };
 
-                    client.complete(SESSION_ID, &oauth(), query).await.unwrap();
+                    client.complete(query).await.unwrap();
 
                     let received = server.received_requests().await.expect("recorded requests");
                     let body: serde_json::Value =
@@ -270,7 +279,7 @@ mod tests {
                     config.gateway.attribution = attribution;
 
                     client_for(&config)
-                        .complete(SESSION_ID, &auth, query("sys", "Fix login"))
+                        .complete(query(&auth, "sys", "Fix login"))
                         .await
                         .unwrap();
 
@@ -299,7 +308,7 @@ mod tests {
                 let client = test_client(server.uri());
 
                 let (text, _) = client
-                    .complete(SESSION_ID, &api_key(), query("sys", "user input"))
+                    .complete(query(&api_key(), "sys", "user input"))
                     .await
                     .unwrap();
 
@@ -370,7 +379,7 @@ mod tests {
                 let client = test_client(server.uri());
 
                 let err = client
-                    .complete(SESSION_ID, &api_key(), query("", "u"))
+                    .complete(query(&api_key(), "", "u"))
                     .await
                     .expect_err("the request must fail");
 

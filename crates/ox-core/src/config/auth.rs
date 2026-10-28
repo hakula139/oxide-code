@@ -333,7 +333,7 @@ pub(crate) enum AuthState {
 
 impl AuthState {
     /// Where the credential came from, `None` until one is loaded.
-    pub(crate) fn source(&self) -> Option<AuthSource> {
+    pub(super) fn source(&self) -> Option<AuthSource> {
         match self {
             Self::Ready(auth) => Some(auth.source()),
             Self::Unresolved(_) | Self::SignedOut(_) => None,

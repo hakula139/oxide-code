@@ -803,8 +803,9 @@ mod tests {
             (calls, results)
         }
 
-        /// The credential and settings every turn in these tests sends under.
+        /// The credential every turn in these tests sends.
         static API_KEY: LazyLock<Auth> = LazyLock::new(api_key);
+        /// The settings every turn in these tests sends under.
         static SETTINGS: LazyLock<ModelSettings> =
             LazyLock::new(|| ModelSettings::test("claude-sonnet-5-5"));
 

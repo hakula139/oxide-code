@@ -1008,11 +1008,14 @@ mod tests {
         }
 
         fn assert_auth(config: &Config, source: AuthSource, secret: &str) {
-            let AuthState::Ready(auth) = &config.auth else {
-                panic!("the session must be signed in: {:?}", config.auth);
-            };
-            assert_eq!(auth.source(), source);
-            assert_eq!(auth.secret(), secret);
+            assert!(
+                matches!(
+                    &config.auth,
+                    AuthState::Ready(auth) if auth.source() == source && auth.secret() == secret
+                ),
+                "{:?} must send {secret} from {source:?}",
+                config.auth,
+            );
         }
 
         /// Env with no explicit credential and an oxide-code login under `data` that expires at
@@ -1813,14 +1816,16 @@ mod tests {
             let can_sign_in = load_in(&dir, vars.clone(), true).await;
             let cannot_sign_in = load_in(&dir, vars, false).await;
 
-            let AuthState::SignedOut(signed_out) = can_sign_in.unwrap().auth else {
-                panic!("a session that can sign in starts signed out");
-            };
-            assert_eq!(
-                signed_out.notice,
-                "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
+            let auth = can_sign_in.unwrap().auth;
+            assert!(
+                matches!(
+                    &auth,
+                    AuthState::SignedOut(LoginUnavailable { notice, retry: false })
+                        if notice == "Not signed in: oxide-code login has expired. \
+                                      Run `/login` to sign in again."
+                ),
+                "an expired login signs out until a new sign-in: {auth:?}",
             );
-            assert!(!signed_out.retry, "an expired login needs a new sign-in");
             assert_eq!(
                 format!(
                     "{:#}",
@@ -1840,20 +1845,22 @@ mod tests {
 
             let config = load_in(&dir, vars, true).await.unwrap();
 
-            let AuthState::SignedOut(signed_out) = config.auth else {
-                panic!("signed out: {:?}", config.auth);
-            };
-            assert_eq!(
-                signed_out.notice,
-                format!(
-                    "Not signed in: failed to refresh the expired oxide-code login: \
-                     another process held {} for over 20 s. \
-                     Try again in a moment. \
-                     The next prompt tries the stored login again.",
-                    store.join("credentials.lock").display(),
-                ),
+            let expected = format!(
+                "Not signed in: failed to refresh the expired oxide-code login: \
+                 another process held {} for over 20 s. \
+                 Try again in a moment. \
+                 The next prompt tries the stored login again.",
+                store.join("credentials.lock").display(),
             );
-            assert!(signed_out.retry);
+            assert!(
+                matches!(
+                    &config.auth,
+                    AuthState::SignedOut(LoginUnavailable { notice, retry: true })
+                        if *notice == expected
+                ),
+                "{:?}",
+                config.auth,
+            );
         }
 
         #[tokio::test]

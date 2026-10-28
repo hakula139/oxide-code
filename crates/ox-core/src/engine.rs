@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 
 use self::abort::{Inbox, TurnAbort};
-use self::login::Login;
+use self::login::SignIn;
 use self::transcript::{LiveTranscript, TranscriptStart};
 use self::turn::{TurnContext, TurnOutcome, TurnReport, TurnStop};
 use self::usage::UsageLedger;
@@ -115,7 +115,7 @@ pub struct Engine {
     /// The Keychain `/logout` checks for the Claude Code login before its file, none in tests.
     claude_code_keychain: ClaudeCodeKeychain,
     /// The credential requests send, or whether a signed-out session loads the stored login again.
-    login: Login,
+    sign_in: SignIn,
     tools: Arc<ToolRegistry>,
     store: SessionStore,
     /// The live session, its transcript, and what the model has seen of the prompt.
@@ -157,7 +157,7 @@ impl Engine {
             transcript,
         } = session;
         let client = Client::new(config, trust, device_id)?;
-        let login = Login::from_config(&config.auth)?;
+        let sign_in = SignIn::try_from(&config.auth)?;
         let settings = config.model_settings();
         let shells = Arc::new(BackgroundShells::default());
         let read_filter = config.permission.read_filter();
@@ -171,7 +171,7 @@ impl Engine {
             settings,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
             claude_code_keychain: ClaudeCodeKeychain::SYSTEM,
-            login,
+            sign_in,
             tools,
             store,
             transcript,
@@ -802,9 +802,9 @@ mod tests {
                     ["Not signed in. Run `/login` to sign in."],
                 );
                 assert!(
-                    matches!(engine.login, Login::SignedOut { retry: true }),
+                    matches!(engine.sign_in, SignIn::SignedOut { retry: true }),
                     "{:?}",
-                    engine.login,
+                    engine.sign_in,
                 );
             })
             .await;
@@ -3147,7 +3147,7 @@ mod tests {
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.login = Login::SignedOut { retry: false };
+                engine.sign_in = SignIn::SignedOut { retry: false };
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 

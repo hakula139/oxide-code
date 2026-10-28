@@ -64,7 +64,7 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 // ── Client ──
 
 /// Anthropic client, which attributes each request to the session its caller names. Clones share
-/// the connection pool and stored-login token.
+/// the connection pool and the stored-login reload tracker.
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
@@ -593,14 +593,14 @@ mod tests {
             use super::*;
 
             #[tokio::test]
-            async fn waits_for_a_refresh_that_a_replaced_login_left_in_flight() {
+            async fn waits_for_a_refresh_an_aborted_request_left_in_flight() {
                 for (token, expires_at) in [("expired", 0), ("rejected", 9_999_999_999_999)] {
                     let server = serve(vec![ResponseTemplate::new(401)]).await;
                     let refresh = HeldRefresh::mount(&server).await;
                     let dir = tempfile::tempdir().unwrap();
                     let creds = dir.path().join("credentials.json");
                     write_creds(&creds, token, Some("old-refresh"), expires_at);
-                    let replaced = ox_login_in(&creds, &server.uri(), token, expires_at);
+                    let login = ox_login_in(&creds, &server.uri(), token, expires_at);
                     let client = test_client(server.uri());
 
                     refresh
@@ -610,7 +610,7 @@ mod tests {
                                 SESSION_ID,
                                 String::new(),
                                 "{}".to_owned(),
-                                &replaced,
+                                &login,
                             );
                             async move { transport::post_messages(&http, &request, 0).await }
                         })
@@ -618,7 +618,7 @@ mod tests {
                     refresh.release();
                     client.finish_reloads().await;
 
-                    assert_eq!(replaced.secret(), "fresh-access", "{token}");
+                    assert_eq!(login.secret(), "fresh-access", "{token}");
                     server.verify().await;
                 }
             }
@@ -1263,7 +1263,10 @@ mod tests {
                 let stored: serde_json::Value =
                     serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
                 std::fs::remove_file(&file).unwrap();
+                let clone = login.clone();
                 let query = SideQuery {
+                    session_id: SESSION_ID,
+                    auth: &clone,
                     model: ModelSpec::resolve("claude-haiku-5-5"),
                     system: "",
                     user: "u",
@@ -1271,10 +1274,7 @@ mod tests {
                     effort: None,
                     output_format: None,
                 };
-                let (title, _) = client
-                    .complete(SESSION_ID, &login.clone(), query)
-                    .await
-                    .unwrap();
+                let (title, _) = client.complete(query).await.unwrap();
 
                 assert_eq!(stored["claudeAiOauth"]["accessToken"], "fresh-access");
                 assert_eq!(stored["claudeAiOauth"]["refreshToken"], "fresh-refresh");

@@ -110,6 +110,8 @@ async fn generate_and_record(
     let output_format = title_output_format();
     let user = title_request(first_prompt);
     let query = SideQuery {
+        session_id: session.session_id(),
+        auth,
         model: ModelSpec::resolve(HAIKU_MODEL),
         system: SYSTEM_PROMPT,
         user: &user,
@@ -118,7 +120,7 @@ async fn generate_and_record(
         output_format: Some(&output_format),
     };
     let (raw, usage) = client
-        .complete(session.session_id(), auth, query)
+        .complete(query)
         .await
         .context("Haiku completion failed")?;
 
