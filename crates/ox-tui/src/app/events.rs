@@ -28,12 +28,18 @@ use crate::slash;
 use crate::{NOTICE_DURATION, now};
 
 impl App {
-    /// Passes `event` to the open modals, shows it, then ends the in-flight operation if `event` is
-    /// its terminal event.
+    /// Passes `event` to the open modals and shows it, leaving a saved-session result to a modal
+    /// that shows it, then ends the in-flight operation if `event` is its terminal event.
     pub(super) fn handle_engine_event(&mut self, event: Event) {
         let end = self.in_flight.as_ref().and_then(|op| op.end(&event));
         let shown = self.notify_modals(EngineUpdate::Event(&event));
-        self.apply_event(event, shown);
+        let saved_result = matches!(
+            event,
+            Event::ArchiveUpdated { .. } | Event::SavedDeleted { .. }
+        );
+        if !(shown && saved_result) {
+            self.apply_event(event);
+        }
         if let Some(end) = end
             && let Some(ended) = self.in_flight.take()
         {
@@ -42,8 +48,8 @@ impl App {
         self.dirty = true;
     }
 
-    /// Shows `event` in chat and the status bar, leaving a result a modal `shown` to that modal.
-    fn apply_event(&mut self, event: Event, shown: bool) {
+    /// Shows `event` in chat and the status bar.
+    fn apply_event(&mut self, event: Event) {
         match event {
             Event::StreamToken(token) => {
                 self.chat.append_stream_token(&token);
@@ -63,13 +69,8 @@ impl App {
             }
             Event::ToolCallEnd(result) => self.chat.push_tool_result(result),
             Event::PromptDrained(text) => self.apply_prompt_drained(text),
-            Event::SavedDeleted { id, result } if !shown => self.report_saved_deleted(&id, &result),
-            // Terminal events that only end the operation, which `end_operation` settles, and a
-            // delete result the modal that shows it already reported.
-            Event::TurnComplete
-            | Event::Cancelled
-            | Event::SessionReady
-            | Event::SavedDeleted { .. } => {}
+            // Terminal events that only end the operation, which `end_operation` settles.
+            Event::TurnComplete | Event::Cancelled | Event::SessionReady => {}
             Event::TurnRolledBack => self.queue.mark_rolled_back(),
             Event::PromptUnsent => self.queue.mark_unsent(),
             Event::UsageUpdated(usage) => self.session_info.usage = Some(usage),
@@ -91,6 +92,7 @@ impl App {
                 result,
             } => self.report_archive_updated(&target, state, &result),
             Event::SavedFound(result) => self.apply_saved_found(result),
+            Event::SavedDeleted { id, result } => self.report_saved_deleted(&id, &result),
             Event::SessionRolled { id, old_session } => self.apply_session_rolled(id, old_session),
             Event::SessionResumed {
                 id,
@@ -227,14 +229,6 @@ impl App {
         }
     }
 
-    /// Opens the `/delete` confirm modal on the session the engine resolved the prefix to.
-    fn apply_saved_found(&mut self, result: Result<Box<SessionInfo>, SavedError>) {
-        match result {
-            Ok(info) => self.push_modal(slash::delete_confirm_modal(&info)),
-            Err(error) => self.chat.push_error(&slash::delete_lookup_error(&error)),
-        }
-    }
-
     fn report_archive_updated(
         &mut self,
         target: &SavedTarget,
@@ -244,6 +238,14 @@ impl App {
         match slash::archive_message(target, state, result) {
             Ok(note) => self.chat.push_system_message(note),
             Err(error) => self.chat.push_error(&error),
+        }
+    }
+
+    /// Opens the `/delete` confirm modal on the session the engine resolved the prefix to.
+    fn apply_saved_found(&mut self, result: Result<Box<SessionInfo>, SavedError>) {
+        match result {
+            Ok(info) => self.push_modal(slash::delete_confirm_modal(&info)),
+            Err(error) => self.chat.push_error(&slash::delete_lookup_error(&error)),
         }
     }
 
@@ -556,6 +558,7 @@ mod tests {
     };
     use crate::clipboard::CopyError;
     use crate::glyphs::INTERRUPTED_MARKER;
+    use crate::modal::UpdateReply;
     use crate::modal::testing::ScriptedModal;
     use crate::session_info::testing::unknown_model_session_info;
     use crate::slash::{ResumePicker, SlashOutcome, WorkingTreeDiff};
@@ -2296,6 +2299,48 @@ mod tests {
             assert_eq!(app.session_info.background_shells, shells_in_each_state());
             assert!(app.dirty);
         }
+
+        #[test]
+        fn leaves_a_saved_session_result_to_a_modal_that_shows_it() {
+            let target = SavedTarget::Id("saved".to_owned());
+            for (op, event) in [
+                (
+                    Op::SetArchive {
+                        target: target.clone(),
+                        state: ArchiveState::Archived,
+                    },
+                    Event::ArchiveUpdated {
+                        target: target.clone(),
+                        state: ArchiveState::Archived,
+                        result: Ok(ArchiveUpdate {
+                            id: "saved".to_owned(),
+                            changed: true,
+                        }),
+                    },
+                ),
+                (
+                    Op::DeleteSaved {
+                        session_id: "saved".to_owned(),
+                    },
+                    Event::SavedDeleted {
+                        id: "saved".to_owned(),
+                        result: Ok(()),
+                    },
+                ),
+            ] {
+                let (mut app, _rx, _event_tx) = test_app(None);
+                let mut modal = ScriptedModal::new();
+                modal.reply = Some(UpdateReply::Shown);
+                app.push_modal(Box::new(modal));
+                start_op(&mut app, &op);
+
+                app.handle_engine_event(event);
+
+                assert_eq!(activity(&app), None, "{op:?}");
+                assert!(app.modals.is_active(), "{op:?}");
+                assert_eq!(app.chat.last_system_text(), None, "{op:?}");
+            }
+        }
     }
 
     mod end_operation {
@@ -2671,7 +2716,7 @@ mod tests {
         }
     }
 
-    mod apply_archive_updated {
+    mod report_archive_updated {
         use super::*;
 
         #[test]
@@ -2788,7 +2833,7 @@ mod tests {
         }
     }
 
-    mod apply_saved_deleted {
+    mod report_saved_deleted {
         use super::*;
 
         fn delete_saved(id: &str) -> Op {

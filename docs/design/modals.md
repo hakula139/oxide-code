@@ -22,7 +22,7 @@ The App's frame tick also calls `Modal::tick` on the top modal, which reports wh
 
 Dispatched actions flow through the same channel as keyboard input, so the modal never needs to know what handler will run on the other side.
 
-`Modal::on_engine` tells every open modal about each op the App sends (`EngineUpdate::Admitted`) and each event the engine reports (`EngineUpdate::Event`), so a modal that sent an op learns whether it left and how it ended, while an op the App drops never reaches it. Its `UpdateReply` says whether the modal shows the update, closes on it with a replacement action, or leaves it for the App to report, which the App does only when no modal claims it.
+`Modal::on_engine` tells every open modal about each op `dispatch_op` admits (`EngineUpdate::Admitted`) and each event the engine reports (`EngineUpdate::Event`), so a modal that sent an op learns whether it left and how it ended. Prompts go through the prompt queue and never reach modals. Its `UpdateReply` says whether the modal shows the update, closes on it with a replacement action, or leaves it for the App to report. The App skips its own report of an archive or delete result that a modal shows, and applies the actions of the modals an admitted op closes only after it sends that op.
 
 Bracketed pastes reach `Modal::handle_paste`, which defaults to a no-op. Text fields such as `/rename`, the picker search, and the approval prompt's editors accept them, and a paste never answers a confirm or approval prompt.
 
@@ -92,7 +92,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 10. **Nested modals use `ModalKey::Push`.** A push outcome keeps `handle_key` returning one value and avoids threading a stack borrow through every modal. `Debug for ModalKey` is hand-rolled because `Box<dyn Modal>` cannot derive it.
 
-11. **Modals learn saved-session results from the engine's events.** The engine owns saved-session writes, so `ModalStack` passes `ArchiveUpdated` and `SavedDeleted` to every modal on the stack. A covered `/resume` picker updates its rows from the same result that closes the confirm-delete modal above it, without rereading the store when it regains focus.
+11. **Modals learn the fate of their ops through one hook.** The engine owns saved-session writes, so `ModalStack` passes every admitted op and every engine event to every modal on the stack through `Modal::on_engine`, so a new modal that sends an op needs only a match arm in that hook. The App does not filter updates per modal, because each modal matches the session ID it acted on and ignores the rest. A covered `/resume` picker updates its rows from the same result that closes the confirm-delete modal above it, without rereading the store when it regains focus. `Admitted` follows `dispatch_op`'s busy check and delivery reservation, so an op the App drops never reaches a modal, and a confirm modal whose delete was dropped still takes Y again.
 
 ## Out of Scope
 

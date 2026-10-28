@@ -45,9 +45,8 @@ pub(crate) trait Modal: Send {
     /// Receives bracketed-paste text. Default no-op, so a paste never answers a prompt.
     fn handle_paste(&mut self, _text: &str) {}
 
-    /// Receives an op the App sent or an event the engine reported while this modal is on the
-    /// stack, so a modal that sent an op learns whether it left and how it ended. Default
-    /// unclaimed.
+    /// Receives each op `dispatch_op` admits and each event the engine reports while this modal is
+    /// open, so a modal learns whether its op left and how it ended. Default unclaimed.
     fn on_engine(&mut self, _update: EngineUpdate<'_>) -> UpdateReply {
         UpdateReply::Unclaimed
     }
@@ -132,7 +131,8 @@ pub(crate) enum ModalAction {
 /// What [`Modal::on_engine`] receives.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum EngineUpdate<'a> {
-    /// The App sent the op to the engine.
+    /// `dispatch_op` reserved delivery for the op and sends it next. Prompts reach the engine
+    /// through the prompt queue and never arrive here.
     Admitted(&'a Op),
     /// The engine reported the event.
     Event(&'a Event),
@@ -243,9 +243,10 @@ impl ModalStack {
     }
 
     /// Routes `event` to the top modal. Returns the action of a Submit or Emit, or of the
-    /// [`Modal::on_cancel`] a cancel fires, and `None` otherwise. Esc and Ctrl+C short-circuit before delegation as a universal cancel, so
-    /// individual modals don't reimplement the gesture, except that Esc reaches a modal whose
-    /// [`Modal::captures_esc`] is set. A modified key the modal does not bind is dropped.
+    /// [`Modal::on_cancel`] a cancel fires, and `None` otherwise. Esc and Ctrl+C short-circuit
+    /// before delegation as a universal cancel, so individual modals don't reimplement the gesture,
+    /// except that Esc reaches a modal whose [`Modal::captures_esc`] is set. A modified key the
+    /// modal does not bind is dropped.
     pub(crate) fn handle_key(&mut self, event: &KeyEvent) -> Option<ModalAction> {
         let top = self.stack.last_mut()?;
         if is_universal_cancel(event) && !(event.code == KeyCode::Esc && top.captures_esc()) {

@@ -189,12 +189,6 @@ impl App {
         }
     }
 
-    fn revert_theme_preview(&mut self) {
-        if let Some(theme) = self.preview_theme_snapshot.take() {
-            self.apply_theme(&theme);
-        }
-    }
-
     /// Passes `update` to the open modals and applies the actions of those it closes. Returns
     /// whether a modal shows the update.
     pub(super) fn notify_modals(&mut self, update: EngineUpdate<'_>) -> bool {
@@ -306,9 +300,12 @@ impl App {
             | Op::Logout
             | Op::Shutdown => {}
         }
-        self.notify_modals(EngineUpdate::Admitted(&op));
         self.begin(&op);
+        let closed = self.modals.notify(EngineUpdate::Admitted(&op));
         permit.send(op);
+        for action in closed.into_iter().flatten() {
+            self.apply_modal_action(action);
+        }
     }
 
     /// Puts `op` in flight when it runs until a terminal event, which also closes an exit window.
@@ -380,6 +377,12 @@ impl App {
         self.preview_theme_snapshot
             .get_or_insert_with(|| self.theme.clone());
         self.apply_theme(&preview);
+    }
+
+    fn revert_theme_preview(&mut self) {
+        if let Some(theme) = self.preview_theme_snapshot.take() {
+            self.apply_theme(&theme);
+        }
     }
 
     fn swap_theme(&mut self, builtin: &BuiltinTheme) {
@@ -583,6 +586,7 @@ mod tests {
         push_answerable_approval, render_app, rendered_text, start_op, test_app,
     };
     use crate::components::status::StatusHyperlink;
+    use crate::modal::UpdateReply;
     use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::modal::testing::ScriptedModal;
     use crate::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};
@@ -1289,19 +1293,6 @@ mod tests {
         use super::*;
 
         #[test]
-        fn a_revert_without_a_preview_keeps_the_theme() {
-            // The `/theme` modal reverts on every cancel, including Enter on its original row
-            // before any preview.
-            let (mut app, _rx, _event_tx) = test_app(None);
-            let original_text = app.theme.text;
-
-            app.apply_modal_action(ModalAction::Dispatch(Action::RevertThemePreview));
-
-            assert!(app.preview_theme_snapshot.is_none());
-            assert_eq!(app.theme.text, original_text);
-        }
-
-        #[test]
         fn system_message_action_pushes_into_chat() {
             // Destructive-action modals report success in chat so the user can confirm the action
             // ran.
@@ -1353,13 +1344,15 @@ mod tests {
         }
 
         #[test]
-        fn rolls_back_theme_preview() {
+        fn rolls_back_the_theme_picker_preview() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let original = app.theme.clone();
-            let mut picker = ScriptedModal::new();
-            picker.cancel_action = Some(ModalAction::Dispatch(Action::RevertThemePreview));
-            app.push_modal(Box::new(picker));
-            app.dispatch_action(Action::PreviewTheme(latte()));
+            app.dispatch_action(Action::Submit("/theme".to_owned()));
+            app.handle_crossterm_event(&key_event(KeyCode::Down, KeyModifiers::NONE));
+            assert_ne!(
+                app.theme.text, original.text,
+                "the highlight previews a theme"
+            );
 
             app.clear_modals();
 
@@ -1997,6 +1990,24 @@ mod tests {
         use super::*;
 
         #[tokio::test]
+        async fn sends_the_admitted_op_before_the_action_of_a_modal_it_closes() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            let mut modal = ScriptedModal::new();
+            modal.reply = Some(UpdateReply::Closed(ModalAction::Dispatch(Action::Op(
+                Op::Clear,
+            ))));
+            app.push_modal(Box::new(modal));
+
+            app.dispatch_op(Op::Compact { instructions: None });
+
+            assert_eq!(rx.try_recv(), Ok(Op::Compact { instructions: None }));
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+            assert!(!app.modals.is_active());
+            assert_eq!(app.chat.last_error_text(), Some(BUSY_DROPPED));
+            assert_eq!(activity(&app), Some(&Activity::Compacting));
+        }
+
+        #[tokio::test]
         async fn an_operation_closes_the_exit_window() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
@@ -2571,7 +2582,22 @@ mod tests {
         }
 
         #[test]
-        fn then_a_revert_restores_the_theme_from_before_the_first_preview() {
+        fn keeps_the_configured_overrides() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.theme_overrides = red_text_overrides();
+
+            app.dispatch_action(Action::PreviewTheme(latte()));
+
+            assert_eq!(app.theme.text.fg, Some(RED));
+            assert_ne!(app.theme.accent, Theme::default().accent, "latte applies");
+        }
+    }
+
+    mod revert_theme_preview {
+        use super::*;
+
+        #[test]
+        fn restores_the_theme_from_before_the_first_preview() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let original = app.theme.clone();
             app.dispatch_action(Action::PreviewTheme(latte()));
@@ -2587,14 +2613,16 @@ mod tests {
         }
 
         #[test]
-        fn keeps_the_configured_overrides() {
+        fn keeps_the_theme_without_a_preview() {
+            // The `/theme` picker reverts on every cancel, including Enter on its original row
+            // before any preview.
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.theme_overrides = red_text_overrides();
+            let original_text = app.theme.text;
 
-            app.dispatch_action(Action::PreviewTheme(latte()));
+            app.dispatch_action(Action::RevertThemePreview);
 
-            assert_eq!(app.theme.text.fg, Some(RED));
-            assert_ne!(app.theme.accent, Theme::default().accent, "latte applies");
+            assert!(app.preview_theme_snapshot.is_none());
+            assert_eq!(app.theme.text, original_text);
         }
     }
 
