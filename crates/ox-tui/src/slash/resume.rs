@@ -4,8 +4,6 @@
 
 use std::borrow::Cow;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Instant;
@@ -20,10 +18,10 @@ use time::OffsetDateTime;
 
 use ox_core::command;
 use ox_core::protocol::{Op, ResumeTarget, SavedTarget};
-use ox_core::session::display::{ID_PREFIX_WIDTH, display_title, id_prefix};
-use ox_core::session::entry::{ArchiveState, SessionInfo};
+use ox_core::session::display::{DisplayTitle, ID_PREFIX_WIDTH, id_prefix};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::session::store::SessionStore;
+use ox_core::session::store::listing::{ArchiveState, SessionInfo};
 use ox_core::session::store::listing::{ListScope, ProjectScope, SessionWalk};
 use ox_core::util::path::tildify;
 use ox_core::util::text::{
@@ -37,7 +35,7 @@ use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use super::sessions::{
     BARE_ARCHIVE_HINT, SHORT_RELATIVE_TIME_WIDTH, format_metadata_line, format_short_relative_time,
-    open_store, saved_error_message,
+    saved_error_message,
 };
 use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
@@ -105,7 +103,7 @@ impl SlashCommand for ResumeCmd {
             return Ok(SlashOutcome::Forward(Action::Op(command::resume(args)?)));
         }
         Ok(SlashOutcome::Modal(Box::new(ResumePicker::new(
-            open_store(ctx.info)?,
+            ctx.info.store.clone(),
             ctx.info.session_id.clone(),
         ))))
     }
@@ -119,8 +117,8 @@ struct SessionRow {
     last_active_at: OffsetDateTime,
     /// When the listing started, in local time. The row's relative times count from here.
     listed_at: OffsetDateTime,
-    title: String,
-    /// `0` when no `Summary` line was found, as in a session that never finalized.
+    title: DisplayTitle,
+    /// The messages on the session's branch since its last compaction, `0` for an empty branch.
     message_count: u32,
     git_branch: Option<String>,
     /// `Some` only when the picker spans every project, where the path tells rows apart.
@@ -159,8 +157,8 @@ impl Column {
 
 impl SessionRow {
     fn from_info(info: SessionInfo, listed_at: OffsetDateTime, show_project: bool) -> Self {
-        let title = escape_line(display_title(&info));
-        let project_path = escape_line(&tildify(Path::new(info.project())));
+        let title = DisplayTitle::of(&info);
+        let project_path = escape_line(&tildify(Path::new(&info.project_root)));
         // The project is searchable only when shown, since every scoped row shares it.
         let haystack = if show_project {
             format!("{} {} {}", info.session_id, title, project_path)
@@ -172,7 +170,7 @@ impl SessionRow {
             last_active_at: info.last_active_at,
             listed_at,
             title,
-            message_count: info.exit.as_ref().map_or(0, |e| e.message_count),
+            message_count: info.message_count,
             git_branch: info.git_branch,
             project: show_project.then_some(project_path),
             haystack,
@@ -218,7 +216,7 @@ impl SessionRow {
     fn cell(&self, column: Column, width: usize) -> String {
         match column {
             Column::Id => pad_to_width(id_prefix(&self.session_id), width),
-            Column::Title => pad_to_width(&truncate_to_width(&self.title, width), width),
+            Column::Title => pad_to_width(&self.title.fit(width), width),
             Column::Branch => {
                 let branch = self.git_branch.as_deref().unwrap_or_default();
                 pad_to_width(&truncate_to_width(branch, width), width)
@@ -364,17 +362,10 @@ enum Pages {
     Done,
 }
 
-/// A worker reading one page, which hands the walk back with it. Dropping the handle, as a reload
-/// or a closing picker does, stops the worker at the next file.
+/// A worker reading one page, which hands the walk back with it. A reload or a closing picker
+/// drops the receiver, and the worker's page goes nowhere.
 struct Worker {
-    rx: Receiver<(SessionWalk, Vec<SessionInfo>)>,
-    cancel: Arc<AtomicBool>,
-}
-
-impl Drop for Worker {
-    fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-    }
+    rx: Receiver<(SessionWalk, anyhow::Result<Vec<SessionInfo>>)>,
 }
 
 /// What [`Pages::poll`] found.
@@ -382,6 +373,8 @@ enum Polled {
     /// No page is ready.
     Pending,
     Page(Vec<SessionInfo>),
+    /// The store failed to read the page, which ends the listing.
+    Failed(anyhow::Error),
     /// The worker died without a page, which only a panic does.
     Stopped,
 }
@@ -405,14 +398,12 @@ impl Pages {
         match std::mem::replace(self, Self::Done) {
             Self::Idle(mut walk) => {
                 let (tx, rx) = mpsc::channel();
-                let cancel = Arc::new(AtomicBool::new(false));
-                let cancelled = Arc::clone(&cancel);
                 thread::spawn(move || {
-                    let page = read_page(&mut walk, &cancelled);
+                    let page = walk.next_page(PAGE_SIZE);
                     // A closed channel means the picker moved on to another view or closed.
                     _ = tx.send((walk, page));
                 });
-                *self = Self::Loading(Worker { rx, cancel });
+                *self = Self::Loading(Worker { rx });
             }
             pages => *self = pages,
         }
@@ -424,9 +415,13 @@ impl Pages {
             return Polled::Pending;
         };
         match worker.rx.try_recv() {
-            Ok((walk, page)) => {
+            Ok((walk, Ok(page))) => {
                 *self = Self::rest(walk);
                 Polled::Page(page)
+            }
+            Ok((_, Err(err))) => {
+                *self = Self::Done;
+                Polled::Failed(err)
             }
             Err(TryRecvError::Empty) => Polled::Pending,
             Err(TryRecvError::Disconnected) => {
@@ -444,19 +439,8 @@ impl Pages {
         };
         let (walk, page) = worker.rx.recv().expect("page worker panicked");
         *self = Self::rest(walk);
-        Some(page)
+        Some(page.expect("page read failed"))
     }
-}
-
-/// Up to [`PAGE_SIZE`] sessions from `walk`, or fewer once `cancel` is set.
-fn read_page(walk: &mut SessionWalk, cancel: &AtomicBool) -> Vec<SessionInfo> {
-    let mut page = Vec::new();
-    while page.len() < PAGE_SIZE
-        && let Some(info) = walk.next_unless(|| cancel.load(Ordering::Relaxed))
-    {
-        page.push(info);
-    }
-    page
 }
 
 // ── ResumePicker ──
@@ -551,20 +535,8 @@ impl ResumePicker {
     /// top. Rows arrive as pages load.
     fn reload(&mut self) {
         self.listed_at = now_local();
-        self.pages = match self.store.walk(self.scope) {
-            Ok(walk) => {
-                self.load_error = None;
-                Pages::rest(walk)
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = %format_args!("{err:#}"),
-                    "resume picker failed to list sessions"
-                );
-                self.load_error = Some(format!("Failed to load sessions: {err:#}"));
-                Pages::Done
-            }
-        };
+        self.pages = Pages::rest(self.store.walk(self.scope));
+        self.load_error = None;
         self.list.replace_items(Vec::new());
         self.load_ahead();
     }
@@ -753,7 +725,7 @@ impl Modal for ResumePicker {
         if let Some(row) = self.list.selected().filter(|row| row.session_id == *id) {
             self.archive = Some(PendingArchive {
                 session_id: id.clone(),
-                title: row.title.clone(),
+                title: row.title.to_string(),
                 listed_at: self.listed_at,
             });
         }
@@ -816,6 +788,15 @@ impl Modal for ResumePicker {
                 self.append_page(page);
                 true
             }
+            Polled::Failed(err) => {
+                tracing::warn!(
+                    error = %format_args!("{err:#}"),
+                    "resume picker failed to list sessions"
+                );
+                self.load_error = Some(format!("Failed to load sessions: {err:#}"));
+                self.list.set_has_more(false);
+                true
+            }
             Polled::Stopped => {
                 self.load_error = Some(LOADER_STOPPED.to_owned());
                 self.list.set_has_more(false);
@@ -876,11 +857,10 @@ mod tests {
     use time::macros::datetime;
 
     use ox_core::session::display::UNTITLED_MARKER;
-    use ox_core::session::entry::{ExitInfo, TitleInfo};
     use ox_core::session::saved::{self, SavedAction};
     use ox_core::session::store::testing::{
         WriterBarrier, archive_test_session, isolated_store, listed_ids, listed_session,
-        seed_test_session, stamped_id, test_project_dir, test_store, with_isolated_xdg,
+        seed_test_session, stamped_id, test_store,
     };
     use ox_core::util::log::testing::LogCapture;
 
@@ -917,7 +897,7 @@ mod tests {
                 store,
                 &stamped_id(byte),
                 Some(title),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
             );
         }
@@ -942,7 +922,7 @@ mod tests {
             let id = stamped_id(byte);
             let last_active_at =
                 datetime!(2026-04-18 09:00:00 UTC) - time::Duration::days(days_ago);
-            seed_test_session(store, &id, Some(title), Some(msg_count), last_active_at);
+            seed_test_session(store, &id, Some(title), msg_count, last_active_at);
             if archived {
                 archive_test_session(store, &id);
             }
@@ -964,7 +944,7 @@ mod tests {
                     store,
                     &id,
                     Some("session"),
-                    Some(1),
+                    1,
                     datetime!(2026-04-18 09:00:00 UTC)
                         + time::Duration::seconds(i64::try_from(i).unwrap()),
                 );
@@ -1018,10 +998,9 @@ mod tests {
 
             #[test]
             fn bare_opens_the_picker() {
-                with_isolated_xdg(|_| {
-                    let outcome = run_execute(&ResumeCmd, "");
-                    outcome.unwrap().into_modal();
-                });
+                let outcome = run_execute(&ResumeCmd, "");
+
+                outcome.unwrap().into_modal();
             }
 
             #[test]
@@ -1045,28 +1024,19 @@ mod tests {
         const LISTED_AT: OffsetDateTime = datetime!(2026-06-01 00:00:00 UTC);
 
         /// A session last active on 2026-04-18, more than 30 days ago, so rows show the date.
-        /// `message_count` is `None` for a session that never finalized.
         fn raw_session_info(
             session_id: &str,
-            cwd: &str,
+            project_root: &str,
             title: Option<&str>,
-            message_count: Option<u32>,
+            message_count: u32,
             git_branch: Option<&str>,
         ) -> SessionInfo {
-            let info = listed_session(session_id);
-            let last_active_at = info.last_active_at;
             SessionInfo {
-                cwd: cwd.to_owned(),
-                title: title.map(|t| TitleInfo {
-                    title: t.to_owned(),
-                    updated_at: last_active_at,
-                }),
-                exit: message_count.map(|message_count| ExitInfo {
-                    message_count,
-                    updated_at: last_active_at,
-                }),
+                project_root: project_root.to_owned(),
+                title: title.map(str::to_owned),
+                message_count,
                 git_branch: git_branch.map(str::to_owned),
-                ..info
+                ..listed_session(session_id)
             }
         }
 
@@ -1076,7 +1046,7 @@ mod tests {
                 &stamped_id(0xab),
                 "/work/oxide",
                 Some("Fix auth"),
-                Some(14),
+                14,
                 Some("feat/login"),
             );
             SessionRow::from_info(info, LISTED_AT, show_project)
@@ -1086,10 +1056,10 @@ mod tests {
             use super::*;
 
             #[test]
-            fn shows_the_title_or_the_untitled_marker() {
-                let absent = raw_session_info(&stamped_id(0xab), "/work/oxide", None, None, None);
+            fn shows_the_title_or_the_untitled_marker_and_the_fork_source() {
+                let absent = raw_session_info(&stamped_id(0xab), "/work/oxide", None, 0, None);
                 let row = SessionRow::from_info(absent, LISTED_AT, true);
-                assert_eq!(row.title, UNTITLED_MARKER);
+                assert_eq!(row.title.to_string(), UNTITLED_MARKER);
                 assert!(row.haystack.contains(&row.session_id));
                 assert!(row.haystack.contains("/work/oxide"));
 
@@ -1097,12 +1067,25 @@ mod tests {
                     &stamped_id(0xcd),
                     "/work/oxide",
                     Some("Fix auth bug"),
-                    None,
+                    0,
                     None,
                 );
                 let row = SessionRow::from_info(present, LISTED_AT, true);
-                assert_eq!(row.title, "Fix auth bug");
+                assert_eq!(row.title.to_string(), "Fix auth bug");
                 assert!(row.haystack.contains("Fix auth bug"));
+
+                let fork = SessionInfo {
+                    forked_from: Some("12345678-0000-4000-8000-000000000000".to_owned()),
+                    ..raw_session_info(
+                        &stamped_id(0xef),
+                        "/work/oxide",
+                        Some("Fix auth bug"),
+                        0,
+                        None,
+                    )
+                };
+                let row = SessionRow::from_info(fork, LISTED_AT, true);
+                assert_eq!(row.title.to_string(), "Fix auth bug (fork of 12345678)");
             }
 
             #[test]
@@ -1164,21 +1147,20 @@ mod tests {
                     &stamped_id(0x22),
                     "/work/oxide",
                     Some("First turn"),
-                    Some(1),
+                    1,
                     None,
                 );
-                let unfinished =
-                    raw_session_info(&stamped_id(0x33), "/work/oxide", None, None, None);
+                let untitled = raw_session_info(&stamped_id(0x33), "/work/oxide", None, 0, None);
 
                 let recent = SessionRow {
                     listed_at: datetime!(2026-04-18 12:00:00 UTC),
-                    ..SessionRow::from_info(unfinished.clone(), LISTED_AT, true)
+                    ..SessionRow::from_info(untitled.clone(), LISTED_AT, true)
                 };
 
                 let rows = [
                     rendered(&fix_auth_row(true), 120),
                     rendered(&SessionRow::from_info(one, LISTED_AT, true), 120),
-                    rendered(&SessionRow::from_info(unfinished, LISTED_AT, true), 120),
+                    rendered(&SessionRow::from_info(untitled, LISTED_AT, true), 120),
                     rendered(&recent, 120),
                 ];
 
@@ -1200,7 +1182,7 @@ mod tests {
                         &stamped_id(0xab),
                         "/work/oxide",
                         Some("Long run"),
-                        Some(count),
+                        count,
                         None,
                     );
                     rendered(&SessionRow::from_info(info, LISTED_AT, false), 60)
@@ -1221,7 +1203,7 @@ mod tests {
                     &stamped_id(0xab),
                     "/home/user/projects/a-rather-deep/checkout",
                     Some("修复登录重定向 and a long English tail that never fits"),
-                    Some(123_456),
+                    123_456,
                     Some("feature/an-unusually-long-branch-name"),
                 );
                 let row = SessionRow::from_info(info, LISTED_AT, true);
@@ -1287,57 +1269,6 @@ mod tests {
         }
     }
 
-    mod worker {
-        use super::*;
-
-        mod drop {
-            use super::*;
-
-            #[test]
-            fn tells_the_worker_to_stop() {
-                let cancel = Arc::new(AtomicBool::new(false));
-                let (_tx, rx) = mpsc::channel();
-                let worker = Worker {
-                    rx,
-                    cancel: Arc::clone(&cancel),
-                };
-
-                drop(worker);
-
-                assert!(cancel.load(Ordering::Relaxed));
-            }
-        }
-    }
-
-    mod read_page {
-        use super::*;
-
-        #[test]
-        fn stops_at_the_page_size() {
-            let (_dir, store) = isolated_store();
-            let ids = seed_many(&store, PAGE_SIZE + 1);
-            let mut walk = store.walk(ListScope::default()).unwrap();
-
-            let page = read_page(&mut walk, &AtomicBool::new(false));
-
-            let page_ids: Vec<_> = page.into_iter().map(|info| info.session_id).collect();
-            assert_eq!(page_ids, ids[..PAGE_SIZE]);
-            assert!(!walk.is_exhausted());
-        }
-
-        #[test]
-        fn reads_nothing_once_cancelled() {
-            let (_dir, store) = isolated_store();
-            seed_many(&store, 2);
-            let mut walk = store.walk(ListScope::default()).unwrap();
-
-            let page = read_page(&mut walk, &AtomicBool::new(true));
-
-            assert_eq!(page, [] as [SessionInfo; 0]);
-            assert!(!walk.is_exhausted(), "no file was drawn");
-        }
-    }
-
     mod new {
         use super::*;
 
@@ -1348,14 +1279,14 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("First"),
-                Some(3),
+                3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             seed_test_session(
                 &store,
                 &stamped_id(0x22),
                 Some("Second"),
-                Some(5),
+                5,
                 datetime!(2026-04-18 09:05:00 UTC),
             );
             let picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1370,14 +1301,14 @@ mod tests {
                 &store,
                 &live_id,
                 Some("live"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             seed_test_session(
                 &store,
                 &stamped_id(0x22),
                 Some("other"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:01:00 UTC),
             );
             let picker = opened(ResumePicker::new(store, live_id.clone()));
@@ -1397,7 +1328,7 @@ mod tests {
                 &other,
                 &stamped_id(0x22),
                 Some("foreign"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
 
@@ -1431,41 +1362,6 @@ mod tests {
         }
     }
 
-    mod reload {
-        use super::*;
-
-        #[test]
-        fn sets_load_error_and_clears_rows_when_the_walk_fails() {
-            let (dir, store) = isolated_store();
-            let project_dir = test_project_dir(dir.path());
-            std::fs::remove_dir_all(&project_dir).unwrap();
-            let Err(cause) = store.walk(ListScope::default()) else {
-                panic!("the walk must fail without the project directory");
-            };
-            let logs = LogCapture::default();
-
-            let picker = tracing::dispatcher::with_default(&logs.dispatch(), || {
-                opened(ResumePicker::new(store, "live-session-id".to_owned()))
-            });
-
-            assert_eq!(
-                picker.load_error,
-                Some(format!("Failed to load sessions: {cause:#}")),
-            );
-            assert_eq!(row_ids(&picker), Vec::<String>::new());
-            assert_eq!(
-                logs.events(),
-                [BTreeMap::from([
-                    ("error".to_owned(), format!("{cause:#}")),
-                    (
-                        "message".to_owned(),
-                        "resume picker failed to list sessions".to_owned(),
-                    ),
-                ])]
-            );
-        }
-    }
-
     mod submit {
         use super::*;
 
@@ -1476,7 +1372,7 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("only"),
-                Some(3),
+                3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1516,7 +1412,7 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("only"),
-                Some(3),
+                3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1651,7 +1547,7 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("Auth"),
-                Some(3),
+                3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1703,7 +1599,7 @@ mod tests {
                 &other,
                 &stamped_id(0x99),
                 Some("foreign"),
-                Some(1),
+                1,
                 datetime!(2026-04-19 09:00:00 UTC),
             );
             let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
@@ -1721,14 +1617,14 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("Auth fix"),
-                Some(3),
+                3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             seed_test_session(
                 &store,
                 &stamped_id(0x22),
                 Some("Refactor pass"),
-                Some(5),
+                5,
                 datetime!(2026-04-18 09:05:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1754,7 +1650,7 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("Auth"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1772,7 +1668,7 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("Auth"),
-                Some(3),
+                3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1794,7 +1690,7 @@ mod tests {
                     &store,
                     &stamped_id(0x10 + i),
                     Some(&format!("row-{i}")),
-                    Some(1),
+                    1,
                     datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(i)),
                 );
             }
@@ -1822,7 +1718,7 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("only"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1853,7 +1749,7 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("local"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
@@ -1861,7 +1757,7 @@ mod tests {
                 &other,
                 &stamped_id(0x22),
                 Some("foreign"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:01:00 UTC),
             );
             let live_id = stamped_id(0x33);
@@ -1869,7 +1765,7 @@ mod tests {
                 &other,
                 &live_id,
                 Some("live-foreign"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:02:00 UTC),
             );
 
@@ -1934,7 +1830,7 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("only"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -1955,7 +1851,7 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("Fix auth"),
-                Some(3),
+                3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -2102,7 +1998,7 @@ mod tests {
                     &store,
                     &stamped_id(i + 1),
                     Some(&format!("row-{i}")),
-                    Some(1),
+                    1,
                     datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(i)),
                 );
             }
@@ -2164,7 +2060,7 @@ mod tests {
                 &store,
                 &id,
                 Some("only"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(
@@ -2209,7 +2105,7 @@ mod tests {
                 &store,
                 &id,
                 Some("only"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -2281,9 +2177,8 @@ mod tests {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
             let target = stamped_id(0x22);
-            let path = store.saved_file(&target);
             let mut picker = opened(ResumePicker::new(store.clone(), "live".to_owned()));
-            let barrier = WriterBarrier::hold(&path);
+            let barrier = WriterBarrier::hold(&store);
 
             let action =
                 picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
@@ -2414,7 +2309,7 @@ mod tests {
                 &store,
                 &stamped_id(0x11),
                 Some("only"),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -2459,15 +2354,47 @@ mod tests {
         }
 
         #[test]
+        fn surfaces_and_logs_a_page_the_store_failed_to_read() {
+            let (_dir, store) = isolated_store();
+            let walk = store.walk(ListScope::default());
+            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let (tx, rx) = mpsc::channel();
+            tx.send((walk, Err(anyhow::anyhow!("disk I/O error"))))
+                .unwrap();
+            picker.pages = Pages::Loading(Worker { rx });
+            picker.list.set_has_more(true);
+            let logs = LogCapture::default();
+
+            let repaint =
+                tracing::dispatcher::with_default(&logs.dispatch(), || picker.tick(now()));
+
+            assert!(repaint);
+            let error = "Failed to load sessions: disk I/O error";
+            assert_eq!(picker.load_error.as_deref(), Some(error));
+            assert_eq!(
+                footer_row(&mut picker, 80),
+                format!("{MODAL_ERROR_PREFIX}{error}"),
+            );
+            assert!(!picker.pages.has_more());
+            assert_eq!(
+                logs.events(),
+                [BTreeMap::from([
+                    ("error".to_owned(), "disk I/O error".to_owned()),
+                    (
+                        "message".to_owned(),
+                        "resume picker failed to list sessions".to_owned(),
+                    ),
+                ])]
+            );
+        }
+
+        #[test]
         fn surfaces_a_page_loader_that_stopped_without_a_page() {
             let (_dir, store) = isolated_store();
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
             let (tx, rx) = mpsc::channel();
             drop(tx);
-            picker.pages = Pages::Loading(Worker {
-                rx,
-                cancel: Arc::new(AtomicBool::new(false)),
-            });
+            picker.pages = Pages::Loading(Worker { rx });
             picker.list.set_has_more(true);
 
             assert!(picker.tick(now()));

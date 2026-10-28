@@ -12,6 +12,9 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use ox_core::engine::testing::{mount_reply, mount_tool_call_once, request_bodies};
+use ox_core::session::resolver::export_session;
+use ox_core::session::store::SessionStore;
+use ox_core::session::store::listing::{ArchiveState, ListScope, ProjectScope, SessionInfo};
 use ox_core::util::git::testing::{isolate_git, isolated_git};
 use ox_core::util::tls::testing::TEST_CA_PATH;
 
@@ -145,6 +148,62 @@ fn assert_private_auth_run(root: &Path, output: &Output) {
             }
         }
     }
+    // A byte scan of the database can miss a value split across its pages.
+    if !root.join("data").join("ox").join("sessions.db").exists() {
+        return;
+    }
+    for export in saved_exports(root) {
+        for secret in secrets {
+            assert!(!export.contains(secret), "{export}");
+        }
+    }
+}
+
+/// The session store a run under `root` writes.
+fn saved_store(root: &Path) -> SessionStore {
+    SessionStore::open_at(root.join("data").join("ox"), "cli").expect("the run's store opens")
+}
+
+/// Every unarchived session the runs under `root` saved, in any project.
+fn saved_sessions(root: &Path) -> Vec<SessionInfo> {
+    let scope = ListScope {
+        projects: ProjectScope::Every,
+        archive: ArchiveState::Active,
+    };
+    saved_store(root)
+        .list_paged(None, scope)
+        .expect("the run's sessions list")
+        .sessions()
+        .to_vec()
+}
+
+/// The export of each session [`saved_sessions`] lists.
+fn saved_exports(root: &Path) -> Vec<String> {
+    let store = saved_store(root);
+    saved_sessions(root)
+        .iter()
+        .map(|info| {
+            let mut out = Vec::new();
+            export_session(&store, &info.session_id, &mut out).expect("the session exports");
+            String::from_utf8(out).expect("an export is UTF-8")
+        })
+        .collect()
+}
+
+/// The records of the `ox export` of session `id` from the store under `root`.
+fn exported(root: &Path, id: &str) -> Vec<serde_json::Value> {
+    let output = ox(root)
+        .args(["export", id])
+        .current_dir(root)
+        .output()
+        .expect("ox export runs");
+    assert!(output.status.success(), "{output:?}");
+    output
+        .stdout
+        .split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("an export line is JSON"))
+        .collect()
 }
 
 fn request_header<'a>(request: &'a wiremock::Request, name: &str) -> Option<&'a str> {
@@ -500,10 +559,9 @@ async fn native_auth_sends_each_inline_and_file_credential_with_its_request_shap
                 request_header(request, "x-private"),
                 Some("private-header-sentinel")
             );
-            assert!(
-                tree(&root.join("data"))
-                    .iter()
-                    .any(|path| path.extension().is_some_and(|ext| ext == "jsonl")),
+            assert_eq!(
+                saved_sessions(root).len(),
+                1,
                 "the run persisted its session"
             );
             assert_private_auth_run(root, &output);
@@ -1221,15 +1279,14 @@ fn list_with_unusable_storage_fails() {
 }
 
 #[test]
-fn resume_in_the_repl_unarchives_the_session_with_a_note() {
+fn resume_in_the_repl_imports_an_archived_export_and_unarchives_it_with_a_note() {
     let dir = tempfile::tempdir().unwrap();
-    let session = dir.path().join("session.jsonl");
+    let export = dir.path().join("session.jsonl");
     std::fs::write(
-        &session,
+        &export,
         indoc! {r#"
-            {"type":"header","session_id":"abcdef01-2222-3333-4444-555555555555","cwd":"/repo","model":"claude-opus-5-5","created_at":"2026-01-01T00:00:00Z","version":1}
-            {"type":"message","uuid":"00000000-0000-4000-8000-000000000001","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"timestamp":"2026-01-01T00:00:00Z"}
-            {"type":"archive","archived":true,"at":"2026-01-02T00:00:00Z"}
+            {"type":"session","id":"abcdef01-2222-3333-4444-555555555555","forked_from":null,"project_root":"/repo","cwd":"/repo","git_branch":null,"model":"claude-opus-5-5","format":1,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","title":null,"title_manual":false,"archived_at":"2026-01-02T00:00:00Z","head_id":"00000000-0000-4000-8000-000000000001","message_count":1,"file_snapshots":null}
+            {"type":"message","id":"00000000-0000-4000-8000-000000000001","parent_id":null,"role":"user","content":[{"type":"text","text":"hello"}],"context":null,"compact":null,"tool_metadata":{},"created_at":"2026-01-01T00:00:00Z"}
         "#},
     )
     .unwrap();
@@ -1237,7 +1294,7 @@ fn resume_in_the_repl_unarchives_the_session_with_a_note() {
     let output = ox(dir.path())
         .arg("--no-tui")
         .arg("--resume")
-        .arg(&session)
+        .arg(&export)
         .current_dir(dir.path())
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
@@ -1247,15 +1304,101 @@ fn resume_in_the_repl_unarchives_the_session_with_a_note() {
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("Unarchived session abcdef01\n"), "{stderr}");
-    let transcript = std::fs::read_to_string(&session).unwrap();
-    let archive_state = transcript
-        .lines()
-        .rfind(|line| line.contains(r#""type":"archive""#))
+    let session = &exported(dir.path(), "abcdef01")[0];
+    assert_eq!(session["type"], "session");
+    assert_eq!(session["archived_at"], serde_json::Value::Null);
+}
+
+#[test]
+fn resume_of_a_file_that_is_not_an_export_fails_naming_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join("session.jsonl");
+    std::fs::write(
+        &legacy,
+        indoc! {r#"
+            {"type":"header","session_id":"abcdef01-2222-3333-4444-555555555555","cwd":"/repo","model":"claude-opus-5-5","created_at":"2026-01-01T00:00:00Z","version":1}
+            {"type":"message","uuid":"00000000-0000-4000-8000-000000000001","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"timestamp":"2026-01-01T00:00:00Z"}
+        "#},
+    )
+    .unwrap();
+
+    let output = ox(dir.path())
+        .args(["-p", "hello", "--resume"])
+        .arg(&legacy)
+        .current_dir(dir.path())
+        .env("ANTHROPIC_AUTH_TOKEN", "test-token")
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+        .output()
         .unwrap();
-    assert!(
-        archive_state.contains(r#""archived":false"#),
-        "{transcript}"
+
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "Error: failed to import {}: line 1: not an ox session export, which starts with a \
+             session record\n",
+            legacy.display(),
+        ),
     );
+}
+
+#[tokio::test]
+async fn headless_continues_an_exported_session_in_a_fresh_data_dir() {
+    let server = MockServer::start().await;
+    mount_reply(&server, "Done.").await;
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let run = |root: &Path, args: &[&str]| {
+        let mut command = tokio::process::Command::from(ox(root));
+        command
+            .args(args)
+            .args(["--output", "json"])
+            .current_dir(root)
+            .env("ANTHROPIC_API_KEY", "test-key")
+            .env("ANTHROPIC_BASE_URL", server.uri());
+        command
+    };
+    let session_id = |stdout: &[u8]| {
+        let result: serde_json::Value = serde_json::from_slice(stdout).unwrap();
+        result["data"]["session_id"].as_str().unwrap().to_owned()
+    };
+    let first = run(source.path(), &["-p", "first"]).output().await.unwrap();
+    assert!(first.status.success(), "{first:?}");
+    let id = session_id(&first.stdout);
+    let export = ox(source.path())
+        .args(["export", &id[..8]])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    assert!(export.status.success(), "{export:?}");
+    let file = target.path().join("moved.jsonl");
+    std::fs::write(&file, &export.stdout).unwrap();
+
+    let next = run(
+        target.path(),
+        &["-p", "second", "-r", file.to_str().unwrap()],
+    )
+    .output()
+    .await
+    .unwrap();
+
+    assert!(next.status.success(), "{next:?}");
+    assert_eq!(session_id(&next.stdout), id);
+    let requests = request_bodies(&server).await;
+    let texts: Vec<_> = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| message["content"].as_array().unwrap().last().unwrap()["text"].clone())
+        .filter(|text| !text.as_str().unwrap().starts_with("<system-reminder>"))
+        .collect();
+    assert_eq!(texts, ["first", "Done.", "second"]);
+    let saved: Vec<_> = exported(target.path(), &id[..8])
+        .iter()
+        .filter(|record| record["type"] == "message")
+        .map(|message| message["content"][0]["text"].clone())
+        .collect();
+    assert_eq!(saved, ["first", "Done.", "second", "Done."]);
 }
 
 #[test]
@@ -1320,11 +1463,9 @@ async fn headless_rejected_request_preserves_branch_and_user_message() {
         .unwrap();
     assert!(init.status.success(), "{init:?}");
 
-    let data_dir = dir.path().join("data");
     let output = tokio::process::Command::from(ox(dir.path()))
         .args(["-p", "hello"])
         .current_dir(dir.path())
-        .env("XDG_DATA_HOME", &data_dir)
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .env("ANTHROPIC_BASE_URL", server.uri())
         .output()
@@ -1334,36 +1475,22 @@ async fn headless_rejected_request_preserves_branch_and_user_message() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("fixture rejection"), "{stderr}");
-
-    let projects: Vec<_> = std::fs::read_dir(data_dir.join("ox/sessions"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    assert_eq!(projects.len(), 1, "session projects: {projects:?}");
-    let (sessions, sidecars): (Vec<_>, Vec<_>) = std::fs::read_dir(&projects[0])
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .partition(|path| path.extension().is_some_and(|ext| ext == "jsonl"));
-    assert_eq!(sidecars, [projects[0].join(".writer.lock")]);
-    assert_eq!(sessions.len(), 1, "session files: {sessions:?}");
-    let transcript = std::fs::read_to_string(&sessions[0]).unwrap();
-    let entries: Vec<serde_json::Value> = transcript
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(entries[0]["type"], "header");
-    assert_eq!(entries[0]["git_branch"], "fixture-branch");
-    let user_messages: Vec<_> = entries
-        .iter()
-        .filter(|entry| entry["type"] == "message" && entry["message"]["role"] == "user")
-        .map(|entry| entry["message"].clone())
+    let sessions = saved_sessions(dir.path());
+    let [session] = &sessions[..] else {
+        panic!("one saved session: {sessions:?}");
+    };
+    assert_eq!(session.git_branch.as_deref(), Some("fixture-branch"));
+    let messages: Vec<_> = exported(dir.path(), &session.session_id)
+        .into_iter()
+        .filter(|record| record["type"] == "message")
+        .map(|message| (message["role"].clone(), message["content"].clone()))
         .collect();
     assert_eq!(
-        user_messages,
-        vec![serde_json::json!({
-            "role": "user",
-            "content": [{"type": "text", "text": "hello"}],
-        })],
+        messages,
+        [(
+            serde_json::json!("user"),
+            serde_json::json!([{"type": "text", "text": "hello"}]),
+        )],
     );
 }
 

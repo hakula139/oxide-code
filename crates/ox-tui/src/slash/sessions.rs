@@ -1,4 +1,4 @@
-//! Store access, messages, and metadata lines for the commands that act on saved sessions.
+//! Messages and metadata lines for the commands that act on saved sessions.
 
 use std::fmt::Write as _;
 
@@ -6,20 +6,9 @@ use time::OffsetDateTime;
 
 use ox_core::protocol::SavedTarget;
 use ox_core::session::display::{archive_notice, id_prefix};
-use ox_core::session::entry::ArchiveState;
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
-use ox_core::session::store::SessionStore;
+use ox_core::session::store::listing::ArchiveState;
 use ox_core::util::text::{capitalize_first, plural};
-
-use crate::session_info::LiveSessionInfo;
-
-// ── Store ──
-
-/// Opens the store scoped to the session's project.
-pub(super) fn open_store(info: &LiveSessionInfo) -> Result<SessionStore, String> {
-    SessionStore::open(&info.cwd, &info.project_root)
-        .map_err(|e| format!("Session store unavailable: {e:#}"))
-}
 
 // ── Messages ──
 
@@ -159,31 +148,6 @@ mod tests {
     use ox_core::session::saved::SavedAction;
 
     use super::*;
-    use crate::session_info::testing::test_session_info;
-
-    mod open_store {
-        use super::*;
-
-        #[test]
-        fn reports_a_data_dir_it_cannot_create() {
-            let dir = tempfile::tempdir().unwrap();
-            let data_home = dir.path().join("data");
-            std::fs::write(&data_home, "").unwrap();
-            let sessions_dir = data_home.join("ox").join("sessions");
-            let cause = std::fs::create_dir_all(&sessions_dir).unwrap_err();
-
-            let err = temp_env::with_var("XDG_DATA_HOME", Some(data_home.as_os_str()), || {
-                open_store(&test_session_info()).err().unwrap()
-            });
-            assert_eq!(
-                err,
-                format!(
-                    "Session store unavailable: failed to create {}: {cause}",
-                    sessions_dir.display(),
-                ),
-            );
-        }
-    }
 
     mod saved_error_message {
         use super::*;

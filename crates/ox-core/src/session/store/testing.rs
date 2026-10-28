@@ -29,6 +29,12 @@ impl SessionStore {
         Self::open_in(data_dir, &root, &root)
     }
 
+    /// A store for `project_name` whose database was never set up, so every read fails.
+    pub fn unopened(project_name: &str) -> Self {
+        let root = PathBuf::from(format!("/work/{project_name}"));
+        Self::at(PathBuf::from("/nonexistent/ox"), &root, &root)
+    }
+
     /// Every resumable unarchived session in the home project, most recently active first.
     pub fn list(&self) -> Result<Vec<SessionInfo>> {
         Ok(self.list_paged(None, ListScope::default())?.into_sessions())
@@ -92,15 +98,6 @@ pub fn isolated_store() -> (tempfile::TempDir, SessionStore) {
 /// Session ID with every byte set to `byte`, in the hyphenated UUID form real session IDs use.
 pub fn stamped_id(byte: u8) -> String {
     uuid::Uuid::from_bytes([byte; 16]).to_string()
-}
-
-/// Runs `f` with `XDG_DATA_HOME` set to a fresh temp dir, so [`SessionStore::open`] lands there,
-/// and passes `f` the dir so it can add stores beneath it.
-pub fn with_isolated_xdg<R>(f: impl FnOnce(&Path) -> R) -> R {
-    let dir = tempfile::tempdir().expect("a temp dir is created");
-    temp_env::with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
-        f(dir.path())
-    })
 }
 
 /// Session `session_id` as a listing reports it: in the [`test_store`] project, last active at

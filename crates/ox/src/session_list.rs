@@ -8,13 +8,13 @@ use anyhow::{Context as _, Result};
 use time::UtcOffset;
 use unicode_width::UnicodeWidthStr as _;
 
-use ox_core::session::display::{display_title, id_prefix};
-use ox_core::session::entry::{ArchiveState, SessionInfo};
+use ox_core::session::display::{DisplayTitle, id_prefix};
 use ox_core::session::store::SessionStore;
+use ox_core::session::store::listing::{ArchiveState, SessionInfo};
 use ox_core::session::store::listing::{ListScope, ProjectScope};
 use ox_core::util;
 use ox_core::util::path::tildify;
-use ox_core::util::text::{escape_line, pad_to_width, truncate_to_width};
+use ox_core::util::text::{escape_line, pad_to_width};
 
 const ID_COL: usize = 10;
 const LAST_ACTIVE_COL: usize = 19;
@@ -79,7 +79,7 @@ fn render(
     let projects: Vec<String> = if all {
         sessions
             .iter()
-            .map(|s| escape_line(&tildify(Path::new(s.project()))))
+            .map(|s| escape_line(&tildify(Path::new(&s.project_root))))
             .collect()
     } else {
         Vec::new()
@@ -114,14 +114,11 @@ fn render(
                 "[year]-[month]-[day] [hour]:[minute]"
             ))
             .unwrap_or_default();
-        let msgs = s
-            .exit
-            .as_ref()
-            .map_or("-".to_owned(), |e| e.message_count.to_string());
-        let raw_title = escape_line(display_title(s));
+        let msgs = s.message_count.to_string();
+        let title = DisplayTitle::of(s);
         let title = match title_budget {
-            Some(budget) => truncate_to_width(&raw_title, budget),
-            None => raw_title,
+            Some(budget) => title.fit(budget),
+            None => title.to_string(),
         };
         _ = write!(
             table,
@@ -142,7 +139,6 @@ fn render(
 mod tests {
     use time::macros::datetime;
 
-    use ox_core::session::entry::{ExitInfo, TitleInfo};
     use ox_core::session::store::testing::{
         archive_test_session, listed_session, seed_test_session,
     };
@@ -168,7 +164,7 @@ mod tests {
                 &local,
                 "local-session",
                 Some("Local session"),
-                Some(2),
+                2,
                 datetime!(2026-01-01 00:00 UTC),
             );
             let other = SessionStore::open_at(dir.path().to_path_buf(), "other").unwrap();
@@ -176,14 +172,14 @@ mod tests {
                 &other,
                 "other-session",
                 Some("Other session"),
-                Some(3),
+                3,
                 datetime!(2026-01-02 00:00 UTC),
             );
             seed_test_session(
                 &other,
                 "archived-session",
                 Some("Archived session"),
-                Some(4),
+                4,
                 datetime!(2026-01-03 00:00 UTC),
             );
             archive_test_session(&other, "archived-session");
@@ -243,7 +239,7 @@ mod tests {
 
         fn session(session_id: &str, last_active_at: time::OffsetDateTime) -> SessionInfo {
             SessionInfo {
-                cwd: "/work/project".to_owned(),
+                project_root: "/work/project".to_owned(),
                 last_active_at,
                 ..listed_session(session_id)
             }
@@ -280,21 +276,15 @@ mod tests {
             let row = lines.next().unwrap();
             assert!(row.starts_with("01234567   "), "got: {row:?}");
             assert!(row.contains("2026-04-18 13:45"), "got: {row:?}");
-            assert!(row.ends_with(" -      (untitled)"), "got: {row:?}");
+            assert!(row.ends_with(" 0      (untitled)"), "got: {row:?}");
             assert!(lines.next().is_none(), "unexpected trailing line");
         }
 
         #[test]
         fn shows_message_count_and_title_when_available() {
             let mut s = session("feeddeadbeef0000", datetime!(2026-04-18 09:00:00 UTC));
-            s.title = Some(TitleInfo {
-                title: "Fix auth bug".to_owned(),
-                updated_at: datetime!(2026-04-18 09:05:00 UTC),
-            });
-            s.exit = Some(ExitInfo {
-                message_count: 42,
-                updated_at: datetime!(2026-04-18 09:30:00 UTC),
-            });
+            s.title = Some("Fix auth bug".to_owned());
+            s.message_count = 42;
 
             let out = rendered(&[s], false, None);
 
@@ -306,9 +296,9 @@ mod tests {
         #[test]
         fn all_mode_inserts_project_column_aligned_to_widest_cwd() {
             let mut short = session("aaaaaaaaaaaa", datetime!(2026-04-18 09:00:00 UTC));
-            short.cwd = "/a".to_owned();
+            short.project_root = "/a".to_owned();
             let mut longer = session("bbbbbbbbbbbb", datetime!(2026-04-18 09:05:00 UTC));
-            longer.cwd = "/work/oxide-code".to_owned();
+            longer.project_root = "/work/oxide-code".to_owned();
 
             let out = rendered(&[short, longer], true, None);
 
@@ -344,10 +334,10 @@ mod tests {
         #[test]
         fn pads_wide_character_projects_by_display_width() {
             let mut wide = session("aaaaaaaaaaaa", datetime!(2026-04-18 09:00:00 UTC));
-            wide.cwd = "/work/项目代码".to_owned();
+            wide.project_root = "/work/项目代码".to_owned();
             let mut ascii = session("bbbbbbbbbbbb", datetime!(2026-04-18 09:05:00 UTC));
-            ascii.cwd = "/work/abcdefghij".to_owned();
-            let widest = ascii.cwd.width();
+            ascii.project_root = "/work/abcdefghij".to_owned();
+            let widest = ascii.project_root.width();
 
             let out = rendered(&[wide, ascii], true, None);
 
@@ -364,7 +354,7 @@ mod tests {
         #[test]
         fn project_col_width_respects_minimum() {
             let mut s = session("cccccccccccc", datetime!(2026-04-18 09:00:00 UTC));
-            s.cwd = "/a".to_owned();
+            s.project_root = "/a".to_owned();
 
             let out = rendered(&[s], true, None);
 
@@ -384,7 +374,7 @@ mod tests {
                 .chain(std::iter::repeat_n('x', 80))
                 .collect();
             let mut s = session("cccccccccccc", datetime!(2026-04-18 09:00:00 UTC));
-            s.cwd = long_cwd.clone();
+            s.project_root = long_cwd.clone();
 
             let out = rendered(&[s], true, None);
 
@@ -403,38 +393,33 @@ mod tests {
         }
 
         #[test]
-        fn shows_the_recorded_project_root_over_the_launch_directory() {
-            let mut recorded = session("eeeeeeeeeeee", datetime!(2026-04-18 09:00:00 UTC));
-            recorded.cwd = "/work/repo/crates/core".to_owned();
-            recorded.project_root = Some("/work/repo".to_owned());
-            let mut older = session("ffffffffffff", datetime!(2026-04-18 08:00:00 UTC));
-            older.cwd = "/work/legacy".to_owned();
+        fn shows_the_project_root_over_the_launch_directory() {
+            let mut s = session("eeeeeeeeeeee", datetime!(2026-04-18 09:00:00 UTC));
+            s.cwd = "/work/repo/crates/core".to_owned();
+            s.project_root = "/work/repo".to_owned();
 
-            let out = rendered(&[recorded, older], true, None);
+            let out = rendered(&[s], true, None);
 
             let projects: Vec<_> = out
                 .lines()
                 .skip(1)
                 .filter_map(|row| row.split_whitespace().nth(4))
                 .collect();
-            assert_eq!(projects, ["/work/repo", "/work/legacy"], "{out}");
+            assert_eq!(projects, ["/work/repo"], "{out}");
         }
 
         #[test]
         fn escapes_control_characters_in_titles_and_projects() {
             let mut s = session("dddddddddddd", datetime!(2026-04-18 09:00:00 UTC));
-            s.cwd = "/work/a\nb".to_owned();
-            s.title = Some(TitleInfo {
-                title: "Fix\u{1b}]52;c;eA==\u{7} it\nnow".to_owned(),
-                updated_at: datetime!(2026-04-18 09:05:00 UTC),
-            });
+            s.project_root = "/work/a\nb".to_owned();
+            s.title = Some("Fix\u{1b}]52;c;eA==\u{7} it\nnow".to_owned());
 
             let out = rendered(&[s], true, None);
 
             let rows: Vec<&str> = out.lines().collect();
             assert_eq!(rows.len(), 2, "{out}");
             assert_eq!(
-                rows[1].split_once(" -      ").map(|(_, cells)| cells),
+                rows[1].split_once(" 0      ").map(|(_, cells)| cells),
                 Some("/work/a\\nb Fix\\u{1b}]52;c;eA==\\u{7} it\\nnow"),
             );
         }
@@ -442,10 +427,7 @@ mod tests {
         #[test]
         fn truncates_title_when_term_width_too_narrow() {
             let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
-            s.title = Some(TitleInfo {
-                title: "A very long session title that will not fit".to_owned(),
-                updated_at: datetime!(2026-04-18 09:05:00 UTC),
-            });
+            s.title = Some("A very long session title that will not fit".to_owned());
 
             // Prefix = 38, term_width = 60 → title budget = 22 (fits ~19 chars + `...`).
             let out = rendered(&[s], false, Some(60));
@@ -458,10 +440,7 @@ mod tests {
         #[test]
         fn title_budget_leaves_room_for_the_project_column() {
             let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
-            s.title = Some(TitleInfo {
-                title: "A very long session title that will not fit".to_owned(),
-                updated_at: datetime!(2026-04-18 09:05:00 UTC),
-            });
+            s.title = Some("A very long session title that will not fit".to_owned());
 
             // Prefix = 38 + `/work/project` (13) + 1 = 52, term_width = 70 → title budget = 18.
             let out = rendered(&[s], true, Some(70));
@@ -475,10 +454,7 @@ mod tests {
         fn leaves_title_untruncated_without_term_width() {
             let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
             let full_title = "A very long session title that will not fit";
-            s.title = Some(TitleInfo {
-                title: full_title.to_owned(),
-                updated_at: datetime!(2026-04-18 09:05:00 UTC),
-            });
+            s.title = Some(full_title.to_owned());
 
             let out = rendered(&[s], false, None);
 
@@ -492,10 +468,7 @@ mod tests {
         fn skips_truncation_when_title_budget_below_minimum() {
             let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
             let full_title = "A very long session title that will not fit";
-            s.title = Some(TitleInfo {
-                title: full_title.to_owned(),
-                updated_at: datetime!(2026-04-18 09:05:00 UTC),
-            });
+            s.title = Some(full_title.to_owned());
 
             // term_width 45 < prefix 38 + MIN_TITLE_BUDGET 12 → untruncated, so the terminal wraps.
             let out = rendered(&[s], false, Some(45));

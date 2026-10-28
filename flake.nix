@@ -208,6 +208,7 @@
             git-cliff
             nodejs_24
             pnpm
+            sqlite
           ]);
 
           # git-hooks.nix sets a hooks path relative to the main checkout, which linked worktrees

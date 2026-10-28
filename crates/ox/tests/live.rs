@@ -11,6 +11,11 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 use tempfile::TempDir;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+use ox_core::session::store::SessionStore;
+use ox_core::session::store::listing::{ArchiveState, ListScope, ProjectScope};
 
 const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 const DEFAULT_THINKING_MODEL: &str = "claude-opus-5-5";
@@ -42,10 +47,9 @@ fn headless_reply_streams_the_text_the_session_records() {
     let streamed = chunks.concat();
     assert!(streamed.contains("29 30"), "{streamed}");
     let session = live.session();
-    let recorded: String = session
-        .iter()
-        .filter(|entry| entry["type"] == "message" && entry["message"]["role"] == "assistant")
-        .flat_map(|entry| texts(&entry["message"]))
+    let recorded: String = messages(&session)
+        .filter(|message| message["role"] == "assistant")
+        .flat_map(texts)
         .collect();
     assert_eq!(recorded, streamed);
 }
@@ -76,7 +80,7 @@ fn tool_round_trip_reads_the_first_request_from_the_prompt_cache() {
     let reply = result["message"].as_str().unwrap();
     assert!(reply.contains(&code), "{result}");
     let session = live.session();
-    let usage = usage_records(&session);
+    let usage = usage_records(&session, |_| true);
     assert_eq!(usage.len(), 2, "{usage:?}");
     assert_reads_cached_prefix(usage[0], usage[1]);
 }
@@ -114,7 +118,7 @@ fn thinking_after_tool_results_is_replayed_across_three_turns() {
             "turn {number} has no signed thinking after a tool result: {turn:?}"
         );
     }
-    for pair in usage_records(&session).windows(2) {
+    for pair in usage_records(&session, |_| true).windows(2) {
         assert_reads_cached_prefix(pair[0], pair[1]);
     }
 }
@@ -138,12 +142,12 @@ fn auto_compaction_summarizes_from_the_cached_conversation() {
 
     assert!(output.status.success(), "{output:?}");
     let session = live.session();
-    let compact = session
-        .iter()
-        .position(|entry| entry["type"] == "compact")
+    let compacted_at = messages(&session)
+        .find(|message| !message["compact"].is_null())
+        .map(saved_at)
         .expect("the second prompt triggered auto-compaction");
-    let before = usage_records(&session[..compact]);
-    let after = usage_records(&session[compact..]);
+    let before = usage_records(&session, |usage| saved_at(usage) < compacted_at);
+    let after = usage_records(&session, |usage| saved_at(usage) >= compacted_at);
     let (Some(last), [summary, next, ..]) = (before.last(), after.as_slice()) else {
         panic!("expected requests before and after compaction: {before:?} {after:?}");
     };
@@ -180,7 +184,7 @@ fn continue_answers_from_the_resumed_transcript_and_cache() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains(&code), "{stdout}");
     let session = live.session();
-    let usage = usage_records(&session);
+    let usage = usage_records(&session, |_| true);
     assert_eq!(usage.len(), 2, "{usage:?}");
     assert_reads_cached_prefix(usage[0], usage[1]);
 }
@@ -278,17 +282,36 @@ impl Live {
         }
     }
 
-    /// Entries of the one session file the runs wrote.
+    /// The records of the `ox export` of the one session the runs saved: the session, every message
+    /// in commit order, then every billed request.
     fn session(&self) -> Vec<Value> {
-        let files: Vec<PathBuf> = children(&self.root.path().join("data/ox/sessions"))
-            .iter()
-            .flat_map(|project| children(project))
-            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
-            .collect();
-        let [file] = files.as_slice() else {
-            panic!("expected one session file: {files:?}");
+        let store = SessionStore::open_at(self.root.path().join("data").join("ox"), "live")
+            .expect("open the runs' session store");
+        let scope = ListScope {
+            projects: ProjectScope::Every,
+            archive: ArchiveState::Active,
         };
-        json_lines(&fs::read_to_string(file).expect("read the session file"))
+        let page = store
+            .list_paged(None, scope)
+            .expect("list the saved sessions");
+        let [session] = page.sessions() else {
+            panic!("expected one saved session: {:?}", page.sessions());
+        };
+        let output = self
+            .ox(DEFAULT_MODEL)
+            .args(["export", &session.session_id])
+            .output()
+            .expect("run ox export");
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8(output.stdout).expect("an export is UTF-8");
+        // A byte scan of the database can miss a credential split across its pages.
+        for (name, value) in &self.credentials {
+            assert!(
+                !text.contains(value.as_str()),
+                "the export contains ${name}"
+            );
+        }
+        json_lines(&text)
     }
 }
 
@@ -363,11 +386,14 @@ fn blocks(message: &Value) -> impl Iterator<Item = &Value> {
     message["content"].as_array().into_iter().flatten()
 }
 
+fn messages(session: &[Value]) -> impl Iterator<Item = &Value> {
+    session.iter().filter(|record| record["type"] == "message")
+}
+
 /// Groups the transcript's messages into turns, each starting at a user message with text.
 fn split_turns(session: &[Value]) -> Vec<Vec<&Value>> {
     let mut turns: Vec<Vec<&Value>> = Vec::new();
-    for entry in session.iter().filter(|entry| entry["type"] == "message") {
-        let message = &entry["message"];
+    for message in messages(session) {
         if message["role"] == "user" && has_block(message, "text") {
             turns.push(Vec::new());
         }
@@ -378,11 +404,21 @@ fn split_turns(session: &[Value]) -> Vec<Vec<&Value>> {
     turns
 }
 
-fn usage_records(entries: &[Value]) -> Vec<&Value> {
-    entries
+/// The token usage of each billed request whose record `keep` accepts, in request order.
+fn usage_records(session: &[Value], keep: impl Fn(&Value) -> bool) -> Vec<&Value> {
+    session
         .iter()
-        .filter(|entry| entry["type"] == "usage")
+        .filter(|record| record["type"] == "usage" && keep(record))
+        .map(|record| &record["record"])
         .collect()
+}
+
+/// When `record` was saved.
+fn saved_at(record: &Value) -> OffsetDateTime {
+    let at = record["created_at"]
+        .as_str()
+        .expect("a record has a save time");
+    OffsetDateTime::parse(at, &Rfc3339).expect("a save time is RFC 3339")
 }
 
 /// Asserts that `later` read from the cache everything `earlier` wrote to or read from it, so the

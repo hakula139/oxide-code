@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use ox_core::protocol::Op;
-use ox_core::session::display::id_prefix;
+use ox_core::session::display::{DisplayTitle, id_prefix};
 use ox_core::session::saved::SavedError;
 use ox_core::util::text::truncate_to_width;
 
@@ -34,7 +34,7 @@ const BODY_HEIGHT: u16 = 2;
 pub(super) struct ConfirmDeleteSessionModal {
     header: Header,
     session_id: String,
-    display_title: String,
+    display_title: DisplayTitle,
     /// The [`format_metadata_line`](crate::slash::sessions::format_metadata_line) row, such as
     /// `abcd1234 · 2 hours ago · 14 msgs`, which carries the ID prefix.
     metadata: String,
@@ -46,7 +46,7 @@ pub(super) struct ConfirmDeleteSessionModal {
 }
 
 impl ConfirmDeleteSessionModal {
-    pub(super) fn new(session_id: String, display_title: String, metadata: String) -> Self {
+    pub(super) fn new(session_id: String, display_title: DisplayTitle, metadata: String) -> Self {
         Self {
             header: Header::new(TITLE),
             session_id,
@@ -80,7 +80,7 @@ impl Modal for ConfirmDeleteSessionModal {
         self.header.push_lines(&mut lines, area.width, theme);
 
         lines.push(Line::from(Span::styled(
-            truncate_to_width(&self.display_title, budget),
+            self.display_title.fit(budget),
             theme.text(),
         )));
         lines.push(Line::from(Span::styled(metadata, theme.dim())));
@@ -147,7 +147,8 @@ mod tests {
     use time::OffsetDateTime;
     use time::macros::datetime;
 
-    use ox_core::session::store::testing::stamped_id;
+    use ox_core::session::store::listing::SessionInfo;
+    use ox_core::session::store::testing::{listed_session, stamped_id};
 
     use super::*;
     use crate::modal::ModalStack;
@@ -168,7 +169,11 @@ mod tests {
     fn modal(byte: u8, title: &str) -> ConfirmDeleteSessionModal {
         let id = stamped_id(byte);
         let metadata = format_metadata_line(&id, LAST_ACTIVE, NOW, MESSAGES, None, None);
-        ConfirmDeleteSessionModal::new(id, title.to_owned(), metadata)
+        let title = DisplayTitle::of(&SessionInfo {
+            title: Some(title.to_owned()),
+            ..listed_session(&id)
+        });
+        ConfirmDeleteSessionModal::new(id, title, metadata)
     }
 
     /// Renders `modal` in full so its acceptance arms, then lets the type-ahead guard lapse.

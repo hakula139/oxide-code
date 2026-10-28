@@ -8,8 +8,8 @@ use time::OffsetDateTime;
 
 use ox_core::command;
 use ox_core::protocol::Op;
-use ox_core::session::display::display_title;
-use ox_core::session::entry::SessionInfo;
+use ox_core::session::display::DisplayTitle;
+use ox_core::session::store::listing::SessionInfo;
 use ox_core::util::path::tildify;
 use ox_core::util::time::now_local;
 
@@ -66,7 +66,7 @@ impl SlashCommand for DeleteCmd {
 pub(crate) fn confirm_modal(info: &SessionInfo) -> Box<dyn Modal> {
     Box::new(ConfirmDeleteSessionModal::new(
         info.session_id.clone(),
-        display_title(info).to_owned(),
+        DisplayTitle::of(info),
         metadata_line(info, now_local()),
     ))
 }
@@ -74,16 +74,16 @@ pub(crate) fn confirm_modal(info: &SessionInfo) -> Box<dyn Modal> {
 // ── Display Formatting ──
 
 /// Wraps [`format_metadata_line`] with the `/delete`-specific project rule: the confirm modal has
-/// no scope context, so the project always shows when it is non-empty.
+/// no scope context, so the project always shows.
 fn metadata_line(info: &SessionInfo, now: OffsetDateTime) -> String {
-    let project = tildify(Path::new(info.project()));
+    let project = tildify(Path::new(&info.project_root));
     format_metadata_line(
         &info.session_id,
         info.last_active_at,
         now,
-        info.exit.as_ref().map_or(0, |e| e.message_count),
+        info.message_count,
         info.git_branch.as_deref(),
-        (!project.is_empty()).then_some(project.as_str()),
+        Some(&project),
     )
 }
 
@@ -91,7 +91,6 @@ fn metadata_line(info: &SessionInfo, now: OffsetDateTime) -> String {
 mod tests {
     use time::macros::datetime;
 
-    use ox_core::session::entry::{ExitInfo, TitleInfo};
     use ox_core::session::store::testing::{listed_session, stamped_id};
     use ox_core::util::path::testing::HOME_VAR;
 
@@ -154,10 +153,7 @@ mod tests {
         #[test]
         fn names_the_found_session_by_title_above_its_metadata() {
             let info = SessionInfo {
-                title: Some(TitleInfo {
-                    title: "Doomed session".to_owned(),
-                    updated_at: datetime!(2026-04-18 09:00:00 UTC),
-                }),
+                title: Some("Doomed session".to_owned()),
                 ..listed_session(&stamped_id(0xab))
             };
 
@@ -177,11 +173,8 @@ mod tests {
         #[test]
         fn shows_the_count_branch_and_tildified_project() {
             let info = SessionInfo {
-                cwd: "/work/oxide".to_owned(),
-                exit: Some(ExitInfo {
-                    message_count: 14,
-                    updated_at: NOW,
-                }),
+                project_root: "/work/oxide".to_owned(),
+                message_count: 14,
                 git_branch: Some("feat/login".to_owned()),
                 ..listed_session(&stamped_id(0xab))
             };
@@ -192,16 +185,6 @@ mod tests {
                 line,
                 "abababab · 3 hours ago · 14 msgs · feat/login · ~/oxide"
             );
-        }
-
-        #[test]
-        fn omits_project_when_cwd_is_empty() {
-            let info = SessionInfo {
-                cwd: String::new(),
-                ..listed_session(&stamped_id(0xab))
-            };
-
-            assert_eq!(metadata_line(&info, NOW), "abababab · 3 hours ago");
         }
     }
 }

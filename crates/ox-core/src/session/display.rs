@@ -1,9 +1,11 @@
 //! Display helpers for session IDs, titles, and archive notices shared by every frontend.
 
-use std::borrow::Cow;
+use std::fmt;
+
+use unicode_width::UnicodeWidthStr as _;
 
 use super::store::listing::{ArchiveState, SessionInfo};
-use crate::util::text::truncate_to_width;
+use crate::util::text::{escape_line, truncate_to_width};
 
 pub const ID_PREFIX_WIDTH: usize = 8;
 pub const UNTITLED_MARKER: &str = "(untitled)";
@@ -17,13 +19,43 @@ pub fn id_prefix(session_id: &str) -> &str {
     session_id.get(..ID_PREFIX_WIDTH).unwrap_or(session_id)
 }
 
-/// Title from `info`, or [`UNTITLED_MARKER`] when absent. A fork, which starts with its source's
-/// title, is labeled `fork of {id}` with the source's [`id_prefix`].
-pub fn display_title(info: &SessionInfo) -> Cow<'_, str> {
-    let title = info.title.as_deref().unwrap_or(UNTITLED_MARKER);
-    match &info.forked_from {
-        Some(source) => Cow::Owned(format!("{title} (fork of {})", id_prefix(source))),
-        None => Cow::Borrowed(title),
+/// A session's title as listings show it: the title, or [`UNTITLED_MARKER`] when absent, escaped
+/// onto one line. A fork, which starts with its source's title, is labeled `(fork of {id})` with
+/// the source's [`id_prefix`].
+#[derive(Clone, Debug)]
+pub struct DisplayTitle {
+    title: String,
+    fork_label: Option<String>,
+}
+
+impl DisplayTitle {
+    pub fn of(info: &SessionInfo) -> Self {
+        Self {
+            title: escape_line(info.title.as_deref().unwrap_or(UNTITLED_MARKER)),
+            fork_label: info
+                .forked_from
+                .as_deref()
+                .map(|source| format!(" (fork of {})", id_prefix(source))),
+        }
+    }
+
+    /// The title fit to `width` columns. A fork's label stays whole while the title can shrink to
+    /// one column, since the label tells the fork from its source.
+    pub fn fit(&self, width: usize) -> String {
+        let Some(label) = &self.fork_label else {
+            return truncate_to_width(&self.title, width);
+        };
+        match width.checked_sub(label.width()) {
+            Some(room) if room > 0 => format!("{}{label}", truncate_to_width(&self.title, room)),
+            _ => truncate_to_width(&self.to_string(), width),
+        }
+    }
+}
+
+impl fmt::Display for DisplayTitle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.title)?;
+        f.write_str(self.fork_label.as_deref().unwrap_or_default())
     }
 }
 
@@ -82,7 +114,29 @@ mod tests {
                     ..listed_session("abc")
                 };
 
-                assert_eq!(display_title(&info), expected, "{title:?} {forked_from:?}");
+                let shown = DisplayTitle::of(&info).to_string();
+
+                assert_eq!(shown, expected, "{title:?} {forked_from:?}");
+            }
+        }
+
+        #[test]
+        fn fits_the_title_before_a_whole_fork_label() {
+            for (forked_from, width, expected) in [
+                (None, 8, "Fix a..."),
+                (Some("abcdefghij"), 40, "Fix auth flow (fork of abcdefgh)"),
+                (Some("abcdefghij"), 25, "Fix... (fork of abcdefgh)"),
+                (Some("abcdefghij"), 19, "Fix auth flow (f..."),
+            ] {
+                let info = SessionInfo {
+                    title: Some("Fix auth flow".to_owned()),
+                    forked_from: forked_from.map(str::to_owned),
+                    ..listed_session("abc")
+                };
+
+                let fitted = DisplayTitle::of(&info).fit(width);
+
+                assert_eq!(fitted, expected, "{forked_from:?} at {width}");
             }
         }
     }
