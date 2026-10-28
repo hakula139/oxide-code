@@ -15,7 +15,7 @@ use ox_core::command::{self, Parsed};
 use ox_core::protocol::{Op, SignInCode};
 
 use super::operation::InFlight;
-use super::queue::QueuedPrompt;
+use super::queue::{QueuedPrompt, SwitchTo};
 use super::{App, EXIT_WINDOW, SlashTask};
 use crate::action::{APP_KEYMAP, Action, AppAction, next_mode};
 use crate::components::input::InputOutcome;
@@ -278,7 +278,8 @@ impl App {
                     in_flight.cancel();
                 }
             }
-            Op::Clear | Op::Archive | Op::Resume { .. } => self.queue.mark_switch(),
+            Op::Clear | Op::Archive => self.queue.mark_switch(SwitchTo::Fresh),
+            Op::Resume { .. } => self.queue.mark_switch(SwitchTo::Saved),
             Op::Compact { .. } => self.queue.mark_compacting(),
             Op::SetArchive { target, .. } => self.modals.archive_started(target),
             Op::DeleteSaved { session_id } => self.modals.delete_started(session_id),
@@ -2373,8 +2374,9 @@ mod tests {
                 let before = activity(&app).cloned();
                 app.requested_mode = Mode::Manual;
                 app.queue.push("old session".to_owned());
-                app.queue.mark_switch();
+                app.queue.mark_switch(SwitchTo::Fresh);
                 app.queue.push("current session".to_owned());
+                app.queue.hold();
                 let buffered = fill_channel(&app);
 
                 app.dispatch_op(op.clone());
@@ -2387,6 +2389,7 @@ mod tests {
                     Some("ox is busy, so the request was dropped. Try again."),
                     "{op:?}",
                 );
+                assert!(app.queue.held(), "{op:?}");
                 app.queue.discard_left_behind();
                 assert_eq!(*app.queue.pending(), ["current session"], "{op:?}");
                 for buffered_op in buffered {
