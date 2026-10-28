@@ -1,6 +1,6 @@
 # Terminal UI
 
-The terminal UI is a ratatui app that composes its components directly, paints each frame without flicker, renders only the chat blocks near the viewport, and renders streamed markdown from a cache of the blocks already complete.
+The terminal UI is a ratatui app that composes its components directly, paints each frame without flicker, renders only the chat blocks near the viewport, renders streamed markdown from a cache of the blocks already complete, and paints a welcome screen while the chat is empty.
 
 ## Stack
 
@@ -81,21 +81,49 @@ Columns keep their natural widths when the table fits. Otherwise each column get
 
 A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other line break.
 
+## Welcome Screen
+
+While the chat has no blocks, no streaming reply, and no compaction summary, and `show_welcome` is on, `App::draw_frame` paints the welcome in the chat region: an identity ribbon with the version, then a body column with the model, effort, and auth source, the working directory, three starter commands, and a tip. `/clear` empties the chat, so the welcome returns, and a resume fills it, so a resumed session never shows the welcome.
+
+The starters sample the built-in commands a new session can run bare, each with its registry description, and the tip samples `TIP_POOL`, offering the pull request tip only when the status line shows the `pull-request` segment. Both draws seed `fastrand` with the xxh64 hash of the session ID, so a session keeps its picks while each new session draws again.
+
+The body lines pad to one shared width, since `Paragraph::alignment(Center)` centers each line on its own, so lines of different widths would each start at a different column. The layout steps down by width:
+
+| Cols  | Identity                    | Environment         | Cwd                         | Starters and tip |
+| ----- | --------------------------- | ------------------- | --------------------------- | ---------------- |
+| ≥60   | ribbon `━━━━ oxide-code...` | full line           | tildified, full             | shown            |
+| 40-59 | wordmark `oxide-code v...`  | full line           | tildified, full             | shown            |
+| 25-39 | wordmark                    | model + effort only | tildified, center-truncated | hidden           |
+| <25   | suppressed                  | suppressed          | suppressed                  | suppressed       |
+
+A chat region shorter than 13 rows hides the starters and the tip at any width.
+
 ## Design Decisions
 
-1. **ratatui + crossterm + tokio.** No custom rendering engine.
-2. **Concrete component structs.** `App` composes chat, input, status, and modal surfaces directly, with no shared component trait.
+1. **ratatui + crossterm + tokio.** Codex builds its TUI on the same stack, which diffs a double buffer and streams terminal events into the async loop, so oxide-code writes no renderer or input reader of its own.
+2. **Concrete component structs.** `App` composes chat, input, status, and modal surfaces directly. They share nothing beyond rendering into an area, so a component trait would add dynamic dispatch with nothing to abstract over.
 3. **Synchronized output by default.** A terminal that supports mode 2026 presents each frame at once, so a large repaint never shows half drawn, and a terminal without it ignores the mode.
 4. **Render throttling at ~60 FPS, and a sleeping idle loop.** Tokens can stream faster than a terminal can repaint, so the tick batches them into one frame, which keeps the event loop free for input. The tick runs every frame while a redraw or a modal's page load is pending, and otherwise only at the earliest timed change, such as the busy spinner's next frame, a git probe falling due, the clock segment's next minute, a usage-limit reset, or an expiring notice, so an idle session wakes about once every 5 s for the branch probe while the roster shows the branch. Each component that changes with time reports its next deadline beside its `tick`.
-5. **Block-based markdown commit with stable-prefix cache** during streaming, full render on completion.
+5. **Block-based markdown commit with a stable-prefix cache.** Re-parsing a whole reply on every frame costs more as the reply grows, so complete blocks render once and each frame re-parses only the tail.
 6. **Custom pulldown-cmark + syntect renderer.** Uses Codex's `pending_marker` pattern for correct list handling.
-7. **Catppuccin Mocha dark theme by default** with named color slots covering text, surfaces, accents, status, code, diff, headings, body, and chrome. Transparent background.
-8. **Two-tier tool display.** Inline summary with per-tool icons, plus an output body the compact view caps.
-9. **Per-block render cache with viewport-scoped rendering.** Rendering markdown and highlighting code for a whole long session on each resize or theme swap would stall the frame, so only the blocks near the viewport render, and anchoring the scroll offset on a block keeps the rows the user is reading in place while farther blocks catch up.
-10. **A rule between every table row.** Without one, the continuation lines of a wrapped row leave blank cells that read as spacing, so the single-line rows around it seem to run together. Claude Code and oh-my-pi rule off every row of their boxed tables, as Codex does in its borderless ones.
-11. **Table columns no narrower than their longest word.** A narrower column splits words mid-way, so a flag such as `--all-targets` breaks across rows. When the words can't all fit side by side, the rows stack as `header: value` lines. Claude Code and oh-my-pi also start each column at its longest word, and Claude Code stacks rows the same way once wrapped rows grow too tall.
-12. **One toggle for every collapsed block.** Claude Code's Ctrl+O transcript viewer expands lines that collapse by default, and its collapsed thinking names the key. Codex ends truncated output with the key that opens its transcript. A toggle in place keeps the reader's position in the chat, so one key serves tool bodies and thinking, and each footer names it.
-13. **Tildes stay literal.** The model writes `~` for "approximately" and in home-relative paths, and pulldown-cmark 0.13 strikes the text between two single tildes, so `cost ~$1-~$2` would render `$1-` crossed out. The renderer leaves strikethrough off, as Claude Code does for the same reason, while Codex keeps it.
+7. **Two-tier tool display.** An inline summary with a per-tool icon keeps a long tool loop scannable, while the output body, which the compact view caps, shows what a reader needs to judge the call.
+8. **Per-block render cache with viewport-scoped rendering.** Rendering markdown and highlighting code for a whole long session on each resize or theme swap would stall the frame, so only the blocks near the viewport render, and anchoring the scroll offset on a block keeps the rows the user is reading in place while farther blocks catch up.
+9. **A rule between every table row.** Without one, the continuation lines of a wrapped row leave blank cells that read as spacing, so the single-line rows around it seem to run together. Claude Code and oh-my-pi rule off every row of their boxed tables, as Codex does in its borderless ones.
+10. **Table columns no narrower than their longest word.** A narrower column splits words mid-way, so a flag such as `--all-targets` breaks across rows. When the words can't all fit side by side, the rows stack as `header: value` lines. Claude Code and oh-my-pi also start each column at its longest word, and Claude Code stacks rows the same way once wrapped rows grow too tall.
+11. **One toggle for every collapsed block.** Claude Code's Ctrl+O transcript viewer expands lines that collapse by default, and its collapsed thinking names the key. Codex ends truncated output with the key that opens its transcript. A toggle in place keeps the reader's position in the chat, so one key serves tool bodies and thinking, and each footer names it.
+12. **Tildes stay literal.** The model writes `~` for "approximately" and in home-relative paths, and pulldown-cmark 0.13 strikes the text between two single tildes, so `cost ~$1-~$2` would render `$1-` crossed out. The renderer leaves strikethrough off, as Claude Code does for the same reason, while Codex keeps it.
+13. **The welcome paints in place of an empty chat.** It is an ephemeral placeholder, so `App::draw_frame` chooses between it and the chat render, and `ChatView` stays free of onboarding UI that would break its `is_empty` check and leak into the transcript.
+14. **The welcome is a stateless projection.** `paint` reads `LiveSessionInfo` on each frame, and its picks are a pure function of the session ID and the status line, so a model, effort, or sign-in change shows on the next frame with no cached copy to refresh.
+15. **Three sampled starters and a tip.** Listing every slash command would defeat "try one of", while sampled starters and a curated tip add variety without becoming a dashboard, and every entry is an action a user can take next.
+16. **Starters come from the slash registry.** A new command joins the pool with its registry description, so no second description drifts. `NOT_STARTERS` names the exceptions, since an `is_starter` method on `SlashCommand` would push welcome curation into every command.
+17. **An editorial ribbon, with no box, mascot, or animation.** A four-side box reads as generic CLI chrome, and an ASCII mascot, as Claude Code shows, or an animation, as Codex shows, is outsized for the value. The single ribbon line anchors the wordmark, which uses the project name `oxide-code`, the name a migrator searches for, while `ox` stays the binary name.
+18. **A coarse width ladder.** Codex and Claude Code truncate and reflow, and opencode shrinks flex items, but the welcome's content is fixed, so three tiers are simpler than a shrink rule per element.
+
+## Out of Scope
+
+- **Live feeds on the welcome.** Recent sessions, release notes, and upsells, which Claude Code shows, would turn the welcome into a dashboard with ongoing maintenance cost.
+- **Interactive welcome.** The welcome is read-only, and the user types in the input below it.
+- **Git status on the welcome.** The status line already shows the branch and pull request.
 
 ## Sources
 
@@ -107,6 +135,7 @@ A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other
 - `crates/ox-tui/src/components/chat/blocks/streaming.rs`: `StreamingAssistant`, the streaming reply over its cache.
 - `crates/ox-tui/src/components/chat/scroll.rs`: `ChatView::place`, the anchored placement each frame paints, and the auto-scroll that follows the tail.
 - `crates/ox-tui/src/components/chat/stack.rs`: `CachedBlock`, `SlotTops`, and `Stack`, the block cache and the row anchors.
+- `crates/ox-tui/src/components/welcome.rs`: `paint`, `Picks`, `NOT_STARTERS`, `TIP_POOL`, and the width ladder.
 - `crates/ox-tui/src/grapheme.rs`: the grapheme-aware editing table the prompt and the modal text fields share, with `GraphemeStops`.
 - `crates/ox-tui/src/keymap.rs`: `KeyAction`, `KeyChord`, `Keymap`, and `hint`, the shape every key hint takes.
 - `crates/ox-tui/src/markdown.rs`: `OPTIONS`, the parser extensions, and `render_markdown_chunk` and `complete_blocks_len`, the stable block boundaries.

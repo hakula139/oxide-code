@@ -13,12 +13,9 @@ Segment render rules:
 - Return `None` when data is unavailable, so an absent branch, title, usage, or price renders no placeholder.
 - Use active theme styles, leaving color customization to theme overrides.
 - Join only rendered segments, so omitted segments do not leave extra separators.
-- The `model` and `model-with-effort` segments drop the `Claude` family prefix to save width (e.g., `Opus 5.5 (xhigh)`). Other surfaces (welcome screen, prompt environment, error blocks) keep the full `Claude Opus 5.5` label.
-- The pull request checks and review segments color their state with the theme's `success`, `warning`, `error`, and `muted` slots, and link the PR's checks and changed-files pages.
+- The model segments drop the `Claude` family prefix to save width, while other surfaces keep the full label.
 - The review segment appears only when branch protection requires a review, because GitHub otherwise reports no review decision.
-- The context and usage-limit segments use the `text` slot, switch to `warning` at 70%, and switch to `error` at 90%. Session cost stays `muted` because it has no limit to approach.
-- `permission-mode` shows `manual` in the `muted` slot, `plan` in the `accent` slot, and `yolo` in the `error` slot.
-- `task-progress` counts the completed tasks on the session's [task list](tasks.md) and shows only while the list holds a task.
+- Segments that approach a limit escalate their color as **Escalate usage by the percent shown** describes, and the permission mode takes the colors **Show every configured permission mode** gives.
 
 ## Usage Data
 
@@ -62,7 +59,7 @@ The status line retains the highest-priority segment, truncating it if needed, t
 8. **Checks like `gh pr checks`.** The checks segment buckets each check's state the way the GitHub CLI does and counts only the latest run of a re-run check, so a passing re-run clears an earlier failure. Cancelled checks get their own bucket, below failing and pending. A workflow that failed to start counts as failing, where `gh` leaves it pending even though it will never run.
 9. **Usage limits from response headers.** Every response already reports the account's utilization, so the segments add no extra request and refresh with each turn.
 10. **Show every configured permission mode.** The segment confirms the active mode after a switch, including a return to `manual`. In a narrow row, `manual` drops before the model, while `plan` and `yolo` rank just below run state so the active restriction or bypass stays visible. `manual` takes `muted`, `yolo` takes `error`, as Claude Code colors its bypass mode, and `plan` takes `accent`, since it only restricts.
-11. **Escalate usage by the percent shown.** The context and limit segments use the same pair of thresholds and compare the floored percent in their labels, keeping each label's color aligned with its number. The 70% warning matches Claude Code's `WARNING_THRESHOLD` in `src/services/rateLimitMessages.ts`. Below that threshold, Claude Code shows no usage-limit warning. Default [auto-compaction](compaction.md) begins near 97% of the window, which puts context at 90% about as close to its end as a limit at 90%. oh-my-pi changes its context color at 50%, 70%, and 90%, as well as at 150k, 270k, and 500k tokens. On a 1M window, those token thresholds would flag most of a long session. Its quota windows change color at 50% and 80%.
+11. **Escalate usage by the percent shown.** The context and limit segments use the same pair of thresholds and compare the floored percent in their labels, keeping each label's color aligned with its number. Session cost has no limit to approach, so it keeps one color. The 70% warning matches Claude Code's `WARNING_THRESHOLD` in `src/services/rateLimitMessages.ts`. Below that threshold, Claude Code shows no usage-limit warning. Default [auto-compaction](compaction.md) begins near 97% of the window, which puts context at 90% about as close to its end as a limit at 90%. oh-my-pi changes its context color at 50%, 70%, and 90%, as well as at 150k, 270k, and 500k tokens. On a 1M window, those token thresholds would flag most of a long session. Its quota windows change color at 50% and 80%.
 
 ## Out of Scope
 

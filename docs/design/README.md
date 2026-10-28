@@ -30,7 +30,7 @@ Each page covers one topic, and [`docs/research/`](../research/) holds the API r
 
 | Document                            | Description                                                                      |
 | ----------------------------------- | -------------------------------------------------------------------------------- |
-| [Slash Commands](slash-commands.md) | Registry, dispatch, autocomplete, per-command behavior                           |
+| [Slash Commands](slash-commands.md) | Registry, dispatch, autocomplete, `/diff`                                        |
 | [Init](init.md)                     | `/init`, the instruction-file picker, diff-first updates                         |
 | [Login](login.md)                   | `/login` and `/logout`, browser sign-in, credential stores, signed-out sessions  |
 | [Modal UI](modals.md)               | Modal trait and stack, shared primitives, pickers, editors, approvals, overviews |
@@ -51,8 +51,7 @@ Each page covers one topic, and [`docs/research/`](../research/) holds the API r
 
 | Document                                         | Description                                                                 |
 | ------------------------------------------------ | --------------------------------------------------------------------------- |
-| [Terminal UI](tui.md)                            | Core stack, rendering strategy, streaming architecture                      |
+| [Terminal UI](tui.md)                            | Core stack, rendering strategy, streaming architecture, welcome screen      |
 | [Cancellation and Queued Input](cancellation.md) | Cancel, exit, and mid-turn queued prompts                                   |
 | [Mouse Interactions](mouse.md)                   | Mouse capture for wheel scroll, chat selection and copy, OSC 8 PR hyperlink |
 | [Status Line](status-line.md)                    | Configurable status-line segments and usage display                         |
-| [Welcome Screen](welcome.md)                     | Empty-state renderer, session-seeded starter picks, width ladder            |
