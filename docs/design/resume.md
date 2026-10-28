@@ -55,9 +55,9 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 
 11. **Project scoping defaults to the current project, with Tab widening.** Matches the `ox -c` resolver semantics: CLI `--all` widens up front, in-picker `Tab` toggles, and the typed query persists across the rebuild.
 
-12. **Load pages in the background as the cursor nears the end.** Loading the next page while a viewport of matching rows remains below the cursor keeps paging out of sight and lets a query reach every session in scope. Parsing reads each transcript in full, and a page can parse far more files than it keeps when most sessions sit in the other archive view, so the reads run on a worker thread. On 1,000 sessions of 650 kB each, a 30-session page took about 10 ms with a warm cache, while a scan that found no match in the requested view took about 250 ms. Listing and sorting the files stays on the UI thread and took a few milliseconds there.
+12. **Load pages in the background as the cursor nears the end.** Loading the next page while a viewport of matching rows remains below the cursor keeps paging out of sight and lets a query reach every session in scope. Each page is one query, which runs on a worker thread so a slow disk never stalls the render loop.
 
-13. **Listing API centralizes pagination in `list_paged(limit, scope)`.** The page, the archive filter, and whether more sessions follow come from one walk that stops one session past the page, so a listing's cost scales with the page. Listings report no exact total, since counting the sessions in one archive state would parse every file in scope. `ox -c` stops at the first unarchived session through `latest`, and a prefix lookup parses only matching files.
+13. **Keyset pages through `SessionWalk`.** The picker walks a `SessionWalk`, and `ox --list` reads one page of it through `list_paged`. Each page is ordered by `(updated_at, id)` and starts after the last row of the page before, so pages never overlap, while a session another process writes between two pages may show twice or not at all. Each query asks for one row past the page to learn whether more sessions follow, so listings report no exact total. In the current project, the `sessions_by_project` index on `(project_root, updated_at)` serves the order, so a page reads the project's rows in order and stops once it fills. Across all projects no index serves it, so each page scans and sorts the whole table. `ox -c` reads one row through `latest`, and a prefix lookup searches the current project through `sessions_by_project` before it widens to every project.
 
 14. **`--list --limit 0` opts back into unbounded listing.** Scripts piping output need the full set, so `0` is the explicit unbounded value and no magic large default is needed.
 
@@ -75,7 +75,7 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 
 ## Out of Scope
 
-- **Date grouping in the picker.** `Today` / `Yesterday` / ISO date groups would not improve on a flat mtime list, whose relative times already encode recency.
+- **Date grouping in the picker.** `Today` / `Yesterday` / ISO date groups would not improve on a list ordered by last activity, whose relative times already encode recency.
 - **Numeric `1`–`9` mnemonics.** Cursor plus Enter is enough, and mnemonics conflict with type-to-search.
 - **Worktree or branch tree expansion.** Claude Code's `▼` / `▶` tree and a side preview pane would both double layout complexity for marginal gain.
 - **In-picker rename of other sessions.** `/rename` covers the live session's title.
