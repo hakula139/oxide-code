@@ -111,7 +111,6 @@ pub fn session_forked(id: &str, from: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
-    use crate::model::ResolvedModelId;
     use crate::util::text::compact_count;
 
     mod compacted {
@@ -145,7 +144,7 @@ mod tests {
 
         fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
             ConfigPick::Model {
-                id: ResolvedModelId::new(model.id()),
+                id: model.id().to_owned(),
                 effort,
             }
         }

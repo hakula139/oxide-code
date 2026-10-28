@@ -9,7 +9,7 @@ use ratatui::widgets::Paragraph;
 use strum::VariantArray as _;
 
 use ox_core::config::DEFAULT_MODEL;
-use ox_core::model::{Effort, MODELS, ModelInfo, ResolvedModelId};
+use ox_core::model::{Effort, MODELS, ModelInfo};
 use ox_core::protocol::{ConfigPick, Op};
 
 use super::effort_slider::step_level;
@@ -132,7 +132,7 @@ impl ModelEffortPicker {
 
         let pick = if model != self.active_model {
             ConfigPick::Model {
-                id: ResolvedModelId::new(model.to_owned()),
+                id: model.to_owned(),
                 effort,
             }
         } else if let Some(effort) = effort {
@@ -322,7 +322,7 @@ mod tests {
 
         fn model_only(id: &str) -> ConfigPick {
             ConfigPick::Model {
-                id: ResolvedModelId::new(id),
+                id: id.to_owned(),
                 effort: None,
             }
         }
@@ -404,7 +404,7 @@ mod tests {
             assert_eq!(
                 pick,
                 ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-sonnet-5-5"),
+                    id: "claude-sonnet-5-5".to_owned(),
                     effort: Some(Effort::Xhigh),
                 },
             );

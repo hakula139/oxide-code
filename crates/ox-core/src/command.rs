@@ -10,7 +10,7 @@ use std::path::Path;
 
 use indoc::formatdoc;
 
-use crate::model::{Effort, MODELS, ModelInfo, ResolvedModelId};
+use crate::model::{Effort, MODELS, ModelInfo};
 use crate::permission::Mode;
 use crate::protocol::{ConfigPick, Op, ResumeTarget};
 use crate::session::display::fit_title;
@@ -182,7 +182,7 @@ fn model(arg: &str) -> Result<Op, String> {
         [] => raw,
     };
     Ok(Op::SetModel(ConfigPick::Model {
-        id: ResolvedModelId::new(id),
+        id: id.to_owned(),
         effort: None,
     }))
 }
@@ -239,7 +239,7 @@ mod tests {
 
     fn set_model(id: &str) -> Op {
         Op::SetModel(ConfigPick::Model {
-            id: ResolvedModelId::new(id),
+            id: id.to_owned(),
             effort: None,
         })
     }

@@ -472,7 +472,7 @@ impl Engine {
             auto_compaction: self.compaction.auto,
         };
         if let ConfigPick::Model { id, .. } = &pick {
-            self.settings.set_model(id.clone().into_inner());
+            self.settings.set_model(id.clone());
             self.compaction = self
                 .compaction
                 .for_model(self.settings.model(), self.settings.max_tokens());
@@ -605,7 +605,7 @@ mod tests {
     use crate::file_tracker::{FileSnapshot, FileTracker, GateError, GatePurpose};
     use crate::message::{Replay, Role};
     use crate::model;
-    use crate::model::{Effort, ModelSpec, PromptCacheTtl, ResolvedModelId, TokenUsage};
+    use crate::model::{Effort, ModelSpec, PromptCacheTtl, TokenUsage};
     use crate::permission::PermissionClass;
     use crate::permission::rule::Rule;
     use crate::protocol::testing::CapturingSink;
@@ -3720,7 +3720,7 @@ mod tests {
 
         fn sonnet_pick() -> ConfigPick {
             ConfigPick::Model {
-                id: ResolvedModelId::new("claude-sonnet-5-5"),
+                id: "claude-sonnet-5-5".to_owned(),
                 effort: None,
             }
         }
@@ -3738,7 +3738,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 for id in ["custom-model", MODEL] {
-                    let id = ResolvedModelId::new(id);
+                    let id = id.to_owned();
                     engine.set_model(&sink, ConfigPick::Model { id, effort: None });
                 }
 

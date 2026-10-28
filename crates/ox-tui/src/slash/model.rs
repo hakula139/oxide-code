@@ -57,7 +57,6 @@ impl SlashCommand for ModelCmd {
 
 #[cfg(test)]
 mod tests {
-    use ox_core::model::ResolvedModelId;
     use ox_core::protocol::{ConfigPick, Op};
 
     use super::*;
@@ -109,7 +108,7 @@ mod tests {
             assert_eq!(
                 run_execute(&ModelCmd, "sonnet").unwrap().into_forward(),
                 Action::Op(Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-sonnet-5-5"),
+                    id: "claude-sonnet-5-5".to_owned(),
                     effort: None,
                 })),
             );
@@ -120,7 +119,7 @@ mod tests {
             assert_eq!(
                 run_execute(&ModelCmd, "gpt-4").unwrap().into_forward(),
                 Action::Op(Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("gpt-4"),
+                    id: "gpt-4".to_owned(),
                     effort: None,
                 })),
             );

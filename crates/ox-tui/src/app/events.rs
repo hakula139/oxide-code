@@ -528,7 +528,6 @@ mod tests {
     use ox_core::config::StatusLineSegment;
     use ox_core::config::compaction::testing::WINDOW_1M_THRESHOLD;
     use ox_core::config::provenance::Source;
-    use ox_core::model::ResolvedModelId;
     use ox_core::permission::PermissionClass;
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
@@ -572,7 +571,7 @@ mod tests {
 
     fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
         ConfigPick::Model {
-            id: ResolvedModelId::new(model.id()),
+            id: model.id().to_owned(),
             effort,
         }
     }

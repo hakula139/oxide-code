@@ -552,7 +552,7 @@ mod tests {
 
     use ox_core::config::ThemeConfig;
     use ox_core::config::provenance::Source;
-    use ox_core::model::{Effort, ResolvedModelId};
+    use ox_core::model::Effort;
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::testing::text_result;
@@ -2183,7 +2183,7 @@ mod tests {
             // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
             for op in [
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5"),
+                    id: "claude-opus-5-5".to_owned(),
                     effort: None,
                 }),
                 Op::SetModel(ConfigPick::Effort(Effort::High)),
@@ -2736,7 +2736,7 @@ mod tests {
             assert_eq!(
                 forwarded,
                 Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-haiku-5-5"),
+                    id: "claude-haiku-5-5".to_owned(),
                     effort: None,
                 }),
             );

@@ -18,7 +18,7 @@ use tracing::error;
 use crate::auth::AuthSource;
 use crate::client::RateLimits;
 use crate::config::compaction::AutoCompactionConfig;
-use crate::model::{Effort, ModelSpec, ResolvedModelId};
+use crate::model::{Effort, ModelSpec};
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, Mode, SessionGrant};
 use crate::session::handle::WriteReport;
@@ -188,11 +188,9 @@ pub enum ApprovalDecision {
 /// current value, and an omitted effort carries over where the new model supports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigPick {
-    /// A model, with the effort to use on it when one was picked alongside.
-    Model {
-        id: ResolvedModelId,
-        effort: Option<Effort>,
-    },
+    /// A model, with the effort to use on it when one was picked alongside. The engine accepts
+    /// any ID and runs an unknown one without catalog info.
+    Model { id: String, effort: Option<Effort> },
     /// An effort for the active model.
     Effort(Effort),
 }
