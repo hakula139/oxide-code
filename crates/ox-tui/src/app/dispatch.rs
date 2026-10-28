@@ -27,6 +27,8 @@ use crate::theme::Theme;
 use crate::theme::builtin::BuiltinTheme;
 use crate::viewport::Direction;
 
+const BUSY_DROPPED: &str = "ox is busy, so the request was dropped. Try again.";
+
 impl App {
     pub(super) fn handle_crossterm_event(&mut self, event: &CrosstermEvent) {
         // Windows also reports key releases, which would otherwise act as a second press.
@@ -175,7 +177,7 @@ impl App {
         }
     }
 
-    fn apply_modal_action(&mut self, action: ModalAction) {
+    pub(super) fn apply_modal_action(&mut self, action: ModalAction) {
         match action {
             ModalAction::Cancelled => self.cancel_theme_preview(),
             ModalAction::Dispatch(action) => self.dispatch_action(action),
@@ -250,11 +252,17 @@ impl App {
         }
     }
 
-    /// Reserves delivery before applying the op's local state change. Prompts reach the engine
-    /// only through the prompt queue, by [`Self::start_turn`] and [`Self::forward_queued_prompts`].
+    /// Reserves delivery before applying the op's local state change, and drops an idle-only op
+    /// with a chat error while another operation runs, since the engine would drop it silently.
+    /// Prompts reach the engine only through the prompt queue, by [`Self::start_turn`] and
+    /// [`Self::forward_queued_prompts`].
     pub(super) fn dispatch_op(&mut self, op: Op) {
         if op == Op::Shutdown {
             self.should_quit = true;
+        }
+        if op.is_idle_only() && !self.status.is_idle() {
+            self.chat.push_error(BUSY_DROPPED);
+            return;
         }
         let Some((permit, op)) = self.reserve_op(op) else {
             return;
@@ -276,10 +284,12 @@ impl App {
                 self.queue.mark_switch();
                 self.set_status(Status::Archiving);
             }
-            Op::SetArchive { session_id, .. } => {
+            Op::SetArchive { target, .. } => {
                 self.set_status(Status::Archiving);
-                self.modals.archive_started(session_id);
+                self.modals.archive_started(target);
             }
+            Op::FindSaved { .. } => self.set_status(Status::Searching),
+            Op::DeleteSaved { .. } => self.set_status(Status::Deleting),
             Op::SetMode(mode) => self.requested_mode = *mode,
             Op::Prompt { .. }
             | Op::Queue(_)
@@ -324,10 +334,7 @@ impl App {
                      or submit another prompt to retry.",
                 );
             }
-            TrySendError::Full(_) => {
-                self.chat
-                    .push_error("ox is busy, so the request was dropped. Try again.");
-            }
+            TrySendError::Full(_) => self.chat.push_error(BUSY_DROPPED),
         }
     }
 
@@ -409,7 +416,7 @@ impl App {
         if !self.allows_mutating(&parsed.name, kind) {
             return;
         }
-        if let Some(action) = self.run_slash(&parsed, text, kind) {
+        if let Some(action) = self.run_slash(&parsed, text) {
             self.dispatch_action(action);
         }
     }
@@ -466,6 +473,8 @@ impl App {
                 | Status::Clearing
                 | Status::Resuming
                 | Status::Archiving
+                | Status::Searching
+                | Status::Deleting
                 | Status::Cancelling,
         ) {
             return;
@@ -484,21 +493,15 @@ impl App {
 
     /// Runs `parsed`, the command the user typed as `line`, and applies its outcome, returning the
     /// action it asks the caller to route.
-    fn run_slash(
-        &mut self,
-        parsed: &Parsed,
-        line: &str,
-        kind: Option<SlashKind>,
-    ) -> Option<Action> {
+    fn run_slash(&mut self, parsed: &Parsed, line: &str) -> Option<Action> {
         let ctx = SlashContext::new(&self.session_info, self.status_bar.title());
         let outcome = slash::dispatch(parsed, &ctx);
-        self.apply_slash_outcome(outcome, &parsed.name, kind, line)
+        self.apply_slash_outcome(outcome, line)
     }
 
-    /// Refuses a `Mutating` command while the App is busy, naming it in a chat notice. Both the
-    /// submit-time check and a background task's result pass through here, since a task can finish
-    /// after a turn or another session operation starts. Returns whether the command may run.
-    pub(super) fn allows_mutating(&mut self, name: &str, kind: Option<SlashKind>) -> bool {
+    /// Refuses a `Mutating` command while the App is busy, naming it in a chat notice. Returns
+    /// whether the command may run.
+    fn allows_mutating(&mut self, name: &str, kind: Option<SlashKind>) -> bool {
         if self.status.is_idle() || kind != Some(SlashKind::Mutating) {
             return true;
         }
@@ -514,8 +517,6 @@ impl App {
     pub(super) fn apply_slash_outcome(
         &mut self,
         outcome: Result<SlashOutcome, String>,
-        name: &str,
-        kind: Option<SlashKind>,
         line: &str,
     ) -> Option<Action> {
         match outcome {
@@ -530,12 +531,9 @@ impl App {
             }
             Ok(SlashOutcome::Modal(modal)) => self.modals.push(modal),
             Ok(SlashOutcome::Background(task)) => {
-                let name = name.to_owned();
                 let line = line.to_owned();
                 _ = self.slash_tasks.spawn(async move {
                     SlashTask {
-                        name,
-                        kind,
                         line,
                         outcome: task.await,
                     }
@@ -574,12 +572,12 @@ mod tests {
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::testing::text_result;
-    use ox_core::protocol::{ApprovalDecision, CompactTrigger, ConfigPick, Event, ResumeTarget};
-    use ox_core::session::entry::ArchiveState;
-    use ox_core::session::saved::{SavedAction, SavedError};
-    use ox_core::session::store::testing::{
-        seed_test_session, stamped_id, with_isolated_xdg_async,
+    use ox_core::protocol::{
+        ApprovalDecision, CompactTrigger, ConfigPick, Event, ResumeTarget, SavedTarget,
     };
+    use ox_core::session::entry::ArchiveState;
+    use ox_core::session::saved::{ArchiveUpdate, SavedAction, SavedError};
+    use ox_core::session::store::testing::{listed_session, stamped_id};
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
     use super::*;
@@ -632,38 +630,31 @@ mod tests {
         async fn buffered_confirmation_keys_leave_the_saved_session_untouched() {
             for code in [KeyCode::Enter, KeyCode::Char('y')] {
                 for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
-                    with_isolated_xdg_async(|_| async {
-                        let (mut app, _rx, _event_tx) = test_app(None);
-                        let store = ox_core::session::store::SessionStore::open(
-                            &app.session_info.cwd,
-                            &app.session_info.project_root,
-                        )
-                        .unwrap();
-                        let id = stamped_id(0xab);
-                        seed_test_session(
-                            &store,
-                            &id,
-                            Some("Delete target"),
-                            Some(1),
-                            time::macros::datetime!(2026-04-18 09:00:00 UTC),
-                        );
-                        let path = store.find_session_path(&id).unwrap();
-                        app.input.set_text(&format!("/delete {}", &id[..8]));
-                        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-                        let lookup = app.slash_tasks.join_next().await.expect("the lookup runs");
-                        app.apply_slash_task(lookup);
-                        assert!(app.modals.is_active());
+                    let (mut app, mut rx, _event_tx) = test_app(None);
+                    let id = stamped_id(0xab);
+                    app.input.set_text("/delete abab");
+                    app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+                    assert_eq!(
+                        rx.try_recv(),
+                        Ok(Op::FindSaved {
+                            prefix: "abab".to_owned()
+                        })
+                    );
+                    app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session(&id)))));
+                    assert!(app.modals.is_active());
 
-                        app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::new_with_kind(
-                            code,
-                            KeyModifiers::NONE,
-                            kind,
-                        )));
+                    app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::new_with_kind(
+                        code,
+                        KeyModifiers::NONE,
+                        kind,
+                    )));
 
-                        assert!(path.exists(), "{code:?} {kind:?} deleted an unseen target");
-                        assert!(app.modals.is_active(), "{code:?} {kind:?}");
-                    })
-                    .await;
+                    assert_eq!(
+                        rx.try_recv(),
+                        Err(TryRecvError::Empty),
+                        "{code:?} {kind:?} deleted an unseen target"
+                    );
+                    assert!(app.modals.is_active(), "{code:?} {kind:?}");
                 }
             }
         }
@@ -2170,6 +2161,33 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_saved_session_delete_holds_prompts_typed_during_its_lookup_and_delete() {
+            let delete = Op::DeleteSaved {
+                session_id: "saved".to_owned(),
+            };
+            for (action, busy, sent) in [
+                (
+                    Action::Submit("/delete abcd".to_owned()),
+                    Status::Searching,
+                    Op::FindSaved {
+                        prefix: "abcd".to_owned(),
+                    },
+                ),
+                (Action::Op(delete.clone()), Status::Deleting, delete.clone()),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.dispatch_action(action);
+                assert_eq!(rx.try_recv(), Ok(sent), "{busy:?}");
+
+                app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+
+                assert_eq!(app.status, busy, "{busy:?}");
+                assert_eq!(*app.queue.pending(), ["typed meanwhile"], "{busy:?}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{busy:?}");
+            }
+        }
+
+        #[tokio::test]
         async fn forwards_engine_ops_unchanged() {
             // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
             for op in [
@@ -2194,11 +2212,11 @@ mod tests {
         fn saved_archive_retains_ownership_and_reports_after_the_picker_closes() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             let modal = ScriptedModal::new(ModalAction::Cancelled);
-            let observed = Arc::clone(&modal.archive_events);
+            let observed = Arc::clone(&modal.saved_events);
             app.push_modal(Box::new(modal));
+            let target = SavedTarget::Prefix("saved".to_owned());
             let op = Op::SetArchive {
-                path: "/repo/saved.jsonl".into(),
-                session_id: "saved".to_owned(),
+                target: target.clone(),
                 state: ArchiveState::Archived,
             };
             let buffered = fill_channel(&app);
@@ -2215,18 +2233,21 @@ mod tests {
 
             assert_eq!(rx.try_recv(), Ok(op.clone()));
             assert_eq!(app.status, Status::Archiving);
-            assert_eq!(*observed.lock().unwrap(), ["started:saved"]);
+            let started = r#"started:Prefix("saved")"#;
+            assert_eq!(*observed.lock().unwrap(), [started]);
 
             app.handle_engine_event(Event::ArchiveUpdated {
-                id: "saved".to_owned(),
-                result: Ok(ArchiveState::Archived),
+                target: target.clone(),
+                state: ArchiveState::Archived,
+                result: Ok(ArchiveUpdate {
+                    id: "saved".to_owned(),
+                    changed: true,
+                }),
             });
 
             assert_eq!(app.status, Status::Idle);
-            assert_eq!(
-                *observed.lock().unwrap(),
-                ["started:saved", "completed:saved:Ok(Archived)"]
-            );
+            let completed = r#"completed:Prefix("saved"):Archived:Ok(ArchiveUpdate { id: "saved", changed: true })"#;
+            assert_eq!(*observed.lock().unwrap(), [started, completed]);
             assert_eq!(
                 app.chat.last_system_text(),
                 Some(
@@ -2239,7 +2260,8 @@ mod tests {
             assert_eq!(rx.try_recv(), Ok(op));
             app.modals.clear();
             app.handle_engine_event(Event::ArchiveUpdated {
-                id: "saved".to_owned(),
+                target,
+                state: ArchiveState::Archived,
                 result: Err(SavedError::Failed {
                     action: SavedAction::Archive,
                     id: "saved".to_owned(),
@@ -2250,16 +2272,43 @@ mod tests {
             assert_eq!(app.status, Status::Idle);
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("Failed to archive session saved: disk full")
+                Some("/archive: Failed to archive session saved: disk full")
             );
-            assert_eq!(
-                *observed.lock().unwrap(),
-                [
-                    "started:saved",
-                    "completed:saved:Ok(Archived)",
-                    "started:saved"
-                ]
-            );
+            assert_eq!(*observed.lock().unwrap(), [started, completed, started]);
+        }
+
+        #[test]
+        fn drops_an_idle_only_op_while_another_operation_runs() {
+            for (op, busy) in [
+                (
+                    Op::Resume {
+                        target: ResumeTarget::Id("saved".to_owned()),
+                    },
+                    Status::Deleting,
+                ),
+                (
+                    Op::SetArchive {
+                        target: SavedTarget::Id("saved".to_owned()),
+                        state: ArchiveState::Archived,
+                    },
+                    Status::Resuming,
+                ),
+                (
+                    Op::DeleteSaved {
+                        session_id: "saved".to_owned(),
+                    },
+                    Status::Streaming,
+                ),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.set_status(busy.clone());
+
+                app.dispatch_op(op.clone());
+
+                assert_eq!(app.status, busy, "{op:?}");
+                assert_eq!(app.chat.last_error_text(), Some(BUSY_DROPPED), "{op:?}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{op:?}");
+            }
         }
 
         #[test]
@@ -2284,6 +2333,20 @@ mod tests {
                 (Op::Login, Status::Idle, Status::SigningIn),
                 (Op::Logout, Status::Idle, Status::SigningOut),
                 (Op::Archive, Status::Idle, Status::Archiving),
+                (
+                    Op::FindSaved {
+                        prefix: "saved".to_owned(),
+                    },
+                    Status::Idle,
+                    Status::Searching,
+                ),
+                (
+                    Op::DeleteSaved {
+                        session_id: "saved".to_owned(),
+                    },
+                    Status::Idle,
+                    Status::Deleting,
+                ),
                 (Op::SetMode(Mode::Plan), Status::Idle, Status::Idle),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
@@ -2752,44 +2815,24 @@ mod tests {
                     app.handle_engine_event(Event::StreamToken("partial".to_owned()));
                 }
 
-                let handed_back = app.apply_slash_outcome(
-                    Err("/diff: boom".to_owned()),
-                    "diff",
-                    Some(SlashKind::ReadOnly),
-                    "/diff",
-                );
+                let handed_back = app.apply_slash_outcome(Err("/diff: boom".to_owned()), "/diff");
 
                 assert_eq!(handed_back, None);
                 assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
 
                 let modal = SlashOutcome::Modal(Box::new(FakeModal::new("picker")));
-                let handed_back = app.apply_slash_outcome(
-                    Ok(modal),
-                    "theme",
-                    Some(SlashKind::ReadOnly),
-                    "/theme",
-                );
+                let handed_back = app.apply_slash_outcome(Ok(modal), "/theme");
 
                 assert_eq!(handed_back, None);
                 assert!(app.modals.is_active());
 
                 let forward = SlashOutcome::Forward(Action::Op(Op::Clear));
-                let handed_back = app.apply_slash_outcome(
-                    Ok(forward),
-                    "clear",
-                    Some(SlashKind::Mutating),
-                    "/clear",
-                );
+                let handed_back = app.apply_slash_outcome(Ok(forward), "/clear");
 
                 assert_eq!(handed_back, Some(Action::Op(Op::Clear)));
 
                 let prompt = SlashOutcome::Prompt("Create AGENTS.md".to_owned());
-                let handed_back = app.apply_slash_outcome(
-                    Ok(prompt),
-                    "init",
-                    Some(SlashKind::Mutating),
-                    "/init AGENTS.md",
-                );
+                let handed_back = app.apply_slash_outcome(Ok(prompt), "/init AGENTS.md");
 
                 assert_eq!(
                     handed_back,
@@ -2814,8 +2857,7 @@ mod tests {
                 Ok(SlashOutcome::SystemMessage(rx.await.unwrap()))
             }));
 
-            let handed_back =
-                app.apply_slash_outcome(Ok(task), "diff", Some(SlashKind::ReadOnly), "/diff");
+            let handed_back = app.apply_slash_outcome(Ok(task), "/diff");
 
             assert_eq!(handed_back, None);
             assert_eq!(app.chat.entry_count(), 0);
@@ -2825,88 +2867,6 @@ mod tests {
             app.apply_slash_task(finished);
 
             assert_eq!(app.chat.last_system_text(), Some("done"));
-        }
-    }
-
-    mod mutating_gate {
-        use super::*;
-
-        /// Seeds a saved session and submits `/{cmd}` for its prefix, leaving the command's
-        /// background lookup running.
-        fn seed_and_submit(app: &mut App, id: &str, cmd: &str) {
-            let store = ox_core::session::store::SessionStore::open(
-                &app.session_info.cwd,
-                &app.session_info.project_root,
-            )
-            .unwrap();
-            seed_test_session(
-                &store,
-                id,
-                Some("Saved"),
-                Some(1),
-                time::macros::datetime!(2026-04-18 09:00:00 UTC),
-            );
-
-            app.handle_submit_prompt(&format!("/{cmd} {}", &id[..8]));
-        }
-
-        #[tokio::test]
-        async fn a_mutating_result_arriving_busy_is_dropped_with_the_submit_notice() {
-            for cmd in ["archive", "delete"] {
-                with_isolated_xdg_async(|_| async {
-                    let (mut app, mut rx, _event_tx) = test_app(None);
-                    let id = stamped_id(0xab);
-                    seed_and_submit(&mut app, &id, cmd);
-                    app.handle_submit_prompt("run the suite");
-                    assert_eq!(app.status, Status::Streaming);
-                    while rx.try_recv().is_ok() {}
-
-                    let finished = app.slash_tasks.join_next().await.expect("the lookup runs");
-                    app.apply_slash_task(finished);
-
-                    let notice =
-                        format!("/{cmd} runs only when idle. Try again after the turn finishes.");
-                    assert_eq!(
-                        app.status,
-                        Status::Streaming,
-                        "{cmd}: the turn keeps running"
-                    );
-                    assert_eq!(
-                        rx.try_recv(),
-                        Err(TryRecvError::Empty),
-                        "{cmd}: no op goes out"
-                    );
-                    assert!(
-                        !app.modals.is_active(),
-                        "{cmd}: no modal opens over the turn"
-                    );
-                    assert_eq!(app.chat.last_system_text(), Some(notice.as_str()), "{cmd}");
-                })
-                .await;
-            }
-        }
-
-        #[tokio::test]
-        async fn an_idle_archive_result_forwards_the_archive_op() {
-            with_isolated_xdg_async(|_| async {
-                let (mut app, mut rx, _event_tx) = test_app(None);
-                let id = stamped_id(0xab);
-                seed_and_submit(&mut app, &id, "archive");
-
-                let finished = app.slash_tasks.join_next().await.expect("the lookup runs");
-                app.apply_slash_task(finished);
-
-                assert_eq!(app.status, Status::Archiving);
-                let Ok(Op::SetArchive {
-                    session_id, state, ..
-                }) = rx.try_recv()
-                else {
-                    panic!("the idle result must forward SetArchive");
-                };
-                assert_eq!(session_id, id);
-                assert_eq!(state, ArchiveState::Archived);
-            })
-            .await;
         }
     }
 }

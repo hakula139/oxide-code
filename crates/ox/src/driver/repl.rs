@@ -589,8 +589,7 @@ mod tests {
                         sink.events()
                             .contains(&Event::StreamToken("reply".to_owned()))
                     );
-                    let transcript =
-                        fs::read_to_string(store.find_session_path(&session_id).unwrap()).unwrap();
+                    let transcript = fs::read_to_string(store.saved_file(&session_id)).unwrap();
                     let text: Vec<String> = transcript
                         .lines()
                         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
@@ -722,8 +721,7 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(replies, ["reply"]);
-                let transcript =
-                    fs::read_to_string(store.find_session_path(&session_id).unwrap()).unwrap();
+                let transcript = fs::read_to_string(store.saved_file(&session_id)).unwrap();
                 let messages: Vec<serde_json::Value> = transcript
                     .lines()
                     .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
@@ -1136,8 +1134,7 @@ mod tests {
                         .collect();
                     assert_eq!(approved, [], "{failure:?}");
                     assert_eq!(request_bodies(&server).await.len(), 1, "{failure:?}");
-                    let transcript =
-                        fs::read_to_string(store.find_session_path(&session_id).unwrap()).unwrap();
+                    let transcript = fs::read_to_string(store.saved_file(&session_id)).unwrap();
                     let messages: Vec<serde_json::Value> = transcript
                         .lines()
                         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())

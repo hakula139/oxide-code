@@ -51,20 +51,7 @@ impl Inbox {
                 sink.emit(Event::ModeChanged(mode), "mode-changed");
                 Ok(None)
             }
-            Some(
-                op @ (Op::Prompt { .. }
-                | Op::Clear
-                | Op::Archive
-                | Op::SetArchive { .. }
-                | Op::Resume { .. }
-                | Op::Compact { .. }
-                | Op::Rename { .. }
-                | Op::SetModel(_)
-                | Op::Login
-                | Op::LoginCode(_)
-                | Op::Logout
-                | Op::Resolve { .. }),
-            ) => Ok(Some(op)),
+            Some(op) => Ok(Some(op)),
         }
     }
 }

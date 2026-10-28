@@ -1,7 +1,5 @@
 //! JSONL entry schema for session files.
 
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -113,14 +111,14 @@ pub(crate) enum Entry {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TitleInfo {
     pub title: String,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExitInfo {
     pub message_count: u32,
     #[serde(with = "time::serde::rfc3339")]
@@ -190,12 +188,9 @@ pub(crate) struct UsageRecord {
     pub(crate) tokens: TokenUsage,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
     pub session_id: String,
-    /// Source file used by resume and delete, since a renamed file's header ID may name another
-    /// file.
-    pub path: PathBuf,
     pub cwd: String,
     /// The header's project root, `None` in sessions that releases up to 0.1.0-alpha.5 wrote.
     pub project_root: Option<String>,

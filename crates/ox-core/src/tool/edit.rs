@@ -441,6 +441,7 @@ mod tests {
     use crate::tool::local_testing::{self, ctx_with, temp_ctx};
     use crate::tool::read::ReadTool;
     use crate::tool::write::WriteTool;
+    use crate::util::fs::testing::make_read_only;
     use crate::util::path::local_testing::canonical_tempdir;
 
     fn seeded_ctx(path: &Path) -> ToolCtx {
@@ -992,7 +993,7 @@ mod tests {
             let path = dir.path().join("readonly.txt");
             fs::write(&path, "hello world").unwrap();
             let ctx = seeded_ctx(&path);
-            local_testing::make_read_only(&path);
+            make_read_only(&path);
 
             let err = edit_file(&path, "hello", "goodbye", false, &ctx)
                 .await

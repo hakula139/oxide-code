@@ -6,7 +6,7 @@ oxide-code automatically saves every conversation to disk. You can list past ses
 
 Sessions are stored under `$XDG_DATA_HOME/ox/sessions/` (default: `~/.local/share/ox/sessions/`), grouped by project. A session's project is the Git repository containing the directory where you start `ox`, or that directory itself outside a repository, which is the same project root that [instruction files](instructions.md#where-instruction-files-can-live) load from. Sessions started in different subdirectories of one repository share a project. Sessions saved by 0.1.0-alpha.5 and earlier belong to the directory they started in, so the current project lists them when you start `ox` in that directory, or anywhere in the repository for a session started at its root, while `--all` and an ID prefix always find them.
 
-A session file is created on the first message, so launching `ox` and quitting without typing leaves nothing behind.
+A session file is created on the first message, so launching `ox` and quitting without typing leaves nothing behind. Its name ends with the session ID, and listings and ID prefixes skip a file renamed so that its name no longer carries that ID, which you can still resume by its path.
 
 When a tool's output is too long to send whole to the model, the full output is saved beside the session file in a directory named after the session ID, where the model can read it back. For a session resumed from a file path outside `$XDG_DATA_HOME/ox/sessions/`, that directory sits beside the resumed file.
 
@@ -93,7 +93,7 @@ Inside the TUI, `/resume` (alias `/continue`) opens a session picker without res
 
 ### Deleting a Session
 
-Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm modal. The modal ignores keys until you pause typing for 300 ms, so a keystroke typed ahead cannot confirm it. **Y** deletes the session file and its saved tool output, and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirmation for any saved session except the live one.
+Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm modal. The modal ignores keys until you pause typing for 300 ms, so a keystroke typed ahead cannot confirm it. **Y** deletes the session file and its saved tool output, and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. Dismissing the modal after **Y** does not stop the delete, which still reports its result in chat, and ox drops other session actions until it finishes. `/delete <id-prefix>` opens the same confirmation for any saved session except the live one.
 
 ### Archiving a Session
 

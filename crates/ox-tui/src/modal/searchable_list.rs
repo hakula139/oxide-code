@@ -139,18 +139,6 @@ impl<T: SearchableItem> SearchableList<T> {
         self.has_more = has_more;
     }
 
-    /// Moves the cursor to the first visible row matching `f`. No-op if none matches. Pairs with
-    /// [`Self::retain_items`] to keep the cursor on its item when rows above it drop.
-    pub(crate) fn cursor_to(&mut self, f: impl Fn(&T) -> bool) {
-        if let Some(vi) = self
-            .visible
-            .iter()
-            .position(|&item_idx| self.items.get(item_idx).is_some_and(&f))
-        {
-            self.cursor = vi;
-        }
-    }
-
     pub(crate) fn selected(&self) -> Option<&T> {
         self.visible
             .get(self.cursor)
@@ -643,57 +631,6 @@ mod tests {
 
             assert_eq!(l.cursor_index(), 0);
             assert!(l.selected().is_none());
-        }
-    }
-
-    mod cursor_to {
-        use super::*;
-
-        #[test]
-        fn seeks_to_first_visible_row_matching_predicate() {
-            let mut l = list(vec![
-                FakeItem::new("alpha"),
-                FakeItem::new("beta"),
-                FakeItem::new("gamma"),
-            ]);
-
-            l.cursor_to(|item| item.haystack == "gamma");
-
-            assert_eq!(l.cursor_index(), 2);
-
-            l.cursor_to(|item| item.haystack == "alpha");
-
-            assert_eq!(l.cursor_index(), 0);
-        }
-
-        #[test]
-        fn is_a_noop_when_no_row_matches() {
-            let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
-            l.select_next();
-            assert_eq!(l.cursor_index(), 1);
-
-            l.cursor_to(|item| item.haystack == "missing");
-
-            assert_eq!(l.cursor_index(), 1, "no match leaves cursor untouched");
-        }
-
-        #[test]
-        fn walks_only_filtered_rows() {
-            let mut l = list(vec![
-                FakeItem::new("apple"),
-                FakeItem::new("BERRY"),
-                FakeItem::new("apricot"),
-            ]);
-            l.set_query("ap");
-            assert_eq!(l.visible_len(), 2, "berry filtered out");
-
-            l.cursor_to(|item| item.haystack == "BERRY");
-
-            assert_eq!(
-                l.cursor_index(),
-                0,
-                "filtered-out row never receives the cursor"
-            );
         }
     }
 

@@ -1,6 +1,7 @@
-//! Resolution of the CLI `--continue` and `--resume` targets and of session-ID prefixes.
+//! Resolution of the CLI `--continue` and `--resume` targets, of resume targets to session files,
+//! and of session IDs and their prefixes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use tracing::debug;
@@ -10,6 +11,7 @@ use super::entry::{ArchiveState, SessionInfo};
 use super::handle::{self, LoadedTranscript, ResumedSession};
 use super::store::SessionStore;
 use super::store::listing::ProjectScope;
+use crate::protocol::ResumeTarget;
 
 /// The saved session a run continues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,15 +23,13 @@ pub enum SessionTarget<'a> {
 }
 
 /// Normalized form of the CLI's session target.
-enum ResumeMode<'a> {
+enum ResumeMode {
     /// No target starts a new session.
     Fresh,
     /// The most recent unarchived session in scope.
     Latest,
-    /// The unique session whose ID starts with the prefix.
-    Prefix(&'a str),
-    /// The session file at the path, bypassing the XDG lookup.
-    Path(&'a Path),
+    /// The session an ID prefix or a session file path names.
+    Named(ResumeTarget),
 }
 
 /// Starts a new session, or resumes the one `target` names. A fresh session records `git_branch`. A
@@ -43,7 +43,7 @@ pub async fn resolve_session(
     target: Option<SessionTarget<'_>>,
     projects: ProjectScope,
 ) -> Result<ResumedSession> {
-    let path = match normalize_target(target)? {
+    let target = match normalize_target(target)? {
         ResumeMode::Fresh => {
             return Ok(ResumedSession {
                 handle: handle::start(store, model, git_branch),
@@ -52,39 +52,32 @@ pub async fn resolve_session(
                 prior: ArchiveState::Active,
             });
         }
-        ResumeMode::Path(path) => path.to_owned(),
         ResumeMode::Latest => {
             let scope_hint = match projects {
                 ProjectScope::Current => " in this project (use --all to search every project)",
                 ProjectScope::Every => "",
             };
-            store
+            let latest = store
                 .latest(projects)?
-                .with_context(|| format!("no sessions to resume{scope_hint}"))?
-                .path
+                .with_context(|| format!("no sessions to resume{scope_hint}"))?;
+            ResumeTarget::Id(latest.session_id)
         }
-        ResumeMode::Prefix(prefix) => {
-            let info = match projects {
-                ProjectScope::Current => resolve_prefix_to_info(store, prefix, None)?,
-                ProjectScope::Every => match_in_scope(store, prefix, None, ProjectScope::Every)?,
-            };
-            info.ok_or_else(|| ResolveError::NoMatch {
-                prefix: prefix.to_owned(),
-            })?
-            .path
-        }
+        ResumeMode::Named(target) => target,
     };
 
-    debug!(path = %path.display(), "resuming session");
+    debug!(?target, "resuming session");
     let store = store.clone();
-    tokio::task::spawn_blocking(move || handle::resume_from_path(&store, &path))
-        .await
-        .context("session resume task failed")?
+    tokio::task::spawn_blocking(move || {
+        let path = session_path(&store, target, None, projects)?;
+        handle::resume_from_path(&store, &path)
+    })
+    .await
+    .context("session resume task failed")?
 }
 
 /// Trims and classifies `target` into a [`ResumeMode`], rejecting a blank name, which names no
 /// session.
-fn normalize_target(target: Option<SessionTarget<'_>>) -> Result<ResumeMode<'_>> {
+fn normalize_target(target: Option<SessionTarget<'_>>) -> Result<ResumeMode> {
     match target {
         None => Ok(ResumeMode::Fresh),
         Some(SessionTarget::Latest) => Ok(ResumeMode::Latest),
@@ -96,11 +89,11 @@ fn normalize_target(target: Option<SessionTarget<'_>>) -> Result<ResumeMode<'_>>
                      (run `ox -c` to continue the latest session or `ox -r` to pick one)"
                 );
             }
-            if looks_like_path(trimmed) {
-                Ok(ResumeMode::Path(Path::new(trimmed)))
+            Ok(ResumeMode::Named(if looks_like_path(trimmed) {
+                ResumeTarget::Path(PathBuf::from(trimmed))
             } else {
-                Ok(ResumeMode::Prefix(trimmed))
-            }
+                ResumeTarget::Prefix(trimmed.to_owned())
+            }))
         }
     }
 }
@@ -115,9 +108,27 @@ fn looks_like_path(arg: &str) -> bool {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
-/// Why a session-ID prefix resolved to no single session. `Display` is the lowercase `anyhow`
-/// headline for startup, which slash commands rephrase as a sentence.
-#[derive(Debug, thiserror::Error)]
+/// The file of the session `target` names. A prefix matches sessions other than `live_id` in
+/// `projects`, as [`resolve_prefix`] does.
+pub(super) fn session_path(
+    store: &SessionStore,
+    target: ResumeTarget,
+    live_id: Option<&str>,
+    projects: ProjectScope,
+) -> Result<PathBuf> {
+    let session_id = match target {
+        ResumeTarget::Path(path) => return Ok(path),
+        ResumeTarget::Id(session_id) => session_id,
+        ResumeTarget::Prefix(prefix) => {
+            resolve_prefix(store, &prefix, live_id, projects)?.session_id
+        }
+    };
+    store.find_session_path(&session_id)
+}
+
+/// Why a session ID or its prefix resolved to no single session. `Display` is the lowercase
+/// `anyhow` headline for startup, which slash commands rephrase as a sentence.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ResolveError {
     #[error("no session matching `{prefix}`")]
     NoMatch { prefix: String },
@@ -132,56 +143,54 @@ pub enum ResolveError {
         preview: String,
     },
     /// `scope` names where the listing looked: `this project` or `all projects`.
-    #[error("failed to list sessions in {scope}: {cause:#}")]
-    List {
-        scope: &'static str,
-        cause: anyhow::Error,
-    },
-    /// The blocking task that ran the lookup panicked.
-    #[error("session lookup task failed: {0}")]
-    Task(String),
+    #[error("failed to list sessions in {scope}: {cause}")]
+    List { scope: &'static str, cause: String },
 }
 
-/// Matches `prefix` against session IDs other than `live_id`, first in the current project, then in
-/// every project.
-fn resolve_prefix_to_info(
+impl ResolveError {
+    fn list(projects: ProjectScope, cause: &anyhow::Error) -> Self {
+        Self::List {
+            scope: projects.label(),
+            cause: format!("{cause:#}"),
+        }
+    }
+}
+
+/// The saved session `session_id`, in any project.
+pub(super) fn resolve_id(
+    store: &SessionStore,
+    session_id: &str,
+) -> Result<SessionInfo, ResolveError> {
+    store
+        .find(session_id)
+        .map_err(|cause| ResolveError::list(ProjectScope::Every, &cause))?
+        .ok_or_else(|| ResolveError::NoMatch {
+            prefix: session_id.to_owned(),
+        })
+}
+
+/// The one saved session other than `live_id` whose ID starts with `prefix`, telling a prefix that
+/// matches only the live session from one that matches nothing. [`ProjectScope::Current`] matches
+/// in the current project first and then in every project, while [`ProjectScope::Every`] weighs
+/// every project at once.
+pub(super) fn resolve_prefix(
     store: &SessionStore,
     prefix: &str,
     live_id: Option<&str>,
-) -> Result<Option<SessionInfo>, ResolveError> {
-    if let Some(info) = match_in_scope(store, prefix, live_id, ProjectScope::Current)? {
-        return Ok(Some(info));
-    }
-    match_in_scope(store, prefix, live_id, ProjectScope::Every)
-}
-
-/// [`resolve_saved_prefix`] on the blocking pool, so an async caller never stalls its task on a
-/// listing walk.
-pub async fn resolve_saved_prefix_blocking(
-    store: SessionStore,
-    prefix: String,
-    live_id: String,
+    projects: ProjectScope,
 ) -> Result<SessionInfo, ResolveError> {
-    tokio::task::spawn_blocking(move || resolve_saved_prefix(&store, &prefix, &live_id))
-        .await
-        .unwrap_or_else(|error| Err(ResolveError::Task(error.to_string())))
-}
-
-/// [`resolve_prefix_to_info`] for commands that act on a saved session, telling a prefix that
-/// matches only the live session from one that matches nothing.
-pub fn resolve_saved_prefix(
-    store: &SessionStore,
-    prefix: &str,
-    live_id: &str,
-) -> Result<SessionInfo, ResolveError> {
-    if let Some(info) = resolve_prefix_to_info(store, prefix, Some(live_id))? {
+    if projects == ProjectScope::Current
+        && let Some(info) = match_in_scope(store, prefix, live_id, ProjectScope::Current)?
+    {
         return Ok(info);
     }
-    let prefix = prefix.to_owned();
-    Err(if live_id.starts_with(&prefix) {
-        ResolveError::Live { prefix }
-    } else {
-        ResolveError::NoMatch { prefix }
+    match_in_scope(store, prefix, live_id, ProjectScope::Every)?.ok_or_else(|| {
+        let prefix = prefix.to_owned();
+        if live_id.is_some_and(|live_id| live_id.starts_with(&prefix)) {
+            ResolveError::Live { prefix }
+        } else {
+            ResolveError::NoMatch { prefix }
+        }
     })
 }
 
@@ -191,13 +200,9 @@ fn match_in_scope(
     live_id: Option<&str>,
     projects: ProjectScope,
 ) -> Result<Option<SessionInfo>, ResolveError> {
-    let mut matches =
-        store
-            .list_matching(prefix, projects)
-            .map_err(|cause| ResolveError::List {
-                scope: projects.label(),
-                cause,
-            })?;
+    let mut matches = store
+        .list_matching(prefix, projects)
+        .map_err(|cause| ResolveError::list(projects, &cause))?;
     matches.retain(|info| live_id != Some(info.session_id.as_str()));
     match matches.len() {
         0 => Ok(None),
@@ -231,9 +236,8 @@ mod tests {
     use super::*;
     use crate::message::Message;
     use crate::session::store::local_testing::{test_session_file, write_newest_corrupt_session};
-    use crate::session::store::set_archived_at;
     use crate::session::store::testing::{
-        isolated_store, seed_test_session, test_project_dir, test_store,
+        archive_test_session, isolated_store, seed_test_session, test_project_dir, test_store,
     };
 
     mod resolve_session {
@@ -384,7 +388,7 @@ mod tests {
                 Some(1),
                 time::macros::datetime!(2026-04-18 11:00:00 UTC),
             );
-            set_archived_at(&test_session_file(dir.path(), "archived"), true).unwrap();
+            archive_test_session(&store, "archived");
             write_newest_corrupt_session(dir.path());
 
             let resumed = resolve_session(
@@ -412,8 +416,7 @@ mod tests {
                 Some(1),
                 time::macros::datetime!(2026-04-18 09:00:00 UTC),
             );
-            let path = test_session_file(dir.path(), "archived");
-            set_archived_at(&path, true).unwrap();
+            archive_test_session(&store, "archived");
 
             let resumed = resolve_session(
                 &store,
@@ -577,7 +580,10 @@ mod tests {
         #[test]
         fn trims_valid_prefix() {
             let mode = normalize_target(Some(SessionTarget::Named("  abc123 "))).unwrap();
-            assert!(matches!(mode, ResumeMode::Prefix("abc123")));
+            assert!(matches!(
+                mode,
+                ResumeMode::Named(ResumeTarget::Prefix(prefix)) if prefix == "abc123"
+            ));
         }
 
         #[test]
@@ -591,7 +597,7 @@ mod tests {
             ] {
                 let mode = normalize_target(Some(SessionTarget::Named(raw))).unwrap();
                 assert!(
-                    matches!(mode, ResumeMode::Path(p) if p == Path::new(raw)),
+                    matches!(mode, ResumeMode::Named(ResumeTarget::Path(p)) if p == Path::new(raw)),
                     "{raw:?} should classify as Path",
                 );
             }
@@ -600,7 +606,10 @@ mod tests {
         #[test]
         fn keeps_uuid_shaped_prefix_as_prefix() {
             let mode = normalize_target(Some(SessionTarget::Named("a1b2c3d4-e5f6-7890"))).unwrap();
-            assert!(matches!(mode, ResumeMode::Prefix("a1b2c3d4-e5f6-7890")));
+            assert!(matches!(
+                mode,
+                ResumeMode::Named(ResumeTarget::Prefix(prefix)) if prefix == "a1b2c3d4-e5f6-7890"
+            ));
         }
 
         #[test]
@@ -620,7 +629,79 @@ mod tests {
         }
     }
 
-    mod resolve_prefix_to_info {
+    mod session_path {
+        use super::*;
+
+        #[test]
+        fn finds_the_file_of_an_id_or_a_prefix_and_keeps_an_explicit_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let id = "abcd1234-eeff-1122-3344-556677889900";
+            seed_test_session(
+                &store,
+                id,
+                Some("Saved"),
+                Some(1),
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let file = test_session_file(dir.path(), id);
+            let explicit = dir.path().join("elsewhere.jsonl");
+
+            for (target, expected) in [
+                (ResumeTarget::Id(id.to_owned()), &file),
+                (ResumeTarget::Prefix("abcd".to_owned()), &file),
+                (ResumeTarget::Path(explicit.clone()), &explicit),
+            ] {
+                let path = session_path(&store, target.clone(), None, ProjectScope::Current);
+                assert_eq!(&path.unwrap(), expected, "{target:?}");
+            }
+        }
+
+        #[test]
+        fn names_an_id_with_no_file() {
+            let (_dir, store) = isolated_store();
+
+            let err = session_path(
+                &store,
+                ResumeTarget::Id("missing".to_owned()),
+                None,
+                ProjectScope::Current,
+            )
+            .unwrap_err();
+
+            assert_eq!(err.to_string(), "session not found: missing");
+        }
+    }
+
+    mod resolve_id {
+        use super::*;
+
+        #[test]
+        fn finds_the_session_in_another_project_and_tells_an_unknown_id() {
+            let dir = tempfile::tempdir().unwrap();
+            let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+            let id = "abcd1234-eeff-1122-3344-556677889900";
+            seed_test_session(
+                &other,
+                id,
+                Some("Foreign"),
+                Some(1),
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let current = test_store(dir.path());
+
+            assert_eq!(resolve_id(&current, id).unwrap().session_id, id);
+            assert_eq!(
+                resolve_id(&current, "abcd1234"),
+                Err(ResolveError::NoMatch {
+                    prefix: "abcd1234".to_owned()
+                }),
+                "an ID matches only in full",
+            );
+        }
+    }
+
+    mod resolve_prefix {
         use super::*;
 
         #[test]
@@ -635,42 +716,43 @@ mod tests {
                 Some(1),
                 time::macros::datetime!(2026-04-18 09:00:00 UTC),
             );
-
             let current = test_store(dir.path());
-            let info = resolve_prefix_to_info(&current, &target[..6], Some("live"))
-                .unwrap()
-                .expect("widening pass must surface the foreign session");
+
+            let info = resolve_prefix(&current, &target[..6], Some("live"), ProjectScope::Current)
+                .unwrap();
+
             assert_eq!(info.session_id, target);
         }
 
         #[test]
-        fn no_match_resolves_to_no_session() {
-            let (_dir, store) = isolated_store();
-            assert!(
-                resolve_prefix_to_info(&store, "zzz", Some("live"))
-                    .unwrap()
-                    .is_none(),
-                "missing prefix is Ok(None) so callers can layer their own error",
-            );
-        }
-
-        #[test]
-        fn filters_live_id_so_caller_layers_its_own_message() {
+        fn tells_a_live_only_match_from_no_match() {
             let (_dir, store) = isolated_store();
             let live_id = "abcd1234-eeff-1122-3344-556677889900";
-            seed_test_session(
-                &store,
-                live_id,
-                Some("Live"),
-                Some(1),
-                time::macros::datetime!(2026-04-18 09:00:00 UTC),
-            );
+            let saved_id = "abcd5678-eeff-1122-3344-556677889900";
+            for id in [live_id, saved_id] {
+                seed_test_session(
+                    &store,
+                    id,
+                    Some("Saved"),
+                    Some(1),
+                    time::macros::datetime!(2026-04-18 09:00:00 UTC),
+                );
+            }
+            let resolve =
+                |prefix| resolve_prefix(&store, prefix, Some(live_id), ProjectScope::Current);
 
-            assert!(
-                resolve_prefix_to_info(&store, &live_id[..6], Some(live_id))
-                    .unwrap()
-                    .is_none(),
-                "live-id-only matches don't surface to the caller",
+            assert_eq!(resolve("abcd").unwrap().session_id, saved_id);
+            assert_eq!(
+                resolve("abcd1"),
+                Err(ResolveError::Live {
+                    prefix: "abcd1".to_owned()
+                })
+            );
+            assert_eq!(
+                resolve("zzz"),
+                Err(ResolveError::NoMatch {
+                    prefix: "zzz".to_owned()
+                })
             );
         }
 
@@ -690,45 +772,16 @@ mod tests {
                 seed_test_session(&store, id, Some("dup"), Some(1), created_at);
             }
 
-            let err = resolve_prefix_to_info(&store, "abcd", Some("live")).unwrap_err();
+            let err = resolve_prefix(&store, "abcd", Some("live"), ProjectScope::Current);
 
-            assert!(
-                matches!(
-                    &err,
-                    ResolveError::Ambiguous { prefix, count: 2, preview }
-                        if prefix == "abcd" && preview == "abcd2222, abcd1111"
-                ),
-                "{err:?}",
+            assert_eq!(
+                err,
+                Err(ResolveError::Ambiguous {
+                    prefix: "abcd".to_owned(),
+                    count: 2,
+                    preview: "abcd2222, abcd1111".to_owned(),
+                })
             );
-        }
-    }
-
-    mod resolve_saved_prefix {
-        use super::*;
-
-        #[test]
-        fn tells_a_live_only_match_from_no_match() {
-            let (_dir, store) = isolated_store();
-            let live_id = "abcd1234-eeff-1122-3344-556677889900";
-            let saved_id = "abcd5678-eeff-1122-3344-556677889900";
-            seed_test_session(
-                &store,
-                saved_id,
-                Some("Saved"),
-                Some(1),
-                time::macros::datetime!(2026-04-18 09:00:00 UTC),
-            );
-
-            let saved = resolve_saved_prefix(&store, "abcd", live_id).unwrap();
-            assert_eq!(saved.session_id, saved_id);
-            assert!(matches!(
-                resolve_saved_prefix(&store, "abcd1", live_id),
-                Err(ResolveError::Live { prefix }) if prefix == "abcd1",
-            ));
-            assert!(matches!(
-                resolve_saved_prefix(&store, "zzz", live_id),
-                Err(ResolveError::NoMatch { prefix }) if prefix == "zzz",
-            ));
         }
     }
 

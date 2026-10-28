@@ -3,7 +3,7 @@
 //! startup.
 
 use std::borrow::Cow;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -19,10 +19,10 @@ use strum::VariantArray;
 use time::OffsetDateTime;
 
 use ox_core::command;
-use ox_core::protocol::{Op, ResumeTarget};
+use ox_core::protocol::{Op, ResumeTarget, SavedTarget};
 use ox_core::session::display::{ID_PREFIX_WIDTH, display_title, id_prefix};
 use ox_core::session::entry::{ArchiveState, SessionInfo};
-use ox_core::session::saved::SavedError;
+use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{ListScope, ProjectScope, SessionWalk};
 use ox_core::util::path::tildify;
@@ -47,7 +47,7 @@ use crate::modal::chrome::{
 };
 use crate::modal::line_editor::LineEditor;
 use crate::modal::searchable_list::{SearchableItem, SearchableList};
-use crate::modal::{Modal, ModalAction, ModalKey};
+use crate::modal::{DeleteReply, Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
 use crate::{NOTICE_DURATION, now};
 
@@ -116,7 +116,6 @@ impl SlashCommand for ResumeCmd {
 /// Row payload for the resume picker: display strings and a search haystack.
 struct SessionRow {
     session_id: String,
-    path: PathBuf,
     last_active_at: OffsetDateTime,
     /// When the listing started, in local time. The row's relative times count from here.
     listed_at: OffsetDateTime,
@@ -170,7 +169,6 @@ impl SessionRow {
         };
         Self {
             session_id: info.session_id,
-            path: info.path,
             last_active_at: info.last_active_at,
             listed_at,
             title,
@@ -640,8 +638,7 @@ impl ResumePicker {
             return ModalKey::Consumed;
         };
         ModalKey::Emit(ModalAction::Dispatch(Action::Op(Op::SetArchive {
-            path: row.path.clone(),
-            session_id: row.session_id.clone(),
+            target: SavedTarget::Id(row.session_id.clone()),
             state: self.scope.archive.toggled(),
         })))
     }
@@ -649,7 +646,7 @@ impl ResumePicker {
     fn submit(&self) -> ModalKey {
         match self.list.selected() {
             Some(row) => ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
-                target: ResumeTarget::Path(row.path.clone()),
+                target: ResumeTarget::Id(row.session_id.clone()),
             }))),
             // Stay open so the user can Tab the scope or Esc out. Silent dismissal hides why
             // nothing happened.
@@ -664,11 +661,9 @@ impl ResumePicker {
             return ModalKey::Consumed;
         };
         ModalKey::Push(Box::new(ConfirmDeleteSessionModal::new(
-            row.path.clone(),
             row.session_id.clone(),
             row.title.clone(),
             row.metadata_line(now_local()),
-            self.live_session_id.clone(),
         )))
     }
 
@@ -751,22 +746,34 @@ impl Modal for ResumePicker {
         self.load_ahead();
     }
 
-    fn archive_started(&mut self, id: &str) {
-        if let Some(row) = self.list.selected().filter(|row| row.session_id == id) {
+    fn archive_started(&mut self, target: &SavedTarget) {
+        let SavedTarget::Id(id) = target else {
+            return;
+        };
+        if let Some(row) = self.list.selected().filter(|row| row.session_id == *id) {
             self.archive = Some(PendingArchive {
-                session_id: id.to_owned(),
+                session_id: id.clone(),
                 title: row.title.clone(),
                 listed_at: self.listed_at,
             });
         }
     }
 
-    fn archive_updated(&mut self, id: &str, result: &Result<ArchiveState, SavedError>) {
-        let Some(pending) = self.archive.take_if(|pending| pending.session_id == id) else {
+    fn archive_updated(
+        &mut self,
+        target: &SavedTarget,
+        state: ArchiveState,
+        result: &Result<ArchiveUpdate, SavedError>,
+    ) {
+        let Some(pending) = self
+            .archive
+            .take_if(|pending| matches!(target, SavedTarget::Id(id) if *id == pending.session_id))
+        else {
             return;
         };
+        let id = pending.session_id.as_str();
         let (text, failed) = match result {
-            Ok(state) => {
+            Ok(_) => {
                 if self.listed_at == pending.listed_at {
                     self.list.retain_items(|row| row.session_id != id);
                 } else {
@@ -790,15 +797,12 @@ impl Modal for ResumePicker {
         });
     }
 
-    fn on_focus_regained(&mut self) {
-        // A session deleted from the nested modal leaves its row behind. Re-seek the cursor after
-        // the prune so a row dropped above it doesn't shift the cursor onto another session.
-        let prev_id = self.list.selected().map(|r| r.session_id.clone());
-        self.list.retain_items(|row| row.path.exists());
-        if let Some(id) = prev_id {
-            self.list.cursor_to(|row| row.session_id == id);
+    fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> DeleteReply {
+        if result.is_ok() {
+            self.list.retain_items(|row| row.session_id != id);
+            self.load_ahead();
         }
-        self.load_ahead();
+        DeleteReply::Unclaimed
     }
 
     fn tick(&mut self, now: Instant) -> bool {
@@ -869,7 +873,7 @@ mod tests {
 
     use ox_core::session::display::UNTITLED_MARKER;
     use ox_core::session::entry::{ExitInfo, TitleInfo};
-    use ox_core::session::saved;
+    use ox_core::session::saved::{self, SavedAction};
     use ox_core::session::store::testing::{
         WriterBarrier, archive_test_session, isolated_store, listed_ids, listed_session,
         seed_test_session, stamped_id, test_project_dir, test_store, with_isolated_xdg,
@@ -887,16 +891,17 @@ mod tests {
 
     fn archive(picker: &mut ResumePicker) -> ModalKey {
         let outcome = picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
-        if let ModalKey::Emit(ModalAction::Dispatch(Action::Op(Op::SetArchive {
-            path,
-            session_id,
-            state,
-        }))) = &outcome
+        if let ModalKey::Emit(ModalAction::Dispatch(Action::Op(Op::SetArchive { target, state }))) =
+            &outcome
         {
-            picker.archive_started(session_id);
-            let result = saved::set_archived(path, session_id, *state, &picker.live_session_id)
-                .map(|()| *state);
-            picker.archive_updated(session_id, &result);
+            picker.archive_started(target);
+            let result = saved::testing::set_archived(
+                &picker.store,
+                target,
+                *state,
+                &picker.live_session_id,
+            );
+            picker.archive_updated(target, *state, &result);
         }
         outcome
     }
@@ -1331,7 +1336,7 @@ mod tests {
 
             let page = read_page(&mut walk, &AtomicBool::new(true));
 
-            assert!(page.is_empty());
+            assert_eq!(page, [] as [SessionInfo; 0]);
             assert!(!walk.is_exhausted(), "no file was drawn");
         }
     }
@@ -1477,7 +1482,6 @@ mod tests {
                 Some(3),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let expected = store.find_session_path(&stamped_id(0x11)).unwrap();
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
 
             let ctrl_enter =
@@ -1486,12 +1490,12 @@ mod tests {
 
             assert!(matches!(ctrl_enter, ModalKey::Consumed), "{ctrl_enter:?}");
             let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
-                target: ResumeTarget::Path(path),
+                target: ResumeTarget::Id(id),
             }))) = outcome
             else {
                 panic!("expected Submitted(Resume), got {outcome:?}");
             };
-            assert_eq!(path, expected);
+            assert_eq!(id, stamped_id(0x11));
         }
 
         #[test]
@@ -1900,7 +1904,6 @@ mod tests {
         fn ctrl_a_toggles_between_active_and_archived_sessions() {
             let (_dir, store) = isolated_store();
             seed_active_and_archived(&store);
-            let archived_path = store.find_session_path(&stamped_id(0x33)).unwrap();
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
             let ctrl_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
             let active_view = rendered_text(&mut picker, 180);
@@ -1912,8 +1915,8 @@ mod tests {
                 matches!(
                     &outcome,
                     ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
-                        target: ResumeTarget::Path(path),
-                    }))) if *path == archived_path
+                        target: ResumeTarget::Id(id),
+                    }))) if *id == stamped_id(0x33)
                 ),
                 "Enter must resume the archived session: {outcome:?}",
             );
@@ -1997,40 +2000,46 @@ mod tests {
         async fn ctrl_d_then_y_deletes_the_cursor_session_through_the_modal_stack() {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
-            let picker = opened(ResumePicker::new(
-                store.clone(),
-                "live-session-id".to_owned(),
-            ));
+            let picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
             let mut stack = ModalStack::default();
             stack.push(Box::new(picker));
             let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+            let shown = |stack: &mut ModalStack| {
+                render_rows_with(60, 10, |frame, area, theme| {
+                    stack.render(frame, area, theme);
+                })
+                .join("\n")
+            };
 
             let pushed = stack.handle_key(&ctrl_d);
             assert!(pushed.is_none(), "{pushed:?}");
-            render_rows_with(60, 7, |frame, area, theme| stack.render(frame, area, theme));
+            shown(&mut stack);
             tokio::time::advance(TYPE_AHEAD_GUARD).await;
+            let confirmed = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            assert!(
+                matches!(
+                    &confirmed,
+                    Some(ModalAction::Dispatch(Action::Op(Op::DeleteSaved { session_id })))
+                        if *session_id == stamped_id(0x22)
+                ),
+                "{confirmed:?}",
+            );
 
-            let deleted = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            let actions = stack.saved_deleted(&stamped_id(0x22), &Ok(()));
 
             assert!(
                 matches!(
-                    &deleted,
-                    Some(ModalAction::SystemMessage(msg))
-                        if msg == "Deleted session 22222222: second"
+                    actions.as_deref(),
+                    Some([ModalAction::SystemMessage(msg)]) if msg == "Deleted session 22222222: second"
                 ),
-                "{deleted:?}",
+                "{actions:?}",
             );
             assert!(
                 stack.is_active(),
-                "the picker stays after the confirm modal pops"
+                "the picker stays after the confirm modal closes"
             );
-            let remaining: Vec<String> = store
-                .list()
-                .unwrap()
-                .into_iter()
-                .map(|info| info.session_id)
-                .collect();
-            assert_eq!(remaining, [stamped_id(0x11)]);
+            let rows = shown(&mut stack);
+            assert!(rows.contains("first") && !rows.contains("second"), "{rows}");
         }
 
         #[test]
@@ -2206,11 +2215,15 @@ mod tests {
                 Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let path = store.find_session_path(&id).unwrap();
-            make_read_only(&path);
+            make_read_only(&store.saved_file(&id));
             let failure = saved_error_message(
-                &saved::set_archived(&path, &id, ArchiveState::Archived, "live-session-id")
-                    .unwrap_err(),
+                &saved::testing::set_archived(
+                    &store,
+                    &SavedTarget::Id(id.clone()),
+                    ArchiveState::Archived,
+                    "live-session-id",
+                )
+                .unwrap_err(),
                 Some(BARE_ARCHIVE_HINT),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
@@ -2268,7 +2281,7 @@ mod tests {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
             let target = stamped_id(0x22);
-            let path = store.find_session_path(&target).unwrap();
+            let path = store.saved_file(&target);
             let mut picker = opened(ResumePicker::new(store.clone(), "live".to_owned()));
             let barrier = WriterBarrier::hold(&path);
 
@@ -2279,8 +2292,16 @@ mod tests {
                 picker.archive.is_none(),
                 "only accepted operations become pending"
             );
-            picker.archive_started(&target);
-            picker.archive_updated("unrelated", &Ok(ArchiveState::Archived));
+            let accepted = SavedTarget::Id(target.clone());
+            picker.archive_started(&accepted);
+            picker.archive_updated(
+                &SavedTarget::Id("unrelated".to_owned()),
+                ArchiveState::Archived,
+                &Ok(ArchiveUpdate {
+                    id: "unrelated".to_owned(),
+                    changed: true,
+                }),
+            );
             assert!(matches!(
                 picker.handle_key(&KeyEvent::from(KeyCode::Enter)),
                 ModalKey::Consumed
@@ -2299,9 +2320,10 @@ mod tests {
             picker.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
             picker.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
             barrier.release();
-            saved::set_archived(&path, &target, ArchiveState::Archived, "live").unwrap();
+            let result =
+                saved::testing::set_archived(&store, &accepted, ArchiveState::Archived, "live");
 
-            picker.archive_updated(&target, &Ok(ArchiveState::Archived));
+            picker.archive_updated(&accepted, ArchiveState::Archived, &result);
             picker.settle();
 
             assert_eq!(row_ids(&picker), [target]);
@@ -2312,78 +2334,73 @@ mod tests {
         }
     }
 
-    mod on_focus_regained {
+    mod saved_deleted {
         use super::*;
 
         #[test]
-        fn drops_the_row_of_an_externally_deleted_session() {
-            let (_dir, store) = isolated_store();
-            let id_a = stamped_id(0x11);
-            let id_b = stamped_id(0x22);
-            for (id, title) in [(&id_a, "first"), (&id_b, "second")] {
-                seed_test_session(
-                    &store,
-                    id,
-                    Some(title),
-                    Some(1),
-                    datetime!(2026-04-18 09:00:00 UTC),
-                );
-            }
-            let mut picker = opened(ResumePicker::new(
-                store.clone(),
-                "live-session-id".to_owned(),
-            ));
-            assert_eq!(row_ids(&picker).len(), 2, "both seeded rows present");
-
-            std::fs::remove_file(store.find_session_path(&id_a).unwrap()).unwrap();
-            picker.on_focus_regained();
-            assert_eq!(row_ids(&picker), [id_b], "the deleted row drops");
-        }
-
-        #[test]
-        fn preserves_cursor_when_row_is_still_present() {
-            let (_dir, store) = isolated_store();
-            seed_titled(
-                &store,
-                &[(0x11, "first"), (0x22, "second"), (0x33, "third")],
-            );
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            picker.handle_key(&KeyEvent::from(KeyCode::Down));
-            let pinned = picker.list.selected().unwrap().session_id.clone();
-
-            picker.on_focus_regained();
-            let after = picker.list.selected().unwrap().session_id.clone();
-            assert_eq!(
-                after, pinned,
-                "cursor must remain on the previously selected row"
-            );
-        }
-
-        #[test]
-        fn moves_to_the_next_row_when_the_selected_row_was_deleted() {
+        fn drops_the_deleted_row_and_moves_the_highlight_to_the_next() {
             let (_dir, store) = isolated_store();
             seed_titled(
                 &store,
                 &[(0x11, "first"), (0x22, "doomed"), (0x33, "third")],
             );
             let target = stamped_id(0x22);
-            let mut picker = opened(ResumePicker::new(
-                store.clone(),
-                "live-session-id".to_owned(),
-            ));
-            picker.list.cursor_to(|row| row.session_id == target);
+            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            picker.handle_key(&KeyEvent::from(KeyCode::Down));
             assert_eq!(picker.list.selected().unwrap().session_id, target);
 
-            std::fs::remove_file(store.find_session_path(&target).unwrap()).unwrap();
+            let action = picker.saved_deleted(&target, &Ok(()));
 
-            picker.on_focus_regained();
-
+            assert!(
+                matches!(action, DeleteReply::Unclaimed),
+                "the picker stays open: {action:?}"
+            );
             assert_eq!(row_ids(&picker), [stamped_id(0x33), stamped_id(0x11)]);
             assert_eq!(
                 picker.list.selected().unwrap().session_id,
                 stamped_id(0x11),
                 "the row that followed takes the highlight",
             );
+        }
+
+        #[test]
+        fn loads_the_next_page_once_the_delete_leaves_too_few_rows_below_the_cursor() {
+            let (_dir, store) = isolated_store();
+            let ids = seed_many(&store, PAGE_SIZE + 5);
+            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            while picker.list.rows_below_cursor() > LOAD_AHEAD {
+                picker.handle_key(&KeyEvent::from(KeyCode::Down));
+            }
+            picker.settle();
+            assert_eq!(row_ids(&picker), ids[..PAGE_SIZE]);
+
+            let action = picker.saved_deleted(&ids[PAGE_SIZE - 1], &Ok(()));
+            picker.settle();
+
+            assert!(matches!(action, DeleteReply::Unclaimed), "{action:?}");
+            let mut remaining = ids.clone();
+            remaining.remove(PAGE_SIZE - 1);
+            assert_eq!(row_ids(&picker), remaining);
+        }
+
+        #[test]
+        fn keeps_every_row_and_the_highlight_after_a_failed_delete() {
+            let (_dir, store) = isolated_store();
+            seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
+            let target = stamped_id(0x11);
+            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            picker.handle_key(&KeyEvent::from(KeyCode::Down));
+            let failure = SavedError::Failed {
+                action: SavedAction::Delete,
+                id: "11111111".to_owned(),
+                cause: "permission denied".to_owned(),
+            };
+
+            let action = picker.saved_deleted(&target, &Err(failure));
+
+            assert!(matches!(action, DeleteReply::Unclaimed), "{action:?}");
+            assert_eq!(row_ids(&picker), [stamped_id(0x22), target.clone()]);
+            assert_eq!(picker.list.selected().unwrap().session_id, target);
         }
     }
 

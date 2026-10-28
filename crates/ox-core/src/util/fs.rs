@@ -262,6 +262,13 @@ pub(crate) mod testing {
         std::os::windows::fs::symlink_dir(target, link).unwrap();
     }
 
+    /// Marks the file at `path` read-only, so opening it for writing fails on every platform.
+    pub(crate) fn make_read_only(path: &Path) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
     /// Denies reading the file or directory at `path` until the returned guard drops.
     pub(crate) fn deny_read_access(path: &Path) -> AccessDenied {
         #[cfg(unix)]

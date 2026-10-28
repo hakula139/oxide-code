@@ -628,13 +628,6 @@ pub(crate) mod local_testing {
         file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
             .unwrap();
     }
-
-    /// Marks the file at `path` read-only, so opening it for writing fails on every platform.
-    pub(super) fn make_read_only(path: &Path) {
-        let mut permissions = fs::metadata(path).unwrap().permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(path, permissions).unwrap();
-    }
 }
 
 #[cfg(any(test, feature = "testing"))]

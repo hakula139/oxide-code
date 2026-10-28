@@ -17,10 +17,11 @@ use uuid::Uuid;
 
 use super::actor::{self, Record, SessionCmd};
 use super::entry::{ArchiveState, CompactBoundary, CompactInfo, UsageRecord};
-use super::resolver::resolve_saved_prefix;
+use super::resolver::session_path;
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
 use super::state::SessionState;
+use super::store::listing::ProjectScope;
 use super::store::{SessionData, SessionStore, load_session_data_from_path, open_append_at};
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
@@ -458,10 +459,7 @@ pub(crate) async fn roll_into(
         title,
         prior,
     } = tokio::task::spawn_blocking(move || {
-        let path = match target {
-            ResumeTarget::Path(path) => path,
-            ResumeTarget::Prefix(prefix) => resolve_saved_prefix(&store, &prefix, &live_id)?.path,
-        };
+        let path = session_path(&store, target, Some(&live_id), ProjectScope::Current)?;
         let data = load_session_data_from_path(&path)?;
         if data.session_id == live_id {
             return Err(SavedError::live(&live_id).into());
@@ -2683,8 +2681,12 @@ mod tests {
         async fn resume_and_continue(fixture: &str) -> String {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
-            let path = test_project_dir(dir.path()).join("0-fixture.jsonl");
-            std::fs::write(&path, unmask(fixture)).unwrap();
+            let content = unmask(fixture);
+            let header: serde_json::Value =
+                serde_json::from_str(content.lines().next().unwrap()).unwrap();
+            let file_name = format!("0-{}.jsonl", header["session_id"].as_str().unwrap());
+            let path = test_project_dir(dir.path()).join(file_name);
+            std::fs::write(&path, content).unwrap();
 
             let [listed]: [SessionInfo; 1] = store
                 .list_matching("", ProjectScope::Current)

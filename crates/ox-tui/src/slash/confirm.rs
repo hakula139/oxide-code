@@ -1,22 +1,22 @@
 //! The confirm modal for deleting a saved session.
 
-use std::path::PathBuf;
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use ox_core::protocol::Op;
 use ox_core::session::display::id_prefix;
-use ox_core::session::saved;
+use ox_core::session::saved::SavedError;
 use ox_core::util::text::truncate_to_width;
 
 use super::sessions::{CLEAR_THEN_DELETE_HINT, saved_error_message};
+use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::modal::acceptance::Acceptance;
 use crate::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
-use crate::modal::{Modal, ModalAction, ModalKey};
+use crate::modal::{DeleteReply, Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
 
 // ── Constants ──
@@ -29,55 +29,40 @@ const BODY_HEIGHT: u16 = 2;
 
 // ── ConfirmDeleteSessionModal ──
 
-/// Confirm-and-delete overlay. Y unlinks the session file synchronously, bypassing the engine.
+/// Confirm-and-delete overlay. Y sends [`Op::DeleteSaved`] and keeps the modal open until the
+/// engine reports the result, which closes it on success and shows the error on failure.
 pub(super) struct ConfirmDeleteSessionModal {
     header: Header,
-    path: PathBuf,
     session_id: String,
     display_title: String,
     /// The [`format_metadata_line`](crate::slash::sessions::format_metadata_line) row, such as
     /// `abcd1234 · 2 hours ago · 14 msgs`, which carries the ID prefix.
     metadata: String,
-    live_session_id: String,
+    /// Whether a delete went to the engine and has not reported back, which ignores another Y.
+    pending: bool,
     /// Error from the last failed delete, shown until a retry replaces it or the modal closes.
     error: Option<String>,
     acceptance: Acceptance,
 }
 
 impl ConfirmDeleteSessionModal {
-    pub(super) fn new(
-        path: PathBuf,
-        session_id: String,
-        display_title: String,
-        metadata: String,
-        live_session_id: String,
-    ) -> Self {
+    pub(super) fn new(session_id: String, display_title: String, metadata: String) -> Self {
         Self {
             header: Header::new(TITLE),
-            path,
             session_id,
             display_title,
             metadata,
-            live_session_id,
+            pending: false,
             error: None,
             acceptance: Acceptance::default(),
         }
     }
 
-    /// Deletes the session file, submitting a chat confirmation on success and keeping the modal
-    /// open with the error on failure.
     fn confirm(&mut self) -> ModalKey {
-        match saved::delete(&self.path, &self.session_id, &self.live_session_id) {
-            Ok(()) => ModalKey::Submitted(ModalAction::SystemMessage(format!(
-                "Deleted session {}: {}",
-                id_prefix(&self.session_id),
-                self.display_title,
-            ))),
-            Err(err) => {
-                self.error = Some(saved_error_message(&err, Some(CLEAR_THEN_DELETE_HINT)));
-                ModalKey::Consumed
-            }
-        }
+        self.pending = true;
+        ModalKey::Emit(ModalAction::Dispatch(Action::Op(Op::DeleteSaved {
+            session_id: self.session_id.clone(),
+        })))
     }
 }
 
@@ -113,7 +98,9 @@ impl Modal for ConfirmDeleteSessionModal {
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         // The modal stack handles Esc and Ctrl+C.
         match event.code {
-            KeyCode::Char('y' | 'Y') if self.acceptance.accepts(event) => self.confirm(),
+            KeyCode::Char('y' | 'Y') if !self.pending && self.acceptance.accepts(event) => {
+                self.confirm()
+            }
             KeyCode::Char('n' | 'N') => ModalKey::Cancelled,
             _ => {
                 self.acceptance.guard();
@@ -125,6 +112,24 @@ impl Modal for ConfirmDeleteSessionModal {
     fn binds_modified_key(&self, _event: &KeyEvent) -> bool {
         self.acceptance.is_guarded()
     }
+
+    fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> DeleteReply {
+        if id != self.session_id {
+            return DeleteReply::Unclaimed;
+        }
+        self.pending = false;
+        match result {
+            Ok(()) => DeleteReply::Closed(ModalAction::SystemMessage(format!(
+                "Deleted session {}: {}",
+                id_prefix(id),
+                self.display_title,
+            ))),
+            Err(error) => {
+                self.error = Some(saved_error_message(error, Some(CLEAR_THEN_DELETE_HINT)));
+                DeleteReply::Shown
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -133,8 +138,7 @@ mod tests {
     use time::OffsetDateTime;
     use time::macros::datetime;
 
-    use ox_core::session::store::SessionStore;
-    use ox_core::session::store::testing::{isolated_store, seed_test_session, stamped_id};
+    use ox_core::session::store::testing::stamped_id;
 
     use super::*;
     use crate::modal::ModalStack;
@@ -147,22 +151,30 @@ mod tests {
     const NOW: OffsetDateTime = datetime!(2026-06-01 09:00:00 UTC);
     const MESSAGES: u32 = 3;
 
-    fn seed_modal(store: &SessionStore, byte: u8, title: &str) -> ConfirmDeleteSessionModal {
-        seed_modal_with_live(store, byte, title, "live-session-id")
+    /// The error a delete of the live session stamped `0xab` reports.
+    const LIVE_REFUSAL: &str = "Session abababab is the live session. \
+                                Run `/clear` to start a new one, then delete it.";
+
+    /// The confirm modal for the session stamped with `byte`.
+    fn modal(byte: u8, title: &str) -> ConfirmDeleteSessionModal {
+        let id = stamped_id(byte);
+        let metadata = format_metadata_line(&id, LAST_ACTIVE, NOW, MESSAGES, None, None);
+        ConfirmDeleteSessionModal::new(id, title.to_owned(), metadata)
     }
 
-    /// Seeds a session stamped with `byte` and opens its confirm modal, with `live_id` live.
-    fn seed_modal_with_live(
-        store: &SessionStore,
-        byte: u8,
-        title: &str,
-        live_id: &str,
-    ) -> ConfirmDeleteSessionModal {
-        let id = stamped_id(byte);
-        seed_test_session(store, &id, Some(title), Some(MESSAGES), LAST_ACTIVE);
-        let path = store.find_session_path(&id).unwrap();
-        let metadata = format_metadata_line(&id, LAST_ACTIVE, NOW, MESSAGES, None, None);
-        ConfirmDeleteSessionModal::new(path, id, title.to_owned(), metadata, live_id.to_owned())
+    /// Renders `modal` in full so its acceptance arms, then lets the type-ahead guard lapse.
+    fn show_and_arm(modal: &mut ConfirmDeleteSessionModal) {
+        render_modal(modal, 60);
+        modal.acceptance.expire();
+    }
+
+    /// Returns whether `action` asks the engine to delete the session stamped `0xab`.
+    fn deletes(action: Option<&ModalAction>) -> bool {
+        matches!(
+            action,
+            Some(ModalAction::Dispatch(Action::Op(Op::DeleteSaved { session_id })))
+                if *session_id == stamped_id(0xab)
+        )
     }
 
     mod render {
@@ -177,8 +189,7 @@ mod tests {
 
         #[test]
         fn names_the_session_by_title_above_the_metadata_that_carries_its_id() {
-            let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
+            let mut modal = modal(0xab, "Fix auth flow");
 
             let rows = rendered_rows(&mut modal, 60);
 
@@ -197,8 +208,7 @@ mod tests {
 
         #[test]
         fn places_the_error_row_above_the_footer() {
-            let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
+            let mut modal = modal(0xab, "Fix auth flow");
             modal.error = Some("permission denied".to_owned());
 
             let rows = rendered_rows(&mut modal, 60);
@@ -216,8 +226,7 @@ mod tests {
 
         #[test]
         fn does_not_panic_at_minimum_widths() {
-            let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, 0xab, "T");
+            let mut modal = modal(0xab, "T");
             for width in [4_u16, 8, 20] {
                 rendered_rows(&mut modal, width);
             }
@@ -227,56 +236,38 @@ mod tests {
     mod handle_key {
         use super::*;
 
-        fn show_and_arm(modal: &mut ConfirmDeleteSessionModal) {
-            render_modal(modal, 60);
-            modal.acceptance.expire();
-        }
-
-        fn is_listed(store: &SessionStore, session_id: &str) -> bool {
-            store
-                .list()
-                .unwrap()
-                .iter()
-                .any(|s| s.session_id == session_id)
-        }
-
-        /// The error a delete of the live session stamped `0xab` reports.
-        const LIVE_REFUSAL: &str = "Session abababab is the live session. \
-                                    Run `/clear` to start a new one, then delete it.";
-
         #[test]
-        fn y_deletes_and_submits_a_chat_confirmation() {
+        fn y_sends_the_delete_once_until_the_result_arrives() {
             for event in [
                 KeyEvent::from(KeyCode::Char('y')),
                 KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
             ] {
-                let (_dir, store) = isolated_store();
-                let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
+                let mut modal = modal(0xab, "Fix auth flow");
                 show_and_arm(&mut modal);
 
                 let outcome = modal.handle_key(&event);
+                let repeat = modal.handle_key(&event);
 
                 assert!(
-                    matches!(&outcome, ModalKey::Submitted(ModalAction::SystemMessage(msg))
-                        if msg == "Deleted session abababab: Fix auth flow"),
+                    matches!(&outcome, ModalKey::Emit(action) if deletes(Some(action))),
                     "{event:?}: {outcome:?}",
                 );
-                assert!(!is_listed(&store, &stamped_id(0xab)), "{event:?}");
+                assert!(
+                    matches!(repeat, ModalKey::Consumed),
+                    "{event:?}: {repeat:?}"
+                );
             }
         }
 
         #[tokio::test(start_paused = true)]
         async fn a_visible_target_waits_for_quiet_and_rejects_enter_and_repeated_y() {
-            let (_dir, store) = isolated_store();
-            let modal = seed_modal(&store, 0xab, "Fix auth flow");
             let mut stack = ModalStack::default();
-            stack.push(Box::new(modal));
+            stack.push(Box::new(modal(0xab, "Fix auth flow")));
             render_rows_with(60, 7, |frame, area, theme| stack.render(frame, area, theme));
 
             let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
 
             assert!(outcome.is_none());
-            assert!(is_listed(&store, &stamped_id(0xab)));
 
             tokio::time::advance(TYPE_AHEAD_GUARD).await;
             for event in [
@@ -290,7 +281,6 @@ mod tests {
                 let outcome = stack.handle_key(&event);
 
                 assert!(outcome.is_none(), "{event:?}");
-                assert!(is_listed(&store, &stamped_id(0xab)), "{event:?}");
             }
 
             let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
@@ -300,19 +290,14 @@ mod tests {
             tokio::time::advance(TYPE_AHEAD_GUARD).await;
             let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
 
-            assert!(
-                matches!(outcome, Some(ModalAction::SystemMessage(ref text))
-                if text == "Deleted session abababab: Fix auth flow"),
-                "{outcome:?}"
-            );
-            assert!(!is_listed(&store, &stamped_id(0xab)));
+            assert!(deletes(outcome.as_ref()), "{outcome:?}");
+            assert!(stack.is_active(), "the modal waits for the result");
         }
 
         #[tokio::test(start_paused = true)]
         async fn clipped_targets_rearm_when_they_reappear() {
             for (width, height) in [(60, 0), (60, 1), (60, 6), (0, 7), (7, 7), (8, 7), (10, 7)] {
-                let (_dir, store) = isolated_store();
-                let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
+                let mut modal = modal(0xab, "Fix auth flow");
                 show_and_arm(&mut modal);
                 let mut stack = ModalStack::default();
                 stack.push(Box::new(modal));
@@ -323,7 +308,6 @@ mod tests {
                 let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
 
                 assert!(outcome.is_none(), "{width}x{height}: {outcome:?}");
-                assert!(is_listed(&store, &stamped_id(0xab)));
 
                 tokio::time::advance(TYPE_AHEAD_GUARD).await;
                 render_rows_with(60, 7, |frame, area, theme| stack.render(frame, area, theme));
@@ -334,21 +318,14 @@ mod tests {
                 tokio::time::advance(TYPE_AHEAD_GUARD).await;
                 let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('y')));
 
-                assert!(
-                    matches!(outcome, Some(ModalAction::SystemMessage(ref text))
-                    if text == "Deleted session abababab: Fix auth flow"),
-                    "{outcome:?}"
-                );
-                assert!(!is_listed(&store, &stamped_id(0xab)));
+                assert!(deletes(outcome.as_ref()), "{width}x{height}: {outcome:?}");
             }
         }
 
         #[test]
         fn modified_confirmation_keys_do_not_delete() {
-            let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, 0xab, "Fix auth");
+            let mut modal = modal(0xab, "Fix auth");
             show_and_arm(&mut modal);
-
             let mut stack = ModalStack::default();
             stack.push(Box::new(modal));
 
@@ -359,24 +336,17 @@ mod tests {
             ] {
                 assert!(stack.handle_key(&event).is_none(), "{event:?}");
             }
-
-            assert!(
-                is_listed(&store, &stamped_id(0xab)),
-                "modified confirmation keys must not delete the session",
-            );
         }
 
         #[test]
-        fn cancel_keys_leave_the_session_untouched_before_rendering() {
+        fn cancel_keys_close_the_modal_before_rendering() {
             for event in [
                 KeyEvent::from(KeyCode::Char('n')),
                 KeyEvent::from(KeyCode::Esc),
                 KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             ] {
-                let (_dir, store) = isolated_store();
-                let modal = seed_modal(&store, 0xab, "Fix auth flow");
                 let mut stack = ModalStack::default();
-                stack.push(Box::new(modal));
+                stack.push(Box::new(modal(0xab, "Fix auth flow")));
 
                 let outcome = stack.handle_key(&event);
 
@@ -385,55 +355,76 @@ mod tests {
                     "{event:?}: {outcome:?}"
                 );
                 assert!(!stack.is_active());
-                assert!(is_listed(&store, &stamped_id(0xab)), "{event:?}");
             }
         }
 
         #[test]
-        fn a_failed_delete_keeps_the_modal_open_through_stray_keys() {
-            // Deleting the live session fails, so the modal stays open with the error.
-            let (_dir, store) = isolated_store();
-            let live_id = stamped_id(0xab);
-            let mut modal = seed_modal_with_live(&store, 0xab, "Fix auth flow", &live_id);
+        fn unrecognized_keys_consume_silently() {
+            let mut modal = modal(0xab, "Fix auth flow");
             show_and_arm(&mut modal);
 
-            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
-            assert!(matches!(outcome, ModalKey::Consumed));
-
-            for stray in [KeyCode::Char('x'), KeyCode::Up, KeyCode::Down, KeyCode::Tab] {
+            for stray in [KeyCode::Char('z'), KeyCode::Up, KeyCode::Down, KeyCode::Tab] {
                 let outcome = modal.handle_key(&KeyEvent::from(stray));
+
                 assert!(matches!(outcome, ModalKey::Consumed), "{stray:?}");
             }
-
-            assert_eq!(modal.error.as_deref(), Some(LIVE_REFUSAL));
-            assert!(is_listed(&store, &live_id), "the live session survives");
         }
+    }
 
-        #[test]
-        fn a_retry_replaces_the_previous_error() {
-            let (_dir, store) = isolated_store();
-            let live_id = stamped_id(0xab);
-            let mut modal = seed_modal_with_live(&store, 0xab, "Fix auth flow", &live_id);
-            modal.error = Some("permission denied".to_owned());
+    mod saved_deleted {
+        use super::*;
+
+        /// The modal of the session stamped `0xab`, with its delete sent to the engine.
+        fn pending_modal() -> ConfirmDeleteSessionModal {
+            let mut modal = modal(0xab, "Fix auth flow");
             show_and_arm(&mut modal);
-
-            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
-
-            assert!(matches!(outcome, ModalKey::Consumed));
-            assert_eq!(modal.error.as_deref(), Some(LIVE_REFUSAL));
+            modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            modal
         }
 
         #[test]
-        fn unrecognized_keys_consume_silently_without_running_delete() {
-            let (_dir, store) = isolated_store();
-            let mut modal = seed_modal(&store, 0xab, "Fix auth flow");
+        fn a_delete_closes_the_modal_with_a_chat_confirmation() {
+            let mut modal = pending_modal();
 
-            let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Char('z')));
+            let action = modal.saved_deleted(&stamped_id(0xab), &Ok(()));
 
-            assert!(matches!(outcome, ModalKey::Consumed));
             assert!(
-                is_listed(&store, &stamped_id(0xab)),
-                "session untouched on unrecognized key",
+                matches!(&action, DeleteReply::Closed(ModalAction::SystemMessage(msg))
+                    if msg == "Deleted session abababab: Fix auth flow"),
+                "{action:?}",
+            );
+        }
+
+        #[test]
+        fn a_failure_replaces_the_error_and_takes_y_again() {
+            let mut modal = pending_modal();
+            modal.error = Some("permission denied".to_owned());
+            let live = SavedError::Live {
+                id: "abababab".to_owned(),
+            };
+
+            let action = modal.saved_deleted(&stamped_id(0xab), &Err(live));
+
+            assert!(matches!(action, DeleteReply::Shown), "{action:?}");
+            assert_eq!(modal.error.as_deref(), Some(LIVE_REFUSAL));
+            let retry = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            assert!(
+                matches!(&retry, ModalKey::Emit(action) if deletes(Some(action))),
+                "{retry:?}"
+            );
+        }
+
+        #[test]
+        fn ignores_another_sessions_result() {
+            let mut modal = pending_modal();
+
+            let action = modal.saved_deleted(&stamped_id(0xcd), &Ok(()));
+
+            assert!(matches!(action, DeleteReply::Unclaimed), "{action:?}");
+            let repeat = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            assert!(
+                matches!(repeat, ModalKey::Consumed),
+                "still pending: {repeat:?}"
             );
         }
     }
