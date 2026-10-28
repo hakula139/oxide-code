@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 use crate::permission::defaults::Shipped;
 use crate::permission::{PermissionClass, Tier};
-use crate::util::env;
 
 // ── Layer ──
 
@@ -61,13 +60,6 @@ pub enum Source {
     Flag(&'static str),
     /// Changed during the session by `/model`, `/effort`, `/mode`, `/theme`, or Shift+Tab.
     Session,
-}
-
-impl Source {
-    /// [`Source::Env`] when `var` is set and non-empty, matching how env vars override.
-    pub(super) fn env_if_set(var: &'static str) -> Self {
-        env::string(var).map_or(Self::Default, |_| Self::Env(var))
-    }
 }
 
 impl fmt::Display for Source {
@@ -196,21 +188,6 @@ mod tests {
                 Source::File(Layer::DropIn(PathBuf::from("/x/config.d/a.toml"))).to_string(),
                 "config.d/a.toml",
             );
-        }
-
-        mod env_if_set {
-            use super::*;
-
-            #[test]
-            fn treats_an_empty_variable_as_unset() {
-                const VAR: &str = "OX_TEST_PROVENANCE_VAR";
-                temp_env::with_var(VAR, Some("1"), || {
-                    assert_eq!(Source::env_if_set(VAR), Source::Env(VAR));
-                });
-                temp_env::with_var(VAR, Some(""), || {
-                    assert_eq!(Source::env_if_set(VAR), Source::Default);
-                });
-            }
         }
     }
 }

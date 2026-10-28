@@ -3,10 +3,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::RangeInclusive;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde::de::{self, Unexpected};
 use serde::{Deserialize, Deserializer};
+use toml::Table;
 
 use super::StatusLineSegment;
 use super::compaction::ThresholdPercent;
@@ -29,11 +32,11 @@ pub(super) struct FileConfig {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct ClientTable {
-    pub(super) api_key: Option<String>,
     pub(super) auth: Option<ClientAuth>,
     pub(super) base_url: Option<String>,
     pub(super) extra_ca_certs: Option<String>,
-    pub(super) headers: Option<BTreeMap<String, String>>,
+    #[serde(deserialize_with = "super::gateway::file_headers")]
+    pub(super) headers: Option<HeaderMap>,
     pub(super) attribution: Option<bool>,
     pub(super) structured_outputs: Option<bool>,
     pub(super) model: Option<String>,
@@ -47,19 +50,44 @@ pub(super) struct ClientTable {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    deny_unknown_fields,
+    expecting = "a table with type bearer, api-key, oauth, or login"
+)]
 pub(super) enum ClientAuth {
     Bearer(AuthValue),
     ApiKey(AuthValue),
     Oauth(AuthValue),
-    Login {},
+    Login(LoginAuth),
 }
 
+/// The `login` credential type, which takes no other keys.
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "Table")]
+pub(super) struct LoginAuth;
+
+impl TryFrom<Table> for LoginAuth {
+    type Error = anyhow::Error;
+
+    fn try_from(table: Table) -> Result<Self> {
+        ensure!(
+            table.is_empty(),
+            "client.auth type login takes no other keys"
+        );
+        Ok(Self)
+    }
+}
+
+/// One credential source, validated when it deserializes.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AuthValue {
-    pub(super) value: Option<String>,
-    pub(super) file: Option<String>,
+#[serde(try_from = "AuthValueTable")]
+pub(super) enum AuthValue {
+    /// An inline secret that can travel in an HTTP header value.
+    Value(String),
+    /// An absolute or `~/` path to a file holding the secret.
+    File(PathBuf),
 }
 
 impl fmt::Debug for AuthValue {
@@ -68,42 +96,41 @@ impl fmt::Debug for AuthValue {
     }
 }
 
-impl ClientTable {
-    pub(super) fn validate(&self) -> Result<()> {
-        if let Some(headers) = &self.headers {
-            super::gateway::file_headers(headers)?;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthValueTable {
+    value: Option<String>,
+    file: Option<String>,
+}
+
+impl TryFrom<AuthValueTable> for AuthValue {
+    type Error = anyhow::Error;
+
+    fn try_from(table: AuthValueTable) -> Result<Self> {
+        match (table.value, table.file) {
+            (Some(value), None) => Ok(Self::Value(inline_secret("client.auth.value", value)?)),
+            (None, Some(file)) => {
+                let path = expand_user(&file).map_err(|_| {
+                    anyhow!("invalid client.auth.file: cannot expand ~ without a home directory")
+                })?;
+                ensure!(
+                    path.is_absolute()
+                        && (Path::new(&file).is_absolute() || file.starts_with("~/")),
+                    "client.auth.file must be an absolute or ~/ path"
+                );
+                Ok(Self::File(path))
+            }
+            _ => bail!("client.auth requires exactly one of value or file"),
         }
-        ensure!(
-            self.api_key.is_none() || self.auth.is_none(),
-            "client.api_key and client.auth cannot be set in the same file"
-        );
-        let Some(auth) = &self.auth else {
-            return Ok(());
-        };
-        let (ClientAuth::Bearer(source) | ClientAuth::ApiKey(source) | ClientAuth::Oauth(source)) =
-            auth
-        else {
-            return Ok(());
-        };
-        ensure!(
-            source.value.is_some() != source.file.is_some(),
-            "client.auth requires exactly one of value or file"
-        );
-        if let Some(value) = &source.value {
-            ensure!(!value.is_empty(), "client.auth.value must not be empty");
-            reqwest::header::HeaderValue::from_str(value)
-                .context("invalid client.auth.value: expected an HTTP header value")?;
-        }
-        if let Some(file) = &source.file {
-            let path = expand_user(file).context("invalid client.auth.file")?;
-            ensure!(
-                path.is_absolute()
-                    && (std::path::Path::new(file).is_absolute() || file.starts_with("~/")),
-                "client.auth.file must be an absolute or ~/ path"
-            );
-        }
-        Ok(())
     }
+}
+
+/// Validates a secret that must travel in an HTTP header value, naming `key` in an error.
+fn inline_secret(key: &str, value: String) -> Result<String> {
+    ensure!(!value.is_empty(), "{key} must not be empty");
+    HeaderValue::from_str(&value)
+        .with_context(|| format!("invalid {key}: expected an HTTP header value"))?;
+    Ok(value)
 }
 
 impl fmt::Debug for ClientTable {
@@ -257,7 +284,6 @@ mod tests {
         #[test]
         fn debug_omits_inline_credentials_and_custom_header_values() {
             for auth in [
-                "api_key = 'private-token-sentinel'",
                 "auth = { type = 'bearer', value = 'private-token-sentinel' }",
                 "auth = { type = 'api-key', value = 'private-token-sentinel' }",
                 "auth = { type = 'oauth', value = 'private-token-sentinel' }",

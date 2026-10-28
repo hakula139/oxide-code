@@ -17,7 +17,6 @@ Run `/config` to see each resolved value next to the layer that set it: `default
 Each file sets only the keys it names, and a later layer wins key by key, so a drop-in that sets `client.effort` keeps the `client.model` from `config.toml`. Tables merge recursively, including `[tui.theme.overrides]`, with these replacement and list rules:
 
 - **`client.auth` and `client.headers`** come whole from the last layer that sets them. An empty header map clears the lower map.
-- **`client.api_key` and `client.auth`** are alternative credential settings, so a layer that sets either clears the other from lower layers. A single file cannot set both.
 - **`permission.extra_roots` and the class lists under `permission.deny`, `permission.ask`, and `permission.allow`**, such as `permission.allow.exec`, concatenate, so the entries from every layer apply.
 - **Other arrays**, such as `tui.status_line`, come whole from the last layer that sets them.
 - **`auto_threshold_tokens` and `auto_threshold_percent`** act as one setting, so a layer that sets either replaces both.
@@ -203,7 +202,7 @@ Each request carries one credential. oxide-code uses the first source that is se
 | ---------------------------------------------------- | ------------------------------- | ----------------------------------------------------- |
 | 1. `ANTHROPIC_AUTH_TOKEN`                            | `Authorization: Bearer`         | [LLM gateways](#llm-gateways) that take bearer tokens |
 | 2. `ANTHROPIC_API_KEY`                               | `x-api-key`                     | Anthropic Console API key                             |
-| 3. `[client.auth]` or legacy `client.api_key`        | Configured scheme               | Private inline credential or secret file              |
+| 3. `[client.auth]`                                   | Configured scheme               | Private inline credential or secret file              |
 | 4. `CLAUDE_CODE_OAUTH_TOKEN`                         | `Authorization: Bearer` + OAuth | Long-lived token from `claude setup-token`            |
 | 5. oxide-code login                                  | `Authorization: Bearer` + OAuth | Signed in with `/login`                               |
 | 6. [Claude Code](https://code.claude.com/docs) login | `Authorization: Bearer` + OAuth | Claude Code installed and signed in                   |
@@ -211,7 +210,7 @@ Each request carries one credential. oxide-code uses the first source that is se
 - **`CLAUDE_CODE_OAUTH_TOKEN`** is sent as is, so it suits CI, headless machines, and secret managers. oxide-code never refreshes it and does not read either stored login while it is set. When the API rejects it as expired or revoked, the error names the variable, and `claude setup-token` issues a new one.
 - **The oxide-code login** comes from [`/login`](slash-commands.md#signing-in), which stores it in `$XDG_DATA_HOME/ox/credentials.json` (default: `~/.local/share/ox/credentials.json`) with mode `0600`. `/logout` deletes that file and leaves the Claude Code login alone. When the oxide-code login exists but stops working, for example after it expires, oxide-code reports it with the fix and does not fall back to the Claude Code login.
 - **The Claude Code login** comes from the `"Claude Code-credentials"` Keychain entry on macOS, falling back to `.credentials.json` in Claude Code's config directory, which is the only store on Linux. That directory is `~/.claude`, or `$CLAUDE_CONFIG_DIR` when you set it to run Claude Code under another account, and with the variable set, the Keychain entry is the one Claude Code keeps for that directory. Set the same `CLAUDE_CONFIG_DIR` for `ox` to use that account's login.
-- **Both logins** refresh automatically near expiry and are sent only to the Anthropic API. With a custom `base_url` and no other credential, startup fails and names `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`, so a personal subscription token never reaches a third-party host.
+- **Both logins** refresh automatically near expiry and are sent only to the Anthropic API. With a custom `base_url` and no other credential, startup fails and names `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, and `CLAUDE_CODE_OAUTH_TOKEN`, and points at `[client.auth]`, so a personal subscription token never reaches a third-party host.
 - **Without a credential**, `ox` starts signed out and shows how to sign in, and prompts fail until `/login` succeeds. When a stored login failed only for a passing reason, such as an unreachable token endpoint, the next prompt tries it again. `ox -p` and `ox --no-tui` exit at startup with the list of credential options.
 - **`/status` and `/config`** show the active source, such as `OAuth (CLAUDE_CODE_OAUTH_TOKEN)`, without its value.
 
@@ -225,7 +224,7 @@ file = "~/.secrets/gateway-token"
 
 `type` is `"bearer"` for an `Authorization: Bearer` gateway token, `"api-key"` for `x-api-key`, or `"oauth"` for a fixed OAuth token with the OAuth request shape. Set exactly one of `file` or `value`. A `file` path must be absolute or start with `~/`, and ox reads only the winning file once during startup, trimming trailing line endings. Restart ox to read a rotated file. `ox config check` validates the declaration without opening the credential file. A fixed OAuth token can use the configured endpoint and is never refreshed.
 
-An inline `value` or legacy `client.api_key` sits on disk in plaintext, so keep that user config private, conventionally mode `0600`. ox does not change its permissions. `type = "login"` takes neither `file` nor `value` and selects the remaining environment and stored-login fallback chain. Stored logins retain their first-party endpoint restriction.
+An inline `value` sits on disk in plaintext, so keep that user config private, conventionally mode `0600`. ox does not change its permissions. `type = "login"` takes no other keys and selects the remaining environment and stored-login fallback chain. Stored logins retain their first-party endpoint restriction.
 
 Commands the assistant runs with `bash` cannot access `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or `ANTHROPIC_CUSTOM_HEADERS`, so no command finds your credential in its own environment. On Linux, the built-in [`credentials` rule](permissions.md#built-in-rules) also covers each process's environment under `/proc`, including `ox`'s own. A script that needs its own Anthropic key, such as a test suite that calls the API, must read it from another variable or a file.
 
@@ -251,6 +250,8 @@ export NODE_EXTRA_CA_CERTS=~/.config/ox/corp-cachain.pem
 
 oxide-code is stricter than Claude Code in three ways. It never sends a stored login to a custom base URL, it sends one credential even when several are set, and it rejects malformed `ANTHROPIC_CUSTOM_HEADERS` lines where Claude Code skips them.
 
+`ox` ignores `ANTHROPIC_MODEL`. Set `OX_MODEL` or `client.model`.
+
 A gateway that does not serve the configured model may return HTTP 404 with a plain-text `404 page not found` response, which `ox` reports as `Anthropic API found no such endpoint or model`. The gateway may list the models it serves at `GET /v1/models`.
 
 ## Logs
@@ -268,7 +269,6 @@ Each key goes in the table its prefix names, so `client.compaction.auto_enabled`
 
 | Key                                        | Type    | Default                         | Description                                                                                                 |
 | ------------------------------------------ | ------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `client.api_key`                           | string  | -                               | [Anthropic API key](#authentication), user config only                                                      |
 | `client.attribution`                       | boolean | `true`                          | Send the [attribution block](#llm-gateways), user config only                                               |
 | `client.auth`                              | table   | -                               | [Typed credential](#authentication), user config only                                                       |
 | `client.base_url`                          | string  | `"https://api.anthropic.com"`   | [API base URL](#base_url-endpoint), user config only                                                        |
@@ -301,7 +301,7 @@ A variable that maps to a config key overrides that key in every file.
 
 | Variable                                 | Config key                                 | Description                                                                                   |
 | ---------------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------- |
-| `ANTHROPIC_API_KEY`                      | `client.api_key`                           | [Anthropic API key](#authentication)                                                          |
+| `ANTHROPIC_API_KEY`                      | `client.auth`                              | [Anthropic API key](#authentication)                                                          |
 | `ANTHROPIC_AUTH_TOKEN`                   | `client.auth`                              | [Gateway bearer token](#llm-gateways)                                                         |
 | `ANTHROPIC_BASE_URL`                     | `client.base_url`                          | API base URL                                                                                  |
 | `ANTHROPIC_CUSTOM_HEADERS`               | `client.headers`                           | [Extra request headers](#llm-gateways), one `Name: value` per line                            |

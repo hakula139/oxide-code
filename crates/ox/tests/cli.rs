@@ -77,7 +77,7 @@ async fn startup_error_escapes_control_characters_a_project_file_supplies() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains(r"cannot set client.\u{1b}]0;pwned\u{7}."),
+        stderr.contains(r"unknown field `\u{1b}]0;pwned\u{7}`, expected"),
         "{stderr}"
     );
     assert!(!stderr.contains(['\u{1b}', '\u{7}']), "{stderr:?}");
@@ -184,41 +184,92 @@ fn config_check_accepts_native_auth_without_reading_credential_files() {
     }
 }
 
+/// A config body and the message that `ox config check` must report for it.
+const INVALID_AUTH_CONFIGS: [(&str, &str); 19] = [
+    (
+        "client.auth = 'private-token-sentinel'",
+        "expected a table with type bearer, api-key, oauth, or login",
+    ),
+    (
+        "client.auth = { type = 'private-token-sentinel', value = 'private-token-sentinel' }",
+        "in `client.auth.type`: expected one of `bearer`, `api-key`, `oauth`, `login`",
+    ),
+    (
+        "client.auth = { type = 'bearer', value = ['private-token-sentinel'] }",
+        "in `client.auth`: expected a string",
+    ),
+    (
+        "client.auth = { type = 'bearer', value = 987654321 }",
+        "in `client.auth`: expected a string",
+    ),
+    (
+        "client.auth = { type = 'bearer', file = ['private-token-sentinel'] }",
+        "in `client.auth`: expected a string",
+    ),
+    (
+        "client.auth = { type = 'bearer' }",
+        "client.auth requires exactly one of value or file",
+    ),
+    (
+        "client.auth = { type = 'bearer', value = '' }",
+        "client.auth.value must not be empty",
+    ),
+    (
+        "client.auth = { type = 'bearer', value = 'private-token-sentinel', file = '/token' }",
+        "client.auth requires exactly one of value or file",
+    ),
+    (
+        "client.auth = { type = 'login', value = 'private-token-sentinel' }",
+        "client.auth type login takes no other keys",
+    ),
+    (
+        "client.auth = { type = 'login', file = '/token' }",
+        "client.auth type login takes no other keys",
+    ),
+    (
+        "client.auth = { type = 'bearer', value = 'private-token-sentinel', extra = true }",
+        "unknown field `extra`, expected `value` or `file`",
+    ),
+    (
+        "client.api_key = 'private-token-sentinel'",
+        "unknown field `api_key`",
+    ),
+    (
+        "client.headers = 'private-header-sentinel'",
+        "in `client.headers`: expected a map",
+    ),
+    (
+        "client.headers = { x-private = ['private-header-sentinel'] }",
+        "in `client.headers.x-private`: expected a string",
+    ),
+    (
+        "client.headers = { 'private-header-sentinel name' = 'private-header-sentinel' }",
+        "invalid client.headers: invalid header name",
+    ),
+    (
+        r#"client.headers = { x-private = "private-header-sentinel\nsecond-line" }"#,
+        "invalid client.headers: the x-private value contains a character a header cannot carry",
+    ),
+    (
+        "client.headers = { X-Private = 'private-header-sentinel', x-private = 'private-header-sentinel' }",
+        "invalid client.headers: x-private is set more than once",
+    ),
+    (
+        r#"client.auth = { type = "bearer", value = "bad\u0007key" }"#,
+        "invalid client.auth.value: expected an HTTP header value",
+    ),
+    (
+        indoc! {"
+                client.auth = { type = 'bearer', value = 'private-token-sentinel' }
+                [private-token-sentinel
+            "},
+        "unclosed table, expected `]`",
+    ),
+];
+
 #[test]
 fn config_check_rejects_native_auth_shapes_without_echoing_private_values() {
-    for body in [
-        "client.auth = 'private-token-sentinel'",
-        "client.auth = { type = 'private-token-sentinel', value = 'private-token-sentinel' }",
-        "client.auth = { type = 'bearer', value = ['private-token-sentinel'] }",
-        "client.auth = { type = 'bearer', value = 987654321 }",
-        "client.auth = { type = 'bearer', file = ['private-token-sentinel'] }",
-        "client.auth = { type = 'bearer' }",
-        "client.auth = { type = 'bearer', value = '' }",
-        "client.auth = { type = 'bearer', value = 'private-token-sentinel', file = '/token' }",
-        "client.auth = { type = 'login', value = 'private-token-sentinel' }",
-        "client.auth = { type = 'login', file = '/token' }",
-        "client.auth = { type = 'bearer', value = 'private-token-sentinel', extra = true }",
-        indoc! {"
-            [client]
-            api_key = 'private-token-sentinel'
-            auth = { type = 'bearer', value = 'private-token-sentinel' }
-        "},
-        indoc! {"
-            [client]
-            api_key = 'private-token-sentinel'
-            model = ['private-token-sentinel']
-        "},
-        "client.headers = 'private-header-sentinel'",
-        "client.headers = { x-private = ['private-header-sentinel'] }",
-        "client.headers = { 'private-header-sentinel name' = 'private-header-sentinel' }",
-        r#"client.headers = { x-private = "private-header-sentinel\nsecond-line" }"#,
-        "client.headers = { X-Private = 'private-header-sentinel', x-private = 'private-header-sentinel' }",
-        "client.api_key = 987654321",
-        indoc! {"
-            client.auth = { type = 'bearer', value = 'private-token-sentinel' }
-            [private-token-sentinel
-        "},
-    ] {
+    for (body, expected) in INVALID_AUTH_CONFIGS {
         let dir = tempfile::tempdir().unwrap();
         let config = write_user_config(dir.path(), body);
 
@@ -226,9 +277,43 @@ fn config_check_rejects_native_auth_shapes_without_echoing_private_values() {
         assert_eq!(output.status.code(), Some(1), "{body}: {output:?}");
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains(&config.display().to_string()), "{stderr}");
-        assert!(stderr.contains("invalid config"), "{stderr}");
+        assert!(
+            stderr.contains(&config.display().to_string()),
+            "{body}: {stderr}"
+        );
+        assert!(stderr.contains("invalid config"), "{body}: {stderr}");
+        assert!(stderr.contains(expected), "{body}: {stderr}");
         assert_private_auth_run(dir.path(), &output);
+    }
+}
+
+#[test]
+fn config_check_rejects_a_credential_env_var_no_header_can_carry() {
+    for (var, expected) in [
+        (
+            "ANTHROPIC_API_KEY",
+            "API key (ANTHROPIC_API_KEY) is not a valid HTTP header value",
+        ),
+        (
+            "ANTHROPIC_AUTH_TOKEN",
+            "Auth token (ANTHROPIC_AUTH_TOKEN) is not a valid HTTP header value",
+        ),
+        (
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "OAuth (CLAUDE_CODE_OAUTH_TOKEN) is not a valid HTTP header value",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+
+        let output = config_check(dir.path())
+            .env(var, "bad\u{7}key")
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(1), "{var}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{var}: {stderr}");
+        assert!(!stderr.contains("bad"), "{var}: {stderr}");
     }
 }
 
@@ -295,11 +380,7 @@ fn config_check_keeps_native_connection_settings_user_only() {
 fn config_check_validates_native_auth_in_each_layer_before_replacement() {
     for body in [
         "client.auth = { type = 'bearer' }",
-        indoc! {"
-            [client]
-            api_key = 'private-token-sentinel'
-            auth = { type = 'login' }
-        "},
+        "client.auth = { type = 'login', extra = 'private-token-sentinel' }",
         "client.headers = { content-type = 'private-header-sentinel' }",
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -584,7 +665,7 @@ async fn native_auth_expands_home_paths_independently_of_cwd_and_rereads_on_the_
 async fn native_auth_replaces_layer_credentials_and_header_maps_as_whole_choices() {
     for (lower_auth, upper_auth, upper_headers, expected_header, expected_value) in [
         (
-            "api_key = 'old-key'",
+            "auth = { type = 'api-key', value = 'old-key' }",
             "auth = { type = 'bearer', value = 'new-token' }",
             "{ x-route = 'new' }",
             "authorization",
@@ -592,7 +673,7 @@ async fn native_auth_replaces_layer_credentials_and_header_maps_as_whole_choices
         ),
         (
             "auth = { type = 'bearer', value = 'old-token' }",
-            "api_key = 'new-key'",
+            "auth = { type = 'api-key', value = 'new-key' }",
             "{}",
             "x-api-key",
             "new-key",
@@ -612,7 +693,7 @@ async fn native_auth_replaces_layer_credentials_and_header_maps_as_whole_choices
             "Bearer oauth-fallback",
         ),
         (
-            "api_key = 'old-key'",
+            "auth = { type = 'api-key', value = 'old-key' }",
             "auth = { type = 'login' }",
             "{}",
             "authorization",
