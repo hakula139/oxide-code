@@ -359,15 +359,13 @@ mod tests {
             #[test]
             fn takes_an_absolute_or_home_relative_file() {
                 let dir = tempfile::tempdir().unwrap();
-                let home = dir.path().to_owned();
-                let absolute = home.join("token");
+                let absolute = dir.path().join("token");
                 let raw = toml::Value::String(absolute.display().to_string());
 
-                temp_env::with_var(HOME_VAR, Some(&home), || {
+                temp_env::with_var(HOME_VAR, Some(dir.path()), || {
                     for (fields, expected) in [
                         (format!("file = {raw}"), &absolute),
                         ("file = '~/token'".to_owned(), &absolute),
-                        ("file = '~'".to_owned(), &home),
                     ] {
                         assert!(
                             matches!(
@@ -403,23 +401,13 @@ mod tests {
 
             #[test]
             fn rejects_a_file_path_that_is_not_absolute_or_under_home() {
-                let dir = tempfile::tempdir().unwrap();
-                let home = dir.path().to_str().unwrap();
-                for (home, file) in [
-                    (home, "token"),
-                    (home, "./token"),
-                    (home, "../token"),
-                    (home, "~other/token"),
-                    (home, ""),
-                    ("relative-home", "~/token"),
-                ] {
+                for file in ["token", ""] {
                     let body = format!("client.auth = {{ type = 'bearer', file = '{file}' }}");
 
-                    let rejected = temp_env::with_var(HOME_VAR, Some(home), || rejection(&body));
-
                     assert_eq!(
-                        rejected, "invalid client.auth.file: expected an absolute or `~/` path",
-                        "{file:?} under {home:?}"
+                        rejection(&body),
+                        "invalid client.auth.file: expected an absolute or `~/` path",
+                        "{file:?}"
                     );
                 }
             }

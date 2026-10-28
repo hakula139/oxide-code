@@ -3,7 +3,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context as _, Result, ensure};
 use strum::VariantArray;
 use unicode_normalization::UnicodeNormalization as _;
 
@@ -94,8 +94,7 @@ pub fn expand_user(raw: &str) -> Result<PathBuf> {
     if !(tail.is_empty() || tail.starts_with(std::path::is_separator)) {
         return Ok(PathBuf::from(raw));
     }
-    let home = std::env::home_dir()
-        .ok_or_else(|| anyhow!("failed to expand `~` in {raw:?}: no home directory"))?;
+    let home = std::env::home_dir().context("failed to expand `~`: no home directory")?;
     if tail.is_empty() {
         return Ok(home);
     }
@@ -103,16 +102,15 @@ pub fn expand_user(raw: &str) -> Result<PathBuf> {
     Ok(home.join(tail.trim_start_matches(std::path::is_separator)))
 }
 
-/// Expands `raw` like [`expand_user`] and requires an absolute result, so a configured path cannot
-/// depend on the working directory. Errors never quote `raw`, which may hold a pasted secret.
+/// Expands `raw` like [`expand_user`] and requires an absolute path other than the home directory
+/// itself, so a configured path cannot depend on the working directory. Errors never quote `raw`,
+/// which may hold a pasted secret.
 pub(crate) fn expand_absolute(raw: &str) -> Result<PathBuf> {
-    require_absolute(expand_user(raw))
-}
-
-/// Checks an [`expand_user`] result, replacing its error, which quotes the raw path.
-fn require_absolute(expanded: Result<PathBuf>) -> Result<PathBuf> {
-    let path = expanded.map_err(|_| anyhow!("cannot expand `~` without a home directory"))?;
-    ensure!(path.is_absolute(), "expected an absolute or `~/` path");
+    let path = expand_user(raw)?;
+    ensure!(
+        path.is_absolute() && raw.trim_end_matches(std::path::is_separator) != "~",
+        "expected an absolute or `~/` path"
+    );
     Ok(path)
 }
 
@@ -402,34 +400,25 @@ mod tests {
         }
 
         #[test]
-        fn rejects_a_relative_path_without_quoting_it() {
-            for raw in ["certs/ca.pem", "~alice/ca.pem"] {
-                let err = expand_absolute(raw).unwrap_err();
+        fn rejects_a_relative_path_or_the_bare_home_directory_without_quoting_it() {
+            let home = std::env::temp_dir();
+            let home = home.to_str().unwrap();
+            for (home, raw) in [
+                (home, "certs/ca.pem"),
+                (home, "~alice/ca.pem"),
+                (home, "~"),
+                (home, "~/"),
+                ("relative-home", "~/ca.pem"),
+            ] {
+                let err =
+                    temp_env::with_var(HOME_VAR, Some(home), || expand_absolute(raw).unwrap_err());
 
                 assert_eq!(
                     err.to_string(),
                     "expected an absolute or `~/` path",
-                    "{raw:?}"
+                    "{raw:?} under {home:?}"
                 );
             }
-        }
-    }
-
-    mod require_absolute {
-        use super::*;
-
-        #[test]
-        fn names_the_missing_home_directory_without_quoting_the_path() {
-            let expanded = Err(anyhow!(
-                "failed to expand `~` in \"~/secret\": no home directory"
-            ));
-
-            let err = require_absolute(expanded).unwrap_err();
-
-            assert_eq!(
-                err.to_string(),
-                "cannot expand `~` without a home directory"
-            );
         }
     }
 
