@@ -52,9 +52,22 @@ enum Pattern {
 struct PathGlob {
     /// Whether the glob matches absolute paths, or paths below each anchor directory.
     absolute: bool,
+    /// Whether the glob also matches everything below a path it matches, as every pattern a user
+    /// writes does.
+    below: bool,
     literal: PathBuf,
     exact: GlobSet,
     folded: GlobSet,
+}
+
+/// Where a [built-in protected name](Rule::protected_name) takes effect.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Placement {
+    /// At any depth on disk, under any root.
+    Anywhere,
+    /// Directly under each anchor directory, so the policy also protects where the name resolves
+    /// when it is a link.
+    Anchored,
 }
 
 /// The tier a match is evaluated for, selecting how commands, symlinked paths, and name spellings
@@ -132,6 +145,21 @@ impl Rule {
         let rule = Self::parse(class, &pattern).ok()?;
         rule.matches(class, target, MatchDiscipline::Allow)
             .then_some(rule)
+    }
+
+    /// The built-in `edit` rule protecting `name`, a relative path such as `.git` or
+    /// `.cargo/config`, where it sits at `placement`. A `dir` also covers everything below it, and
+    /// any other name matches only itself.
+    pub(super) fn protected_name(name: &str, placement: Placement, dir: bool) -> Result<Self> {
+        let (glob, absolute, source) = match placement {
+            Placement::Anywhere => (format!("**/{name}"), true, format!("/**/{name}")),
+            Placement::Anchored => (name.to_owned(), false, format!("./{name}")),
+        };
+        Ok(Self {
+            class: PermissionClass::Edit,
+            source,
+            pattern: Pattern::Path(PathGlob::new(&glob, absolute, dir)?),
+        })
     }
 
     pub const fn class(&self) -> PermissionClass {
@@ -222,7 +250,10 @@ impl Rule {
             return Vec::new();
         };
         let mut bases: Vec<PathBuf> = if glob.absolute {
-            vec![glob.literal.clone()]
+            Some(glob.literal.clone())
+                .filter(|literal| !literal.as_os_str().is_empty())
+                .into_iter()
+                .collect()
         } else if glob.literal.has_root() {
             Vec::new()
         } else {
@@ -240,10 +271,15 @@ impl Rule {
     }
 }
 
-/// Rules compare by their class and pattern, which parse to the same matcher every time.
+/// Rules compare by their class and pattern, which parse to the same matcher every time, and by
+/// whether a path pattern covers what lies below a match, which only a built-in name can turn off.
 impl PartialEq for Rule {
     fn eq(&self, other: &Self) -> bool {
-        self.class == other.class && self.source == other.source
+        let below = |rule: &Self| match &rule.pattern {
+            Pattern::Path(glob) => glob.below,
+            Pattern::Any | Pattern::Exec(_) | Pattern::Host(_) | Pattern::Tool(_) => true,
+        };
+        self.class == other.class && self.source == other.source && below(self) == below(other)
     }
 }
 
@@ -386,7 +422,7 @@ impl PathGlob {
             if Path::new(trimmed).is_absolute() {
                 pattern.truncate(trimmed.len());
             }
-            return Self::new(&pattern, true);
+            return Self::new(&pattern, true, true);
         }
 
         let anchored = pattern.starts_with("./");
@@ -396,28 +432,30 @@ impl PathGlob {
             .to_owned();
         ensure!(!body.is_empty(), "the pattern names no path");
         if anchored || body.contains('/') {
-            Self::new(&body, false)
+            Self::new(&body, false, true)
         } else {
-            Self::new(&format!("**/{body}"), false)
+            Self::new(&format!("**/{body}"), false, true)
         }
     }
 
-    fn new(glob: &str, absolute: bool) -> Result<Self> {
-        let below = format!("{}/**", glob.trim_end_matches('/'));
-        let set = |globs: [Glob; 2]| -> Result<GlobSet> {
+    /// Compiles `glob`, and with `below` everything under a path it matches.
+    fn new(glob: &str, absolute: bool, below: bool) -> Result<Self> {
+        let globs: Vec<String> = std::iter::once(glob.to_owned())
+            .chain(below.then(|| format!("{}/**", glob.trim_end_matches('/'))))
+            .collect();
+        let set = |globs: &mut dyn Iterator<Item = String>| -> Result<GlobSet> {
             let mut builder = GlobSetBuilder::new();
             for glob in globs {
-                builder.add(glob);
+                builder.add(path_glob(&glob)?);
             }
             Ok(builder.build()?)
         };
-        let parsed = path_glob(glob)?;
-        let literal = literal_prefix(&parsed);
         Ok(Self {
-            exact: set([parsed, path_glob(&below)?])?,
-            folded: set([path_glob(&fold_path(glob))?, path_glob(&fold_path(&below))?])?,
+            exact: set(&mut globs.iter().cloned())?,
+            folded: set(&mut globs.iter().map(|glob| fold_path(glob)))?,
             absolute,
-            literal,
+            below,
+            literal: literal_prefix(&path_glob(glob)?),
         })
     }
 
@@ -610,7 +648,6 @@ mod tests {
             requested: canonical.to_owned(),
             deny_rooted: Vec::new(),
             zone: Zone::Outside,
-            protected: Vec::new(),
         }
     }
 

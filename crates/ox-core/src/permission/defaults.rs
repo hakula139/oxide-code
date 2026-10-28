@@ -1,17 +1,14 @@
-//! The rules oxide-code ships, in named groups that `[permission.defaults]` turns off. Most groups
-//! name files whose edits ask, the `rm` group asks about forced recursive deletes, and the rest add
-//! patterns to the deny or ask tier.
+//! The rules oxide-code ships, in named groups that `[permission.defaults]` turns off. Each group
+//! adds patterns to the deny or ask tier, except `rm`, which asks about forced recursive deletes.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use strum::{Display, VariantArray};
 
-use super::rule::{Rule, escaped};
-use super::{
-    DirectoryAliases, PermissionClass, folded_components, folded_names, relative_to_folded, resolve,
-};
+use super::PermissionClass;
+use super::rule::{Placement, Rule, escaped};
 use crate::util::path::{
     CLAUDE_CREDENTIALS, XdgBase, app_dir, claude_dir, lexical_normalize, xdg_dir,
 };
@@ -55,7 +52,41 @@ pub enum Shipped {
 }
 
 impl Shipped {
-    /// The names this group asks about when edited, or `None` for any other group.
+    /// Whether the group guards secret files, which no config change should offer to expose.
+    pub(crate) const fn guards_secrets(self) -> bool {
+        matches!(self, Self::Ssh | Self::Credentials)
+    }
+
+    /// The group's rules, each with the tier it joins. Empty for `rm`.
+    pub(super) fn rules(self) -> Result<Vec<(ShippedTier, Rule)>> {
+        let mut rules = Vec::new();
+        if let Some(names) = self.names() {
+            let dirs = names.dirs.iter().map(|name| (name, true));
+            let files = names.files.iter().map(|name| (name, false));
+            for (name, dir) in dirs.chain(files) {
+                for placement in [Placement::Anywhere, Placement::Anchored] {
+                    let rule = Rule::protected_name(name, placement, dir)
+                        .with_context(|| format!("invalid built-in `{self}` name {name:?}"))?;
+                    rules.push((ShippedTier::Ask, rule));
+                }
+            }
+        }
+        let tiers = [
+            (ShippedTier::Ask, PermissionClass::Edit, self.edit_asks()),
+            (ShippedTier::Deny, PermissionClass::Read, self.read_denies()),
+        ];
+        for (tier, class, patterns) in tiers {
+            for pattern in patterns {
+                let rule = Rule::parse(class, &pattern)
+                    .with_context(|| format!("invalid built-in `{self}` pattern {pattern:?}"))?;
+                rules.push((tier, rule));
+            }
+        }
+        Ok(rules)
+    }
+
+    /// The names this group asks about when edited wherever they sit, or `None` for a group that
+    /// protects none.
     const fn names(self) -> Option<&'static Names> {
         match self {
             Self::Git => Some(&GIT),
@@ -69,10 +100,76 @@ impl Shipped {
         }
     }
 
-    /// The tier the group holds calls back in: deny for the secret files, ask for the rest.
-    pub(crate) const fn tier(self) -> ShippedTier {
+    /// The patterns whose edits this group asks about: oxide-code's own config, data, and state
+    /// directories, the XDG git directory and the git credential store, Claude Code's user settings
+    /// and hooks wherever `CLAUDE_CONFIG_DIR` moves them, `~/.ssh`, whose `authorized_keys`, `rc`,
+    /// and `environment` set what a login runs, the cloud CLIs' config directories, whose
+    /// credential helpers run commands, and on Unix the device files.
+    fn edit_asks(self) -> Vec<String> {
+        let home = std::env::home_dir;
+        let in_home = |names: &[&str]| -> Vec<PathBuf> {
+            home()
+                .map(|home| names.iter().map(|name| home.join(name)).collect())
+                .unwrap_or_default()
+        };
+        let paths: Vec<PathBuf> = match self {
+            Self::Git => xdg_dir(XdgBase::Config)
+                .map(|dir| dir.join("git"))
+                .into_iter()
+                .chain(in_home(&[".git-credentials"]))
+                .collect(),
+            Self::Agents => claude_dir()
+                .into_iter()
+                .flat_map(|dir| ["settings.json", "hooks"].map(|name| dir.join(name)))
+                .collect(),
+            Self::Ox => XdgBase::VARIANTS
+                .iter()
+                .copied()
+                .filter_map(app_dir)
+                .collect(),
+            Self::Ssh => in_home(&[".ssh"]),
+            Self::Cloud => in_home(&[".aws", ".azure", ".config/gcloud", ".docker", ".kube"]),
+            Self::Devices => {
+                return if cfg!(unix) {
+                    vec!["/dev/**".to_owned()]
+                } else {
+                    Vec::new()
+                };
+            }
+            Self::Direnv
+            | Self::Editors
+            | Self::Cargo
+            | Self::Shell
+            | Self::Rm
+            | Self::Credentials => Vec::new(),
+        };
+        paths.iter().map(|path| path_pattern(path)).collect()
+    }
+
+    /// The patterns whose reads this group denies: `~/.ssh` and the files that hold credentials.
+    fn read_denies(self) -> Vec<String> {
+        let home = std::env::home_dir;
         match self {
-            Self::Ssh | Self::Credentials => ShippedTier::Deny,
+            Self::Ssh => home()
+                .map(|home| path_pattern(&home.join(".ssh")))
+                .into_iter()
+                .collect(),
+            Self::Credentials => [
+                app_dir(XdgBase::Data).map(|dir| dir.join("credentials.json")),
+                claude_dir().map(|dir| dir.join(CLAUDE_CREDENTIALS)),
+                home().map(|home| home.join(".git-credentials")),
+                xdg_dir(XdgBase::Config).map(|dir| dir.join("git").join("credentials")),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|path| path_pattern(&path))
+            .chain(
+                PROCESS_ENVIRONMENTS
+                    .iter()
+                    .filter(|_| cfg!(unix))
+                    .map(|&pattern| pattern.to_owned()),
+            )
+            .collect(),
             Self::Git
             | Self::Direnv
             | Self::Editors
@@ -82,72 +179,18 @@ impl Shipped {
             | Self::Ox
             | Self::Devices
             | Self::Rm
-            | Self::Cloud => ShippedTier::Ask,
+            | Self::Cloud => Vec::new(),
         }
-    }
-
-    /// The rules of a group of patterns, or `None` for any other group.
-    pub(super) fn rules(self) -> Result<Option<Vec<Rule>>> {
-        let home = std::env::home_dir;
-        let pattern = |path: PathBuf| escaped(&lexical_normalize(&path));
-        let (class, patterns): (PermissionClass, Vec<String>) = match self {
-            Self::Devices => (
-                PermissionClass::Edit,
-                if cfg!(unix) {
-                    vec!["/dev/**".to_owned()]
-                } else {
-                    Vec::new()
-                },
-            ),
-            Self::Ssh => (
-                PermissionClass::Read,
-                home()
-                    .map(|home| pattern(home.join(".ssh")))
-                    .into_iter()
-                    .collect(),
-            ),
-            Self::Credentials => (
-                PermissionClass::Read,
-                [
-                    app_dir(XdgBase::Data).map(|dir| dir.join("credentials.json")),
-                    claude_dir().map(|dir| dir.join(CLAUDE_CREDENTIALS)),
-                    home().map(|home| home.join(".git-credentials")),
-                    xdg_dir(XdgBase::Config).map(|dir| dir.join("git").join("credentials")),
-                ]
-                .into_iter()
-                .flatten()
-                .map(pattern)
-                .chain(
-                    PROCESS_ENVIRONMENTS
-                        .iter()
-                        .filter(|_| cfg!(unix))
-                        .map(|&pattern| pattern.to_owned()),
-                )
-                .collect(),
-            ),
-            Self::Git
-            | Self::Direnv
-            | Self::Editors
-            | Self::Cargo
-            | Self::Shell
-            | Self::Agents
-            | Self::Ox
-            | Self::Rm
-            | Self::Cloud => return Ok(None),
-        };
-        let rules = patterns
-            .iter()
-            .map(|pattern| {
-                Rule::parse(class, pattern)
-                    .with_context(|| format!("invalid built-in `{self}` pattern {pattern:?}"))
-            })
-            .collect::<Result<_>>()?;
-        Ok(Some(rules))
     }
 }
 
-/// The tier a shipped group's rules join. A shipped default only holds calls back, so none joins
-/// the allow tier.
+/// The pattern that names exactly `path`, lexically normalized, and everything below it.
+fn path_pattern(path: &std::path::Path) -> String {
+    escaped(&lexical_normalize(path))
+}
+
+/// The tier a shipped rule joins. A shipped default only holds calls back, so none joins the allow
+/// tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShippedTier {
     Deny,
@@ -156,54 +199,47 @@ pub(crate) enum ShippedTier {
 
 // ── Protected Names ──
 
-/// The names one group protects, each compared by [`fold_name`](super::fold_name).
+/// The relative paths one group protects from edits wherever they sit, each compared by
+/// [`fold_name`](super::fold_name).
 struct Names {
-    /// Directories protected at any depth.
+    /// Directories, protected with everything below them.
     dirs: &'static [&'static str],
-    /// File names protected wherever they sit.
+    /// Files, protected only where the last components of a path spell them.
     files: &'static [&'static str],
-    /// `(parent, dir)` pairs protected at any depth only together.
-    nested_dirs: &'static [(&'static str, &'static str)],
-    /// `(parent, file)` pairs protected only together.
-    nested_files: &'static [(&'static str, &'static str)],
 }
 
 /// VCS metadata, hook managers, and git config.
 const GIT: Names = Names {
     dirs: &[".git", ".githooks", ".husky"],
     files: &[".gitconfig", ".gitmodules"],
-    nested_dirs: &[],
-    nested_files: &[],
 };
 
 const DIRENV: Names = Names {
     dirs: &[],
     files: &[".envrc"],
-    nested_dirs: &[],
-    nested_files: &[],
 };
 
 /// Editor and dev-container config, which can run tasks when the project opens.
 const EDITORS: Names = Names {
     dirs: &[".devcontainer", ".idea", ".vscode"],
     files: &[],
-    nested_dirs: &[],
-    nested_files: &[],
 };
 
 /// Cargo config, which can install a `runner` or `rustc-wrapper` that executes on the next build,
 /// and the rustup toolchain pin.
 const CARGO: Names = Names {
     dirs: &[],
-    files: &["rust-toolchain", "rust-toolchain.toml"],
-    nested_dirs: &[],
-    nested_files: &[(".cargo", "config"), (".cargo", "config.toml")],
+    files: &[
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        ".cargo/config",
+        ".cargo/config.toml",
+    ],
 };
 
-/// The files a shell runs when it starts or a login shell exits, and fish's autoloaded config and
-/// functions.
+/// The startup and logout files of each shell, and fish's autoloaded config and functions.
 const SHELL: Names = Names {
-    dirs: &[],
+    dirs: &["fish/conf.d", "fish/functions"],
     files: &[
         ".bash_aliases",
         ".bash_login",
@@ -222,191 +258,83 @@ const SHELL: Names = Names {
         ".zprofile",
         ".zshenv",
         ".zshrc",
+        "fish/config.fish",
     ],
-    nested_dirs: &[("fish", "conf.d"), ("fish", "functions")],
-    nested_files: &[("fish", "config.fish")],
 };
 
-/// Codex's project config, Claude Code's hooks and the settings that register them, and the files
-/// that register MCP servers it starts. The rest of `.claude`, such as worktrees and plans, stays
-/// editable.
+/// Codex's project config, Claude Code's hooks, the settings that register them, and its MCP
+/// server list. The rest of `.claude`, such as worktrees and plans, stays editable.
 const AGENTS: Names = Names {
-    dirs: &[".codex"],
-    files: &[".claude.json", ".mcp.json"],
-    nested_dirs: &[(".claude", "hooks")],
-    nested_files: &[
-        (".claude", "settings.json"),
-        (".claude", "settings.local.json"),
+    dirs: &[".codex", ".claude/hooks"],
+    files: &[
+        ".claude.json",
+        ".mcp.json",
+        ".claude/settings.json",
+        ".claude/settings.local.json",
     ],
 };
 
-/// oxide-code's project config. [`protected_roots`] adds its own directories, where an edit could
-/// rewrite its config or session history.
+/// oxide-code's project config. [`Shipped::edit_asks`] adds its own directories, where an edit
+/// could rewrite its config or session history.
 const OX: Names = Names {
     dirs: &[".ox"],
     files: &[],
-    nested_dirs: &[],
-    nested_files: &[],
 };
-
-impl Names {
-    /// Returns whether the folded `names` of a path hold one of these names where it takes effect.
-    fn hold(&self, names: &[&str]) -> bool {
-        names.iter().any(|name| self.dirs.contains(name))
-            || names.last().is_some_and(|name| self.files.contains(name))
-            || names
-                .windows(2)
-                .any(|pair| self.nested_dirs.contains(&(pair[0], pair[1])))
-            || names
-                .windows(2)
-                .last()
-                .is_some_and(|pair| self.nested_files.contains(&(pair[0], pair[1])))
-    }
-
-    /// Every protected name relative to the directory it sits in.
-    fn paths(&self) -> impl Iterator<Item = PathBuf> {
-        self.dirs.iter().chain(self.files).map(PathBuf::from).chain(
-            self.nested_dirs
-                .iter()
-                .chain(self.nested_files)
-                .map(|(parent, name)| Path::new(parent).join(name)),
-        )
-    }
-}
-
-/// The protected locations whose insides belong to a group wherever their names sit: the
-/// [`home_locations`], plus where each protected name directly under `cwd` or a workspace root
-/// resolves, so a `.vscode` symlinked to `tools/vscode` protects its target too.
-pub(super) fn protected_roots(cwd: &Path, workspace_roots: &[PathBuf]) -> Vec<(Shipped, PathBuf)> {
-    let extra = workspace_roots.iter().filter(|root| *root != cwd);
-    let bases: Vec<&Path> = std::iter::once(cwd)
-        .chain(extra.map(PathBuf::as_path))
-        .collect();
-    let mut roots: Vec<(Shipped, PathBuf)> = home_locations();
-    for &group in Shipped::VARIANTS {
-        let Some(names) = group.names() else {
-            continue;
-        };
-        for name in names.paths() {
-            roots.extend(
-                bases
-                    .iter()
-                    .filter_map(|base| resolve(&base.join(&name)).ok())
-                    .map(|path| (group, path)),
-            );
-        }
-    }
-    roots
-}
-
-/// oxide-code's own config, data, and state directories, the XDG git directory and the git
-/// credential store, Claude Code's user settings and hooks wherever `CLAUDE_CONFIG_DIR` moves them,
-/// `~/.ssh`, whose `authorized_keys`, `rc`, and `environment` set what a login runs, and the cloud
-/// CLIs' config directories, whose credential helpers run commands. Each comes with its group,
-/// resolved like a target so a symlinked home or XDG base still compares equal.
-fn home_locations() -> Vec<(Shipped, PathBuf)> {
-    let app_dirs = XdgBase::VARIANTS
-        .iter()
-        .copied()
-        .filter_map(app_dir)
-        .map(|dir| (Shipped::Ox, dir));
-    let git_dir = xdg_dir(XdgBase::Config).map(|dir| (Shipped::Git, dir.join("git")));
-    let claude_settings = claude_dir()
-        .into_iter()
-        .flat_map(|dir| ["settings.json", "hooks"].map(|name| (Shipped::Agents, dir.join(name))));
-    let home = std::env::home_dir();
-    let in_home = home.iter().flat_map(|home| {
-        [
-            (Shipped::Git, ".git-credentials"),
-            (Shipped::Ssh, ".ssh"),
-            (Shipped::Cloud, ".aws"),
-            (Shipped::Cloud, ".azure"),
-            (Shipped::Cloud, ".config/gcloud"),
-            (Shipped::Cloud, ".docker"),
-            (Shipped::Cloud, ".kube"),
-        ]
-        .map(|(group, name)| (group, home.join(name)))
-    });
-    app_dirs
-        .chain(git_dir)
-        .chain(claude_settings)
-        .chain(in_home)
-        .map(|(group, path)| (group, resolve(&path).unwrap_or(path)))
-        .collect()
-}
-
-/// Protected locations with their [`fold_name`](super::fold_name)-folded component names.
-pub(super) struct ProtectedRoots(Vec<(Shipped, PathBuf, Vec<String>)>);
-
-impl From<Vec<(Shipped, PathBuf)>> for ProtectedRoots {
-    fn from(roots: Vec<(Shipped, PathBuf)>) -> Self {
-        Self(
-            roots
-                .into_iter()
-                .map(|(group, root)| {
-                    let folded = folded_components(&root);
-                    (group, root, folded)
-                })
-                .collect(),
-        )
-    }
-}
-
-impl ProtectedRoots {
-    /// The groups whose protected names one of `paths` holds, or whose roots it sits under, each
-    /// once and in [`Shipped::VARIANTS`] order.
-    pub(super) fn protected_by(
-        &self,
-        paths: &[&Path],
-        aliases: &mut DirectoryAliases,
-    ) -> Vec<Shipped> {
-        let folded: Vec<_> = paths
-            .iter()
-            .map(|path| (folded_names(path), folded_components(path)))
-            .collect();
-        Shipped::VARIANTS
-            .iter()
-            .copied()
-            .filter(|group| {
-                folded.iter().any(|(names, components)| {
-                    let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                    group.names().is_some_and(|own| own.hold(&names))
-                        || self
-                            .0
-                            .iter()
-                            .any(|(owner, _, root)| owner == group && components.starts_with(root))
-                }) || self.0.iter().any(|(owner, root, folded)| {
-                    owner == group
-                        && paths.iter().any(|path| {
-                            aliases.respell(path, root).is_some_and(|aliased| {
-                                aliased != *path && relative_to_folded(&aliased, folded).is_some()
-                            })
-                        })
-                })
-            })
-            .collect()
-    }
-}
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use crate::permission::rule::{MatchDiscipline, Prefixes};
+    use crate::permission::{PathTarget, Zone};
     use crate::util::path::local_testing::abs;
     use crate::util::path::slash_separated;
     use crate::util::path::testing::HOME_VAR;
 
-    fn protected_by(paths: &[&Path], roots: &[(Shipped, PathBuf)]) -> Vec<Shipped> {
-        ProtectedRoots::from(roots.to_vec()).protected_by(paths, &mut DirectoryAliases::default())
-    }
-
     /// The process-environment patterns `credentials` adds on Unix, spelled out.
     const PROC_ENVIRONS: [&str; 2] = ["/proc/*/environ", "/proc/*/task/*/environ"];
+
+    /// Each rule of `group` as its tier, class, and pattern.
+    fn patterns(group: Shipped) -> Vec<(ShippedTier, PermissionClass, String)> {
+        group
+            .rules()
+            .unwrap()
+            .iter()
+            .map(|(tier, rule)| (*tier, rule.class(), rule.pattern().to_owned()))
+            .collect()
+    }
+
+    /// The groups whose shipped ask rules hold an edit of `raw`, a resolved absolute path.
+    fn protected_by(raw: &str) -> Vec<Shipped> {
+        let target = PathTarget {
+            canonical: raw.to_owned(),
+            exact: None,
+            relative: None,
+            rooted: Vec::new(),
+            requested: raw.to_owned(),
+            deny_rooted: Vec::new(),
+            zone: Zone::Outside,
+        };
+        Shipped::VARIANTS
+            .iter()
+            .copied()
+            .filter(|group| {
+                group.rules().unwrap().iter().any(|(tier, rule)| {
+                    let bases = rule.prefix_bases(&[]);
+                    let discipline = MatchDiscipline::Deny(Prefixes::Located(&bases));
+                    *tier == ShippedTier::Ask
+                        && rule.matches_path(PermissionClass::Edit, &target, discipline)
+                })
+            })
+            .collect()
+    }
 
     mod shipped {
         use super::*;
 
         #[test]
-        fn puts_each_pattern_group_in_its_tier_and_class() {
+        fn puts_each_rule_in_its_tier_and_class() {
             temp_env::with_vars(
                 [
                     (HOME_VAR, Some(abs("/home/u"))),
@@ -415,39 +343,42 @@ mod tests {
                     ("CLAUDE_CONFIG_DIR", None),
                 ],
                 || {
-                    let patterns = |group: Shipped| {
-                        let rules = group.rules().unwrap().unwrap();
-                        let classes: Vec<PermissionClass> = rules.iter().map(Rule::class).collect();
-                        let patterns: Vec<String> =
-                            rules.iter().map(|rule| rule.pattern().to_owned()).collect();
-                        (group.tier(), classes, patterns)
-                    };
                     let home = slash_separated(Path::new(&abs("/home/u")));
                     let data = slash_separated(Path::new(&abs("/data")));
                     let config = slash_separated(Path::new(&abs("/config")));
+                    let ask_edit =
+                        |pattern: String| (ShippedTier::Ask, PermissionClass::Edit, pattern);
+                    let deny_read =
+                        |pattern: String| (ShippedTier::Deny, PermissionClass::Read, pattern);
+
+                    let names = [".git", ".githooks", ".husky", ".gitconfig", ".gitmodules"];
+                    let git: Vec<_> = names
+                        .iter()
+                        .flat_map(|name| [format!("/**/{name}"), format!("./{name}")])
+                        .chain([format!("{config}/git"), format!("{home}/.git-credentials")])
+                        .map(ask_edit)
+                        .collect();
+                    assert_eq!(patterns(Shipped::Git), git);
                     assert_eq!(
                         patterns(Shipped::Devices),
-                        (
-                            ShippedTier::Ask,
-                            if cfg!(unix) {
-                                vec![PermissionClass::Edit]
-                            } else {
-                                Vec::new()
-                            },
-                            if cfg!(unix) {
-                                vec!["/dev/**".to_owned()]
-                            } else {
-                                Vec::new()
-                            },
-                        )
+                        if cfg!(unix) {
+                            vec![ask_edit("/dev/**".to_owned())]
+                        } else {
+                            Vec::new()
+                        }
                     );
+                    assert_eq!(patterns(Shipped::Rm), []);
                     assert_eq!(
                         patterns(Shipped::Ssh),
-                        (
-                            ShippedTier::Deny,
-                            vec![PermissionClass::Read],
-                            vec![format!("{home}/.ssh")]
-                        )
+                        [
+                            ask_edit(format!("{home}/.ssh")),
+                            deny_read(format!("{home}/.ssh"))
+                        ]
+                    );
+                    let cloud = [".aws", ".azure", ".config/gcloud", ".docker", ".kube"];
+                    assert_eq!(
+                        patterns(Shipped::Cloud),
+                        cloud.map(|name| ask_edit(format!("{home}/{name}")))
                     );
                     let mut credentials = vec![
                         format!("{data}/ox/credentials.json"),
@@ -460,15 +391,8 @@ mod tests {
                     }
                     assert_eq!(
                         patterns(Shipped::Credentials),
-                        (
-                            ShippedTier::Deny,
-                            vec![PermissionClass::Read; credentials.len()],
-                            credentials
-                        )
+                        credentials.into_iter().map(deny_read).collect::<Vec<_>>()
                     );
-                    assert!(Shipped::Git.rules().unwrap().is_none());
-                    assert!(Shipped::Rm.rules().unwrap().is_none());
-                    assert!(Shipped::Cloud.rules().unwrap().is_none());
                 },
             );
         }
@@ -504,10 +428,10 @@ mod tests {
                         ],
                         || {
                             [Shipped::Ssh, Shipped::Credentials].map(|group| {
-                                let rules = group.rules().unwrap().unwrap();
-                                rules
-                                    .iter()
-                                    .map(|rule| rule.pattern().to_owned())
+                                patterns(group)
+                                    .into_iter()
+                                    .filter(|(_, class, _)| *class == PermissionClass::Read)
+                                    .map(|(_, _, pattern)| pattern)
                                     .collect::<Vec<_>>()
                             })
                         },
@@ -533,46 +457,21 @@ mod tests {
             fn name_claude_codes_login_inside_claude_config_dir() {
                 let dir = abs("/srv/claude");
 
-                let rules = temp_env::with_var("CLAUDE_CONFIG_DIR", Some(dir.as_str()), || {
-                    Shipped::Credentials.rules().unwrap().unwrap()
+                let patterns = temp_env::with_var("CLAUDE_CONFIG_DIR", Some(dir.as_str()), || {
+                    patterns(Shipped::Credentials)
                 });
 
                 let expected = format!("{}/.credentials.json", slash_separated(Path::new(&dir)));
-                assert_eq!(rules[1].pattern(), expected);
+                assert_eq!(patterns[1].2, expected);
             }
         }
     }
 
-    #[cfg(unix)]
-    mod protected_roots {
-        use super::*;
-        use crate::util::path::local_testing::canonical_tempdir;
-
-        #[test]
-        fn tags_where_each_symlinked_name_resolves_with_its_group() {
-            let dir = canonical_tempdir();
-            let cwd = dir.path().to_path_buf();
-            std::fs::create_dir_all(cwd.join("tools/vscode")).unwrap();
-            std::os::unix::fs::symlink("tools/vscode", cwd.join(".vscode")).unwrap();
-
-            let roots = protected_roots(&cwd, std::slice::from_ref(&cwd));
-
-            assert!(roots.contains(&(Shipped::Editors, cwd.join("tools/vscode"))));
-            assert!(!roots.iter().any(
-                |(group, path)| *group != Shipped::Editors && *path == cwd.join("tools/vscode")
-            ));
-        }
-    }
-
-    mod protected_by {
+    mod protected_names {
         use super::*;
 
-        fn groups(raw: &str) -> Vec<Shipped> {
-            protected_by(&[Path::new(raw)], &[])
-        }
-
         #[test]
-        fn names_the_group_of_each_protected_name_at_any_depth_and_spelling() {
+        fn name_the_group_of_each_protected_name_at_any_depth_and_spelling() {
             for (raw, group) in [
                 ("/repo/.git/hooks/pre-commit", Shipped::Git),
                 ("/repo/vendor/sub/.GIT/config", Shipped::Git),
@@ -625,16 +524,16 @@ mod tests {
                 ("/repo/.g\u{200b}it/config", Shipped::Git),
                 ("/repo/.git\u{feff}/hooks/pre-commit", Shipped::Git),
             ] {
-                assert_eq!(groups(raw), [group], "{raw}");
+                assert_eq!(protected_by(raw), [group], "{raw}");
             }
             assert_eq!(
-                groups("/repo/.git/.vscode/.envrc"),
+                protected_by("/repo/.git/.vscode/.envrc"),
                 [Shipped::Git, Shipped::Direnv, Shipped::Editors]
             );
         }
 
         #[test]
-        fn leaves_lookalike_names_unprotected() {
+        fn leave_lookalike_names_unprotected() {
             for raw in [
                 "/repo/.github/workflows/ci.yml",
                 "/repo/src/git/mod.rs",
@@ -649,28 +548,23 @@ mod tests {
                 "/repo/fish/notes.md",
                 "/repo/docs/config.fish",
             ] {
-                assert_eq!(groups(raw), [], "{raw}");
+                assert_eq!(protected_by(raw), [], "{raw}");
             }
         }
 
         #[test]
-        fn covers_paths_under_a_root_case_insensitively() {
-            let roots = [(Shipped::Ox, PathBuf::from("/home/u/.config/ox"))];
-            for raw in [
-                "/home/u/.config/ox/config.toml",
-                "/home/u/.CONFIG/Ox/config.toml",
-                "/home/u/.con\u{fb01}g/ox/config.toml",
-            ] {
-                assert_eq!(
-                    protected_by(&[Path::new(raw)], &roots),
-                    [Shipped::Ox],
-                    "{raw}"
-                );
-            }
-            assert_eq!(
-                protected_by(&[Path::new("/home/u/.config/oxen/config.toml")], &roots),
-                []
-            );
+        fn cover_paths_under_an_app_directory_case_insensitively() {
+            let config = abs("/home/u/.config");
+            temp_env::with_var("XDG_CONFIG_HOME", Some(&config), || {
+                for raw in [
+                    "/home/u/.config/ox/config.toml",
+                    "/home/u/.CONFIG/Ox/config.toml",
+                    "/home/u/.con\u{fb01}g/ox/config.toml",
+                ] {
+                    assert_eq!(protected_by(&abs(raw)), [Shipped::Ox], "{raw}");
+                }
+                assert_eq!(protected_by(&abs("/home/u/.config/oxen/config.toml")), []);
+            });
         }
     }
 }
