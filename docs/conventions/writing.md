@@ -51,7 +51,7 @@ These rules apply to errors, warnings, notices, and other strings shown to users
 
 - Put each paragraph on one line without hard wrapping, and separate paragraphs with a blank line.
 - Use prose for explanations, bullets for parallel options or requirements, numbered lists for sequences, and tables for comparisons.
-- Make a list loose, with a blank line between items, when any item holds a nested list, a second paragraph, or a code block. Keep a list of single-paragraph items tight, even when it is nested in a loose list.
+- Make a list loose, with a blank line between items and before each nested part, when any item holds a nested list, a second paragraph, or a code block. Keep a list of single-paragraph items tight, even when it is nested in a loose list.
 - Align trailing comments in directory trees and similar listings in one column, several spaces beyond the longest entry.
 - Write headings in Title Case. Capitalize every word except articles, coordinating conjunctions, and prepositions of four letters or fewer, such as `a`, `and`, `for`, `from`, and `with`, unless the word starts or ends the heading. In a hyphenated compound, capitalize each part except an inner small word, as in `Built-In` and `Fork-on-Conflict`. Keep code spans and lowercase names such as oxide-code and opencode as written. PR, issue, and release bodies follow GitHub's sentence case, so the PR template keeps `## Test plan` and `CHANGELOG.md` keeps `### Breaking changes`.
 - Join a modifier to its key or mouse action with `+`, as in Shift+Tab and Ctrl+click, and write approval keys as the uppercase letters the TUI prompt shows. In the README and user guides, also put key names in bold, such as **Esc** and **Ctrl+C**.
@@ -76,7 +76,7 @@ These rules apply to errors, warnings, notices, and other strings shown to users
 
 - Cite a design decision by its bold title, since inserting a decision renumbers the list and leaves every numeric reference pointing at a different choice. Use `(**Title**)` in the same page and `[**Title**](page.md#design-decisions)` from another page.
 
-- Add `## Out of Scope` when the page leaves out a feature. Each bullet opens with a bold label naming the feature, then links its issue if the feature is deferred or gives the reason if it is declined.
+- Add `## Out of Scope` when the page defers or declines a feature a user or maintainer could expect. Each bullet opens with a bold label naming the feature, then links its issue if the feature is deferred or gives the reason if it is declined.
 
 - End the doc with `## Sources`, listing the files that own the mechanism by full path, in alphabetical order, with a one-clause annotation and no line numbers. Files that only call into the mechanism stay out, since the [module map](../design/architecture.md) places their modules:
 
