@@ -825,6 +825,23 @@ mod tests {
         }
     }
 
+    mod spec {
+        use super::*;
+
+        #[test]
+        fn states_how_each_call_runs() {
+            let description = BashTool::new(Arc::default()).spec().definition.description;
+
+            for rule in [
+                "Each call starts a new shell",
+                "Chain dependent steps in one call with `&&`.",
+                "Commands read no stdin",
+            ] {
+                assert!(description.contains(rule), "should state: {rule}");
+            }
+        }
+    }
+
     mod prepare {
         use super::*;
 

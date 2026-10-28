@@ -47,13 +47,12 @@ impl Tool for GrepTool {
         ToolSpec {
             definition: ToolDefinition {
                 name: "grep".to_owned(),
-                description: format!(
-                    "Search file contents with a Rust `regex` pattern, \
-                     which supports no lookaround or backreferences. \
-                     A directory search includes hidden files and skips VCS directories, \
-                     files that `.gitignore` excludes, and files over {}.",
-                    format_size(MAX_WALK_FILE_SIZE),
-                ),
+                description: "Search file contents with a Rust `regex` pattern, \
+                              which supports no lookaround or backreferences. \
+                              Each line is matched on its own, so a pattern cannot span lines. \
+                              A directory search includes hidden files and skips VCS directories \
+                              and files that `.gitignore` excludes."
+                    .to_owned(),
                 input_schema: input_schema(),
             },
             class: PermissionClass::Read,
@@ -638,6 +637,22 @@ mod tests {
             head_limit: None,
             read_filter: ReadFilter::default(),
             cancel: CancellationToken::new(),
+        }
+    }
+
+    mod spec {
+        use super::*;
+
+        #[test]
+        fn states_what_a_pattern_cannot_match() {
+            let description = grep_tool().spec().definition.description;
+
+            for rule in [
+                "supports no lookaround or backreferences",
+                "a pattern cannot span lines",
+            ] {
+                assert!(description.contains(rule), "should state: {rule}");
+            }
         }
     }
 

@@ -668,7 +668,25 @@ mod tests {
 
         #[test]
         fn state_their_distinctive_rules() {
-            let sections: [(&str, &str, &[&str]); 3] = [
+            let sections: [(&str, &str, &[&str]); 6] = [
+                (
+                    "INTRO",
+                    INTRO,
+                    &[
+                        "You run in oxide-code",
+                        "which may only add deny and ask rules",
+                        "have no effect in oxide-code",
+                    ],
+                ),
+                (
+                    "SYSTEM_SECTION",
+                    SYSTEM_SECTION,
+                    &[
+                        "In `plan`, every `edit`, `write`, and `bash` call is denied",
+                        "reads each command of a chain",
+                        "needs approval in `manual`, so prefer plain commands",
+                    ],
+                ),
                 (
                     "TASK_GUIDANCE",
                     TASK_GUIDANCE,
@@ -688,6 +706,7 @@ mod tests {
                     CAUTION,
                     &["Never print credentials", "redact any credential"],
                 ),
+                ("STYLE", STYLE, &["give its full URL"]),
                 (
                     "OUTPUT_EFFICIENCY",
                     OUTPUT_EFFICIENCY,

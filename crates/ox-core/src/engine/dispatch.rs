@@ -15,7 +15,7 @@ use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
-use crate::permission::{Basis, ConfigFix, Decision, Policy, SessionGrant, Workspace};
+use crate::permission::{Basis, ConfigFix, Decision, Mode, Policy, SessionGrant, Workspace};
 use crate::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::handle::SessionHandle;
 use crate::tool::spill::run_capped;
@@ -361,10 +361,10 @@ impl<'r> Dispatcher<'r, '_> {
         );
         match verdict.decision {
             Decision::Allow => Ok(None),
-            Decision::Deny => Ok(Some(denied_output(
-                name,
-                format_args!("by {}", verdict.basis),
-            ))),
+            Decision::Deny => Ok(Some(match verdict.basis {
+                Basis::Mode(Mode::Plan) => plan_denied_output(name),
+                basis => denied_output(name, format_args!("by {basis}")),
+            })),
             Decision::Unapproved => {
                 let policy = &self.dispatch_ctx.policy;
                 let fix = policy.config_fix(class, &prepared.access);
@@ -451,6 +451,16 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
         "The {name} call was denied {reason}. \
          Do not retry it. \
          Choose a different approach or ask the user to adjust permissions."
+    ))
+}
+
+/// The synthetic error result for a call `plan` mode denies. It steers the model toward the plan the
+/// mode exists for, since asking the user to adjust permissions would defeat the mode.
+fn plan_denied_output(name: &str) -> ToolOutput {
+    ToolOutput::error(format!(
+        "The {name} call was denied by `plan` mode, which allows only reads. \
+         Do not retry it. \
+         Finish investigating with `read`, `glob`, and `grep`, then present your plan."
     ))
 }
 
@@ -542,7 +552,7 @@ mod tests {
     use crate::engine::local_testing::{EchoTool, dispatch_with, inert_ops};
     use crate::permission::defaults::Shipped;
     use crate::permission::testing::exec_grant;
-    use crate::permission::{Mode, PermissionClass, Tier};
+    use crate::permission::{PermissionClass, Tier};
     use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::tool::ToolDefinition;
     #[cfg(unix)]
