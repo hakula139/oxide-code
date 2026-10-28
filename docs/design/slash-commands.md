@@ -72,7 +72,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Sources
 
-- `crates/ox-core/src/command.rs`: the command table with each command's aliases and parser, `typed_op`, and the typed forms of `/clear`, `/compact`, `/effort`, `/mode`, `/model`, `/rename`, and `/resume`, plus the model resolver.
+- `crates/ox-core/src/command.rs`: the command table with each command's aliases and parser, `typed_op`, and the typed forms of `/clear`, `/compact`, `/effort`, `/exit`, `/mode`, `/model`, `/rename`, and `/resume`, plus the model resolver.
 - `crates/ox-core/src/command/init.rs`: the typed form of `/init`, the instruction-file discovery, and the create and update prompts.
 - `crates/ox-core/src/command/parser.rs`: `parse_slash`, which parses a typed line into a command name and its arguments, `split_slash`, the borrowed split it shares with the popup, and `unescape_literal` for the `//` escape.
 - `crates/ox-core/src/engine.rs`: `Engine::run` arms for `Op::Clear`, `Op::SetModel`, and `Op::SetMode`, and `Engine::set_model`, which re-resolves the compaction threshold for the new model and words the `ConfigChanged` notice against the settings before the swap.

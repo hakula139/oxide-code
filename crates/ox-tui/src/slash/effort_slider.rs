@@ -281,36 +281,17 @@ mod tests {
         use super::*;
 
         #[test]
-        fn right_arrow_advances_selected_within_supported() {
-            let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
-            let before = s.selected;
-            s.handle_key(&KeyEvent::from(KeyCode::Right));
-            assert_eq!(s.selected, before + 1);
-        }
-
-        #[test]
-        fn right_arrow_at_top_clamps_without_panicking() {
-            let mut s = slider_for("claude-opus-5-5", Some(Effort::Max));
-            s.handle_key(&KeyEvent::from(KeyCode::Right));
-            assert_eq!(selected_level(&s), Effort::Max, "must stay clamped");
-        }
-
-        #[test]
-        fn left_arrow_retreats_selected_until_low() {
+        fn arrows_and_vim_keys_step_the_ladder() {
             let mut s = slider_for("claude-opus-5-5", Some(Effort::Medium));
-            s.handle_key(&KeyEvent::from(KeyCode::Left));
-            assert_eq!(selected_level(&s), Effort::Low);
-            s.handle_key(&KeyEvent::from(KeyCode::Left));
-            assert_eq!(selected_level(&s), Effort::Low, "stays clamped");
-        }
-
-        #[test]
-        fn vim_keys_mirror_arrow_navigation() {
-            let mut s = slider_for("claude-opus-5-5", Some(Effort::Low));
-            s.handle_key(&KeyEvent::from(KeyCode::Char('l')));
-            assert_eq!(selected_level(&s), Effort::Medium);
-            s.handle_key(&KeyEvent::from(KeyCode::Char('h')));
-            assert_eq!(selected_level(&s), Effort::Low);
+            for (code, expected) in [
+                (KeyCode::Right, Effort::High),
+                (KeyCode::Char('l'), Effort::Xhigh),
+                (KeyCode::Left, Effort::High),
+                (KeyCode::Char('h'), Effort::Medium),
+            ] {
+                s.handle_key(&KeyEvent::from(code));
+                assert_eq!(selected_level(&s), expected, "{code:?}");
+            }
         }
 
         #[test]
@@ -345,6 +326,38 @@ mod tests {
                     "{code:?} must be consumed"
                 );
                 assert_eq!(s.selected, before, "{code:?} must not move the cursor");
+            }
+        }
+    }
+
+    mod step_level {
+        use super::*;
+
+        #[test]
+        fn steps_one_level_and_stops_at_either_end() {
+            let index = |level: Effort| {
+                Effort::VARIANTS
+                    .iter()
+                    .position(|&variant| variant == level)
+                    .expect("VARIANTS lists every level")
+            };
+            for (start, direction, expected) in [
+                (Effort::Low, Direction::Forward, Effort::Medium),
+                (Effort::Medium, Direction::Forward, Effort::High),
+                (Effort::High, Direction::Forward, Effort::Xhigh),
+                (Effort::Xhigh, Direction::Forward, Effort::Max),
+                (Effort::Max, Direction::Forward, Effort::Max),
+                (Effort::Max, Direction::Backward, Effort::Xhigh),
+                (Effort::Xhigh, Direction::Backward, Effort::High),
+                (Effort::High, Direction::Backward, Effort::Medium),
+                (Effort::Medium, Direction::Backward, Effort::Low),
+                (Effort::Low, Direction::Backward, Effort::Low),
+            ] {
+                assert_eq!(
+                    Effort::VARIANTS[step_level(index(start), direction)],
+                    expected,
+                    "{start:?} {direction:?}",
+                );
             }
         }
     }

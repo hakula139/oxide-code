@@ -334,7 +334,7 @@ mod tests {
         }
 
         #[test]
-        fn right_and_left_step_the_ladder_and_stop_at_its_ends() {
+        fn arrows_and_vim_keys_step_the_effort_ladder() {
             let mut p = picker();
             let mut press = |code| {
                 p.handle_key(&KeyEvent::from(code));
@@ -343,12 +343,8 @@ mod tests {
 
             assert_eq!(press(KeyCode::Right), Effort::Xhigh);
             assert_eq!(press(KeyCode::Char('l')), Effort::Max);
-            assert_eq!(press(KeyCode::Right), Effort::Max, "Right stops at max");
-            for _ in 0..3 {
-                press(KeyCode::Left);
-            }
-            assert_eq!(press(KeyCode::Char('h')), Effort::Low);
-            assert_eq!(press(KeyCode::Left), Effort::Low, "Left stops at low");
+            assert_eq!(press(KeyCode::Char('h')), Effort::Xhigh);
+            assert_eq!(press(KeyCode::Left), Effort::High);
         }
 
         #[test]

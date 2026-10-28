@@ -966,6 +966,11 @@ mod tests {
             terminal
                 .draw(|frame| l.render(frame, Rect::new(0, 0, 40, 1), &theme))
                 .expect("render must not panic when area is too short for the search row");
+
+            assert!(
+                !terminal.backend().cursor_visible(),
+                "a hidden search row places no cursor",
+            );
         }
 
         #[test]
