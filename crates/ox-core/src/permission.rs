@@ -3197,7 +3197,7 @@ mod tests {
                     assert_eq!(decide(&p, READ, &target), Decision::Deny, "{name}");
                 }
                 let cat = Access::for_command("cat env", &workspace);
-                assert_eq!(decide(&p, EXEC, &cat), Decision::Ask);
+                assert_eq!(decide(&p, EXEC, &cat), Decision::Deny);
             }
         }
 
