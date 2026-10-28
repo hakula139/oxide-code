@@ -114,8 +114,8 @@ impl GitProbes {
     }
 
     /// Waits for the next probe update, scheduling each finished probe's next run one interval out.
-    /// A stale pull-request run reports a clear and asks for a fresh one. Cancel-safe, so it can sit
-    /// in a `tokio::select!` arm.
+    /// A stale pull-request run reports a clear and asks for a fresh one. Cancel-safe, so it can
+    /// sit in a `tokio::select!` arm.
     pub(crate) async fn recv(&mut self) -> Option<GitUpdate> {
         loop {
             let (probe, update) = self.rx.recv().await?;

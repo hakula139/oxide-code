@@ -120,6 +120,24 @@
 
           shellcheck.enable = true;
 
+          comment-width = {
+            enable = true;
+            entry = pkgs.lib.getExe (
+              pkgs.writeShellApplication {
+                name = "check-comment-width";
+                runtimeInputs = [ pkgs.gawk ];
+                text = builtins.readFile ./scripts/check-comment-width.sh;
+              }
+            );
+            types_or = [
+              "nix"
+              "rust"
+              "shell"
+              "toml"
+              "yaml"
+            ];
+          };
+
           rustfmt = {
             enable = true;
             packageOverrides = {

@@ -24,8 +24,8 @@ const HELP: &str = "help";
 
 /// Reads prompts and slash commands until EOF, `/exit`, or a signal, then finalizes the session.
 /// EOF after an operation failed, a command was rejected, or output failed exits with failure. An
-/// attended `engine` asks its approvals on stdin, while an unattended one asks none, so a piped line
-/// is never taken as an answer. In an attended run, SIGINT interrupts the running operation or
+/// attended `engine` asks its approvals on stdin, while an unattended one asks none, so a piped
+/// line is never taken as an answer. In an attended run, SIGINT interrupts the running operation or
 /// discards the line at the prompt, as shells do. Every other signal ends the run. `first`, when
 /// given, runs as the first input line.
 pub(crate) async fn run(
@@ -56,8 +56,8 @@ pub(crate) async fn run(
     .await
 }
 
-/// Runs the REPL over `first`, then `prompter`'s input. Each `signal` call waits for the next signal
-/// and reports whether its line break succeeded.
+/// Runs the REPL over `first`, then `prompter`'s input. Each `signal` call waits for the next
+/// signal and reports whether its line break succeeded.
 async fn drive<R, W>(
     mut handle: EngineHandle,
     project_root: &Path,

@@ -38,7 +38,7 @@ impl BaseUrl {
     }
 
     /// Returns whether the URL points at Anthropic's production or staging host. Gates the
-    /// stored-login fallback, body-side `cache_control.scope = "global"`, and the billing `cch` hash.
+    /// stored-login fallback, the billing `cch` hash, and the body-side `cache_control.scope`.
     pub(crate) fn is_first_party(&self) -> bool {
         // `Url` lowercases the host of an `http` or `https` URL.
         matches!(

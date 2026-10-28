@@ -176,7 +176,7 @@ jobs:
                 [.[].jobs[]] as $jobs
                 | first($jobs[] | select(.id == $gate))
                   // error("job \($gate) is missing from this run attempt")
-                # The jobs of a calling workflow share this run, so check only names with this prefix.
+                # Jobs of a calling workflow share this run, so check only names with this prefix.
                 | (.name | sub("[^/]*$"; "")) as $prefix
                 | $jobs[]
                 | select(.id != $gate and (.name | startswith($prefix)))

@@ -15,8 +15,8 @@ use crate::config::credentials::withhold_secrets;
 #[cfg(windows)]
 static RUNTIME: MsysRuntime = MsysRuntime::new();
 
-/// How long a shell waits for the holding bash to start, which is how long an MSYS process waits for
-/// another to set up the runtime.
+/// How long a shell waits for the holding bash to start, matching how long an MSYS process waits
+/// for another to set up the runtime.
 #[cfg(windows)]
 const START_LIMIT: Duration = Duration::from_secs(15);
 
