@@ -6,7 +6,7 @@ use indoc::formatdoc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, warn};
 
-use ox_core::config::auth::AuthSource;
+use ox_core::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::{Effort, ModelSpec};
 use ox_core::permission::{Basis, Mode, SessionGrant};

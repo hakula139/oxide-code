@@ -26,11 +26,11 @@ use self::login::SignIn;
 use self::transcript::{LiveTranscript, TranscriptStart};
 use self::turn::{TurnContext, TurnOutcome, TurnReport, TurnStop};
 use self::usage::UsageLedger;
+use crate::auth::Auth;
+use crate::auth::oauth::{self, ClaudeCodeKeychain};
 use crate::client::anthropic::Client;
 use crate::config::Config;
-use crate::config::auth::Auth;
 use crate::config::compaction::CompactionConfig;
-use crate::config::oauth::{self, ClaudeCodeKeychain};
 use crate::message::{ContentBlock, Message, TextOrigin};
 use crate::model::ModelSettings;
 use crate::permission::{Mode, Policy, Workspace};
@@ -582,13 +582,14 @@ mod tests {
         mount_tool_call_once, panic_message, request_bodies, until_requested, with_pinned_home,
     };
     use super::*;
+    use crate::auth::{AuthSource, LoginUnavailable};
     use crate::client::anthropic::local_testing::COMPLETION_USAGE;
     use crate::client::anthropic::testing::{
         DEVICE_ID, api_key, sse_body, sse_response, text_stream_body,
     };
-    use crate::config::auth::{AuthSource, AuthState, LoginUnavailable};
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
+    use crate::config::credentials::AuthState;
     use crate::config::testing::test_config;
     use crate::engine::compaction::AutoCompactFailures;
     use crate::file_tracker::testing::{

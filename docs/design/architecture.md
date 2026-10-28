@@ -15,7 +15,8 @@ Layers run from the foundation to the frontends.
 | `ox-core` | Foundation | `file_tracker`  | Per-session Read-before-Edit gate with xxh64 staleness detection                                                                                                                        |
 | `ox-core` | Foundation | `message`       | Conversation message and content-block types shared by the client, the engine, the session transcript, and the tools                                                                    |
 | `ox-core` | Foundation | `util`          | Shared helpers for environment variables, the filesystem, git probes, logging, paths, server error responses, mutex recovery, text width, local time, TLS, TOML, and enum variant names |
-| `ox-core` | Domain     | `config`        | Layered configuration with per-value provenance, credentials, gateway settings, and stored OAuth logins with browser sign-in                                                            |
+| `ox-core` | Domain     | `auth`          | The credential requests send, and the stored OAuth logins it falls back on, with browser sign-in, refresh, and write-back                                                               |
+| `ox-core` | Domain     | `config`        | Layered configuration with per-value provenance, credential resolution, and gateway settings                                                                                            |
 | `ox-core` | Domain     | `model`         | Supported-model catalog, per-model request capabilities, effort and prompt cache TTL, the model settings each request carries, token usage, and pricing                                 |
 | `ox-core` | Domain     | `permission`    | Tool permission gate: modes, deny / ask / allow rules, shipped defaults, path resolution, shell-command parsing, and project file containment                                           |
 | `ox-core` | Domain     | `prompt`        | System prompt assembly, environment detection, and instruction-file discovery                                                                                                           |
@@ -51,4 +52,4 @@ Layers run from the foundation to the frontends.
 
 ## Dependency Direction
 
-A module imports only from its own layer and lower layers. `ox-tui` depends on `ox-core`, `ox` depends on both, and no dependency runs the other way. Only `ox-tui` depends on terminal UI crates, such as `ratatui` and `crossterm`. The crate manifests encode this direction and the terminal UI rule, and review of manifest changes enforces both, so `deny.toml` holds no crate-layering bans.
+A module imports only from its own layer and lower layers. `auth` sits in the Domain layer beside `config`, although it makes network and Keychain calls, because a resolved config holds the session's credential. `ox-tui` depends on `ox-core`, `ox` depends on both, and no dependency runs the other way. Only `ox-tui` depends on terminal UI crates, such as `ratatui` and `crossterm`. The crate manifests encode this direction and the terminal UI rule, and review of manifest changes enforces both, so `deny.toml` holds no crate-layering bans.

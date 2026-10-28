@@ -15,8 +15,8 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::error;
 
+use crate::auth::AuthSource;
 use crate::client::RateLimits;
-use crate::config::auth::AuthSource;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{Effort, ModelSpec, ResolvedModelId};
 use crate::permission::rule::Rule;

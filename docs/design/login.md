@@ -44,13 +44,18 @@ A refresh required by a request, whether for an expired token or after a 401, re
 
 ## Sources
 
+- `crates/ox-core/src/auth.rs`: `AuthSource`, the stored-login search, and `Auth::credential`, which refreshes a stored login before a request.
+- `crates/ox-core/src/auth/oauth.rs`: `SessionLogin`, which holds a session's token, and `save_login` and `delete_login`, which `/login` and `/logout` call.
+- `crates/ox-core/src/auth/oauth/keychain.rs`: Claude Code's macOS Keychain entry.
+- `crates/ox-core/src/auth/oauth/lock.rs`: the lock directory, which matches Claude Code's `proper-lockfile`.
+- `crates/ox-core/src/auth/oauth/login.rs`: PKCE, the loopback listener, the pasted code, and code exchange.
+- `crates/ox-core/src/auth/oauth/store.rs`: credential stores, refresh, and write-back.
+- `crates/ox-core/src/auth/oauth/token.rs`: the session's `Token`, its expiry checks, and the token endpoint requests that issue it.
 - `crates/ox-core/src/client.rs`: `Request`, which carries the credential each conversation request sends.
 - `crates/ox-core/src/client/anthropic.rs`: `Client::finish_reloads`, which waits for the reloads in flight.
 - `crates/ox-core/src/client/anthropic/transport.rs`: `MessagesRequest`, which carries the credential into every attempt, and `post_messages`, which resends a request after a 401.
 - `crates/ox-core/src/config.rs`: `Config::resolve_auth`, which loads the credential or starts a TUI session signed out.
-- `crates/ox-core/src/config/auth.rs`: `AuthState`, `AuthSource`, resolution order, the stored-login search, and `Auth::credential`, which refreshes a stored login before a request.
-- `crates/ox-core/src/config/login.rs`: PKCE, the loopback listener, the pasted code, and code exchange.
-- `crates/ox-core/src/config/oauth.rs`: credential stores, refresh, write-back, and `SessionLogin`, the token a session holds.
+- `crates/ox-core/src/config/credentials.rs`: `AuthState`, resolution order, and the fallback that keeps stored logins off gateways.
 - `crates/ox-core/src/engine.rs`: `Engine::finalize`, which waits at exit for the reloads in flight.
 - `crates/ox-core/src/engine/login.rs`: `SignIn`, the credential requests send or whether a signed-out session loads the stored login again, `Engine::ensure_signed_in`, which retries a stored login after a transient sign-out, and `Engine::login` and `Engine::logout`, which swap the credential.
 - `crates/ox-core/src/protocol.rs`: `Op::Login`, `Op::LoginCode`, `Op::Logout`, `Event::LoginStarted`, `Event::SignedIn`, `Event::LoginRestored`, and `Event::SignedOut`.
