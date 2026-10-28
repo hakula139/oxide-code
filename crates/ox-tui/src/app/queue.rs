@@ -1,12 +1,11 @@
 //! The prompts the TUI holds: the one running as the active turn and the FIFO typed mid-turn.
 
 use std::collections::VecDeque;
-use std::mem::{self, Discriminant};
+use std::mem;
 
 use tracing::warn;
 
 use ox_core::command;
-use ox_core::protocol::Op;
 
 /// A prompt the TUI holds: the line the user typed and the text the engine receives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,12 +96,21 @@ pub(super) struct PromptQueue {
     switch: Option<SwitchMark>,
 }
 
-/// A session switch and how many leading `pending` prompts were queued before it. They belong
-/// to the session it leaves, and the later ones to the session it reaches.
+/// Where a session switch heads, and how many leading `pending` prompts were queued before it.
+/// They belong to the session it leaves, and the later ones to the session it reaches.
 #[derive(Clone, Copy)]
 struct SwitchMark {
-    op: Discriminant<Op>,
+    to: SwitchTo,
     before: usize,
+}
+
+/// The kind of session a switch reaches.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SwitchTo {
+    /// A new empty session, which `/clear` and `/archive` start.
+    Fresh,
+    /// A saved session, which `/resume` loads.
+    Saved,
 }
 
 /// What a failure of the in-flight operation hands back to the user.
@@ -320,18 +328,17 @@ impl PromptQueue {
         self.drained.clear();
     }
 
-    /// Notes that the session switch `op` starts. The prompts queued so far belong to the
-    /// session it leaves, and later ones to the session it reaches, so a failed switch holds
-    /// them. A retry of the same command keeps a failed attempt's mark, since the prompts typed
-    /// during it still wait for the session the user is switching to, while another command
-    /// counts them as queued before it. The switch settles an earlier hold, so a prompt typed
-    /// while it runs keeps the mark.
-    pub(super) fn mark_switch(&mut self, op: &Op) {
-        let op = mem::discriminant(op);
+    /// Notes that a switch to a session of kind `to` starts. The prompts queued so far belong to
+    /// the session it leaves, and later ones to the session it reaches, so a failed switch holds
+    /// them. A retry that heads for the same kind of session keeps a failed attempt's mark, since
+    /// the prompts typed during it still wait for the session the user is switching to, while a
+    /// switch to the other kind counts them as queued before it. The switch settles an earlier
+    /// hold, so a prompt typed while it runs keeps the mark.
+    pub(super) fn mark_switch(&mut self, to: SwitchTo) {
         self.held = false;
-        if self.switch.is_none_or(|mark| mark.op != op) {
+        if self.switch.is_none_or(|mark| mark.to != to) {
             self.switch = Some(SwitchMark {
-                op,
+                to,
                 before: self.pending.len(),
             });
         }
@@ -561,15 +568,7 @@ mod tests {
     }
 
     mod discard_left_behind {
-        use ox_core::protocol::ResumeTarget;
-
         use super::*;
-
-        fn resume() -> Op {
-            Op::Resume {
-                target: ResumeTarget::Prefix("ab".to_owned()),
-            }
-        }
 
         /// A queue whose failed `/resume` kept "during the failed switch", typed while it ran, with
         /// `before` queued ahead of it.
@@ -578,7 +577,7 @@ mod tests {
             for prompt in before {
                 queue.push((*prompt).to_owned());
             }
-            queue.mark_switch(&resume());
+            queue.mark_switch(SwitchTo::Saved);
             queue.push("during the failed switch".to_owned());
             assert_eq!(queue.fail_turn(true), FailedTurn::Held);
             queue.end_turn();
@@ -590,7 +589,7 @@ mod tests {
         fn keeps_the_prompts_queued_after_the_switch_started() {
             let mut queue = PromptQueue::default();
             queue.push("before".to_owned());
-            queue.mark_switch(&Op::Clear);
+            queue.mark_switch(SwitchTo::Fresh);
             queue.push("after".to_owned());
 
             let dropped = queue.discard_left_behind();
@@ -602,7 +601,7 @@ mod tests {
         #[test]
         fn a_retry_keeps_the_prompts_typed_during_the_failed_switch() {
             let mut queue = after_a_failed_resume(&["before"]);
-            queue.mark_switch(&resume());
+            queue.mark_switch(SwitchTo::Saved);
 
             let dropped = queue.discard_left_behind();
 
@@ -619,15 +618,15 @@ mod tests {
             for (case, move_on) in [
                 (
                     "another switch",
-                    (|queue| queue.mark_switch(&Op::Clear)) as fn(&mut PromptQueue),
+                    (|queue| queue.mark_switch(SwitchTo::Fresh)) as fn(&mut PromptQueue),
                 ),
                 ("a submit", |queue| {
                     queue.push("after".to_owned());
-                    queue.mark_switch(&resume());
+                    queue.mark_switch(SwitchTo::Saved);
                 }),
                 ("a cancel", |queue| {
                     queue.leave_to_user();
-                    queue.mark_switch(&resume());
+                    queue.mark_switch(SwitchTo::Saved);
                 }),
             ] {
                 let mut queue = after_a_failed_resume(&["before"]);
@@ -640,10 +639,13 @@ mod tests {
         }
 
         #[test]
-        fn a_prompt_returned_to_the_head_counts_as_left_behind() {
+        fn a_prompt_handed_back_to_the_head_counts_as_left_behind() {
             let mut queue = after_a_failed_resume(&["held by a cancel"]);
-            queue.push_front(QueuedPrompt::typed("/init".to_owned()));
-            queue.mark_switch(&resume());
+            queue.set_active(QueuedPrompt::slash("/init".to_owned(), "built".to_owned()));
+            queue.mark_unsent();
+            assert_eq!(queue.fail_turn(true), FailedTurn::HandedBack(None));
+            queue.end_turn();
+            queue.mark_switch(SwitchTo::Saved);
 
             let dropped = queue.discard_left_behind();
 
@@ -656,11 +658,11 @@ mod tests {
             let mut queue = PromptQueue::default();
             queue.push("first".to_owned());
             queue.push("second".to_owned());
-            queue.mark_switch(&resume());
+            queue.mark_switch(SwitchTo::Saved);
             queue.end_turn();
             queue.hold();
             queue.pop_last();
-            queue.mark_switch(&resume());
+            queue.mark_switch(SwitchTo::Saved);
 
             let dropped = queue.discard_left_behind();
 

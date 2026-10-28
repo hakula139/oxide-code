@@ -89,7 +89,7 @@ Inside the TUI, `/resume` (alias `/continue`) opens a session picker without res
 - Type to filter by ID, title, or project. Press **Tab** to toggle current-project / all-projects scope and **Ctrl+A** to toggle active / archived sessions. Press **Enter** to resume the highlighted session in place.
 - To skip the picker, pass `/resume <id-prefix>` to jump directly, which also works in the `--no-tui` REPL. An ambiguous prefix lists the candidates. This form matches active and archived sessions, excluding the live session. It checks the current project first and searches all projects only when there is no match in the current project.
 - The picker lists every session in the selected scope and archive view, most recent first, and loads older ones as you scroll. Typing a query searches all of them.
-- Chat repopulates from the resumed transcript. Prompts queued before the resume are discarded because they were typed for the previous session, and a prompt sent while it loads runs in the resumed session. The next prompt continues the resumed thread just as it would after `ox -c`.
+- Chat repopulates from the resumed transcript. Prompts queued before the resume are discarded because they were typed for the previous session, and a prompt sent while it loads runs in the resumed session. If a resume fails, a prompt sent while it ran waits, and runs once a retried `/resume` lands. The next prompt continues the resumed thread just as it would after `ox -c`.
 
 ### Deleting a Session
 

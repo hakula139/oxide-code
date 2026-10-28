@@ -2519,31 +2519,49 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_retried_resume_runs_the_prompt_typed_during_the_failed_one() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.queue.push("for the old session".to_owned());
-            app.queue.hold();
-            app.dispatch_op(Op::Resume {
-                target: ResumeTarget::Id("missing".to_owned()),
-            });
-            rx.try_recv().expect("resume forwarded");
-            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
-            app.handle_engine_event(Event::TurnFailed("No session matches".to_owned()));
-            app.dispatch_op(Op::Resume {
-                target: ResumeTarget::Id("abcd".to_owned()),
-            });
-            rx.try_recv().expect("retry forwarded");
+        async fn a_retried_switch_runs_the_prompt_typed_during_the_failed_one() {
+            for (case, failed, retry, landed) in [
+                (
+                    "/resume",
+                    Op::Resume {
+                        target: ResumeTarget::Id("missing".to_owned()),
+                    },
+                    Op::Resume {
+                        target: ResumeTarget::Id("abcd".to_owned()),
+                    },
+                    Event::SessionResumed {
+                        id: "abcd".to_owned(),
+                        title: None,
+                        prior: ArchiveState::Active,
+                        history: Vec::new(),
+                    },
+                ),
+                (
+                    "/clear after /archive",
+                    Op::Archive,
+                    Op::Clear,
+                    Event::SessionRolled {
+                        id: "fresh".to_owned(),
+                        old_session: ArchiveState::Active,
+                    },
+                ),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.queue.push("for the old session".to_owned());
+                app.queue.hold();
+                app.dispatch_op(failed);
+                rx.try_recv().expect("switch forwarded");
+                app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+                app.handle_engine_event(Event::TurnFailed("Switch failed".to_owned()));
+                app.dispatch_op(retry);
+                rx.try_recv().expect("retry forwarded");
 
-            app.handle_engine_event(Event::SessionResumed {
-                id: "abcd".to_owned(),
-                title: None,
-                prior: ArchiveState::Active,
-                history: Vec::new(),
-            });
-            app.handle_engine_event(Event::SessionReady);
+                app.handle_engine_event(landed);
+                app.handle_engine_event(Event::SessionReady);
 
-            assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
-            assert_eq!(*app.queue.pending(), [] as [&str; 0]);
+                assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")), "{case}");
+                assert_eq!(*app.queue.pending(), [] as [&str; 0], "{case}");
+            }
         }
 
         #[tokio::test]
