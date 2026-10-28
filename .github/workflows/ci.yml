@@ -157,7 +157,35 @@ jobs:
     needs: [lint, rust, msrv, nix]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: read
     steps:
       - name: Check results
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
-        run: exit 1
+        # Unlike the default shell, `bash` sets pipefail, so a failed API call fails the gate.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GATE_ID: ${{ job.check_run_id }}
+        run: |
+          # `needs` misses a matrix leg cancelled before it starts, so read each job from the API.
+          failed=$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+              --paginate \
+              --slurp |
+              jq -r --argjson gate "$GATE_ID" '
+                [.[].jobs[]] as $jobs
+                | first($jobs[] | select(.id == $gate))
+                  // error("job \($gate) is missing from this run attempt")
+                # The jobs of a calling workflow share this run, so check only names with this prefix.
+                | (.name | sub("[^/]*$"; "")) as $prefix
+                | $jobs[]
+                | select(.id != $gate and (.name | startswith($prefix)))
+                | select(.conclusion != "success" and .conclusion != "skipped")
+                | "::error::\(.name): \(.conclusion // .status)"
+              '
+          )
+
+          if [[ -n "$failed" ]]; then
+            echo "$failed"
+            exit 1
+          fi
