@@ -1145,6 +1145,30 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn turn_failed_during_a_manual_compaction_holds_the_prompts_queued_during_it() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Compact { instructions: None });
+            assert_eq!(rx.try_recv().ok(), Some(Op::Compact { instructions: None }));
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+
+            app.handle_engine_event(Event::TurnFailed(
+                "Compaction failed: summarizer down".to_owned(),
+            ));
+
+            assert_eq!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty),
+                "nothing retries compaction until the user sends again"
+            );
+            assert_eq!(*app.queue.pending(), ["typed meanwhile"]);
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(
+                app.chat.last_error_text(),
+                Some("Compaction failed: summarizer down")
+            );
+        }
+
+        #[tokio::test]
         async fn failed_resume_goes_idle_and_keeps_the_prompts_a_cancel_held() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("first".to_owned()));

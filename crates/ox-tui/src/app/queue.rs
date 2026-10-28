@@ -98,8 +98,8 @@ enum HandBack {
     /// Nothing, since the prompt ran and the queue goes on.
     #[default]
     Nothing,
-    /// Nothing, but the queue waits for the user, since an automatic compaction is running and
-    /// after its failure the next prompt would start another summary request.
+    /// Nothing, but the queue waits for the user, since a compaction is running and after its
+    /// failure the next prompt would start another summary request.
     HeldQueue,
     /// The prompt, since the automatic compaction ahead of it failed, so the engine never sent it.
     UnsentPrompt,
@@ -137,7 +137,7 @@ impl PromptQueue {
         self.active = None;
     }
 
-    /// Notes that an automatic compaction is running, so a failure holds the queue.
+    /// Notes that a manual or automatic compaction is running, so a failure holds the queue.
     pub(super) fn mark_compacting(&mut self) {
         self.hand_back = HandBack::HeldQueue;
     }
@@ -234,10 +234,10 @@ impl PromptQueue {
         }
     }
 
-    /// Settles a failed turn by what it marked. A failed automatic compaction holds the queue. An
-    /// unsent prompt returns for the input when the input and the queue are empty, so Enter sends
-    /// it again, and otherwise heads the queue so it still runs first. A rolled-back turn returns
-    /// the queued prompts it took in to the queue head, and its own prompt for the input when
+    /// Settles a failed turn by what it marked. A failed compaction holds the queue. An unsent
+    /// prompt returns for the input when the input and the queue are empty, so Enter sends it
+    /// again, and otherwise heads the queue so it still runs first. A rolled-back turn returns the
+    /// queued prompts it took in to the queue head, and its own prompt for the input when
     /// `input_empty`, or else ahead of them.
     pub(super) fn fail_turn(&mut self, input_empty: bool) -> FailedTurn {
         match self.hand_back {
