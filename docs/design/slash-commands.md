@@ -24,7 +24,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/help`**: Opens a [`KvOverview`](modals.md) listing every registered command with its description.
 
-- **`/init`**: Returns `Prompt(..)` with the prompt `command::init::resolve` builds. With an instruction file at the project root or in its `.claude/` directory, the body asks the model to propose its changes as a diff before it edits. With none, `/init <file>` sends the prompt that creates that file, and bare `/init` opens a picker whose choice sends the same prompt. The expanded body is invisible in the live session but recorded in JSONL for resume. Full design: [init.md](init.md).
+- **`/init`**: Returns `Prompt(..)` with the prompt `command::init::resolve` builds. With an instruction file at the project root or in its `.claude/` directory, the body asks the model to propose its changes as a diff before it edits. With none, `/init <file>` sends the prompt that creates that file, and bare `/init` opens a picker whose choice sends the same prompt. The expanded body is invisible in the live session but stored for resume. Full design: [init.md](init.md).
 
 - **`/login`** / **`/logout`**: Forward `Op::Login` and `Op::Logout`. The engine runs the browser sign-in and swaps the credential requests send, and the TUI opens the browser and reports the credential requests use afterward. Both are `Mutating`. Full design: [login.md](login.md).
 
@@ -83,7 +83,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-core/src/session/display.rs`: shared `id_prefix` and `display_title`, `archive_notice`, and the `MAX_TITLE_WIDTH` cap that `fit_title` applies to every title.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_prefix` checks the current project first, widens the search on a miss, reports a live-only match as `ResolveError::Live`, and returns a typed `ResolveError` that the CLI prints as is and slash commands rephrase. `resolve_id` looks up a whole ID in every project.
 - `crates/ox-core/src/session/saved.rs`: `find`, `set_archived`, and `delete`, which the engine runs for the typed commands and the `/resume` picker, refuse the live session, and return a typed `SavedError`.
-- `crates/ox-core/src/session/store.rs`: `SessionStore::set_archived` and `SessionStore::delete`, the ID-keyed file operations behind `saved`, and `find_session_path`, which maps an ID to its file.
+- `crates/ox-core/src/session/store.rs`: `SessionStore::set_archived` and `SessionStore::delete`, the ID-keyed store operations behind `saved`.
 - `crates/ox-tui/src/action.rs`: `Action`, which slash commands forward.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_action`, `dispatch_op`, `run_slash`, `apply_slash_outcome`, `allows_mutating`, modal gate, echo gate.
 - `crates/ox-tui/src/app/events.rs`: `apply_slash_task`, which applies a finished `Background` outcome through the dispatch path, `apply_session_rolled`, which clears the chat when the roll lands, and the `ArchiveUpdated`, `SavedFound`, and `SavedDeleted` handlers.
@@ -117,7 +117,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 - `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS`, `SlashKind`, `SlashOutcome`, and the `SlashCommand` trait.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker` (see [Resume](resume.md)).
-- `crates/ox-tui/src/slash/sessions.rs`: `open_store` for the picker, `saved_error_message`, `archive_message`, and the live-session recovery hints, shared by the session commands, plus `format_metadata_line` for the delete confirm modal.
+- `crates/ox-tui/src/slash/sessions.rs`: `saved_error_message`, `archive_message`, and the live-session recovery hints, shared by the session commands, plus `format_metadata_line` for the delete confirm modal.
 - `crates/ox-tui/src/slash/status.rs`: `/status` row builder plus `KvOverview` constructor.
 - `crates/ox-tui/src/slash/theme.rs`: `ThemeCmd`, picker open plus typed-arg validator.
 - `crates/ox/src/driver/repl.rs`: `command_op`, which runs typed slash commands in the bare REPL.
