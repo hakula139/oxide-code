@@ -347,5 +347,14 @@ mod tests {
                 );
             }
         }
+
+        mod sends_idle_only_ops {
+            use super::*;
+
+            #[test]
+            fn holds_the_queue_head_for_the_rename() {
+                assert!(RenameModal::new(None).sends_idle_only_ops());
+            }
+        }
     }
 }

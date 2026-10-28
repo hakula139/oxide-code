@@ -420,4 +420,13 @@ mod tests {
             assert_eq!(pick, model_only("claude-opus-5-5"));
         }
     }
+
+    mod sends_idle_only_ops {
+        use super::*;
+
+        #[test]
+        fn holds_the_queue_head_for_the_model_swap() {
+            assert!(picker().sends_idle_only_ops());
+        }
+    }
 }

@@ -56,8 +56,7 @@ impl InFlight {
         &self.activity
     }
 
-    /// Returns whether the op runs an agent turn, which continues the conversation the queued
-    /// prompts were typed for.
+    /// Returns whether the op runs an agent turn.
     pub(super) const fn runs_turn(&self) -> bool {
         matches!(self.op, Op::Prompt { .. })
     }

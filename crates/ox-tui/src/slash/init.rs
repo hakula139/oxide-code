@@ -309,5 +309,14 @@ mod tests {
                 );
             }
         }
+
+        mod sends_idle_only_ops {
+            use super::*;
+
+            #[test]
+            fn holds_the_queue_head_for_the_init_turn() {
+                assert!(InitPicker::new(Path::new("/repo")).sends_idle_only_ops());
+            }
+        }
     }
 }

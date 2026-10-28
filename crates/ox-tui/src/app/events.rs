@@ -162,7 +162,7 @@ impl App {
         if !goes_on || ended.cancelling() {
             self.queue.hold();
         }
-        self.head_awaits_modal = !ended.runs_turn() && self.modals.sends_idle_only_ops();
+        self.head_awaits_modal = self.modals.sends_idle_only_ops();
         if !self.head_awaits_modal {
             self.drain_pending_prompt();
         }
@@ -2312,8 +2312,7 @@ mod tests {
 
         #[test]
         fn evicts_orphaned_pending_calls() {
-            // Turn boundaries discard calls whose results never arrived, preventing stale IDs from
-            // accumulating.
+            // Every op end drops calls whose results never arrived, so stale IDs cannot pile up.
             let (mut app, _rx, _event_tx) = test_app(None);
             start_op(&mut app, &Op::prompt("running"));
             app.handle_engine_event(bash_call_start("orphan", "ls"));
@@ -2404,12 +2403,17 @@ mod tests {
                 });
 
                 assert_eq!(app.modals.is_active(), stays_open, "{case}");
-                if stays_open {
-                    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{case}");
-                    assert_eq!(*app.queue.pending(), ["typed meanwhile"], "{case}");
-                    app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::from(KeyCode::Esc)));
-                }
-                assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")), "{case}");
+                assert_eq!(
+                    rx.try_recv().ok(),
+                    (!stays_open).then(|| Op::prompt("typed meanwhile")),
+                    "{case}"
+                );
+                let pending: &[&str] = if stays_open {
+                    &["typed meanwhile"]
+                } else {
+                    &[]
+                };
+                assert_eq!(*app.queue.pending(), pending, "{case}");
             }
         }
 
@@ -2430,6 +2434,26 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn closing_the_last_modal_that_sends_ops_starts_the_queue_under_a_read_only_one() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
+            rx.try_recv().expect("lookup forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.dispatch_action(Action::Submit("/help".to_owned()));
+            app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+            let deferred = rx.try_recv();
+
+            app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
+
+            assert_eq!(deferred, Err(TryRecvError::Empty));
+            assert!(
+                app.modals.is_active(),
+                "/help stays open under the closed confirm"
+            );
+            assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
+        }
+
+        #[tokio::test]
         async fn a_modal_the_user_opened_meanwhile_leaves_the_queue_going() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_op(Op::Clear);
@@ -2440,18 +2464,6 @@ mod tests {
             app.handle_engine_event(Event::SessionReady);
 
             assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
-        }
-
-        #[tokio::test]
-        async fn a_turn_a_modal_started_goes_on_to_the_queue_head() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.push_modal(Box::new(FakeModal::new("picker")));
-            start_op(&mut app, &Op::prompt("running"));
-            app.queue.push("next".to_owned());
-
-            app.handle_engine_event(Event::TurnComplete);
-
-            assert_eq!(rx.try_recv(), Ok(Op::prompt("next")));
         }
 
         #[tokio::test]

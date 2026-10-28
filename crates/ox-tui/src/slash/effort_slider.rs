@@ -334,6 +334,15 @@ mod tests {
         }
     }
 
+    mod sends_idle_only_ops {
+        use super::*;
+
+        #[test]
+        fn holds_the_queue_head_for_the_effort_change() {
+            assert!(slider_for("claude-opus-5-5", Some(Effort::High)).sends_idle_only_ops());
+        }
+    }
+
     mod step_level {
         use super::*;
 
