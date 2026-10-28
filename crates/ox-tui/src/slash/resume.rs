@@ -844,6 +844,10 @@ impl Modal for ResumePicker {
     fn binds_modified_key(&self, event: &KeyEvent) -> bool {
         LineEditor::binds_modified_key(event)
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 // ── Testing ──

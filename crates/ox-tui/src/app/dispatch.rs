@@ -147,7 +147,8 @@ impl App {
         if let Some(action) = self.modals.handle_key(key) {
             self.apply_modal_action(action);
         }
-        if self.head_awaits_modal && self.in_flight.is_none() && !self.modals.is_active() {
+        if self.head_awaits_modal && self.in_flight.is_none() && !self.modals.sends_idle_only_ops()
+        {
             self.head_awaits_modal = false;
             self.drain_pending_prompt();
         }
@@ -299,7 +300,7 @@ impl App {
 
     /// Puts `op` in flight when it runs until a terminal event, which also closes an exit window.
     fn begin(&mut self, op: &Op) {
-        if let Some(in_flight) = InFlight::new(op, self.modals.is_active()) {
+        if let Some(in_flight) = InFlight::new(op) {
             self.in_flight = Some(in_flight);
             self.exit_armed = None;
         }
@@ -1995,9 +1996,9 @@ mod tests {
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
             assert!(app.exit_armed.is_some(), "Ctrl+C arms the exit window");
 
-            app.dispatch_action(Action::Submit("hello".to_owned()));
+            app.dispatch_op(Op::Clear);
 
-            assert_eq!(rx.try_recv(), Ok(Op::prompt("hello")));
+            assert_eq!(rx.try_recv(), Ok(Op::Clear));
             assert_eq!(app.exit_armed, None);
         }
 
@@ -2417,7 +2418,7 @@ mod tests {
                 let buffered = if full {
                     fill_channel(&app)
                 } else {
-                    app.set_status(Status::Archiving);
+                    start_op(&mut app, &Op::Archive);
                     Vec::new()
                 };
                 let y = key_event(KeyCode::Char('y'), KeyModifiers::NONE);
@@ -2434,14 +2435,14 @@ mod tests {
                 }
                 assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "full={full}");
 
-                app.set_status(Status::Idle);
+                app.in_flight = None;
                 app.handle_crossterm_event(&y);
 
                 let delete = Op::DeleteSaved {
                     session_id: "saved".to_owned(),
                 };
                 assert_eq!(rx.try_recv(), Ok(delete), "full={full}");
-                assert_eq!(app.status, Status::Deleting, "full={full}");
+                assert_eq!(activity(&app), Some(&Activity::Deleting), "full={full}");
 
                 let entries = app.chat.entry_count();
                 app.handle_crossterm_event(&y);

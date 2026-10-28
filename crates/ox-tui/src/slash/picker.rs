@@ -192,6 +192,10 @@ impl Modal for ModelEffortPicker {
         }
         ModalKey::Consumed
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

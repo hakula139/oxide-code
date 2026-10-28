@@ -137,6 +137,10 @@ impl Modal for InitPicker {
         self.list.navigate(event);
         ModalKey::Consumed
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

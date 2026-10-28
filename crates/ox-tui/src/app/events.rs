@@ -30,13 +30,11 @@ impl App {
     /// Shows `event`, then ends the in-flight operation if `event` is its terminal event.
     pub(super) fn handle_engine_event(&mut self, event: Event) {
         let end = self.in_flight.as_ref().and_then(|op| op.end(&event));
-        let modal_was_open = self.modals.is_active();
         self.apply_event(event);
         if let Some(end) = end
             && let Some(ended) = self.in_flight.take()
         {
-            let opened_modal = !modal_was_open && self.modals.is_active();
-            self.end_operation(&ended, end, opened_modal);
+            self.end_operation(&ended, end);
         }
         self.dirty = true;
     }
@@ -144,9 +142,8 @@ impl App {
 
     /// Ends the in-flight operation as `end` reports, then starts the queue head. A cancel or a
     /// failure that holds the queue holds it until the user next submits a prompt. An operation
-    /// that ran no turn defers the head while a modal it came from or `opened_modal` stays open,
-    /// since that modal may send the next operation.
-    fn end_operation(&mut self, ended: &InFlight, end: TurnEnd, opened_modal: bool) {
+    /// that ran no turn defers the head while a modal that may send the next operation is open.
+    fn end_operation(&mut self, ended: &InFlight, end: TurnEnd) {
         self.chat.commit_streaming();
         let goes_on = match end {
             TurnEnd::Completed => true,
@@ -165,9 +162,7 @@ impl App {
         if !goes_on || ended.cancelling() {
             self.queue.hold();
         }
-        self.head_awaits_modal = !ended.runs_turn()
-            && self.modals.is_active()
-            && (ended.sent_from_modal() || opened_modal);
+        self.head_awaits_modal = !ended.runs_turn() && self.modals.sends_idle_only_ops();
         if !self.head_awaits_modal {
             self.drain_pending_prompt();
         }
@@ -2297,6 +2292,24 @@ mod tests {
     mod end_operation {
         use super::*;
 
+        /// Runs `op` to its `end` on an app whose queue holds "typed meanwhile", then checks that
+        /// nothing started.
+        fn assert_stays_held(
+            app: &mut App,
+            rx: &mut mpsc::Receiver<Op>,
+            op: &Op,
+            end: Event,
+            label: &str,
+        ) {
+            app.dispatch_op(op.clone());
+            assert_eq!(rx.try_recv().as_ref(), Ok(op), "{label}");
+
+            app.handle_engine_event(end);
+
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{label}");
+            assert_eq!(*app.queue.pending(), ["typed meanwhile"], "{label}");
+        }
+
         #[test]
         fn evicts_orphaned_pending_calls() {
             // Turn boundaries discard calls whose results never arrived, preventing stale IDs from
@@ -2362,29 +2375,42 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_modal_the_lookup_opens_defers_the_queue_until_the_delete_ends() {
-            let (mut app, mut rx, _event_tx) = test_app(None);
-            app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
-            rx.try_recv().expect("lookup forwarded");
-            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+        async fn a_modal_the_lookup_opens_defers_the_queue_while_it_stays_open() {
+            for (case, result, stays_open) in [
+                ("deleted", Ok(()), false),
+                (
+                    "failed",
+                    Err(SavedError::Live {
+                        id: "saved".to_owned(),
+                    }),
+                    true,
+                ),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
+                rx.try_recv().expect("lookup forwarded");
+                app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+                app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{case}");
+                let delete = Op::DeleteSaved {
+                    session_id: "saved".to_owned(),
+                };
+                app.dispatch_op(delete.clone());
+                assert_eq!(rx.try_recv(), Ok(delete), "{case}");
 
-            app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+                app.handle_engine_event(Event::SavedDeleted {
+                    id: "saved".to_owned(),
+                    result,
+                });
 
-            assert!(app.modals.is_active(), "the confirm modal opens");
-            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
-
-            let delete = Op::DeleteSaved {
-                session_id: "saved".to_owned(),
-            };
-            app.dispatch_op(delete.clone());
-            assert_eq!(rx.try_recv(), Ok(delete));
-            app.handle_engine_event(Event::SavedDeleted {
-                id: "saved".to_owned(),
-                result: Ok(()),
-            });
-
-            assert!(!app.modals.is_active(), "the delete closes the modal");
-            assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
+                assert_eq!(app.modals.is_active(), stays_open, "{case}");
+                if stays_open {
+                    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{case}");
+                    assert_eq!(*app.queue.pending(), ["typed meanwhile"], "{case}");
+                    app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::from(KeyCode::Esc)));
+                }
+                assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")), "{case}");
+            }
         }
 
         #[tokio::test]
@@ -2426,24 +2452,6 @@ mod tests {
             app.handle_engine_event(Event::TurnComplete);
 
             assert_eq!(rx.try_recv(), Ok(Op::prompt("next")));
-        }
-
-        /// Runs `op` to its `end` on an app whose queue holds "typed meanwhile", then checks that
-        /// nothing started.
-        fn assert_stays_held(
-            app: &mut App,
-            rx: &mut mpsc::Receiver<Op>,
-            op: &Op,
-            end: Event,
-            label: &str,
-        ) {
-            app.dispatch_op(op.clone());
-            assert_eq!(rx.try_recv().as_ref(), Ok(op), "{label}");
-
-            app.handle_engine_event(end);
-
-            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{label}");
-            assert_eq!(*app.queue.pending(), ["typed meanwhile"], "{label}");
         }
 
         #[tokio::test]

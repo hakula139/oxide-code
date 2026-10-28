@@ -6,7 +6,7 @@ The status line is the TUI's top row, a user-ordered roster of built-in segments
 
 `StatusLineSegment` in `config.rs` defines the roster. `[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
 
-`StatusBar` keeps component state and delegates segment formatting to `ox_tui::components::status::line`. `App` copies the queued prompt count, the task list's progress, whether the input is empty, the session ID, the theme name, and the permission mode into it before each frame, since it owns that state.
+`StatusBar` keeps component state and delegates segment formatting to `ox_tui::components::status::line`. `App` copies the run label, the queued prompt count, the task list's progress, the session ID, the theme name, and the permission mode into it before each frame, since it owns that state.
 
 Segment render rules:
 

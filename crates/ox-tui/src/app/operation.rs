@@ -16,14 +16,12 @@ const ESC: KeyChord = KeyChord::plain(KeyCode::Esc);
 pub(super) struct InFlight {
     op: Op,
     activity: Activity,
-    /// Whether a modal sent the op, which may send the next one once the op ends.
-    from_modal: bool,
 }
 
 impl InFlight {
-    /// Tracks `op`, sent from a modal when `from_modal`, until its terminal event. `None` for an op
-    /// the engine takes at any time, which the TUI never waits on.
-    pub(super) fn new(op: &Op, from_modal: bool) -> Option<Self> {
+    /// Tracks `op` until its terminal event. `None` for an op the engine takes at any time, which
+    /// the TUI never waits on.
+    pub(super) fn new(op: &Op) -> Option<Self> {
         let activity = match op {
             Op::Prompt { .. } => Activity::Streaming,
             Op::Compact { .. } => Activity::Compacting,
@@ -46,7 +44,6 @@ impl InFlight {
         Some(Self {
             op: op.clone(),
             activity,
-            from_modal,
         })
     }
 
@@ -63,10 +60,6 @@ impl InFlight {
     /// prompts were typed for.
     pub(super) const fn runs_turn(&self) -> bool {
         matches!(self.op, Op::Prompt { .. })
-    }
-
-    pub(super) const fn sent_from_modal(&self) -> bool {
-        self.from_modal
     }
 
     /// Returns whether a sign-in waits for the code the sign-in page shows.
@@ -195,11 +188,7 @@ mod tests {
                     Op::Shutdown,
                 ];
                 for op in ops {
-                    assert_eq!(
-                        InFlight::new(&op, false).is_some(),
-                        op.is_idle_only(),
-                        "{op:?}"
-                    );
+                    assert_eq!(InFlight::new(&op).is_some(), op.is_idle_only(), "{op:?}");
                 }
             }
         }
@@ -209,7 +198,7 @@ mod tests {
 
             #[test]
             fn releases_held_prompts_only_when_a_turn_leaves_its_compaction() {
-                let mut turn = InFlight::new(&Op::prompt("hello"), false).unwrap();
+                let mut turn = InFlight::new(&Op::prompt("hello")).unwrap();
                 assert!(turn.takes_queued_prompts());
 
                 assert!(!turn.set_activity(Activity::Compacting));
@@ -221,7 +210,7 @@ mod tests {
 
             #[test]
             fn keeps_a_pending_cancel() {
-                let mut turn = InFlight::new(&Op::prompt("hello"), false).unwrap();
+                let mut turn = InFlight::new(&Op::prompt("hello")).unwrap();
                 turn.set_activity(Activity::Compacting);
                 turn.cancel();
 
@@ -238,7 +227,7 @@ mod tests {
 
             #[test]
             fn only_a_running_turn_takes_them() {
-                let compact = InFlight::new(&Op::Compact { instructions: None }, false).unwrap();
+                let compact = InFlight::new(&Op::Compact { instructions: None }).unwrap();
 
                 assert!(!compact.takes_queued_prompts());
             }

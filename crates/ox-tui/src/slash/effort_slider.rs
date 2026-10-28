@@ -161,6 +161,10 @@ impl Modal for EffortSlider {
             _ => ModalKey::Consumed,
         }
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 // ── Effort Ladder ──

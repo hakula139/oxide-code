@@ -112,6 +112,10 @@ impl Modal for RenameModal {
     fn binds_modified_key(&self, event: &KeyEvent) -> bool {
         LineEditor::binds_modified_key(event)
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

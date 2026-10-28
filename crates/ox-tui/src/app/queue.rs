@@ -98,7 +98,7 @@ pub(super) struct PromptQueue {
 /// What a failure of the in-flight operation hands back to the user.
 #[derive(Clone, Copy, Default)]
 enum HandBack {
-    /// Nothing, since the prompt ran and the queue goes on.
+    /// Nothing, since the operation ran and the queue goes on.
     #[default]
     Nothing,
     /// Nothing, but the queue waits for the user, since a compaction or a session switch is
@@ -114,7 +114,7 @@ enum HandBack {
 /// How [`PromptQueue::fail_turn`] settled a failed turn.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum FailedTurn {
-    /// The prompt ran, so nothing comes back and the queue goes on.
+    /// The operation ran, so nothing comes back and the queue goes on.
     Ran,
     /// The operation ran, but the queue waits for the user.
     Held,
@@ -207,8 +207,7 @@ impl PromptQueue {
         self.pending.pop_front()
     }
 
-    /// The text of the oldest queued prompt the in-flight turn lacks, or `None` while the queue is
-    /// held.
+    /// The text of the oldest queued prompt the in-flight turn lacks, or `None` while held.
     pub(super) fn next_to_forward(&self) -> Option<String> {
         if self.held {
             return None;

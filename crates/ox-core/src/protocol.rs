@@ -463,7 +463,7 @@ impl TurnEnd {
             | (Op::Logout, Event::SignedOut { .. })
             | (Op::SetModel(_), Event::ConfigChanged { .. })
             | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
-            // A background title can land while the rename runs, so only the requested title ends it.
+            // A background title may land mid-rename, so only the requested title ends it.
             (Op::Rename { title: requested }, Event::SessionTitleUpdated { title, .. })
                 if title == requested =>
             {
