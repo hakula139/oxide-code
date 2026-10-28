@@ -278,7 +278,7 @@ impl App {
                     in_flight.cancel();
                 }
             }
-            Op::Clear | Op::Archive | Op::Resume { .. } => self.queue.mark_switch(),
+            Op::Clear | Op::Archive | Op::Resume { .. } => self.queue.mark_switch(&op),
             Op::Compact { .. } => self.queue.mark_compacting(),
             Op::SetArchive { target, .. } => self.modals.archive_started(target),
             Op::DeleteSaved { session_id } => self.modals.delete_started(session_id),
@@ -2373,7 +2373,7 @@ mod tests {
                 let before = activity(&app).cloned();
                 app.requested_mode = Mode::Manual;
                 app.queue.push("old session".to_owned());
-                app.queue.mark_switch();
+                app.queue.mark_switch(&Op::Clear);
                 app.queue.push("current session".to_owned());
                 let buffered = fill_channel(&app);
 

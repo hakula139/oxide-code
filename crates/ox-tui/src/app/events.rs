@@ -141,8 +141,10 @@ impl App {
     }
 
     /// Ends the in-flight operation as `end` reports, then starts the queue head. A cancel or a
-    /// failure that holds the queue holds it until the user next submits a prompt. An operation
-    /// that ran no turn defers the head while a modal that may send the next operation is open.
+    /// failure that holds the queue holds it until the user submits a prompt or starts a session
+    /// switch, and a cancel also leaves the prompts a failed switch kept for its retry to the user.
+    /// An operation that ran no turn defers the head while a modal that may send the next operation
+    /// is open.
     fn end_operation(&mut self, ended: &InFlight, end: TurnEnd) {
         self.chat.commit_streaming();
         let goes_on = match end {
@@ -159,7 +161,9 @@ impl App {
         };
         self.queue.end_turn();
         self.chat.clear_pending_calls();
-        if !goes_on || ended.cancelling() {
+        if ended.cancelling() {
+            self.queue.leave_to_user();
+        } else if !goes_on {
             self.queue.hold();
         }
         self.head_awaits_modal = self.modals.sends_idle_only_ops();
@@ -2539,6 +2543,34 @@ mod tests {
             app.handle_engine_event(Event::SessionReady);
 
             assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
+            assert_eq!(*app.queue.pending(), [] as [&str; 0]);
+        }
+
+        #[tokio::test]
+        async fn a_cancel_during_a_failed_resume_leaves_its_prompts_to_the_retry_discard() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Resume {
+                target: ResumeTarget::Id("missing".to_owned()),
+            });
+            rx.try_recv().expect("resume forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.handle_esc();
+            assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
+            app.handle_engine_event(Event::TurnFailed("No session matches".to_owned()));
+            app.dispatch_op(Op::Resume {
+                target: ResumeTarget::Id("abcd".to_owned()),
+            });
+            rx.try_recv().expect("retry forwarded");
+
+            app.handle_engine_event(Event::SessionResumed {
+                id: "abcd".to_owned(),
+                title: None,
+                prior: ArchiveState::Active,
+                history: Vec::new(),
+            });
+            app.handle_engine_event(Event::SessionReady);
+
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
         }
 
