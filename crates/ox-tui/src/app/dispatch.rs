@@ -568,8 +568,8 @@ mod tests {
     use ox_core::protocol::{
         ApprovalDecision, CompactTrigger, ConfigPick, Event, ResumeTarget, SavedTarget,
     };
-    use ox_core::session::entry::ArchiveState;
     use ox_core::session::saved::{ArchiveUpdate, SavedAction, SavedError};
+    use ox_core::session::store::listing::ArchiveState;
     use ox_core::session::store::testing::{listed_session, stamped_id};
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
@@ -1758,7 +1758,7 @@ mod tests {
         #[tokio::test]
         async fn clear_during_busy_refuses_with_system_message_no_dispatch() {
             // State-mutating commands refuse mid-turn, since rolling while `messages` is still
-            // draining would race the in-flight turn into the wrong JSONL.
+            // draining would race the in-flight turn into the wrong session.
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             rx.try_recv().expect("active submit forwarded");

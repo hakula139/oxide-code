@@ -5,12 +5,16 @@ use std::path::PathBuf;
 
 use ox_core::config::ConfigSnapshot;
 use ox_core::permission::rule::Rule;
+use ox_core::session::store::SessionStore;
 use ox_core::tool::bash::background::BackgroundShell;
 
 /// The running session's state, which the App keeps current from engine events and hands to every
-/// slash command. The saved record `--list` reads is [`ox_core::session::entry::SessionInfo`].
+/// slash command. The saved record `--list` reads is
+/// [`ox_core::session::store::listing::SessionInfo`].
 pub(crate) struct LiveSessionInfo {
-    /// The working directory, which the git probes and the session store use.
+    /// The process's session store, which the `/resume` picker lists from.
+    pub(crate) store: SessionStore,
+    /// The working directory, which the git probes use.
     pub(crate) cwd: PathBuf,
     /// [`Self::cwd`] as shown, with the home directory as `~`.
     pub(crate) display_cwd: String,
@@ -41,12 +45,15 @@ pub(crate) mod testing {
     use ox_core::config::compaction::CompactionConfig;
     use ox_core::config::testing::test_snapshot;
     use ox_core::model::Effort;
+    use ox_core::session::store::SessionStore;
 
     use super::LiveSessionInfo;
 
-    /// Fully populated [`LiveSessionInfo`] that the slash, welcome, and app tests share.
+    /// Fully populated [`LiveSessionInfo`] that the slash, welcome, and app tests share. Its store
+    /// was never set up, so a test that reads saved sessions supplies its own.
     pub(crate) fn test_session_info() -> LiveSessionInfo {
         LiveSessionInfo {
+            store: SessionStore::unopened("repo"),
             cwd: PathBuf::from("/repo"),
             display_cwd: "~/test".to_owned(),
             project_root: PathBuf::from("/repo"),

@@ -1,16 +1,17 @@
-//! Resolution of the CLI `--continue` and `--resume` targets, of resume targets to session files,
-//! and of session IDs and their prefixes.
+//! Resolution of the CLI `--continue` and `--resume` targets, of resume targets to session IDs, and
+//! of session IDs and their prefixes.
 
+use std::fs::File;
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use tracing::debug;
 
 use super::display::id_prefix;
-use super::entry::{ArchiveState, SessionInfo};
 use super::handle::{self, LoadedTranscript, ResumedSession};
 use super::store::SessionStore;
-use super::store::listing::ProjectScope;
+use super::store::listing::{ArchiveState, ProjectScope, SessionInfo};
 use crate::protocol::ResumeTarget;
 
 /// The saved session a run continues.
@@ -18,7 +19,7 @@ use crate::protocol::ResumeTarget;
 pub enum SessionTarget<'a> {
     /// The most recent unarchived session in scope, as `--continue` picks.
     Latest,
-    /// The session an ID prefix or a session file path names, as `--resume <session>` gives.
+    /// The session an ID prefix or an export path names, as `--resume <session>` gives.
     Named(&'a str),
 }
 
@@ -28,7 +29,7 @@ enum ResumeMode {
     Fresh,
     /// The most recent unarchived session in scope.
     Latest,
-    /// The session an ID prefix or a session file path names.
+    /// The session an ID prefix or an export path names.
     Named(ResumeTarget),
 }
 
@@ -67,9 +68,10 @@ pub async fn resolve_session(
 
     debug!(?target, "resuming session");
     let store = store.clone();
+    let model = model.to_owned();
     tokio::task::spawn_blocking(move || {
-        let path = session_path(&store, target, None, projects)?;
-        handle::resume_from_path(&store, &path)
+        let session_id = resolve_target(&store, target, None, projects)?;
+        handle::resume(&store, &session_id, &model)
     })
     .await
     .context("session resume task failed")?
@@ -108,22 +110,34 @@ fn looks_like_path(arg: &str) -> bool {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
-/// The file of the session `target` names. A prefix matches sessions other than `live_id` in
-/// `projects`, as [`resolve_prefix`] does.
-pub(super) fn session_path(
+/// The ID of the session `target` names. A prefix matches sessions other than `live_id` in
+/// `projects`, as [`resolve_prefix`] does, and a path names an export, which this imports first.
+pub(super) fn resolve_target(
     store: &SessionStore,
     target: ResumeTarget,
     live_id: Option<&str>,
     projects: ProjectScope,
-) -> Result<PathBuf> {
-    let session_id = match target {
-        ResumeTarget::Path(path) => return Ok(path),
-        ResumeTarget::Id(session_id) => session_id,
+) -> Result<String> {
+    match target {
+        ResumeTarget::Id(session_id) => Ok(session_id),
         ResumeTarget::Prefix(prefix) => {
-            resolve_prefix(store, &prefix, live_id, projects)?.session_id
+            Ok(resolve_prefix(store, &prefix, live_id, projects)?.session_id)
         }
-    };
-    store.find_session_path(&session_id)
+        ResumeTarget::Path(path) => {
+            let file =
+                File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
+            store
+                .import(BufReader::new(file))
+                .with_context(|| format!("failed to import {}", path.display()))
+        }
+    }
+}
+
+/// Writes the saved session `prefix` names to `out` as JSONL, matching in the current project first
+/// and then in every project.
+pub fn export_session(store: &SessionStore, prefix: &str, out: &mut dyn Write) -> Result<()> {
+    let info = resolve_prefix(store, prefix, None, ProjectScope::Current)?;
+    store.export(&info.session_id, out)
 }
 
 /// Why a session ID or its prefix resolved to no single session. `Display` is the lowercase
@@ -235,9 +249,8 @@ fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
 mod tests {
     use super::*;
     use crate::message::Message;
-    use crate::session::store::local_testing::{test_session_file, write_newest_corrupt_session};
     use crate::session::store::testing::{
-        archive_test_session, isolated_store, seed_test_session, test_project_dir, test_store,
+        SEEDED_PROMPT, archive_test_session, isolated_store, seed_test_session, test_store,
     };
 
     mod resolve_session {
@@ -245,41 +258,35 @@ mod tests {
 
         #[tokio::test]
         async fn starts_fresh_when_no_continue_flag() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
+            let (_dir, store) = isolated_store();
             let resumed = resolve_session(&store, "m", None, None, ProjectScope::Current)
                 .await
                 .unwrap();
             assert_eq!(resumed.transcript.messages, []);
             assert!(resumed.title.is_none());
             assert!(resumed.transcript.tool_metadata.is_empty());
-            assert!(
-                std::fs::read_dir(test_project_dir(dir.path()))
-                    .unwrap()
-                    .next()
-                    .is_none(),
-                "fresh session file should be deferred until the first record_message",
+            assert_eq!(
+                store.list().unwrap(),
+                [],
+                "the first message saves a fresh session"
             );
         }
 
         #[tokio::test]
-        async fn resumes_from_external_path() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let original = handle::start(&store, "m", None);
-            let full_id = original.session_id().to_owned();
-            original
-                .record_message(Message::user("external path test"))
-                .await;
-            original.finish(Vec::new()).await;
-            let path = test_session_file(dir.path(), &full_id);
-            drop(original);
+        async fn imports_and_resumes_an_export_file() {
+            let (_source_dir, source) = isolated_store();
+            let original = handle::start(&source, "m", None);
+            let full_id = original.session_id();
+            original.record_message(Message::user("exported")).await;
+            original.finalize(Vec::new()).await;
+            let export_dir = tempfile::tempdir().unwrap();
+            let export = export_dir.path().join("session.jsonl");
+            source
+                .export(&full_id, &mut File::create(&export).unwrap())
+                .unwrap();
+            let (_dir, store) = isolated_store();
 
-            let external_dir = tempfile::tempdir().unwrap();
-            let external_path = external_dir.path().join("copied.jsonl");
-            std::fs::copy(&path, &external_path).unwrap();
-
-            let arg = external_path.to_string_lossy().into_owned();
+            let arg = export.to_string_lossy().into_owned();
             let resumed = resolve_session(
                 &store,
                 "m",
@@ -289,16 +296,17 @@ mod tests {
             )
             .await
             .unwrap();
+
             assert_eq!(resumed.handle.session_id(), full_id);
-            assert_eq!(resumed.transcript.messages.len(), 1);
-            assert_eq!(resumed.title.as_deref(), Some("external path test"));
+            assert_eq!(resumed.transcript.messages, [Message::user("exported")]);
+            assert_eq!(resumed.title.as_deref(), Some("exported"));
         }
 
         #[tokio::test]
         async fn prefix_resumes_single_match() {
             let (_dir, store) = isolated_store();
             let original = handle::start(&store, "m", None);
-            let full_id = original.session_id().to_owned();
+            let full_id = original.session_id();
             original.record_message(Message::user("hello")).await;
             original.finish(Vec::new()).await;
             drop(original);
@@ -324,8 +332,8 @@ mod tests {
             let store = test_store(dir.path());
             let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
             let at = time::macros::datetime!(2026-04-18 09:00:00 UTC);
-            seed_test_session(&store, "abcd-local", Some("Local"), Some(1), at);
-            seed_test_session(&other, "abcd-other", Some("Other"), Some(1), at);
+            seed_test_session(&store, "abcd-local", Some("Local"), 1, at);
+            seed_test_session(&other, "abcd-other", Some("Other"), 1, at);
             let resume = async |prefix: &str, projects: ProjectScope| {
                 resolve_session(
                     &store,
@@ -364,32 +372,46 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn continue_resumes_the_newest_readable_unarchived_session() {
+        async fn continue_resumes_the_newest_resumable_unarchived_session() {
             let dir = tempfile::tempdir().unwrap();
             let store = test_store(dir.path());
             seed_test_session(
                 &store,
                 "older",
                 Some("Older"),
-                Some(1),
+                1,
                 time::macros::datetime!(2026-04-18 09:00:00 UTC),
             );
             seed_test_session(
                 &store,
                 "newer",
                 Some("Newer"),
-                Some(1),
+                1,
                 time::macros::datetime!(2026-04-18 10:00:00 UTC),
             );
             seed_test_session(
                 &store,
                 "archived",
                 Some("Archived"),
-                Some(1),
+                1,
                 time::macros::datetime!(2026-04-18 11:00:00 UTC),
             );
             archive_test_session(&store, "archived");
-            write_newest_corrupt_session(dir.path());
+            seed_test_session(
+                &store,
+                "newer-build",
+                Some("Newer build"),
+                1,
+                time::macros::datetime!(2026-04-18 12:00:00 UTC),
+            );
+            store
+                .connect()
+                .unwrap()
+                .execute(
+                    "UPDATE sessions SET format = format + 1 WHERE id = 'newer-build'",
+                    [],
+                )
+                .unwrap();
 
             let resumed = resolve_session(
                 &store,
@@ -413,7 +435,7 @@ mod tests {
                 &store,
                 "archived",
                 Some("Archived"),
-                Some(1),
+                1,
                 time::macros::datetime!(2026-04-18 09:00:00 UTC),
             );
             archive_test_session(&store, "archived");
@@ -488,7 +510,7 @@ mod tests {
                     &store,
                     &format!("ab{i}-session"),
                     None,
-                    Some(1),
+                    1,
                     time::macros::datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i),
                 );
             }
@@ -629,47 +651,109 @@ mod tests {
         }
     }
 
-    mod session_path {
+    mod resolve_target {
         use super::*;
 
+        const ID: &str = "abcd1234-eeff-1122-3344-556677889900";
+
         #[test]
-        fn finds_the_file_of_an_id_or_a_prefix_and_keeps_an_explicit_path() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = test_store(dir.path());
-            let id = "abcd1234-eeff-1122-3344-556677889900";
+        fn resolves_an_id_a_prefix_and_an_imported_export() {
+            let (dir, source) = isolated_store();
             seed_test_session(
-                &store,
-                id,
+                &source,
+                ID,
                 Some("Saved"),
-                Some(1),
+                1,
                 time::macros::datetime!(2026-04-18 09:00:00 UTC),
             );
-            let file = test_session_file(dir.path(), id);
-            let explicit = dir.path().join("elsewhere.jsonl");
+            let export = dir.path().join("session.jsonl");
+            source
+                .export(ID, &mut File::create(&export).unwrap())
+                .unwrap();
+            let (_dir, imported) = isolated_store();
 
-            for (target, expected) in [
-                (ResumeTarget::Id(id.to_owned()), &file),
-                (ResumeTarget::Prefix("abcd".to_owned()), &file),
-                (ResumeTarget::Path(explicit.clone()), &explicit),
+            for (store, target) in [
+                (&source, ResumeTarget::Id(ID.to_owned())),
+                (&source, ResumeTarget::Prefix("abcd".to_owned())),
+                (&imported, ResumeTarget::Path(export)),
             ] {
-                let path = session_path(&store, target.clone(), None, ProjectScope::Current);
-                assert_eq!(&path.unwrap(), expected, "{target:?}");
+                let id = resolve_target(store, target.clone(), None, ProjectScope::Current);
+                assert_eq!(id.unwrap(), ID, "{target:?}");
             }
+            assert_eq!(
+                saved_title(&imported, ID),
+                Some("Saved".to_owned()),
+                "the import saves the session"
+            );
         }
 
         #[test]
-        fn names_an_id_with_no_file() {
-            let (_dir, store) = isolated_store();
+        fn names_a_file_it_cannot_open_or_import() {
+            let (dir, store) = isolated_store();
+            let missing = dir.path().join("missing.jsonl");
+            let foreign = dir.path().join("foreign.jsonl");
+            std::fs::write(&foreign, "{\"type\":\"header\"}\n").unwrap();
 
-            let err = session_path(
-                &store,
-                ResumeTarget::Id("missing".to_owned()),
-                None,
-                ProjectScope::Current,
-            )
-            .unwrap_err();
+            let resolve = |path: &Path| {
+                let target = ResumeTarget::Path(path.to_path_buf());
+                let err = resolve_target(&store, target, None, ProjectScope::Current).unwrap_err();
+                format!("{err:#}")
+            };
 
-            assert_eq!(err.to_string(), "session not found: missing");
+            assert!(
+                resolve(&missing).starts_with(&format!("failed to open {}: ", missing.display())),
+                "{}",
+                resolve(&missing),
+            );
+            assert_eq!(
+                resolve(&foreign),
+                format!(
+                    "failed to import {}: line 1: not an ox session export, which starts with a \
+                     session record",
+                    foreign.display()
+                ),
+            );
+        }
+
+        fn saved_title(store: &SessionStore, id: &str) -> Option<String> {
+            store.find(id).unwrap()?.title
+        }
+    }
+
+    mod export_session {
+        use super::*;
+
+        #[test]
+        fn writes_the_session_a_prefix_names_in_any_project() {
+            let dir = tempfile::tempdir().unwrap();
+            let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+            let id = "abcd1234-eeff-1122-3344-556677889900";
+            seed_test_session(
+                &other,
+                id,
+                Some("Foreign"),
+                1,
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let current = test_store(dir.path());
+            let mut by_prefix = Vec::new();
+            let mut by_id = Vec::new();
+
+            export_session(&current, "abcd", &mut by_prefix).unwrap();
+            other.export(id, &mut by_id).unwrap();
+
+            assert_eq!(by_prefix, by_id);
+            assert!(
+                String::from_utf8(by_prefix)
+                    .unwrap()
+                    .contains(&format!(r#""text":"{SEEDED_PROMPT}""#)),
+            );
+            assert_eq!(
+                export_session(&current, "zzzz", &mut Vec::new())
+                    .unwrap_err()
+                    .to_string(),
+                "no session matching `zzzz`",
+            );
         }
     }
 
@@ -685,7 +769,7 @@ mod tests {
                 &other,
                 id,
                 Some("Foreign"),
-                Some(1),
+                1,
                 time::macros::datetime!(2026-04-18 09:00:00 UTC),
             );
             let current = test_store(dir.path());
@@ -713,7 +797,7 @@ mod tests {
                 &other,
                 target,
                 Some("Foreign"),
-                Some(1),
+                1,
                 time::macros::datetime!(2026-04-18 09:00:00 UTC),
             );
             let current = test_store(dir.path());
@@ -734,7 +818,7 @@ mod tests {
                     &store,
                     id,
                     Some("Saved"),
-                    Some(1),
+                    1,
                     time::macros::datetime!(2026-04-18 09:00:00 UTC),
                 );
             }
@@ -769,7 +853,7 @@ mod tests {
                     time::macros::datetime!(2026-04-18 09:00:01 UTC),
                 ),
             ] {
-                seed_test_session(&store, id, Some("dup"), Some(1), created_at);
+                seed_test_session(&store, id, Some("dup"), 1, created_at);
             }
 
             let err = resolve_prefix(&store, "abcd", Some("live"), ProjectScope::Current);

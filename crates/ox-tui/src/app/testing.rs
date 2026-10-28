@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use ox_core::client::{RateLimitWindow, RateLimits};
 use ox_core::model::ModelSpec;
 use ox_core::protocol::{Event, Op};
-use ox_core::session::entry::ArchiveState;
+use ox_core::session::store::listing::ArchiveState;
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
 use super::operation::{Activity, InFlight};

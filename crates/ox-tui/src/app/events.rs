@@ -6,14 +6,14 @@ use indoc::formatdoc;
 use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, warn};
 
-use ox_core::config::auth::AuthSource;
+use ox_core::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::{Effort, ModelSpec};
 use ox_core::permission::{Basis, Mode, SessionGrant};
 use ox_core::protocol::{CompactTrigger, Event, Interaction, SavedTarget, TurnEnd, notice};
 use ox_core::session::display::{archive_notice, id_prefix};
-use ox_core::session::entry::{ArchiveState, SessionInfo};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
+use ox_core::session::store::listing::{ArchiveState, SessionInfo};
 use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::plural;
 
@@ -94,6 +94,7 @@ impl App {
                 prior,
                 history,
             } => self.apply_session_resumed(id, title, prior, history),
+            Event::SessionForked { id, from } => self.apply_session_forked(id, &from),
             Event::SessionCompacted {
                 summary,
                 pre_count,
@@ -266,6 +267,13 @@ impl App {
                 .push_system_message(archive_notice(&old_id, ArchiveState::Archived));
         }
         self.discard_queue();
+    }
+
+    /// Continues the conversation in the fork session `id`, keeping the chat.
+    fn apply_session_forked(&mut self, id: String, from: &str) {
+        self.chat
+            .push_system_message(notice::session_forked(&id, from));
+        self.session_info.session_id = id;
     }
 
     /// Mid-session resume: rebinds the session and rebuilds chat from the target transcript.
@@ -531,7 +539,6 @@ mod tests {
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::text_result;
     use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
-    use ox_core::session::entry::TitleInfo;
     use ox_core::session::resolver::ResolveError;
     use ox_core::session::saved::SavedAction;
     use ox_core::session::store::testing::{
@@ -547,7 +554,8 @@ mod tests {
     use super::*;
     use crate::action::Action;
     use crate::app::testing::{
-        FakeModal, activity, five_hour_limit, rendered_text, start_op, test_app,
+        FakeModal, activity, five_hour_limit, render_app, rendered_text, start_op, test_app,
+        test_app_with, unknown_model_session_info,
     };
     use crate::clipboard::CopyError;
     use crate::glyphs::INTERRUPTED_MARKER;
@@ -1546,6 +1554,21 @@ mod tests {
                 "queued prompts must drop on resume"
             );
             assert!(app.dirty);
+        }
+
+        #[test]
+        fn session_forked_notes_the_fork_and_moves_the_status_bar_to_it() {
+            let mut info = unknown_model_session_info();
+            info.config.status_line = vec![StatusLineSegment::SessionId];
+            let (mut app, _rx, _event_tx) = test_app_with(info, None);
+
+            app.handle_engine_event(Event::SessionForked {
+                id: stamped_id(0xf0),
+                from: app.session_info.session_id.clone(),
+            });
+
+            assert_eq!(app.session_info.session_id, stamped_id(0xf0));
+            insta::assert_snapshot!(render_app(&mut app, 80, 10));
         }
 
         #[test]
@@ -2681,7 +2704,7 @@ mod tests {
                         &store,
                         id,
                         Some(id),
-                        Some(1),
+                        1,
                         time::macros::datetime!(2026-04-18 09:00:00 UTC)
                             + time::Duration::seconds(second),
                     );
@@ -2806,10 +2829,7 @@ mod tests {
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);
                 let info = SessionInfo {
-                    title: Some(TitleInfo {
-                        title: "Old work".to_owned(),
-                        updated_at: time::macros::datetime!(2026-04-18 09:00:00 UTC),
-                    }),
+                    title: Some("Old work".to_owned()),
                     ..listed_session("saved")
                 };
                 app.handle_engine_event(Event::SavedFound(Ok(Box::new(info))));

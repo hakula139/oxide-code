@@ -1,4 +1,4 @@
-//! OAuth sign-in with PKCE, a loopback callback or pasted code, and credential storage.
+//! OAuth sign-in with PKCE, through a loopback callback or a pasted code.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -13,8 +13,9 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::debug;
 
-use super::auth::Auth;
-use super::oauth::{self, CodeGrant, OAUTH_CLIENT_ID, OAUTH_SCOPES};
+use super::token::{self, CodeGrant};
+use super::{OAUTH_CLIENT_ID, OAUTH_SCOPES, save_login};
+use crate::auth::Auth;
 use crate::util::tls::Trust;
 
 const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
@@ -131,8 +132,8 @@ impl PendingLogin {
             state: &self.state,
         };
         let result = async {
-            let tokens = oauth::exchange_code(token_url, &grant, trust).await?;
-            Ok(Auth::stored(oauth::save_login(&tokens, token_url).await?))
+            let tokens = token::exchange_code(token_url, &grant, trust).await?;
+            Ok(Auth::stored(save_login(&tokens, token_url).await?))
         }
         .await;
         if let Some(browser) = &mut browser {
@@ -348,8 +349,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::config::auth::AuthSource;
-    use crate::config::oauth::{ClaudeCodeKeychain, Login, SessionLogin};
+    use crate::auth::AuthSource;
+    use crate::auth::oauth::{ClaudeCodeKeychain, Login, SessionLogin};
     use crate::util::log::testing::LogCapture;
     use crate::util::tls::testing::NoRoots;
 

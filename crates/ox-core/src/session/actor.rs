@@ -1,18 +1,18 @@
-//! Session actor that owns [`SessionState`] and its writer. Each `recv()` wakeup drains the queued
-//! [`SessionCmd`]s into one batch and flushes it under the writer lock, so an isolated write runs
-//! with no interval timer. A compaction and `/archive` end their batch so a failed one can be
-//! unqueued, and cmds after a compaction see its committed synthetic root.
+//! Session actor that owns [`SessionState`]. Each `recv()` wakeup drains the queued [`SessionCmd`]s
+//! into one batch and commits it as one transaction on a blocking task, so an isolated write runs
+//! with no interval timer.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use time::OffsetDateTime;
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
-use uuid::Uuid;
 
-use super::entry::{CompactBoundary, Entry, TitleInfo, UsageRecord};
-use super::handle::{Checkpoint, CompactOutcome, Outcome, RecordOutcome, SharedState};
+use super::handle::{
+    Checkpoint, CompactBoundary, CompactOutcome, Fork, RecordOutcome, SharedState, WriteReport,
+};
 use super::state::SessionState;
+use super::store::UsageRecord;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
@@ -20,53 +20,53 @@ use crate::tool::ToolMetadata;
 
 // ── SessionCmd ──
 
-/// Cross-task protocol for [`super::handle::SessionHandle`]. Acks fire after the batch flush.
+/// Cross-task protocol for [`super::handle::SessionHandle`]. Acks fire after the batch commits.
 pub(super) enum SessionCmd {
     Record(Record),
-    /// Moves the chain anchor back to `checkpoint` and records the move.
+    /// Moves the head back to `checkpoint`.
     Rewind {
         checkpoint: Checkpoint,
-        ack: oneshot::Sender<Outcome>,
+        ack: oneshot::Sender<WriteReport>,
     },
-    /// One tool round's assistant message, the tool results answering it, and their sidecars, all
-    /// written in that order.
+    /// One tool round's assistant message and the tool results answering it, which carry the
+    /// results' metadata.
     RecordRound {
         assistant: Message,
         tool_results: Message,
         metadata: Vec<(String, ToolMetadata)>,
-        ack: oneshot::Sender<Outcome>,
+        ack: oneshot::Sender<WriteReport>,
     },
     Usage {
         records: Vec<UsageRecord>,
-        ack: oneshot::Sender<Outcome>,
+        ack: oneshot::Sender<WriteReport>,
     },
     AppendAiTitle {
         title: String,
-        ack: oneshot::Sender<Outcome>,
+        ack: oneshot::Sender<WriteReport>,
     },
     /// User-supplied title from `/rename`.
     SetManualTitle {
         title: String,
-        ack: oneshot::Sender<Outcome>,
+        ack: oneshot::Sender<WriteReport>,
     },
-    /// Bare `/archive`, sent just before the roll that finalizes the session. Ends its batch, and
-    /// its ack carries every write failure.
+    /// Bare `/archive`, sent just before the roll that finalizes the session. Its ack carries every
+    /// write failure.
     Archive {
-        ack: oneshot::Sender<Outcome>,
+        ack: oneshot::Sender<WriteReport>,
     },
     Finish {
-        /// Drained tracker snapshots, written as one `FileSnapshot` entry each plus a `Summary`.
+        /// Drained tracker snapshots, which replace the session's saved ones.
         snapshots: Vec<FileSnapshot>,
-        ack: oneshot::Sender<Outcome>,
+        ack: oneshot::Sender<WriteReport>,
     },
-    /// Writes a compaction boundary and the synthetic post-compact message, ends its batch, and
-    /// acks the pre-compact message count.
+    /// Writes the synthetic post-compact root carrying the compaction boundary, and acks the
+    /// pre-compact message count.
     Compact {
         boundary: CompactBoundary,
         synthetic_message: Message,
         ack: oneshot::Sender<CompactOutcome>,
     },
-    /// Drains pending writes, acks, then exits the actor loop so shutdown returns without waiting
+    /// Commits pending writes, acks, then exits the actor loop so shutdown returns without waiting
     /// for orphaned clones to drop.
     Shutdown {
         ack: oneshot::Sender<()>,
@@ -76,7 +76,7 @@ pub(super) enum SessionCmd {
 /// A conversation message for the actor to record.
 pub(super) struct Record {
     pub(super) msg: Message,
-    /// Written ahead of `msg`, so prompt state only lands alongside the message carrying it.
+    /// The prompt state `msg` is the first to carry.
     pub(super) context: Option<SessionContext>,
     /// The first-prompt title in place of `msg`'s text.
     pub(super) title: Option<String>,
@@ -85,26 +85,25 @@ pub(super) struct Record {
 
 // ── Actor Loop ──
 
-/// Pending ack for one absorbed cmd, fired once the batch flush returns.
+/// Pending ack for one absorbed cmd, fired once the batch commit returns.
 enum PendingAck {
     Record {
         ack: oneshot::Sender<RecordOutcome>,
         checkpoint: Checkpoint,
         ai_title_seed: Option<String>,
     },
-    Outcome(oneshot::Sender<Outcome>),
-    Archive(oneshot::Sender<Outcome>),
+    /// A report for a cmd that `moves_head` or leaves the head alone.
+    Report {
+        ack: oneshot::Sender<WriteReport>,
+        moves_head: bool,
+    },
+    Archive(oneshot::Sender<WriteReport>),
     Compact {
         ack: oneshot::Sender<CompactOutcome>,
         pre_count: u32,
-        synthetic_uuid: Uuid,
+        checkpoint: Checkpoint,
     },
     Shutdown(oneshot::Sender<()>),
-}
-
-enum BatchFlow {
-    Continue,
-    FlushNow,
 }
 
 /// Actor task body. Exits when the channel closes or a [`SessionCmd::Shutdown`] is absorbed.
@@ -115,36 +114,32 @@ pub(super) async fn run(
 ) {
     while let Some(first) = rx.recv().await {
         let mut batch = Batch::default();
-        let mut flow = batch.absorb(first, &mut state, &shared);
-        // A failed compact or archive leaves its entries at the queue tail for `settle_acks` to
-        // drop, which works only because each one ends its batch.
-        while matches!(flow, BatchFlow::Continue)
-            && let Ok(next) = rx.try_recv()
-        {
-            flow = batch.absorb(next, &mut state, &shared);
+        batch.absorb(first, &mut state, &shared);
+        while let Ok(next) = rx.try_recv() {
+            batch.absorb(next, &mut state, &shared);
         }
-        let stopped_before = state.persistence_stopped();
-        let (flushed, result) = tokio::task::spawn_blocking(move || {
-            let result = state.flush_entries(batch.entries);
+        let (committed, result) = tokio::task::spawn_blocking(move || {
+            let result = state.flush();
             (state, result)
         })
         .await
-        .expect("session flush task panicked");
-        state = flushed;
-        let failure = match result {
+        .expect("session commit task panicked");
+        state = committed;
+        let (failure, fork) = match result {
+            Ok(fork) => (None, fork),
             Err(e) => {
                 let msg = format!("{e:#}");
                 warn!(error = %msg, "session write batch failed");
-                // Keep the I/O cause that stopped persistence from being replaced by the stop
-                // notice every later batch reports.
-                if !stopped_before {
+                if shared.last_flush_failure().is_none() {
                     shared.record_flush_failure(&msg);
                 }
-                Some(msg)
+                (Some(msg), None)
             }
-            Ok(()) => None,
         };
-        settle_acks(batch.acks, &mut state, failure.as_deref(), &shared);
+        if fork.is_some() {
+            shared.set_live(state.session_id(), state.artifact_dir());
+        }
+        settle_acks(batch.acks, failure.as_deref(), fork, &shared);
         if batch.should_exit {
             break;
         }
@@ -153,30 +148,36 @@ pub(super) async fn run(
 
 #[derive(Default)]
 struct Batch {
-    entries: Vec<Entry>,
     acks: Vec<PendingAck>,
     should_exit: bool,
 }
 
 impl Batch {
-    fn absorb(
-        &mut self,
-        cmd: SessionCmd,
-        state: &mut SessionState,
-        shared: &SharedState,
-    ) -> BatchFlow {
-        let now = OffsetDateTime::now_utc();
+    fn absorb(&mut self, cmd: SessionCmd, state: &mut SessionState, shared: &SharedState) {
         match cmd {
-            SessionCmd::Record(record) => {
-                let manual_title_set = shared.manual_title_set();
-                self.absorb_record(record, state, manual_title_set, now);
-                BatchFlow::Continue
+            SessionCmd::Record(Record {
+                msg,
+                context,
+                title,
+                ack,
+            }) => {
+                let checkpoint = state.checkpoint();
+                let ai_title_seed = state.queue_message(
+                    msg,
+                    context,
+                    BTreeMap::new(),
+                    title.as_deref(),
+                    shared.manual_title_set(),
+                );
+                self.acks.push(PendingAck::Record {
+                    ack,
+                    checkpoint,
+                    ai_title_seed,
+                });
             }
             SessionCmd::Rewind { checkpoint, ack } => {
-                self.entries
-                    .push(state.rewind_entry(checkpoint, shared.manual_title_set(), now));
-                self.acks.push(PendingAck::Outcome(ack));
-                BatchFlow::Continue
+                state.rewind(checkpoint, shared.manual_title_set());
+                self.report(ack, true);
             }
             SessionCmd::RecordRound {
                 assistant,
@@ -185,143 +186,73 @@ impl Batch {
                 ack,
             } => {
                 let manual_title_set = shared.manual_title_set();
-                for message in [&assistant, &tool_results] {
-                    let (entries, _) =
-                        state.queue_message_entries(message, None, now, manual_title_set);
-                    self.entries.extend(entries);
-                }
-                self.queue_tool_metadata(metadata, now);
-                self.acks.push(PendingAck::Outcome(ack));
-                BatchFlow::Continue
+                let metadata = metadata
+                    .into_iter()
+                    .filter(|(_, metadata)| *metadata != ToolMetadata::default())
+                    .collect();
+                _ = state.queue_message(assistant, None, BTreeMap::new(), None, manual_title_set);
+                _ = state.queue_message(tool_results, None, metadata, None, manual_title_set);
+                self.report(ack, true);
             }
             SessionCmd::Usage { records, ack } => {
-                self.entries
-                    .extend(records.into_iter().map(|usage| Entry::Usage {
-                        uuid: Uuid::new_v4(),
-                        usage,
-                        timestamp: now,
-                    }));
-                self.acks.push(PendingAck::Outcome(ack));
-                BatchFlow::Continue
+                state.queue_usage(records);
+                self.report(ack, false);
             }
             SessionCmd::AppendAiTitle { title, ack } => {
-                if shared.manual_title_set() {
-                    _ = ack.send(Outcome { failure: None });
-                    return BatchFlow::Continue;
+                if !shared.manual_title_set() {
+                    state.set_title(title, false);
                 }
-                self.entries.push(Entry::Title(TitleInfo {
-                    title,
-                    updated_at: now,
-                }));
-                self.acks.push(PendingAck::Outcome(ack));
-                BatchFlow::Continue
+                self.report(ack, false);
             }
             SessionCmd::SetManualTitle { title, ack } => {
-                match state.try_defer_title(title) {
-                    None => _ = ack.send(Outcome { failure: None }),
-                    Some(title) => {
-                        self.entries.push(Entry::Title(TitleInfo {
-                            title,
-                            updated_at: now,
-                        }));
-                        self.acks.push(PendingAck::Outcome(ack));
-                    }
-                }
-                BatchFlow::Continue
+                state.set_title(title, true);
+                self.report(ack, false);
             }
             SessionCmd::Archive { ack } => {
-                self.entries.push(Entry::Archive {
-                    archived: true,
-                    at: now,
-                });
+                state.queue_archive();
                 self.acks.push(PendingAck::Archive(ack));
-                BatchFlow::FlushNow
             }
             SessionCmd::Finish { snapshots, ack } => {
-                self.entries.extend(state.finish_entries(snapshots, now));
-                self.acks.push(PendingAck::Outcome(ack));
-                BatchFlow::Continue
+                state.finish(snapshots);
+                self.report(ack, false);
             }
             SessionCmd::Compact {
                 boundary,
                 synthetic_message,
                 ack,
             } => {
-                let pre_count = state.message_count();
-                let (compact_entries, synthetic_uuid) =
-                    state.compact_entries(boundary, synthetic_message, now);
-                self.entries.extend(compact_entries);
+                let pre_count = state.compact(boundary, synthetic_message);
                 self.acks.push(PendingAck::Compact {
                     ack,
                     pre_count,
-                    synthetic_uuid,
+                    checkpoint: state.checkpoint(),
                 });
-                BatchFlow::FlushNow
             }
             SessionCmd::Shutdown { ack } => {
                 self.acks.push(PendingAck::Shutdown(ack));
                 self.should_exit = true;
-                BatchFlow::Continue
             }
         }
     }
 
-    /// Queues the record's message behind the prompt context it is the first to carry, if any.
-    fn absorb_record(
-        &mut self,
-        record: Record,
-        state: &mut SessionState,
-        manual_title_set: bool,
-        now: OffsetDateTime,
-    ) {
-        let Record {
-            msg,
-            context,
-            title,
-            ack,
-        } = record;
-        let checkpoint = state.checkpoint();
-        let (msg_entries, ai_title_seed) =
-            state.queue_message_entries(&msg, title.as_deref(), now, manual_title_set);
-        if let Some(context) = context {
-            self.entries.push(Entry::Context {
-                context: Box::new(context),
-                timestamp: now,
-            });
-        }
-        self.entries.extend(msg_entries);
-        self.acks.push(PendingAck::Record {
-            ack,
-            checkpoint,
-            ai_title_seed,
-        });
-    }
-
-    /// Queues one sidecar per item, skipping default metadata since it adds no display fields.
-    fn queue_tool_metadata(&mut self, items: Vec<(String, ToolMetadata)>, now: OffsetDateTime) {
-        self.entries.extend(
-            items
-                .into_iter()
-                .filter(|(_, metadata)| *metadata != ToolMetadata::default())
-                .map(|(tool_use_id, metadata)| Entry::ToolResultMetadata {
-                    tool_use_id,
-                    metadata,
-                    timestamp: now,
-                }),
-        );
+    fn report(&mut self, ack: oneshot::Sender<WriteReport>, moves_head: bool) {
+        self.acks.push(PendingAck::Report { ack, moves_head });
     }
 }
 
-/// Acks each absorbed cmd once its batch flush returns `failure`. A compact commits when its batch
-/// flushed or persistence has stopped, which leaves no file to keep it consistent with. Any other
-/// failed compact and every failed archive are unqueued, matching what their acks tell the caller.
+/// Acks each absorbed cmd once its batch commit returns `failure`. The first ack of a cmd that
+/// moved the head carries `fork`, which only such a cmd can trigger.
 fn settle_acks(
     acks: Vec<PendingAck>,
-    state: &mut SessionState,
     failure: Option<&str>,
+    mut fork: Option<Fork>,
     shared: &SharedState,
 ) {
-    let stopped = state.persistence_stopped();
+    let surfaced = failure.filter(|_| shared.surface_first_flush_failure());
+    let report = |fork: Option<Fork>| WriteReport {
+        failure: surfaced.map(str::to_owned),
+        fork,
+    };
     for pending in acks {
         match pending {
             PendingAck::Record {
@@ -332,43 +263,28 @@ fn settle_acks(
                 _ = ack.send(RecordOutcome {
                     checkpoint: Some(checkpoint),
                     ai_title_seed,
-                    failure: surface_failure(failure, stopped, shared),
+                    report: report(fork.take()),
                 });
             }
-            PendingAck::Outcome(ack) => {
-                _ = ack.send(Outcome {
-                    failure: surface_failure(failure, stopped, shared),
-                });
+            PendingAck::Report { ack, moves_head } => {
+                let fork = if moves_head { fork.take() } else { None };
+                _ = ack.send(report(fork));
             }
             PendingAck::Archive(ack) => {
-                if failure.is_some() {
-                    state.abandon_archive();
-                }
-                _ = ack.send(Outcome {
+                _ = ack.send(WriteReport {
                     failure: failure.map(str::to_owned),
+                    fork: None,
                 });
             }
             PendingAck::Compact {
                 ack,
                 pre_count,
-                synthetic_uuid,
+                checkpoint,
             } => {
-                // Every failure that leaves the compact uncommitted reaches the agent, so each
-                // discarded summary shows its cause.
-                let (checkpoint, failure) = if failure.is_none() || stopped {
-                    state.commit_compact(synthetic_uuid);
-                    (
-                        Some(state.checkpoint()),
-                        surface_failure(failure, stopped, shared),
-                    )
-                } else {
-                    state.abandon_compact();
-                    (None, failure.map(str::to_owned))
-                };
                 _ = ack.send(CompactOutcome {
                     pre_count,
-                    checkpoint,
-                    failure,
+                    checkpoint: Some(checkpoint),
+                    report: report(fork.take()),
                 });
             }
             PendingAck::Shutdown(ack) => _ = ack.send(()),
@@ -376,815 +292,177 @@ fn settle_acks(
     }
 }
 
-/// Carries the first flush failure and the first failure after persistence stopped. Later ones stay
-/// in the warn-log.
-fn surface_failure(failure: Option<&str>, stopped: bool, shared: &SharedState) -> Option<String> {
-    let msg = failure?;
-    let first = if stopped {
-        shared.surface_first_persistence_stop()
-    } else {
-        shared.surface_first_flush_failure()
-    };
-    first.then(|| msg.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
+    use std::path::PathBuf;
 
     use super::*;
-    use crate::session::entry::{ArchiveState, CompactInfo, CompactRecord, ExitInfo};
-    use crate::session::handle::testing::boundary;
-    use crate::session::state::MAX_UNWRITTEN_BYTES;
-    use crate::session::store::local_testing::{saved_entries, saved_titles, test_session_file};
-    use crate::session::store::open_append_at;
-    use crate::session::store::testing::{test_project_dir, test_store};
+    use crate::session::handle::start;
+    use crate::session::state::STOPPED;
+    use crate::session::store::local_testing::fail_writes;
+    use crate::session::store::testing::{isolated_store, saved_messages};
 
     mod run {
         use super::*;
 
-        /// Runs the actor over `cmds` until the channel closes, returning its `SharedState`.
-        async fn drive(state: SessionState, cmds: Vec<SessionCmd>) -> Arc<SharedState> {
-            let shared = Arc::new(SharedState::default());
-            drive_with(state, Arc::clone(&shared), cmds).await;
-            shared
-        }
+        #[tokio::test]
+        async fn surfaces_a_failed_commit_once_but_to_every_archive() {
+            let (_dir, store) = isolated_store();
+            let handle = start(&store, "m", None);
+            fail_writes(&store);
 
-        async fn drive_with(state: SessionState, shared: Arc<SharedState>, cmds: Vec<SessionCmd>) {
-            let (tx, rx) = mpsc::channel(cmds.len().max(1));
-            for cmd in cmds {
-                tx.send(cmd).await.unwrap();
-            }
-            drop(tx);
-            run(state, rx, shared).await;
-        }
-
-        /// Shared state with the manual-title latch that `SessionHandle::set_manual_title` sets.
-        fn renamed() -> Arc<SharedState> {
-            let shared = Arc::new(SharedState::default());
-            shared.mark_manual_title_set();
-            shared
-        }
-
-        fn record_cmd(text: &str) -> (SessionCmd, oneshot::Receiver<RecordOutcome>) {
-            let (ack, rx) = oneshot::channel();
-            (
-                SessionCmd::Record(Record {
-                    msg: Message::user(text),
-                    context: None,
-                    title: None,
-                    ack,
-                }),
-                rx,
-            )
-        }
-
-        fn finish_cmd() -> (SessionCmd, oneshot::Receiver<Outcome>) {
-            let (ack, rx) = oneshot::channel();
-            (
-                SessionCmd::Finish {
-                    snapshots: Vec::new(),
-                    ack,
-                },
-                rx,
-            )
-        }
-
-        fn shutdown_cmd() -> (SessionCmd, oneshot::Receiver<()>) {
-            let (ack, rx) = oneshot::channel();
-            (SessionCmd::Shutdown { ack }, rx)
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn idle_actor_allows_the_clock_to_advance_before_the_next_record() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let session_id = state.session_id.to_string();
-            let (tx, rx) = mpsc::channel(1);
-            let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
-
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let (record, ack) = record_cmd("after idle");
-            tx.send(record).await.unwrap();
-            assert!(ack.await.unwrap().failure.is_none());
-            drop(tx);
-            actor.await.unwrap();
+            let first = handle.record_message(Message::user("a")).await;
+            let second = handle.record_message(Message::user("b")).await;
+            let archived = handle.archive().await;
+            handle.shutdown().await;
 
             assert_eq!(
-                store.load_session_data(&session_id).unwrap().messages,
-                [Message::user("after idle")],
+                first.report.failure.as_deref(),
+                Some("disk full: Error code 1811: constraint failed")
             );
+            assert_eq!(second.report, WriteReport::default());
+            assert_eq!(archived.failure.as_deref(), Some(STOPPED));
         }
 
         #[tokio::test]
-        async fn record_then_finish_writes_header_title_message_summary_in_order() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store, "m", None);
-            let session_id = state.session_id.to_string();
-            let (rec, _rec_rx) = record_cmd("hello");
-            let (fin, _fin_rx) = finish_cmd();
+        async fn commits_the_commands_queued_behind_the_first_in_order() {
+            let (_dir, store) = isolated_store();
+            let handle = start(&store, "m", None);
+            let session_id = handle.session_id();
 
-            drive(state, vec![rec, fin]).await;
-
-            let entries = saved_entries(dir.path(), &session_id);
-            assert!(
-                matches!(
-                    entries.as_slice(),
-                    [
-                        Entry::Header(_),
-                        Entry::Title(_),
-                        Entry::Message { .. },
-                        Entry::Summary(ExitInfo {
-                            message_count: 1,
-                            ..
-                        }),
-                    ]
-                ),
-                "{entries:?}",
+            let (first, second) = tokio::join!(
+                handle.record_message(Message::user("a")),
+                handle.record_message(Message::user("b")),
             );
-        }
+            handle.shutdown().await;
 
-        #[tokio::test]
-        async fn first_record_seeds_ai_title_and_subsequent_does_not() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store, "m", None);
-            let (cmd_a, rx_a) = record_cmd("Fix login bug");
-            let (cmd_b, rx_b) = record_cmd("follow up");
-
-            drive(state, vec![cmd_a, cmd_b]).await;
-
-            let outcome_a = rx_a.await.unwrap();
-            let outcome_b = rx_b.await.unwrap();
-            assert_eq!(outcome_a.ai_title_seed.as_deref(), Some("Fix login bug"));
-            assert!(outcome_b.ai_title_seed.is_none());
-        }
-
-        #[tokio::test]
-        async fn persists_queued_messages_in_order() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let session_id = state.session_id.to_string();
-            let (a, _ra) = record_cmd("one");
-            let (b, _rb) = record_cmd("two");
-            let (c, _rc) = record_cmd("three");
-
-            drive(state, vec![a, b, c]).await;
-
-            let data = store.load_session_data(&session_id).unwrap();
-            assert_eq!(
-                data.messages,
-                [
-                    Message::user("one"),
-                    Message::user("two"),
-                    Message::user("three"),
-                ],
-            );
-        }
-
-        #[tokio::test]
-        async fn round_with_default_sidecars_writes_messages_without_metadata() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let session_id = state.session_id.to_string();
-            let (rec, _rec_rx) = record_cmd("trigger");
-            let (round_ack, round_rx) = oneshot::channel();
-            let round_cmd = SessionCmd::RecordRound {
-                assistant: Message::assistant("answer"),
-                tool_results: Message::user("result"),
-                metadata: vec![("t1".to_owned(), ToolMetadata::default())],
-                ack: round_ack,
-            };
-
-            drive(state, vec![rec, round_cmd]).await;
-
-            let outcome = round_rx.await.unwrap();
-            assert!(outcome.failure.is_none());
-            let entries = saved_entries(dir.path(), &session_id);
-            assert!(
-                !entries
-                    .iter()
-                    .any(|entry| matches!(entry, Entry::ToolResultMetadata { .. })),
-                "default metadata must not be written: {entries:?}",
-            );
-            let data = store.load_session_data(&session_id).unwrap();
-            assert_eq!(
-                data.messages,
-                [
-                    Message::user("trigger"),
-                    Message::assistant("answer"),
-                    Message::user("result"),
-                ],
-            );
-        }
-
-        #[tokio::test]
-        async fn appends_ai_title_after_record() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let session_id = state.session_id.to_string();
-            let (rec, _rec_rx) = record_cmd("Fix login");
-            let (ai_ack, _ai_rx) = oneshot::channel();
-            let ai_cmd = SessionCmd::AppendAiTitle {
-                title: "Fix the auth flow".to_owned(),
-                ack: ai_ack,
-            };
-            let (fin, _fin_rx) = finish_cmd();
-
-            drive(state, vec![rec, ai_cmd, fin]).await;
-
-            // Tail scan picks the title with the latest `updated_at`, so the AI title wins.
-            let title = store
-                .list()
-                .unwrap()
+            assert_eq!(first.report, WriteReport::default());
+            assert_eq!(second.report, WriteReport::default());
+            let prompts: Vec<_> = saved_messages(&store, &session_id)
                 .into_iter()
-                .find(|s| s.session_id == session_id)
-                .and_then(|s| s.title)
-                .expect("title");
-            assert_eq!(title.title, "Fix the auth flow");
-        }
-
-        #[tokio::test]
-        async fn set_manual_title_alone_leaves_no_file_on_disk() {
-            // The deferred title waits in `WriterStatus::Pending` and dies with the actor.
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let (manual_ack, manual_rx) = oneshot::channel();
-            let manual_cmd = SessionCmd::SetManualTitle {
-                title: "Doomed rename".to_owned(),
-                ack: manual_ack,
-            };
-            let (fin, _fin_rx) = finish_cmd();
-
-            drive(state, vec![manual_cmd, fin]).await;
-
-            let outcome = manual_rx.await.expect("manual ack must arrive");
-            assert!(
-                outcome.failure.is_none(),
-                "deferred-entry path acks healthily"
-            );
-
-            assert!(
-                store.list().unwrap().is_empty(),
-                "no message ever sent → no on-disk session",
-            );
-        }
-
-        #[tokio::test]
-        async fn set_manual_title_then_record_replaces_first_prompt_title() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let session_id = state.session_id.to_string();
-            let (manual_ack, _manual_rx) = oneshot::channel();
-            let manual_cmd = SessionCmd::SetManualTitle {
-                title: "User-named".to_owned(),
-                ack: manual_ack,
-            };
-            let (rec, _rec_rx) = record_cmd("hello");
-            let (fin, _fin_rx) = finish_cmd();
-
-            drive_with(state, renamed(), vec![manual_cmd, rec, fin]).await;
-
-            let entries = saved_entries(dir.path(), &session_id);
-            assert!(
-                matches!(
-                    entries[..],
-                    [Entry::Header(_), Entry::Title(_), Entry::Message { .. }, ..]
-                ),
-                "deferred title must flush after the header and before the message: {entries:?}",
-            );
-            assert_eq!(
-                saved_titles(&entries),
-                ["User-named"],
-                "deferred title replaces the first-prompt title",
-            );
-        }
-
-        #[tokio::test]
-        async fn two_set_manual_titles_keep_only_the_last() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let session_id = state.session_id.to_string();
-            let (a_ack, _a_rx) = oneshot::channel();
-            let (b_ack, _b_rx) = oneshot::channel();
-            let a = SessionCmd::SetManualTitle {
-                title: "First name".to_owned(),
-                ack: a_ack,
-            };
-            let b = SessionCmd::SetManualTitle {
-                title: "Final name".to_owned(),
-                ack: b_ack,
-            };
-            let (rec, _rec_rx) = record_cmd("trigger");
-            let (fin, _fin_rx) = finish_cmd();
-
-            drive_with(state, renamed(), vec![a, b, rec, fin]).await;
-
-            let entries = saved_entries(dir.path(), &session_id);
-            assert_eq!(
-                saved_titles(&entries),
-                ["Final name"],
-                "second rename overwrites the first",
-            );
-        }
-
-        #[tokio::test]
-        async fn set_manual_title_after_record_blocks_ai_title() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store, "m", None);
-            let session_id = state.session_id.to_string();
-            let shared = Arc::new(SharedState::default());
-            let (tx, rx) = mpsc::channel(4);
-            let actor = tokio::spawn(run(state, rx, Arc::clone(&shared)));
-            let (rec, rec_rx) = record_cmd("Fix login");
-            tx.send(rec).await.unwrap();
-            rec_rx.await.unwrap();
-            shared.mark_manual_title_set();
-            let (manual_ack, _manual_rx) = oneshot::channel();
-            let manual_cmd = SessionCmd::SetManualTitle {
-                title: "User-picked title".to_owned(),
-                ack: manual_ack,
-            };
-            let (ai_ack, _ai_rx) = oneshot::channel();
-            let ai_cmd = SessionCmd::AppendAiTitle {
-                title: "AI title that should lose".to_owned(),
-                ack: ai_ack,
-            };
-            let (fin, _fin_rx) = finish_cmd();
-
-            for cmd in [manual_cmd, ai_cmd, fin] {
-                tx.send(cmd).await.unwrap();
-            }
-            drop(tx);
-            actor.await.unwrap();
-
-            let entries = saved_entries(dir.path(), &session_id);
-            assert_eq!(
-                saved_titles(&entries),
-                ["Fix login", "User-picked title"],
-                "AI title must not reach disk after a manual override",
-            );
-        }
-
-        #[tokio::test]
-        async fn shutdown_exits_loop_even_with_live_sender_clones() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store, "m", None);
-            let shared = Arc::new(SharedState::default());
-            let (tx, rx) = mpsc::channel::<SessionCmd>(4);
-            let _orphan_clone = tx.clone();
-            let actor = tokio::spawn(run(state, rx, Arc::clone(&shared)));
-
-            let (cmd, ack_rx) = shutdown_cmd();
-            tx.send(cmd).await.unwrap();
-            ack_rx.await.unwrap();
-
-            let exit = tokio::time::timeout(std::time::Duration::from_secs(1), actor).await;
-            assert!(
-                exit.is_ok(),
-                "actor must exit on Shutdown without the orphan clone dropping",
-            );
-        }
-
-        #[tokio::test]
-        async fn shutdown_flushes_preceding_record_in_same_batch() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let session_id = state.session_id.to_string();
-            let (rec, _rec_rx) = record_cmd("flush before exit");
-            let (shut, _shut_rx) = shutdown_cmd();
-
-            drive(state, vec![rec, shut]).await;
-
-            let data = store.load_session_data(&session_id).unwrap();
-            assert_eq!(data.messages.len(), 1, "record must reach disk before exit");
-        }
-
-        #[tokio::test]
-        async fn finish_idempotent_writes_one_summary() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let session_id = state.session_id.to_string();
-            let (rec, _rec_rx) = record_cmd("hi");
-            let (f1, _r1) = finish_cmd();
-            let (f2, _r2) = finish_cmd();
-
-            drive(state, vec![rec, f1, f2]).await;
-
-            let summary_count = saved_entries(dir.path(), &session_id)
-                .iter()
-                .filter(|entry| matches!(entry, Entry::Summary(_)))
-                .count();
-            assert_eq!(summary_count, 1, "second finish must not duplicate");
-        }
-
-        #[tokio::test]
-        async fn compact_writes_boundary_and_synthetic_message_to_disk() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let session_id = state.session_id.to_string();
-            let (rec_a, _) = record_cmd("user one");
-            let (rec_b, _) = record_cmd("user two");
-            let (compact_ack, _compact_rx) = oneshot::channel();
-            let compact_cmd = SessionCmd::Compact {
-                boundary: CompactBoundary {
-                    record: CompactRecord {
-                        instructions: Some("focus on auth".to_owned()),
-                        ..boundary("synth summary").record
-                    },
-                    ..boundary("synth summary")
-                },
-                synthetic_message: Message::user("post"),
-                ack: compact_ack,
-            };
-
-            drive(state, vec![rec_a, rec_b, compact_cmd]).await;
-
-            let entries = saved_entries(dir.path(), &session_id);
-            let boundaries: Vec<_> = entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    Entry::Compact {
-                        info:
-                            CompactInfo {
-                                record:
-                                    CompactRecord {
-                                        summary,
-                                        instructions,
-                                        ..
-                                    },
-                                ..
-                            },
-                        ..
-                    } => Some((summary.as_str(), instructions.as_deref())),
-                    _ => None,
-                })
+                .map(|message| message["content"][0]["text"].clone())
                 .collect();
-            assert_eq!(boundaries, [("synth summary", Some("focus on auth"))]);
-            assert!(
-                matches!(
-                    entries[..],
-                    [
-                        Entry::Header(_),
-                        Entry::Title(_),
-                        Entry::Message { .. },
-                        Entry::Message { .. },
-                        Entry::Compact { .. },
-                        Entry::Context { .. },
-                        Entry::Message { .. },
-                    ]
-                ),
-                "the refreshed context and the synthetic continuation \
-                 follow the boundary: {entries:?}",
-            );
-        }
-
-        #[tokio::test]
-        async fn compact_acks_with_pre_compact_message_count() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store, "m", None);
-            let (rec_a, _) = record_cmd("one");
-            let (rec_b, _) = record_cmd("two");
-            let (compact_ack, compact_rx) = oneshot::channel();
-            let compact_cmd = SessionCmd::Compact {
-                boundary: boundary("s"),
-                synthetic_message: Message::user("synth"),
-                ack: compact_ack,
-            };
-
-            drive(state, vec![rec_a, rec_b, compact_cmd]).await;
-
-            let outcome = compact_rx.await.unwrap();
-            assert_eq!(
-                outcome.pre_count, 2,
-                "pre_count reports the count BEFORE the compact reset",
-            );
-            assert!(outcome.failure.is_none());
-        }
-
-        #[tokio::test]
-        async fn compact_flushes_before_following_record() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let session_id = state.session_id.to_string();
-            let (rec_before, _) = record_cmd("before compact");
-            let (compact_ack, _compact_rx) = oneshot::channel();
-            let compact_cmd = SessionCmd::Compact {
-                boundary: boundary("s"),
-                synthetic_message: Message::user("synthetic summary"),
-                ack: compact_ack,
-            };
-            let (rec_after, _) = record_cmd("after compact");
-
-            drive(state, vec![rec_before, compact_cmd, rec_after]).await;
-
-            let data = store.load_session_data(&session_id).unwrap();
-            assert_eq!(data.messages.len(), 2);
-            assert!(matches!(
-                &data.messages[0].content[0],
-                crate::message::ContentBlock::Text { text, .. } if text == "synthetic summary"
-            ));
-            assert!(matches!(
-                &data.messages[1].content[0],
-                crate::message::ContentBlock::Text { text, .. } if text == "after compact"
-            ));
-        }
-
-        #[tokio::test]
-        async fn failed_compact_is_dropped_while_earlier_records_retry() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-            let session_id = state.session_id.to_string();
-            let (tx, rx) = mpsc::channel(4);
-            let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
-            let project_dir = test_project_dir(dir.path());
-            std::fs::remove_dir_all(&project_dir).unwrap();
-
-            let (rec, rec_rx) = record_cmd("before compact");
-            tx.send(rec).await.unwrap();
-            assert!(rec_rx.await.unwrap().failure.is_some());
-            let (compact_ack, compact_rx) = oneshot::channel();
-            tx.send(SessionCmd::Compact {
-                boundary: boundary("s"),
-                synthetic_message: Message::user("synthetic summary"),
-                ack: compact_ack,
-            })
-            .await
-            .unwrap();
-            let outcome = compact_rx.await.unwrap();
-            assert!(outcome.checkpoint.is_none());
-            assert!(
-                outcome.failure.is_some(),
-                "the agent must see every compact failure, even after one was already surfaced",
-            );
-
-            std::fs::create_dir_all(&project_dir).unwrap();
-            let (rec, rec_rx) = record_cmd("after compact");
-            tx.send(rec).await.unwrap();
-            assert!(rec_rx.await.unwrap().failure.is_none());
-            drop(tx);
-            actor.await.unwrap();
-
-            let data = store.load_session_data(&session_id).unwrap();
-            assert!(data.compact.is_none(), "failed compact must not reach disk");
-            assert_eq!(
-                data.messages,
-                [
-                    Message::user("before compact"),
-                    Message::user("after compact")
-                ]
-            );
-        }
-
-        #[tokio::test]
-        async fn compact_after_persistence_stopped_commits_in_memory() {
-            async fn compact(tx: &mpsc::Sender<SessionCmd>) -> CompactOutcome {
-                let (ack, rx) = oneshot::channel();
-                tx.send(SessionCmd::Compact {
-                    boundary: boundary("s"),
-                    synthetic_message: Message::user("synthetic summary"),
-                    ack,
-                })
-                .await
-                .unwrap();
-                rx.await.unwrap()
-            }
-
-            let dir = tempdir().unwrap();
-            let state = SessionState::fresh(test_store(dir.path()), "m", None);
-            let (tx, rx) = mpsc::channel(1);
-            let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
-            std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
-            for text in ["small".to_owned(), "x".repeat(MAX_UNWRITTEN_BYTES)] {
-                let (rec, rec_rx) = record_cmd(&text);
-                tx.send(rec).await.unwrap();
-                assert!(rec_rx.await.unwrap().failure.is_some());
-            }
-
-            let first = compact(&tx).await;
-            let (rec, rec_rx) = record_cmd("after compact");
-            tx.send(rec).await.unwrap();
-            assert!(rec_rx.await.unwrap().failure.is_none());
-            let second = compact(&tx).await;
-            drop(tx);
-            actor.await.unwrap();
-
-            assert!(first.checkpoint.is_some());
-            assert_eq!(first.failure, None, "the stop already surfaced");
-            assert_eq!(first.pre_count, 2);
-            assert!(second.checkpoint.is_some());
-            assert_eq!(second.failure, None);
-            assert_eq!(
-                second.pre_count, 2,
-                "the chain restarts at the synthetic root"
-            );
-        }
-
-        #[tokio::test]
-        async fn later_batches_keep_the_io_cause_that_stopped_persistence() {
-            let dir = tempdir().unwrap();
-            let state = SessionState::fresh(test_store(dir.path()), "m", None);
-            let (tx, rx) = mpsc::channel(1);
-            let shared = Arc::new(SharedState::default());
-            let actor = tokio::spawn(run(state, rx, Arc::clone(&shared)));
-            std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
-            for text in ["small".to_owned(), "x".repeat(MAX_UNWRITTEN_BYTES)] {
-                let (rec, rec_rx) = record_cmd(&text);
-                tx.send(rec).await.unwrap();
-                assert!(rec_rx.await.unwrap().failure.is_some());
-            }
-            let stopped_cause = shared
-                .last_flush_failure()
-                .expect("a flush failure is recorded");
-            assert!(
-                stopped_cause.contains("failed to create"),
-                "{stopped_cause}"
-            );
-
-            let (rec, rec_rx) = record_cmd("after stop");
-            tx.send(rec).await.unwrap();
-            assert!(
-                rec_rx.await.unwrap().failure.is_none(),
-                "the stop notice surfaces once",
-            );
-            drop(tx);
-            actor.await.unwrap();
-
-            assert_eq!(
-                shared.last_flush_failure().as_deref(),
-                Some(stopped_cause.as_str()),
-                "a later batch must not replace the I/O cause with the stop notice",
-            );
-        }
-
-        #[tokio::test]
-        async fn failed_archive_is_dropped_while_later_records_land() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let original = SessionState::fresh(store.clone(), "m", None);
-            let session_id = original.session_id.to_string();
-            let (rec, _) = record_cmd("before archive");
-            drive(original, vec![rec]).await;
-            let path = test_session_file(dir.path(), &session_id);
-            let last_uuid = store.load_session_data(&session_id).unwrap().last_uuid;
-            let writer = open_append_at(&path).unwrap();
-            let saved = dir.path().join("saved.jsonl");
-            std::fs::rename(&path, &saved).unwrap();
-            std::fs::create_dir(&path).unwrap();
-            let state = SessionState::resumed(
-                store.clone(),
-                session_id.clone(),
-                writer,
-                last_uuid,
-                1,
-                true,
-            );
-            let (tx, rx) = mpsc::channel(4);
-            let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
-
-            let (archive_ack, archive_rx) = oneshot::channel();
-            tx.send(SessionCmd::Archive { ack: archive_ack })
-                .await
-                .unwrap();
-            assert!(archive_rx.await.unwrap().failure.is_some());
-            std::fs::remove_dir(&path).unwrap();
-            std::fs::rename(&saved, &path).unwrap();
-            let (rec, rec_rx) = record_cmd("after archive");
-            tx.send(rec).await.unwrap();
-            assert!(rec_rx.await.unwrap().failure.is_none());
-            drop(tx);
-            actor.await.unwrap();
-
-            let data = store.load_session_data(&session_id).unwrap();
-            assert_eq!(
-                data.archive_state,
-                ArchiveState::Active,
-                "failed archive must not reach disk",
-            );
-            assert_eq!(
-                data.messages,
-                [
-                    Message::user("before archive"),
-                    Message::user("after archive")
-                ]
-            );
-        }
-
-        #[tokio::test]
-        async fn failed_archive_reports_the_failure_after_an_earlier_one_surfaced() {
-            let dir = tempdir().unwrap();
-            let state = SessionState::fresh(test_store(dir.path()), "m", None);
-            let (tx, rx) = mpsc::channel(4);
-            let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
-            std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
-
-            let (rec, rec_rx) = record_cmd("unsaved");
-            tx.send(rec).await.unwrap();
-            assert!(rec_rx.await.unwrap().failure.is_some());
-            let (archive_ack, archive_rx) = oneshot::channel();
-            tx.send(SessionCmd::Archive { ack: archive_ack })
-                .await
-                .unwrap();
-            drop(tx);
-            actor.await.unwrap();
-
-            assert!(
-                archive_rx.await.unwrap().failure.is_some(),
-                "the driver must see every archive failure, even after one was already surfaced",
-            );
-        }
-
-        #[tokio::test]
-        async fn flush_error_records_failure_in_ack() {
-            let dir = tempdir().unwrap();
-            let store = test_store(dir.path());
-            let state = SessionState::fresh(store.clone(), "m", None);
-
-            let project_dir = test_project_dir(dir.path());
-            std::fs::remove_dir_all(&project_dir).unwrap();
-
-            let (cmd, rx) = record_cmd("hello");
-            drive(state, vec![cmd]).await;
-
-            let outcome = rx.await.unwrap();
-            assert!(
-                outcome.failure.is_some(),
-                "flush error must surface in the Record ack",
-            );
-        }
-
-        #[tokio::test]
-        async fn surfaces_the_persistence_stop_after_an_earlier_flush_failure() {
-            let dir = tempdir().unwrap();
-            let state = SessionState::fresh(test_store(dir.path()), "m", None);
-            let (tx, rx) = mpsc::channel(1);
-            let actor = tokio::spawn(run(state, rx, Arc::new(SharedState::default())));
-            std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
-
-            let mut failures = Vec::new();
-            let huge = "x".repeat(MAX_UNWRITTEN_BYTES);
-            for text in ["small", huge.as_str(), "later"] {
-                let (rec, rec_rx) = record_cmd(text);
-                tx.send(rec).await.unwrap();
-                failures.push(rec_rx.await.unwrap().failure);
-            }
-            drop(tx);
-            actor.await.unwrap();
-
-            assert!(
-                failures[0].is_some(),
-                "the first flush failure must surface"
-            );
-            let stop = &failures[1];
-            assert!(
-                stop.as_deref()
-                    .is_some_and(|msg| msg.contains("persistence stopped")),
-                "the stop must surface after an earlier failure, got: {stop:?}",
-            );
-            assert!(failures[2].is_none(), "failures after the stop stay silent");
+            assert_eq!(prompts, ["a", "b"]);
         }
     }
 
-    mod surface_failure {
+    mod settle_acks {
         use super::*;
 
-        #[test]
-        fn surfaces_the_first_flush_failure_and_the_first_stop_then_silences() {
-            let shared = SharedState::default();
-            let surface = |msg, stopped| surface_failure(Some(msg), stopped, &shared);
+        fn checkpoint() -> Checkpoint {
+            Checkpoint {
+                tip: None,
+                message_count: 0,
+                first_user_prompt_seen: false,
+            }
+        }
 
-            assert_eq!(surface("boom", false).as_deref(), Some("boom"));
-            assert!(
-                surface("boom", false).is_none(),
-                "later flush failures stay silent"
+        fn shared() -> SharedState {
+            SharedState::new("source", PathBuf::from("/artifacts/source"), false)
+        }
+
+        fn report(moves_head: bool) -> (PendingAck, oneshot::Receiver<WriteReport>) {
+            let (ack, rx) = oneshot::channel();
+            (PendingAck::Report { ack, moves_head }, rx)
+        }
+
+        #[test]
+        fn hands_the_fork_to_the_first_ack_that_moved_the_head() {
+            let fork = Fork {
+                from: "source".to_owned(),
+                to: "fork".to_owned(),
+            };
+            let (usage, usage_rx) = report(false);
+            let (round, round_rx) = report(true);
+            let (record_ack, mut record_rx) = oneshot::channel();
+            let record = PendingAck::Record {
+                ack: record_ack,
+                checkpoint: checkpoint(),
+                ai_title_seed: None,
+            };
+
+            settle_acks(
+                vec![usage, round, record],
+                None,
+                Some(fork.clone()),
+                &shared(),
             );
-            assert_eq!(surface("stopped", true).as_deref(), Some("stopped"));
-            assert!(
-                surface("stopped", true).is_none(),
-                "later stop failures stay silent"
+
+            assert_eq!(usage_rx.blocking_recv().unwrap().fork, None);
+            assert_eq!(round_rx.blocking_recv().unwrap().fork, Some(fork));
+            assert_eq!(record_rx.try_recv().unwrap().report.fork, None);
+        }
+
+        #[test]
+        fn hands_the_fork_to_a_record_or_compaction_that_leads_the_batch() {
+            let fork = Fork {
+                from: "source".to_owned(),
+                to: "fork".to_owned(),
+            };
+            let (record_ack, record_rx) = oneshot::channel();
+            let (compact_ack, compact_rx) = oneshot::channel();
+            let acks = vec![
+                PendingAck::Record {
+                    ack: record_ack,
+                    checkpoint: checkpoint(),
+                    ai_title_seed: None,
+                },
+                PendingAck::Compact {
+                    ack: compact_ack,
+                    pre_count: 0,
+                    checkpoint: checkpoint(),
+                },
+            ];
+            let (compact_first, compact_first_rx) = oneshot::channel();
+
+            settle_acks(acks, None, Some(fork.clone()), &shared());
+            settle_acks(
+                vec![PendingAck::Compact {
+                    ack: compact_first,
+                    pre_count: 0,
+                    checkpoint: checkpoint(),
+                }],
+                None,
+                Some(fork.clone()),
+                &shared(),
+            );
+
+            assert_eq!(
+                record_rx.blocking_recv().unwrap().report.fork,
+                Some(fork.clone())
+            );
+            assert_eq!(compact_rx.blocking_recv().unwrap().report.fork, None);
+            assert_eq!(
+                compact_first_rx.blocking_recv().unwrap().report.fork,
+                Some(fork)
             );
         }
 
         #[test]
-        fn stays_silent_without_a_failure() {
-            let shared = SharedState::default();
-            assert!(surface_failure(None, false, &shared).is_none());
+        fn surfaces_a_failure_once_except_to_archive() {
+            let shared = shared();
+            let mut received = Vec::new();
+
+            for _ in 0..2 {
+                let (write, write_rx) = report(true);
+                let (archive_ack, archive_rx) = oneshot::channel();
+                settle_acks(
+                    vec![write, PendingAck::Archive(archive_ack)],
+                    Some("disk full"),
+                    None,
+                    &shared,
+                );
+                received.push((
+                    write_rx.blocking_recv().unwrap().failure,
+                    archive_rx.blocking_recv().unwrap().failure,
+                ));
+            }
+
+            let failure = Some("disk full".to_owned());
+            assert_eq!(
+                received,
+                [(failure.clone(), failure.clone()), (None, failure)]
+            );
         }
     }
 }

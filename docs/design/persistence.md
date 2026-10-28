@@ -1,191 +1,215 @@
 # Session Persistence
 
-`ox` stores each session as an append-only JSONL file, writes it through a single actor task, and rebuilds the transcript on resume.
+`ox` stores every session in one SQLite database, writes each session through a single actor task, and rebuilds the transcript on resume from the chain its head names. JSONL is the interchange form that `ox export` writes and `ox -r <file>` imports.
 
-## Storage Format
+## Storage Layout
 
-Every session is a single append-only `.jsonl` file with one JSON object per line.
+```text
+$XDG_DATA_HOME/ox/
+├── sessions.db                   # The store, with sessions.db-wal and sessions.db-shm beside it
+├── artifacts/{session-id}/       # Spill files under tool-results/, created by the first artifact
+├── locks/{session-id}.lock       # Held shared while a process has the session open
+└── locks/sessions.db.lock        # Held while a process sets up the store
+```
 
-### Entry Types
+The data directory is created with mode `0700`. On Unix the store creates `sessions.db` with mode `0600` before SQLite opens it, since SQLite gives the `-wal` and `-shm` files the main file's mode. The database must live on a local filesystem, because WAL [does not work over a network filesystem](https://www.sqlite.org/wal.html). SQLite cannot detect one reliably, so the [guide](../guide/sessions.md#where-sessions-live) states the requirement and the store does not probe for it.
 
-| Type                   | Position       | Purpose                                                                                                     |
-| ---------------------- | -------------- | ----------------------------------------------------------------------------------------------------------- |
-| `header`               | First line     | Session metadata: ID, working directory, project root, Git branch, model, created timestamp, format version |
-| `message`              | Middle lines   | Conversation message with `uuid`, optional `parent_uuid`, timestamp                                         |
-| `rewind`               | After messages | Moves the active branch's tip back to an earlier message, or before the first one                           |
-| `title`                | Re-appended    | Session title. Latest wins                                                                                  |
-| `tool_result_metadata` | Sidecar        | Display metadata for replaying tool results                                                                 |
-| `file_snapshot`        | Sidecar        | File-tracker state restored on resume when disk state still matches                                         |
-| `usage`                | After request  | One billed request's token usage, model, and prompt-cache TTL                                               |
-| `context`              | Before message | Prompt context of that message. Latest on the resolved chain wins                                           |
-| `compact`              | Boundary       | Summary, pre-compact count, and optional instructions and tasks                                             |
-| `archive`              | Re-appended    | Archive state: `archived` + `at`. Latest wins                                                               |
-| `summary`              | Last line      | Exit marker: `message_count` + `updated_at`. Latest wins                                                    |
+A session's artifacts, such as [spilled tool output](truncation.md#spill-files), live in `artifacts/{session-id}/`, which `store::artifact_dir` names. The first artifact creates the directory, and `SessionStore::delete` removes it with the rows.
 
-### Schema Invariants
+## Connection
 
-1. **Explicit entry schema.** The loader treats unknown discriminators as malformed lines, so schema compatibility stays explicit.
-2. **`parent_uuid` chain.** Each message links to its predecessor. Concurrent resumes can fork, and the newest-leaf rule resolves the active branch without rewriting history. A `rewind` entry moves the tip back the same way, by leaving the abandoned messages in place.
-3. **`version` field.** Bump on incompatible changes so older binaries fail fast on session state they cannot read.
+- **Bundled SQLite.** `rusqlite` builds SQLite from source, so every platform gets the fix for the WAL-reset bug that corrupts a database when connections in separate processes write or checkpoint concurrently ([how to corrupt](https://www.sqlite.org/howtocorrupt.html), fixed in [3.51.3](https://www.sqlite.org/releaselog/3_51_3.html)). That is the multi-process case `ox` runs in, and the system SQLite on macOS and older distributions predates the fix.
+- **Open.** Each process opens the store once at startup, and the TUI's `/resume` picker reuses that handle. `SessionStore::open` holds an exclusive lock on `locks/sessions.db.lock` while `schema::open` switches a fresh file to WAL and creates its schema, because leaving rollback mode upgrades a read lock to a write lock, which SQLite fails at once without calling the busy handler. A store already at this revision opens without taking the write lock, and only a migration runs under `BEGIN IMMEDIATE`. A file SQLite cannot read fails the open with the recovery steps in the order the [sessions guide](../guide/sessions.md#where-sessions-live) gives them: quit every `ox`, run `sqlite3 .recover` while the WAL still sits beside the database, then move the database aside together with its `-wal` and `-shm` files. The open reads only the header and the schema, so damage deeper in the file surfaces at the first write or listing that reaches it.
+- **Per connection.** `synchronous = NORMAL`, `checkpoint_fullfsync = ON`, a 5 s busy timeout, and `foreign_keys = ON`. In WAL mode, `NORMAL` survives a process crash, and power loss may roll back the last commits but leaves the file intact as long as each checkpoint reaches the disk in order. macOS orders a sync only with `F_FULLFSYNC`, which `checkpoint_fullfsync` turns on for checkpoints at the cost of one full flush per checkpoint, and other systems ignore it.
+- **Transactions.** Writes run under `BEGIN IMMEDIATE`, so a commit's head check and the writes that depend on it happen under the write lock. Reads use deferred transactions and never write.
+
+## Schema
+
+Columns hold what SQL filters, sorts, joins, or compares. JSON text holds the payloads only Rust reads, through their serde types, so content blocks evolve under the rules in [Compatibility](#compatibility). Timestamps are Unix milliseconds, and every table is `STRICT`.
+
+| Table      | Row                    | Columns                                                                                                                                                                                                                        |
+| ---------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sessions` | One per session        | ID, `forked_from`, project root, launch directory, Git branch, model, content `format`, created and last-active times, title and whether `/rename` set it, archive time, `head_id`, message count, and the file snapshots JSON |
+| `messages` | One per message        | Commit-order `seq`, session ID, message ID, `parent_id`, role, content JSON, and the JSON of the prompt `context` it first carries, the `compact` boundary it opens as a root, and its results' `tool_metadata`                |
+| `usage`    | One per billed request | Request ID, session ID, the usage record JSON, and its time                                                                                                                                                                    |
+
+1. **Immutable rows and a head pointer.** Rows never change once written, and only deleting their session removes them. `head_id` names the tip of the active branch, so rewind, compaction, and fork move the head while abandoned rows stay for export. The chain from the head back to the nearest NULL parent, the session start or the last compaction root, is the transcript resume reads.
+2. **Parents first.** `messages` keys on `(session_id, id)`, and a composite foreign key on `(session_id, parent_id)` makes "a message never precedes its parent, and both belong to one session" a database invariant.
+3. **Last activity.** `updated_at` changes only when the head moves, so renaming or archiving a session keeps its place in listings.
 
 ## Compatibility
 
-Session files follow the [stability surface](../../RELEASING.md#stability-surface): within a minor version, each stable release can resume session files written by earlier stable releases of that minor version. Before 0.1.0, a release may stop reading files from earlier versions, and an earlier prerelease binary may skip lines in a newer file without a header `version` bump. The loader treats a line in a shape it no longer reads as malformed and skips it. Since a skipped message breaks the chain that resume follows back from its newest leaf, the session resumes with only the messages after the last skipped one.
+The store follows the [stability surface](../../RELEASING.md#stability-surface) through two version numbers:
 
-Within the stability surface, a newer binary can read an older file as long as every format change is one of the following:
+- **Revision** (`PRAGMA user_version`). A revision only adds tables, indexes, and nullable or defaulted columns. A newer binary migrates under `BEGIN IMMEDIATE`, and an older binary keeps working on a newer revision, since nothing it relies on changed. An incompatible schema change would write a new file, such as `sessions-2.db`, so an older binary keeps the file it understands.
+- **Content format** (`sessions.format`). Every message commit stores the binary's `CONTENT_VERSION`. It bumps when an older binary would misread a newer payload: when a closed serde enum, such as a content block `type`, a text `origin`, a reasoning `wire`, or a task `status`, gains a value, or when a field older binaries require goes away. Listings and `ox -c` hide sessions of a newer format, and loading or importing one fails with an upgrade message.
 
-- **Additions.** A new entry type, or a new field that deserializes to a default when absent.
-- **Removals.** A removed field, since the loader ignores fields it does not know. The data the field held is lost on resume.
-- **Changed shapes with a loader.** Renaming a field or changing its type or meaning requires a loader that still reads the old shape.
-
-An older binary reading a newer file skips entry types it does not know as malformed lines and ignores unknown fields. Bump the header's `version` only when an older binary would misread a newer file, since an older binary refuses any file whose `version` is newer than it supports. A prerelease binary that predates `rewind` entries skips them, so until a newer message follows a rewind it resumes the abandoned branch. Binaries through 0.1.0-alpha.5 require a `source` field on `title` entries, so they skip the titles later binaries write and list those sessions as untitled.
+Within a format, a newer binary reads an older payload as long as each change is an addition that deserializes to a default when absent, a removal of a field the loader ignores, or a changed shape with a loader that still reads the old one.
 
 A reasoning block stores the `wire` and `model` that produced it alongside a `payload` that only that wire can read, such as the `signature` of an Anthropic `thinking` block or the `data` of a `redacted_thinking` block. The Anthropic wire sends every Anthropic block back unchanged whichever model produced it, as Anthropic's guide to [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks, so the recorded `model` changes no request. Which blocks a model reads depends on the platform, and the API drops or ignores the rest, as the [research note](../research/api/extended-thinking.md#constraints) details.
 
 A server tool's result, such as a `web_search_tool_result`, is stored as a `server_tool_result` block that keeps the API's block type in `kind` and every other field unchanged, so the Anthropic wire sends it back as the API returned it.
 
-Generated text blocks carry an optional `origin`: `system_reminder`, `interruption`, `compaction_summary`, or `compaction_truncation`. The provider request keeps the original text and omits this field. Transcript displays use it to hide reminders, render interruptions, and show a compact summary once. Text without an origin stays visible even when it contains a reminder tag or interruption marker. For older files, the loader restores missing origins only on the synthetic root identified by a committed `compact` boundary, assigning the first text block to the summary and subsequent text blocks to reminders.
+Generated text blocks carry an optional `origin`: `system_reminder`, `interruption`, `compaction_summary`, or `compaction_truncation`. The provider request keeps the original text and omits this field. Transcript displays use it to hide reminders, render interruptions, and show a compact summary once. Text without an origin stays visible even when it contains a reminder tag or interruption marker.
 
-An unknown `wire`, content block `type`, or text `origin` value fails to parse in a reader that recognizes that field, so it skips the whole message as a malformed line. From 0.1.0 on, adding a value to one of these closed enums needs a header `version` bump. A task `status` works the same way inside a `compact` entry: an unknown one makes an older binary skip the boundary, so adding one needs a bump too. Removing a field that older binaries require makes them skip the entry in the same way, so from 0.1.0 on that needs a bump as well.
+Tests in `session/handle.rs` enforce the guarantee for stable releases, using two fixtures per release starting with `v0.1.0`, in `crates/ox-core/src/session/fixtures/` and named after the tag:
 
-Tests in `session/handle.rs` enforce this guarantee for stable releases, using one fixture per release starting with `v0.1.0`. Each fixture lives in `crates/ox-core/src/session/fixtures/` and is named after its tag:
-
-- **Fixture source.** One test writes a session containing every entry type and content block, then adds messages, prompt contexts, and sidecars after compaction so a resume reads them. It snapshots the file after masking its per-run UUIDs, timestamps, and working directory. For each stable tag, the release PR copies that snapshot as the fixture for the new release, as described in [Prepare a Release](../../RELEASING.md#prepare-a-release).
-- **Resume check.** Another test fills each fixture's masks with fixed values, then lists and resumes it. It snapshots what the listing and the resume recovered: the title, branch, archive state, compaction, prompt context, transcript, sidecars, and recorded usage. It then appends a message and checks that the message continues the resumed chain. The same check runs on the session this build writes, so a pull request that changes the format also shows how its files will resume.
-- **Changed behavior.** If a change alters how an old file resumes, that fixture's snapshot will fail. Fixtures capture frozen release output, so never edit them. Accept a changed fixture snapshot only when the change is allowed by this section.
-
-## Storage Layout
-
-Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`. `{project}` is a filesystem-safe name derived by `project_dir_name` from the project root, which is the Git repository containing the working directory, or the working directory itself outside a repository. Characters other than ASCII letters, digits, `.`, `_`, and `-` become `-`, and a name longer than 80 characters is cut and given an xxh64 suffix over the raw path bytes.
-
-Distinct paths can share a name, such as `/work/a b` and `/work/a-b`, so the header records `project_root`, and a project-scoped listing keeps only the files whose header names its project. Headers written by 0.1.0-alpha.5 and earlier have no `project_root`, and those files sit under the name of the directory the session started in. A project-scoped listing also reads the working directory's subdirectory, and keeps a file when its header records the project's root, when its `cwd` is the working directory, or when it records no root and its `cwd` is the project root. Files are never moved, so older binaries keep reading the sessions they wrote.
-
-File naming: `{unix_timestamp}-{session_id}.jsonl`. Timestamp prefix gives chronological listings, while lookup by session ID uses the suffix, which `SessionStore::find_session_path` matches in every project. Listings skip a file whose name lacks its header's session ID, such as a renamed copy, so every listed ID leads back to its own file. `ox -r <file>` still resumes such a file by path.
-
-A session's artifacts, such as [spilled tool output](truncation.md#spill-files), are stored in a `{session_id}/` directory beside its file wherever the file lives, so a session resumed from a file outside the store keeps them there. Named by `store::artifact_dir`, the directory is created by the first artifact and removed with the file by `SessionStore::delete`. Listings skip it because they read only `.jsonl` files.
-
-On Unix, session files are created with mode `0600`.
+- **Fixture source.** One test writes a session holding every row kind and content block, with messages, prompt contexts, and metadata after its compaction so a resume reads them. `session_format::writes_every_row_kind` snapshots a deterministic SQL dump of the store, its schema and then its rows with per-run UUIDs and timestamps masked, and `session_format::exports_every_row_kind` snapshots the session's masked export. For each stable tag, the release PR copies the two snapshots as `{tag}.sql` and `{tag}.jsonl`, as [Prepare a Release](../../RELEASING.md#prepare-a-release) describes.
+- **Resume check.** `session_format::resumes_from_every_release_fixture` fills each fixture's masks with fixed values, loads the dump or imports the export into a fresh store, then lists and resumes the session. It snapshots what the listing and the resume recovered: the title, branch, archive state, compaction, prompt context, transcript, tool metadata, recorded usage, and file snapshots. It then appends a message and checks that the message continues the resumed chain. The same check runs on the dump this build writes, so a pull request that changes the format also shows how its sessions will resume.
+- **Changed behavior.** If a change alters how an old release's session resumes, that fixture's snapshot fails. Fixtures are frozen release output, so never edit them. Accept a changed fixture snapshot only when this section allows the change.
 
 ## Session Lifecycle
 
 ### Actor and Batched Writes
 
-Each process uses a single `tokio::spawn`-ed actor task for its session. The rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, drains any queued commands with `try_recv()`, then moves its state and entries into a `spawn_blocking` operation. That operation flushes the batch and returns the state before the actor sends its acknowledgments, so waiting for another process's file lock leaves the async runtime available.
+Each process uses a single `tokio::spawn`-ed actor task for its session. The rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, drains any queued commands with `try_recv()` into `SessionState`, then moves the state into a `spawn_blocking` task that commits the batch as one transaction and returns the state before the actor sends its acknowledgments, so waiting for another process's write lock leaves the async runtime available. The state owns one connection, opened by its first commit.
 
-`agent_turn` records a tool round with one `SessionCmd::RecordRound`, which writes the assistant message, the tool results answering it, and their sidecars contiguously in that order. The text-only branch records its single assistant message through the same actor. Because one command owns the whole round, a resumed session always reads the assistant turn before the results that answer it, even when the runtime's cooperative budget runs out between awaits. Resume sanitization drops a tool call whose result was torn off.
-
-### Writer Recovery on Write Error
-
-- `WriterStatus` is either `Pending` (file not yet on disk, staged header plus an optional deferred title) or `Active(SessionWriter)`.
-- Entries stay queued in `SessionState` until a write succeeds, and each batch retries the queue ahead of its own entries, so a message never reaches disk before its parent.
-- The flush that creates the file writes the header and its batch into a private temporary file in the session directory, then publishes the complete file without replacing an existing session. A failed write removes only that private file, so the session stays `Pending` and a concurrent creator's session survives.
-- Each append holds the session directory's exclusive writer lock from opening the transcript through length inspection, torn-tail repair, every short write and retry, and rollback. The lock lives in a private `.writer.lock` file beside the sessions, so Windows readers can keep reading the transcript. The file stays in place across session deletion and recreation. The writer guard explicitly releases the lock before the batch is acknowledged, including after a failure and for sessions resumed from an explicit path.
-- A failed flush with more than 8 MiB to write drops the queue and stops persistence for the rest of the session.
-
-Every append first terminates a torn last line. A process crash can leave complete entries from its unacknowledged batch, while prior acknowledged batches survive. A failed append truncates its bytes while still holding the lock, so another process can append only after rollback finishes. When truncation fails, the retry repeats the lines that landed, and the loader keeps one copy of each message and `usage` entry by its `uuid`. Until persistence stops, a compact whose write fails is unqueued and never committed, matching the agent, which keeps its pre-compact transcript. The loader applies a compact boundary only once its post-compact root follows, so a boundary whose root never landed leaves the old chain in place.
+`agent_turn` records a tool round with one `SessionCmd::RecordRound`, which writes the assistant row and then the row of the tool results answering it, carrying their metadata. Because one command owns the whole round, a resumed session always reads the assistant turn before the results that answer it. Resume sanitization drops a tool call whose result is missing.
 
 ### Lazy Materialization
 
-Starting a session stages the header in memory. The on-disk file is created by the first batch flush carrying real content. A session that exits before any message leaves no artifact.
+A fresh session's row is inserted from the in-memory state in the transaction of its first message, title included. A session that exits before any message leaves no row, and a `/rename` before the first message lands with it.
+
+### Write Failures
+
+A failed commit rolls back its whole batch and stops persistence for the rest of the process's session, while the conversation continues in memory. Nothing is retried, since a later batch would chain onto rows that never landed and the failures SQLite still reports, such as a full disk, an I/O error, or a lock held past the busy timeout, do not clear on a blind retry. Every later batch with records fails with a stopped-persistence error, and resuming later continues from the last commit.
+
+Each ack carries a `WriteReport`, whose `failure` the engine turns into one `Event::Error`:
+
+- A failure is reported once per session, by the first ack after it. Two sticky-once flags in `SharedState`, one for commit failures and one for an actor that is gone, keep the two kinds from masking each other.
+- Archive acks report every failure, since a bare `/archive` rolls to a fresh session only once its archive commits.
+- A compaction always takes effect in memory, and its boundary is on disk exactly when its batch committed. The engine reports a committed compaction's write error after `SessionCompacted`, which clears the TUI's chat, so the notice stays visible.
 
 ### Resume and Sanitization
 
-`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. A `rewind` entry moves the tip to the message it names and abandons the other leaves, so the newest-leaf rule skips them from then on. Its tip ends the chain until another message line follows it in the file. A rewind naming a message the loader has not read, such as one before the last compaction, is ignored. The sanitization pipeline then drops tool calls without results and results without calls, and injects head / tail sentinels. It preserves message boundaries, including adjacent messages with the same role, which the [Messages API](https://platform.claude.com/docs/en/api/messages/create) accepts. A client call pairs with a user `tool_result`, and a server call with the result block in the same or a later reply. A server call that a `pause_turn` left waiting is dropped, because the next prompt closes the turn and the API rejects a call without its result.
+`ox -c`, `ox -r`, and `/resume` take the session's liveness lock, read its row, and walk the chain from `head_id` with a recursive CTE until a NULL parent. The newest `context` on the chain is replayed, the root's `compact` gives the boundary, `tool_metadata` merges along the chain, and every `usage` row of the session is summed. The cost is proportional to the chain since the last compaction. The sanitization pipeline then drops tool calls without results and results without calls, and injects head / tail sentinels. It preserves message boundaries, including adjacent messages with the same role, which the [Messages API](https://platform.claude.com/docs/en/api/messages/create) accepts. A client call pairs with a user `tool_result`, and a server call with the result block in the same or a later reply. A server call that a `pause_turn` left waiting is dropped, because the next prompt closes the turn and the API rejects a call without its result.
 
 ### Refused Turns
 
-The API keeps refusing while a refused turn stays in the conversation, so when the model stops with `refusal`, the engine rolls the whole turn back: its prompt, any queued prompts it took in, and its tool rounds. It truncates the live transcript to its length before the prompt, and it restores what the model had seen of the user context and the file tracker. It also appends a `rewind` entry whose tip is the message the prompt chained from, so a resume leaves the turn out too. The next prompt then chains from that message and records the prompt context again if the refused prompt was the first to carry it. A rewind to before the first prompt stops the title request that prompt started, so the next prompt titles the session unless the user named it manually. The engine emits `TurnRolledBack` ahead of the turn's `TurnFailed`, and the TUI hands the prompts back: the refused one into the empty input for rephrasing, and the queued ones the turn took in to the head of the queue, which waits for the user. A turn that compacted partway through rolls back only to the compaction's synthetic message. The summary already covers the prompt and the queued prompts the turn took in before it, so the TUI hands back only the queued prompts the turn took in after the compaction. The turn's requests stay in the session's cost estimate, and its tool calls' effects remain, such as the files it changed and the background shells it started.
+The API keeps refusing while a refused turn stays in the conversation, so when the model stops with `refusal`, the engine rolls the whole turn back: its prompt, any queued prompts it took in, and its tool rounds. It truncates the live transcript to its length before the prompt, and it restores what the model had seen of the user context and the file tracker. It also moves the session's head back to the message the prompt chained from, so a resume leaves the turn out too. The next prompt then chains from that message and records the prompt context again if the refused prompt was the first to carry it. A rewind to before the first prompt stops the title request that prompt started, so the next prompt titles the session unless the user named it manually. The engine emits `TurnRolledBack` ahead of the turn's `TurnFailed`, and the TUI hands the prompts back: the refused one into the empty input for rephrasing, and the queued ones the turn took in to the head of the queue, which waits for the user. A turn that compacted partway through rolls back only to the compaction's synthetic message. The summary already covers the prompt and the queued prompts the turn took in before it, so the TUI hands back only the queued prompts the turn took in after the compaction. The turn's requests stay in the session's cost estimate, and its tool calls' effects remain, such as the files it changed and the background shells it started.
 
-The rewind records `first_user_prompt_seen`, including whether a manual title consumed the opportunity, so title eligibility survives exit and resume. The loader applies that state in record order, and a later title or ordinary user prompt consumes it. An ordinary prompt or compact summary retained on the resolved chain also consumes the opportunity. Older rewinds without the field fall back to the retained chain and title, preserving manually named sessions even when they contain no prompt.
+Resume derives the first-prompt title opportunity from what it read: the opportunity is used once the chain holds a user prompt, starts at a compaction root, or the session's title was set by `/rename`. The manual flag also seeds the handle's `manual_title_set`, so a resumed session keeps a manual title from being replaced by a generated one.
 
 ### Prompt Context
 
 A session records its prompt context: the environment section, the first message's rendered instructions, date, model identity, and what the model has seen of them.
 
-- **Record with the carrying message.** A `context` entry is written in the same batch as the first user message that carries it, immediately before that message and with the same timestamp. A compaction records the refreshed context with its synthetic message the same way. The loader binds the entry to the next message with a matching timestamp, so a context entry stranded by a torn write cannot attach to another writer's message.
-- **Replay the resolved branch.** On resume, the latest context entry on the resolved chain is replayed verbatim, so the request sends the same cached system prompt and first message. A forked session replays the context recorded on its own branch.
+- **Record with the carrying message.** The context is stored on the row of the first user message that carries it. A compaction records the refreshed context on its synthetic root the same way.
+- **Replay the resolved branch.** On resume, the newest context on the chain is replayed verbatim, so the request sends the same cached system prompt and first message.
 - **Refresh changed context.** If the session resumes in another directory, the environment section is redetected. Any later instruction, date, or model change, including a `/model` swap, is attached to the next user message as a `<system-reminder>` block, which transcript displays omit, so the system prompt stays byte-identical across a swap.
-- **Rebuild missing context.** A transcript lacking a `context` entry, such as one an earlier version compacted without recording it, rebuilds the context and records it with the next message.
 
 ### Task List
 
-The session's [task list](tasks.md) needs no entry of its own. On resume, the loader takes it from the last successful `tasks` call on the resolved chain, or else from the `tasks` field of the last `compact` entry, which records the list the summarized transcript left. The field is omitted when the list was empty.
+The session's [task list](tasks.md) needs no column of its own. On resume, the loader takes it from the last successful `tasks` call on the chain, or else from the `tasks` field of the root's compaction record, which holds the list the summarized transcript left.
 
 ### Archiving
 
-An `archive` entry sets whether default listings and `ox -c` skip the session, and the latest one wins. Bare `/archive` queues one through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker append an entry to another session's file and preserve its mtime within the same writer-lock transaction, so toggling its archive status does not erase concurrent activity. Each of these names the session by an ID or a prefix, and the engine resolves it, owns the archive through completion, and offloads its file I/O to a blocking worker, keeping input and rendering available while another process holds the lock. Later session operations wait for that completion, and the result reaches chat even after the picker closes. Resuming an archived session appends an entry that unarchives it. Files never move, so path-based resume and every other reference to a session file keep working.
+`archived_at` sets whether default listings and `ox -c` skip the session, and archiving leaves `updated_at` alone. Bare `/archive` queues the archive through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker update another session's row. Each of these names the session by an ID or a prefix, and the engine resolves it, owns the archive through completion, and runs the update on a blocking worker, keeping input and rendering available while another process holds the write lock. Later session operations wait for that completion, and the result reaches chat even after the picker closes. Resuming an archived session unarchives it.
 
-### Fork-on-Conflict Concurrency
+### Liveness Locks
 
-Two processes may resume the same session and append separate branches. The newest-leaf rule resolves forks deterministically, while the directory's writer lock serializes each complete append batch across processes. A rewind abandons every leaf it moves away from, including one another process wrote, so that branch ends the chain again only once a newer message extends it. A batch may require several writes (`O_APPEND` on Unix, end-of-file-offset writes on Windows), and concurrent appends interleave only between batches. A compaction starts a new chain, so once one process compacts, resume drops the messages another process appends to the old chain after the boundary, whatever their timestamps.
+A process that opens a session for writing takes a shared lock on `locks/{session-id}.lock` and holds it until the actor shuts down. The kernel releases the lock when the process dies, so no stale-lock cleanup exists. `/delete` takes a non-blocking exclusive lock on the same file and refuses a session another process has open. Resume takes the lock before it reads the row, so a racing delete either sees the lock or finishes first and the resume finds no session. Delete commits the removal of the rows first and then removes the artifacts and the lock file, so a failure leaves at most orphaned files.
+
+The lock serves delete alone. Two processes holding one session open is the normal case that the lazy fork handles.
+
+### Lazy Fork
+
+A commit that moves the head first compares `head_id` with the head this process last committed or loaded, its base. Rows are immutable, so a matching head means the active branch is exactly the one this process holds in memory, and the commit lands in place. A different head means another process moved it since this process last looked, so the commit forks. The check runs under `BEGIN IMMEDIATE` with the writes that follow, and it needs no owner row, lease, or clock.
+
+| Sequence on session S                                     | Result                                               |
+| --------------------------------------------------------- | ---------------------------------------------------- |
+| A and B open S, only B writes                             | B continues S                                        |
+| A and B open S, B writes, then A writes                   | A forks to S', and S keeps B's line                  |
+| A writes, B opens S and writes, then A writes again       | A forks, since B wrote after A's last view           |
+| B writes and exits, then A writes from its older view     | A forks                                              |
+| B renames or archives S, then A writes                    | A continues S, since metadata does not move the head |
+| B rewinds S to exactly the head A last saw, then A writes | A continues S, since that head names A's branch      |
+
+In the same transaction, the forking process takes the fork's liveness lock, inserts the fork's row from its in-memory state with `forked_from` set to S and the title and manual flag copied from S, copies its base chain back to the nearest NULL parent into the fork with the message IDs unchanged, and writes its batch there. It then releases S's lock. Pre-compaction rows, other branches, and usage stay in S, so every request is counted once, in the session that made it. Keeping the message IDs keeps the process's chain tip and rewind checkpoints valid in the fork.
+
+The handle's shared state holds the live session ID and artifact directory, so `session_id()` and `artifact_dir()` follow the fork, and the next request and tool call use them. New spills land under the fork, while spill paths in copied tool results still name S's directory. The ack of the first head-moving command in the batch carries `Fork { from, to }`, and the engine emits `Event::SessionForked`. The TUI shows `Another ox process wrote to session {from8}, so this conversation continues as session {to8}` and moves its status bar to the fork, the stdio drivers print the notice to stderr, and the headless result reports the fork's ID. Listings label the fork `fork of {from8}` beside its title. File snapshots at finish are written only while the session's head still equals the process's base, since they describe the files as of that head.
+
+### Export and Import
+
+`ox export <id-prefix>` writes a session as JSONL to stdout: a `session` record first, then every `message` record in commit order, every branch and pre-compaction message included, then every `usage` record, with RFC 3339 timestamps. `ox -r <file>` imports an export and resumes the session that holds its head. Import checks that the input starts with a `session` record of a valid ID and a supported format and that each parent precedes its children, and its errors name the line. Rows already present are kept once. An export carries every message its session ever had, so the head lands by which messages each side holds, a lookup that compaction roots and rewinds cannot hide the way they cut the chain:
+
+| Local store                                  | Result                                                         |
+| -------------------------------------------- | -------------------------------------------------------------- |
+| No session with the ID                       | Inserted with the export's metadata                            |
+| Local head among the exported messages       | Fast-forward: head and metadata from the import                |
+| Exported head among the local session's rows | The import is older: the local head and metadata stay          |
+| Neither, and a fork of the session relates   | The newest such fork receives the import by the same two rules |
+| Neither, and no fork relates                 | The import becomes a fork with `forked_from` set to the ID     |
+
+A session the import creates, new or a fork, records the importing store's project and launch directory, as a fresh session does, so it lists in the project that imported it. A process holding the session open while an import moves its head forks at its next write, as it would for any other writer.
 
 ### AI-Generated Titles
 
-In the TUI, the first user prompt of a fresh session spawns a tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema unless `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` turns it off, and keeps the first line of the reply under the same 80-column cap as other titles. The request wraps the prompt in `<first_prompt>` tags, cutting a prompt over 2,000 characters to its first 1,500 and as much of its end as fits around a `... [N characters omitted] ...` line, so a request that leads a long paste survives. The turn ends with an instruction to title the prompt, so that an imperative prompt reads as text to title even without the schema. The session owns the task, and finalizing the session on a roll or at exit aborts it first, so a late title never writes to or reports on a session that has ended. Once the API answers and reports usage, the task appends the request's `usage` entry before parsing the reply, since a reply without a usable title is billed too. Generation failures only log a warning, while a failed title or usage write surfaces like any other session write error.
+In the TUI, the first user prompt of a fresh session spawns a tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema unless `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` turns it off, and keeps the first line of the reply under the same 80-column cap as other titles. The request wraps the prompt in `<first_prompt>` tags, cutting a prompt over 2,000 characters to its first 1,500 and as much of its end as fits around a `... [N characters omitted] ...` line, so a request that leads a long paste survives. The turn ends with an instruction to title the prompt, so that an imperative prompt reads as text to title even without the schema. The session owns the task, and finalizing the session on a roll or at exit aborts it first, so a late title never writes to or reports on a session that has ended. Once the API answers and reports usage, the task records the request's usage before parsing the reply, since a reply without a usable title is billed too. Generation failures only log a warning, while a failed title or usage write surfaces like any other session write error.
 
 ### Session Cost
 
-Each request behind a turn, a `/compact` summary, an auto-compaction summary, or an AI title appends a `usage` entry. The entry holds a `uuid`, the request's `model` ID and `cache_ttl` (`"5m"` or `"1h"`), the four provider counts `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`, and a `timestamp`. The model and TTL let the engine price the request at the rates it ran with, even after a `/model` swap or a TTL change.
+Each request behind a turn, a `/compact` summary, an auto-compaction summary, or an AI title adds a `usage` row. Its record holds the request's `model` ID and `cache_ttl` (`"5m"` or `"1h"`) and the four provider counts `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`, so the engine prices each request at the rates it ran with, even after a `/model` swap or a TTL change. Rows are keyed by a per-request ID, so a request is stored once.
 
-On resume, the loader collects every `usage` entry in the file, including those on abandoned branches and before compact boundaries, since the session paid for each. The engine sums their estimated cost into the session total, which `/clear` resets with the fresh session. A file without `usage` entries resumes with a cost of zero. Older binaries skip `usage` lines as unknown entries and still resume the transcript.
-
-### Write-Error Surfacing
-
-Write failures surface through the session handle:
-
-- First failure populates the handle's `RecordOutcome::failure` slot so the agent loop emits a one-shot `Event::Error`.
-- Archive acknowledgments include every failure, and compact acknowledgments do until persistence stops.
-- Until persistence stops, the agent swaps in the summary only after the boundary reaches disk. Bare `/archive` always rolls to a fresh session only after the archive entry is written.
-- Failed compact and archive operations are also removed from the retry queue, so a later flush cannot persist them.
-- Once persistence stops, the file receives no further lines, so a compaction commits in memory alone, and its acknowledgment reports the stop only when no earlier write reported it. Bare `/archive` keeps failing, since its whole effect is the entry on disk. The engine reports a committed compaction's write error after `SessionCompacted`, which clears the TUI's chat, so the notice stays visible.
-- Three independent sticky-once flags (`flush_failure_surfaced`, `persistence_stop_surfaced`, `actor_gone_surfaced`) keep different failure kinds from masking each other, so stopping persistence surfaces even after an earlier flush failure.
+On resume, the loader returns every usage row of the session, including those from abandoned branches and before compaction boundaries, since the session paid for each. The engine sums their estimated cost into the session total, which `/clear` resets with the fresh session. A fork's resumed cost covers only its own requests, while the live status bar keeps the process's running total.
 
 ## Listing
 
-Session listing separates file discovery from metadata parsing:
-
-- **Scope.** `ox --list`, bare `ox -c`, and the `/resume` picker walk the current project's subdirectory, plus the working directory's subdirectory for older files, and `--all` widens to every project. A prefix lookup that matches nothing in the current project searches every project.
-- **Discovery.** The walk only stats files, so bare `ox -c` parses files only until it finds the newest readable unarchived one, and a prefix lookup parses only files whose name carries a matching ID.
-- **Metadata.** A parsed file yields its header, the latest `Entry::Title` and `Entry::Summary`, and the archive state. A prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path.
+- **Scope.** `ox --list`, bare `ox -c`, and the `/resume` picker list the current project's sessions, and `--all` widens to every project. A prefix lookup that matches nothing in the current project searches every project.
+- **Query.** A page is one indexed query ordered by `updated_at` and then ID, newest first, and the picker's next page continues after the last row through a keyset cursor, so pages never overlap. Sessions of a newer content format stay hidden. The picker reads pages on a worker thread, off the UI thread.
+- **Prefix lookup.** A prefix holding a character no session ID holds matches nothing, so GLOB metacharacters never reach SQL, and the lookup uses the primary key.
 - **Archive view.** `--list` and the `/resume` picker show unarchived sessions, or only archived ones with `--list --archived` and the picker's Ctrl+A.
-- **Page budget.** Archive state is stored in each file, so a listing parses sessions in order until it finds one beyond the page, then reports only whether more sessions follow. When few sessions are archived, the archived view parses further.
 
-Listings sort rows and render them as follows:
+Listings render rows as follows:
 
-- Sessions without a title are shown as `(untitled)`.
-- Sessions without a summary still list (`Msgs` displays `-`).
-- Sort by file mtime, with the file name breaking ties.
-- Under `--all`, a `Project` column shows the tildified project root, or the stored `cwd` for a header that records none.
-- Titles truncated to terminal width with trailing `...`.
+- Sessions without a title are shown as `(untitled)`, and a fork's title is followed by `(fork of {from8})`.
+- `Msgs` counts the active branch's messages since its last compaction.
+- Under `--all`, a `Project` column shows the tildified project root.
+- Titles are truncated to the terminal width with a trailing `...`, before a fork's label, which stays whole.
 - Control characters in titles and project paths, line breaks included, are escaped, so a row stays on one line and cannot change the terminal's state.
 
 ## Design Decisions
 
-1. **JSONL, append-only, one file per session.** A process crash loses at most the batch in progress, and readers can stream the file line by line.
-2. **Per-project subdirectory keyed by the project root.** Listings stay scoped, `--all` opts into cross-project view, and the header's `project_root` keeps a colliding directory name from mixing projects. Older files stay where they are, since a listing reads both subdirectories.
-3. **First-failure-only write-error surfacing.** One `Event::Error` per failure kind plus warn-logs gives visibility without spam.
-4. **Listing scan with message pre-filter, mtime sort.** Titles and summaries can appear anywhere in the file, so the scan reads every line and the prefix check keeps message lines out of JSON parsing.
-5. **Search views preserve native result rows.** The `tool_result_metadata` sidecar records a call's title and, when the tool sets one, a `result_view`, which is either the structured view or a marker that the result reads as plain text. Grep in content mode, Glob, and Edit store their structured view, so complete filenames and line numbers survive even when a path contains colons, newlines, or trailing whitespace, and stored paths retain their search-time display spelling on replay. Search results that carry notes, and output capped into a spill file, store the text marker, so their warnings and spill locations render with the result text. Errors always render their error text. Read and Tasks store no view and derive it on every render, Read from the result text and Tasks from the call's input, since storing it would repeat the file content or the task list. A result without a stored view uses the tool's own derivation. Sidecars from alpha.8 and alpha.9 stored the view as the bare type, which this shape rejects, so the loader skips those records as malformed, as the Compatibility section allows.
+1. **One store.** SQLite holds every session and JSONL is only interchange, so no second copy can drift and no read path reconciles two stores.
+2. **Bundled SQLite.** Every supported platform gets the WAL-reset fix, which multi-process use needs.
+3. **JSON payload columns.** Message content, context, compaction info, tool metadata, and usage keep their serde types, so their evolution rules stay as they are and only searchable or sortable fields become columns.
+4. **Immutable rows and a head pointer.** Rewind, compaction, and fork move the head, history stays for export, and the head names its chain exactly, which makes the head check a complete fork detector.
+5. **Lazy fork by head check.** A session forks only after two processes both wrote to it, never on open, and the check needs no owner, lease, or clock. Codex refuses a second writer at open and oh-my-pi gives the first writer a lease, and both decide before anyone writes.
+6. **Import by membership.** An export holds every message, so whether it saw the local head is a lookup that compaction and rewind leave exact, and reusing a related fork keeps repeated imports of a diverged session on one fork.
+7. **Messages keyed by session and ID.** A fork or diverged import copies rows with their UUIDs, so live checkpoints stay valid without remapping.
+8. **Usage keyed by request and never copied.** Each request is stored once, so totals across sessions stay exact.
+9. **Liveness locks for delete only.** Kernel-held locks vanish with their process, so delete safety needs no stale-lock recovery.
+10. **No retry.** Without torn writes, the failures left are not transient, so a failed commit stops persistence with one report.
+11. **Derived title latch and a persisted manual flag.** The title opportunity follows from the chain and `title_manual`, so no stored copy can disagree with them.
+12. **Fork labels from `forked_from`.** The fork keeps the user's title unchanged, and the label tells the two rows apart.
+13. **Search views preserve native result rows.** A result's `tool_metadata` records the call's title and, when the tool sets one, a `result_view`, which is either the structured view or a marker that the result reads as plain text. Grep in content mode, Glob, and Edit store their structured view, so complete filenames and line numbers survive even when a path contains colons, newlines, or trailing whitespace, and stored paths retain their search-time display spelling on replay. Search results that carry notes, and output capped into a spill file, store the text marker, so their warnings and spill locations render with the result text. Errors always render their error text. Read and Tasks store no view and derive it on every render, Read from the result text and Tasks from the call's input, since storing it would repeat the file content or the task list. A result without a stored view uses the tool's own derivation.
+
+## Out of Scope
+
+- **Prompt history across sessions** ([#421](https://github.com/hakula139/oxide-code/issues/421)). The store makes it a query over user messages joined to their project, and full-text search would arrive as an FTS5 revision.
+- **Rewind history** ([#293](https://github.com/hakula139/oxide-code/issues/293)). Abandoned rows already stay in the store, so browsing them needs no format change.
+- **Subagent sessions** ([#136](https://github.com/hakula139/oxide-code/issues/136), [#285](https://github.com/hakula139/oxide-code/issues/285)). A parent session column would arrive as an additive revision.
 
 ## Sources
 
-- `crates/ox-core/src/engine/turn.rs`: the tool round it records through `record_round`, which sends the assistant message, its tool results, and their sidecars as one `SessionCmd::RecordRound`.
-- `crates/ox-core/src/engine/usage.rs`: `UsageLedger::for_session`, which sums the session cost from the resumed `usage` entries.
-- `crates/ox-core/src/message.rs`: the message and content-block types that the entry schema stores.
-- `crates/ox-core/src/session/actor.rs`: the actor that owns the session state and flushes each wakeup's commands through a blocking operation.
-- `crates/ox-core/src/session/chain.rs`: message chain reconstruction from the `parent_uuid` DAG.
-- `crates/ox-core/src/session/display.rs`: the session ID and title formatting that listings use.
-- `crates/ox-core/src/session/entry.rs`: the JSONL entry schema and its header `version`.
-- `crates/ox-core/src/session/handle.rs`: `SessionHandle`, the public API that sends each write to the actor and surfaces the first write failure of each kind.
+- `crates/ox-core/src/engine/turn.rs`: `agent_turn`, which records each tool round with one `RecordRound` command.
+- `crates/ox-core/src/engine/usage.rs`: `UsageLedger::for_session`, which sums the session cost from the resumed usage rows.
+- `crates/ox-core/src/message.rs`: the message and content-block types that the message rows store.
+- `crates/ox-core/src/session/actor.rs`: the actor that owns the session state and commits each wakeup's commands on a blocking task.
+- `crates/ox-core/src/session/display.rs`: the session ID and title formatting that listings use, including the fork label.
+- `crates/ox-core/src/session/handle.rs`: `SessionHandle`, `WriteReport`, and `Fork`, and the session-format tests.
 - `crates/ox-core/src/session/history.rs`: the resumed transcript, whose tool results take their views from `ToolRegistry::result_view`.
-- `crates/ox-core/src/session/path.rs`: the sanitized per-project subdirectory names.
-- `crates/ox-core/src/session/post_compact.rs`: the synthetic post-compact root and the origin restore on resume.
-- `crates/ox-core/src/session/resolver.rs`: the `--continue` argument and session-ID prefix resolution.
+- `crates/ox-core/src/session/post_compact.rs`: the synthetic post-compact root.
+- `crates/ox-core/src/session/resolver.rs`: the `--continue` and `--resume` targets, `ox export`, and session-ID prefix resolution.
 - `crates/ox-core/src/session/sanitize.rs`: resume-time transcript repair.
 - `crates/ox-core/src/session/saved.rs`: archiving and deleting saved sessions.
-- `crates/ox-core/src/session/state.rs`: the in-memory session state the actor owns.
-- `crates/ox-core/src/session/store.rs`: session file I/O and the `{epoch}-{uuid}.jsonl` file names.
-- `crates/ox-core/src/session/store/listing.rs`: stat-only listing walks and metadata parsing.
+- `crates/ox-core/src/session/state.rs`: the in-memory session state that builds each commit.
+- `crates/ox-core/src/session/store.rs`: the data directory, the setup lock, connections, liveness locks, archive, and delete.
+- `crates/ox-core/src/session/store/commit.rs`: the write transaction, with its head check and lazy fork.
+- `crates/ox-core/src/session/store/export.rs`: the JSONL interchange records, export, and import by message membership.
+- `crates/ox-core/src/session/store/listing.rs`: the page, latest, and prefix queries.
+- `crates/ox-core/src/session/store/load.rs`: the chain query and the decoding of a resumed session.
+- `crates/ox-core/src/session/store/schema.rs`: the pragmas, the schema, and its revisions.
 - `crates/ox-core/src/session/title_generator.rs`: the background AI title generator.
-- `crates/ox-core/src/tool.rs`: `ToolMetadata`, the fields the `tool_result_metadata` sidecar records.
+- `crates/ox-core/src/tool.rs`: `ToolMetadata`, the fields a result's `tool_metadata` records.
 - `crates/ox/src/session_list.rs`: the `ox --list` table.

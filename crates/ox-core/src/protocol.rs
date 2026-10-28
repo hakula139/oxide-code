@@ -15,14 +15,15 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::error;
 
+use crate::auth::AuthSource;
 use crate::client::RateLimits;
-use crate::config::auth::AuthSource;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::model::{Effort, ModelSpec, ResolvedModelId};
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, Mode, SessionGrant};
-use crate::session::entry::{ArchiveState, SessionInfo};
+use crate::session::handle::WriteReport;
 use crate::session::saved::{ArchiveUpdate, SavedError};
+use crate::session::store::listing::{ArchiveState, SessionInfo};
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 use crate::tool::view::{ApprovalPreview, ToolResultView};
@@ -146,7 +147,7 @@ impl fmt::Debug for SignInCode {
 /// The session an [`Op::Resume`] or `ox --resume` continues.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeTarget {
-    /// The session file at this path, which need not be in the session store.
+    /// The session that the export at this path holds, imported into the store first.
     Path(PathBuf),
     /// The saved session with this ID.
     Id(String),
@@ -219,7 +220,7 @@ pub struct UsageSnapshot {
     pub context_window: Option<u32>,
     /// Running session cost in USD, accumulated across every request, summaries and the AI title
     /// included, and positive when present. A roll starts it over, and a resume restores it from
-    /// the session file. `None` hides the cost segment.
+    /// the session's usage records. `None` hides the cost segment.
     pub estimated_cost_usd: Option<f64>,
 }
 
@@ -335,6 +336,10 @@ pub enum Event {
         prior: ArchiveState,
         history: Vec<Interaction>,
     },
+    /// Another process wrote to session `from` since this one last saw it, so the conversation
+    /// continues as session `id`, a fork holding what this process saw. Leaves any in-flight
+    /// operation running, and frontends show [`notice::session_forked`].
+    SessionForked { id: String, from: String },
     /// Compaction replaced the transcript with a synthetic continuation. The frontend clears its
     /// chat and shows the summary boundary. Automatic compaction leaves the frontend busy while the
     /// pending prompt or turn continues.
@@ -548,12 +553,22 @@ pub trait EventSink: Send + Sync {
         }
     }
 
-    /// Surfaces a session-writer failure, if any, as one [`Event::Error`].
-    fn session_write_error(&self, failure: Option<&str>) {
-        if let Some(failure) = failure {
+    /// Surfaces a session write's failure as [`Event::Error`] and its fork as
+    /// [`Event::SessionForked`], each when present.
+    fn session_write(&self, report: &WriteReport) {
+        if let Some(failure) = &report.failure {
             self.emit(
                 Event::Error(notice::session_write_failed(failure)),
                 "session-write-failed",
+            );
+        }
+        if let Some(fork) = &report.fork {
+            self.emit(
+                Event::SessionForked {
+                    id: fork.to.clone(),
+                    from: fork.from.clone(),
+                },
+                "session-forked",
             );
         }
     }

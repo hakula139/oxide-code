@@ -9,11 +9,11 @@ Two-layer truncation combines per-tool view-shape caps with a centralized byte-b
 
 ## Spill Files
 
-- **Location**: `store::artifact_dir` designates the directory beside a session file, named after the session ID, that holds the session's artifacts, with spill files placed in its `tool-results/` child. For a session in the store, this is `$XDG_DATA_HOME/ox/sessions/<project>/<session-id>/`, and a session resumed from a file outside the store spills beside that file. Because the session handle derives the directory from the file its writer creates or resumes and the engine passes the live handle's directory with each dispatch, new spills land with the session in use after `/clear` or `/resume`.
+- **Location**: `store::artifact_dir` designates the directory that holds a session's artifacts, `$XDG_DATA_HOME/ox/artifacts/<session-id>/`, with spill files placed in its `tool-results/` child. The engine passes the live handle's directory with each dispatch, so new spills land with the session in use after `/clear`, `/resume`, or a [lazy fork](persistence.md#lazy-fork). Tool results a fork copied still name the source session's spills.
 - **Names**: Each file name begins with the call's tool use ID, replacing every character other than an ASCII letter, digit, `-`, or `_` with `_`. The dispatcher writes `<id>.txt`, a foreground `bash` call writes `<id>.output.txt`, and the `n`th read of a background shell by `bash_output` or `bash_stop` writes `<id>.<n>.output.txt`, where `<id>` is the call that started the shell.
 - **Creation**: The first write creates the directory and the file and refuses to replace an existing file, so a result that fits leaves nothing on disk. On Unix, the directory gets `0700` perms and the file gets `0600`.
 - **Size**: A file keeps at most `MAX_SPILL_BYTES`, equal to `MAX_TRACKED_FILE_SIZE` so `read` can open every spill, and beyond that limit the marker says `first 10 MiB of output saved to <path>`. If creating or writing the file fails, the result is still truncated, and the marker names the error in place of the path.
-- **Access and cleanup**: `read` and `grep` open spill files without prompting, while editing prompts only when the file lies in oxide-code's data directory, so the spills of a session resumed from a file elsewhere lack that protection ([permissions](permissions.md#shipped-defaults)). `/delete` removes the session's directory along with its session file, and archiving keeps both.
+- **Access and cleanup**: `read` and `grep` open spill files without prompting, while editing them prompts, since they lie in oxide-code's data directory ([permissions](permissions.md#shipped-defaults)). `/delete` removes the session's directory along with its rows, and archiving keeps both.
 
 ## Per-Tool View-Shape Caps
 
@@ -29,7 +29,7 @@ The per-line caps below go through `truncate_line(line, max_chars)`, which appen
 
 1. **Two truncation layers, separated by responsibility.** View-shape stays per-tool because it needs tool-specific knowledge. Byte-budget runs after `Tool::run` as the absolute safety net.
 2. **Head-and-tail strategy.** Keeps the command setup and final outcome, the two slices the model needs most. Tail-only would lose the prompt, and head-only would lose the result.
-3. **Spill the cut output to a session file.** The model gets the head and tail inline, and the marker names a file holding the rest for `read` and `grep` to page through when the middle matters. Keying the directory by session ID beside the session file ties the files to the session, so `/delete` removes them and nothing else needs to clean up. Because `bash` spills as it drains, a command's full output never sits in memory, and a background shell spills each read's window to its own file. Because the cap applies to each file, and so to each call or read, the total is unbounded: a long-running background shell read many times can fill the disk across its files, which [#679](https://github.com/hakula139/oxide-code/issues/679) tracks.
+3. **Spill the cut output to a session artifact.** The model gets the head and tail inline, and the marker names a file holding the rest for `read` and `grep` to page through when the middle matters. Keying the directory by session ID ties the files to the session, so `/delete` removes them and nothing else needs to clean up. Because `bash` spills as it drains, a command's full output never sits in memory, and a background shell spills each read's window to its own file. Because the cap applies to each file, and so to each call or read, the total is unbounded: a long-running background shell read many times can fill the disk across its files, which [#679](https://github.com/hakula139/oxide-code/issues/679) tracks.
 4. **Complete Read rows.** Read emits each line in full because Edit needs its exact text and Write needs coverage of every byte. Grep lists many hits per call and caps each line at 500 characters.
 5. **A fixed 1 KiB window for line-boundary cuts.** A cut always moves to the nearest line break, so a wider window drops no more than the partial line, but it lets a partial line of several KiB vanish whole at the cost of up to that much of each end's budget. 1 KiB is under 2% of a 64 KiB end, while longer lines, such as minified code, keep the char cut and stay visible.
 
@@ -39,7 +39,7 @@ The per-line caps below go through `truncate_line(line, max_chars)`, which appen
 - `crates/ox-core/src/engine/dispatch.rs`: `DispatchContext::artifact_dir`, which each dispatch hands to `ToolCtx`.
 - `crates/ox-core/src/file_tracker.rs`: `MAX_TRACKED_FILE_SIZE`.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle::artifact_dir`.
-- `crates/ox-core/src/session/store.rs`: `artifact_dir`, `SessionStore::session_file`, `delete_at`.
+- `crates/ox-core/src/session/store.rs`: `SessionStore::artifact_dir` and `SessionStore::delete`.
 - `crates/ox-core/src/tool.rs`: `truncate_line()`.
 - `crates/ox-core/src/tool/bash.rs`: `OUTPUT_BUDGET`, `ShellTree::spawn()`, `PipeCapture`, `render_pipe()`, `ends_within()`.
 - `crates/ox-core/src/tool/bash/background.rs`: `ShellOutput::take`, the per-read capture of a background shell.

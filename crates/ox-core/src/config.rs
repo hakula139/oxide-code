@@ -2,16 +2,14 @@
 //!
 //! Precedence (highest wins): env > project `.ox/config.toml` > user `config.d/*.toml` drop-ins >
 //! user `~/.config/ox/config.toml` > defaults. Auth stops at the first source that resolves, in
-//! [`auth::AuthSource`] order.
+//! [`AuthSource`] order.
 
-pub mod auth;
 mod base_url;
 pub mod compaction;
+pub(crate) mod credentials;
 pub mod gateway;
 pub mod load;
-pub(crate) mod login;
 mod merge;
-pub(crate) mod oauth;
 pub mod provenance;
 mod schema;
 #[cfg(any(test, feature = "testing"))]
@@ -27,15 +25,16 @@ use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr, VariantArray};
 use tracing::warn;
 
-use self::auth::{AuthSource, AuthState, CredentialError, LoginUnavailable};
 pub(crate) use self::base_url::BaseUrl;
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
+use self::credentials::{AuthState, CredentialError};
 use self::gateway::{GatewayCompat, GatewaySnapshot, ResolvedGateway};
 use self::load::Loaded;
 use self::merge::Origins;
-use self::oauth::ClaudeCodeKeychain;
 use self::provenance::{Provenance, Source, Sourced, TierPattern};
 use self::schema::{ClientAuth, FileConfig, PermissionTable, ThemeTable, TierTable, TuiTable};
+use crate::auth::oauth::ClaudeCodeKeychain;
+use crate::auth::{self, AuthSource, LoginUnavailable};
 use crate::model::{Effort, ModelSettings, ModelSpec, PromptCacheTtl};
 use crate::permission::defaults::Shipped;
 use crate::permission::{Mode, Policy, Tier, Workspace};
@@ -378,7 +377,7 @@ impl Config {
         }
         let trust = PlatformTrust(self.extra_ca_certs.clone());
         let stored = auth::stored_login(ClaudeCodeKeychain::SYSTEM, &trust);
-        self.auth = match auth::fallback(&self.base_url, stored).await {
+        self.auth = match credentials::fallback(&self.base_url, stored).await {
             Ok(auth) => AuthState::Ready(auth),
             Err(CredentialError::SignedOut { cause, .. }) if can_sign_in => {
                 AuthState::SignedOut(LoginUnavailable::new(&cause))
@@ -504,9 +503,12 @@ fn resolve_explicit_auth(
     base_url: &BaseUrl,
     gateway: &ResolvedGateway,
 ) -> Result<Sourced<AuthState>> {
-    let config = file_auth.map(auth::configured_auth).transpose()?.flatten();
-    let explicit = auth::first_explicit(config)?;
-    let explicit_source = explicit.as_ref().map(auth::ExplicitAuth::source);
+    let config = file_auth
+        .map(credentials::configured_auth)
+        .transpose()?
+        .flatten();
+    let explicit = credentials::first_explicit(config)?;
+    let explicit_source = explicit.as_ref().map(credentials::ExplicitAuth::source);
     if explicit_source.is_some() || base_url.is_first_party() {
         gateway.check_credential_header(explicit_source)?;
     }
@@ -518,8 +520,8 @@ fn resolve_explicit_auth(
         source => source.env_var().map_or(Source::Default, Source::Env),
     };
     let state = match explicit {
-        Some(auth::ExplicitAuth::Inline(auth)) => AuthState::Ready(auth),
-        Some(auth::ExplicitAuth::File(pending)) => AuthState::Unresolved(Some(pending)),
+        Some(credentials::ExplicitAuth::Inline(auth)) => AuthState::Ready(auth),
+        Some(credentials::ExplicitAuth::File(pending)) => AuthState::Unresolved(Some(pending)),
         None => AuthState::Unresolved(None),
     };
     Ok(Sourced::new(state, source))
@@ -755,13 +757,13 @@ mod tests {
     use serde::de::{self, value::StrDeserializer};
     use tempfile::TempDir;
 
-    use super::auth::Auth;
     use super::compaction::testing::WINDOW_1M_THRESHOLD;
-    use super::oauth::LoginError;
-    use super::oauth::testing::{creds_json, write_creds};
     use super::provenance::Layer;
     use super::testing::test_config;
     use super::*;
+    use crate::auth::Auth;
+    use crate::auth::oauth::LoginError;
+    use crate::auth::oauth::testing::{creds_json, write_creds};
     use crate::permission::{Access, Decision, PermissionClass};
     use crate::util::fs::testing::deny_read_access;
     use crate::util::path::testing::HOME_VAR;

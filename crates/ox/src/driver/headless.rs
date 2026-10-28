@@ -36,7 +36,7 @@ pub(crate) async fn run(
     prompt: &str,
     format: OutputFormat,
 ) -> Result<Exit, EnginePanic> {
-    let session_id = engine.session_id().to_owned();
+    let session_id = engine.session_id();
     let printer = Printer::new(
         format,
         show_thinking,
@@ -216,7 +216,6 @@ pub(crate) enum OutputFormat {
 /// text in every format, so stdout carries only the reply or the JSON.
 struct Printer<O, E> {
     format: OutputFormat,
-    session_id: String,
     stdio: StdioSink,
     output: Mutex<Output<O, E>>,
 }
@@ -224,6 +223,8 @@ struct Printer<O, E> {
 struct Output<O, E> {
     stdout: O,
     stderr: E,
+    /// The run's session, which a fork replaces.
+    session_id: String,
     /// Reply text since the last tool call, which the result reports as the final message.
     message: String,
     error: Option<String>,
@@ -241,13 +242,13 @@ impl<O: Write, E: Write> Printer<O, E> {
     ) -> Self {
         Self {
             format,
-            session_id,
             // Thinking renders on stdout, so the JSON formats leave it off, which also keeps the
             // progress notes it would replace on stderr.
             stdio: StdioSink::new(show_thinking && format == OutputFormat::Text),
             output: Mutex::new(Output {
                 stdout,
                 stderr,
+                session_id,
                 message: String::new(),
                 error: None,
                 session_write_error: None,
@@ -264,6 +265,7 @@ impl<O: Write, E: Write> Printer<O, E> {
         }
         let Output {
             stdout,
+            session_id,
             message,
             error,
             session_write_error,
@@ -276,7 +278,7 @@ impl<O: Write, E: Write> Printer<O, E> {
             session_write_error: session_write_error.as_deref(),
             message: (stop_reason == TurnEnd::Completed).then_some(message.as_str()),
             usage: usage.as_ref(),
-            session_id: &self.session_id,
+            session_id,
         });
         write_json_line(stdout, &line)
     }
@@ -376,6 +378,7 @@ impl<O, E> Output<O, E> {
             Event::ToolCallStart(_) => self.message.clear(),
             Event::TurnFailed(error) => self.error = Some(error.clone()),
             Event::UsageUpdated(usage) => self.usage = Some(*usage),
+            Event::SessionForked { id, .. } => id.clone_into(&mut self.session_id),
             _ => {}
         }
     }
@@ -558,7 +561,7 @@ mod tests {
                         .await
                         .with_tools(tools)
                         .unattended();
-                    let session_id = engine.session_id().to_owned();
+                    let session_id = engine.session_id();
                     let printer =
                         Printer::new(format, false, session_id.clone(), Vec::new(), Vec::new());
 
@@ -995,6 +998,31 @@ mod tests {
                 assert_eq!(result["stop_reason"], "completed");
                 assert_eq!(result["message"], "reply");
                 assert_eq!(result["session_write_error"], "disk full");
+            }
+
+            #[test]
+            fn reports_the_fork_the_run_continued_in() {
+                let printer = printer(OutputFormat::Json);
+                printer
+                    .print(Event::SessionForked {
+                        id: "fork-session-id".to_owned(),
+                        from: SESSION_ID.to_owned(),
+                    })
+                    .into_result()
+                    .unwrap();
+
+                printer.finish(TurnEnd::Completed).unwrap();
+
+                let stdout = String::from_utf8(printed(printer).0).unwrap();
+                assert_eq!(
+                    stdout.lines().count(),
+                    1,
+                    "the notice stays off the wire: {stdout}"
+                );
+                assert_eq!(
+                    result_data(stdout.as_bytes())["session_id"],
+                    "fork-session-id"
+                );
             }
         }
 

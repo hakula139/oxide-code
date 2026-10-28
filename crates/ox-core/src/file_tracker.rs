@@ -31,8 +31,8 @@ pub(crate) const MAX_TRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// - **Freshness**: mutating tools must pass the current bytes through
 ///   [`Self::verify_current_content`], and only matching xxh64 content counts as unchanged.
 ///
-/// State is persisted into the session JSONL as [`FileSnapshot`]s and re-verified against disk on
-/// resume by [`Self::restored`].
+/// State is persisted with the session as [`FileSnapshot`]s and re-verified against disk on resume
+/// by [`Self::restored`].
 #[derive(Default)]
 pub(crate) struct FileTracker {
     by_path: Mutex<HashMap<PathBuf, FileState>>,

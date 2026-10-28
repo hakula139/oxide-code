@@ -15,8 +15,8 @@ use tracing::debug;
 
 use super::Client;
 use super::wire::{ApiError, ErrorResponse};
+use crate::auth::{self, Auth, AuthSource, Credential};
 use crate::client::{PromptTooLong, RateLimitWindow, RateLimits};
-use crate::config::auth::{self, Auth, AuthSource, Credential};
 use crate::util::response::{self, condense, http_status};
 use crate::util::text::join_sentences;
 use crate::util::tls::Trust;
@@ -494,10 +494,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::auth::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
     use crate::client::anthropic::local_testing::{
         SESSION_ID, messages_request, plain_http, retry_counts, serve,
     };
-    use crate::config::oauth::testing::{ok_refresh_body, ox_login_in, write_creds};
 
     mod post_messages {
         use super::*;

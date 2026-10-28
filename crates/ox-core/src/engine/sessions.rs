@@ -10,10 +10,10 @@ use super::{Engine, turn};
 use crate::protocol::notice::session_write_failed;
 use crate::protocol::{Event, EventSink, ResumeTarget, SavedTarget};
 use crate::session::display::id_prefix;
-use crate::session::entry::ArchiveState;
 use crate::session::handle::LoadedTranscript;
 use crate::session::saved::{self, SavedError};
 use crate::session::store::SessionStore;
+use crate::session::store::listing::ArchiveState;
 use crate::util::git::current_branch;
 use crate::util::text::plural;
 
@@ -34,7 +34,7 @@ impl Engine {
             );
             return;
         }
-        if let Some(failure) = self.transcript.archive().await {
+        if let Some(failure) = self.transcript.archive().await.failure {
             sink.emit(
                 Event::TurnFailed(format!("Archive failed: {failure}")),
                 "archive-failed",
@@ -90,13 +90,13 @@ impl Engine {
     }
 
     /// Runs `op` on the blocking pool with the store and the live session's ID, since a
-    /// saved-session operation walks and writes session files.
+    /// saved-session operation reads and writes the store.
     async fn on_saved<T: Send + 'static>(
         &self,
         op: impl FnOnce(&SessionStore, &str) -> Result<T, SavedError> + Send + 'static,
     ) -> Result<T, SavedError> {
         let store = self.store.clone();
-        let live_id = self.transcript.session().session_id().to_owned();
+        let live_id = self.transcript.session().session_id();
         tokio::task::spawn_blocking(move || op(&store, &live_id))
             .await
             .unwrap_or_else(|error| Err(SavedError::Task(error.to_string())))
@@ -116,20 +116,24 @@ impl Engine {
             },
             "session-rolled",
         );
-        report_finalize_failure(sink, outcome.finalize_failure);
+        report_finalize_failure(sink, outcome.finalize.failure);
         self.emit_session_start(sink);
         sink.emit(Event::SessionReady, "session-ready");
     }
 
     /// Finalizes the live session and continues `target`. On failure the live session stays.
     pub(super) async fn resume(&mut self, sink: &dyn EventSink, target: ResumeTarget) {
-        let outcome = match self.transcript.roll_into(&self.store, target).await {
+        let outcome = match self
+            .transcript
+            .roll_into(&self.store, target, self.settings.model().id())
+            .await
+        {
             Ok(outcome) => outcome,
             Err(e) => {
                 sink.emit(
                     Event::TurnFailed(format!(
                         "Resume failed (still on session {}): {e:#}",
-                        id_prefix(self.transcript.session().session_id()),
+                        id_prefix(&self.transcript.session().session_id()),
                     )),
                     "resume-failed",
                 );
@@ -139,14 +143,14 @@ impl Engine {
         self.adopt_session(sink, outcome.transcript).await;
         sink.emit(
             Event::SessionResumed {
-                id: self.transcript.session().session_id().to_owned(),
+                id: self.transcript.session().session_id(),
                 title: outcome.title,
                 prior: outcome.prior,
                 history: self.take_history(),
             },
             "session-resumed",
         );
-        report_finalize_failure(sink, outcome.finalize_failure);
+        report_finalize_failure(sink, outcome.finalize.failure);
         self.emit_session_start(sink);
         sink.emit(Event::SessionReady, "session-ready");
     }
@@ -167,7 +171,12 @@ impl Engine {
     }
 
     pub(super) async fn rename(&self, sink: &dyn EventSink, title: String) {
-        if let Some(failure) = self.transcript.set_manual_title(title.clone()).await {
+        if let Some(failure) = self
+            .transcript
+            .set_manual_title(title.clone())
+            .await
+            .failure
+        {
             sink.emit(
                 Event::RenameFailed(session_write_failed(&failure)),
                 "rename-failed",
@@ -176,7 +185,7 @@ impl Engine {
         }
         sink.emit(
             Event::SessionTitleUpdated {
-                id: self.transcript.session().session_id().to_owned(),
+                id: self.transcript.session().session_id(),
                 title,
             },
             "session-title-updated",
@@ -286,8 +295,7 @@ mod tests {
     use crate::session::handle::testing::record_write_call;
     use crate::session::saved::ArchiveUpdate;
     use crate::session::store::SessionStore;
-    use crate::session::store::local_testing::test_session_file;
-    use crate::session::store::testing::{listed_ids, test_project_dir, test_store};
+    use crate::session::store::testing::{listed_ids, test_store};
     use crate::tool::ToolRegistry;
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
@@ -297,21 +305,18 @@ mod tests {
     use crate::util::git::local_testing::init_fixture_repo;
     use crate::util::git::testing::with_isolated_git_env_async;
 
-    /// The branch in the live session's header, after one recorded message writes the file.
-    async fn header_branch(engine: &Engine, dir: &Path) -> Option<String> {
+    /// The branch the live session records, after one recorded message saves it.
+    async fn saved_branch(engine: &Engine, store: &SessionStore) -> Option<String> {
         engine
             .transcript
             .session()
             .record_message(Message::user("first"))
             .await;
-        let jsonl = std::fs::read_to_string(test_session_file(
-            dir,
-            engine.transcript.session().session_id(),
-        ))
-        .unwrap();
-        let header: serde_json::Value =
-            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
-        header["git_branch"].as_str().map(ToOwned::to_owned)
+        store
+            .find(&engine.session_id())
+            .unwrap()
+            .expect("the session is saved")
+            .git_branch
     }
 
     /// Runs a turn whose echo call `id` spills its output, and returns the session it ran in.
@@ -323,7 +328,7 @@ mod tests {
         engine
             .submit_prompt("echo it", None, &CapturingSink::default(), &mut inert_ops())
             .await;
-        engine.session_id().to_owned()
+        engine.session_id()
     }
 
     /// The `x-claude-code-session-id` of each request `server` received, in order.
@@ -360,9 +365,8 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let old_id = engine.session_id().to_owned();
+                let old_id = engine.session_id();
                 let target_id = finished_session(&store).await;
-                let target = store.find_session_path(&target_id).unwrap();
                 let path = dir.path().join("notes.txt");
                 record_write_call(
                     engine.transcript.session(),
@@ -379,7 +383,7 @@ mod tests {
 
                 {
                     let mut operation: std::pin::Pin<Box<dyn Future<Output = ()>>> = if resume {
-                        Box::pin(engine.resume(&sink, ResumeTarget::Path(target)))
+                        Box::pin(engine.resume(&sink, ResumeTarget::Id(target_id.clone())))
                     } else {
                         Box::pin(engine.clear(&sink))
                     };
@@ -457,8 +461,9 @@ mod tests {
             SESSION_CONTEXT.clone_into(&mut engine.transcript.prompt_mut().user_context);
             engine.usage.total_estimated_cost_usd = 1.23;
             engine.policy.allow_for_session(rule);
-            let target_path = store.find_session_path(&target_id).unwrap();
-            engine.resume(&sink, ResumeTarget::Path(target_path)).await;
+            engine
+                .resume(&sink, ResumeTarget::Id(target_id.clone()))
+                .await;
             assert_eq!(engine.policy.session_allow(), []);
             assert_eq!(engine.transcript.session().session_id(), target_id);
             assert_eq!(engine.transcript.messages().len(), 2);
@@ -482,14 +487,14 @@ mod tests {
             engine
                 .submit_prompt("before", None, &sink, &mut inert_ops())
                 .await;
-            let old_id = engine.session_id().to_owned();
+            let old_id = engine.session_id();
 
             engine.clear(&sink).await;
             engine
                 .submit_prompt("after", None, &sink, &mut inert_ops())
                 .await;
 
-            let new_id = engine.session_id().to_owned();
+            let new_id = engine.session_id();
             assert_ne!(new_id, old_id);
             assert_eq!(session_ids_sent(&server).await, [old_id, new_id]);
         })
@@ -509,7 +514,7 @@ mod tests {
             engine
                 .submit_prompt("before", None, &sink, &mut inert_ops())
                 .await;
-            let old_id = engine.session_id().to_owned();
+            let old_id = engine.session_id();
 
             engine
                 .resume(&sink, ResumeTarget::Id(target_id.clone()))
@@ -530,16 +535,17 @@ mod tests {
             let server = MockServer::start().await;
             let dir = tempfile::tempdir().unwrap();
             init_fixture_repo(dir.path());
-            let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+            let store = test_store(dir.path());
+            let mut engine = engine(server.uri(), &store, dir.path()).await;
             let sink = CapturingSink::default();
 
             engine.clear(&sink).await;
-            let cleared = header_branch(&engine, dir.path()).await;
+            let cleared = saved_branch(&engine, &store).await;
             engine
                 .transcript
                 .set_messages(vec![Message::user("archive me")]);
             engine.archive(&sink).await;
-            let archived = header_branch(&engine, dir.path()).await;
+            let archived = saved_branch(&engine, &store).await;
 
             assert_eq!(cleared.as_deref(), Some("fixture-branch"));
             assert_eq!(archived.as_deref(), Some("fixture-branch"));
@@ -555,7 +561,6 @@ mod tests {
             let store = test_store(dir.path());
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             let target_id = finished_session(&store).await;
-            let target_path = store.find_session_path(&target_id).unwrap();
             let clear_sink = CapturingSink::default();
             let resume_sink = CapturingSink::default();
 
@@ -564,7 +569,7 @@ mod tests {
             let after_clear = engine.usage.auto_compaction_failures;
             engine.usage.auto_compaction_failures = AutoCompactFailures::new(3);
             engine
-                .resume(&resume_sink, ResumeTarget::Path(target_path))
+                .resume(&resume_sink, ResumeTarget::Id(target_id.clone()))
                 .await;
 
             assert_eq!(after_clear, AutoCompactFailures::default());
@@ -617,20 +622,18 @@ mod tests {
             let first = spill_echo_output(&server, &mut engine, "call-1").await;
             engine.clear(&CapturingSink::default()).await;
             let cleared = spill_echo_output(&server, &mut engine, "call-2").await;
-            let first_path = store.find_session_path(&first).unwrap();
             engine
-                .resume(&CapturingSink::default(), ResumeTarget::Path(first_path))
+                .resume(&CapturingSink::default(), ResumeTarget::Id(first.clone()))
                 .await;
             let resumed = spill_echo_output(&server, &mut engine, "call-3").await;
 
             assert_ne!(cleared, first);
             assert_eq!(resumed, first);
-            let beside_file = |id: &str| store.find_session_path(id).unwrap().with_file_name(id);
             assert_eq!(
-                spill_names(&beside_file(&first)),
+                spill_names(&store.artifact_dir(&first)),
                 ["call-1.txt", "call-3.txt"]
             );
-            assert_eq!(spill_names(&beside_file(&cleared)), ["call-2.txt"]);
+            assert_eq!(spill_names(&store.artifact_dir(&cleared)), ["call-2.txt"]);
         })
         .await;
     }
@@ -643,14 +646,15 @@ mod tests {
             let store = test_store(dir.path());
             let mut engine = engine(server.uri(), &store, dir.path()).await;
             let target_id = finished_session(&store).await;
-            let target_path = store.find_session_path(&target_id).unwrap();
-
             start_shell(&engine.shells, "sleep 30").await;
             engine.clear(&CapturingSink::default()).await;
             let after_clear = engine.shells.list();
             start_shell(&engine.shells, "sleep 30").await;
             engine
-                .resume(&CapturingSink::default(), ResumeTarget::Path(target_path))
+                .resume(
+                    &CapturingSink::default(),
+                    ResumeTarget::Id(target_id.clone()),
+                )
                 .await;
 
             assert_eq!(after_clear, []);
@@ -670,7 +674,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let old_id = engine.session_id().to_owned();
+                let old_id = engine.session_id();
                 let before = dir.path().join("before.txt");
                 let after = dir.path().join("after.txt");
                 let late = dir.path().join("late.txt");
@@ -688,7 +692,7 @@ mod tests {
                 engine.clear(&sink).await;
                 assert_eq!(tracked_paths(&engine), [] as [PathBuf; 0]);
                 seed_full_read(&old_tracker, &late);
-                let new_id = engine.session_id().to_owned();
+                let new_id = engine.session_id();
                 engine
                     .submit_prompt("after clear", None, &sink, &mut ops)
                     .await;
@@ -797,7 +801,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path())
                     .await
                     .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
-                let planned_id = engine.session_id().to_owned();
+                let planned_id = engine.session_id();
                 let mut ops = inert_ops();
                 engine
                     .submit_prompt("plan it", None, &CapturingSink::default(), &mut ops)
@@ -807,8 +811,9 @@ mod tests {
                 assert_eq!(engine.transcript.tasks, []);
 
                 let sink = CapturingSink::default();
-                let planned_path = store.find_session_path(&planned_id).unwrap();
-                engine.resume(&sink, ResumeTarget::Path(planned_path)).await;
+                engine
+                    .resume(&sink, ResumeTarget::Id(planned_id.clone()))
+                    .await;
                 assert_eq!(engine.transcript.tasks, plan());
                 let events = sink.events();
                 let resumed = events
@@ -835,7 +840,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let live_id = engine.transcript.session().session_id().to_owned();
+                let live_id = engine.transcript.session().session_id();
                 let sink = CapturingSink::default();
 
                 engine.archive(&sink).await;
@@ -882,7 +887,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let saved_id = finished_session(&store).await;
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let live_id = engine.transcript.session().session_id().to_owned();
+                let live_id = engine.transcript.session().session_id();
                 let target = SavedTarget::Prefix(saved_id[..8].to_owned());
                 let sink = CapturingSink::default();
 
@@ -922,7 +927,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let saved_id = finished_session(&store).await;
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let live_id = engine.transcript.session().session_id().to_owned();
+                let live_id = engine.transcript.session().session_id();
                 let sink = CapturingSink::default();
 
                 engine.find_saved(&sink, saved_id.clone()).await;
@@ -953,7 +958,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let saved_id = finished_session(&store).await;
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let live_id = engine.transcript.session().session_id().to_owned();
+                let live_id = engine.transcript.session().session_id();
                 let sink = CapturingSink::default();
 
                 engine.delete_saved(&sink, saved_id.clone()).await;
@@ -987,7 +992,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let saved = handle::start(&store, MODEL, None);
-                let saved_id = saved.session_id().to_owned();
+                let saved_id = saved.session_id();
                 saved
                     .record_message(Message::user("x".repeat(240_000)))
                     .await;
@@ -995,10 +1000,11 @@ mod tests {
                 saved.finalize(Vec::new()).await;
                 let mut engine = engine("http://127.0.0.1:9".to_owned(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
-                let path = store.find_session_path(&saved_id).unwrap();
-
                 engine
-                    .resume(&CapturingSink::default(), ResumeTarget::Path(path))
+                    .resume(
+                        &CapturingSink::default(),
+                        ResumeTarget::Id(saved_id.clone()),
+                    )
                     .await;
 
                 assert_eq!(
@@ -1024,7 +1030,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let saved = handle::start(&store, MODEL, None);
-                let saved_id = saved.session_id().to_owned();
+                let saved_id = saved.session_id();
                 let saved_tracker = FileTracker::default();
                 let kept = dir.path().join("kept.txt");
                 let drifted = dir.path().join("drifted.txt");
@@ -1034,7 +1040,7 @@ mod tests {
                 std::fs::write(&drifted, "changed").unwrap();
                 saved.finalize(saved_tracker.snapshot_all()).await;
                 let mut engine = engine("http://127.0.0.1:9".to_owned(), &store, dir.path()).await;
-                let live_id = engine.session_id().to_owned();
+                let live_id = engine.session_id();
                 engine
                     .transcript
                     .session()
@@ -1044,9 +1050,9 @@ mod tests {
                 std::fs::write(&live, "live").unwrap();
                 seed_full_read(&engine.transcript.file_tracker, &live);
                 let sink = CapturingSink::default();
-                let path = store.find_session_path(&saved_id).unwrap();
-
-                engine.resume(&sink, ResumeTarget::Path(path)).await;
+                engine
+                    .resume(&sink, ResumeTarget::Id(saved_id.clone()))
+                    .await;
 
                 assert_eq!(tracked_paths(&engine), [kept]);
                 let notice = Event::Notice(format_drift_warning(&[drifted]));
@@ -1066,15 +1072,14 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let recorded_id = engine.transcript.session().session_id().to_owned();
+                let recorded_id = engine.transcript.session().session_id();
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
                 engine.submit_prompt("first", None, &sink, &mut ops).await;
                 engine.clear(&sink).await;
 
-                let recorded_path = store.find_session_path(&recorded_id).unwrap();
                 engine
-                    .resume(&sink, ResumeTarget::Path(recorded_path))
+                    .resume(&sink, ResumeTarget::Id(recorded_id.clone()))
                     .await;
                 assert_eq!(engine.transcript.prompt().user_context, SESSION_CONTEXT);
                 assert!(!engine.transcript.prompt_unrecorded());
@@ -1096,7 +1101,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let interrupted_id = engine.session_id().to_owned();
+                let interrupted_id = engine.session_id();
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
                 ops_tx.send(Op::Interrupt).await.unwrap();
@@ -1104,9 +1109,7 @@ mod tests {
                     .submit_prompt("write a story", None, &sink, &mut ops)
                     .await;
                 engine.clear(&sink).await;
-                let path = store.find_session_path(&interrupted_id).unwrap();
-
-                engine.resume(&sink, ResumeTarget::Path(path)).await;
+                engine.resume(&sink, ResumeTarget::Id(interrupted_id.clone())).await;
                 engine
                     .submit_prompt("what is 7 times 6?", None, &sink, &mut ops)
                     .await;
@@ -1135,7 +1138,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn from_another_project_spills_beside_the_file_that_delete_removes() {
+        async fn from_another_project_spills_into_artifacts_that_delete_removes() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
@@ -1143,7 +1146,6 @@ mod tests {
                 let other =
                     SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
                 let other_id = finished_session(&other).await;
-                let other_path = store.find_session_path(&other_id).unwrap();
                 let mut engine = engine(server.uri(), &store, dir.path())
                     .await
                     .with_tools(ToolRegistry::new(vec![Box::new(EchoTool)]));
@@ -1156,8 +1158,8 @@ mod tests {
                     .await;
 
                 spill_echo_output(&server, &mut engine, "call-1").await;
-                let beside_file = other_path.with_file_name(&other_id);
-                assert_eq!(spill_names(&beside_file), ["call-1.txt"]);
+                let artifacts = other.artifact_dir(&other_id);
+                assert_eq!(spill_names(&artifacts), ["call-1.txt"]);
                 engine.clear(&CapturingSink::default()).await;
                 let sink = CapturingSink::default();
                 engine.delete_saved(&sink, other_id.clone()).await;
@@ -1169,8 +1171,7 @@ mod tests {
                     }]
                 );
 
-                assert!(!beside_file.exists(), "delete removes the spills");
-                assert!(!test_project_dir(dir.path()).join(&other_id).exists());
+                assert!(!artifacts.exists(), "delete removes the spills");
             })
             .await;
         }
@@ -1186,8 +1187,9 @@ mod tests {
                 engine.transcript.set_session(dead_test_session());
                 let sink = CapturingSink::default();
 
-                let target_path = store.find_session_path(&target_id).unwrap();
-                engine.resume(&sink, ResumeTarget::Path(target_path)).await;
+                engine
+                    .resume(&sink, ResumeTarget::Id(target_id.clone()))
+                    .await;
 
                 let events = sink.events();
                 assert!(
@@ -1215,7 +1217,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let original_id = engine.transcript.session().session_id().to_owned();
+                let original_id = engine.transcript.session().session_id();
                 let context_estimate = 100_000;
                 let displayed_usage = TokenUsage::new(90_000, 9);
                 engine
@@ -1276,7 +1278,7 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let live_id = engine.transcript.session().session_id().to_owned();
+                let live_id = engine.transcript.session().session_id();
                 let sink = CapturingSink::default();
 
                 engine.rename(&sink, "Fix login".to_owned()).await;

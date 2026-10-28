@@ -13,16 +13,16 @@ use tracing::warn;
 use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use super::turn::{collect_response, conversation_request, record_interruption};
 use super::{Engine, TurnEnd, report_abort};
+use crate::auth::Auth;
 use crate::client::{PromptTooLong, Request, Response, ResponseEvent, StopReason, Wire};
-use crate::config::auth::Auth;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::message::{ContentBlock, Message, Role, TextOrigin};
 use crate::model::TokenUsage;
 use crate::prompt::{PromptParts, UserContext};
 use crate::protocol::{CompactTrigger, Event, EventSink, Op};
-use crate::session::entry::{CompactBoundary, CompactRecord};
-use crate::session::handle::Checkpoint;
+use crate::session::handle::{Checkpoint, CompactBoundary};
 use crate::session::post_compact::synthesize_post_compact_message;
+use crate::session::store::CompactRecord;
 use crate::tool::ToolDefinition;
 use crate::util::text::join_sentences;
 
@@ -294,10 +294,11 @@ impl Engine {
     ) -> Result<Checkpoint, CompactFailure> {
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
+        let session_id = self.session_id();
         let summary = await_unless_aborted(
             request_summary(
                 &self.client,
-                conversation_request(auth, &self.settings, &self.transcript, &tools),
+                conversation_request(&session_id, auth, &self.settings, &self.transcript, &tools),
                 instructions.as_deref(),
                 sink,
                 &mut spent,
@@ -361,7 +362,7 @@ impl Engine {
         let outcome = self.transcript.compact(boundary, synthetic).await;
         let Some(checkpoint) = outcome.checkpoint else {
             sink.emit(Event::SummaryDiscarded, "summary-discarded");
-            sink.session_write_error(outcome.failure.as_deref());
+            sink.session_write(&outcome.report);
             return None;
         };
 
@@ -374,8 +375,8 @@ impl Engine {
             },
             "session-compacted",
         );
-        // Reports the write error after the compaction event, which clears the TUI's chat.
-        sink.session_write_error(outcome.failure.as_deref());
+        // Reports the write after the compaction event, which clears the TUI's chat.
+        sink.session_write(&outcome.report);
         Some(checkpoint)
     }
 }
@@ -745,10 +746,10 @@ mod tests {
     use crate::model::ModelSettings;
     use crate::permission::Mode;
     use crate::prompt::SessionContext;
-    use crate::protocol::notice::session_write_failed;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{ResumeTarget, UsageSnapshot};
-    use crate::session::store::testing::{test_project_dir, test_store};
+    use crate::session::store::local_testing::fail_writes;
+    use crate::session::store::testing::test_store;
     use crate::tool::bash::background::ShellState;
     use crate::tool::bash::background::local_testing::start_shell;
     use crate::tool::bash::background::testing::shell;
@@ -1144,7 +1145,7 @@ mod tests {
                     !engine.transcript.prompt_unrecorded(),
                     "the boundary records the fresh prompt"
                 );
-                let data = store.load_session_data(engine.session_id()).unwrap();
+                let data = store.load_session_data(&engine.session_id()).unwrap();
                 assert_eq!(
                     data.context,
                     Some(engine.transcript.prompt().session_context())
@@ -1186,7 +1187,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                let session_id = engine.session_id().to_owned();
+                let session_id = engine.session_id();
                 engine.transcript.set_messages(tool_heavy_transcript());
                 engine.transcript.tasks = plan();
                 let mut ops = inert_ops();
@@ -1208,9 +1209,11 @@ mod tests {
                 assert_eq!(engine.transcript.tasks, plan());
 
                 engine.clear(&CapturingSink::default()).await;
-                let compacted = store.find_session_path(&session_id).unwrap();
                 engine
-                    .resume(&CapturingSink::default(), ResumeTarget::Path(compacted))
+                    .resume(
+                        &CapturingSink::default(),
+                        ResumeTarget::Id(session_id.clone()),
+                    )
                     .await;
 
                 assert_eq!(engine.session_id(), session_id);
@@ -1530,7 +1533,7 @@ mod tests {
                     let dir = tempfile::tempdir().unwrap();
                     let store = test_store(dir.path());
                     let mut engine = engine(server.uri(), &store, dir.path()).await;
-                    let session_id = engine.session_id().to_owned();
+                    let session_id = engine.session_id();
                     engine.transcript.set_messages(tool_heavy_transcript());
                     let read = dir.path().join("read.txt");
                     std::fs::write(&read, "read").unwrap();
@@ -1631,14 +1634,15 @@ mod tests {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
-                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                std::fs::remove_dir_all(test_project_dir(dir.path())).unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                fail_writes(&store);
                 let unsaved = engine
                     .transcript
                     .session()
-                    .record_message(Message::user("x".repeat(5 << 20)))
+                    .record_message(Message::user("unsaved"))
                     .await;
-                assert!(unsaved.failure.is_some());
+                assert!(unsaved.report.failure.is_some());
                 engine.transcript.set_messages(tool_heavy_transcript());
                 let summary = "s".repeat(2 << 20);
                 let mut large = boundary(Vec::new());
@@ -1659,18 +1663,10 @@ mod tests {
                         CompactTrigger::Auto
                     )]
                 );
-                let stop = session_write_failed(
-                    "session persistence stopped after more than 8 MiB of entries failed to \
-                     write: failed to create ",
-                );
                 let events = sink.events();
                 assert!(
-                    matches!(
-                        events.as_slice(),
-                        [Event::SessionCompacted { .. }, Event::Error(message)]
-                            if message.starts_with(&stop)
-                    ),
-                    "expected the compaction, then the stop: {events:?}",
+                    matches!(events.as_slice(), [Event::SessionCompacted { .. }]),
+                    "the stop already surfaced, so the compaction reports no error: {events:?}",
                 );
                 engine.transcript.session().clone().shutdown().await;
             })
@@ -1713,8 +1709,12 @@ mod tests {
                 .await;
         }
 
+        /// The session every summary request in these tests is attributed to.
+        const SESSION_ID: &str = "parent-session";
+
         /// The credential every summary request in these tests sends.
         static API_KEY: LazyLock<Auth> = LazyLock::new(api_key);
+
         /// The settings every summary request in these tests sends under.
         static SETTINGS: LazyLock<ModelSettings> =
             LazyLock::new(|| ModelSettings::test("claude-haiku-5-5"));
@@ -1741,7 +1741,13 @@ mod tests {
             let sink = CapturingSink::default();
             let summary = request_summary(
                 client,
-                conversation_request(&API_KEY, &SETTINGS, &parent(transcript.to_vec()), &[]),
+                conversation_request(
+                    SESSION_ID,
+                    &API_KEY,
+                    &SETTINGS,
+                    &parent(transcript.to_vec()),
+                    &[],
+                ),
                 None,
                 &sink,
                 &mut Vec::new(),
@@ -1927,7 +1933,8 @@ mod tests {
                 description: "Read a file.".to_owned(),
                 input_schema: json!({"type": "object"}),
             }];
-            let next_round = conversation_request(&API_KEY, &SETTINGS, &conversation, &tools);
+            let next_round =
+                conversation_request(SESSION_ID, &API_KEY, &SETTINGS, &conversation, &tools);
 
             let mut rx = client.stream(next_round).unwrap();
             while rx.recv().await.is_some() {}
@@ -1950,7 +1957,7 @@ mod tests {
                         .unwrap()
                 })
                 .collect();
-            assert_eq!(session_ids, [conversation.session().session_id(); 2]);
+            assert_eq!(session_ids, [SESSION_ID; 2]);
             let mut bodies = request_bodies(&server).await;
             let last_block = |body: &serde_json::Value| {
                 let messages = body["messages"].as_array().unwrap();
@@ -1997,7 +2004,7 @@ mod tests {
 
             let summary = request_summary(
                 &client,
-                conversation_request(&API_KEY, &SETTINGS, &conversation, &[]),
+                conversation_request(SESSION_ID, &API_KEY, &SETTINGS, &conversation, &[]),
                 None,
                 &sink,
                 &mut spent,
@@ -2017,8 +2024,7 @@ mod tests {
             );
             let received = server.received_requests().await.expect("recorded requests");
             assert_eq!(
-                received[1].headers["x-claude-code-session-id"],
-                conversation.session().session_id(),
+                received[1].headers["x-claude-code-session-id"], SESSION_ID,
                 "the retry stays attributed to the conversation's session",
             );
             let [_, retry] = request_bodies(&server).await.try_into().unwrap();
@@ -2153,7 +2159,13 @@ mod tests {
 
             let err = request_summary(
                 &client,
-                conversation_request(&API_KEY, &SETTINGS, &parent(overflowing_transcript()), &[]),
+                conversation_request(
+                    SESSION_ID,
+                    &API_KEY,
+                    &SETTINGS,
+                    &parent(overflowing_transcript()),
+                    &[],
+                ),
                 None,
                 &sink,
                 &mut spent,
@@ -2286,6 +2298,7 @@ mod tests {
                 let err = request_summary(
                     &client,
                     conversation_request(
+                        SESSION_ID,
                         &API_KEY,
                         &SETTINGS,
                         &parent(tool_heavy_transcript()),
@@ -2322,7 +2335,7 @@ mod tests {
             {
                 let mut compaction = pin!(request_summary(
                     &client,
-                    conversation_request(&API_KEY, &SETTINGS, &conversation, &[]),
+                    conversation_request(SESSION_ID, &API_KEY, &SETTINGS, &conversation, &[]),
                     None,
                     &sink,
                     &mut spent,
@@ -2355,7 +2368,13 @@ mod tests {
 
             let summary = request_summary(
                 &client,
-                conversation_request(&API_KEY, &SETTINGS, &parent(tool_heavy_transcript()), &[]),
+                conversation_request(
+                    SESSION_ID,
+                    &API_KEY,
+                    &SETTINGS,
+                    &parent(tool_heavy_transcript()),
+                    &[],
+                ),
                 None,
                 &sink,
                 &mut Vec::new(),

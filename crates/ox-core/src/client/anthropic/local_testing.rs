@@ -10,7 +10,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::Client;
 use super::testing::{DEVICE_ID, api_key};
 use super::transport::MessagesRequest;
-use crate::config::auth::{Auth, AuthSource};
+use crate::auth::{Auth, AuthSource};
 use crate::config::testing::test_config;
 use crate::config::{Config, DEFAULT_MODEL};
 use crate::model::TokenUsage;

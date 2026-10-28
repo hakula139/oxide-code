@@ -4,11 +4,12 @@ use std::path::Path;
 
 use reqwest::header::HeaderMap;
 
-use super::auth::{Auth, AuthSource, AuthState};
 use super::compaction::CompactionConfig;
+use super::credentials::AuthState;
 use super::gateway::GatewayCompat;
 use super::provenance::{Provenance, Source};
 use super::{BaseUrl, Config, ConfigSnapshot, DEFAULT_THEME, StatusLineSegment, ThemeConfig};
+use crate::auth::{Auth, AuthSource};
 use crate::model::{ModelSpec, PromptCacheTtl};
 use crate::permission::{Policy, Workspace};
 
