@@ -55,7 +55,6 @@ impl Shutdown {
     fn end_process(self) -> ExitCode {
         #[cfg(unix)]
         {
-            // Aborts when it cannot restore or raise the signal, so it does not return.
             _ = signal_hook::low_level::emulate_default_handler(self.number());
             unreachable!("emulate_default_handler aborts when it cannot raise the signal")
         }
@@ -172,7 +171,7 @@ mod tests {
             use super::*;
 
             #[test]
-            fn names_each_signals_number() {
+            fn maps_each_variant_to_its_signal_number() {
                 assert_eq!(
                     (
                         Shutdown::Hangup.number(),

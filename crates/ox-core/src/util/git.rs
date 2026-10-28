@@ -373,16 +373,21 @@ pub mod testing {
         ("GIT_CONFIG_NOSYSTEM", Some("1")),
     ];
 
-    /// `git` in `cwd` under [`ISOLATED_GIT_ENV`].
-    pub fn isolated_git(cwd: &Path) -> Command {
-        let mut command = Command::new("git");
-        command.current_dir(cwd);
+    /// Applies [`ISOLATED_GIT_ENV`] to `command`.
+    pub fn isolate_git(command: &mut Command) {
         for (key, value) in ISOLATED_GIT_ENV {
             match value {
                 Some(value) => command.env(key, value),
                 None => command.env_remove(key),
             };
         }
+    }
+
+    /// `git` in `cwd` under [`ISOLATED_GIT_ENV`].
+    pub fn isolated_git(cwd: &Path) -> Command {
+        let mut command = Command::new("git");
+        command.current_dir(cwd);
+        isolate_git(&mut command);
         command
     }
 

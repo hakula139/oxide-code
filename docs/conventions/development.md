@@ -12,7 +12,7 @@ nix flake check                                    # Run pre-commit hooks and th
 nix build                                          # Build ox from source
 ```
 
-If you use [direnv](https://direnv.net), run `direnv allow` once. After that, `.envrc` loads the dev shell whenever you enter the repository.
+If you use [direnv](https://direnv.net), run `direnv allow` once. After that, `.envrc` loads the dev shell whenever you enter the repository, sources the gitignored `.envrc.local` when it exists, then loads the gitignored `.env.local`, so local setup and variables reach every command in the shell.
 
 ## Pre-Commit Hooks
 
