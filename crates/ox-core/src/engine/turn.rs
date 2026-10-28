@@ -2640,10 +2640,9 @@ mod tests {
             let ContentBlock::ToolResult { content, .. } = &messages[2].content[0] else {
                 panic!("expected ToolResult, got {:?}", messages[2].content[0]);
             };
-            assert_eq!(
-                content,
-                "The echo call was denied by `plan` mode, which allows only reads. Do not retry it. \
-                 Finish investigating with `read`, `glob`, and `grep`, then present your plan.",
+            assert!(
+                content.starts_with("The echo call was denied by `plan` mode,"),
+                "{content}"
             );
             assert!(
                 matches!(

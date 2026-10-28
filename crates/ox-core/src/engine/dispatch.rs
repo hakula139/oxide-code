@@ -454,8 +454,8 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ))
 }
 
-/// The synthetic error result for a call `plan` mode denies. It steers the model toward the plan the
-/// mode exists for, since asking the user to adjust permissions would defeat the mode.
+/// The synthetic error result for a call `plan` mode denies. It steers the model toward the plan
+/// the mode exists for, since asking the user to adjust permissions would defeat the mode.
 fn plan_denied_output(name: &str) -> ToolOutput {
     ToolOutput::error(format!(
         "The {name} call was denied by `plan` mode, which allows only reads. \
@@ -998,6 +998,39 @@ mod tests {
                     approval_ids(&sink),
                     [] as [&str; 0],
                     "a deny rule never prompts"
+                );
+            }
+
+            #[tokio::test]
+            async fn plan_mode_denial_steers_toward_the_plan() {
+                let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Plan, &[], &[], Path::new("/repo"));
+
+                let denial = gate_call(
+                    &tools,
+                    "tool_1",
+                    "echo",
+                    json!({}),
+                    &sink,
+                    &mut inert_ops(),
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("deny resolves without abort");
+                let denial = expect_settled(denial);
+
+                assert!(denial.is_error);
+                assert_eq!(
+                    denial.content,
+                    "The echo call was denied by `plan` mode, which allows only reads. \
+                     Do not retry it. \
+                     Finish investigating with `read`, `glob`, and `grep`, then present your plan."
+                );
+                assert_eq!(
+                    approval_ids(&sink),
+                    [] as [&str; 0],
+                    "plan mode never prompts"
                 );
             }
 

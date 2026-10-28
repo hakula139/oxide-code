@@ -82,7 +82,9 @@ fn input_schema() -> serde_json::Value {
             },
             "limit": {
                 "type": "integer",
-                "description": format!("The number of lines to read (default: {DEFAULT_LINE_LIMIT})")
+                "description": format!(
+                    "The number of lines to read (default: {DEFAULT_LINE_LIMIT})"
+                )
             }
         },
         "required": ["file_path"]

@@ -674,7 +674,7 @@ mod tests {
                     INTRO,
                     &[
                         "You run in oxide-code",
-                        "which may only add deny and ask rules",
+                        "A project's config cannot add allow rules",
                         "have no effect in oxide-code",
                     ],
                 ),
