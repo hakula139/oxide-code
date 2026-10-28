@@ -5,13 +5,13 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
 use ox_core::util::text::ELLIPSIS;
 
 use super::RenderCtx;
 use crate::glyphs::{BAR, TOOL_BORDER_CONT};
-use crate::grapheme::head_end;
 use crate::wrap::{expand_tabs, wrap_line};
 
 const DEFAULT_SEPARATOR: &str = " │ ";
@@ -223,6 +223,18 @@ pub(super) fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
     }
     let boundary = head_end(s, max_bytes);
     format!("{}{ELLIPSIS}", &s[..boundary])
+}
+
+/// The byte offset of the last grapheme boundary at or before `budget`.
+fn head_end(text: &str, budget: usize) -> usize {
+    let mut end = 0;
+    for (byte, grapheme) in text.grapheme_indices(true) {
+        if byte + grapheme.len() > budget {
+            break;
+        }
+        end = byte + grapheme.len();
+    }
+    end
 }
 
 #[cfg(test)]
@@ -559,6 +571,26 @@ mod tests {
                 ("inside a combining mark", "e\u{301}x", 2, "..."),
             ] {
                 assert_eq!(truncate_to_bytes(input, max_bytes), expected, "{case}");
+            }
+        }
+    }
+
+    mod head_end {
+        use super::*;
+
+        #[test]
+        fn stops_at_the_last_cluster_boundary_within_the_budget() {
+            for (text, budget, expected) in [
+                ("abc", 10, 3),
+                ("abc", 2, 2),
+                ("a👨‍👩‍👧b", 2, 1),
+                ("a👨‍👩‍👧b", 6, 1),
+                ("a👨‍👩‍👧b", 19, 19),
+                ("e\u{301}x", 2, 0),
+                ("e\u{301}x", 3, 3),
+                ("abc", 0, 0),
+            ] {
+                assert_eq!(head_end(text, budget), expected, "{text:?} {budget}");
             }
         }
     }
