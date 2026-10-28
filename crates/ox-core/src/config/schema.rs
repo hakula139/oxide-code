@@ -359,13 +359,15 @@ mod tests {
             #[test]
             fn takes_an_absolute_or_home_relative_file() {
                 let dir = tempfile::tempdir().unwrap();
-                let absolute = dir.path().join("token");
+                let home = dir.path().to_owned();
+                let absolute = home.join("token");
                 let raw = toml::Value::String(absolute.display().to_string());
 
-                temp_env::with_var(HOME_VAR, Some(dir.path()), || {
+                temp_env::with_var(HOME_VAR, Some(&home), || {
                     for (fields, expected) in [
                         (format!("file = {raw}"), &absolute),
                         ("file = '~/token'".to_owned(), &absolute),
+                        ("file = '~'".to_owned(), &home),
                     ] {
                         assert!(
                             matches!(
@@ -392,14 +394,32 @@ mod tests {
             }
 
             #[test]
+            fn rejects_an_empty_value() {
+                assert_eq!(
+                    rejection("client.auth = { type = 'bearer', value = '' }"),
+                    "client.auth.value must not be empty"
+                );
+            }
+
+            #[test]
             fn rejects_a_file_path_that_is_not_absolute_or_under_home() {
-                for file in ["token", "./token", "../token", "~other/token", ""] {
+                let dir = tempfile::tempdir().unwrap();
+                let home = dir.path().to_str().unwrap();
+                for (home, file) in [
+                    (home, "token"),
+                    (home, "./token"),
+                    (home, "../token"),
+                    (home, "~other/token"),
+                    (home, ""),
+                    ("relative-home", "~/token"),
+                ] {
                     let body = format!("client.auth = {{ type = 'bearer', file = '{file}' }}");
 
+                    let rejected = temp_env::with_var(HOME_VAR, Some(home), || rejection(&body));
+
                     assert_eq!(
-                        rejection(&body),
-                        "client.auth.file must be an absolute or ~/ path",
-                        "{file:?}"
+                        rejected, "invalid client.auth.file: expected an absolute or `~/` path",
+                        "{file:?} under {home:?}"
                     );
                 }
             }
@@ -415,13 +435,6 @@ mod tests {
                 inline_secret("client.auth.value", "token".to_owned()).unwrap(),
                 "token"
             );
-        }
-
-        #[test]
-        fn rejects_an_empty_value_naming_the_key() {
-            let err = inline_secret("client.auth.value", String::new()).unwrap_err();
-
-            assert_eq!(format!("{err:#}"), "client.auth.value must not be empty");
         }
 
         #[test]

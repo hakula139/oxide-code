@@ -106,8 +106,12 @@ pub fn expand_user(raw: &str) -> Result<PathBuf> {
 /// Expands `raw` like [`expand_user`] and requires an absolute result, so a configured path cannot
 /// depend on the working directory. Errors never quote `raw`, which may hold a pasted secret.
 pub(crate) fn expand_absolute(raw: &str) -> Result<PathBuf> {
-    let path =
-        expand_user(raw).map_err(|_| anyhow!("cannot expand `~` without a home directory"))?;
+    require_absolute(expand_user(raw))
+}
+
+/// Checks an [`expand_user`] result, replacing its error, which quotes the raw path.
+fn require_absolute(expanded: Result<PathBuf>) -> Result<PathBuf> {
+    let path = expanded.map_err(|_| anyhow!("cannot expand `~` without a home directory"))?;
     ensure!(path.is_absolute(), "expected an absolute or `~/` path");
     Ok(path)
 }
@@ -408,6 +412,24 @@ mod tests {
                     "{raw:?}"
                 );
             }
+        }
+    }
+
+    mod require_absolute {
+        use super::*;
+
+        #[test]
+        fn names_the_missing_home_directory_without_quoting_the_path() {
+            let expanded = Err(anyhow!(
+                "failed to expand `~` in \"~/secret\": no home directory"
+            ));
+
+            let err = require_absolute(expanded).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "cannot expand `~` without a home directory"
+            );
         }
     }
 
