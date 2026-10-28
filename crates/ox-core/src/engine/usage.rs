@@ -16,13 +16,13 @@ use crate::session::store::UsageRecord;
 pub(super) struct UsageLedger {
     /// [`TurnReport::context_estimate`] of the latest turn the transcript keeps, or an estimate
     /// from the parts of the next request when that turn reported no usage.
-    pub(super) context_estimate: u32,
+    context_estimate: u32,
     /// The latest usage any turn the transcript keeps reported, which the status line shows.
-    pub(super) displayed_usage: Option<TokenUsage>,
-    pub(super) total_estimated_cost_usd: f64,
+    displayed_usage: Option<TokenUsage>,
+    total_estimated_cost_usd: f64,
     /// Delivers the usage of the live session's title request, which joins the session total once
     /// it lands.
-    pub(super) title_usage: Option<oneshot::Receiver<UsageRecord>>,
+    title_usage: Option<oneshot::Receiver<UsageRecord>>,
     /// Automatic compaction failures in a row, which pause it once they reach the limit.
     pub(super) auto_compaction_failures: AutoCompactFailures,
 }
@@ -39,72 +39,69 @@ impl UsageLedger {
             auto_compaction_failures: AutoCompactFailures::default(),
         }
     }
-}
 
-impl Engine {
-    pub(super) async fn account_usage(&mut self, sink: &dyn EventSink, report: &TurnReport) {
-        self.usage.context_estimate = report.context_estimate(
-            self.transcript.prompt(),
-            &self.tools.definitions(),
-            self.transcript.messages(),
-        );
-        let Some(usage) = report.usage() else {
-            return;
-        };
-        self.usage.displayed_usage = Some(usage);
-        self.bill(sink, &report.billable_rounds).await;
-        self.emit_usage_update(sink);
+    pub(super) const fn context_estimate(&self) -> u32 {
+        self.context_estimate
     }
 
-    /// Records each request in `requests` and adds its estimated cost to the session total.
-    pub(super) async fn bill(&mut self, sink: &dyn EventSink, requests: &[TokenUsage]) {
-        if requests.is_empty() {
-            return;
+    /// Takes a turn's context `estimate` and, when the turn reported any, its `usage`.
+    fn observe_turn(&mut self, estimate: u32, usage: Option<TokenUsage>) {
+        self.context_estimate = estimate;
+        if usage.is_some() {
+            self.displayed_usage = usage;
         }
-        let records: Vec<_> = requests
-            .iter()
-            .map(|&tokens| UsageRecord {
-                model: self.settings.model().id().to_owned(),
-                cache_ttl: self.settings.prompt_cache_ttl(),
-                tokens,
-            })
-            .collect();
-        self.usage.total_estimated_cost_usd += estimate_cost_usd(&records);
-        let report = self.transcript.record_usage(records).await;
-        sink.session_write(&report);
     }
 
-    /// Forgets the usage and auto-compaction failures of a transcript the session no longer sends.
-    /// The context estimate comes from the parts of the next request until a turn reports usage.
-    pub(super) fn reset_context_usage(&mut self, sink: &dyn EventSink) {
-        self.usage.auto_compaction_failures.reset(sink);
-        self.usage.context_estimate = self.transcript.request_estimate(&self.tools.definitions());
-        self.usage.displayed_usage = None;
+    /// Adds the estimated cost of `records` to the session total.
+    fn bill(&mut self, records: &[UsageRecord]) {
+        self.total_estimated_cost_usd += estimate_cost_usd(records);
     }
 
-    /// Shows the context usage and session cost, first adding the title request's cost once its
-    /// usage lands.
-    pub(super) fn emit_usage_update(&mut self, sink: &dyn EventSink) {
+    /// Forgets the usage and auto-compaction failures of a transcript the session no longer sends,
+    /// taking the context `estimate` of the next request's parts until a turn reports usage.
+    fn reset_context(&mut self, sink: &dyn EventSink, estimate: u32) {
+        self.auto_compaction_failures.reset(sink);
+        self.context_estimate = estimate;
+        self.displayed_usage = None;
+    }
+
+    /// Shows the context usage against `context_window` and the session cost, first adding the
+    /// title request's cost once its usage lands.
+    fn emit_update(&mut self, sink: &dyn EventSink, context_window: Option<u32>) {
         self.absorb_title_usage();
-        let estimated_cost_usd = (self.usage.total_estimated_cost_usd > 0.0)
-            .then_some(self.usage.total_estimated_cost_usd);
-        if self.usage.displayed_usage.is_none() && estimated_cost_usd.is_none() {
+        let estimated_cost_usd =
+            (self.total_estimated_cost_usd > 0.0).then_some(self.total_estimated_cost_usd);
+        if self.displayed_usage.is_none() && estimated_cost_usd.is_none() {
             return;
         }
         sink.emit(
             Event::UsageUpdated(UsageSnapshot {
-                context_tokens: self.usage.displayed_usage.map(TokenUsage::context_tokens),
-                context_window: self.settings.model().context_window(),
+                context_tokens: self.displayed_usage.map(TokenUsage::context_tokens),
+                context_window,
                 estimated_cost_usd,
             }),
             "usage-updated",
         );
     }
 
+    /// Waits for `usage`, the result of the title request just started, to join the session total.
+    pub(super) fn await_title_usage(&mut self, usage: oneshot::Receiver<UsageRecord>) {
+        self.title_usage = Some(usage);
+    }
+
+    /// The title request's usage once the request ends, `None` when it reported none. Pending until
+    /// then, and forever when no title request is in flight.
+    pub(super) async fn title_usage(&mut self) -> Option<UsageRecord> {
+        match &mut self.title_usage {
+            Some(pending) => pending.await.ok(),
+            None => std::future::pending().await,
+        }
+    }
+
     /// Adds the title request's cost to the session total once its usage lands, and stops waiting
     /// once the request has ended, with or without usage.
     fn absorb_title_usage(&mut self) {
-        let Some(pending) = &mut self.usage.title_usage else {
+        let Some(pending) = &mut self.title_usage else {
             return;
         };
         let record = match pending.try_recv() {
@@ -117,12 +114,87 @@ impl Engine {
 
     /// Consumes the title result and returns whether it reported usage.
     pub(super) fn account_title_usage(&mut self, record: Option<UsageRecord>) -> bool {
-        self.usage.title_usage = None;
+        self.title_usage = None;
         let Some(record) = record else {
             return false;
         };
-        self.usage.total_estimated_cost_usd += estimate_cost_usd(&[record]);
+        self.bill(&[record]);
         true
+    }
+}
+
+#[cfg(test)]
+impl UsageLedger {
+    pub(super) const fn awaits_title_usage(&self) -> bool {
+        self.title_usage.is_some()
+    }
+
+    pub(super) const fn displayed_usage(&self) -> Option<TokenUsage> {
+        self.displayed_usage
+    }
+
+    pub(super) const fn total_estimated_cost_usd(&self) -> f64 {
+        self.total_estimated_cost_usd
+    }
+
+    pub(super) const fn set_context_estimate(&mut self, estimate: u32) {
+        self.context_estimate = estimate;
+    }
+
+    pub(super) const fn set_displayed_usage(&mut self, usage: Option<TokenUsage>) {
+        self.displayed_usage = usage;
+    }
+
+    pub(super) const fn set_total_estimated_cost_usd(&mut self, cost: f64) {
+        self.total_estimated_cost_usd = cost;
+    }
+}
+
+impl Engine {
+    pub(super) async fn account_usage(&mut self, sink: &dyn EventSink, report: &TurnReport) {
+        let estimate = report.context_estimate(
+            self.transcript.prompt(),
+            &self.tools.definitions(),
+            self.transcript.messages(),
+        );
+        let usage = report.usage();
+        self.usage.observe_turn(estimate, usage);
+        if usage.is_none() {
+            return;
+        }
+        self.bill(sink, &report.billable_rounds).await;
+        self.emit_usage_update(sink);
+    }
+
+    /// Records each request in `requests`, priced by the session's model and cache TTL, and adds
+    /// its estimated cost to the session total.
+    pub(super) async fn bill(&mut self, sink: &dyn EventSink, requests: &[TokenUsage]) {
+        if requests.is_empty() {
+            return;
+        }
+        let records: Vec<_> = requests
+            .iter()
+            .map(|&tokens| UsageRecord {
+                model: self.settings.model().id().to_owned(),
+                cache_ttl: self.settings.prompt_cache_ttl(),
+                tokens,
+            })
+            .collect();
+        self.usage.bill(&records);
+        let report = self.transcript.record_usage(records).await;
+        sink.session_write(&report);
+    }
+
+    /// [`UsageLedger::reset_context`] with the estimate of the next request's parts.
+    pub(super) fn reset_context_usage(&mut self, sink: &dyn EventSink) {
+        let estimate = self.transcript.request_estimate(&self.tools.definitions());
+        self.usage.reset_context(sink, estimate);
+    }
+
+    /// [`UsageLedger::emit_update`] against the session model's context window.
+    pub(super) fn emit_usage_update(&mut self, sink: &dyn EventSink) {
+        self.usage
+            .emit_update(sink, self.settings.model().context_window());
     }
 }
 

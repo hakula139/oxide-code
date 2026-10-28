@@ -57,7 +57,8 @@ impl SlashCommand for ModelCmd {
 
 #[cfg(test)]
 mod tests {
-    use ox_core::protocol::{ConfigPick, Op};
+    use ox_core::protocol::Op;
+    use ox_core::protocol::testing::model_pick;
 
     use super::*;
     use crate::action::Action;
@@ -107,10 +108,7 @@ mod tests {
         fn typed_id_forwards_the_resolved_model() {
             assert_eq!(
                 run_execute(&ModelCmd, "sonnet").unwrap().into_forward(),
-                Action::Op(Op::SetModel(ConfigPick::Model {
-                    id: "claude-sonnet-5-5".to_owned(),
-                    effort: None,
-                })),
+                Action::Op(Op::SetModel(model_pick("claude-sonnet-5-5", None))),
             );
         }
 
@@ -118,10 +116,7 @@ mod tests {
         fn unknown_id_forwards_verbatim() {
             assert_eq!(
                 run_execute(&ModelCmd, "gpt-4").unwrap().into_forward(),
-                Action::Op(Op::SetModel(ConfigPick::Model {
-                    id: "gpt-4".to_owned(),
-                    effort: None,
-                })),
+                Action::Op(Op::SetModel(model_pick("gpt-4", None))),
             );
         }
     }

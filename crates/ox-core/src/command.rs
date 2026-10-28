@@ -235,13 +235,11 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::protocol::testing::model_pick;
     use crate::session::display::MAX_TITLE_WIDTH;
 
     fn set_model(id: &str) -> Op {
-        Op::SetModel(ConfigPick::Model {
-            id: id.to_owned(),
-            effort: None,
-        })
+        Op::SetModel(model_pick(id, None))
     }
 
     fn set_effort(level: Effort) -> Op {

@@ -589,7 +589,8 @@ pub mod testing {
     use anyhow::{Result, bail};
     use serde_json::json;
 
-    use super::{Event, EventSink, ToolCall, ToolResult};
+    use super::{ConfigPick, Event, EventSink, ToolCall, ToolResult};
+    use crate::model::Effort;
     use crate::tool::view::ToolResultView;
 
     /// An [`EventSink`] that keeps every event it receives. Clones share one log.
@@ -621,6 +622,14 @@ pub mod testing {
     impl EventSink for FailingSink {
         fn send(&self, _event: Event) -> Result<()> {
             bail!("sink closed")
+        }
+    }
+
+    /// A pick of the model `id`, with `effort` when one was picked alongside.
+    pub fn model_pick(id: &str, effort: Option<Effort>) -> ConfigPick {
+        ConfigPick::Model {
+            id: id.to_owned(),
+            effort,
         }
     }
 

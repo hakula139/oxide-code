@@ -250,10 +250,8 @@ impl Engine {
         loop {
             let op = tokio::select! {
                 biased;
-                usage = async { self.usage.title_usage.as_mut()?.await.ok() },
-                    if self.usage.title_usage.is_some() =>
-                {
-                    if self.account_title_usage(usage) {
+                usage = self.usage.title_usage() => {
+                    if self.usage.account_title_usage(usage) {
                         self.emit_usage_update(&sink);
                     }
                     continue;
@@ -340,7 +338,7 @@ impl Engine {
         if self.generates_titles
             && let Some(seed) = outcome.ai_title_seed
         {
-            self.usage.title_usage = Some(title_generator::spawn(
+            self.usage.await_title_usage(title_generator::spawn(
                 self.client.clone(),
                 auth.clone(),
                 self.settings.prompt_cache_ttl(),
@@ -608,7 +606,7 @@ mod tests {
     use crate::model::{Effort, ModelSpec, PromptCacheTtl, TokenUsage};
     use crate::permission::PermissionClass;
     use crate::permission::rule::Rule;
-    use crate::protocol::testing::CapturingSink;
+    use crate::protocol::testing::{CapturingSink, model_pick};
     use crate::protocol::{CompactTrigger, ResumeTarget, SavedTarget, UsageSnapshot};
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;
@@ -742,9 +740,9 @@ mod tests {
                     .unwrap();
 
                     assert!(
-                        (engine.usage.total_estimated_cost_usd - 0.006).abs() < 1e-12,
+                        (engine.usage.total_estimated_cost_usd() - 0.006).abs() < 1e-12,
                         "priced at the recorded model's rates: {}",
-                        engine.usage.total_estimated_cost_usd,
+                        engine.usage.total_estimated_cost_usd(),
                     );
                     assert_eq!(
                         engine.transcript.prompt().user_context == SESSION_CONTEXT,
@@ -925,7 +923,7 @@ mod tests {
                         }],
                     },
                 ]);
-                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.set_total_estimated_cost_usd(1.23);
                 engine.transcript.tasks = plan();
                 engine.transcript.drifted = vec![PathBuf::from("a.rs")];
 
@@ -1098,7 +1096,7 @@ mod tests {
                 let session = engine.transcript.session().clone();
                 let session_id = engine.session_id();
                 let (billed, usage) = oneshot::channel();
-                engine.usage.title_usage = Some(usage);
+                engine.usage.await_title_usage(usage);
                 let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
                 let (sink, events) = mpsc::unbounded_channel();
                 let task = EngineTask(tokio::spawn(engine.run(sink.clone(), op_rx)));
@@ -1163,7 +1161,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let (billed, usage) = oneshot::channel();
-                engine.usage.title_usage = Some(usage);
+                engine.usage.await_title_usage(usage);
                 drop(billed);
                 let mut handle = engine.spawn();
 
@@ -1885,7 +1883,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.context_estimate = 50_000;
+                engine.usage.set_context_estimate(50_000);
                 let mut handle = engine.spawn();
 
                 handle.ops.send(Op::prompt("five")).await.unwrap();
@@ -2742,7 +2740,7 @@ mod tests {
                         "hello".to_owned(),
                     );
                     let (billed, usage) = oneshot::channel();
-                    engine.usage.title_usage = Some(usage);
+                    engine.usage.await_title_usage(usage);
                     let failure = async {
                         assert!(
                             title.await.is_err(),
@@ -2906,7 +2904,7 @@ mod tests {
                         .await;
                     assert_eq!(end, TurnEnd::Completed);
                     if manual {
-                        assert!(resumed.usage.title_usage.is_none());
+                        assert!(!resumed.usage.awaits_title_usage());
                     } else {
                         let title = tokio::time::timeout(Duration::from_secs(5), async {
                             loop {
@@ -3097,9 +3095,11 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.context_estimate = 50_000;
-                engine.usage.displayed_usage = Some(TokenUsage::new(50_000, 1));
-                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.set_context_estimate(50_000);
+                engine
+                    .usage
+                    .set_displayed_usage(Some(TokenUsage::new(50_000, 1)));
+                engine.usage.set_total_estimated_cost_usd(1.23);
                 engine.usage.auto_compaction_failures = AutoCompactFailures::new(2);
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
@@ -3133,14 +3133,15 @@ mod tests {
                 ));
                 assert_eq!(engine.transcript.messages().len(), 3);
                 assert_eq!(
-                    engine.usage.context_estimate,
+                    engine.usage.context_estimate(),
                     1_000 + compaction::transcript_tokens(&engine.transcript.messages()[2..]),
                     "the turn's input plus its reply",
                 );
                 assert!(
-                    (engine.usage.total_estimated_cost_usd - (1.23 + 0.006 + 0.006)).abs() < 1e-12,
+                    (engine.usage.total_estimated_cost_usd() - (1.23 + 0.006 + 0.006)).abs()
+                        < 1e-12,
                     "the session cost keeps earlier turns and adds the summary and the turn: {}",
-                    engine.usage.total_estimated_cost_usd,
+                    engine.usage.total_estimated_cost_usd(),
                 );
                 let events = sink.events();
                 let compacted = events
@@ -3198,7 +3199,7 @@ mod tests {
                 let first = engine.submit_prompt("hello", None, &sink, &mut ops).await;
                 assert_eq!(first, TurnEnd::Completed);
                 assert_eq!(
-                    engine.usage.context_estimate,
+                    engine.usage.context_estimate(),
                     1_000 + compaction::transcript_tokens(&engine.transcript.messages()[1..])
                 );
                 let rejected = engine
@@ -3259,7 +3260,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.context_estimate = 50_000;
+                engine.usage.set_context_estimate(50_000);
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
@@ -3312,7 +3313,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.context_estimate = 50_000;
+                engine.usage.set_context_estimate(50_000);
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
                 ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
@@ -3718,13 +3719,6 @@ mod tests {
     mod set_model {
         use super::*;
 
-        fn sonnet_pick() -> ConfigPick {
-            ConfigPick::Model {
-                id: "claude-sonnet-5-5".to_owned(),
-                effort: None,
-            }
-        }
-
         #[tokio::test]
         async fn notices_the_change_against_the_settings_before_it() {
             with_pinned_home(async {
@@ -3738,8 +3732,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 for id in ["custom-model", MODEL] {
-                    let id = id.to_owned();
-                    engine.set_model(&sink, ConfigPick::Model { id, effort: None });
+                    engine.set_model(&sink, model_pick(id, None));
                 }
 
                 let notices: Vec<String> = sink
@@ -3782,7 +3775,7 @@ mod tests {
                 let mut ops = inert_ops();
 
                 engine.submit_prompt("first", None, &sink, &mut ops).await;
-                engine.set_model(&sink, sonnet_pick());
+                engine.set_model(&sink, model_pick("claude-sonnet-5-5", None));
                 engine.submit_prompt("second", None, &sink, &mut ops).await;
 
                 let turns = request_bodies(&server).await;
@@ -3830,7 +3823,7 @@ mod tests {
                 let mut ops = inert_ops();
 
                 engine.submit_prompt("first", None, &sink, &mut ops).await;
-                engine.set_model(&sink, sonnet_pick());
+                engine.set_model(&sink, model_pick("claude-sonnet-5-5", None));
                 engine.submit_prompt("second", None, &sink, &mut ops).await;
 
                 let turns = request_bodies(&server).await;
@@ -3880,7 +3873,7 @@ mod tests {
                     engine.settings = config.model_settings();
                     engine.compaction = configured;
 
-                    engine.set_model(&sink, sonnet_pick());
+                    engine.set_model(&sink, model_pick("claude-sonnet-5-5", None));
 
                     assert_eq!(
                         engine.compaction.auto.threshold_tokens,
@@ -3911,8 +3904,8 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.usage.auto_compaction_failures = AutoCompactFailures::new(3);
-                engine.usage.context_estimate = 100_000;
-                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.set_context_estimate(100_000);
+                engine.usage.set_total_estimated_cost_usd(1.23);
                 let sink = CapturingSink::default();
 
                 engine.set_model(&sink, ConfigPick::Effort(Effort::Xhigh));
@@ -3921,11 +3914,11 @@ mod tests {
                     engine.usage.auto_compaction_failures,
                     AutoCompactFailures::default()
                 );
-                assert_eq!(engine.usage.context_estimate, 100_000);
+                assert_eq!(engine.usage.context_estimate(), 100_000);
                 assert!(
-                    (engine.usage.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,
+                    (engine.usage.total_estimated_cost_usd() - 1.23).abs() < f64::EPSILON,
                     "session cost must accumulate across swaps: {}",
-                    engine.usage.total_estimated_cost_usd,
+                    engine.usage.total_estimated_cost_usd(),
                 );
                 let events = sink.events();
                 assert!(

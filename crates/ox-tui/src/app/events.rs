@@ -531,7 +531,7 @@ mod tests {
     use ox_core::permission::PermissionClass;
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
-    use ox_core::protocol::testing::text_result;
+    use ox_core::protocol::testing::{model_pick, text_result};
     use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
     use ox_core::session::resolver::ResolveError;
     use ox_core::session::saved::SavedAction;
@@ -567,13 +567,6 @@ mod tests {
             icon: "$".to_owned(),
             label: command.to_owned(),
         })
-    }
-
-    fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
-        ConfigPick::Model {
-            id: model.id().to_owned(),
-            effort,
-        }
     }
 
     mod handle_engine_event {
@@ -1941,7 +1934,7 @@ mod tests {
             app.handle_engine_event(Event::ConfigChanged {
                 model: sonnet.clone(),
                 effort: Some(Effort::High),
-                requested: model_pick(&sonnet, None),
+                requested: model_pick(sonnet.id(), None),
                 auto_compaction: AutoCompactionConfig {
                     enabled: true,
                     threshold_tokens: Some(WINDOW_1M_THRESHOLD),
