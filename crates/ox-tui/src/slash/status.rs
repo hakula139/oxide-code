@@ -107,7 +107,7 @@ mod tests {
         fn lists_each_session_descriptor() {
             let mut modal = build_modal(&test_session_info());
 
-            insta::assert_debug_snapshot!(render_modal(&mut modal, 80));
+            insta::assert_debug_snapshot!(render_modal(&mut modal, 80, u16::MAX));
         }
 
         #[test]

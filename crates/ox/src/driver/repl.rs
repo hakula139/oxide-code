@@ -172,15 +172,8 @@ fn repl_command_list() -> String {
     names.push(HELP);
     names.sort_unstable();
     names
-        .iter()
-        .map(|name| {
-            let aliases = command::aliases(name);
-            if aliases.is_empty() {
-                format!("/{name}")
-            } else {
-                format!("/{name} ({})", aliases.join(", "))
-            }
-        })
+        .into_iter()
+        .map(command::label)
         .collect::<Vec<_>>()
         .join(", ")
 }

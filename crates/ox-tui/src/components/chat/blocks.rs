@@ -5,7 +5,7 @@ mod compacted;
 mod error;
 mod git_diff;
 mod interrupted;
-mod markdown_cache;
+mod live_markdown;
 mod notice;
 mod rows;
 mod streaming;
@@ -18,7 +18,7 @@ pub(super) use self::compacted::CompactedBlock;
 pub(super) use self::error::ErrorBlock;
 pub(super) use self::git_diff::GitDiffBlock;
 pub(super) use self::interrupted::InterruptedMarker;
-pub(super) use self::markdown_cache::MarkdownCache;
+pub(super) use self::live_markdown::LiveMarkdown;
 pub(super) use self::notice::NoticeBlock;
 pub(super) use self::streaming::StreamingAssistant;
 pub(super) use self::system::SystemMessageBlock;
@@ -188,32 +188,27 @@ fn bar_section(
     body: &str,
 ) -> Vec<Line<'static>> {
     let width = usize::from(ctx.width).saturating_sub(prefix.width());
-    bar_section_rows(ctx, prefix, styles, header, body, |body| {
+    bar_section_rows(ctx, prefix, styles, header, body.trim().is_empty(), || {
         render_markdown_on(body, ctx.theme, styles.body, width).lines
     })
 }
 
-/// [`bar_section`] for a body that grows while it streams, reusing `cache` for its complete blocks.
+/// [`bar_section`] for a `body` that grows while it streams, reusing its complete blocks' rows.
 fn streaming_bar_section(
     ctx: &RenderCtx<'_>,
     prefix: &str,
     styles: &SectionStyles,
     header: &str,
-    body: &str,
-    cache: &mut MarkdownCache,
+    body: &mut LiveMarkdown,
 ) -> Vec<Line<'static>> {
     let width = usize::from(ctx.width).saturating_sub(prefix.width());
-    cache.invalidate_for_width(ctx.width);
-    let render = |chunk: &str, after_block: bool| {
-        let (text, after_block) =
-            render_markdown_chunk_on(chunk, ctx.theme, styles.body, width, after_block);
-        (text.lines, after_block)
-    };
-    bar_section_rows(ctx, prefix, styles, header, body, |body| {
-        cache.advance(body, ctx.width, render);
-        let mut rows = cache.rendered().to_vec();
-        rows.extend(cache.tail(body, render));
-        rows
+    let blank = body.text().trim().is_empty();
+    bar_section_rows(ctx, prefix, styles, header, blank, || {
+        body.render(ctx.width, |chunk, after_block| {
+            let (text, after_block) =
+                render_markdown_chunk_on(chunk, ctx.theme, styles.body, width, after_block);
+            (text.lines, after_block)
+        })
     })
 }
 
@@ -222,17 +217,17 @@ fn bar_section_rows(
     prefix: &str,
     styles: &SectionStyles,
     header: &str,
-    body: &str,
-    body_rows: impl FnOnce(&str) -> Vec<Line<'static>>,
+    blank: bool,
+    body_rows: impl FnOnce() -> Vec<Line<'static>>,
 ) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     prefixed_row(&mut out, ctx, prefix, styles.bar, header, styles.header);
-    if body.trim().is_empty() {
+    if blank {
         return out;
     }
 
     out.push(Line::from(Span::styled(prefix.to_owned(), styles.bar)));
-    for line in body_rows(body) {
+    for line in body_rows() {
         out.push(prepend_markdown_prefix(line, prefix, styles.bar));
     }
     out

@@ -6,7 +6,7 @@ use ratatui::text::Line;
 use ox_core::protocol::notice;
 
 use super::{
-    ChatBlock, MarkdownCache, RenderCtx, SectionStyles, bar_section, streaming_bar_section,
+    ChatBlock, LiveMarkdown, RenderCtx, SectionStyles, bar_section, streaming_bar_section,
 };
 use crate::glyphs::TOOL_BORDER_PREFIX;
 
@@ -32,11 +32,9 @@ impl CompactedBlock {
     }
 
     /// Renders the summary of a compaction in flight, laid out like the boundary it becomes.
-    /// `cache` holds the rendered blocks the summary has already closed.
     pub(crate) fn render_streaming(
-        summary: &str,
+        summary: &mut LiveMarkdown,
         ctx: &RenderCtx<'_>,
-        cache: &mut MarkdownCache,
     ) -> Vec<Line<'static>> {
         streaming_bar_section(
             ctx,
@@ -44,7 +42,6 @@ impl CompactedBlock {
             &boundary_styles(ctx),
             STREAMING_HEADER,
             summary,
-            cache,
         )
     }
 }

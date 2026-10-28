@@ -1,4 +1,5 @@
-//! The `stream-json` wire format: a documented [`Event`] in the shape `RELEASING.md` keeps stable.
+//! The JSON lines a headless run writes to stdout: each documented [`Event`] in the shape
+//! `RELEASING.md` keeps stable, and the result that ends the run.
 //!
 //! The enum restates each documented variant, so renaming an internal variant or adding a TUI-only
 //! one cannot change stdout. Payloads stay the protocol types, whose field names and result views
@@ -7,11 +8,11 @@
 use serde::Serialize;
 
 use ox_core::client::RateLimits;
-use ox_core::protocol::{CompactTrigger, Event, ToolCall, ToolResult, UsageSnapshot};
+use ox_core::protocol::{CompactTrigger, Event, ToolCall, ToolResult, TurnEnd, UsageSnapshot};
 use ox_core::tool::bash::background::BackgroundShell;
 use ox_core::tool::tasks::Task;
 
-/// One `stream-json` line.
+/// One JSON line on stdout.
 #[derive(Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub(super) enum HeadlessEvent<'a> {
@@ -40,6 +41,23 @@ pub(super) enum HeadlessEvent<'a> {
     PromptUnsent,
     TurnRolledBack,
     TurnFailed(&'a str),
+    /// The line that ends a `json` or `stream-json` run.
+    Result(RunResult<'a>),
+}
+
+/// How a headless run ended.
+#[derive(Serialize)]
+pub(super) struct RunResult<'a> {
+    pub(super) stop_reason: TurnEnd,
+    /// Why the turn failed.
+    pub(super) error: Option<&'a str>,
+    /// Why the session could not be saved, which leaves its run missing from the transcript.
+    pub(super) session_write_error: Option<&'a str>,
+    /// The reply after the last tool call, kept only when the turn completed.
+    pub(super) message: Option<&'a str>,
+    /// The latest usage snapshot any request reported.
+    pub(super) usage: Option<&'a UsageSnapshot>,
+    pub(super) session_id: &'a str,
 }
 
 /// The wire form of `event`, or `None` for a variant that `docs/guide/headless.md` does not
@@ -207,12 +225,27 @@ mod tests {
 
     #[test]
     fn pins_every_documented_payload() {
-        let lines: Vec<String> = documented_events()
+        let usage = UsageSnapshot {
+            context_tokens: Some(1_000),
+            context_window: Some(1_000_000),
+            estimated_cost_usd: Some(0.018),
+        };
+        let result = HeadlessEvent::Result(RunResult {
+            stop_reason: TurnEnd::Completed,
+            error: None,
+            session_write_error: Some("disk full"),
+            message: Some("Done."),
+            usage: Some(&usage),
+            session_id: "session-1",
+        });
+
+        let mut lines: Vec<String> = documented_events()
             .iter()
             .map(|event| {
                 serde_json::to_string(&wire(event).expect("a documented event has a form")).unwrap()
             })
             .collect();
+        lines.push(serde_json::to_string(&result).unwrap());
 
         insta::assert_snapshot!(lines.join("\n"));
     }

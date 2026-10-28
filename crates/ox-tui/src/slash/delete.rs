@@ -99,11 +99,6 @@ mod tests {
     use crate::modal::testing::render_modal;
     use crate::slash::registry::testing::run_execute;
 
-    #[test]
-    fn requires_an_id_prefix() {
-        assert_eq!(DeleteCmd.usage(), Some("<id-prefix>"));
-    }
-
     mod classify {
         use super::*;
 
@@ -168,7 +163,7 @@ mod tests {
 
             let mut modal = confirm_modal(&info);
 
-            let rows = render_modal(&mut *modal, 80);
+            let rows = render_modal(&mut *modal, 80, u16::MAX);
             assert_eq!(rows[2].trim_end(), "Doomed session");
             assert!(rows[3].starts_with("abababab · "), "{}", rows[3]);
         }

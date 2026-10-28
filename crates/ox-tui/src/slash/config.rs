@@ -229,7 +229,7 @@ mod tests {
         fn lists_every_resolved_key_with_its_source() {
             let mut modal = build_modal(&test_session_info(), None);
 
-            insta::assert_debug_snapshot!(render_modal(&mut modal, 80));
+            insta::assert_debug_snapshot!(render_modal(&mut modal, 80, u16::MAX));
         }
 
         #[test]
@@ -265,7 +265,7 @@ mod tests {
             }];
             let mut modal = build_modal(&info, None);
 
-            insta::assert_debug_snapshot!(render_modal(&mut modal, 80));
+            insta::assert_debug_snapshot!(render_modal(&mut modal, 80, u16::MAX));
         }
 
         #[test]

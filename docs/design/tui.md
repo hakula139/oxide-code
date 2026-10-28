@@ -64,7 +64,7 @@ Thinking that is still streaming shows its body in both views under the spinner 
 
 ## Streaming Markdown
 
-The streaming reply, live thinking, and the compaction summary in flight each keep a block-based stable-prefix cache:
+The streaming reply, live thinking, and the compaction summary in flight each hold their text in a `LiveMarkdown` with a block-based stable-prefix cache, which advances when a frame renders and starts over when the chat's width changes:
 
 - **Commit complete blocks.** A top-level markdown block is complete once another top-level block starts after it. The cache renders complete blocks once into owned `Line<'static>` values, and each frame re-parses only the tail from the last block start.
 - **Detect stable boundaries.** Block starts are found in newline-terminated lines only, because a partial line can still change which block it opens. Blank lines inside a fenced code block or a loose list stay in the tail.
@@ -103,7 +103,7 @@ A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other
 - `crates/ox-tui/src/app.rs`: `App`, its `tokio::select!` loop, `TICK_INTERVAL`, the shortest gap between ticks, and `App::next_tick`, which picks when the loop wakes.
 - `crates/ox-tui/src/components/chat.rs`: `ChatView` and the compact and expanded views.
 - `crates/ox-tui/src/components/chat/blocks.rs`: `ChatBlock` and `RenderCtx`, the render contract of a chat block.
-- `crates/ox-tui/src/components/chat/blocks/markdown_cache.rs`: `MarkdownCache`, the stable-prefix cache of a section that grows while it streams.
+- `crates/ox-tui/src/components/chat/blocks/live_markdown.rs`: `LiveMarkdown`, the text of a section that grows while it streams, with its stable-prefix cache.
 - `crates/ox-tui/src/components/chat/blocks/streaming.rs`: `StreamingAssistant`, the streaming reply over its cache.
 - `crates/ox-tui/src/components/chat/scroll.rs`: `ChatView::place`, the anchored placement each frame paints, and the auto-scroll that follows the tail.
 - `crates/ox-tui/src/components/chat/stack.rs`: `CachedBlock`, `SlotTops`, and `Stack`, the block cache and the row anchors.

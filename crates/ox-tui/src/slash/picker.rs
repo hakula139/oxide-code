@@ -15,6 +15,7 @@ use ox_core::protocol::{ConfigPick, Op};
 use super::effort_slider::step_level;
 use crate::action::Action;
 use crate::glyphs::RADIO_SELECTED;
+use crate::keymap::hint;
 use crate::modal::chrome::{
     CONFIRM_HINTS, FOOTER_HEIGHT, KEY_LEFT_RIGHT, above, height_above, render_footer,
 };
@@ -153,7 +154,7 @@ impl ModelEffortPicker {
                 format!("{level} effort{suffix}"),
                 style.add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {KEY_LEFT_RIGHT} to adjust"), theme.dim()),
+            Span::styled(format!("  {}", hint(KEY_LEFT_RIGHT, "adjust")), theme.dim()),
         ])
     }
 }

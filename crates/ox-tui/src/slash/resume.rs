@@ -788,7 +788,7 @@ impl Modal for ResumePicker {
                     false,
                 )
             }
-            Err(error) => (saved_error_message(error, Some(BARE_ARCHIVE_HINT)), true),
+            Err(error) => (saved_error_message(error, BARE_ARCHIVE_HINT), true),
         };
         self.notice = Some(Notice {
             text,
@@ -887,7 +887,6 @@ mod tests {
     use crate::modal::chrome::HINT_SEPARATOR;
     use crate::modal::testing::{render_modal, render_rows, render_rows_with, rendered_text};
     use crate::slash::registry::testing::run_execute;
-    use crate::slash::testing::make_read_only;
 
     fn archive(picker: &mut ResumePicker) -> ModalKey {
         let outcome = picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
@@ -947,14 +946,8 @@ mod tests {
     }
 
     fn footer_row(picker: &mut ResumePicker, width: u16) -> String {
-        let rows = picker_rows(picker, width, 40);
-        rows.last().unwrap().trim_end().to_owned()
-    }
-
-    /// [`render_rows`] at the height the picker asks for within `max_height`.
-    fn picker_rows(picker: &mut ResumePicker, width: u16, max_height: u16) -> Vec<String> {
-        let height = picker.height(width, max_height);
-        render_rows(picker, width, height)
+        let rows = render_modal(picker, width, 40);
+        rows.last().unwrap().clone()
     }
 
     /// Seeds `count` sessions titled `session`, the newest first in the walk, and returns their IDs
@@ -1658,7 +1651,7 @@ mod tests {
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            let rows = picker_rows(&mut picker, 40, 40);
+            let rows = render_modal(&mut picker, 40, 40);
             assert_eq!(
                 rows.last().unwrap(),
                 "Enter to resume  ·  Esc to cancel  · ..."
@@ -1671,7 +1664,7 @@ mod tests {
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
             picker.load_error = Some("permission denied".to_owned());
 
-            let rows = picker_rows(&mut picker, 60, 40);
+            let rows = render_modal(&mut picker, 60, 40);
             assert_eq!(rows.last().unwrap().trim_end(), "! permission denied");
         }
     }
@@ -1981,7 +1974,7 @@ mod tests {
             let ModalKey::Push(mut confirm) = outcome else {
                 panic!("Ctrl+D must push the confirm modal, got {outcome:?}");
             };
-            let rows = render_modal(&mut *confirm, 60);
+            let rows = render_modal(&mut *confirm, 60, u16::MAX);
             assert_eq!(rows[2].trim_end(), "Fix auth");
             assert_eq!(rows[3].trim_end(), "11111111 · 2026-04-18 · 3 msgs");
         }
@@ -2111,7 +2104,7 @@ mod tests {
             }
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
             let first_shown = |picker: &mut ResumePicker| -> String {
-                let rows = picker_rows(picker, 60, 40);
+                let rows = render_modal(picker, 60, 40);
                 rows[5].split_whitespace().next().unwrap().to_owned()
             };
             for _ in 0..15 {
@@ -2215,22 +2208,25 @@ mod tests {
                 Some(1),
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            make_read_only(&store.saved_file(&id));
-            let failure = saved_error_message(
-                &saved::testing::set_archived(
-                    &store,
-                    &SavedTarget::Id(id.clone()),
-                    ArchiveState::Archived,
-                    "live-session-id",
-                )
-                .unwrap_err(),
-                Some(BARE_ARCHIVE_HINT),
-            );
             let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let target = SavedTarget::Id(id.clone());
+            picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            picker.archive_started(&target);
 
-            archive(&mut picker);
+            picker.archive_updated(
+                &target,
+                ArchiveState::Archived,
+                &Err(SavedError::Failed {
+                    action: SavedAction::Archive,
+                    id: id.clone(),
+                    cause: "disk full".to_owned(),
+                }),
+            );
 
-            assert_eq!(footer_row(&mut picker, 400), format!("! {failure}"));
+            assert_eq!(
+                footer_row(&mut picker, 400),
+                format!("! Failed to archive session {id}: disk full"),
+            );
             assert_eq!(picker.list.selected().unwrap().session_id, id);
         }
     }

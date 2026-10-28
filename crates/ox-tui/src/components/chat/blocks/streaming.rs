@@ -5,44 +5,39 @@ use ratatui::text::Line;
 
 use super::RenderCtx;
 use super::assistant::{assistant_markdown_width, with_assistant_gutter};
-use super::markdown_cache::MarkdownCache;
+use super::live_markdown::LiveMarkdown;
 use crate::markdown::render_markdown_chunk;
 
 /// In-flight assistant turn buffered between stream tokens.
 #[derive(Default)]
 pub(crate) struct StreamingAssistant {
-    buffer: String,
-    cache: MarkdownCache,
+    text: LiveMarkdown,
 }
 
 impl StreamingAssistant {
     pub(crate) fn append(&mut self, token: &str) {
-        self.buffer.push_str(token);
+        self.text.push_str(token);
     }
 
     /// The streamed text, ending the turn's buffering.
-    pub(crate) fn into_buffer(self) -> String {
-        self.buffer
-    }
-
-    pub(crate) fn invalidate_cache_for_width(&mut self, width: u16) {
-        self.cache.invalidate_for_width(width);
+    pub(crate) fn into_buffer(mut self) -> String {
+        self.text.take()
     }
 
     /// Drops the prefix cache so the next render re-parses the buffer with current styles.
     pub(crate) fn invalidate_cache(&mut self) {
-        self.cache.invalidate();
+        self.text.invalidate();
     }
 
     /// Caches rendered lines for every top-level block that is complete.
     pub(crate) fn advance_cache(&mut self, ctx: &RenderCtx<'_>, continues_turn: bool) {
-        let starts_new_turn = !continues_turn && self.cache.rendered().is_empty();
+        let starts_new_turn = !continues_turn && self.text.starts_over_at(ctx.width);
         let render = chunk_renderer(ctx, starts_new_turn);
-        self.cache.advance(&self.buffer, ctx.width, render);
+        self.text.advance(ctx.width, render);
     }
 
     pub(crate) fn rendered(&self) -> &[Line<'static>] {
-        self.cache.rendered()
+        self.text.rendered()
     }
 
     /// Renders the uncached tail in one parse so pulldown keeps its block separators.
@@ -51,9 +46,8 @@ impl StreamingAssistant {
         ctx: &RenderCtx<'_>,
         continues_turn: bool,
     ) -> Vec<Line<'static>> {
-        let starts_new_turn = !continues_turn && self.cache.rendered().is_empty();
-        self.cache
-            .tail(&self.buffer, chunk_renderer(ctx, starts_new_turn))
+        let starts_new_turn = !continues_turn && self.text.starts_over_at(ctx.width);
+        self.text.tail(chunk_renderer(ctx, starts_new_turn))
     }
 }
 
@@ -92,23 +86,6 @@ mod tests {
 
     fn rows(lines: &[Line<'_>]) -> Vec<String> {
         lines.iter().map(ToString::to_string).collect()
-    }
-
-    mod invalidate_cache_for_width {
-        use super::*;
-
-        #[test]
-        fn drops_the_cache_only_when_the_width_changes() {
-            let theme = Theme::default();
-            let ctx = RenderCtx::new(80, &theme);
-            for (width, cached) in [(80, &["◉ para1"][..]), (40, &[])] {
-                let mut streaming = streamed(&["para1\n\npara2\n"], &ctx);
-
-                streaming.invalidate_cache_for_width(width);
-
-                assert_eq!(rows(streaming.rendered()), cached, "width {width}");
-            }
-        }
     }
 
     mod invalidate_cache {

@@ -121,13 +121,6 @@ pub(crate) fn classify(parsed: &Parsed) -> Option<SlashKind> {
 #[cfg(test)]
 pub(crate) mod testing {
     pub(crate) use super::diff::testing::{added, context, removed};
-
-    /// Marks the file at `path` read-only, so appending to it fails on every platform.
-    pub(super) fn make_read_only(path: &std::path::Path) {
-        let mut permissions = std::fs::metadata(path).unwrap().permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(path, permissions).unwrap();
-    }
 }
 
 #[cfg(test)]
