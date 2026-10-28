@@ -22,7 +22,7 @@ use crate::components::input::InputOutcome;
 use crate::keymap::{CTRL_C, CTRL_D};
 use crate::modal::ModalAction;
 use crate::now;
-use crate::slash::{self, SlashContext, SlashKind, SlashOutcome};
+use crate::slash::{self, SlashContext, SlashOutcome};
 use crate::theme::Theme;
 use crate::theme::builtin::BuiltinTheme;
 use crate::viewport::Direction;
@@ -412,8 +412,11 @@ impl App {
         if echoes {
             self.chat.push_user_message(text.to_owned());
         }
-        let kind = slash::classify(&parsed);
-        if !self.allows_mutating(&parsed.name, kind) {
+        if self.in_flight.is_some() && slash::idle_only(&parsed) {
+            self.chat.push_system_message(format!(
+                "/{} runs only when idle. Try again after the turn finishes.",
+                parsed.name,
+            ));
             return;
         }
         if let Some(action) = self.run_slash(&parsed, text) {
@@ -490,18 +493,6 @@ impl App {
         let ctx = SlashContext::new(&self.session_info);
         let outcome = slash::dispatch(parsed, &ctx);
         self.apply_slash_outcome(outcome, line)
-    }
-
-    /// Refuses a `Mutating` command while the App is busy, naming it in a chat notice. Returns
-    /// whether the command may run.
-    fn allows_mutating(&mut self, name: &str, kind: Option<SlashKind>) -> bool {
-        if self.in_flight.is_none() || kind != Some(SlashKind::Mutating) {
-            return true;
-        }
-        self.chat.push_system_message(format!(
-            "/{name} runs only when idle. Try again after the turn finishes.",
-        ));
-        false
     }
 
     /// Applies a slash command's outcome: shows its chat output or modal, starts its background
@@ -1862,7 +1853,7 @@ mod tests {
 
         #[tokio::test]
         async fn init_during_busy_refuses_with_system_message_no_forward() {
-            // Mutating: refuse. The typed `/init` row lands, but its synthesized body doesn't.
+            // Idle-only: refuse. The typed `/init` row lands, but its synthesized body doesn't.
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             rx.try_recv().expect("active submit forwarded");

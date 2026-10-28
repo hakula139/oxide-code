@@ -4,7 +4,7 @@
 use ox_core::protocol::Op;
 
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{SlashCommand, SlashOutcome};
 use crate::action::Action;
 
 // ── LoginCmd ──
@@ -20,8 +20,8 @@ impl SlashCommand for LoginCmd {
         "Sign in to a Claude account"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        SlashKind::Mutating
+    fn idle_only(&self, _args: &str) -> bool {
+        true
     }
 
     fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -42,8 +42,8 @@ impl SlashCommand for LogoutCmd {
         "Sign out of the oxide-code login"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        SlashKind::Mutating
+    fn idle_only(&self, _args: &str) -> bool {
+        true
     }
 
     fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -62,15 +62,6 @@ mod tests {
             .into_forward()
     }
 
-    mod classify {
-        use super::*;
-
-        #[test]
-        fn is_mutating() {
-            assert_eq!(LoginCmd.classify(""), SlashKind::Mutating);
-        }
-    }
-
     mod execute {
         use super::*;
 
@@ -82,15 +73,6 @@ mod tests {
 
     mod logout_cmd {
         use super::*;
-
-        mod classify {
-            use super::*;
-
-            #[test]
-            fn is_mutating() {
-                assert_eq!(LogoutCmd.classify(""), SlashKind::Mutating);
-            }
-        }
 
         mod execute {
             use super::*;

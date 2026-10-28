@@ -1,10 +1,7 @@
-//! `/exit` forwards [`Op::Shutdown`], which quits `ox` as Ctrl+D on an empty idle input does.
-
-use ox_core::protocol::Op;
+//! `/exit` forwards [`ox_core::protocol::Op::Shutdown`], which quits `ox` as Ctrl+D on an empty idle input does.
 
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use crate::action::Action;
+use super::registry::{SlashCommand, SlashOutcome, typed_form};
 
 // ── ExitCmd ──
 
@@ -19,18 +16,17 @@ impl SlashCommand for ExitCmd {
         "Quit oxide-code"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        SlashKind::Steering
-    }
-
-    fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        Ok(SlashOutcome::Forward(Action::Op(Op::Shutdown)))
+    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+        typed_form(self.name(), args, ctx)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use ox_core::protocol::Op;
+
     use super::*;
+    use crate::action::Action;
     use crate::slash::registry::testing::run_execute;
 
     mod execute {

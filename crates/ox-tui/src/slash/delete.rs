@@ -15,7 +15,7 @@ use ox_core::util::time::now_local;
 
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{SlashCommand, SlashOutcome};
 use super::sessions::format_metadata_line;
 use crate::action::Action;
 use crate::modal::Modal;
@@ -33,9 +33,9 @@ impl SlashCommand for DeleteCmd {
         "Delete a saved session"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        // Mutating keeps both forms idle-gated, since the typed-arg form deletes a session.
-        SlashKind::Mutating
+    fn idle_only(&self, _args: &str) -> bool {
+        // Both forms wait for an idle App, since the typed-arg form deletes a session.
+        true
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -98,14 +98,9 @@ mod tests {
     use crate::modal::testing::render_modal;
     use crate::slash::registry::testing::run_execute;
 
-    mod classify {
-        use super::*;
-
-        #[test]
-        fn is_always_mutating() {
-            assert_eq!(DeleteCmd.classify(""), SlashKind::Mutating);
-            assert_eq!(DeleteCmd.classify("ab"), SlashKind::Mutating);
-        }
+    #[test]
+    fn requires_an_id_prefix() {
+        assert_eq!(DeleteCmd.usage(), Some("<id-prefix>"));
     }
 
     mod echoes_input {

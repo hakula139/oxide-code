@@ -1,11 +1,8 @@
 //! `/compact [instructions]` compresses the conversation into a summary, appending any trailing
 //! text to the rubric as focus instructions.
 
-use ox_core::command;
-
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use crate::action::Action;
+use super::registry::{SlashCommand, SlashOutcome, typed_form};
 
 // ── CompactCmd ──
 
@@ -20,16 +17,16 @@ impl SlashCommand for CompactCmd {
         "Compress conversation context into a summary"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        SlashKind::Mutating
+    fn idle_only(&self, _args: &str) -> bool {
+        true
     }
 
     fn usage(&self) -> Option<&'static str> {
         Some("[<instructions>]")
     }
 
-    fn execute(&self, args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        Ok(SlashOutcome::Forward(Action::Op(command::compact(args))))
+    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+        typed_form(self.name(), args, ctx)
     }
 }
 
@@ -38,17 +35,8 @@ mod tests {
     use ox_core::protocol::Op;
 
     use super::*;
+    use crate::action::Action;
     use crate::slash::registry::testing::run_execute;
-
-    mod classify {
-        use super::*;
-
-        #[test]
-        fn is_always_mutating() {
-            assert_eq!(CompactCmd.classify(""), SlashKind::Mutating);
-            assert_eq!(CompactCmd.classify("focus on the bug"), SlashKind::Mutating);
-        }
-    }
 
     mod execute {
         use super::*;

@@ -31,7 +31,7 @@ pub(crate) use self::context::SlashContext;
 pub(crate) use self::delete::confirm_modal as delete_confirm_modal;
 pub(crate) use self::diff::{DiffRow, WorkingTreeDiff};
 pub(crate) use self::matcher::MatchedCommand;
-pub(crate) use self::registry::{ArgCompletion, SlashKind, SlashOutcome};
+pub(crate) use self::registry::{ArgCompletion, SlashOutcome};
 pub use self::resume::ResumePicker;
 pub(crate) use self::sessions::{
     CLEAR_THEN_DELETE_HINT, archive_message, delete_lookup_error, saved_error_message,
@@ -110,10 +110,11 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
         .join(", ")
 }
 
-/// Returns the [`SlashKind`] that decides whether `parsed` may dispatch mid-turn, or `None` for an
-/// unknown command.
-pub(crate) fn classify(parsed: &Parsed) -> Option<SlashKind> {
-    registry::lookup_in(registry::BUILT_INS, &parsed.name).map(|cmd| cmd.classify(&parsed.args))
+/// Returns whether `parsed` waits for an idle App. An unknown command runs mid-turn, which reports
+/// the error.
+pub(crate) fn idle_only(parsed: &Parsed) -> bool {
+    registry::lookup_in(registry::BUILT_INS, &parsed.name)
+        .is_some_and(|cmd| cmd.idle_only(&parsed.args))
 }
 
 // ── Testing ──
@@ -240,35 +241,45 @@ mod tests {
         }
     }
 
-    mod classify {
+    mod idle_only {
         use super::*;
 
         #[test]
-        fn built_in_read_only_command_is_read_only() {
-            let parsed = parsed("help", "");
-            assert_eq!(classify(&parsed), Some(SlashKind::ReadOnly));
-        }
+        fn waits_for_idle_only_for_forms_that_change_the_session() {
+            let cases = [
+                ("archive", "", true),
+                ("archive", "ab", true),
+                ("clear", "", true),
+                ("new", "", true),
+                ("compact", "focus", true),
+                ("config", "", false),
+                ("delete", "ab", true),
+                ("diff", "", false),
+                ("effort", "", true),
+                ("effort", "high", true),
+                ("exit", "", false),
+                ("quit", "", false),
+                ("help", "", false),
+                ("init", "", true),
+                ("login", "", true),
+                ("logout", "", true),
+                ("mode", "", false),
+                ("mode", "plan", false),
+                ("model", "", true),
+                ("model", "opus", true),
+                ("rename", "", true),
+                ("resume", "", true),
+                ("continue", "ab", true),
+                ("status", "", false),
+                ("theme", "", false),
+                ("theme", "latte", false),
+                ("unarchive", "ab", true),
+                ("no-such-thing", "", false),
+            ];
 
-        #[test]
-        fn built_in_state_mutating_command_is_mutating() {
-            for name in ["clear", "new", "reset", "init"] {
-                let parsed = parsed(name, "");
-                assert_eq!(classify(&parsed), Some(SlashKind::Mutating), "{name}");
+            for (name, args, expected) in cases {
+                assert_eq!(idle_only(&parsed(name, args)), expected, "/{name} {args}");
             }
-        }
-
-        #[test]
-        fn exit_and_its_alias_steer() {
-            for name in ["exit", "quit"] {
-                let parsed = parsed(name, "");
-                assert_eq!(classify(&parsed), Some(SlashKind::Steering), "{name}");
-            }
-        }
-
-        #[test]
-        fn unknown_command_has_no_kind() {
-            let parsed = parsed("no-such-thing", "");
-            assert_eq!(classify(&parsed), None);
         }
     }
 }

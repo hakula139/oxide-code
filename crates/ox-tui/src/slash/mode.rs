@@ -1,4 +1,4 @@
-//! `/mode` opens the picker, or switches with `/mode <mode>`, which [`command::mode`] parses. Both
+//! `/mode` opens the picker, or switches with `/mode <mode>`, which [`ox_core::command::typed_form`] parses. Both
 //! forms run mid-turn, and the switch applies from the next tool call the gate weighs.
 
 use std::borrow::Cow;
@@ -8,13 +8,12 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use strum::VariantArray as _;
 
-use ox_core::command;
 use ox_core::permission::Mode;
 use ox_core::protocol::Op;
 
 use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
-use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{ArgCompletion, SlashCommand, SlashOutcome, typed_form};
 use crate::action::Action;
 use crate::modal::chrome::CONFIRM_HINTS;
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
@@ -32,14 +31,6 @@ impl SlashCommand for ModeCmd {
 
     fn description(&self) -> &'static str {
         "Switch the permission mode"
-    }
-
-    fn classify(&self, args: &str) -> SlashKind {
-        if args.is_empty() {
-            SlashKind::ReadOnly
-        } else {
-            SlashKind::Steering
-        }
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -66,7 +57,7 @@ impl SlashCommand for ModeCmd {
                 ctx.info.config.permission_mode,
             ))));
         }
-        Ok(SlashOutcome::Forward(Action::Op(command::mode(args)?)))
+        typed_form(self.name(), args, ctx)
     }
 }
 
@@ -155,16 +146,6 @@ mod tests {
     use super::*;
     use crate::modal::testing::render_modal;
     use crate::slash::registry::testing::run_execute;
-
-    mod classify {
-        use super::*;
-
-        #[test]
-        fn opens_the_picker_read_only_and_steers_with_a_mode() {
-            assert_eq!(ModeCmd.classify(""), SlashKind::ReadOnly);
-            assert_eq!(ModeCmd.classify("plan"), SlashKind::Steering);
-        }
-    }
 
     mod complete_arg {
         use super::*;

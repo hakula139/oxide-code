@@ -11,7 +11,7 @@ use ox_core::command;
 use ox_core::session::display::MAX_TITLE_WIDTH;
 
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{SlashCommand, SlashOutcome, typed_form};
 use crate::action::Action;
 use crate::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
 use crate::modal::line_editor::LineEditor;
@@ -36,8 +36,8 @@ impl SlashCommand for RenameCmd {
         "Rename the current session"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        SlashKind::Mutating
+    fn idle_only(&self, _args: &str) -> bool {
+        true
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -54,7 +54,7 @@ impl SlashCommand for RenameCmd {
                 ctx.info.title.as_deref(),
             ))));
         }
-        Ok(SlashOutcome::Forward(Action::Op(command::rename(args)?)))
+        typed_form(self.name(), args, ctx)
     }
 }
 
@@ -133,16 +133,6 @@ mod tests {
     use crate::modal::testing::render_modal;
     use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
-
-    mod classify {
-        use super::*;
-
-        #[test]
-        fn is_always_mutating() {
-            assert_eq!(RenameCmd.classify(""), SlashKind::Mutating);
-            assert_eq!(RenameCmd.classify("New Title"), SlashKind::Mutating);
-        }
-    }
 
     mod echoes_input {
         use super::*;
