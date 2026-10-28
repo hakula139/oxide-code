@@ -389,13 +389,10 @@ pub(super) fn notify_if_interrupted(messages: &[Message], sink: &dyn EventSink) 
         && last.role == Role::Assistant
         && ends_on_interrupted_work(&last.content)
     {
-        sink.emit(
-            Event::Error(
-                "The response was interrupted before it finished. Send a message to continue."
-                    .to_owned(),
-            ),
-            "interrupted-work",
-        );
+        sink.emit(Event::Error(
+            "The response was interrupted before it finished. Send a message to continue."
+                .to_owned(),
+        ));
     }
 }
 
@@ -442,7 +439,7 @@ pub(super) async fn record_drained_prompts(
     for text in texts {
         let report = transcript.record_message(Message::user(text.clone())).await;
         sink.session_write(&report);
-        sink.emit(Event::PromptDrained(text), "prompt-drained");
+        sink.emit(Event::PromptDrained(text));
     }
 }
 
@@ -503,9 +500,9 @@ pub(super) async fn collect_response(
             ResponseEvent::Progress(note) => _ = sink.send(Event::ProgressUpdate(note)),
             ResponseEvent::Usage(reported) => *usage = Some(reported),
             ResponseEvent::RateLimits(limits) => {
-                sink.emit(Event::RateLimitsUpdated(limits), "rate-limits");
+                sink.emit(Event::RateLimitsUpdated(limits));
             }
-            ResponseEvent::Retrying(notice) => sink.emit(Event::Retrying(notice), "retry-notice"),
+            ResponseEvent::Retrying(notice) => sink.emit(Event::Retrying(notice)),
             ResponseEvent::Completed(response) => return Ok(response),
         }
     }

@@ -77,7 +77,7 @@ impl Engine {
             Ok(auth) => {
                 let source = auth.source();
                 self.sign_in = SignIn::SignedIn(auth.clone());
-                sink.emit(Event::LoginRestored { auth: source }, "login-restored");
+                sink.emit(Event::LoginRestored { auth: source });
                 Ok(auth)
             }
             Err(unavailable) => {
@@ -97,15 +97,12 @@ impl Engine {
     ) -> TurnEnd {
         let pending = match PendingLogin::start().await {
             Ok(pending) => pending,
-            Err(e) => return report_abort(sink, sign_in_failed(&e), "login-failed"),
+            Err(e) => return report_abort(sink, sign_in_failed(&e)),
         };
-        sink.emit(
-            Event::LoginStarted {
-                url: pending.url().to_owned(),
-                manual_url: pending.manual_url().to_owned(),
-            },
-            "login-started",
-        );
+        sink.emit(Event::LoginStarted {
+            url: pending.url().to_owned(),
+            manual_url: pending.manual_url().to_owned(),
+        });
 
         let mut inbox = Inbox::default();
         let signed_in = match await_grant(&pending, ops, &mut inbox, sink).await {
@@ -122,8 +119,8 @@ impl Engine {
                 self.adopt_login(sink, auth);
                 TurnEnd::Completed
             }
-            Ok(Err(e)) => report_abort(sink, sign_in_failed(&e), "login-failed"),
-            Err(abort) => report_abort(sink, abort, "login-failed"),
+            Ok(Err(e)) => report_abort(sink, sign_in_failed(&e)),
+            Err(abort) => report_abort(sink, abort),
         }
     }
 
@@ -136,7 +133,7 @@ impl Engine {
                 AuthSource::OxLogin
             }
         };
-        sink.emit(Event::SignedIn { auth: active }, "signed-in");
+        sink.emit(Event::SignedIn { auth: active });
     }
 
     /// Removes the oxide-code login. A session using it, or one signed out, falls back to the
@@ -145,10 +142,7 @@ impl Engine {
         let removed = match oauth::delete_login().await {
             Ok(removed) => removed,
             Err(e) => {
-                sink.emit(
-                    Event::TurnFailed(format!("Sign-out failed: {e:#}")),
-                    "logout-failed",
-                );
+                sink.emit(Event::TurnFailed(format!("Sign-out failed: {e:#}")));
                 return;
             }
         };
@@ -168,14 +162,11 @@ impl Engine {
                 });
             self.sign_in = fallback.map_or(SignIn::SignedOut { retry }, SignIn::SignedIn);
         }
-        sink.emit(
-            Event::SignedOut {
-                removed,
-                auth: self.sign_in.source(),
-                fallback_error,
-            },
-            "signed-out",
-        );
+        sink.emit(Event::SignedOut {
+            removed,
+            auth: self.sign_in.source(),
+            fallback_error,
+        });
     }
 }
 
@@ -191,7 +182,7 @@ async fn await_grant(
         Op::LoginCode(SignInCode(input)) => match pending.paste(&input) {
             Ok(grant) => Some(Ok(grant)),
             Err(e) => {
-                sink.emit(Event::Error(e.to_string()), "login-code-rejected");
+                sink.emit(Event::Error(e.to_string()));
                 None
             }
         },

@@ -194,16 +194,13 @@ impl<'r> Dispatcher<'r, '_> {
         let mut abort = None;
         let mut calls = batch.into_iter();
         for PendingToolUse { id, name, input } in calls.by_ref() {
-            self.sink.emit(
-                Event::ToolCallStart(ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                    icon: self.tools.icon(&name).to_owned(),
-                    label: self.tools.label(&name, &input, cwd),
-                }),
-                "tool-call-start",
-            );
+            self.sink.emit(Event::ToolCallStart(ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                icon: self.tools.icon(&name).to_owned(),
+                label: self.tools.label(&name, &input, cwd),
+            }));
             let output = match self.gate(&id, &name, input.clone()).await {
                 Ok(Ok(call)) => {
                     ready.push(Ready {
@@ -234,26 +231,22 @@ impl<'r> Dispatcher<'r, '_> {
         }
         for call in started {
             let mut output = call.output.unwrap_or_else(|| ToolOutput::error(NOT_RUN));
-            self.sink.emit(
-                Event::ToolCallEnd(ToolResult {
-                    id: call.id.clone(),
-                    content: output.content.clone(),
-                    is_error: output.is_error,
-                    title: output.metadata.title.clone(),
-                    view: self.tools.result_view(
-                        &call.name,
-                        &call.input,
-                        &output.content,
-                        &output.metadata,
-                        output.is_error,
-                        cwd,
-                    ),
-                }),
-                "tool-call-end",
-            );
+            self.sink.emit(Event::ToolCallEnd(ToolResult {
+                id: call.id.clone(),
+                content: output.content.clone(),
+                is_error: output.is_error,
+                title: output.metadata.title.clone(),
+                view: self.tools.result_view(
+                    &call.name,
+                    &call.input,
+                    &output.content,
+                    &output.metadata,
+                    output.is_error,
+                    cwd,
+                ),
+            }));
             if let Some(tasks) = output.tasks.take() {
-                self.sink
-                    .emit(Event::TasksUpdated(tasks.clone()), "tasks-updated");
+                self.sink.emit(Event::TasksUpdated(tasks.clone()));
                 round.tasks = Some(tasks);
             }
             round.push(call.id, output);
@@ -425,19 +418,15 @@ impl<'r> Dispatcher<'r, '_> {
         match admitted {
             Ok(rule) => {
                 self.dispatch_ctx.policy.allow_for_session(rule);
-                self.sink.emit(
-                    Event::SessionRulesUpdated(self.dispatch_ctx.policy.session_allow().to_vec()),
-                    "session-rules-updated",
-                );
+                self.sink.emit(Event::SessionRulesUpdated(
+                    self.dispatch_ctx.policy.session_allow().to_vec(),
+                ));
                 None
             }
             Err(e) => {
-                self.sink.emit(
-                    Event::Error(format!(
-                        "Session rule refused, so the {name} call was denied: {e:#}"
-                    )),
-                    "session-rule-refused",
-                );
+                self.sink.emit(Event::Error(format!(
+                    "Session rule refused, so the {name} call was denied: {e:#}"
+                )));
                 Some(denied_output(
                     name,
                     "because the session rule chosen in its approval does not cover it",

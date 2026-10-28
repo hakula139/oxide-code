@@ -26,19 +26,13 @@ impl Engine {
     /// Archives the live session, then rolls like [`Self::clear`].
     pub(super) async fn archive(&mut self, sink: &dyn EventSink) {
         if self.transcript.messages().is_empty() {
-            sink.emit(
-                Event::TurnFailed(
-                    "Nothing to archive: this session has no messages yet".to_owned(),
-                ),
-                "archive-empty",
-            );
+            sink.emit(Event::TurnFailed(
+                "Nothing to archive: this session has no messages yet".to_owned(),
+            ));
             return;
         }
         if let Some(failure) = self.transcript.archive().await.failure {
-            sink.emit(
-                Event::TurnFailed(format!("Archive failed: {failure}")),
-                "archive-failed",
-            );
+            sink.emit(Event::TurnFailed(format!("Archive failed: {failure}")));
             return;
         }
         self.roll_session(sink, ArchiveState::Archived).await;
@@ -56,21 +50,18 @@ impl Engine {
                 move |store, live_id| saved::set_archived(store, &target, state, live_id)
             })
             .await;
-        sink.emit(
-            Event::ArchiveUpdated {
-                target,
-                state,
-                result,
-            },
-            "archive-updated",
-        );
+        sink.emit(Event::ArchiveUpdated {
+            target,
+            state,
+            result,
+        });
     }
 
     pub(super) async fn find_saved(&self, sink: &dyn EventSink, prefix: String) {
         let result = self
             .on_saved(move |store, live_id| saved::find(store, &prefix, live_id).map(Box::new))
             .await;
-        sink.emit(Event::SavedFound(result), "saved-found");
+        sink.emit(Event::SavedFound(result));
     }
 
     pub(super) async fn delete_saved(&self, sink: &dyn EventSink, session_id: String) {
@@ -80,13 +71,10 @@ impl Engine {
                 move |store, live_id| saved::delete(store, &session_id, live_id)
             })
             .await;
-        sink.emit(
-            Event::SavedDeleted {
-                id: session_id,
-                result,
-            },
-            "saved-deleted",
-        );
+        sink.emit(Event::SavedDeleted {
+            id: session_id,
+            result,
+        });
     }
 
     /// Runs `op` on the blocking pool with the store and the live session's ID, since a
@@ -109,16 +97,13 @@ impl Engine {
             .roll(&self.store, self.settings.model().id(), git_branch)
             .await;
         self.adopt_session(sink, LoadedTranscript::default()).await;
-        sink.emit(
-            Event::SessionRolled {
-                id: outcome.new_id,
-                old_session,
-            },
-            "session-rolled",
-        );
+        sink.emit(Event::SessionRolled {
+            id: outcome.new_id,
+            old_session,
+        });
         report_finalize_failure(sink, outcome.finalize.failure);
         self.emit_session_start(sink);
-        sink.emit(Event::SessionReady, "session-ready");
+        sink.emit(Event::SessionReady);
     }
 
     /// Finalizes the live session and continues `target`. On failure the live session stays.
@@ -130,29 +115,23 @@ impl Engine {
         {
             Ok(outcome) => outcome,
             Err(e) => {
-                sink.emit(
-                    Event::TurnFailed(format!(
-                        "Resume failed (still on session {}): {e:#}",
-                        id_prefix(&self.transcript.session().session_id()),
-                    )),
-                    "resume-failed",
-                );
+                sink.emit(Event::TurnFailed(format!(
+                    "Resume failed (still on session {}): {e:#}",
+                    id_prefix(&self.transcript.session().session_id()),
+                )));
                 return;
             }
         };
         self.adopt_session(sink, outcome.transcript).await;
-        sink.emit(
-            Event::SessionResumed {
-                id: self.transcript.session().session_id(),
-                title: outcome.title,
-                prior: outcome.prior,
-                history: self.take_history(),
-            },
-            "session-resumed",
-        );
+        sink.emit(Event::SessionResumed {
+            id: self.transcript.session().session_id(),
+            title: outcome.title,
+            prior: outcome.prior,
+            history: self.take_history(),
+        });
         report_finalize_failure(sink, outcome.finalize.failure);
         self.emit_session_start(sink);
-        sink.emit(Event::SessionReady, "session-ready");
+        sink.emit(Event::SessionReady);
     }
 
     async fn adopt_session(&mut self, sink: &dyn EventSink, transcript: LoadedTranscript) {
@@ -177,19 +156,13 @@ impl Engine {
             .await
             .failure
         {
-            sink.emit(
-                Event::RenameFailed(session_write_failed(&failure)),
-                "rename-failed",
-            );
+            sink.emit(Event::RenameFailed(session_write_failed(&failure)));
             return;
         }
-        sink.emit(
-            Event::SessionTitleUpdated {
-                id: self.transcript.session().session_id(),
-                title,
-            },
-            "session-title-updated",
-        );
+        sink.emit(Event::SessionTitleUpdated {
+            id: self.transcript.session().session_id(),
+            title,
+        });
     }
 
     /// Shows what a session carries as the engine starts on it: its usage and task list, the
@@ -199,7 +172,7 @@ impl Engine {
         self.emit_usage_update(sink);
         self.emit_restored_tasks(sink);
         for warning in &self.instruction_warnings {
-            sink.emit(Event::Notice(warning.clone()), "instruction-warning");
+            sink.emit(Event::Notice(warning.clone()));
         }
         report_drift(sink, &std::mem::take(&mut self.transcript.drifted));
         turn::notify_if_interrupted(self.transcript.messages(), sink);
@@ -209,10 +182,7 @@ impl Engine {
     /// frontend empties its list when the session changes.
     fn emit_restored_tasks(&self, sink: &dyn EventSink) {
         if !self.transcript.tasks.is_empty() {
-            sink.emit(
-                Event::TasksUpdated(self.transcript.tasks.clone()),
-                "tasks-restored",
-            );
+            sink.emit(Event::TasksUpdated(self.transcript.tasks.clone()));
         }
     }
 }
@@ -220,10 +190,7 @@ impl Engine {
 /// Reports that the session a roll or resume left behind failed to finalize.
 fn report_finalize_failure(sink: &dyn EventSink, failure: Option<String>) {
     if let Some(failure) = failure {
-        sink.emit(
-            Event::Error(previous_session_write_failed(&failure)),
-            "previous-session-finalize-failed",
-        );
+        sink.emit(Event::Error(previous_session_write_failed(&failure)));
     }
 }
 
@@ -232,10 +199,7 @@ fn report_drift(sink: &dyn EventSink, drifted: &[PathBuf]) {
     if drifted.is_empty() {
         return;
     }
-    sink.emit(
-        Event::Notice(format_drift_warning(drifted)),
-        "resume-drift-warning",
-    );
+    sink.emit(Event::Notice(format_drift_warning(drifted)));
 }
 
 pub(super) fn format_drift_warning(drifted: &[PathBuf]) -> String {
