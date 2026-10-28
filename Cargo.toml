@@ -67,6 +67,7 @@ ratatui-textarea = "0.9.3"
 regex = "1"
 regex-syntax = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 rustls-platform-verifier = "0.7"
 rustls-webpki = { version = "0.103", default-features = false, features = ["std"] }

@@ -47,6 +47,7 @@ fpats
 fprint
 fprintf
 fsmonitor
+fullfsync
 getpgid
 Ghostty
 GOARCH
@@ -92,6 +93,7 @@ noclobber
 nohup
 nonewline
 noprefix
+NOTADB
 nptu
 NTFS
 numtide
@@ -121,6 +123,7 @@ rollup
 rposition
 rrggbb
 rsplit
+rusqlite
 rustc
 rustls
 serde
