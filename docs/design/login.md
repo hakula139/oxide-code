@@ -62,5 +62,5 @@ A refresh required by a request, whether for an expired token or after a 401, re
 - `crates/ox-core/src/util/path.rs`: `claude_config_var` and `claude_dir`, which follow `CLAUDE_CONFIG_DIR` to Claude Code's config directory.
 - `crates/ox-tui/src/app/dispatch.rs`: `App::handle_submit_prompt`, which sends the pasted code.
 - `crates/ox-tui/src/app/events.rs`: browser launch and sign-in messages.
-- `crates/ox-tui/src/components/status.rs`: `Status::SigningIn`, the status line while the browser is out, and `Status::SigningOut`.
+- `crates/ox-tui/src/app/operation.rs`: `Activity::SigningIn`, the status line while the browser is out, and `Activity::SigningOut`.
 - `crates/ox-tui/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.

@@ -103,6 +103,12 @@ pub(crate) trait Modal: Send {
     fn binds_modified_key(&self, _event: &KeyEvent) -> bool {
         false
     }
+
+    /// Returns whether the modal may send an op that needs an idle engine, so a queued prompt must
+    /// not start while it is open. Default false.
+    fn sends_idle_only_ops(&self) -> bool {
+        false
+    }
 }
 
 // ── Outcomes ──
@@ -165,6 +171,11 @@ pub(crate) struct ModalStack {
 impl ModalStack {
     pub(crate) fn is_active(&self) -> bool {
         !self.stack.is_empty()
+    }
+
+    /// Returns whether an open modal may send an op that needs an idle engine.
+    pub(crate) fn sends_idle_only_ops(&self) -> bool {
+        self.stack.iter().any(|modal| modal.sends_idle_only_ops())
     }
 
     pub(crate) fn push(&mut self, modal: Box<dyn Modal>) {

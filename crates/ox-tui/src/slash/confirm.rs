@@ -135,6 +135,10 @@ impl Modal for ConfirmDeleteSessionModal {
             }
         }
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

@@ -112,6 +112,10 @@ impl Modal for RenameModal {
     fn binds_modified_key(&self, event: &KeyEvent) -> bool {
         LineEditor::binds_modified_key(event)
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -341,6 +345,15 @@ mod tests {
                     matches!(outcome, ModalKey::Consumed),
                     "all-whitespace Enter must not submit, got {outcome:?}",
                 );
+            }
+        }
+
+        mod sends_idle_only_ops {
+            use super::*;
+
+            #[test]
+            fn holds_the_queue_head_for_the_rename() {
+                assert!(RenameModal::new(None).sends_idle_only_ops());
             }
         }
     }
