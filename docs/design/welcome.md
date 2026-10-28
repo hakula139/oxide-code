@@ -32,18 +32,18 @@ At 80 cols and 14 rows with the test fixture (`claude-opus-5-5`, `xhigh` effort,
 
 The starter rows sample the built-in commands a new session can run bare and show each one's registry description, and the tip samples `TIP_POOL`, skipping `PR_TIP` unless the configured status line includes the `pull-request` segment. Both draws seed `fastrand` with the xxh64 hash of the session ID, so a session keeps its picks while each new session draws again.
 
-Sections: identity ribbon above a body column (env, cwd, starter list, trailer). Body lines pad to one shared width so they keep one left edge under `Paragraph::alignment(Center)`. Without that pad, each line floats to its own visual center and the welcome reads as a "ransom note" stack. The ribbon centers as its own unit, and the body column centers on the same axis because every padded line has the same width.
+Sections: identity ribbon above a body column (env, cwd, starter list, tip). Body lines pad to one shared width so they keep one left edge under `Paragraph::alignment(Center)`. Without that pad, each line floats to its own visual center and the welcome reads as a "ransom note" stack. The ribbon centers as its own unit, and the body column centers on the same axis because every padded line has the same width.
 
 ### Width Ladder
 
-| Cols  | Identity                    | Environment         | Cwd                         | Starter list | Trailer hint |
-| ----- | --------------------------- | ------------------- | --------------------------- | ------------ | ------------ |
-| ≥60   | ribbon `━━━━ oxide-code...` | full line           | tildified, full             | 3 rows       | yes          |
-| 40-59 | wordmark `oxide-code v...`  | full line           | tildified, full             | 3 rows       | yes          |
-| 25-39 | wordmark                    | model + effort only | tildified, center-truncated | hidden       | hidden       |
-| <25   | suppressed                  | suppressed          | suppressed                  | suppressed   | suppressed   |
+| Cols  | Identity                    | Environment         | Cwd                         | Starter list | Tip hint   |
+| ----- | --------------------------- | ------------------- | --------------------------- | ------------ | ---------- |
+| ≥60   | ribbon `━━━━ oxide-code...` | full line           | tildified, full             | 3 rows       | yes        |
+| 40-59 | wordmark `oxide-code v...`  | full line           | tildified, full             | 3 rows       | yes        |
+| 25-39 | wordmark                    | model + effort only | tildified, center-truncated | hidden       | hidden     |
+| <25   | suppressed                  | suppressed          | suppressed                  | suppressed   | suppressed |
 
-Below 25 cols nothing paints, since the terminal is too narrow to read the welcome cleanly. The input field anchors the empty session instead. The chat region also needs 13 rows for the starter list and trailer hint, so a shorter region hides them at any width and centers the environment and cwd lines on their own width.
+Below 25 cols nothing paints, since the terminal is too narrow to read the welcome cleanly. The input field anchors the empty session instead. The chat region also needs 13 rows for the starter list and tip hint, so a shorter region hides them at any width and centers the environment and cwd lines on their own width.
 
 ### Theme Slots
 
@@ -58,7 +58,7 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 5. **Starters come from the slash registry.** Every built-in a new session can run bare is a starter, shown with its registry description, so a new command joins the pool with no second description to drift. `NOT_STARTERS` in the welcome names the exceptions, since an `is_starter() -> bool` on `SlashCommand` would push welcome-specific curation into every command.
 6. **Editorial ribbon `━━━━ oxide-code v{ver} ━━━━` with no ASCII mark and no animation.** A four-side box reads as generic CLI chrome, and an ASCII mascot (Claude Code) or animation (Codex) is outsized for the value. The ribbon is a single line that anchors horizontally without surrounding the wordmark, giving the welcome a typographic identity. The wordmark uses the project name `oxide-code`, the brand a migrator searches for, while `ox` stays the binary name.
 7. **Coarse three-tier width ladder (full / collapsed / suppressed).** Codex and Claude Code lean on truncate-and-reflow, while opencode uses flex-shrink. For fixed content, a coarse ladder is simpler than per-element shrink rules.
-8. **Body lines pad to one shared column width, while the ribbon centers independently.** `Paragraph::alignment(Center)` centers each line separately, so padding env / cwd / starters / trailer to one width is what gives the body a shared left edge.
+8. **Body lines pad to one shared column width, while the ribbon centers independently.** `Paragraph::alignment(Center)` centers each line separately, so padding env / cwd / starters / tip to one width is what gives the body a shared left edge.
 9. **`[tui] show_welcome = true` (default) + `OX_SHOW_WELCOME` env override.** Mirrors the existing `show_thinking` knob shape: TOML option + env, empty-is-absent. When false, the chat region is blank and the input field anchors the empty session.
 10. **`/clear` re-shows the welcome automatically.** `/clear` clears `chat.blocks`, which restores `is_empty()` → welcome paints on next frame. No special re-emission path is needed.
 11. **Resume never shows the welcome.** Resume populates `chat.blocks` from the JSONL transcript, so `is_empty()` returns false on first paint. No special-casing needed.
@@ -68,7 +68,7 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 - **Live feeds.** Recent sessions, release notes, and upsells would make an onboarding dashboard with ongoing maintenance cost, though Claude Code ships them.
 - **An ASCII mascot or animations.** Codex and Claude Code both ship them, but static text carries the value with less complexity.
 - **Tab-into-the-welcome navigation.** The welcome is read-only, and the user types in the input below it.
-- **Branch or git status.** It is orthogonal to onboarding, and `/diff` and the trailer hint cover the "what changed" angle.
+- **Branch or git status.** It is orthogonal to onboarding.
 
 ## Sources
 
