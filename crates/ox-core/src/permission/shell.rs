@@ -344,7 +344,7 @@ pub(crate) struct CommandTarget {
     writes: Vec<Access>,
     /// The files it reads for certain, resolved like a read's path: each input redirection, each
     /// file a wrapper option names, and each [certain](Operand::certain) operand of one of
-    /// [`READERS`] that names no tree it traverses.
+    /// [`READERS`], including the root of a tree it traverses.
     reads: Vec<Access>,
     /// The first construct the analysis does not recognize, as [`construct`] cuts it for a prompt.
     unrecognized: Option<String>,
@@ -433,8 +433,9 @@ pub(super) struct Segment {
     /// each word past a wrapper option the analysis does not know.
     programs: Vec<usize>,
     /// The files one of [`READERS`] may read beyond those the command reads for certain, resolved
-    /// like a read's path: each tree it may traverse and each word whose role or matches the
-    /// analysis cannot pin. Empty for any other command.
+    /// like a read's path: each tree it may traverse, whose descendants a rule may match below its
+    /// root, and each word whose role or matches the analysis cannot pin. Empty for any other
+    /// command.
     reads: Vec<ReaderPath<Access>>,
     /// Whether one of [`READERS`] takes a word whose files the analysis cannot list, such as one
     /// that expands a variable, so it may read any file.
@@ -1050,7 +1051,8 @@ impl Walk<'_> {
     }
 
     /// Resolves the `operands` of one simple command, recording each file it reads for certain as
-    /// the command's read and returning the rest.
+    /// the command's read, and returns those it may read: each uncertain operand, and each tree it
+    /// traverses, whose descendants a rule may hold below its root.
     fn resolve_operands(&mut self, operands: &[Operand]) -> Vec<ReaderPath<Access>> {
         self.relative_path |= operands
             .iter()
@@ -1058,9 +1060,10 @@ impl Walk<'_> {
         let mut possible = Vec::new();
         for operand in operands {
             let read = operand.read.resolve(&mut self.paths);
-            if operand.certain && !read.recursive {
-                self.reads.push(read.path);
-            } else {
+            if operand.certain {
+                self.reads.push(read.path.clone());
+            }
+            if !operand.certain || read.recursive {
                 possible.push(read);
             }
         }
@@ -2661,7 +2664,7 @@ fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<Operand>> {
     let files = || {
         let known: Vec<Option<&str>> = values.iter().copied().map(Some).collect();
         let operands = reader_args(name, &known);
-        (!operands.unknown).then(|| operands.reads().collect())
+        (!operands.unknown).then(|| operands.reads(None).collect())
     };
     match name {
         ":" | "echo" | "export" | "false" | "printf" | "pwd" | "true" => Some(Vec::new()),
@@ -2813,11 +2816,7 @@ fn expanded_reader_paths(
         .map(|(range, _)| range.start);
     let anything = written.unknown || expanded.unknown || ambiguous.is_some();
     let mut files: Vec<Operand> = expanded
-        .reads()
-        .map(|operand| Operand {
-            certain: operand.certain && ambiguous.is_none(),
-            ..operand
-        })
+        .reads(ambiguous)
         .chain(
             written
                 .files
@@ -2881,7 +2880,7 @@ struct ReaderArgs {
     fixed_values: Vec<usize>,
     /// Words that are ordinary file operands in every supported argument order and build.
     operands: Vec<usize>,
-    /// Words that every supported argument order and build reads as a file.
+    /// Words that every supported argument order and build opens as a file.
     read_everywhere: Vec<usize>,
     /// Words that supply an option's value in any supported argument order or build.
     option_values: Vec<usize>,
@@ -2891,11 +2890,14 @@ struct ReaderArgs {
 }
 
 impl ReaderArgs {
-    /// Each path in `files`, certain when its word is in `read_everywhere`.
-    fn reads(&self) -> impl Iterator<Item = Operand> + '_ {
-        self.files.iter().map(|(index, read)| Operand {
+    /// Each path in `files`, certain when its word is in `read_everywhere` and comes before the
+    /// first match of an `ambiguous` glob, whose matches may shift the roles of later words.
+    fn reads(&self, ambiguous: Option<usize>) -> impl Iterator<Item = Operand> + '_ {
+        self.files.iter().map(move |(index, read)| Operand {
             read: read.clone(),
-            certain: index.is_some_and(|index| self.read_everywhere.contains(&index)),
+            certain: index.is_some_and(|index| {
+                self.read_everywhere.contains(&index) && ambiguous.is_none_or(|start| index < start)
+            }),
         })
     }
 
@@ -2936,7 +2938,7 @@ fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
                 .retain(|index| read.option_values.contains(index));
             args.operands.retain(|index| read.operands.contains(index));
             args.read_everywhere
-                .retain(|index| read.files.iter().any(|(file, _)| *file == Some(*index)));
+                .retain(|index| read.read_everywhere.contains(index));
             args.files.extend(read.files);
             args.option_values.extend(read.option_values);
             args.unknown |= read.unknown;
@@ -3017,8 +3019,9 @@ impl ReaderGrammar {
             if value.is_some() {
                 args.option_values.push(index);
             }
+            args.unknown |= matches!(role, Role::FileList);
             match (role, value) {
-                (Role::File | Role::PatternFile | Role::Directory, Some(file))
+                (Role::File | Role::PatternFile | Role::Directory | Role::FileList, Some(file))
                     if !file.is_empty() =>
                 {
                     args.files.push((
@@ -3029,7 +3032,6 @@ impl ReaderGrammar {
                         },
                     ));
                 }
-                (Role::FileList, _) => args.unknown = true,
                 _ => {}
             }
         };
@@ -3092,8 +3094,27 @@ impl ReaderGrammar {
         args.operands
             .extend(paths.iter().filter_map(|(index, _)| *index));
         args.files.extend(paths);
+        let tree_end = self.tree_end(values);
+        args.read_everywhere = args
+            .files
+            .iter()
+            .filter_map(|(index, _)| index.filter(|index| *index < tree_end))
+            .collect();
         args.fixed_values.clone_from(&args.option_values);
         args
+    }
+
+    /// Where the trees end and, for `find`, its expression starts, whose operands `find` never
+    /// opens, such as the value of `-name`.
+    fn tree_end(&self, values: &[Option<&str>]) -> usize {
+        if self.operands == OperandKind::Find {
+            values
+                .iter()
+                .position(|value| value.is_some_and(|value| self.find_expression(value)))
+                .unwrap_or(values.len())
+        } else {
+            values.len()
+        }
     }
 
     fn may_recurse(&self, values: &[Option<&str>], ambiguous: usize, args: &ReaderArgs) -> bool {
@@ -3143,14 +3164,7 @@ impl ReaderGrammar {
     ) -> Vec<(Option<usize>, ReaderPath<String>)> {
         let operands: Vec<_> = operands.collect();
         let has_operand = !operands.is_empty();
-        let tree_end = if self.operands == OperandKind::Find {
-            values
-                .iter()
-                .position(|value| value.is_some_and(|value| self.find_expression(value)))
-                .unwrap_or(values.len())
-        } else {
-            values.len()
-        };
+        let tree_end = self.tree_end(values);
         let stdin = self.operands == OperandKind::Stream;
         let mut files: Vec<_> = operands
             .into_iter()
@@ -5181,7 +5195,7 @@ mod tests {
             };
             assert_eq!(segment.reads(), [tree("docs"), tree("src/*.rs")]);
             let main = Path::new("src").join("main.rs");
-            assert_eq!(command.reads, [at(&main.to_string_lossy())]);
+            assert_eq!(command.reads, [at("docs"), at(&main.to_string_lossy())]);
         }
     }
 

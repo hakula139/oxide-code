@@ -4230,7 +4230,10 @@ mod tests {
                         ("cat ~/.ssh/id_*", Decision::Deny),
                         ("cat ~/.ss?/id_rsa", Decision::Deny),
                         ("cat ~/.*/id_rsa", Decision::Deny),
-                        ("grep -r key ~/.ssh", Decision::Ask),
+                        ("grep -r key ~/.ssh", Decision::Deny),
+                        ("ls -R ~/.ssh", Decision::Deny),
+                        ("grep -r key ~", Decision::Ask),
+                        ("wc --files0-from ~/.ssh/id_rsa", Decision::Deny),
                         ("cat $HOME/.ssh/id_rsa", Decision::Deny),
                         ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Deny),
                         ("cat $F", Decision::Ask),
@@ -4254,6 +4257,8 @@ mod tests {
                 std::fs::create_dir_all(&cwd).unwrap();
                 std::fs::create_dir_all(home.join(".ssh")).unwrap();
                 std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
+                std::fs::write(cwd.join("-n"), "").unwrap();
+                std::fs::write(cwd.join("notes"), "").unwrap();
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
                     let yolo = resolved_policy(
@@ -4270,8 +4275,12 @@ mod tests {
                         ("cat $HOME/.ssh/id_rsa", Decision::Deny),
                         ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Deny),
                         ("cat secrets/key", Decision::Ask),
-                        ("grep -r key ~/.ssh", Decision::Allow),
-                        ("grep -r key secrets", Decision::Allow),
+                        ("grep -r key ~/.ssh", Decision::Deny),
+                        ("grep -r key ~", Decision::Allow),
+                        ("grep -r key secrets", Decision::Ask),
+                        ("cat ~/.ssh/id_rsa *", Decision::Deny),
+                        ("cat * ~/.ssh/id_rsa", Decision::Allow),
+                        ("find ~ -path ~/.ssh/id_rsa", Decision::Allow),
                         ("test -f ~/.ssh/id_rsa", Decision::Allow),
                         ("cat $F", Decision::Allow),
                         ("echo x | xargs cat", Decision::Allow),
