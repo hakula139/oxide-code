@@ -5,7 +5,9 @@ use ratatui::text::Line;
 
 use ox_core::protocol::notice;
 
-use super::{ChatBlock, RenderCtx, SectionStyles, bar_section};
+use super::{
+    ChatBlock, MarkdownCache, RenderCtx, SectionStyles, bar_section, streaming_bar_section,
+};
 use crate::glyphs::TOOL_BORDER_PREFIX;
 
 /// Header over a summary still streaming in.
@@ -30,25 +32,43 @@ impl CompactedBlock {
     }
 
     /// Renders the summary of a compaction in flight, laid out like the boundary it becomes.
-    pub(crate) fn render_streaming(summary: &str, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        render_boundary(STREAMING_HEADER, summary, ctx)
+    /// `cache` holds the rendered blocks the summary has already closed.
+    pub(crate) fn render_streaming(
+        summary: &str,
+        ctx: &RenderCtx<'_>,
+        cache: &mut MarkdownCache,
+    ) -> Vec<Line<'static>> {
+        streaming_bar_section(
+            ctx,
+            TOOL_BORDER_PREFIX,
+            &boundary_styles(ctx),
+            STREAMING_HEADER,
+            summary,
+            cache,
+        )
     }
 }
 
 impl ChatBlock for CompactedBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        render_boundary(&self.header, &self.summary, ctx)
+        let styles = boundary_styles(ctx);
+        bar_section(
+            ctx,
+            TOOL_BORDER_PREFIX,
+            &styles,
+            &self.header,
+            &self.summary,
+        )
     }
 }
 
-fn render_boundary(header: &str, summary: &str, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+fn boundary_styles(ctx: &RenderCtx<'_>) -> SectionStyles {
     let bar = ctx.theme.accent();
-    let styles = SectionStyles {
+    SectionStyles {
         bar,
         header: bar.add_modifier(Modifier::BOLD),
         body: ctx.theme.text(),
-    };
-    bar_section(ctx, TOOL_BORDER_PREFIX, &styles, header, summary)
+    }
 }
 
 #[cfg(test)]

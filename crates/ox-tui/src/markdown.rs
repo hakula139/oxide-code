@@ -41,7 +41,19 @@ pub(crate) fn render_markdown_chunk(
     width: usize,
     after_block: bool,
 ) -> (Text<'static>, bool) {
-    render_document(input, theme, Style::default(), width, after_block)
+    render_markdown_chunk_on(input, theme, Style::default(), width, after_block)
+}
+
+/// Renders `input` as the next chunk of a document whose body is styled `base`, as
+/// [`render_markdown_on`] styles a whole one.
+pub(crate) fn render_markdown_chunk_on(
+    input: &str,
+    theme: &Theme,
+    base: Style,
+    width: usize,
+    after_block: bool,
+) -> (Text<'static>, bool) {
+    render_document(input, theme, base, width, after_block)
 }
 
 fn render_document(
