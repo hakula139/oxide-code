@@ -26,7 +26,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/init`**: Returns `Prompt(..)` with the prompt `command::init::resolve` builds. With an instruction file at the project root or in its `.claude/` directory, the body asks the model to propose its changes as a diff before it edits. With none, `/init <file>` sends the prompt that creates that file, and bare `/init` opens a picker whose choice sends the same prompt. The expanded body is invisible in the live session but recorded in JSONL for resume. Full design: [init.md](init.md).
 
-- **`/login`** / **`/logout`**: Forward `Op::Login` and `Op::Logout`. The engine runs the browser sign-in and swaps the client's credential, and the TUI opens the browser and reports the credential requests use afterward. Both are `Mutating`. Full design: [login.md](login.md).
+- **`/login`** / **`/logout`**: Forward `Op::Login` and `Op::Logout`. The engine runs the browser sign-in and swaps the credential requests send, and the TUI opens the browser and reports the credential requests use afterward. Both are `Mutating`. Full design: [login.md](login.md).
 
 - **`/mode`**: Switches the permission mode. Bare opens a list picker of the three permission modes ([modals.md](modals.md)), and `/mode <mode>` forwards `Op::SetMode` directly. Bare is `ReadOnly`, so its picker opens mid-turn and submits the op as a modal action. Typed is `Steering`, so the dispatcher forwards its op mid-turn. Either switch applies from the turn's next gated call. Tab and Shift+Tab send the same op. [permissions.md](permissions.md#switching-modes) covers how the engine applies it.
 

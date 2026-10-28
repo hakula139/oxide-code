@@ -14,6 +14,7 @@ use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use super::turn::{collect_response, conversation_request, record_interruption};
 use super::{Engine, TurnEnd, report_abort};
 use crate::client::{PromptTooLong, Request, Response, ResponseEvent, StopReason, Wire};
+use crate::config::auth::Auth;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::message::{ContentBlock, Message, Role, TextOrigin};
 use crate::model::TokenUsage;
@@ -173,6 +174,7 @@ impl Engine {
     /// caller hands back.
     pub(super) async fn auto_compact(
         &mut self,
+        auth: &Auth,
         sink: &dyn EventSink,
         ops: &mut mpsc::Receiver<Op>,
         inbox: &mut Inbox,
@@ -185,7 +187,7 @@ impl Engine {
             return Ok(());
         }
 
-        self.run_auto_compaction(sink, ops, inbox, AutoPoint::BeforePrompt)
+        self.run_auto_compaction(auth, sink, ops, inbox, AutoPoint::BeforePrompt)
             .await
             .map(drop)
     }
@@ -196,12 +198,13 @@ impl Engine {
     /// toward the pause and fails the turn.
     pub(super) async fn compact_mid_turn(
         &mut self,
+        auth: &Auth,
         sink: &dyn EventSink,
         ops: &mut mpsc::Receiver<Op>,
         inbox: &mut Inbox,
     ) -> AbortResult<Checkpoint> {
         let compacted = self
-            .run_auto_compaction(sink, ops, inbox, AutoPoint::MidTurn)
+            .run_auto_compaction(auth, sink, ops, inbox, AutoPoint::MidTurn)
             .await;
         if let Err(TurnAbort::Cancelled | TurnAbort::Shutdown) = compacted {
             record_interruption(&mut self.transcript, sink).await;
@@ -212,6 +215,7 @@ impl Engine {
     /// Runs an automatic compaction at `point`, counting a failure toward the pause.
     async fn run_auto_compaction(
         &mut self,
+        auth: &Auth,
         sink: &dyn EventSink,
         ops: &mut mpsc::Receiver<Op>,
         inbox: &mut Inbox,
@@ -219,7 +223,7 @@ impl Engine {
     ) -> AbortResult<Checkpoint> {
         sink.emit(Event::AutoCompactionStarted, "auto-compaction-started");
         let cause = match self
-            .run_compaction(sink, ops, inbox, None, point.into())
+            .run_compaction(auth, sink, ops, inbox, None, point.into())
             .await
         {
             Ok(checkpoint) => return Ok(checkpoint),
@@ -244,12 +248,22 @@ impl Engine {
         instructions: Option<String>,
     ) -> TurnEnd {
         let mut inbox = Inbox::default();
-        if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
-            self.adopt_mode(&mut inbox);
-            return report_abort(sink, abort, "compact-failed");
-        }
+        let auth = match self.ensure_signed_in(sink, ops, &mut inbox).await {
+            Ok(auth) => auth,
+            Err(abort) => {
+                self.adopt_mode(&mut inbox);
+                return report_abort(sink, abort, "compact-failed");
+            }
+        };
         let compacted = self
-            .run_compaction(sink, ops, &mut inbox, instructions, CompactTrigger::Manual)
+            .run_compaction(
+                &auth,
+                sink,
+                ops,
+                &mut inbox,
+                instructions,
+                CompactTrigger::Manual,
+            )
             .await;
         self.adopt_mode(&mut inbox);
         let abort = match compacted {
@@ -271,6 +285,7 @@ impl Engine {
     /// summary request and shows the usage once any request reported it or the transcript changed.
     async fn run_compaction(
         &mut self,
+        auth: &Auth,
         sink: &dyn EventSink,
         ops: &mut mpsc::Receiver<Op>,
         inbox: &mut Inbox,
@@ -282,7 +297,7 @@ impl Engine {
         let summary = await_unless_aborted(
             request_summary(
                 &self.client,
-                conversation_request(&self.settings, &self.transcript, &tools),
+                conversation_request(auth, &self.settings, &self.transcript, &tools),
                 instructions.as_deref(),
                 sink,
                 &mut spent,
@@ -718,6 +733,7 @@ mod tests {
     use crate::client::testing::five_hour_limit;
     use crate::config::compaction::CompactionConfig;
     use crate::engine::local_testing::{dead_test_session, inert_ops, tool_heavy_transcript};
+    use crate::engine::login::SignIn;
     use crate::engine::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, request_bodies, with_pinned_home,
     };
@@ -895,7 +911,7 @@ mod tests {
                     let sink = CapturingSink::default();
 
                     let compacted = engine
-                        .auto_compact(&sink, &mut inert_ops(), &mut Inbox::default())
+                        .auto_compact(&api_key(), &sink, &mut inert_ops(), &mut Inbox::default())
                         .await;
 
                     assert!(compacted.is_ok(), "{compacted:?}");
@@ -922,10 +938,10 @@ mod tests {
                 let mut ops = inert_ops();
 
                 let third = engine
-                    .auto_compact(&sink, &mut ops, &mut Inbox::default())
+                    .auto_compact(&api_key(), &sink, &mut ops, &mut Inbox::default())
                     .await;
                 let fourth = engine
-                    .auto_compact(&sink, &mut ops, &mut Inbox::default())
+                    .auto_compact(&api_key(), &sink, &mut ops, &mut Inbox::default())
                     .await;
 
                 assert!(matches!(third, Err(TurnAbort::Failed(_))), "{third:?}");
@@ -966,7 +982,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 let e = engine
-                    .auto_compact(&sink, &mut inert_ops(), &mut Inbox::default())
+                    .auto_compact(&api_key(), &sink, &mut inert_ops(), &mut Inbox::default())
                     .await
                     .unwrap_err()
                     .into_failure();
@@ -1023,7 +1039,9 @@ mod tests {
                     .unwrap();
                 let mut inbox = Inbox::default();
 
-                let compacted = engine.auto_compact(&sink, &mut ops, &mut inbox).await;
+                let compacted = engine
+                    .auto_compact(&api_key(), &sink, &mut ops, &mut inbox)
+                    .await;
 
                 assert!(compacted.is_ok(), "{compacted:?}");
                 assert_eq!(inbox.prompts, ["queued after summary"]);
@@ -1350,7 +1368,7 @@ mod tests {
                 mount_reply(&server, "summary").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.client.set_auth(None);
+                engine.sign_in = SignIn::SignedOut { retry: false };
                 engine.transcript.set_messages(tool_heavy_transcript());
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
@@ -1695,6 +1713,8 @@ mod tests {
                 .await;
         }
 
+        /// The credential every summary request in these tests sends.
+        static API_KEY: LazyLock<Auth> = LazyLock::new(api_key);
         /// The settings every summary request in these tests sends under.
         static SETTINGS: LazyLock<ModelSettings> =
             LazyLock::new(|| ModelSettings::test("claude-haiku-5-5"));
@@ -1721,7 +1741,7 @@ mod tests {
             let sink = CapturingSink::default();
             let summary = request_summary(
                 client,
-                conversation_request(&SETTINGS, &parent(transcript.to_vec()), &[]),
+                conversation_request(&API_KEY, &SETTINGS, &parent(transcript.to_vec()), &[]),
                 None,
                 &sink,
                 &mut Vec::new(),
@@ -1842,7 +1862,7 @@ mod tests {
         async fn trims_the_whitespace_around_the_summary() {
             let server = MockServer::start().await;
             mount_summary(&server, streamed_summary_body("  fixed login bug  \n")).await;
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
 
             let summary = summarize(&client, &tool_heavy_transcript()).await.unwrap();
 
@@ -1857,7 +1877,7 @@ mod tests {
                 summary_stream("  fixed", " login bug  \n", "end_turn", true),
             )
             .await;
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
 
             let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
 
@@ -1888,7 +1908,7 @@ mod tests {
                 ]),
             )
             .await;
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
 
             let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
 
@@ -1900,14 +1920,14 @@ mod tests {
         async fn request_forks_the_conversation_prefix() {
             let server = MockServer::start().await;
             mount_summary(&server, streamed_summary_body("done")).await;
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
             let conversation = parent(tool_heavy_transcript());
             let tools = [&ToolDefinition {
                 name: "read".to_owned(),
                 description: "Read a file.".to_owned(),
                 input_schema: json!({"type": "object"}),
             }];
-            let next_round = conversation_request(&SETTINGS, &conversation, &tools);
+            let next_round = conversation_request(&API_KEY, &SETTINGS, &conversation, &tools);
 
             let mut rx = client.stream(next_round).unwrap();
             while rx.recv().await.is_some() {}
@@ -1970,14 +1990,14 @@ mod tests {
         async fn retries_an_overflow_without_the_oldest_rounds_or_thinking() {
             let server = MockServer::start().await;
             mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
             let sink = CapturingSink::default();
             let mut spent = Vec::new();
             let conversation = parent(overflowing_transcript());
 
             let summary = request_summary(
                 &client,
-                conversation_request(&SETTINGS, &conversation, &[]),
+                conversation_request(&API_KEY, &SETTINGS, &conversation, &[]),
                 None,
                 &sink,
                 &mut spent,
@@ -2032,7 +2052,7 @@ mod tests {
                 .mount(&server)
                 .await;
             mount_summary(&server, streamed_summary_body("trimmed summary")).await;
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
             let transcript = heavy_rounds(4);
 
             let (summary, events) = summarize_streaming(&client, &transcript).await;
@@ -2071,7 +2091,7 @@ mod tests {
             for interrupted in [false, true] {
                 let server = MockServer::start().await;
                 mount_overflow_then(&server, streamed_summary_body("trimmed summary")).await;
-                let client = test_client(server.uri(), api_key());
+                let client = test_client(server.uri());
                 let mut transcript = vec![
                     Message::user("a".repeat(100_000)),
                     Message::assistant("reply 0"),
@@ -2127,13 +2147,13 @@ mod tests {
                 summary_stream("", "partial", "model_context_window_exceeded", true),
             )
             .await;
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
             let sink = CapturingSink::default();
             let mut spent = Vec::new();
 
             let err = request_summary(
                 &client,
-                conversation_request(&SETTINGS, &parent(overflowing_transcript()), &[]),
+                conversation_request(&API_KEY, &SETTINGS, &parent(overflowing_transcript()), &[]),
                 None,
                 &sink,
                 &mut spent,
@@ -2173,7 +2193,7 @@ mod tests {
             prompt_too_long("prompt is too long: 200001 tokens > 200000 maximum")
                 .mount(&server)
                 .await;
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
 
             let err = summarize(&client, &heavy_rounds(8))
                 .await
@@ -2190,7 +2210,7 @@ mod tests {
         #[tokio::test]
         async fn refuses_an_empty_or_short_session_without_a_request() {
             let server = MockServer::start().await;
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
             let short = vec![
                 Message::user("fix the bug"),
                 Message::assistant("looking now"),
@@ -2218,7 +2238,7 @@ mod tests {
         async fn rejects_an_empty_summary() {
             let server = MockServer::start().await;
             mount_summary(&server, streamed_summary_body("   \n  ")).await;
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
 
             let (summary, events) = summarize_streaming(&client, &tool_heavy_transcript()).await;
 
@@ -2259,13 +2279,18 @@ mod tests {
                     summary_stream("", "partial", stop_reason, finished),
                 )
                 .await;
-                let client = test_client(server.uri(), api_key());
+                let client = test_client(server.uri());
                 let sink = CapturingSink::default();
                 let mut spent = Vec::new();
 
                 let err = request_summary(
                     &client,
-                    conversation_request(&SETTINGS, &parent(tool_heavy_transcript()), &[]),
+                    conversation_request(
+                        &API_KEY,
+                        &SETTINGS,
+                        &parent(tool_heavy_transcript()),
+                        &[],
+                    ),
                     None,
                     &sink,
                     &mut spent,
@@ -2297,7 +2322,7 @@ mod tests {
             {
                 let mut compaction = pin!(request_summary(
                     &client,
-                    conversation_request(&SETTINGS, &conversation, &[]),
+                    conversation_request(&API_KEY, &SETTINGS, &conversation, &[]),
                     None,
                     &sink,
                     &mut spent,
@@ -2330,7 +2355,7 @@ mod tests {
 
             let summary = request_summary(
                 &client,
-                conversation_request(&SETTINGS, &parent(tool_heavy_transcript()), &[]),
+                conversation_request(&API_KEY, &SETTINGS, &parent(tool_heavy_transcript()), &[]),
                 None,
                 &sink,
                 &mut Vec::new(),
@@ -2361,7 +2386,7 @@ mod tests {
             )
             .await;
 
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
             let err = summarize(&client, &tool_heavy_transcript())
                 .await
                 .expect_err("in-band error must propagate");
@@ -2382,7 +2407,7 @@ mod tests {
                 .mount(&server)
                 .await;
 
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
             let err = summarize(&client, &tool_heavy_transcript())
                 .await
                 .expect_err("expected error");

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 
+use crate::config::auth::Auth;
 use crate::message::{ContentBlock, Message};
 use crate::model::{ModelSettings, TokenUsage};
 use crate::prompt::SystemPrompt;
@@ -31,6 +32,7 @@ pub(crate) trait Wire: Send + Sync {
 pub(crate) struct Request<'a> {
     /// The live session the request is attributed to.
     pub(crate) session_id: &'a str,
+    pub(crate) auth: &'a Auth,
     pub(crate) settings: &'a ModelSettings,
     pub(crate) system: &'a SystemPrompt,
     /// Dynamic context, such as instruction files, sent ahead of `messages` to keep it out of the
