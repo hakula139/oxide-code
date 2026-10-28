@@ -1,52 +1,84 @@
-//! The engine's `/login` and `/logout`, which swap the client's credentials.
+//! The engine's sign-in state, with `/login` and `/logout` to change it.
 
-use anyhow::anyhow;
+use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 use tracing::warn;
 
 use super::abort::{AbortResult, Inbox, TurnAbort};
 use super::{Engine, TurnEnd, abort, report_abort};
-use crate::config::auth::{self, Auth, AuthSource};
+use crate::config::auth::{self, Auth, AuthSource, AuthState};
 use crate::config::login::{Grant, PendingLogin};
 use crate::config::oauth;
 use crate::protocol::{Event, EventSink, Op, SignInCode};
 use crate::util::text::join_sentences;
 
+/// The credential requests send, or why there is none.
+#[derive(Debug)]
+pub(super) enum Login {
+    SignedIn(Auth),
+    /// `retry` says whether the next prompt or compaction loads the stored login again, since a
+    /// transient failure signed the session out.
+    SignedOut {
+        retry: bool,
+    },
+}
+
+impl Login {
+    /// The state a session starts in. Fails when `state` still waits on
+    /// [`Config::resolve_auth`](crate::config::Config::resolve_auth).
+    pub(super) fn from_config(state: &AuthState) -> Result<Self> {
+        Ok(match state {
+            AuthState::Ready(auth) => Self::SignedIn(auth.clone()),
+            AuthState::SignedOut(unavailable) => Self::SignedOut {
+                retry: unavailable.retry,
+            },
+            AuthState::Unresolved(_) => {
+                bail!("the engine needs a config with resolved credentials")
+            }
+        })
+    }
+
+    /// Where the credential came from, `None` while signed out.
+    fn source(&self) -> Option<AuthSource> {
+        match self {
+            Self::SignedIn(auth) => Some(auth.source()),
+            Self::SignedOut { .. } => None,
+        }
+    }
+}
+
 impl Engine {
-    /// Fails while signed out. A session that a transient failure signed out first loads the stored
-    /// login again, and keeps doing so on later prompts and compactions while the failure stays
-    /// transient. An interrupt or a closed channel stops only the wait.
+    /// Returns the credential the operation sends, failing while signed out. A session that a
+    /// transient failure signed out first loads the stored login again, and keeps doing so on later
+    /// prompts and compactions while the failure stays transient. An interrupt or a closed channel
+    /// stops only the wait.
     pub(super) async fn ensure_signed_in(
         &mut self,
         sink: &dyn EventSink,
         ops: &mut mpsc::Receiver<Op>,
         inbox: &mut Inbox,
-    ) -> Result<(), TurnAbort> {
-        if self.client.auth_source().is_some() {
-            return Ok(());
-        }
-        if !self.retry_login {
-            return Err(signed_out());
-        }
-        let retry = self.client.retry_stored_login(self.claude_code_keychain);
+    ) -> AbortResult<Auth> {
+        let retry = match &self.login {
+            Login::SignedIn(auth) => return Ok(auth.clone()),
+            Login::SignedOut { retry: false } => return Err(signed_out()),
+            Login::SignedOut { retry: true } => {
+                self.client.retry_stored_login(self.claude_code_keychain)
+            }
+        };
         match abort::await_unless_aborted(retry, ops, inbox, sink).await? {
             Ok(auth) => {
                 let source = auth.source();
-                self.set_stored_login(Some(auth), false);
+                self.login = Login::SignedIn(auth.clone());
                 sink.emit(Event::LoginRestored { auth: source }, "login-restored");
-                Ok(())
+                Ok(auth)
             }
             Err(unavailable) => {
-                self.retry_login = unavailable.retry;
+                self.login = Login::SignedOut {
+                    retry: unavailable.retry,
+                };
                 Err(TurnAbort::Failed(anyhow!(unavailable.notice)))
             }
         }
-    }
-
-    /// `retry` says whether the next prompt or compaction loads the stored login again.
-    fn set_stored_login(&mut self, auth: Option<Auth>, retry: bool) {
-        self.client.set_auth(auth);
-        self.retry_login = retry;
     }
 
     /// Signs in through the browser and stores the new oxide-code login.
@@ -89,10 +121,10 @@ impl Engine {
 
     /// Uses a new oxide-code login for requests unless an explicit credential outranks it.
     fn adopt_login(&mut self, sink: &dyn EventSink, auth: Auth) {
-        let active = match self.client.auth_source() {
+        let active = match self.login.source() {
             Some(source) if !source.is_stored_login() => source,
             _ => {
-                self.set_stored_login(Some(auth), false);
+                self.login = Login::SignedIn(auth);
                 AuthSource::OxLogin
             }
         };
@@ -114,8 +146,8 @@ impl Engine {
         };
         let mut fallback_error = None;
         if self
-            .client
-            .auth_source()
+            .login
+            .source()
             .is_none_or(|source| source == AuthSource::OxLogin)
         {
             let mut retry = false;
@@ -126,12 +158,12 @@ impl Engine {
                     fallback_error = Some(format!("{e:#}"));
                     None
                 });
-            self.set_stored_login(fallback, retry);
+            self.login = fallback.map_or(Login::SignedOut { retry }, Login::SignedIn);
         }
         sink.emit(
             Event::SignedOut {
                 removed,
-                auth: self.client.auth_source(),
+                auth: self.login.source(),
                 fallback_error,
             },
             "signed-out",
@@ -200,6 +232,43 @@ mod tests {
         file
     }
 
+    mod from_config {
+        use super::*;
+        use crate::config::auth::LoginUnavailable;
+
+        #[test]
+        fn signs_in_with_a_ready_credential_and_keeps_why_a_session_is_signed_out() {
+            let ready = AuthState::Ready(Auth::test(AuthSource::OxLogin, "ox-token"));
+            let signed_out = |retry| {
+                AuthState::SignedOut(LoginUnavailable {
+                    notice: "Not signed in.".to_owned(),
+                    retry,
+                })
+            };
+
+            let signed_in = Login::from_config(&ready).unwrap();
+            let retrying = Login::from_config(&signed_out(true)).unwrap();
+            let waiting = Login::from_config(&signed_out(false)).unwrap();
+
+            assert!(
+                matches!(&signed_in, Login::SignedIn(auth) if auth.secret() == "ox-token"),
+                "{signed_in:?}"
+            );
+            assert!(matches!(retrying, Login::SignedOut { retry: true }));
+            assert!(matches!(waiting, Login::SignedOut { retry: false }));
+        }
+
+        #[test]
+        fn rejects_a_config_whose_credential_is_unresolved() {
+            let err = Login::from_config(&AuthState::Unresolved(None)).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "the engine needs a config with resolved credentials"
+            );
+        }
+    }
+
     mod ensure_signed_in {
         use super::*;
 
@@ -235,15 +304,18 @@ mod tests {
                 temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
                     let mut engine =
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                    engine.client.set_auth(None);
-                    engine.retry_login = true;
+                    engine.login = Login::SignedOut { retry: true };
                     let sink = CapturingSink::default();
                     let mut ops = inert_ops();
 
                     let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
 
                     assert_eq!(end, TurnEnd::Completed);
-                    assert!(!engine.retry_login);
+                    assert!(
+                        matches!(&engine.login, Login::SignedIn(auth) if auth.secret() == "ox-token"),
+                        "{:?}",
+                        engine.login,
+                    );
                     let events = sink.events();
                     assert!(
                         matches!(
@@ -277,8 +349,7 @@ mod tests {
                     let mut engine =
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                     engine.transcript.set_messages(tool_heavy_transcript());
-                    engine.client.set_auth(None);
-                    engine.retry_login = true;
+                    engine.login = Login::SignedOut { retry: true };
                     let sink = CapturingSink::default();
                     let mut ops = inert_ops();
 
@@ -321,15 +392,18 @@ mod tests {
                         dir.path(),
                     )
                     .await;
-                    engine.client.set_auth(None);
-                    engine.retry_login = true;
+                    engine.login = Login::SignedOut { retry: true };
                     let sink = CapturingSink::default();
                     let mut ops = inert_ops();
 
                     let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
 
                     assert_eq!(end, TurnEnd::Failed);
-                    assert!(engine.retry_login);
+                    assert!(
+                        matches!(engine.login, Login::SignedOut { retry: true }),
+                        "{:?}",
+                        engine.login,
+                    );
                     let events = sink.events();
                     assert!(
                         matches!(
@@ -358,8 +432,7 @@ mod tests {
                         dir.path(),
                     )
                     .await;
-                    engine.client.set_auth(None);
-                    engine.retry_login = true;
+                    engine.login = Login::SignedOut { retry: true };
                     let sink = CapturingSink::default();
                     let (tx, mut ops) = mpsc::channel(1);
                     tx.try_send(Op::Interrupt).unwrap();
@@ -368,8 +441,11 @@ mod tests {
                     engine.client.finish_reloads().await;
 
                     assert_eq!(end, TurnEnd::Cancelled);
-                    assert!(engine.retry_login);
-                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(
+                        matches!(engine.login, Login::SignedOut { retry: true }),
+                        "{:?}",
+                        engine.login,
+                    );
                     assert!(
                         matches!(
                             sink.events().as_slice(),
@@ -396,16 +472,18 @@ mod tests {
                         dir.path(),
                     )
                     .await;
-                    engine.client.set_auth(None);
-                    engine.retry_login = true;
+                    engine.login = Login::SignedOut { retry: true };
                     let sink = CapturingSink::default();
                     let mut ops = inert_ops();
 
                     let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
 
                     assert_eq!(end, TurnEnd::Failed);
-                    assert!(!engine.retry_login);
-                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(
+                        matches!(engine.login, Login::SignedOut { retry: false }),
+                        "{:?}",
+                        engine.login,
+                    );
                     assert!(
                         matches!(
                             sink.events().as_slice(),
@@ -434,14 +512,18 @@ mod tests {
                         dir.path(),
                     )
                     .await;
-                    engine.client.set_auth(None);
+                    engine.login = Login::SignedOut { retry: false };
                     let sink = CapturingSink::default();
                     let mut ops = inert_ops();
 
                     let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
 
                     assert_eq!(end, TurnEnd::Failed);
-                    assert_eq!(engine.client.auth_source(), None);
+                    assert!(
+                        matches!(engine.login, Login::SignedOut { retry: false }),
+                        "{:?}",
+                        engine.login,
+                    );
                     assert!(
                         matches!(
                             sink.events().as_slice(),
@@ -517,7 +599,7 @@ mod tests {
                     async {
                         let mut engine =
                             engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                        engine.client.set_auth(None);
+                        engine.login = Login::SignedOut { retry: false };
                         engine.oauth_token_url = format!("{}/token", server.uri());
                         let mut handle = engine.spawn();
 
@@ -577,7 +659,7 @@ mod tests {
                 Box::pin(temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
                     let mut engine =
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                    engine.client.set_auth(None);
+                    engine.login = Login::SignedOut { retry: false };
                     engine.oauth_token_url = format!("{}/token", server.uri());
                     let mut handle = engine.spawn();
 
@@ -684,16 +766,18 @@ mod tests {
                 let ox_login = || Auth::test(AuthSource::OxLogin, "ox-token");
 
                 engine.adopt_login(&sink, ox_login());
-                assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
+                assert_eq!(engine.login.source(), Some(AuthSource::ApiKeyEnv));
                 for before in [
-                    None,
-                    Some(Auth::test(AuthSource::ClaudeCodeLogin, "claude-code-token")),
+                    Login::SignedOut { retry: true },
+                    Login::SignedIn(Auth::test(AuthSource::ClaudeCodeLogin, "claude-code-token")),
                 ] {
-                    engine.client.set_auth(before);
-                    engine.retry_login = true;
+                    engine.login = before;
                     engine.adopt_login(&sink, ox_login());
-                    assert_eq!(engine.client.auth().unwrap().secret(), "ox-token");
-                    assert!(!engine.retry_login);
+                    assert!(
+                        matches!(&engine.login, Login::SignedIn(auth) if auth.secret() == "ox-token"),
+                        "{:?}",
+                        engine.login,
+                    );
                 }
 
                 let events = sink.events();
@@ -737,7 +821,7 @@ mod tests {
                     engine.logout(&sink).await;
 
                     assert!(!file.exists());
-                    assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
+                    assert_eq!(engine.login.source(), Some(AuthSource::ApiKeyEnv));
                     let events = sink.events();
                     assert!(
                         matches!(
@@ -766,9 +850,7 @@ mod tests {
                 temp_env::async_with_vars([("XDG_DATA_HOME", Some(data.path()))], async {
                     let mut engine =
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                    engine
-                        .client
-                        .set_auth(Some(Auth::test(AuthSource::OxLogin, "ox-token")));
+                    engine.login = Login::SignedIn(Auth::test(AuthSource::OxLogin, "ox-token"));
                     let sink = CapturingSink::default();
                     let claude_code_file = std::env::home_dir()
                         .unwrap()
@@ -787,7 +869,14 @@ mod tests {
                     );
                     engine.logout(&sink).await;
 
-                    assert_eq!(engine.client.auth().unwrap().secret(), "claude-code-token");
+                    assert!(
+                        matches!(
+                            &engine.login,
+                            Login::SignedIn(auth) if auth.secret() == "claude-code-token"
+                        ),
+                        "{:?}",
+                        engine.login,
+                    );
                     let events = sink.events();
                     assert!(
                         matches!(
@@ -832,7 +921,7 @@ mod tests {
 
                     engine.logout(&sink).await;
 
-                    assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
+                    assert_eq!(engine.login.source(), Some(AuthSource::ApiKeyEnv));
                     let events = sink.events();
                     assert!(
                         matches!(
@@ -867,13 +956,11 @@ mod tests {
                         dir.path(),
                     )
                     .await;
-                    engine
-                        .client
-                        .set_auth(Some(Auth::test(AuthSource::OxLogin, "ox-token")));
+                    engine.login = Login::SignedIn(Auth::test(AuthSource::OxLogin, "ox-token"));
                     let sink = CapturingSink::default();
 
                     engine.logout(&sink).await;
-                    let retrying = engine.retry_login;
+                    let retrying = matches!(engine.login, Login::SignedOut { retry: true });
                     std::fs::remove_dir(&lock).unwrap();
                     write_creds(
                         &claude_code_file,
@@ -886,8 +973,20 @@ mod tests {
                         .await;
 
                     assert!(retrying);
-                    assert!(restored.is_ok(), "the next prompt loads the login again");
-                    assert_eq!(engine.client.auth().unwrap().secret(), "claude-code-token");
+                    assert_eq!(
+                        restored
+                            .expect("the next prompt loads the login again")
+                            .secret(),
+                        "claude-code-token",
+                    );
+                    assert!(
+                        matches!(
+                            &engine.login,
+                            Login::SignedIn(auth) if auth.secret() == "claude-code-token"
+                        ),
+                        "{:?}",
+                        engine.login,
+                    );
                     let events = sink.events();
                     assert!(
                         matches!(

@@ -907,7 +907,8 @@ mod tests {
             session.cmd_tx = cmd_tx;
             let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
             title_generator::spawn(
-                test_client(server.uri(), api_key()),
+                test_client(server.uri()),
+                api_key(),
                 PromptCacheTtl::OneHour,
                 session.clone(),
                 TitleSink(tx),
@@ -1030,7 +1031,8 @@ mod tests {
             let (cmd_tx, mut commands) = mpsc::channel(8);
             session.cmd_tx = cmd_tx;
             let usage = title_generator::spawn(
-                test_client(server.uri(), api_key()),
+                test_client(server.uri()),
+                api_key(),
                 PromptCacheTtl::OneHour,
                 session.clone(),
                 CapturingSink::default(),

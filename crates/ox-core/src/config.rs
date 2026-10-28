@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use strum::{EnumString, IntoStaticStr, VariantArray};
 use tracing::warn;
 
-use self::auth::{Auth, AuthSource, CredentialError, LoginUnavailable, PendingAuth};
+use self::auth::{AuthSource, AuthState, CredentialError, LoginUnavailable};
 pub(crate) use self::base_url::BaseUrl;
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::gateway::{GatewayCompat, GatewaySnapshot, ResolvedGateway};
@@ -211,12 +211,7 @@ pub struct Config {
     pub model: ModelSpec,
     /// `None` for models outside the catalog.
     pub(crate) effort: Option<Effort>,
-    /// `None` until [`Config::resolve_auth`] loads a credential file or stored login, and while
-    /// signed out, which only a session that can run `/login` starts in.
-    pub(crate) auth: Option<Auth>,
-    pending_auth: Option<PendingAuth>,
-    /// Why the session started signed out.
-    pub(crate) signed_out: Option<LoginUnavailable>,
+    pub(crate) auth: AuthState,
     pub(crate) base_url: BaseUrl,
     /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the client
     /// trusts only the platform roots.
@@ -286,8 +281,7 @@ impl Config {
             check_ca_bundle,
         )?;
 
-        let (auth, pending_auth) =
-            resolve_explicit_auth(client.auth, &origins, &base_url.value, &gateway)?;
+        let auth = resolve_explicit_auth(client.auth, &origins, &base_url.value, &gateway)?;
 
         let model_id = env_string("OX_MODEL")
             .or_else(|| origins.sourced("client.model", client.model))
@@ -349,8 +343,6 @@ impl Config {
             model,
             effort: effort.value,
             auth: auth.value,
-            pending_auth,
-            signed_out: None,
             base_url: base_url.value,
             extra_ca_certs: extra_ca_certs.value,
             gateway: GatewayCompat {
@@ -377,22 +369,22 @@ impl Config {
     /// `can_sign_in` may start signed out against the first-party API. Other sessions and gateways
     /// require credentials.
     pub async fn resolve_auth(&mut self, can_sign_in: bool) -> Result<()> {
-        if let Some(pending) = &self.pending_auth {
-            self.auth = Some(pending.load()?);
-            self.pending_auth = None;
-        }
-        if self.auth.is_some() {
+        let AuthState::Unresolved(pending) = &self.auth else {
+            return Ok(());
+        };
+        if let Some(pending) = pending {
+            self.auth = AuthState::Ready(pending.load()?);
             return Ok(());
         }
         let trust = PlatformTrust(self.extra_ca_certs.clone());
         let stored = auth::stored_login(ClaudeCodeKeychain::SYSTEM, &trust);
-        match auth::fallback(&self.base_url, stored).await {
-            Ok(auth) => self.auth = Some(auth),
+        self.auth = match auth::fallback(&self.base_url, stored).await {
+            Ok(auth) => AuthState::Ready(auth),
             Err(CredentialError::SignedOut { cause, .. }) if can_sign_in => {
-                self.signed_out = Some(LoginUnavailable::new(&cause));
+                AuthState::SignedOut(LoginUnavailable::new(&cause))
             }
             Err(e) => return Err(e.into()),
-        }
+        };
         Ok(())
     }
 
@@ -412,11 +404,10 @@ impl Config {
         self.model
             .unsupported_notice()
             .into_iter()
-            .chain(
-                self.signed_out
-                    .as_ref()
-                    .map(|signed_out| signed_out.notice.clone()),
-            )
+            .chain(match &self.auth {
+                AuthState::SignedOut(unavailable) => Some(unavailable.notice.clone()),
+                AuthState::Unresolved(_) | AuthState::Ready(_) => None,
+            })
             .collect()
     }
 
@@ -437,7 +428,7 @@ impl Config {
         ConfigSnapshot {
             model: self.model.clone(),
             effort: self.effort,
-            auth: self.auth.as_ref().map(Auth::source),
+            auth: self.auth.source(),
             base_url: self.base_url.to_string(),
             extra_ca_certs: self.extra_ca_certs.clone(),
             gateway: self.gateway.snapshot(),
@@ -512,7 +503,7 @@ fn resolve_explicit_auth(
     origins: &Origins,
     base_url: &BaseUrl,
     gateway: &ResolvedGateway,
-) -> Result<(Sourced<Option<Auth>>, Option<PendingAuth>)> {
+) -> Result<Sourced<AuthState>> {
     let config = file_auth.map(auth::configured_auth).transpose()?.flatten();
     let explicit = auth::first_explicit(config)?;
     let explicit_source = explicit.as_ref().map(auth::ExplicitAuth::source);
@@ -526,12 +517,12 @@ fn resolve_explicit_auth(
         }
         source => source.env_var().map_or(Source::Default, Source::Env),
     };
-    let (auth, pending) = match explicit {
-        Some(auth::ExplicitAuth::Inline(auth)) => (Some(auth), None),
-        Some(auth::ExplicitAuth::File(pending)) => (None, Some(pending)),
-        None => (None, None),
+    let state = match explicit {
+        Some(auth::ExplicitAuth::Inline(auth)) => AuthState::Ready(auth),
+        Some(auth::ExplicitAuth::File(pending)) => AuthState::Unresolved(Some(pending)),
+        None => AuthState::Unresolved(None),
     };
-    Ok((Sourced::new(auth, source), pending))
+    Ok(Sourced::new(state, source))
 }
 
 /// The effort the model takes. A pick the model ignores leaves the source at the default.
@@ -764,6 +755,7 @@ mod tests {
     use serde::de::{self, value::StrDeserializer};
     use tempfile::TempDir;
 
+    use super::auth::Auth;
     use super::compaction::testing::WINDOW_1M_THRESHOLD;
     use super::oauth::LoginError;
     use super::oauth::testing::{creds_json, write_creds};
@@ -1016,7 +1008,9 @@ mod tests {
         }
 
         fn assert_auth(config: &Config, source: AuthSource, secret: &str) {
-            let auth = config.auth.as_ref().expect("the session must be signed in");
+            let AuthState::Ready(auth) = &config.auth else {
+                panic!("the session must be signed in: {:?}", config.auth);
+            };
             assert_eq!(auth.source(), source);
             assert_eq!(auth.secret(), secret);
         }
@@ -1810,7 +1804,6 @@ mod tests {
             let config = load_in(&dir, vars, false).await.unwrap();
             assert_auth(&config, AuthSource::OxLogin, "ox-token");
             assert_eq!(config.provenance.auth, Source::Default);
-            assert!(config.signed_out.is_none());
         }
 
         #[tokio::test]
@@ -1820,9 +1813,9 @@ mod tests {
             let can_sign_in = load_in(&dir, vars.clone(), true).await;
             let cannot_sign_in = load_in(&dir, vars, false).await;
 
-            let can_sign_in = can_sign_in.unwrap();
-            assert!(can_sign_in.auth.is_none());
-            let signed_out = can_sign_in.signed_out.expect("signed out");
+            let AuthState::SignedOut(signed_out) = can_sign_in.unwrap().auth else {
+                panic!("a session that can sign in starts signed out");
+            };
             assert_eq!(
                 signed_out.notice,
                 "Not signed in: oxide-code login has expired. Run `/login` to sign in again.",
@@ -1847,7 +1840,9 @@ mod tests {
 
             let config = load_in(&dir, vars, true).await.unwrap();
 
-            let signed_out = config.signed_out.expect("signed out");
+            let AuthState::SignedOut(signed_out) = config.auth else {
+                panic!("signed out: {:?}", config.auth);
+            };
             assert_eq!(
                 signed_out.notice,
                 format!(
@@ -1873,13 +1868,13 @@ mod tests {
 
             let (loaded, resolved) = temp_env::async_with_vars(vars, async {
                 let mut config = Config::load(dir.path()).expect("load reads no credential");
-                let loaded = (config.auth.is_none(), config.signed_out.is_none());
+                let loaded = matches!(config.auth, AuthState::Unresolved(None));
                 (loaded, config.resolve_auth(true).await)
             })
             .await;
             let err = resolved.expect_err("a gateway gets no stored login");
 
-            assert_eq!(loaded, (true, true));
+            assert!(loaded, "the load leaves the stored login unread");
             assert_eq!(
                 format!("{err:#}"),
                 "no credentials for https://gateway.example.com. \
@@ -2764,8 +2759,7 @@ mod tests {
         #[test]
         fn list_an_unsupported_model_then_why_the_session_is_signed_out() {
             let mut cfg = sample_config();
-            cfg.auth = None;
-            cfg.signed_out = Some(LoginUnavailable::new(&LoginError::Missing));
+            cfg.auth = AuthState::SignedOut(LoginUnavailable::new(&LoginError::Missing));
 
             let notices = cfg.notices();
 
@@ -2838,6 +2832,18 @@ mod tests {
             );
             assert_eq!(snap.theme_name, "macchiato");
             assert_eq!(snap.provenance, cfg.provenance);
+        }
+
+        #[test]
+        fn names_no_auth_source_until_a_credential_loads() {
+            let mut cfg = sample_config();
+            let signed_out = AuthState::SignedOut(LoginUnavailable::new(&LoginError::Missing));
+
+            for state in [AuthState::Unresolved(None), signed_out] {
+                cfg.auth = state;
+
+                assert_eq!(cfg.snapshot().auth, None, "{:?}", cfg.auth);
+            }
         }
     }
 

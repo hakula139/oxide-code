@@ -11,6 +11,7 @@ use super::compaction::{auto_compaction_due, request_tokens, transcript_tokens};
 use super::dispatch::{self, DispatchContext};
 use super::transcript::LiveTranscript;
 use crate::client::{Request, Response, ResponseEvent, StopDetails, StopReason, Wire};
+use crate::config::auth::Auth;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::{ModelSettings, TokenUsage};
@@ -114,6 +115,8 @@ impl TurnOutcome {
 /// What a turn reads from the engine.
 pub(super) struct TurnContext<'a> {
     pub(super) client: &'a dyn Wire,
+    /// The credential the operation signed in with.
+    pub(super) auth: &'a Auth,
     pub(super) settings: &'a ModelSettings,
     pub(super) tools: &'a ToolRegistry,
     pub(super) sink: &'a dyn EventSink,
@@ -142,6 +145,7 @@ pub(super) async fn agent_turn(
 ) -> TurnOutcome {
     let TurnContext {
         client,
+        auth,
         settings,
         tools,
         sink,
@@ -160,7 +164,7 @@ pub(super) async fn agent_turn(
         let stream = await_unless_aborted(
             stream_response(
                 client,
-                conversation_request(settings, transcript, &tool_defs),
+                conversation_request(auth, settings, transcript, &tool_defs),
                 sink,
                 &mut round_usage,
             ),
@@ -239,13 +243,14 @@ pub(super) async fn agent_turn(
         }
     }
 
-    TurnOutcome::aborted(
-        report,
-        TurnAbort::Failed(anyhow!(
-            "Agent stopped after {cap} tool rounds without a final response. \
-             Raise or unset `client.max_tool_rounds` (`OX_MAX_TOOL_ROUNDS`) to allow longer turns."
-        )),
-    )
+    TurnOutcome::aborted(report, rounds_exhausted(cap))
+}
+
+fn rounds_exhausted(cap: u32) -> TurnAbort {
+    TurnAbort::Failed(anyhow!(
+        "Agent stopped after {cap} tool rounds without a final response. \
+         Raise or unset `client.max_tool_rounds` (`OX_MAX_TOOL_ROUNDS`) to allow longer turns."
+    ))
 }
 
 /// How the round loop continues after [`settle_stop_reason`].
@@ -447,8 +452,9 @@ pub(super) async fn record_drained_prompts(
 // ── Stream Processing ──
 
 /// The request for the conversation's next round: `transcript` under its prompt, `settings`, and
-/// `tools`, caching its tail for the round after it.
+/// `tools`, sent with `auth` and caching its tail for the round after it.
 pub(super) fn conversation_request<'a>(
+    auth: &'a Auth,
     settings: &'a ModelSettings,
     transcript: &'a LiveTranscript,
     tools: &'a [&'a ToolDefinition],
@@ -456,6 +462,7 @@ pub(super) fn conversation_request<'a>(
     let prompt = transcript.prompt();
     Request {
         session_id: transcript.session().session_id(),
+        auth,
         settings,
         system: &prompt.system,
         user_context: Some(&prompt.user_context),
@@ -796,7 +803,8 @@ mod tests {
             (calls, results)
         }
 
-        /// The settings every turn in these tests sends under.
+        /// The credential and settings every turn in these tests sends under.
+        static API_KEY: LazyLock<Auth> = LazyLock::new(api_key);
         static SETTINGS: LazyLock<ModelSettings> =
             LazyLock::new(|| ModelSettings::test("claude-sonnet-5-5"));
 
@@ -807,6 +815,7 @@ mod tests {
         ) -> TurnContext<'a> {
             TurnContext {
                 client,
+                auth: &API_KEY,
                 settings: &SETTINGS,
                 tools,
                 sink,
@@ -889,7 +898,7 @@ mod tests {
             tools: &ToolRegistry,
         ) -> (TurnOutcome, Vec<Message>, CapturingSink) {
             let server = serve(responses).await;
-            let client = test_client(server.uri(), api_key());
+            let client = test_client(server.uri());
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());
             let sink = CapturingSink::default();
@@ -3020,6 +3029,7 @@ mod tests {
             "stable".clone_into(&mut prompt.system.stable);
             "dynamic".clone_into(&mut prompt.system.dynamic);
             "context".clone_into(&mut prompt.user_context);
+            let auth = api_key();
             let settings = ModelSettings::test("claude-sonnet-5-5");
             let tools = [&ToolDefinition {
                 name: "read".to_owned(),
@@ -3027,9 +3037,10 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object"}),
             }];
 
-            let request = conversation_request(&settings, &transcript, &tools);
+            let request = conversation_request(&auth, &settings, &transcript, &tools);
 
             assert_eq!(request.session_id, session.session_id());
+            assert!(std::ptr::eq(request.auth, &raw const auth));
             assert!(std::ptr::eq(request.settings, &raw const settings));
             assert_eq!(
                 [&request.system.stable, &request.system.dynamic],
@@ -3067,7 +3078,12 @@ mod tests {
 
             let result = stream_response(
                 &RefusingWire,
-                conversation_request(&ModelSettings::test("claude-sonnet-5-5"), &transcript, &[]),
+                conversation_request(
+                    &api_key(),
+                    &ModelSettings::test("claude-sonnet-5-5"),
+                    &transcript,
+                    &[],
+                ),
                 &sink,
                 &mut usage,
             )

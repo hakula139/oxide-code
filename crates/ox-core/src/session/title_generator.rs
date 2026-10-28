@@ -12,6 +12,7 @@ use super::handle::SessionHandle;
 use crate::client::anthropic::Client;
 use crate::client::anthropic::completion::SideQuery;
 use crate::client::anthropic::wire::OutputFormat;
+use crate::config::auth::Auth;
 use crate::model::{Effort, ModelSpec, PromptCacheTtl};
 use crate::protocol::{Event, EventSink};
 use crate::util::text::ELLIPSIS;
@@ -61,6 +62,7 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 /// only warns, while a write failure shows as a session write error.
 pub(crate) fn spawn<S>(
     client: Client,
+    auth: Auth,
     cache_ttl: PromptCacheTtl,
     session: SessionHandle,
     sink: S,
@@ -72,8 +74,16 @@ where
     let (billed, usage) = oneshot::channel();
     let owner = session.clone();
     let task = tokio::spawn(async move {
-        if let Err(e) =
-            generate_and_record(&client, cache_ttl, &session, &sink, &first_prompt, billed).await
+        if let Err(e) = generate_and_record(
+            &client,
+            &auth,
+            cache_ttl,
+            &session,
+            &sink,
+            &first_prompt,
+            billed,
+        )
+        .await
         {
             warn!(error = %format_args!("{e:#}"), "AI title generation failed");
         }
@@ -90,6 +100,7 @@ where
 /// the task during the write still leaves the cost counted.
 async fn generate_and_record(
     client: &Client,
+    auth: &Auth,
     cache_ttl: PromptCacheTtl,
     session: &SessionHandle,
     sink: &impl EventSink,
@@ -107,7 +118,7 @@ async fn generate_and_record(
         output_format: Some(&output_format),
     };
     let (raw, usage) = client
-        .complete(session.session_id(), query)
+        .complete(session.session_id(), auth, query)
         .await
         .context("Haiku completion failed")?;
 
@@ -258,7 +269,7 @@ mod tests {
     use crate::session::store::testing::test_store;
 
     fn title_client(base_url: String) -> Client {
-        test_client(base_url, api_key())
+        test_client(base_url)
     }
 
     /// The cache TTL of the session every title request in these tests runs for.
@@ -303,7 +314,14 @@ mod tests {
             let billed = title_record();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-            let usage = spawn(client, CACHE_TTL, session, tx, "first prompt".to_owned());
+            let usage = spawn(
+                client,
+                api_key(),
+                CACHE_TTL,
+                session,
+                tx,
+                "first prompt".to_owned(),
+            );
 
             assert_eq!(
                 rx.recv().await,
@@ -332,7 +350,14 @@ mod tests {
             let client = title_client(server.uri());
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-            let usage = spawn(client, CACHE_TTL, session, tx, "first prompt".to_owned());
+            let usage = spawn(
+                client,
+                api_key(),
+                CACHE_TTL,
+                session,
+                tx,
+                "first prompt".to_owned(),
+            );
 
             assert_eq!(rx.recv().await, None);
             assert!(usage.await.is_err(), "a failed request bills nothing");
@@ -366,6 +391,7 @@ mod tests {
 
             generate_and_record(
                 &client,
+                &api_key(),
                 CACHE_TTL,
                 &session,
                 &sink,
@@ -407,6 +433,7 @@ mod tests {
 
                 generate_and_record(
                     &client,
+                    &api_key(),
                     CACHE_TTL,
                     &session,
                     &sink,
@@ -463,9 +490,17 @@ mod tests {
             let sink = CapturingSink::default();
             let (billed, usage) = oneshot::channel();
 
-            generate_and_record(&client, CACHE_TTL, &session, &sink, "first prompt", billed)
-                .await
-                .unwrap();
+            generate_and_record(
+                &client,
+                &api_key(),
+                CACHE_TTL,
+                &session,
+                &sink,
+                "first prompt",
+                billed,
+            )
+            .await
+            .unwrap();
 
             let events = sink.events();
             assert!(
@@ -502,6 +537,7 @@ mod tests {
 
             generate_and_record(
                 &client,
+                &api_key(),
                 CACHE_TTL,
                 &session,
                 &sink,
@@ -538,9 +574,17 @@ mod tests {
             let sink = CapturingSink::default();
             let (billed, usage) = oneshot::channel();
 
-            generate_and_record(&client, CACHE_TTL, &session, &sink, "first prompt", billed)
-                .await
-                .unwrap();
+            generate_and_record(
+                &client,
+                &api_key(),
+                CACHE_TTL,
+                &session,
+                &sink,
+                "first prompt",
+                billed,
+            )
+            .await
+            .unwrap();
 
             assert_eq!(
                 sink.events(),
@@ -573,9 +617,17 @@ mod tests {
             let sink = CapturingSink::default();
             let (billed, usage) = oneshot::channel();
 
-            let err = generate_and_record(&client, CACHE_TTL, &session, &sink, "hi", billed)
-                .await
-                .expect_err("plain prose must fail parsing");
+            let err = generate_and_record(
+                &client,
+                &api_key(),
+                CACHE_TTL,
+                &session,
+                &sink,
+                "hi",
+                billed,
+            )
+            .await
+            .expect_err("plain prose must fail parsing");
 
             assert!(format!("{err:#}").contains("title envelope"));
             assert!(
@@ -610,6 +662,7 @@ mod tests {
 
             generate_and_record(
                 &client,
+                &api_key(),
                 CACHE_TTL,
                 &session,
                 &sink,
@@ -651,6 +704,7 @@ mod tests {
 
             let err = generate_and_record(
                 &client,
+                &api_key(),
                 CACHE_TTL,
                 &session,
                 &sink,
