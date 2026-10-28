@@ -1,6 +1,8 @@
 //! Display helpers for session IDs, titles, and archive notices shared by every frontend.
 
-use super::entry::{ArchiveState, SessionInfo};
+use std::borrow::Cow;
+
+use super::store::listing::{ArchiveState, SessionInfo};
 use crate::util::text::truncate_to_width;
 
 pub const ID_PREFIX_WIDTH: usize = 8;
@@ -15,9 +17,14 @@ pub fn id_prefix(session_id: &str) -> &str {
     session_id.get(..ID_PREFIX_WIDTH).unwrap_or(session_id)
 }
 
-/// Title from `info`, or [`UNTITLED_MARKER`] when absent.
-pub fn display_title(info: &SessionInfo) -> &str {
-    info.title.as_ref().map_or(UNTITLED_MARKER, |t| &t.title)
+/// Title from `info`, or [`UNTITLED_MARKER`] when absent. A fork, which starts with its source's
+/// title, is labeled `fork of {id}` with the source's [`id_prefix`].
+pub fn display_title(info: &SessionInfo) -> Cow<'_, str> {
+    let title = info.title.as_deref().unwrap_or(UNTITLED_MARKER);
+    match &info.forked_from {
+        Some(source) => Cow::Owned(format!("{title} (fork of {})", id_prefix(source))),
+        None => Cow::Borrowed(title),
+    }
 }
 
 /// The first non-blank line of `text`, trimmed and truncated to [`MAX_TITLE_WIDTH`] columns.
@@ -40,10 +47,7 @@ pub fn archive_notice(session_id: &str, state: ArchiveState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use time::macros::datetime;
-
     use super::*;
-    use crate::session::entry::TitleInfo;
     use crate::session::store::testing::listed_session;
 
     mod id_prefix {
@@ -61,15 +65,25 @@ mod tests {
         use super::*;
 
         #[test]
-        fn uses_title_when_present_else_untitled_marker() {
-            let mut info = listed_session("abc");
-            assert_eq!(display_title(&info), UNTITLED_MARKER);
+        fn shows_the_title_or_the_untitled_marker_and_labels_a_fork() {
+            for (title, forked_from, expected) in [
+                (None, None, UNTITLED_MARKER),
+                (Some("Fix auth flow"), None, "Fix auth flow"),
+                (
+                    Some("Fix auth flow"),
+                    Some("abcdefghij"),
+                    "Fix auth flow (fork of abcdefgh)",
+                ),
+                (None, Some("abcd"), "(untitled) (fork of abcd)"),
+            ] {
+                let info = SessionInfo {
+                    title: title.map(str::to_owned),
+                    forked_from: forked_from.map(str::to_owned),
+                    ..listed_session("abc")
+                };
 
-            info.title = Some(TitleInfo {
-                title: "Fix auth flow".to_owned(),
-                updated_at: datetime!(2026-05-08 09:00:00 UTC),
-            });
-            assert_eq!(display_title(&info), "Fix auth flow");
+                assert_eq!(display_title(&info), expected, "{title:?} {forked_from:?}");
+            }
         }
     }
 

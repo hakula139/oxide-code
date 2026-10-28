@@ -95,23 +95,6 @@ fn shell_reminder(shells: &[BackgroundShell]) -> Option<String> {
     }))
 }
 
-/// Restores provenance for the synthetic root an older compact boundary identifies. Explicit
-/// origins survive unchanged, and the model-facing text is never rewritten.
-pub(super) fn restore_post_compact_origin(message: &mut Message) {
-    if message.role != Role::User {
-        return;
-    }
-    let [ContentBlock::Text { origin, .. }, reminders @ ..] = &mut message.content[..] else {
-        return;
-    };
-    origin.get_or_insert(TextOrigin::CompactionSummary);
-    for block in reminders {
-        if let ContentBlock::Text { origin, .. } = block {
-            origin.get_or_insert(TextOrigin::SystemReminder);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
@@ -225,53 +208,6 @@ mod tests {
                     </system-reminder>"
                 },
             );
-        }
-    }
-
-    mod restore_post_compact_origin {
-        use super::*;
-
-        #[test]
-        fn preserves_explicit_origins_and_leaves_other_root_shapes_unchanged() {
-            let mut mixed = Message {
-                role: Role::User,
-                content: vec![
-                    ContentBlock::generated_text("explicit", TextOrigin::Interruption),
-                    ContentBlock::generated_text("kept", TextOrigin::CompactionTruncation),
-                    ContentBlock::tool_result("t1", "tool", false),
-                    ContentBlock::text("legacy reminder"),
-                ],
-            };
-
-            restore_post_compact_origin(&mut mixed);
-
-            assert_eq!(
-                mixed.content,
-                [
-                    ContentBlock::generated_text("explicit", TextOrigin::Interruption),
-                    ContentBlock::generated_text("kept", TextOrigin::CompactionTruncation),
-                    ContentBlock::tool_result("t1", "tool", false),
-                    ContentBlock::generated_text("legacy reminder", TextOrigin::SystemReminder),
-                ]
-            );
-
-            for mut message in [
-                Message::assistant("assistant text"),
-                Message {
-                    role: Role::User,
-                    content: Vec::new(),
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::tool_result("t1", "tool", false)],
-                },
-            ] {
-                let expected = message.clone();
-
-                restore_post_compact_origin(&mut message);
-
-                assert_eq!(message, expected);
-            }
         }
     }
 }

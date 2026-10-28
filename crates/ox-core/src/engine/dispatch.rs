@@ -35,8 +35,8 @@ impl DispatchContext<'_> {
     fn tool_ctx(&self, tool_use_id: &str) -> ToolCtx {
         ToolCtx {
             workspace: Arc::clone(&self.workspace),
-            session_id: self.session.session_id().to_owned(),
-            artifact_dir: Arc::clone(self.session.artifact_dir()),
+            session_id: self.session.session_id(),
+            artifact_dir: self.session.artifact_dir(),
             tracker: Arc::clone(&self.tracker),
             tool_use_id: tool_use_id.to_owned(),
             cancel: CancellationToken::new(),
