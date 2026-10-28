@@ -29,7 +29,7 @@ use ox_core::session::store::listing::ArchiveState;
 
 use self::operation::InFlight;
 use self::queue::PromptQueue;
-use crate::clipboard::{Clipboard, Environment};
+use crate::clipboard::Clipboard;
 use crate::components::chat::ChatView;
 use crate::components::input::InputArea;
 use crate::components::status::{StatusBar, StatusHyperlink};
@@ -74,7 +74,7 @@ pub(crate) struct App {
     requested_mode: Mode,
     events: mpsc::UnboundedReceiver<Event>,
     ops: mpsc::Sender<Op>,
-    /// Opens a URL in the system browser. Tests replace it so they never launch one.
+    /// Opens a URL in the system browser.
     open_browser: fn(&str) -> io::Result<()>,
     /// Status-bar links of the last frame, which a plain left click opens.
     status_links: Vec<StatusHyperlink>,
@@ -102,6 +102,17 @@ struct SlashTask {
     outcome: Result<SlashOutcome, String>,
 }
 
+/// What the App reads from and acts on outside the terminal: the git work tree, the clipboard, and
+/// the browser. `run` detects them, and tests pass doubles that leave the host alone.
+pub(crate) struct Host {
+    /// The branch checked out at startup, shown until the first probe reports.
+    pub(crate) git_branch: Option<String>,
+    pub(crate) git_probes: GitProbes,
+    pub(crate) clipboard: Clipboard,
+    /// Opens a URL in the system browser.
+    pub(crate) open_browser: fn(&str) -> io::Result<()>,
+}
+
 pub(crate) struct AppHistory {
     pub(crate) interactions: Vec<Interaction>,
     pub(crate) title: Option<String>,
@@ -115,11 +126,17 @@ impl App {
         theme: Theme,
         theme_overrides: ThemeOverrides,
         mut session_info: LiveSessionInfo,
-        git_branch: Option<String>,
+        host: Host,
         events: mpsc::UnboundedReceiver<Event>,
         ops: mpsc::Sender<Op>,
         history: AppHistory,
     ) -> Self {
+        let Host {
+            git_branch,
+            git_probes,
+            clipboard,
+            open_browser,
+        } = host;
         let mut chat = ChatView::new(&theme, session_info.config.show_thinking);
         chat.load_history(history.interactions);
         if history.prior == ArchiveState::Archived {
@@ -130,11 +147,6 @@ impl App {
         }
         session_info.set_title(history.title);
         let status_bar = StatusBar::new(session_info.config.status_line.clone(), git_branch);
-        let git_probes = GitProbes::new(
-            session_info.cwd.clone(),
-            &session_info.config.status_line,
-            now(),
-        );
         let requested_mode = session_info.config.permission_mode;
         Self {
             theme,
@@ -153,9 +165,9 @@ impl App {
             requested_mode,
             events,
             ops,
-            open_browser: |url| open::that_detached(url),
+            open_browser,
             status_links: Vec::new(),
-            clipboard: Clipboard::new(Environment::detect()),
+            clipboard,
             pending_clipboard: None,
             copy_notice: None,
             slash_tasks: JoinSet::new(),
@@ -293,7 +305,9 @@ mod tests {
     use ox_core::client::{RateLimitWindow, RateLimits};
     use ox_core::config::StatusLineSegment;
 
-    use super::testing::{long_chat_block, render_app, rendered_text, start_op, test_app};
+    use super::testing::{
+        long_chat_block, render_app, rendered_text, start_op, test_app, test_host,
+    };
     use super::*;
     use crate::components::status::SPINNER_FRAME_INTERVAL;
     use crate::git_probes::GitUpdate;
@@ -306,15 +320,19 @@ mod tests {
     mod new {
         use super::*;
 
-        /// [`App::new`] on `session_info` and `history`, without [`test_app`]'s test doubles.
+        /// [`App::new`] on `session_info` and `history`, with no startup branch.
         fn new_app(session_info: LiveSessionInfo, history: AppHistory) -> App {
             let (_event_tx, events) = mpsc::unbounded_channel::<Event>();
             let (ops, _op_rx) = mpsc::channel::<Op>(1);
+            let host = Host {
+                git_branch: None,
+                ..test_host()
+            };
             App::new(
                 Theme::default(),
                 ThemeOverrides::default(),
                 session_info,
-                None,
+                host,
                 events,
                 ops,
                 history,
@@ -360,21 +378,6 @@ mod tests {
             assert_eq!(app.chat.entry_count(), 2);
             let text = rendered_text(&mut app, 80, 12);
             assert!(text.contains("Unarchived session test-ses"), "{text}");
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn schedules_the_git_probes_the_status_line_reads() {
-            let mut info = unknown_model_session_info();
-            info.config.status_line = vec![StatusLineSegment::PullRequest];
-            let history = AppHistory {
-                interactions: Vec::new(),
-                title: None,
-                prior: ArchiveState::Active,
-            };
-
-            let app = new_app(info, history);
-
-            assert_eq!(app.git_probes.next_poll(), Some(now()));
         }
     }
 

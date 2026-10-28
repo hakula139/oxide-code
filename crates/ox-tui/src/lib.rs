@@ -34,7 +34,9 @@ use ox_core::session::store::listing::ArchiveState;
 use ox_core::util::path::tildify;
 
 use self::action::Action;
-use self::app::{App, AppHistory};
+use self::app::{App, AppHistory, Host};
+use self::clipboard::{Clipboard, Environment};
+use self::git_probes::GitProbes;
 use self::session_info::LiveSessionInfo;
 use self::slash::ResumePicker;
 use self::theme::ResolvedTheme;
@@ -79,9 +81,14 @@ pub async fn run<S: Debug>(
         notices: theme_notices,
     } = theme;
     let cwd = engine.cwd();
+    let host = Host {
+        git_branch: startup.git_branch,
+        git_probes: GitProbes::new(cwd.to_owned(), &config.status_line, now()),
+        clipboard: Clipboard::new(Environment::detect()),
+        open_browser: |url| open::that_detached(url),
+    };
     let session_info = LiveSessionInfo {
         store: engine.store().clone(),
-        cwd: cwd.to_owned(),
         display_cwd: tildify(cwd),
         project_root: engine.project_root().to_owned(),
         version: env!("CARGO_PKG_VERSION"),
@@ -103,7 +110,7 @@ pub async fn run<S: Debug>(
         theme,
         overrides,
         session_info,
-        startup.git_branch,
+        host,
         events,
         ops,
         AppHistory {
