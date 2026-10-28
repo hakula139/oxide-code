@@ -161,6 +161,10 @@ impl Modal for EffortSlider {
             _ => ModalKey::Consumed,
         }
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 // ── Effort Ladder ──
@@ -327,6 +331,15 @@ mod tests {
                 );
                 assert_eq!(s.selected, before, "{code:?} must not move the cursor");
             }
+        }
+    }
+
+    mod sends_idle_only_ops {
+        use super::*;
+
+        #[test]
+        fn holds_the_queue_head_for_the_effort_change() {
+            assert!(slider_for("claude-opus-5-5", Some(Effort::High)).sends_idle_only_ops());
         }
     }
 

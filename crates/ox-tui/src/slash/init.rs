@@ -137,6 +137,10 @@ impl Modal for InitPicker {
         self.list.navigate(event);
         ModalKey::Consumed
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -303,6 +307,15 @@ mod tests {
                     press(&mut picker, KeyCode::Enter),
                     Some(create_action(root, "AGENTS.md"))
                 );
+            }
+        }
+
+        mod sends_idle_only_ops {
+            use super::*;
+
+            #[test]
+            fn holds_the_queue_head_for_the_init_turn() {
+                assert!(InitPicker::new(Path::new("/repo")).sends_idle_only_ops());
             }
         }
     }

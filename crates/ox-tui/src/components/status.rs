@@ -43,69 +43,30 @@ pub(crate) struct HyperlinkCell {
     pub(crate) style: Style,
 }
 
-// ── Status ──
+// ── Run State ──
 
+/// The run-state segment's text and how it reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Status {
-    Idle,
-    Streaming,
-    ToolRunning { name: String },
-    Compacting,
-    SigningIn,
-    SigningOut,
-    Clearing,
-    Resuming,
-    Archiving,
-    Searching,
-    Deleting,
-    Cancelling,
-    ExitArmed { until: Instant },
+pub(crate) struct RunLabel {
+    pub(crate) text: Cow<'static, str>,
+    pub(crate) tone: RunTone,
 }
 
-impl Status {
-    /// Returns whether no work is in flight, so a submit starts a turn.
-    pub(crate) const fn is_idle(&self) -> bool {
-        !self.is_busy()
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunTone {
+    /// Nothing runs, in the muted style.
+    Ready,
+    /// Work is in flight, behind an animated spinner in the info style.
+    Busy,
+    /// The user must act soon, in the warning style.
+    Alert,
+}
 
-    /// Returns whether work is in flight, which the bar marks with an animated spinner.
-    pub(crate) const fn is_busy(&self) -> bool {
-        matches!(
-            self,
-            Self::Streaming
-                | Self::ToolRunning { .. }
-                | Self::Compacting
-                | Self::SigningIn
-                | Self::SigningOut
-                | Self::Clearing
-                | Self::Resuming
-                | Self::Archiving
-                | Self::Searching
-                | Self::Deleting
-                | Self::Cancelling,
-        )
-    }
-
-    /// The status text. An armed exit names Ctrl+D only while `input_empty`, since Ctrl+D deletes
-    /// forward in a prompt that holds text.
-    fn label(&self, input_empty: bool) -> Cow<'static, str> {
-        match self {
-            Self::Idle => "Ready".into(),
-            Self::Streaming => "Streaming · Esc to interrupt".into(),
-            Self::ToolRunning { name } => format!("Running {name} · Esc to interrupt").into(),
-            Self::Compacting => "Compacting · Esc to interrupt".into(),
-            Self::SigningIn => "Signing in · Esc to cancel".into(),
-            Self::SigningOut => "Signing out".into(),
-            Self::Clearing => "Clearing".into(),
-            Self::Resuming => "Resuming".into(),
-            Self::Archiving => "Archiving".into(),
-            Self::Searching => "Searching".into(),
-            Self::Deleting => "Deleting".into(),
-            Self::Cancelling => "Cancelling".into(),
-            Self::ExitArmed { .. } if input_empty => "Press Ctrl+C or Ctrl+D again to exit".into(),
-            Self::ExitArmed { .. } => "Press Ctrl+C again to exit".into(),
-        }
-    }
+impl RunLabel {
+    pub(crate) const READY: Self = Self {
+        text: Cow::Borrowed("Ready"),
+        tone: RunTone::Ready,
+    };
 }
 
 // ── StatusBar ──
@@ -129,9 +90,7 @@ pub(crate) struct StatusBar {
     task_progress: Option<Progress>,
     session_id: String,
     theme_name: String,
-    status: Status,
-    /// Whether the prompt is empty, which lets Ctrl+D confirm an armed exit.
-    input_empty: bool,
+    run: RunLabel,
     spinner_frame: usize,
     next_spinner_frame: Instant,
     /// Hyperlink cells captured during the most recent render.
@@ -180,8 +139,7 @@ impl StatusBar {
             task_progress: None,
             session_id: String::new(),
             theme_name: String::new(),
-            status: Status::Idle,
-            input_empty: true,
+            run: RunLabel::READY,
             spinner_frame: 0,
             next_spinner_frame: crate::now(),
             pending_hyperlinks: Vec::new(),
@@ -242,10 +200,6 @@ impl StatusBar {
         self.task_progress = progress;
     }
 
-    pub(crate) fn set_input_empty(&mut self, empty: bool) {
-        self.input_empty = empty;
-    }
-
     pub(crate) fn set_session_id(&mut self, session_id: &str) {
         session_id.clone_into(&mut self.session_id);
     }
@@ -254,12 +208,13 @@ impl StatusBar {
         theme_name.clone_into(&mut self.theme_name);
     }
 
-    pub(crate) fn set_status(&mut self, status: Status) {
-        if status != self.status {
+    /// Shows `run` in the run-state segment, restarting the spinner when the text changes.
+    pub(crate) fn set_run_label(&mut self, run: RunLabel) {
+        if run.text != self.run.text {
             self.spinner_frame = 0;
             self.next_spinner_frame = crate::now() + SPINNER_FRAME_INTERVAL;
         }
-        self.status = status;
+        self.run = run;
     }
 
     /// The spinner frame the bar shows while work is in flight.
@@ -301,7 +256,7 @@ impl StatusBar {
     pub(crate) fn tick(&mut self, now: Instant) -> bool {
         let mut dirty = self.refresh_current_time(local_minute());
         dirty |= self.expire_rate_limits();
-        if self.status.is_busy() && now >= self.next_spinner_frame {
+        if self.run.tone == RunTone::Busy && now >= self.next_spinner_frame {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
             self.next_spinner_frame = now + SPINNER_FRAME_INTERVAL;
             dirty = true;
@@ -316,7 +271,7 @@ impl StatusBar {
     }
 
     fn next_tick_at(&self, now: Instant, wall_now: OffsetDateTime) -> Option<Instant> {
-        let spinner = self.status.is_busy().then_some(self.next_spinner_frame);
+        let spinner = (self.run.tone == RunTone::Busy).then_some(self.next_spinner_frame);
         let minute = self
             .current_minute
             .map(|_| now + until_next_minute(wall_now.time()));
@@ -399,17 +354,15 @@ impl StatusBar {
 
 impl StatusBar {
     fn status_span(&self, theme: &Theme) -> Span<'static> {
-        let label = self.status.label(self.input_empty);
-        if self.status.is_busy() {
-            let spinner = SPINNER_FRAMES[self.spinner_frame];
-            return Span::styled(format!("{spinner} {label}"), theme.info());
+        let text = self.run.text.clone();
+        match self.run.tone {
+            RunTone::Ready => Span::styled(text, theme.muted()),
+            RunTone::Busy => {
+                let spinner = SPINNER_FRAMES[self.spinner_frame];
+                Span::styled(format!("{spinner} {text}"), theme.info())
+            }
+            RunTone::Alert => Span::styled(text, theme.warning()),
         }
-        let style = if matches!(self.status, Status::ExitArmed { .. }) {
-            theme.warning()
-        } else {
-            theme.muted()
-        };
-        Span::styled(label, style)
     }
 
     fn render_line(&self, width: u16, theme: &Theme) -> RenderedStatusLine {
@@ -518,6 +471,14 @@ mod tests {
             .to_owned()
     }
 
+    /// A busy run state showing `text`.
+    fn busy(text: &'static str) -> RunLabel {
+        RunLabel {
+            text: text.into(),
+            tone: RunTone::Busy,
+        }
+    }
+
     /// Ticks the busy bar at each of its next `frames` spinner frames.
     fn advance_spinner(bar: &mut StatusBar, frames: usize) {
         for _ in 0..frames {
@@ -599,40 +560,38 @@ mod tests {
         }
     }
 
-    mod set_status {
+    mod set_run_label {
         use super::*;
 
         #[test]
         fn resets_spinner_on_transition() {
             let mut bar = test_bar();
-            bar.set_status(Status::Streaming);
+            bar.set_run_label(busy("Streaming"));
             advance_spinner(&mut bar, 3);
 
-            bar.set_status(Status::ToolRunning {
-                name: "bash".to_owned(),
-            });
+            bar.set_run_label(busy("Running bash"));
 
             assert_eq!(bar.spinner_frame, 0);
         }
 
         #[test]
-        fn same_status_preserves_spinner() {
+        fn same_label_preserves_spinner() {
             let mut bar = test_bar();
-            bar.set_status(Status::Streaming);
+            bar.set_run_label(busy("Streaming"));
             advance_spinner(&mut bar, 2);
 
-            bar.set_status(Status::Streaming);
+            bar.set_run_label(busy("Streaming"));
 
             assert_eq!(bar.spinner_frame, 2);
         }
 
         #[test]
-        fn to_idle_resets_spinner() {
+        fn to_ready_resets_spinner() {
             let mut bar = test_bar();
-            bar.set_status(Status::Streaming);
+            bar.set_run_label(busy("Streaming"));
             advance_spinner(&mut bar, 2);
 
-            bar.set_status(Status::Idle);
+            bar.set_run_label(RunLabel::READY);
 
             assert_eq!(bar.spinner_frame, 0);
             assert!(!bar.tick(bar.next_spinner_frame));
@@ -645,7 +604,7 @@ mod tests {
         #[test]
         fn follows_the_animation_frame() {
             let mut bar = test_bar();
-            bar.set_status(Status::Streaming);
+            bar.set_run_label(busy("Streaming"));
 
             advance_spinner(&mut bar, 3);
 
@@ -704,7 +663,7 @@ mod tests {
         #[test]
         fn streaming_keeps_the_frame_until_the_frame_interval_passes() {
             let mut bar = test_bar();
-            bar.set_status(Status::Streaming);
+            bar.set_run_label(busy("Streaming"));
             let before = bar.next_spinner_frame.checked_sub(Duration::from_millis(1));
 
             assert!(!bar.tick(before.unwrap()));
@@ -714,7 +673,7 @@ mod tests {
         #[test]
         fn streaming_advances_the_frame_once_the_interval_passes() {
             let mut bar = test_bar();
-            bar.set_status(Status::Streaming);
+            bar.set_run_label(busy("Streaming"));
             let due = bar.next_spinner_frame;
 
             assert!(bar.tick(due));
@@ -725,9 +684,7 @@ mod tests {
         #[test]
         fn wraps_spinner_frames() {
             let mut bar = test_bar();
-            bar.set_status(Status::ToolRunning {
-                name: "bash".to_owned(),
-            });
+            bar.set_run_label(busy("Running bash"));
 
             advance_spinner(&mut bar, SPINNER_FRAMES.len());
 
@@ -741,7 +698,7 @@ mod tests {
         #[test]
         fn is_the_next_spinner_frame_while_busy() {
             let mut bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::RunState]));
-            bar.set_status(Status::Streaming);
+            bar.set_run_label(busy("Streaming"));
 
             assert_eq!(bar.next_tick(crate::now()), Some(bar.next_spinner_frame));
         }
@@ -813,7 +770,7 @@ mod tests {
                 ]));
                 let now = crate::now();
                 let wall_now = WALL_NOW.replace_time(time);
-                bar.set_status(Status::Streaming);
+                bar.set_run_label(busy("Streaming"));
                 bar.next_spinner_frame = now + SPINNER_FRAME_INTERVAL;
                 bar.set_rate_limits(Some(RateLimits {
                     five_hour: Some(RateLimitWindow {
@@ -917,7 +874,7 @@ mod tests {
         fn puts_the_run_state_after_the_model() {
             let mut bar = bar_idle(None, "~/projects/demo");
 
-            bar.set_status(Status::Streaming);
+            bar.set_run_label(busy("Streaming · Esc to interrupt"));
 
             insta::assert_snapshot!(render_status(&mut bar, 80));
         }
@@ -1178,58 +1135,33 @@ mod tests {
         }
 
         #[test]
-        fn busy_labels_follow_the_spinner_in_the_info_style() {
-            let cases = [
-                (Status::Streaming, "Streaming · Esc to interrupt"),
-                (
-                    Status::ToolRunning {
-                        name: "bash".to_owned(),
-                    },
-                    "Running bash · Esc to interrupt",
-                ),
-                (Status::Compacting, "Compacting · Esc to interrupt"),
-                (Status::SigningIn, "Signing in · Esc to cancel"),
-                (Status::SigningOut, "Signing out"),
-                (Status::Clearing, "Clearing"),
-                (Status::Resuming, "Resuming"),
-                (Status::Archiving, "Archiving"),
-                (Status::Searching, "Searching"),
-                (Status::Deleting, "Deleting"),
-                (Status::Cancelling, "Cancelling"),
-            ];
-            for (status, label) in cases {
-                let mut bar = test_bar();
+        fn busy_label_follows_the_spinner_in_the_info_style() {
+            let mut bar = test_bar();
+            bar.set_run_label(busy("Streaming"));
+            advance_spinner(&mut bar, 1);
 
-                bar.set_status(status);
-
-                assert_eq!(
-                    bar.status_span(&Theme::default()),
-                    Span::styled(
-                        format!("{} {label}", SPINNER_FRAMES[0]),
-                        Theme::default().info()
-                    )
-                );
-            }
+            assert_eq!(
+                bar.status_span(&Theme::default()),
+                Span::styled(
+                    format!("{} Streaming", SPINNER_FRAMES[1]),
+                    Theme::default().info()
+                )
+            );
         }
 
         #[test]
-        fn armed_exit_hint_names_only_the_keys_that_confirm_and_reads_as_a_warning() {
-            for (input_empty, label) in [
-                (true, "Press Ctrl+C or Ctrl+D again to exit"),
-                (false, "Press Ctrl+C again to exit"),
-            ] {
-                let mut bar = test_bar();
-                bar.set_status(Status::ExitArmed {
-                    until: Instant::now(),
-                });
-                bar.set_input_empty(input_empty);
+        fn alert_reads_as_a_warning() {
+            let mut bar = test_bar();
 
-                assert_eq!(
-                    bar.status_span(&Theme::default()),
-                    Span::styled(label, Theme::default().warning()),
-                    "input_empty={input_empty}"
-                );
-            }
+            bar.set_run_label(RunLabel {
+                text: "Press Ctrl+C again to exit".into(),
+                tone: RunTone::Alert,
+            });
+
+            assert_eq!(
+                bar.status_span(&Theme::default()),
+                Span::styled("Press Ctrl+C again to exit", Theme::default().warning())
+            );
         }
     }
 

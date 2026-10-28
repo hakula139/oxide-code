@@ -12,7 +12,7 @@ use ox_core::util::text::{center_truncate_to_width, truncate_to_width};
 use super::App;
 use crate::action::next_mode;
 use crate::components::overflow_count;
-use crate::components::status::StatusBar;
+use crate::components::status::{RunLabel, RunTone, StatusBar};
 use crate::components::welcome;
 use crate::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::keymap::{CTRL_END, hint};
@@ -88,7 +88,7 @@ impl App {
         let next_mode = next_mode(self.requested_mode, Direction::Forward);
         let footer_line = self
             .input
-            .footer(area.width, self.status.is_busy(), next_mode);
+            .footer(area.width, self.in_flight.is_some(), next_mode);
         let chat_height = MIN_CHAT_HEIGHT + spare - preview_height - tasks_height;
         let footer_height = u16::from(
             !modal_active && !footer_line.spans.is_empty() && chat_height > FOOTER_MIN_CHAT_HEIGHT,
@@ -110,7 +110,7 @@ impl App {
         self.status_bar
             .set_queued_prompts(self.queue.pending().len());
         self.status_bar.set_task_progress(self.tasks.progress());
-        self.status_bar.set_input_empty(self.input.is_empty());
+        self.status_bar.set_run_label(self.run_label());
         self.status_bar
             .set_session_id(&self.session_info.session_id);
         self.status_bar
@@ -143,10 +143,31 @@ impl App {
                 self.input.render_popup(frame, popup, &self.theme);
             }
             self.input
-                .render(frame, input, self.status.is_busy(), &self.theme);
+                .render(frame, input, self.in_flight.is_some(), &self.theme);
             if footer_height > 0 {
                 frame.render_widget(Paragraph::new(footer_line).style(self.theme.dim()), footer);
             }
+        }
+    }
+
+    /// The run state the status bar shows: what the in-flight operation does, an open exit window,
+    /// or ready. The exit hint names Ctrl+D only for an empty input, since Ctrl+D deletes forward
+    /// in a prompt that holds text.
+    fn run_label(&self) -> RunLabel {
+        if let Some(in_flight) = &self.in_flight {
+            return RunLabel {
+                text: in_flight.activity().label(),
+                tone: RunTone::Busy,
+            };
+        }
+        let text = match self.exit_armed {
+            None => return RunLabel::READY,
+            Some(_) if self.input.is_empty() => "Press Ctrl+C or Ctrl+D again to exit",
+            Some(_) => "Press Ctrl+C again to exit",
+        };
+        RunLabel {
+            text: text.into(),
+            tone: RunTone::Alert,
         }
     }
 
@@ -297,11 +318,11 @@ mod tests {
     use crate::app::CopyNotice;
     use crate::app::testing::{
         FakeModal, cell_of, five_hour_limit, long_chat_block, push_answerable_approval, render_app,
-        rendered_text, test_app,
+        rendered_text, start_op, test_app,
     };
     use crate::clipboard::CopyError;
+    use crate::components::status::StatusBar;
     use crate::components::status::testing::status_bar_init;
-    use crate::components::status::{Status, StatusBar};
     use crate::git_probes::GitUpdate;
     use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::now;
@@ -696,7 +717,7 @@ mod tests {
         #[test]
         fn input_footer_uses_the_queue_hint_below_a_busy_multiline_draft() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.set_status(Status::Streaming);
+            start_op(&mut app, &Op::prompt("running"));
             app.chat.push_system_message("Chat stays visible");
             app.input.set_text("one\ntwo");
 
@@ -1211,6 +1232,50 @@ mod tests {
         }
     }
 
+    mod run_label {
+        use super::*;
+
+        #[test]
+        fn names_the_run_state_and_offers_ctrl_d_only_for_an_empty_input() {
+            let compact = Some(Op::Compact { instructions: None });
+            for (op, armed, draft, text, tone) in [
+                (None, false, "", "Ready", RunTone::Ready),
+                (
+                    compact,
+                    false,
+                    "",
+                    "Compacting · Esc to interrupt",
+                    RunTone::Busy,
+                ),
+                (
+                    None,
+                    true,
+                    "",
+                    "Press Ctrl+C or Ctrl+D again to exit",
+                    RunTone::Alert,
+                ),
+                (
+                    None,
+                    true,
+                    "draft",
+                    "Press Ctrl+C again to exit",
+                    RunTone::Alert,
+                ),
+            ] {
+                let (mut app, _rx, _event_tx) = test_app(None);
+                app.input.set_text(draft);
+                app.exit_armed = armed.then(now);
+                if let Some(op) = &op {
+                    start_op(&mut app, op);
+                }
+
+                let run = app.run_label();
+
+                assert_eq!((run.text.as_ref(), run.tone), (text, tone), "{text}");
+            }
+        }
+    }
+
     mod preview_height {
         use super::*;
 
@@ -1241,7 +1306,7 @@ mod tests {
         #[test]
         fn overflow_appends_a_count_row() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.set_status(Status::Streaming);
+            start_op(&mut app, &Op::prompt("running"));
             let extra = 3;
             for i in 0..(PREVIEW_VISIBLE + extra) {
                 app.queue.push(format!("queued-{i}"));

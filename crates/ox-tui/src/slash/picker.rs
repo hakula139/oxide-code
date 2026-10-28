@@ -192,6 +192,10 @@ impl Modal for ModelEffortPicker {
         }
         ModalKey::Consumed
     }
+
+    fn sends_idle_only_ops(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -414,6 +418,15 @@ mod tests {
             let pick = submitted_pick(p.handle_key(&KeyEvent::from(KeyCode::Enter)));
 
             assert_eq!(pick, model_only("claude-opus-5-5"));
+        }
+    }
+
+    mod sends_idle_only_ops {
+        use super::*;
+
+        #[test]
+        fn holds_the_queue_head_for_the_model_swap() {
+            assert!(picker().sends_idle_only_ops());
         }
     }
 }

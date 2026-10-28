@@ -112,7 +112,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/ox-tui/src/app/events.rs`: `push_approval_modal`, `apply_session_resumed`, and `apply_session_compacted`.
 - `crates/ox-tui/src/app/render.rs`: `draw_frame` modal layout band.
 - `crates/ox-tui/src/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`.
-- `crates/ox-tui/src/modal.rs`: `Modal` (including the `on_cancel`, `captures_esc`, `binds_modified_key`, `tick`, and `next_tick` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
+- `crates/ox-tui/src/modal.rs`: `Modal` (including the `on_cancel`, `captures_esc`, `binds_modified_key`, `sends_idle_only_ops`, `tick`, and `next_tick` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
 - `crates/ox-tui/src/modal/acceptance.rs`: shared visibility and type-ahead guard for destructive confirmation and approval.
 - `crates/ox-tui/src/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls, plus the rule and feedback editors.
 - `crates/ox-tui/src/modal/chrome.rs`: shared `Header`, `render_footer`, and the hint fragments.

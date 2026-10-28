@@ -6,7 +6,7 @@ The status line is the TUI's top row, a user-ordered roster of built-in segments
 
 `StatusLineSegment` in `config.rs` defines the roster. `[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
 
-`StatusBar` keeps component state and delegates segment formatting to `ox_tui::components::status::line`. `App` copies the queued prompt count, the task list's progress, whether the input is empty, the session ID, the theme name, and the permission mode into it before each frame, since it owns that state.
+`StatusBar` keeps component state and delegates segment formatting to `ox_tui::components::status::line`. `App` copies the run label, the queued prompt count, the task list's progress, the session ID, the theme name, and the permission mode into it before each frame, since it owns that state.
 
 Segment render rules:
 
@@ -84,6 +84,6 @@ The status line retains the highest-priority segment, truncating it if needed, t
 - `crates/ox-core/src/session/title_generator.rs`: `spawn`, which records the title request's usage and hands it to the engine.
 - `crates/ox-core/src/util/git.rs`: `current_branch` and `current_pull_request` probes, and the checks summary.
 - `crates/ox-tui/src/app/render.rs`: `App::draw_frame`, which copies App-owned state, the permission mode included, into the status bar.
-- `crates/ox-tui/src/components/status.rs`: `StatusBar` state and the run-state `Status`.
+- `crates/ox-tui/src/components/status.rs`: `StatusBar` state and `RunLabel`, the run-state segment's text and tone.
 - `crates/ox-tui/src/components/status/line.rs`: `StatusLine` segment rendering and width fitting.
 - `crates/ox-tui/src/git_probes.rs`: `GitProbes` background branch and pull-request polling, at the detail the roster needs.
