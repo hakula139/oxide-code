@@ -18,7 +18,7 @@ use indoc::formatdoc;
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
-use tokio::process::{ChildStderr, ChildStdout};
+use tokio::process::ChildStdout;
 #[cfg(all(unix, not(target_os = "linux")))]
 use tracing::warn;
 
@@ -33,7 +33,7 @@ use crate::permission::{Access, PermissionClass};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 const MAX_TIMEOUT: Duration = Duration::from_mins(10);
-/// How long a drain waits for the pipes to close once the shell has exited or its tree is gone.
+/// How long a drain waits for the pipe to close once the shell has exited or its tree is gone.
 const DRAIN_GRACE: Duration = Duration::from_millis(250);
 
 /// The variable each command's environment carries the session ID in, so a script it runs can tell
@@ -49,9 +49,9 @@ const EDITOR_VARS: [&str; 3] = ["EDITOR", "GIT_EDITOR", "VISUAL"];
 /// checked, where an exported `CDPATH` would look elsewhere first.
 const CDPATH_VAR: &str = "CDPATH";
 
-/// Bytes of pipe output one call renders, less the spill paths its omission markers name. The
-/// reserve below the dispatcher cap holds the rest of the markers, the stream separator, and the
-/// footer, so the dispatcher never re-truncates bash output.
+/// Bytes of command output one call renders, less the spill path its omission marker names. The
+/// reserve below the dispatcher cap holds the rest of the marker and the footer, so the dispatcher
+/// never re-truncates bash output.
 const OUTPUT_BUDGET: usize = super::spill::MAX_OUTPUT_BYTES - 512;
 const PIPE_HEAD_BYTES: usize = OUTPUT_BUDGET / 2;
 const PIPE_TAIL_BYTES: usize = OUTPUT_BUDGET - PIPE_HEAD_BYTES;
@@ -226,45 +226,28 @@ async fn execute_until(
     let spawned = Bash::ready()
         .await
         .and_then(|bash| ShellTree::spawn(bash, command, ctx));
-    let mut shell = match spawned {
-        Ok(shell) => shell,
+    let (mut shell, mut output) = match spawned {
+        Ok(spawned) => spawned,
         Err(e) => return Ok(ToolOutput::error(spawn_failure(ctx, &e))),
     };
-
-    let (mut stdout, mut stderr) = shell.take_pipes();
-    let spills = ctx.spills();
-    let mut stdout_capture = PipeCapture::new(spills.file(".stdout.txt"));
-    let mut stderr_capture = PipeCapture::new(spills.file(".stderr.txt"));
+    let mut capture = PipeCapture::new(ctx.spills().file(".output.txt"));
 
     // One deadline covers the exit and the pipe drain, so a backgrounded descendant that holds the
-    // pipes open cannot stretch the call past the timeout.
+    // pipe open cannot stretch the call past the timeout.
     let finished = tokio::select! {
         biased;
-        finished = async {
-            tokio::join!(
-                shell.wait(),
-                stdout_capture.drain(&mut stdout),
-                stderr_capture.drain(&mut stderr),
-            )
-        } => Some(finished),
+        finished = async { tokio::join!(shell.wait(), capture.drain(&mut output)) } => {
+            Some(finished)
+        }
         () = deadline => None,
     };
 
-    let Some((status, stdout_read, stderr_read)) = finished else {
+    let Some((status, read)) = finished else {
         // Killing the tree closes its pipe ends, so the grace drain only waits on a holder that
         // escaped it.
         shell.kill().await;
-        _ = tokio::time::timeout(DRAIN_GRACE, async {
-            tokio::join!(
-                stdout_capture.drain(&mut stdout),
-                stderr_capture.drain(&mut stderr),
-            )
-        })
-        .await;
-        return Err(TimedOut(render_streams(
-            &mut stdout_capture,
-            &mut stderr_capture,
-        )));
+        _ = tokio::time::timeout(DRAIN_GRACE, capture.drain(&mut output)).await;
+        return Err(TimedOut(render_output(&mut capture)));
     };
 
     let status = match status {
@@ -273,20 +256,13 @@ async fn execute_until(
             return Ok(ToolOutput::error(format!("Failed to execute command: {e}")));
         }
     };
-    if let Err(e) = stdout_read {
-        return Ok(ToolOutput::error(format!(
-            "Failed to read command stdout: {e}"
-        )));
+    if let Err(e) = read {
+        capture.push_note(&format!("Failed to read command output: {e}"));
     }
-    if let Err(e) = stderr_read {
-        return Ok(ToolOutput::error(format!(
-            "Failed to read command stderr: {e}"
-        )));
-    }
-    // Descendants that released the pipes, such as a redirected background server, keep running.
+    // Descendants that released the pipe, such as a redirected background server, keep running.
     shell.disarm();
 
-    let mut content = render_streams(&mut stdout_capture, &mut stderr_capture);
+    let mut content = render_output(&mut capture);
     if !status.success() {
         push_footer(&mut content, &exit_footer(status));
     }
@@ -295,7 +271,7 @@ async fn execute_until(
     }
 
     // A nonzero exit stays a success because probes such as `grep` (1 on no match) and `test`
-    // signal through it, so `is_error` marks only spawn, pipe, and timeout failures.
+    // signal through it, so `is_error` marks only spawn, wait, and timeout failures.
     Ok(ToolOutput::success(content))
 }
 
@@ -377,25 +353,11 @@ fn git_bash_on(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
 
 // ── Output Rendering ──
 
-/// Renders stdout and stderr with a shared [`OUTPUT_BUDGET`] for decoded content, spilling
-/// truncated pipes. Omission markers add text beyond the content budget.
-fn render_streams(stdout: &mut PipeCapture, stderr: &mut PipeCapture) -> String {
-    let paths = stdout.spill.path().as_os_str().len() + stderr.spill.path().as_os_str().len();
-    let (stdout_kept, stderr_kept) = (stdout.kept_bytes(), stderr.kept_bytes());
-    let (stdout_budget, stderr_budget) = split_budget(
-        decoded_len(&stdout_kept),
-        decoded_len(&stderr_kept),
-        OUTPUT_BUDGET - paths,
-    );
-    let stdout = render_pipe(stdout, &stdout_kept, stdout_budget, "stdout");
-    let stdout = stdout.trim_start_matches('\n');
-    let stderr = render_pipe(stderr, &stderr_kept, stderr_budget, "stderr");
-    let stderr = stderr.trim_start();
-    match (stdout.is_empty(), stderr.is_empty()) {
-        (_, true) => stdout.to_owned(),
-        (true, false) => stderr.to_owned(),
-        (false, false) => format!("{stdout}\n{stderr}"),
-    }
+/// Renders the captured output with [`OUTPUT_BUDGET`] for decoded content, less the spill path its
+/// omission marker names, spilling a truncated capture.
+fn render_output(capture: &mut PipeCapture) -> String {
+    let budget = OUTPUT_BUDGET - capture.spill.path().as_os_str().len();
+    render_pipe(capture, budget)
 }
 
 fn push_footer(content: &mut String, footer: &str) {
@@ -405,22 +367,16 @@ fn push_footer(content: &mut String, footer: &str) {
     content.push_str(footer);
 }
 
-/// Splits `budget` between parts wanting `first` and `second` bytes. Each gets up to half, and a
-/// part needing less hands its unused share to the other.
-fn split_budget(first: usize, second: usize, budget: usize) -> (usize, usize) {
-    let second = second.min(budget - first.min(budget / 2));
-    (first.min(budget - second), second)
-}
-
-/// Renders `name` with at most `budget` decoded payload bytes, plus omission markers, replacing
-/// invalid UTF-8 with U+FFFD. Cuts move to nearby line boundaries, and omission markers count raw
-/// bytes. A truncated pipe spills its [`PipeCapture::kept_bytes`] in `kept` if needed so the marker
-/// names the full output.
-fn render_pipe(pipe: &mut PipeCapture, kept: &[u8], budget: usize, name: &str) -> String {
-    let text = if pipe.omitted == 0 && decoded_len(kept) <= budget {
-        String::from_utf8_lossy(kept).into_owned()
+/// Renders `pipe` with at most `budget` decoded payload bytes, plus an omission marker, replacing
+/// invalid UTF-8 with U+FFFD and trimming leading line breaks and trailing whitespace. Cuts move to
+/// nearby line boundaries, and the marker counts raw bytes. A truncated pipe spills its kept bytes
+/// if needed so the marker names the full output.
+fn render_pipe(pipe: &mut PipeCapture, budget: usize) -> String {
+    let kept = pipe.kept_bytes();
+    let text = if pipe.omitted == 0 && decoded_len(&kept) <= budget {
+        String::from_utf8_lossy(&kept).into_owned()
     } else {
-        let (split, tail_starts_line) = pipe.split(kept);
+        let (split, tail_starts_line) = pipe.split(&kept);
         let (head, tail) = kept.split_at(split);
         let (head, tail) = ends_within(head, tail, tail_starts_line, budget);
         if !pipe.spill.started() {
@@ -429,7 +385,7 @@ fn render_pipe(pipe: &mut PipeCapture, kept: &[u8], budget: usize, name: &str) -
 
         let omitted = pipe.omitted + kept.len() - head.len() - tail.len();
         let head = String::from_utf8_lossy(head);
-        let marker = omission_marker(omitted, &pipe.spill.note(name));
+        let marker = omission_marker(omitted, &pipe.spill.note());
         let tail = String::from_utf8_lossy(tail);
         formatdoc! {"
             {head}
@@ -438,7 +394,7 @@ fn render_pipe(pipe: &mut PipeCapture, kept: &[u8], budget: usize, name: &str) -
         }
     };
 
-    text.trim_end().to_owned()
+    text.trim_start_matches('\n').trim_end().to_owned()
 }
 
 /// The start of `head` and the end of `tail` to keep around a cut between them, decoding within
@@ -473,6 +429,13 @@ fn ends_within<'a>(
         whole_line_head(kept_head, ends_line),
         whole_line_tail(kept_tail, starts_line),
     )
+}
+
+/// Splits `budget` between parts wanting `first` and `second` bytes. Each gets up to half, and a
+/// part needing less hands its unused share to the other.
+fn split_budget(first: usize, second: usize, budget: usize) -> (usize, usize) {
+    let second = second.min(budget - first.min(budget / 2));
+    (first.min(budget - second), second)
 }
 
 /// The length of `bytes` once [`String::from_utf8_lossy`] decodes them.
@@ -598,6 +561,14 @@ impl PipeCapture {
         self.omitted += overflow;
     }
 
+    /// Appends `note` on a line of its own.
+    fn push_note(&mut self, note: &str) {
+        if self.kept_len() > 0 {
+            self.push(b"\n");
+        }
+        self.push(note.as_bytes());
+    }
+
     /// Starts the spill with the kept bytes, which hold everything the pipe sent while nothing was
     /// dropped.
     fn spill_kept(&mut self) {
@@ -637,8 +608,16 @@ struct ShellTree {
 }
 
 impl ShellTree {
-    /// Spawns `command` with `bash` in the context's cwd.
-    fn spawn(bash: Bash, command: &str, ctx: &ToolCtx) -> io::Result<Self> {
+    /// Spawns `command` with `bash` in the context's cwd, returning the tree and the read end of
+    /// the one pipe stdout and stderr share. Output comes in the order their writes reach the pipe.
+    fn spawn(bash: Bash, command: &str, ctx: &ToolCtx) -> io::Result<(Self, ChildStdout)> {
+        let (output, stdout) = io::pipe()?;
+        let stderr = stdout.try_clone()?;
+        #[cfg(unix)]
+        let output = std::os::fd::OwnedFd::from(output);
+        #[cfg(windows)]
+        let output = std::os::windows::io::OwnedHandle::from(output);
+        let output = ChildStdout::from_std(std::process::ChildStdout::from(output))?;
         let mut cmd = CommandWrap::with_new(bash.0, |cmd| {
             cmd.arg("-c")
                 .arg(command)
@@ -647,27 +626,18 @@ impl ShellTree {
                 .envs(EDITOR_VARS.map(|var| (var, "true")))
                 .env_remove(CDPATH_VAR)
                 .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+                .stdout(stdout)
+                .stderr(stderr);
             withhold_secrets(cmd.as_std_mut());
         });
         #[cfg(unix)]
         cmd.wrap(process_wrap::tokio::ProcessSession);
         #[cfg(windows)]
         cmd.wrap(process_wrap::tokio::JobObject);
-        Ok(Self {
-            child: cmd.spawn()?,
-            armed: true,
-        })
-    }
-
-    fn take_pipes(&mut self) -> (ChildStdout, ChildStderr) {
-        let stdout = self.child.stdout().take();
-        let stderr = self.child.stderr().take();
-        (
-            stdout.expect("stdout configured as piped"),
-            stderr.expect("stderr configured as piped"),
-        )
+        let child = cmd.spawn()?;
+        // The command holds the parent's write ends, and the reader sees EOF only once they close.
+        drop(cmd);
+        Ok((Self { child, armed: true }, output))
     }
 
     /// Waits for the shell alone, since the tree wrapper's own wait also outlasts detached
@@ -832,9 +802,9 @@ mod tests {
     #[cfg(unix)]
     use crate::util::path::local_testing::canonical_tempdir;
 
-    /// An empty capture of the stdout of call `toolu_test` in `dir`.
+    /// An empty capture of the output of call `toolu_test` in `dir`.
     fn empty_capture(dir: &Path) -> PipeCapture {
-        PipeCapture::new(ctx(dir).spills().file(".stdout.txt"))
+        PipeCapture::new(ctx(dir).spills().file(".output.txt"))
     }
 
     /// A capture in `dir` holding `head` and `tail`, with `omitted` bytes dropped between them.
@@ -980,17 +950,10 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn stderr_output_preserves_content() {
-            let output = run_default("echo err >&2").await;
+        async fn interleaves_stdout_and_stderr_in_the_order_written() {
+            let output = run_default("echo out; echo '  err' >&2; echo more; echo last >&2").await;
             assert!(!output.is_error);
-            assert_eq!(output.content, "err");
-        }
-
-        #[tokio::test]
-        async fn combined_stdout_and_stderr_renders_both_streams() {
-            let output = run_default("echo out && echo err >&2").await;
-            assert!(!output.is_error);
-            assert_eq!(output.content, "out\nerr");
+            assert_eq!(output.content, "out\n  err\nmore\nlast");
         }
 
         #[tokio::test]
@@ -1031,13 +994,13 @@ mod tests {
             let output = execute(&command, DEFAULT_TIMEOUT, &ctx(dir.path())).await;
 
             assert!(!output.is_error);
-            let path = spill_path(dir.path(), ".stdout.txt");
+            let path = spill_path(dir.path(), ".output.txt");
             let full = fs::read_to_string(&path).unwrap();
             assert_eq!(full, format!("HEAD\n{}TAIL\n", "x\n".repeat(filler / 2)));
             let (head, rest) = output.content.split_once("\n... [").unwrap();
             let (marker, tail) = rest.split_once("] ...\n").unwrap();
             let (omitted, note) = marker.split_once(" bytes omitted, ").unwrap();
-            assert_eq!(note, format!("full stdout saved to {}", path.display()));
+            assert_eq!(note, format!("full output saved to {}", path.display()));
             assert!(full.starts_with(head) && head.starts_with("HEAD\nx\n"));
             assert!(full.ends_with(&format!("{tail}\n")) && tail.ends_with("x\nTAIL"));
             let omitted: usize = omitted.parse().unwrap();
@@ -1046,7 +1009,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn spills_each_pipe_over_the_cap_to_its_own_file() {
+        async fn spills_both_streams_to_one_file_in_the_order_written() {
             let dir = tempfile::tempdir().unwrap();
             let bytes = 300 << 10;
             let command = format!(
@@ -1056,21 +1019,24 @@ mod tests {
             let output = execute(&command, DEFAULT_TIMEOUT, &ctx(dir.path())).await;
 
             assert!(!output.is_error, "{}", output.content);
-            for (name, byte) in [("stdout", b'o'), ("stderr", b'e')] {
-                let path = spill_path(dir.path(), &format!(".{name}.txt"));
-                assert_eq!(fs::read(&path).unwrap(), vec![byte; bytes], "{name}");
-                let note = format!(
-                    "bytes omitted, full {name} saved to {}] ...",
-                    path.display()
-                );
-                assert!(output.content.contains(&note), "{name}");
-            }
+            let path = spill_path(dir.path(), ".output.txt");
+            assert!(
+                fs::read(&path).unwrap() == [vec![b'o'; bytes], vec![b'e'; bytes]].concat(),
+                "the spill holds stdout, then stderr"
+            );
+            let (head, rest) = output.content.split_once("\n... [").unwrap();
+            let (marker, tail) = rest.split_once("] ...\n").unwrap();
+            let (omitted, note) = marker.split_once(" bytes omitted, ").unwrap();
+            assert_eq!(note, format!("full output saved to {}", path.display()));
+            assert_eq!(head, "o".repeat(head.len()));
+            assert_eq!(tail, "e".repeat(tail.len()));
+            let omitted: usize = omitted.parse().unwrap();
+            assert_eq!(head.len() + omitted + tail.len(), 2 * bytes);
             assert!(output.content.len() <= MAX_OUTPUT_BYTES);
         }
 
         #[tokio::test]
         async fn output_under_the_cap_writes_no_spill_file() {
-            // One pipe can use the other's unused share, so this renders whole.
             let dir = tempfile::tempdir().unwrap();
             let bytes = 100 << 10;
             let command = format!("head -c {bytes} /dev/zero | tr '\\0' o");
@@ -1083,7 +1049,7 @@ mod tests {
 
         #[tokio::test]
         async fn cancelled_mid_run_kills_backgrounded_children() {
-            // The shell either still runs or has exited while a descendant holds its pipes.
+            // The shell either still runs or has exited while a descendant holds its pipe.
             for tail in ["sleep 30", "echo done"] {
                 let dir = tempfile::tempdir().unwrap();
                 let pid_file = dir.path().join("pid");
@@ -1102,7 +1068,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn finished_call_keeps_descendants_detached_from_its_pipes() {
+        async fn finished_call_keeps_descendants_detached_from_its_pipe() {
             let dir = tempfile::tempdir().unwrap();
             let parent = dir.path().join("parent");
             let ready = dir.path().join("ready");
@@ -1238,7 +1204,7 @@ mod tests {
 
         #[tokio::test]
         async fn timeout_covers_background_pipe_holders() {
-            // The backgrounded `sleep` holds the pipes open past bash's exit, so only a deadline
+            // The backgrounded `sleep` holds the pipe open past bash's exit, so only a deadline
             // that covers the drain ends the call before the `sleep` does.
             let dir = tempfile::tempdir().unwrap();
             let pid_file = dir.path().join("pid");
@@ -1282,11 +1248,11 @@ mod tests {
         }
     }
 
-    mod render_streams {
+    mod render_output {
         use super::*;
 
-        /// Counts the chars a pipe's rendering kept, each standing for one raw byte, and reads the
-        /// byte count out of each of its `... [N bytes omitted, ...] ...` marker lines.
+        /// Counts the chars a rendering kept, each standing for one raw byte, and reads the byte
+        /// count out of each of its `... [N bytes omitted, ...] ...` marker lines.
         fn kept_and_omitted(text: &str) -> (usize, Vec<usize>) {
             let (mut kept, mut omitted) = (0, Vec::new());
             for line in text.lines() {
@@ -1301,95 +1267,44 @@ mod tests {
         }
 
         #[test]
-        fn fits_overflowing_pipes_under_the_dispatcher_cap() {
+        fn fits_overflowing_output_under_the_dispatcher_cap() {
             // Each invalid byte, such as `0xFF`, decodes as the three bytes of U+FFFD.
             let cases = [
-                (b'a', 10 << 20, 1024, 0),
-                (b'a', 300 << 10, 300 << 10, 0),
-                (b'a', 300 << 10, 300 << 10, 3),
-                (0xFF, 300 << 10, 300 << 10, 0),
+                (b'a', 10 << 20, 0),
+                (b'a', 600 << 10, 5),
+                (0xFF, 300 << 10, 0),
             ];
-            for (stdout_byte, stdout_len, stderr_len, depth) in cases {
+            for (byte, len, depth) in cases {
                 let dir = tempfile::tempdir().unwrap();
                 let cwd =
                     (0..depth).fold(dir.path().to_owned(), |cwd, _| cwd.join("d".repeat(100)));
-                let spills = ctx(&cwd).spills();
-                let mut stdout = PipeCapture::new(spills.file(".stdout.txt"));
-                stdout.push(&vec![stdout_byte; stdout_len]);
-                let mut stderr = PipeCapture::new(spills.file(".stderr.txt"));
-                stderr.push(&vec![b'z'; stderr_len]);
+                let mut capture = PipeCapture::new(ctx(&cwd).spills().file(".output.txt"));
+                capture.push(&vec![byte; len]);
 
-                let content = render_streams(&mut stdout, &mut stderr);
+                let content = render_output(&mut capture);
 
-                let case =
-                    format!("{stdout_byte:#04x}: {stdout_len} / {stderr_len} at depth {depth}");
+                let case = format!("{byte:#04x}: {len} at depth {depth}");
                 assert!(content.len() <= MAX_OUTPUT_BYTES, "{case}");
-                let (stdout_text, stderr_text) = content.split_once("\nz").unwrap();
-                let (stdout_kept, stdout_omitted) = kept_and_omitted(stdout_text);
-                assert_eq!(stdout_omitted.len(), 1, "{case}");
-                assert_eq!(stdout_kept + stdout_omitted[0], stdout_len, "{case}");
-                let (stderr_kept, stderr_omitted) = kept_and_omitted(stderr_text);
-                assert_eq!(
-                    stderr_kept + 1 + stderr_omitted.iter().sum::<usize>(),
-                    stderr_len,
-                    "{case}"
-                );
+                let (kept, omitted) = kept_and_omitted(&content);
+                assert_eq!(omitted.len(), 1, "{case}");
+                assert_eq!(kept + omitted[0], len, "{case}");
             }
-        }
-
-        #[test]
-        fn splits_the_budget_by_decoded_length() {
-            // 32 KiB of `0xFF` decode to 96 KiB, so they fit only in a split by decoded length.
-            let dir = tempfile::tempdir().unwrap();
-            let mut stdout = capture(dir.path(), &vec![0xFF; 32 << 10], b"", 0);
-            let mut stderr = capture(dir.path(), &vec![b'z'; 16 << 10], b"", 0);
-
-            let content = render_streams(&mut stdout, &mut stderr);
-
-            let stdout = char::REPLACEMENT_CHARACTER.to_string().repeat(32 << 10);
-            let stderr = "z".repeat(16 << 10);
-            assert!(content == format!("{stdout}\n{stderr}"), "a pipe was cut");
-            assert!(!dir.path().join("session").exists());
-        }
-
-        #[test]
-        fn trims_stdout_newlines_and_stderr_whitespace() {
-            let dir = tempfile::tempdir().unwrap();
-            let mut stdout = capture(dir.path(), b"\n  output\n", b"", 0);
-            let mut stderr = capture(dir.path(), b"\n  error\n", b"", 0);
-            assert_eq!(render_streams(&mut stdout, &mut stderr), "  output\nerror");
-        }
-    }
-
-    mod split_budget {
-        use super::*;
-
-        #[test]
-        fn hands_an_unused_share_to_the_other_part() {
-            assert_eq!(split_budget(10, 20, 100), (10, 20));
-            assert_eq!(split_budget(10, 1_000, 100), (10, 90));
-            assert_eq!(split_budget(1_000, 10, 100), (90, 10));
-            assert_eq!(split_budget(1_000, 1_000, 100), (50, 50));
         }
     }
 
     mod render_pipe {
         use super::*;
 
-        /// The marker for `omitted` bytes of the stdout spilled in `dir`.
+        /// The marker for `omitted` bytes of the output spilled in `dir`.
         fn marker(dir: &Path, omitted: usize) -> String {
-            let path = spill_path(dir, ".stdout.txt");
+            let path = spill_path(dir, ".output.txt");
             format!(
-                "... [{omitted} bytes omitted, full stdout saved to {}] ...",
+                "... [{omitted} bytes omitted, full output saved to {}] ...",
                 path.display()
             )
         }
 
-        /// Renders stdout with up to `budget` decoded bytes from `pipe`, plus omission markers.
-        fn render(pipe: &mut PipeCapture, budget: usize) -> String {
-            let kept = pipe.kept_bytes();
-            render_pipe(pipe, &kept, budget, "stdout")
-        }
+        /// Renders up to `budget` decoded bytes from `pipe`, plus an omission marker.
 
         #[test]
         fn marks_the_omitted_middle_between_head_and_tail() {
@@ -1399,7 +1314,7 @@ mod tests {
                 ..capture(dir.path(), b"hello\n", b"world\n", 7)
             };
 
-            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(rendered, format!("hello\n{}\nworld", marker(dir.path(), 8)));
         }
@@ -1409,7 +1324,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"one\ntwo\n333", b"33\nfour\nfive\n", 5);
 
-            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(
                 rendered,
@@ -1424,7 +1339,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut pipe = capture(dir.path(), b"l1\nl2\nl3\n", b"l4\nl5\nl6\n", 0);
 
-                let rendered = render(&mut pipe, budget);
+                let rendered = render_pipe(&mut pipe, budget);
 
                 assert_eq!(
                     rendered,
@@ -1439,7 +1354,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"aa\nbb\ncc", b"dd\nee\n", 5);
 
-            let rendered = render(&mut pipe, 10);
+            let rendered = render_pipe(&mut pipe, 10);
 
             assert_eq!(rendered, format!("aa\nbb\n{}\nee", marker(dir.path(), 11)));
         }
@@ -1452,7 +1367,7 @@ mod tests {
                 ..capture(dir.path(), b"aa\n", b"\x80abc\ndef\n", 5)
             };
 
-            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(rendered, format!("aa\n{}\ndef", marker(dir.path(), 11)));
         }
@@ -1462,7 +1377,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"one\ntwo\nthree\nfour\nlast li", b"ne\n", 0);
 
-            let rendered = render(&mut pipe, 20);
+            let rendered = render_pipe(&mut pipe, 20);
 
             assert_eq!(
                 rendered,
@@ -1475,7 +1390,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"aaaa\n2222\n", b"cc\n", 0);
 
-            let rendered = render(&mut pipe, 8);
+            let rendered = render_pipe(&mut pipe, 8);
 
             assert_eq!(rendered, format!("aaaa\n{}\ncc", marker(dir.path(), 6)));
         }
@@ -1491,7 +1406,7 @@ mod tests {
                 5,
             );
 
-            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(rendered, format!("ab\n{}\ncd", marker(dir.path(), 10)));
         }
@@ -1502,14 +1417,14 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut pipe = capture(dir.path(), b"a\xFF\xFFcd", b"\xFF\xFFw\xE2\x82yz", 0);
 
-            let rendered = render(&mut pipe, 14);
+            let rendered = render_pipe(&mut pipe, 14);
 
             let r = char::REPLACEMENT_CHARACTER;
             assert_eq!(
                 rendered,
                 format!("a{r}{r}\n{}\nw{r}yz", marker(dir.path(), 4))
             );
-            let spilled = fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
+            let spilled = fs::read(spill_path(dir.path(), ".output.txt")).unwrap();
             assert_eq!(spilled, b"a\xFF\xFFcd\xFF\xFFw\xE2\x82yz");
         }
 
@@ -1520,17 +1435,29 @@ mod tests {
             let crab = "🦀".as_bytes();
             let mut pipe = capture(dir.path(), &crab[..2], &crab[2..], 0);
 
-            let rendered = render(&mut pipe, OUTPUT_BUDGET);
+            let rendered = render_pipe(&mut pipe, OUTPUT_BUDGET);
 
             assert_eq!(rendered, "🦀");
             assert!(!dir.path().join("session").exists());
         }
 
         #[test]
-        fn trims_the_end_and_keeps_leading_and_internal_newlines() {
+        fn trims_outer_line_breaks_and_keeps_indentation_and_internal_newlines() {
             let dir = tempfile::tempdir().unwrap();
-            let mut pipe = capture(dir.path(), b"\nerr\nmore\n\n", b"", 0);
-            assert_eq!(render(&mut pipe, OUTPUT_BUDGET), "\nerr\nmore");
+            let mut pipe = capture(dir.path(), b"\n\n  err\n\nmore\n\n", b"", 0);
+            assert_eq!(render_pipe(&mut pipe, OUTPUT_BUDGET), "  err\n\nmore");
+        }
+    }
+
+    mod split_budget {
+        use super::*;
+
+        #[test]
+        fn hands_an_unused_share_to_the_other_part() {
+            assert_eq!(split_budget(10, 20, 100), (10, 20));
+            assert_eq!(split_budget(10, 1_000, 100), (10, 90));
+            assert_eq!(split_budget(1_000, 10, 100), (90, 10));
+            assert_eq!(split_budget(1_000, 1_000, 100), (50, 50));
         }
     }
 
@@ -1565,7 +1492,7 @@ mod tests {
                 let mut pipe = empty_capture(dir.path());
                 pipe.drain(&mut sent.as_slice()).await.unwrap();
 
-                let spilled = fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
+                let spilled = fs::read(spill_path(dir.path(), ".output.txt")).unwrap();
                 assert!(spilled == sent, "the spill holds every byte sent");
                 let buffered = pipe.head.capacity() + pipe.tail.capacity();
                 let bound = 2 * (PIPE_HEAD_BYTES + PIPE_TAIL_BYTES + PIPE_READ_CHUNK_BYTES);
@@ -1588,7 +1515,7 @@ mod tests {
                 assert_eq!(pipe.head, vec![b'h'; PIPE_HEAD_BYTES]);
                 assert_eq!(pipe.tail, vec![b't'; PIPE_TAIL_BYTES]);
                 assert_eq!(pipe.omitted, 100);
-                let spilled = fs::read(spill_path(dir.path(), ".stdout.txt")).unwrap();
+                let spilled = fs::read(spill_path(dir.path(), ".output.txt")).unwrap();
                 let sent = [
                     vec![b'h'; PIPE_HEAD_BYTES],
                     vec![b'm'; 100],
@@ -1676,12 +1603,11 @@ mod tests {
                     .join("; ");
                 let bash = Bash::ready().await.unwrap();
 
-                let mut tree = temp_env::with_vars(vars, || {
+                let (_tree, mut pipe) = temp_env::with_vars(vars, || {
                     ShellTree::spawn(bash, &command, &temp_ctx()).unwrap()
                 });
-                let (mut stdout, _) = tree.take_pipes();
                 let mut output = String::new();
-                stdout.read_to_string(&mut output).await.unwrap();
+                pipe.read_to_string(&mut output).await.unwrap();
 
                 assert_eq!(
                     output,
@@ -1704,12 +1630,11 @@ mod tests {
                 }
                 let bash = Bash::ready().await.unwrap();
 
-                let mut tree = temp_env::with_var("CDPATH", Some("elsewhere"), || {
+                let (_tree, mut pipe) = temp_env::with_var("CDPATH", Some("elsewhere"), || {
                     ShellTree::spawn(bash, "cd sub && cat marker", &ctx(cwd.path())).unwrap()
                 });
-                let (mut stdout, _) = tree.take_pipes();
                 let mut output = String::new();
-                stdout.read_to_string(&mut output).await.unwrap();
+                pipe.read_to_string(&mut output).await.unwrap();
 
                 assert_eq!(output, "cwd");
             }
@@ -1719,7 +1644,7 @@ mod tests {
             async fn leads_a_new_session_and_process_group() {
                 let bash = Bash::ready().await.unwrap();
 
-                let tree = ShellTree::spawn(bash, "sleep 30", &temp_ctx()).unwrap();
+                let (tree, _pipe) = ShellTree::spawn(bash, "sleep 30", &temp_ctx()).unwrap();
                 let pid = Pid::from_raw(tree.child.id().unwrap().try_into().unwrap());
 
                 assert_eq!(getsid(Some(pid)), Ok(pid));

@@ -10,10 +10,11 @@ use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use super::compaction::{auto_compaction_due, request_tokens, transcript_tokens};
 use super::dispatch::{self, DispatchContext};
 use super::transcript::LiveTranscript;
-use crate::client::{Response, ResponseEvent, StopDetails, StopReason, Wire};
+use crate::client::{Request, Response, ResponseEvent, StopDetails, StopReason, Wire};
+use crate::config::auth::Auth;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::message::{ContentBlock, Message, Role};
-use crate::model::TokenUsage;
+use crate::model::{ModelSettings, TokenUsage};
 use crate::prompt::PromptParts;
 use crate::protocol::{Event, EventSink, Op};
 use crate::tool::tasks::Task;
@@ -114,6 +115,9 @@ impl TurnOutcome {
 /// What a turn reads from the engine.
 pub(super) struct TurnContext<'a> {
     pub(super) client: &'a dyn Wire,
+    /// The credential the operation signed in with.
+    pub(super) auth: &'a Auth,
+    pub(super) settings: &'a ModelSettings,
     pub(super) tools: &'a ToolRegistry,
     pub(super) sink: &'a dyn EventSink,
     /// How many rounds may run without a final reply before the turn fails, unbounded when `None`.
@@ -141,6 +145,8 @@ pub(super) async fn agent_turn(
 ) -> TurnOutcome {
     let TurnContext {
         client,
+        auth,
+        settings,
         tools,
         sink,
         max_tool_rounds,
@@ -156,7 +162,12 @@ pub(super) async fn agent_turn(
         let sent_messages = transcript.messages().len();
         let mut round_usage = None;
         let stream = await_unless_aborted(
-            stream_response(client, transcript, &tool_defs, sink, &mut round_usage),
+            stream_response(
+                client,
+                conversation_request(auth, settings, transcript, &tool_defs),
+                sink,
+                &mut round_usage,
+            ),
             ops,
             inbox,
             sink,
@@ -232,13 +243,14 @@ pub(super) async fn agent_turn(
         }
     }
 
-    TurnOutcome::aborted(
-        report,
-        TurnAbort::Failed(anyhow!(
-            "Agent stopped after {cap} tool rounds without a final response. \
-             Raise or unset `client.max_tool_rounds` (`OX_MAX_TOOL_ROUNDS`) to allow longer turns."
-        )),
-    )
+    TurnOutcome::aborted(report, rounds_exhausted(cap))
+}
+
+fn rounds_exhausted(cap: u32) -> TurnAbort {
+    TurnAbort::Failed(anyhow!(
+        "Agent stopped after {cap} tool rounds without a final response. \
+         Raise or unset `client.max_tool_rounds` (`OX_MAX_TOOL_ROUNDS`) to allow longer turns."
+    ))
 }
 
 /// How the round loop continues after [`settle_stop_reason`].
@@ -439,22 +451,35 @@ pub(super) async fn record_drained_prompts(
 
 // ── Stream Processing ──
 
-/// Streams the transcript's next request and collects its reply with [`collect_response`].
+/// The request for the conversation's next round: `transcript` under its prompt, `settings`, and
+/// `tools`, sent with `auth` and caching its tail for the round after it.
+pub(super) fn conversation_request<'a>(
+    auth: &'a Auth,
+    settings: &'a ModelSettings,
+    transcript: &'a LiveTranscript,
+    tools: &'a [&'a ToolDefinition],
+) -> Request<'a> {
+    let prompt = transcript.prompt();
+    Request {
+        session_id: transcript.session().session_id(),
+        auth,
+        settings,
+        system: &prompt.system,
+        user_context: Some(&prompt.user_context),
+        messages: transcript.messages(),
+        tools,
+        cache_tail: true,
+    }
+}
+
+/// Streams `request` and collects its reply with [`collect_response`].
 async fn stream_response(
     client: &dyn Wire,
-    transcript: &LiveTranscript,
-    tools: &[&ToolDefinition],
+    request: Request<'_>,
     sink: &dyn EventSink,
     usage: &mut Option<TokenUsage>,
 ) -> Result<Response> {
-    let prompt = transcript.prompt();
-    let rx = client.stream_message(
-        transcript.session().session_id(),
-        transcript.messages(),
-        &prompt.system,
-        Some(&prompt.user_context),
-        tools,
-    )?;
+    let rx = client.stream(request)?;
     collect_response(rx, sink, usage).await
 }
 
@@ -487,7 +512,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
     use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
 
     use indoc::indoc;
     use serde_json::json;
@@ -507,7 +532,6 @@ mod tests {
     use crate::engine::testing::MODEL;
     use crate::message::{Replay, Role};
     use crate::model::{Effort, ResolvedModelId};
-    use crate::prompt::SystemPrompt;
     use crate::protocol::testing::CapturingSink;
     use crate::protocol::{
         ApprovalDecision, ConfigPick, ResumeTarget, SavedTarget, ToolCall, ToolResult,
@@ -562,15 +586,14 @@ mod tests {
         }
 
         impl Wire for FakeClient {
-            fn stream_message(
+            fn stream(
                 &self,
-                _session_id: &str,
-                messages: &[Message],
-                _system: &SystemPrompt,
-                _user_context: Option<&str>,
-                _tools: &[&ToolDefinition],
+                request: Request<'_>,
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-                self.requests.lock().unwrap().push(messages.to_vec());
+                self.requests
+                    .lock()
+                    .unwrap()
+                    .push(request.messages.to_vec());
                 let events = self
                     .turns
                     .lock()
@@ -723,13 +746,9 @@ mod tests {
         struct StalledClient(&'static str);
 
         impl Wire for StalledClient {
-            fn stream_message(
+            fn stream(
                 &self,
-                _session_id: &str,
-                _messages: &[Message],
-                _system: &SystemPrompt,
-                _user_context: Option<&str>,
-                _tools: &[&ToolDefinition],
+                _request: Request<'_>,
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
                 let (tx, rx) = mpsc::channel(1);
                 tx.try_send(Ok(ResponseEvent::Text(self.0.to_owned())))
@@ -784,6 +803,12 @@ mod tests {
             (calls, results)
         }
 
+        /// The credential every turn in these tests sends.
+        static API_KEY: LazyLock<Auth> = LazyLock::new(api_key);
+        /// The settings every turn in these tests sends under.
+        static SETTINGS: LazyLock<ModelSettings> =
+            LazyLock::new(|| ModelSettings::test("claude-sonnet-5-5"));
+
         fn turn_context<'a>(
             client: &'a dyn Wire,
             tools: &'a ToolRegistry,
@@ -791,6 +816,8 @@ mod tests {
         ) -> TurnContext<'a> {
             TurnContext {
                 client,
+                auth: &API_KEY,
+                settings: &SETTINGS,
                 tools,
                 sink,
                 max_tool_rounds: None,
@@ -872,7 +899,7 @@ mod tests {
             tools: &ToolRegistry,
         ) -> (TurnOutcome, Vec<Message>, CapturingSink) {
             let server = serve(responses).await;
-            let client = test_client(server.uri(), api_key(), "claude-sonnet-5-5");
+            let client = test_client(server.uri());
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());
             let sink = CapturingSink::default();
@@ -2992,6 +3019,42 @@ mod tests {
         }
     }
 
+    mod conversation_request {
+        use super::*;
+
+        #[test]
+        fn sends_the_transcript_under_its_prompt_and_caches_the_tail() {
+            let session = dead_test_session();
+            let mut transcript = LiveTranscript::with_messages(&session, vec![Message::user("hi")]);
+            let prompt = transcript.prompt_mut();
+            "stable".clone_into(&mut prompt.system.stable);
+            "dynamic".clone_into(&mut prompt.system.dynamic);
+            "context".clone_into(&mut prompt.user_context);
+            let auth = api_key();
+            let settings = ModelSettings::test("claude-sonnet-5-5");
+            let tools = [&ToolDefinition {
+                name: "read".to_owned(),
+                description: "Read a file.".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }];
+
+            let request = conversation_request(&auth, &settings, &transcript, &tools);
+
+            assert_eq!(request.session_id, session.session_id());
+            assert!(std::ptr::eq(request.auth, &raw const auth));
+            assert!(std::ptr::eq(request.settings, &raw const settings));
+            assert_eq!(
+                [&request.system.stable, &request.system.dynamic],
+                ["stable", "dynamic"]
+            );
+            assert_eq!(request.user_context, Some("context"));
+            assert_eq!(request.messages, [Message::user("hi")]);
+            assert_eq!(request.tools.len(), 1);
+            assert_eq!(request.tools[0].name, "read");
+            assert!(request.cache_tail, "the next round extends this request");
+        }
+    }
+
     mod stream_response {
         use super::*;
 
@@ -2999,13 +3062,9 @@ mod tests {
         struct RefusingWire;
 
         impl Wire for RefusingWire {
-            fn stream_message(
+            fn stream(
                 &self,
-                _session_id: &str,
-                _messages: &[Message],
-                _system: &SystemPrompt,
-                _user_context: Option<&str>,
-                _tools: &[&ToolDefinition],
+                _request: Request<'_>,
             ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
                 bail!("the API refused the request")
             }
@@ -3018,7 +3077,18 @@ mod tests {
             let sink = CapturingSink::default();
             let mut usage = None;
 
-            let result = stream_response(&RefusingWire, &transcript, &[], &sink, &mut usage).await;
+            let result = stream_response(
+                &RefusingWire,
+                conversation_request(
+                    &api_key(),
+                    &ModelSettings::test("claude-sonnet-5-5"),
+                    &transcript,
+                    &[],
+                ),
+                &sink,
+                &mut usage,
+            )
+            .await;
 
             assert_eq!(
                 result.unwrap_err().to_string(),

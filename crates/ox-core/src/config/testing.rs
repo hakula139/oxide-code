@@ -4,7 +4,7 @@ use std::path::Path;
 
 use reqwest::header::HeaderMap;
 
-use super::auth::{Auth, AuthSource};
+use super::auth::{Auth, AuthSource, AuthState};
 use super::compaction::CompactionConfig;
 use super::gateway::GatewayCompat;
 use super::provenance::{Provenance, Source};
@@ -17,13 +17,12 @@ pub(crate) fn base_url(raw: impl AsRef<str>) -> BaseUrl {
     BaseUrl::parse(raw.as_ref()).expect("test base URL must be valid")
 }
 
-/// Minimal [`Config`] signed in with `auth` against `url`: no effort, compaction off, a 128-token
-/// output cap, and the default permission policy in `/repo`.
+/// Minimal [`Config`] signed in with `auth` against `url`: compaction off, a 128-token output cap,
+/// and the default permission policy in `/repo`. The effort stays unset, so the model settings
+/// built from it take the model's default.
 pub(crate) fn test_config(url: impl AsRef<str>, auth: Auth, model: &str) -> Config {
     Config {
-        auth: Some(auth),
-        pending_auth: None,
-        signed_out: None,
+        auth: AuthState::Ready(auth),
         base_url: base_url(url),
         extra_ca_certs: None,
         gateway: GatewayCompat {

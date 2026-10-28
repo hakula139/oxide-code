@@ -64,8 +64,8 @@ impl Engine {
         let records: Vec<_> = requests
             .iter()
             .map(|&tokens| UsageRecord {
-                model: self.client.model().id().to_owned(),
-                cache_ttl: self.client.prompt_cache_ttl(),
+                model: self.settings.model().id().to_owned(),
+                cache_ttl: self.settings.prompt_cache_ttl(),
                 tokens,
             })
             .collect();
@@ -94,7 +94,7 @@ impl Engine {
         sink.emit(
             Event::UsageUpdated(UsageSnapshot {
                 context_tokens: self.usage.displayed_usage.map(TokenUsage::context_tokens),
-                context_window: self.client.model().context_window(),
+                context_window: self.settings.model().context_window(),
                 estimated_cost_usd,
             }),
             "usage-updated",

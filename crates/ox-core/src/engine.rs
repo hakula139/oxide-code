@@ -22,14 +22,17 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 
 use self::abort::{Inbox, TurnAbort};
+use self::login::SignIn;
 use self::transcript::{LiveTranscript, TranscriptStart};
 use self::turn::{TurnContext, TurnOutcome, TurnReport, TurnStop};
 use self::usage::UsageLedger;
 use crate::client::anthropic::Client;
 use crate::config::Config;
+use crate::config::auth::Auth;
 use crate::config::compaction::CompactionConfig;
 use crate::config::oauth::{self, ClaudeCodeKeychain};
 use crate::message::{ContentBlock, Message, TextOrigin};
+use crate::model::ModelSettings;
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::UserContext;
 use crate::protocol::notice::{self, ConfigSettings};
@@ -105,13 +108,14 @@ pub struct SessionParts {
 /// The live session with its transcript, prompt, and usage accounting.
 pub struct Engine {
     client: Client,
+    /// What each request asks the model for, which `/model` and `/effort` swap.
+    settings: ModelSettings,
     /// Where `/login` exchanges its authorization code, a mock server in tests.
     oauth_token_url: String,
     /// The Keychain `/logout` checks for the Claude Code login before its file, none in tests.
     claude_code_keychain: ClaudeCodeKeychain,
-    /// Whether the next prompt or compaction loads the stored login again, since a transient
-    /// failure signed the session out.
-    retry_login: bool,
+    /// The credential requests send, or whether a signed-out session loads the stored login again.
+    sign_in: SignIn,
     tools: Arc<ToolRegistry>,
     store: SessionStore,
     /// The live session, its transcript, and what the model has seen of the prompt.
@@ -138,7 +142,8 @@ pub struct Engine {
 
 impl Engine {
     /// Continues `session` with a client built from `config` and `trust`, and the built-in tools
-    /// and agent settings from `config`. Fails when the client cannot be built.
+    /// and agent settings from `config`. Fails when the client cannot be built or when `config`
+    /// has not resolved its credential.
     pub async fn new(
         config: &Config,
         trust: impl Trust + 'static,
@@ -152,21 +157,21 @@ impl Engine {
             transcript,
         } = session;
         let client = Client::new(config, trust, device_id)?;
+        let sign_in = SignIn::try_from(&config.auth)?;
+        let settings = config.model_settings();
         let shells = Arc::new(BackgroundShells::default());
         let read_filter = config.permission.read_filter();
         let tools = Arc::new(ToolRegistry::built_in(&read_filter, &shells));
         let workspace = Arc::new(config.workspace.clone());
         let (transcript, usage, instruction_warnings) =
-            LiveTranscript::load(handle, transcript, client.model(), workspace.cwd()).await;
+            LiveTranscript::load(handle, transcript, settings.model(), workspace.cwd()).await;
         let context_estimate = transcript.request_estimate(&tools.definitions());
         Ok(Self {
             client,
+            settings,
             oauth_token_url: oauth::OAUTH_TOKEN_URL.to_owned(),
             claude_code_keychain: ClaudeCodeKeychain::SYSTEM,
-            retry_login: config
-                .signed_out
-                .as_ref()
-                .is_some_and(|signed_out| signed_out.retry),
+            sign_in,
             tools,
             store,
             transcript,
@@ -300,11 +305,14 @@ impl Engine {
         S: EventSink + Clone + 'static,
     {
         let mut inbox = Inbox::default();
-        if let Err(abort) = self.ensure_signed_in(sink, ops, &mut inbox).await {
-            self.adopt_mode(&mut inbox);
-            return report_unsent(sink, abort, "turn-failed");
-        }
-        let compacted = self.auto_compact(sink, ops, &mut inbox).await;
+        let auth = match self.ensure_signed_in(sink, ops, &mut inbox).await {
+            Ok(auth) => auth,
+            Err(abort) => {
+                self.adopt_mode(&mut inbox);
+                return report_unsent(sink, abort, "turn-failed");
+            }
+        };
+        let compacted = self.auto_compact(&auth, sink, ops, &mut inbox).await;
         self.adopt_mode(&mut inbox);
         if let Err(abort) = compacted {
             return report_unsent(sink, abort, "auto-compact-failed");
@@ -328,6 +336,8 @@ impl Engine {
         {
             self.usage.title_usage = Some(title_generator::spawn(
                 self.client.clone(),
+                auth.clone(),
+                self.settings.prompt_cache_ttl(),
                 self.transcript.session().clone(),
                 sink.clone(),
                 seed,
@@ -337,8 +347,9 @@ impl Engine {
         let mut checkpoint = outcome.checkpoint;
         let mut rounds_run = 0;
         let result = loop {
-            let TurnOutcome { mut report, result } =
-                self.run_turn(sink, ops, &mut inbox, rounds_run).await;
+            let TurnOutcome { mut report, result } = self
+                .run_turn(&auth, sink, ops, &mut inbox, rounds_run)
+                .await;
             if let Err(TurnAbort::Refused(notice)) = result {
                 self.roll_back(sink, start, checkpoint, &report).await;
                 break Err(TurnAbort::Refused(notice));
@@ -351,7 +362,7 @@ impl Engine {
                 break result;
             };
 
-            let compacted = self.compact_mid_turn(sink, ops, &mut inbox).await;
+            let compacted = self.compact_mid_turn(&auth, sink, ops, &mut inbox).await;
             self.adopt_mode(&mut inbox);
             match compacted {
                 Ok(summary) => checkpoint = Some(summary),
@@ -374,6 +385,7 @@ impl Engine {
     /// mode switch the turn received.
     async fn run_turn(
         &mut self,
+        auth: &Auth,
         sink: &dyn EventSink,
         ops: &mut mpsc::Receiver<Op>,
         inbox: &mut Inbox,
@@ -389,6 +401,8 @@ impl Engine {
         let outcome = turn::agent_turn(
             TurnContext {
                 client: &self.client,
+                auth,
+                settings: &self.settings,
                 tools: &self.tools,
                 sink,
                 max_tool_rounds: self.max_tool_rounds,
@@ -428,7 +442,7 @@ impl Engine {
 
     /// Reads the user context afresh with [`Self::show_instruction_warnings`].
     async fn load_user_context(&mut self, sink: &dyn EventSink) -> UserContext {
-        let (context, warnings) = UserContext::load(self.cwd(), self.client.model()).await;
+        let (context, warnings) = UserContext::load(self.cwd(), self.settings.model()).await;
         self.show_instruction_warnings(sink, warnings);
         context
     }
@@ -447,24 +461,24 @@ impl Engine {
     /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
     fn set_model(&mut self, sink: &dyn EventSink, pick: ConfigPick) {
         let before = ConfigSettings {
-            model: self.client.model().clone(),
-            effort: self.client.effort(),
+            model: self.settings.model().clone(),
+            effort: self.settings.effort(),
             auto_compaction: self.compaction.auto,
         };
         if let ConfigPick::Model { id, .. } = &pick {
-            self.client.set_model(id.clone().into_inner());
+            self.settings.set_model(id.clone().into_inner());
             self.compaction = self
                 .compaction
-                .for_model(self.client.model(), self.client.max_tokens());
+                .for_model(self.settings.model(), self.settings.max_tokens());
         }
         let resolved = match pick.effort() {
-            Some(effort) => self.client.set_effort(effort),
-            None => self.client.effort(),
+            Some(effort) => self.settings.set_effort(effort),
+            None => self.settings.effort(),
         };
         self.usage.auto_compaction_failures.reset(sink);
         self.emit_usage_update(sink);
         let after = ConfigSettings {
-            model: self.client.model().clone(),
+            model: self.settings.model().clone(),
             effort: resolved,
             auto_compaction: self.compaction.auto,
         };
@@ -568,11 +582,11 @@ mod tests {
         mount_tool_call_once, panic_message, request_bodies, until_requested, with_pinned_home,
     };
     use super::*;
-    use crate::client::anthropic::local_testing::{COMPLETION_USAGE, client_for};
+    use crate::client::anthropic::local_testing::COMPLETION_USAGE;
     use crate::client::anthropic::testing::{
         DEVICE_ID, api_key, sse_body, sse_response, text_stream_body,
     };
-    use crate::config::auth::{AuthSource, LoginUnavailable};
+    use crate::config::auth::{AuthSource, AuthState, LoginUnavailable};
     use crate::config::compaction::CompactionConfig;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
     use crate::config::testing::test_config;
@@ -760,7 +774,7 @@ mod tests {
                 config.compaction = CompactionConfig::with_threshold(50_000);
                 config.permission.set_mode(Mode::Plan);
                 config.workspace = Workspace::new(dir.path());
-                config.signed_out = Some(LoginUnavailable {
+                config.auth = AuthState::SignedOut(LoginUnavailable {
                     notice: "Not signed in. Run `/login` to sign in.".to_owned(),
                     retry: true,
                 });
@@ -787,7 +801,11 @@ mod tests {
                     engine.startup_notices,
                     ["Not signed in. Run `/login` to sign in."],
                 );
-                assert!(engine.retry_login);
+                assert!(
+                    matches!(engine.sign_in, SignIn::SignedOut { retry: true }),
+                    "{:?}",
+                    engine.sign_in,
+                );
             })
             .await;
         }
@@ -1068,6 +1086,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 let client = engine.client.clone();
+                let cache_ttl = engine.settings.prompt_cache_ttl();
                 let session = engine.transcript.session().clone();
                 let session_id = engine.session_id().to_owned();
                 let (billed, usage) = oneshot::channel();
@@ -1079,7 +1098,14 @@ mod tests {
 
                 let first = submit(&mut handle, "hello").await;
                 assert!(matches!(first.last(), Some(Event::TurnComplete)));
-                let title = title_generator::spawn(client, session, sink, "hello".to_owned());
+                let title = title_generator::spawn(
+                    client,
+                    api_key(),
+                    cache_ttl,
+                    session,
+                    sink,
+                    "hello".to_owned(),
+                );
                 billed.send(title.await.unwrap()).unwrap();
                 let late = tokio::time::timeout(Duration::from_secs(5), async {
                     let (mut title, mut usage) = (None, None);
@@ -1162,8 +1188,10 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.generates_titles = true;
+                let mut config = test_config(server.uri(), api_key(), MODEL);
+                config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
+                engine.settings = config.model_settings();
                 let session_id = engine.session_id().to_owned();
-                let cache_ttl = engine.client.prompt_cache_ttl();
                 let mut handle = engine.spawn();
 
                 handle.ops.send(Op::prompt("hello")).await.unwrap();
@@ -1204,7 +1232,7 @@ mod tests {
                     title_usage,
                     [&UsageRecord {
                         model: TITLE_MODEL.to_owned(),
-                        cache_ttl,
+                        cache_ttl: PromptCacheTtl::FiveMin,
                         tokens: COMPLETION_USAGE,
                     }]
                 );
@@ -2516,10 +2544,12 @@ mod tests {
                     let store = test_store(dir.path());
                     let mut engine = engine(server.uri(), &store, dir.path()).await;
                     let session_id = engine.session_id().to_owned();
-                    let cache_ttl = engine.client.prompt_cache_ttl();
+                    let cache_ttl = engine.settings.prompt_cache_ttl();
                     let sink = CapturingSink::default();
                     let title = title_generator::spawn(
                         engine.client.clone(),
+                        api_key(),
+                        cache_ttl,
                         engine.transcript.session().clone(),
                         sink.clone(),
                         "hello".to_owned(),
@@ -3117,7 +3147,7 @@ mod tests {
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.client.set_auth(None);
+                engine.sign_in = SignIn::SignedOut { retry: false };
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
@@ -3516,10 +3546,10 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.client.set_effort(Effort::High);
+                engine.settings.set_effort(Effort::High);
                 let opus = ModelSpec::resolve(MODEL);
                 engine.compaction =
-                    CompactionConfig::with_default_policy(&opus, engine.client.max_tokens());
+                    CompactionConfig::with_default_policy(&opus, engine.settings.max_tokens());
                 let sink = CapturingSink::default();
 
                 for id in ["custom-model", MODEL] {
@@ -3662,7 +3692,7 @@ mod tests {
                     (Some(8_000), unwindowed, 979_000),
                 ] {
                     config.max_tokens = max_tokens;
-                    engine.client = client_for(&config);
+                    engine.settings = config.model_settings();
                     engine.compaction = configured;
 
                     engine.set_model(&sink, sonnet_pick());

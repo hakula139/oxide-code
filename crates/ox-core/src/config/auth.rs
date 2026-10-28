@@ -320,9 +320,30 @@ impl Credential {
 
 // ── Resolution ──
 
+/// Where a config stands in loading its credential.
+#[derive(Debug, Clone)]
+pub(crate) enum AuthState {
+    /// Waiting for [`Config::resolve_auth`](crate::config::Config::resolve_auth) to read the
+    /// selected credential file, or to fall back to a stored login when there is none.
+    Unresolved(Option<PendingAuth>),
+    Ready(Auth),
+    /// No stored login could be loaded, which only a session that can run `/login` starts in.
+    SignedOut(LoginUnavailable),
+}
+
+impl AuthState {
+    /// Where the credential came from, `None` until one is loaded.
+    pub(super) fn source(&self) -> Option<AuthSource> {
+        match self {
+            Self::Ready(auth) => Some(auth.source()),
+            Self::Unresolved(_) | Self::SignedOut(_) => None,
+        }
+    }
+}
+
 /// Selected file credential, whose contents are read once at startup after declaration checks.
 #[derive(Debug, Clone)]
-pub(super) struct PendingAuth {
+pub(crate) struct PendingAuth {
     pub(super) source: AuthSource,
     path: std::path::PathBuf,
 }

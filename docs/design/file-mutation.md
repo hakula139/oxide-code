@@ -24,7 +24,7 @@ A file with more than one hard link, a parent that refuses a new entry, a differ
 
 ### New Files
 
-`create` stages a file in the parent, writes it, sets it to the mode a plain creation in that directory receives, which a `0666` probe reports through the umask, syncs it, rechecks its bytes and name, and publishes it with a no-clobber persist. A no-clobber publish never replaces an existing entry, including a dangling link.
+`create` opens the path with `create_new`, then writes and syncs the file. The exclusive open (`O_EXCL` on Unix, `CREATE_NEW` on Windows) never replaces an existing entry, including a dangling link, and the kernel gives the file the mode and default ACL a plain creation in that directory receives. When the write or sync fails, the error says a partial file remains and asks the model to read it before writing again.
 
 ## Design Decisions
 
@@ -36,9 +36,11 @@ A file with more than one hard link, a parent that refuses a new entry, a differ
 
 4. **Write through the held handle, not a reopened path.** The handle was opened without following a symlink and checked against the tracked bytes, so rewriting through it cannot land on a different file, and every hard link keeps seeing one inode.
 
-5. **In-place publication trades crash atomicity for preservation.** A crash, a full disk, or a kill mid-write can leave partial content, while the atomic path publishes either the complete bytes or none of them. Ordinary workspace files keep the atomic path, while a file whose metadata the copy cannot inherit is written in place and gives up crash atomicity for that write.
+5. **In-place publication trades crash atomicity for preservation.** A crash, a full disk, or a kill mid-write can leave partial content, while the atomic path publishes either the complete bytes or none of them. Ordinary existing files on Linux keep the atomic path, while a file whose metadata the copy cannot inherit is written in place and gives up crash atomicity for that write.
 
-6. **Hard links, set-ID files, and capability files.** A file with several links can sit inside the workspace while another link sits outside every root, so the workspace gate never auto-allows it, but an explicit rule or approval writes it in place and every link sees the new content. Set-ID files and files carrying a capability stay refused because a write can clear either and the tool cannot report what the file system did with them.
+6. **New files trade crash atomicity for portability.** An exclusive open needs no rename or hard link, so it works on volumes such as exFAT, which support neither a no-replace rename nor hard links and on which a staged copy could not be published at all. A crash, a full disk, or a kill mid-write can leave a partial new file, and a reader or file watcher can see the file while it is written, but no earlier content exists to lose.
+
+7. **Hard links, set-ID files, and capability files.** A file with several links can sit inside the workspace while another link sits outside every root, so the workspace gate never auto-allows it, but an explicit rule or approval writes it in place and every link sees the new content. Set-ID files and files carrying a capability stay refused because a write can clear either and the tool cannot report what the file system did with them.
 
 ## Sources
 

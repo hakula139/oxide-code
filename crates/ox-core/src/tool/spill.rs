@@ -45,7 +45,7 @@ pub(crate) async fn run_capped(tool: &dyn Tool, prepared: Prepared, ctx: &ToolCt
 /// meets the marker at a line boundary near its cut, or else at a UTF-8 boundary.
 fn cap_output(content: &str, mut spill: Spill) -> String {
     spill.write(content.as_bytes());
-    let note = spill.note("output");
+    let note = spill.note();
     // The full length has at least as many digits as the omitted count the marker ends up with.
     let reserve = omission_marker(content.len(), &note).len() + "\n\n".len();
     let half = (MAX_OUTPUT_BYTES - reserve) / 2;
@@ -122,7 +122,7 @@ impl Spills {
         }
     }
 
-    /// The spill into the file named by the call's ID followed by `suffix`, such as `.stdout.txt`.
+    /// The spill into the file named by the call's ID followed by `suffix`, such as `.output.txt`.
     pub(super) fn file(&self, suffix: &str) -> Spill {
         Spill {
             path: self.dir.join(format!("{}{suffix}", self.stem)),
@@ -212,19 +212,19 @@ impl Spill {
         SpillState::Failed(error.to_owned())
     }
 
-    /// Where the full `what`, such as `stdout`, is kept, as the omission marker names it. Call it
-    /// only once a write has started the spill.
-    pub(super) fn note(&self, what: &str) -> String {
+    /// Where the full output is kept, as the omission marker names it. Call it only once a write
+    /// has started the spill.
+    pub(super) fn note(&self) -> String {
         let path = self.path.display();
         match &self.state {
             SpillState::Pending => unreachable!("a result omits bytes only after they spill"),
-            SpillState::Open { full: false, .. } => format!("full {what} saved to {path}"),
+            SpillState::Open { full: false, .. } => format!("full output saved to {path}"),
             SpillState::Open { full: true, .. } => {
                 let size = format_size(MAX_SPILL_BYTES);
-                format!("first {size} of {what} saved to {path}")
+                format!("first {size} of output saved to {path}")
             }
             SpillState::Failed(error) => {
-                format!("saving the full {what} to {path} failed: {error}")
+                format!("saving the full output to {path} failed: {error}")
             }
         }
     }
@@ -387,7 +387,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn binary_bash_output_fits_the_cap_with_only_its_pipe_spill() {
+        async fn binary_bash_output_fits_the_cap_with_only_its_own_spill() {
             // Each byte decodes as the three bytes of U+FFFD.
             let dir = tempfile::tempdir().unwrap();
             let bytes = vec![0xFF; 300 << 10];
@@ -403,18 +403,18 @@ mod tests {
                 .await;
 
             assert!(!output.is_error, "{}", output.content);
-            let stdout = spill_path(dir.path(), ".stdout.txt");
-            let note = format!("full stdout saved to {}] ...", stdout.display());
+            let spill = spill_path(dir.path(), ".output.txt");
+            let note = format!("full output saved to {}] ...", spill.display());
             assert!(output.content.contains(&note));
             assert!(
-                fs::read(&stdout).unwrap() == bytes,
+                fs::read(&spill).unwrap() == bytes,
                 "the spill holds the raw bytes"
             );
-            let spills: Vec<_> = fs::read_dir(stdout.parent().unwrap())
+            let spills: Vec<_> = fs::read_dir(spill.parent().unwrap())
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
                 .collect();
-            assert_eq!(spills, [stdout]);
+            assert_eq!(spills, [spill]);
         }
     }
 
@@ -572,26 +572,26 @@ mod tests {
         #[test]
         fn keeps_at_most_the_size_cap_and_says_so() {
             let dir = tempfile::tempdir().unwrap();
-            let mut spill = ctx(dir.path()).spills().file(".stdout.txt");
+            let mut spill = ctx(dir.path()).spills().file(".txt");
             let chunk = vec![b'a'; 1 << 20];
 
             for _ in 0..=MAX_SPILL_BYTES >> 20 {
                 spill.write(&chunk);
             }
 
-            let path = spill_path(dir.path(), ".stdout.txt");
+            let path = spill_path(dir.path(), ".txt");
             let spilled = fs::metadata(&path).unwrap().len();
             assert_eq!(spilled, MAX_SPILL_BYTES);
             assert_eq!(
-                spill.note("stdout"),
-                format!("first 10 MiB of stdout saved to {}", path.display()),
+                spill.note(),
+                format!("first 10 MiB of output saved to {}", path.display()),
             );
         }
 
         #[test]
         fn names_the_error_of_a_write_the_file_refuses() {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("toolu_test.stdout.txt");
+            let path = dir.path().join("toolu_test.txt");
             fs::write(&path, "").unwrap();
             let read_only = || File::open(&path).unwrap();
             let mut spill = Spill {
@@ -607,9 +607,9 @@ mod tests {
 
             let error = read_only().write_all(b"x").unwrap_err();
             assert_eq!(
-                spill.note("stdout"),
+                spill.note(),
                 format!(
-                    "saving the full stdout to {} failed: {error}",
+                    "saving the full output to {} failed: {error}",
                     path.display()
                 ),
             );

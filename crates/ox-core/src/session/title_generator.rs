@@ -12,7 +12,8 @@ use super::handle::SessionHandle;
 use crate::client::anthropic::Client;
 use crate::client::anthropic::completion::SideQuery;
 use crate::client::anthropic::wire::OutputFormat;
-use crate::model::{Effort, ModelSpec};
+use crate::config::auth::Auth;
+use crate::model::{Effort, ModelSpec, PromptCacheTtl};
 use crate::protocol::{Event, EventSink};
 use crate::util::text::ELLIPSIS;
 
@@ -61,6 +62,8 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 /// only warns, while a write failure shows as a session write error.
 pub(crate) fn spawn<S>(
     client: Client,
+    auth: Auth,
+    cache_ttl: PromptCacheTtl,
     session: SessionHandle,
     sink: S,
     first_prompt: String,
@@ -71,7 +74,17 @@ where
     let (billed, usage) = oneshot::channel();
     let owner = session.clone();
     let task = tokio::spawn(async move {
-        if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt, billed).await {
+        if let Err(e) = generate_and_record(
+            &client,
+            &auth,
+            cache_ttl,
+            &session,
+            &sink,
+            &first_prompt,
+            billed,
+        )
+        .await
+        {
             warn!(error = %format_args!("{e:#}"), "AI title generation failed");
         }
     });
@@ -87,6 +100,8 @@ where
 /// the task during the write still leaves the cost counted.
 async fn generate_and_record(
     client: &Client,
+    auth: &Auth,
+    cache_ttl: PromptCacheTtl,
     session: &SessionHandle,
     sink: &impl EventSink,
     first_prompt: &str,
@@ -95,6 +110,8 @@ async fn generate_and_record(
     let output_format = title_output_format();
     let user = title_request(first_prompt);
     let query = SideQuery {
+        session_id: session.session_id(),
+        auth,
         model: ModelSpec::resolve(HAIKU_MODEL),
         system: SYSTEM_PROMPT,
         user: &user,
@@ -103,14 +120,14 @@ async fn generate_and_record(
         output_format: Some(&output_format),
     };
     let (raw, usage) = client
-        .complete(session.session_id(), query)
+        .complete(query)
         .await
         .context("Haiku completion failed")?;
 
     if let Some(tokens) = usage {
         let record = UsageRecord {
             model: HAIKU_MODEL.to_owned(),
-            cache_ttl: client.prompt_cache_ttl(),
+            cache_ttl,
             tokens,
         };
         _ = billed.send(record.clone());
@@ -254,14 +271,17 @@ mod tests {
     use crate::session::store::testing::test_store;
 
     fn title_client(base_url: String) -> Client {
-        test_client(base_url, api_key(), HAIKU_MODEL)
+        test_client(base_url)
     }
 
-    /// The usage record of one title request that `client` sent.
-    fn title_record(client: &Client) -> UsageRecord {
+    /// The cache TTL of the session every title request in these tests runs for.
+    const CACHE_TTL: PromptCacheTtl = PromptCacheTtl::FiveMin;
+
+    /// The usage record of one title request.
+    fn title_record() -> UsageRecord {
         UsageRecord {
             model: HAIKU_MODEL.to_owned(),
-            cache_ttl: client.prompt_cache_ttl(),
+            cache_ttl: CACHE_TTL,
             tokens: COMPLETION_USAGE,
         }
     }
@@ -293,10 +313,17 @@ mod tests {
                 .mount(&server)
                 .await;
             let client = title_client(server.uri());
-            let billed = title_record(&client);
+            let billed = title_record();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-            let usage = spawn(client, session, tx, "first prompt".to_owned());
+            let usage = spawn(
+                client,
+                api_key(),
+                CACHE_TTL,
+                session,
+                tx,
+                "first prompt".to_owned(),
+            );
 
             assert_eq!(
                 rx.recv().await,
@@ -325,7 +352,14 @@ mod tests {
             let client = title_client(server.uri());
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-            let usage = spawn(client, session, tx, "first prompt".to_owned());
+            let usage = spawn(
+                client,
+                api_key(),
+                CACHE_TTL,
+                session,
+                tx,
+                "first prompt".to_owned(),
+            );
 
             assert_eq!(rx.recv().await, None);
             assert!(usage.await.is_err(), "a failed request bills nothing");
@@ -359,6 +393,8 @@ mod tests {
 
             generate_and_record(
                 &client,
+                &api_key(),
+                CACHE_TTL,
                 &session,
                 &sink,
                 "first prompt",
@@ -399,6 +435,8 @@ mod tests {
 
                 generate_and_record(
                     &client,
+                    &api_key(),
+                    CACHE_TTL,
                     &session,
                     &sink,
                     "Run `cargo build` and tell me if it succeeded.",
@@ -454,9 +492,17 @@ mod tests {
             let sink = CapturingSink::default();
             let (billed, usage) = oneshot::channel();
 
-            generate_and_record(&client, &session, &sink, "first prompt", billed)
-                .await
-                .unwrap();
+            generate_and_record(
+                &client,
+                &api_key(),
+                CACHE_TTL,
+                &session,
+                &sink,
+                "first prompt",
+                billed,
+            )
+            .await
+            .unwrap();
 
             let events = sink.events();
             assert!(
@@ -465,11 +511,11 @@ mod tests {
                     .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
                 "AI title must not emit when manual title is already set: {events:?}",
             );
-            assert_eq!(usage.await.unwrap(), title_record(&client));
+            assert_eq!(usage.await.unwrap(), title_record());
             let data = test_store(dir.path())
                 .load_session_data(session.session_id())
                 .unwrap();
-            assert_eq!(data.usage, [title_record(&client)]);
+            assert_eq!(data.usage, [title_record()]);
         }
 
         #[tokio::test]
@@ -491,9 +537,17 @@ mod tests {
             let client = title_client(server.uri());
             let sink = CapturingSink::default();
 
-            generate_and_record(&client, &session, &sink, "prompt", oneshot::channel().0)
-                .await
-                .unwrap();
+            generate_and_record(
+                &client,
+                &api_key(),
+                CACHE_TTL,
+                &session,
+                &sink,
+                "prompt",
+                oneshot::channel().0,
+            )
+            .await
+            .unwrap();
 
             let events = sink.events();
             assert!(
@@ -522,9 +576,17 @@ mod tests {
             let sink = CapturingSink::default();
             let (billed, usage) = oneshot::channel();
 
-            generate_and_record(&client, &session, &sink, "first prompt", billed)
-                .await
-                .unwrap();
+            generate_and_record(
+                &client,
+                &api_key(),
+                CACHE_TTL,
+                &session,
+                &sink,
+                "first prompt",
+                billed,
+            )
+            .await
+            .unwrap();
 
             assert_eq!(
                 sink.events(),
@@ -557,9 +619,17 @@ mod tests {
             let sink = CapturingSink::default();
             let (billed, usage) = oneshot::channel();
 
-            let err = generate_and_record(&client, &session, &sink, "hi", billed)
-                .await
-                .expect_err("plain prose must fail parsing");
+            let err = generate_and_record(
+                &client,
+                &api_key(),
+                CACHE_TTL,
+                &session,
+                &sink,
+                "hi",
+                billed,
+            )
+            .await
+            .expect_err("plain prose must fail parsing");
 
             assert!(format!("{err:#}").contains("title envelope"));
             assert!(
@@ -569,11 +639,11 @@ mod tests {
                     .any(|e| matches!(e, Event::SessionTitleUpdated { .. })),
                 "no title event on parse failure",
             );
-            assert_eq!(usage.await.unwrap(), title_record(&client));
+            assert_eq!(usage.await.unwrap(), title_record());
             let data = test_store(dir.path())
                 .load_session_data(session.session_id())
                 .unwrap();
-            assert_eq!(data.usage, [title_record(&client)]);
+            assert_eq!(data.usage, [title_record()]);
         }
 
         #[tokio::test]
@@ -594,6 +664,8 @@ mod tests {
 
             generate_and_record(
                 &client,
+                &api_key(),
+                CACHE_TTL,
                 &session,
                 &sink,
                 "first prompt",
@@ -632,9 +704,17 @@ mod tests {
             let client = title_client(server.uri());
             let sink = CapturingSink::default();
 
-            let err = generate_and_record(&client, &session, &sink, "hi", oneshot::channel().0)
-                .await
-                .expect_err("HTTP error must propagate");
+            let err = generate_and_record(
+                &client,
+                &api_key(),
+                CACHE_TTL,
+                &session,
+                &sink,
+                "hi",
+                oneshot::channel().0,
+            )
+            .await
+            .expect_err("HTTP error must propagate");
             assert_eq!(
                 format!("{err:#}"),
                 "Haiku completion failed: Anthropic API error (HTTP 400 Bad Request): bad request"
