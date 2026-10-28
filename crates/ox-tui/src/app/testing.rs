@@ -106,11 +106,11 @@ impl FakeModal {
 }
 
 impl Modal for FakeModal {
-    fn height(&self, _width: u16, _max_height: u16) -> u16 {
+    fn height(&mut self, _width: u16, _max_height: u16) -> u16 {
         1
     }
 
-    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let line = Line::from(Span::styled(self.title.clone(), theme.text()));
         frame.render_widget(Paragraph::new(line).style(theme.surface()), area);
     }
@@ -124,11 +124,11 @@ impl Modal for FakeModal {
 pub(super) struct KeyLogModal(pub(super) Arc<Mutex<Vec<KeyCode>>>);
 
 impl Modal for KeyLogModal {
-    fn height(&self, _width: u16, _max_height: u16) -> u16 {
+    fn height(&mut self, _width: u16, _max_height: u16) -> u16 {
         1
     }
 
-    fn render(&self, _frame: &mut Frame<'_>, _area: Rect, _theme: &Theme) {}
+    fn render(&mut self, _frame: &mut Frame<'_>, _area: Rect, _theme: &Theme) {}
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         self.0.lock().unwrap().push(event.code);
@@ -175,7 +175,7 @@ pub(super) fn push_answerable_approval(app: &mut App, command: &str) {
         None,
         None,
     );
-    crate::modal::testing::render_rows(&modal, 60, modal.height(60, 40));
+    crate::modal::testing::render_modal(&mut modal, 60);
     modal.expire_guard();
     app.push_modal(Box::new(modal));
 }

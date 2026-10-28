@@ -121,11 +121,11 @@ impl InitPicker {
 }
 
 impl Modal for InitPicker {
-    fn height(&self, width: u16, max_height: u16) -> u16 {
+    fn height(&mut self, width: u16, max_height: u16) -> u16 {
         self.list.height_with_footer(width, max_height)
     }
 
-    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         self.list
             .render_with_footer(frame, area, &CONFIRM_HINTS, theme);
     }
@@ -254,9 +254,10 @@ mod tests {
 
             #[test]
             fn lists_both_files_with_who_else_reads_them() {
-                let picker = InitPicker::new(Path::new("/repo"));
+                let mut picker = InitPicker::new(Path::new("/repo"));
+                let height = picker.height(80, 20);
 
-                let rows = render_rows(&picker, 80, picker.height(80, 20));
+                let rows = render_rows(&mut picker, 80, height);
 
                 let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
                 assert_eq!(

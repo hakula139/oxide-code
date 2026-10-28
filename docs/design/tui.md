@@ -21,7 +21,7 @@ Components are concrete structs (`ChatView`, `InputArea`, `StatusBar`, modals) t
 
 ### Named Keys
 
-The app's own keys live in `APP_KEYMAP` in `ox_tui::action`, a table of named `AppAction`s built from the `KeyAction`, `KeyChord`, and `Keymap` types in `ox_tui::keymap`. Each entry carries its key and hint, so the hint a footer shows comes from the entry the key dispatches through. A key in the table works while no modal holds the keyboard and reaches the app before the input box. The `/resume` picker builds its keys and footer from the same types.
+The app's global key, Ctrl+O, lives in `APP_KEYMAP` in `ox_tui::action`, a table of named `AppAction`s built from the `KeyAction`, `KeyChord`, and `Keymap` types in `ox_tui::keymap`. Each entry carries its key and hint, so the hint a footer shows comes from the entry the key dispatches through. It works while no modal holds the keyboard and reaches the app before the input box. The `/resume` picker builds its keys and footer from the same types. Other keys are matched beside the state they change: the prompt's editing table in `ox_tui::grapheme`, the app's exit and interrupt keys in `app::dispatch`, and each modal's keys in its own module. Every hint takes the `Key to effect` shape from `keymap::hint`.
 
 ### Async Event Loop
 
@@ -64,7 +64,7 @@ Thinking that is still streaming shows its body in both views under the spinner 
 
 ## Streaming Markdown
 
-Streaming markdown uses a block-based stable-prefix cache:
+The streaming reply, live thinking, and the compaction summary in flight each keep a block-based stable-prefix cache:
 
 - **Commit complete blocks.** A top-level markdown block is complete once another top-level block starts after it. The cache renders complete blocks once into owned `Line<'static>` values, and each frame re-parses only the tail from the last block start.
 - **Detect stable boundaries.** Block starts are found in newline-terminated lines only, because a partial line can still change which block it opens. Blank lines inside a fenced code block or a loose list stay in the tail.
@@ -99,14 +99,16 @@ A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other
 
 ## Sources
 
-- `crates/ox-tui/src/action.rs`: `APP_KEYMAP`, the app's named keys and their hints.
+- `crates/ox-tui/src/action.rs`: `APP_KEYMAP`, the app's global key and its hint.
 - `crates/ox-tui/src/app.rs`: `App`, its `tokio::select!` loop, `TICK_INTERVAL`, the shortest gap between ticks, and `App::next_tick`, which picks when the loop wakes.
 - `crates/ox-tui/src/components/chat.rs`: `ChatView` and the compact and expanded views.
 - `crates/ox-tui/src/components/chat/blocks.rs`: `ChatBlock` and `RenderCtx`, the render contract of a chat block.
-- `crates/ox-tui/src/components/chat/blocks/streaming.rs`: `StreamingAssistant`, the stable-prefix cache of a streaming reply.
+- `crates/ox-tui/src/components/chat/blocks/markdown_cache.rs`: `MarkdownCache`, the stable-prefix cache of a section that grows while it streams.
+- `crates/ox-tui/src/components/chat/blocks/streaming.rs`: `StreamingAssistant`, the streaming reply over its cache.
 - `crates/ox-tui/src/components/chat/scroll.rs`: `ChatView::place`, the anchored placement each frame paints, and the auto-scroll that follows the tail.
 - `crates/ox-tui/src/components/chat/stack.rs`: `CachedBlock`, `SlotTops`, and `Stack`, the block cache and the row anchors.
-- `crates/ox-tui/src/keymap.rs`: `KeyAction`, `KeyChord`, and `Keymap`.
+- `crates/ox-tui/src/grapheme.rs`: the grapheme-aware editing table the prompt and the modal text fields share, with `GraphemeStops`.
+- `crates/ox-tui/src/keymap.rs`: `KeyAction`, `KeyChord`, `Keymap`, and `hint`, the shape every key hint takes.
 - `crates/ox-tui/src/markdown.rs`: `OPTIONS`, the parser extensions, and `render_markdown_chunk` and `complete_blocks_len`, the stable block boundaries.
 - `crates/ox-tui/src/markdown/render.rs`: the pulldown-cmark renderer, its `pending_markers`, and the table layout.
 - `crates/ox-tui/src/terminal.rs`: `synchronized_update`, which wraps each frame in mode 2026.

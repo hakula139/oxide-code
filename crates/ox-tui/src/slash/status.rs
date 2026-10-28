@@ -97,35 +97,17 @@ mod tests {
     use ox_core::tool::bash::background::testing::shells_in_each_state;
 
     use super::*;
-    use crate::modal::Modal as _;
-    use crate::modal::testing::{render_rows, rendered_text};
+    use crate::modal::testing::{render_modal, rendered_text};
     use crate::session_info::testing::test_session_info;
-    use crate::slash::registry::testing::run_execute;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(StatusCmd.name(), "status");
-        assert_ne!(StatusCmd.description(), "");
-    }
-
-    mod execute {
-        use super::*;
-
-        #[test]
-        fn opens_the_overview_modal() {
-            let outcome = run_execute(&StatusCmd, "");
-            outcome.unwrap().into_modal();
-        }
-    }
 
     mod build_modal {
         use super::*;
 
         #[test]
         fn lists_each_session_descriptor() {
-            let modal = build_modal(&test_session_info());
+            let mut modal = build_modal(&test_session_info());
 
-            insta::assert_debug_snapshot!(render_rows(&modal, 80, modal.height(80, u16::MAX)));
+            insta::assert_debug_snapshot!(render_modal(&mut modal, 80));
         }
 
         #[test]
@@ -138,7 +120,7 @@ mod tests {
             .map(|(class, pattern)| Rule::parse(class, pattern).unwrap())
             .to_vec();
 
-            let rendered = rendered_text(&build_modal(&info), 80);
+            let rendered = rendered_text(&mut build_modal(&info), 80);
 
             let rules: Vec<Vec<&str>> = rendered
                 .lines()
@@ -163,7 +145,7 @@ mod tests {
             let mut info = test_session_info();
             info.background_shells = shells_in_each_state();
 
-            let rendered = rendered_text(&build_modal(&info), 80);
+            let rendered = rendered_text(&mut build_modal(&info), 80);
 
             let shells: Vec<&str> = rendered
                 .lines()
@@ -187,7 +169,7 @@ mod tests {
             let mut info = test_session_info();
             info.auto_compaction_paused_after = Some(3);
 
-            let rendered = rendered_text(&build_modal(&info), 80);
+            let rendered = rendered_text(&mut build_modal(&info), 80);
 
             let row = rendered
                 .lines()

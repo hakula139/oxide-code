@@ -200,8 +200,8 @@ impl App {
 
         loop {
             let next_tick = self.next_tick(last_tick);
-            // Six sources can wake the loop. The tick arm is the only renderer, so handlers only
-            // mark `dirty` and render work stays paced by the frame clock.
+            // The tick arm is the only renderer, so handlers only mark `dirty` and render work
+            // stays paced by the frame clock.
             tokio::select! {
                 event = crossterm_events.next() => {
                     match event {

@@ -7,6 +7,7 @@ mod components;
 mod cursor;
 mod git_probes;
 pub mod glyphs;
+mod grapheme;
 mod keymap;
 mod labels;
 mod markdown;
@@ -53,6 +54,7 @@ pub struct Startup {
     pub picker: Option<ResumePicker>,
     /// The `ox <prompt>` text, submitted as if typed once the TUI opens.
     pub prompt: Option<String>,
+    /// The resumed session's title, or `None` when the session starts fresh.
     pub title: Option<String>,
     /// The session's state before startup resumed it, which unarchives an archived session.
     pub prior: ArchiveState,

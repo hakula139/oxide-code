@@ -17,7 +17,7 @@ use ox_core::protocol::{Interaction, ToolCall, ToolResult};
 
 use self::blocks::{
     AssistantText, AssistantThinking, ChatBlock, CompactedBlock, ErrorBlock, GitDiffBlock,
-    InterruptedMarker, NoticeBlock, ProgressUpdate, RenderCtx, StreamingAssistant,
+    InterruptedMarker, MarkdownCache, NoticeBlock, ProgressUpdate, RenderCtx, StreamingAssistant,
     SystemMessageBlock, ToolCallBlock, ToolResultBlock, UserMessage,
 };
 use self::selection::{ClickCounter, Selection};
@@ -39,6 +39,8 @@ pub(crate) struct ChatView {
     thinking_buffer: String,
     /// The compaction summary streaming in, which shows below the chat until compaction ends.
     summary_buffer: String,
+    thinking_cache: MarkdownCache,
+    summary_cache: MarkdownCache,
 
     /// Top row of the last paint.
     scroll_offset: usize,
@@ -114,6 +116,8 @@ impl ChatView {
             streaming: None,
             thinking_buffer: String::new(),
             summary_buffer: String::new(),
+            thinking_cache: MarkdownCache::default(),
+            summary_cache: MarkdownCache::default(),
             scroll_offset: 0,
             max_offset: 0,
             pending_scroll: 0,
@@ -138,6 +142,8 @@ impl ChatView {
         if let Some(s) = &mut self.streaming {
             s.invalidate_cache();
         }
+        self.thinking_cache.invalidate();
+        self.summary_cache.invalidate();
     }
 
     /// Sets the spinner frame the next paint heads streaming thinking with.
@@ -240,6 +246,7 @@ impl ChatView {
             self.new_content_since_pause = self.new_content_since_pause.saturating_sub(1);
         }
         self.summary_buffer.clear();
+        self.summary_cache.invalidate();
     }
 
     /// Finalizes the streaming buffer into a committed block.
@@ -261,6 +268,7 @@ impl ChatView {
             return;
         }
         let text = std::mem::take(&mut self.thinking_buffer);
+        self.thinking_cache.invalidate();
         self.push_block(AssistantThinking::new(text));
     }
 
@@ -346,6 +354,8 @@ impl ChatView {
         self.streaming = None;
         self.thinking_buffer.clear();
         self.summary_buffer.clear();
+        self.thinking_cache.invalidate();
+        self.summary_cache.invalidate();
         self.scroll_offset = 0;
         self.max_offset = 0;
         self.pending_scroll = 0;
@@ -458,20 +468,27 @@ impl ChatView {
         }
     }
 
-    fn render_live(&self, width: u16) -> LiveLines {
+    fn render_live(&mut self, width: u16) -> LiveLines {
+        let continues_turn = self.streaming_continues_turn();
         let ctx = self.settings.ctx(width);
         let thinking = if self.settings.show_thinking && !self.thinking_buffer.is_empty() {
-            AssistantThinking::render_streaming(&self.thinking_buffer, self.spinner, &ctx)
+            AssistantThinking::render_streaming(
+                &self.thinking_buffer,
+                self.spinner,
+                &ctx,
+                &mut self.thinking_cache,
+            )
         } else {
             Vec::new()
         };
-        let streaming_tail = self.streaming.as_ref().map_or_else(Vec::new, |s| {
-            s.render_tail(&ctx, self.streaming_continues_turn())
-        });
+        let streaming_tail = self
+            .streaming
+            .as_ref()
+            .map_or_else(Vec::new, |s| s.render_tail(&ctx, continues_turn));
         let summary = if self.summary_buffer.is_empty() {
             Vec::new()
         } else {
-            CompactedBlock::render_streaming(&self.summary_buffer, &ctx)
+            CompactedBlock::render_streaming(&self.summary_buffer, &ctx, &mut self.summary_cache)
         };
         LiveLines {
             thinking,
@@ -1242,11 +1259,15 @@ mod tests {
             chat.append_summary_token("Fixed ");
             chat.append_summary_token("the bug.");
 
-            let summary: Vec<String> =
-                CompactedBlock::render_streaming("Fixed the bug.", &chat.settings.ctx(80))
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect();
+            let ctx = chat.settings.ctx(80);
+            let summary: Vec<String> = CompactedBlock::render_streaming(
+                "Fixed the bug.",
+                &ctx,
+                &mut MarkdownCache::default(),
+            )
+            .iter()
+            .map(ToString::to_string)
+            .collect();
             assert_eq!(
                 all_rows(&mut chat, 80),
                 [chat_rows, vec![String::new()], summary].concat(),
@@ -1273,11 +1294,15 @@ mod tests {
             assert_eq!(all_rows(&mut chat, 80), chat_rows);
 
             chat.append_summary_token("Second attempt.");
-            let summary: Vec<String> =
-                CompactedBlock::render_streaming("Second attempt.", &chat.settings.ctx(80))
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect();
+            let ctx = chat.settings.ctx(80);
+            let summary: Vec<String> = CompactedBlock::render_streaming(
+                "Second attempt.",
+                &ctx,
+                &mut MarkdownCache::default(),
+            )
+            .iter()
+            .map(ToString::to_string)
+            .collect();
             assert_eq!(
                 all_rows(&mut chat, 80),
                 [chat_rows, vec![String::new()], summary].concat(),

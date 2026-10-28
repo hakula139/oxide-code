@@ -359,22 +359,20 @@ impl App {
     fn apply_signed_in(&mut self, auth: AuthSource) {
         self.session_info.config.auth = Some(auth);
         self.status_bar.set_rate_limits(None);
-        let message = match auth {
-            AuthSource::OxLogin | AuthSource::ClaudeCodeLogin => {
-                format!("Signed in. Requests now use {auth}.")
-            }
+        let recovery = match auth {
+            AuthSource::OxLogin | AuthSource::ClaudeCodeLogin => None,
             AuthSource::ClientBearer | AuthSource::ClientApiKey | AuthSource::ClientOAuth => {
-                format!(
-                    "Signed in. {auth} takes precedence, so requests keep using it. \
-                 Remove `client.auth` and restart ox to use the new login."
-                )
+                Some("Remove `client.auth` and restart ox to use the new login.")
             }
             AuthSource::AuthTokenEnv | AuthSource::ApiKeyEnv | AuthSource::OAuthTokenEnv => {
-                format!(
-                    "Signed in. {auth} takes precedence, so requests keep using it. \
-                 Unset it and restart ox to use the new login."
-                )
+                Some("Unset it and restart ox to use the new login.")
             }
+        };
+        let message = match recovery {
+            Some(recovery) => {
+                format!("Signed in. {auth} takes precedence, so requests keep using it. {recovery}")
+            }
+            None => format!("Signed in. Requests now use {auth}."),
         };
         self.chat.push_system_message(message);
         self.finish_turn();
@@ -2190,7 +2188,7 @@ mod tests {
             });
 
             let text = rendered_text(&mut app, 100, 24);
-            assert!(text.contains("[A] allow for session"), "{text}");
+            assert!(text.contains("A to allow for the session"), "{text}");
         }
 
         #[test]

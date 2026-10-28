@@ -6,11 +6,11 @@ How the TUI cancels work on Esc or Ctrl+C, exits on a second Ctrl+C from idle, a
 
 The TUI exposes these controls and behaviors:
 
-- **Cancel and exit.** Esc / Ctrl+C cancels active work. Dual-press Ctrl+C exits from idle, and Ctrl+D exits when idle with an empty input buffer. `/exit` quits from any state, and a turn in flight ends as a shutdown does.
+- **Cancel and exit.** Esc / Ctrl+C cancels active work. Dual-press Ctrl+C exits from idle, and dual-press Ctrl+D exits from idle with an empty input buffer, since Ctrl+D deletes forward while there is text. `/exit` quits from any state, and a turn in flight ends as a shutdown does.
 - **Queue input.** Enter while busy appends to the app's `PromptQueue`, rendered as a dim preview above the input, and forwards the prompt as `Op::Queue`.
 - **Drain input.** `agent_turn` splices each forwarded prompt into `messages` as a trailing User message at its next round boundary and confirms it with `Event::PromptDrained`, so the model sees new instructions in the next API request without aborting in-flight work. A turn that ends first drops the prompts it still holds, and once it completes or fails the TUI submits the queue head as the next turn. A prompt whose automatic compaction failed was never sent, so the TUI hands it back to the user and leaves the queue waiting. A failed compaction partway through a turn ends the turn and leaves the queue waiting too, as [Inside a Turn](compaction.md#inside-a-turn) describes. A refused turn that the engine rolled back (`TurnRolledBack`) hands back its prompt and the queued prompts it took in the same way, or after a mid-turn compaction only the queued prompts it took in since.
 - **Interrupt work.** Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, the bash tool kills the command's process tree, and a dim italic `(interrupted)` marker lands in chat. The transcript then ends on a `[Request interrupted by user]` user message, so the model knows the user abandoned that prompt.
-- **Show status.** The status bar puts the key that stops the work beside the spinner: `Streaming · Esc to interrupt`, `Running {tool} · Esc to interrupt`, `Compacting · Esc to interrupt`, `Signing in · Esc to cancel`, `Signing out`, `Clearing`, `Resuming`, `Archiving`, and `Cancelling`. An armed exit shows `Press Ctrl+C again to exit`.
+- **Show status.** The status bar puts the key that stops the work beside the spinner: `Streaming · Esc to interrupt`, `Running {tool} · Esc to interrupt`, `Compacting · Esc to interrupt`, `Signing in · Esc to cancel`, `Signing out`, `Clearing`, `Resuming`, `Archiving`, and `Cancelling`. An armed exit names the keys that confirm it: `Press Ctrl+C or Ctrl+D again to exit` with an empty input, and `Press Ctrl+C again to exit` while the input holds a draft, where Ctrl+D deletes forward.
 
 The bare REPL maps SIGINT the way a shell does when stdin is a terminal. During an operation, it sends `Op::Interrupt`, and once cancellation ends the operation, `render_op` drops any approval question still awaiting an answer. At the prompt, SIGINT discards the line and prompts again, so only the end of input exits. With piped stdin, SIGINT ends the run, as SIGTERM and SIGHUP always do.
 
@@ -49,7 +49,7 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-core/src/tool/file.rs`: `write_file`.
 - `crates/ox-core/src/tool/search.rs`: `walk_files`.
 - `crates/ox-tui/src/app.rs`: `App::status` and `App::set_status`.
-- `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `handle_ctrl_c`, the Ctrl+D POSIX gate in `handle_ctrl_d`, and `expire_armed_exit`.
+- `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `handle_ctrl_c`, the delete-forward and empty-input exit split in `handle_ctrl_d`, and `expire_armed_exit`.
 - `crates/ox-tui/src/app/events.rs`: `finish_turn`, `apply_turn_failed`, `apply_session_ready`, `discard_queue`, `finalize_idle` / `enter_idle` / `drain_pending_prompt`, `set_active_status`.
 - `crates/ox-tui/src/app/queue.rs`: `PromptQueue` and its `QueuedPrompt` entries, the active prompt, the queued prompts, what a failed turn hands back, and the prompts a session switch leaves behind.
 - `crates/ox-tui/src/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries, and `ChatView::load_history`, which shows a resumed interruption as the `(interrupted)` line.

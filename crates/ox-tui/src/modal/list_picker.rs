@@ -134,7 +134,7 @@ impl<T: PickerItem> ListPicker<T> {
 
     /// Renders the list above a footer of `hints` at the bottom of `area`.
     pub(crate) fn render_with_footer(
-        &self,
+        &mut self,
         frame: &mut Frame<'_>,
         area: Rect,
         hints: &[&str],
@@ -144,7 +144,7 @@ impl<T: PickerItem> ListPicker<T> {
         render_footer(frame, area, hints, theme);
     }
 
-    pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    pub(crate) fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(usize::from(area.height));
         self.header.push_lines(&mut lines, area.width, theme);
 
@@ -446,11 +446,13 @@ mod tests {
     mod render {
         use super::*;
 
+        /// Renders `picker` at `width` and the height it asks for within `max_height`.
         fn render_rows<T: PickerItem>(
-            picker: &ListPicker<T>,
+            picker: &mut ListPicker<T>,
             width: u16,
-            height: u16,
+            max_height: u16,
         ) -> Vec<String> {
+            let height = picker.height(width, max_height);
             render_rows_with(width, height, |frame, area, theme| {
                 picker.render(frame, area, theme);
             })
@@ -458,7 +460,7 @@ mod tests {
 
         #[test]
         fn aligns_columns_by_display_width() {
-            let p = picker(vec![
+            let mut p = picker(vec![
                 FakeItem {
                     description: Some("abcdefghij"),
                     ..FakeItem::new("中文")
@@ -470,7 +472,7 @@ mod tests {
                 },
             ]);
 
-            let rows = render_rows(&p, 20, p.height(20, 20));
+            let rows = render_rows(&mut p, 20, 20);
 
             assert_eq!(rows[2].trim_end(), ">    中文    ab...");
             assert_eq!(rows[3].trim_end(), "     a     ✓ xyz");
@@ -478,13 +480,13 @@ mod tests {
 
         #[test]
         fn truncates_the_description_at_a_narrow_width() {
-            let p = picker(vec![FakeItem {
+            let mut p = picker(vec![FakeItem {
                 description: Some("a long description"),
                 ..FakeItem::new("very-long-label")
             }])
             .with_description("title-line");
 
-            let rows = render_rows(&p, 32, p.height(32, 8));
+            let rows = render_rows(&mut p, 32, 8);
 
             let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
             assert_eq!(
@@ -508,9 +510,9 @@ mod tests {
                 }
             }
 
-            let p = ListPicker::new("Pick one", vec![MinimalItem("a"), MinimalItem("b")]);
+            let mut p = ListPicker::new("Pick one", vec![MinimalItem("a"), MinimalItem("b")]);
 
-            let rows = render_rows(&p, 40, p.height(40, 40));
+            let rows = render_rows(&mut p, 40, 40);
 
             let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
             assert_eq!(rows, ["Pick one", "", ">    a", "     b"]);
@@ -522,7 +524,7 @@ mod tests {
             let mut p = picker(LABELS.into_iter().map(FakeItem::new).collect());
             p.cursor_to(|item| item.label == "r4");
 
-            let rows = render_rows(&p, 20, p.height(20, 5));
+            let rows = render_rows(&mut p, 20, 5);
 
             assert_eq!(
                 rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),

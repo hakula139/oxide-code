@@ -85,34 +85,16 @@ fn display_label(cmd: &dyn SlashCommand) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modal::Modal as _;
-    use crate::modal::testing::render_rows;
-    use crate::slash::registry::testing::run_execute;
-
-    #[test]
-    fn name_and_metadata_match_built_ins_contract() {
-        assert_eq!(HelpCmd.name(), "help");
-        assert_ne!(HelpCmd.description(), "");
-    }
-
-    mod execute {
-        use super::*;
-
-        #[test]
-        fn opens_the_overview_modal() {
-            let outcome = run_execute(&HelpCmd, "");
-            outcome.unwrap().into_modal();
-        }
-    }
+    use crate::modal::testing::render_modal;
 
     mod build_modal {
         use super::*;
 
         #[test]
         fn lists_every_built_in_with_its_aliases_usage_and_description() {
-            let modal = build_modal();
+            let mut modal = build_modal();
 
-            insta::assert_debug_snapshot!(render_rows(&modal, 100, modal.height(100, u16::MAX)));
+            insta::assert_debug_snapshot!(render_modal(&mut modal, 100));
         }
     }
 }

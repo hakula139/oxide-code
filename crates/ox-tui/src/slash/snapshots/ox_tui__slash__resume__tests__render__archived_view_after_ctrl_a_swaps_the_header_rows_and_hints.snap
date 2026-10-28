@@ -1,6 +1,6 @@
 ---
 source: crates/ox-tui/src/slash/resume.rs
-expression: "render_to_backend(&picker, 120)"
+expression: "render_to_backend(&mut picker, 120)"
 ---
 "Resume archived session                                                                                                 "
 "Pick a session to unarchive and resume in place                                                                         "
@@ -20,4 +20,4 @@ expression: "render_to_backend(&picker, 120)"
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "
-"Enter to resume  ·  Esc to cancel  ·  scope: current project  ·  Ctrl+X to unarchive  ·  Ctrl+D to delete  ·  Tab for..."
+"Enter to resume  ·  Esc to cancel  ·  scope: current project  ·  Ctrl+X to unarchive  ·  Ctrl+D to delete  ·  Tab to ..."

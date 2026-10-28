@@ -1,6 +1,5 @@
 //! Wrapping list navigation and render-sized scroll windows.
 
-use std::cell::Cell;
 use std::ops::Range;
 
 /// Which way a keyboard step moves through a list.
@@ -20,19 +19,23 @@ pub(crate) fn wrap_prev(index: usize, len: usize) -> usize {
     index.checked_sub(1).unwrap_or(len - 1)
 }
 
-/// Scroll window over a list. `Cell`-backed because the window settles during `render(&self)`, when
-/// the granted height is finally known.
+/// Scroll window over a list, which settles during render, when the granted height is known.
 #[derive(Debug, Default)]
 pub(crate) struct Viewport {
-    offset: Cell<usize>,
-    height: Cell<usize>,
+    offset: usize,
+    height: usize,
 }
 
 impl Viewport {
     /// Visible range of `len` rows in a `height`-row window, moved as little as possible to keep
     /// `cursor` in view.
-    pub(crate) fn window(&self, len: usize, height: usize, cursor: Option<usize>) -> Range<usize> {
-        let mut offset = self.offset.get().min(len.saturating_sub(height));
+    pub(crate) fn window(
+        &mut self,
+        len: usize,
+        height: usize,
+        cursor: Option<usize>,
+    ) -> Range<usize> {
+        let mut offset = self.offset.min(len.saturating_sub(height));
         if let Some(cursor) = cursor {
             if cursor < offset {
                 offset = cursor;
@@ -40,25 +43,24 @@ impl Viewport {
                 offset = cursor + 1 - height;
             }
         }
-        self.offset.set(offset);
-        self.height.set(height);
+        self.offset = offset;
+        self.height = height;
         offset..len.min(offset + height)
     }
 
     /// Rows the last render showed, at least one, for page-sized cursor steps.
     pub(crate) fn page(&self) -> usize {
-        self.height.get().max(1)
+        self.height.max(1)
     }
 
     /// Scrolls a cursor-less window by `delta` rows, stopping where the last of `len` rows shows.
-    pub(crate) fn scroll_by(&self, delta: isize, len: usize) {
-        let max_offset = len.saturating_sub(self.height.get());
-        let offset = self.offset.get().saturating_add_signed(delta);
-        self.offset.set(offset.min(max_offset));
+    pub(crate) fn scroll_by(&mut self, delta: isize, len: usize) {
+        let max_offset = len.saturating_sub(self.height);
+        self.offset = self.offset.saturating_add_signed(delta).min(max_offset);
     }
 
-    pub(crate) fn reset(&self) {
-        self.offset.set(0);
+    pub(crate) fn reset(&mut self) {
+        self.offset = 0;
     }
 }
 
@@ -93,7 +95,7 @@ mod tests {
 
         #[test]
         fn follows_the_cursor_with_minimal_movement() {
-            let viewport = Viewport::default();
+            let mut viewport = Viewport::default();
             assert_eq!(viewport.window(10, 4, Some(0)), 0..4);
             assert_eq!(viewport.window(10, 4, Some(3)), 0..4, "still in view");
             assert_eq!(viewport.window(10, 4, Some(5)), 2..6, "bottom edge follows");
@@ -107,7 +109,7 @@ mod tests {
 
         #[test]
         fn reclamps_when_the_granted_height_changes() {
-            let viewport = Viewport::default();
+            let mut viewport = Viewport::default();
             assert_eq!(viewport.window(10, 3, Some(9)), 7..10);
             assert_eq!(
                 viewport.window(10, 6, Some(9)),
@@ -123,14 +125,14 @@ mod tests {
 
         #[test]
         fn on_a_short_list_shows_every_row() {
-            let viewport = Viewport::default();
+            let mut viewport = Viewport::default();
             assert_eq!(viewport.window(2, 5, Some(1)), 0..2);
             assert_eq!(viewport.window(0, 5, None), 0..0);
         }
 
         #[test]
         fn with_zero_height_is_empty_without_moving() {
-            let viewport = Viewport::default();
+            let mut viewport = Viewport::default();
             viewport.window(10, 3, Some(4));
             assert_eq!(viewport.window(10, 0, Some(9)), 2..2);
             assert_eq!(viewport.page(), 1, "paging still moves by at least one row");
@@ -142,7 +144,7 @@ mod tests {
 
         #[test]
         fn reports_the_last_rendered_height() {
-            let viewport = Viewport::default();
+            let mut viewport = Viewport::default();
             assert_eq!(viewport.page(), 1, "no render yet");
             viewport.window(20, 7, Some(0));
             assert_eq!(viewport.page(), 7);
@@ -154,7 +156,7 @@ mod tests {
 
         #[test]
         fn stops_at_both_ends() {
-            let viewport = Viewport::default();
+            let mut viewport = Viewport::default();
             viewport.window(10, 4, None);
             viewport.scroll_by(3, 10);
             assert_eq!(viewport.window(10, 4, None), 3..7);
@@ -174,7 +176,7 @@ mod tests {
 
         #[test]
         fn returns_the_window_to_the_top() {
-            let viewport = Viewport::default();
+            let mut viewport = Viewport::default();
             viewport.window(10, 4, Some(8));
             viewport.reset();
             assert_eq!(viewport.window(10, 4, None), 0..4);

@@ -148,11 +148,11 @@ impl ThemePicker {
 }
 
 impl Modal for ThemePicker {
-    fn height(&self, width: u16, max_height: u16) -> u16 {
+    fn height(&mut self, width: u16, max_height: u16) -> u16 {
         self.list.height_with_footer(width, max_height)
     }
 
-    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         self.list
             .render_with_footer(frame, area, &CONFIRM_HINTS, theme);
     }
@@ -165,7 +165,7 @@ impl Modal for ThemePicker {
             return ModalKey::Consumed;
         }
         let theme = self.list.selected().theme;
-        ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme)))
+        ModalKey::Emit(ModalAction::Dispatch(Action::PreviewTheme(theme)))
     }
 }
 
@@ -312,9 +312,10 @@ mod tests {
 
             #[test]
             fn lists_themes_above_the_footer() {
-                let p = ThemePicker::new("latte");
+                let mut p = ThemePicker::new("latte");
+                let height = p.height(80, 20);
 
-                let rows = render_rows(&p, 80, p.height(80, 20));
+                let rows = render_rows(&mut p, 80, height);
 
                 let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
                 assert_eq!(
@@ -348,7 +349,7 @@ mod tests {
 
                     let outcome = p.handle_key(&KeyEvent::from(code));
 
-                    let ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) =
+                    let ModalKey::Emit(ModalAction::Dispatch(Action::PreviewTheme(theme))) =
                         outcome
                     else {
                         panic!("expected a preview for {code:?}, got {outcome:?}");
@@ -362,7 +363,7 @@ mod tests {
                 let mut p = ThemePicker::new("mocha");
                 let outcome = p.handle_key(&KeyEvent::from(KeyCode::Char('4')));
                 match outcome {
-                    ModalKey::Preview(ModalAction::Dispatch(Action::PreviewTheme(theme))) => {
+                    ModalKey::Emit(ModalAction::Dispatch(Action::PreviewTheme(theme))) => {
                         assert_eq!(theme.name, "latte", "row 4 is latte");
                     }
                     other => panic!("expected Preview, got {other:?}"),

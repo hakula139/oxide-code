@@ -4,7 +4,10 @@ use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr as _;
 
 use super::rows::prefixed_row;
-use super::{BlockRows, ChatBlock, RenderCtx, SectionStyles, bar_section, prepend_markdown_prefix};
+use super::{
+    BlockRows, ChatBlock, MarkdownCache, RenderCtx, SectionStyles, bar_section,
+    prepend_markdown_prefix, streaming_bar_section,
+};
 use crate::glyphs::{ASSISTANT_CONT, ASSISTANT_PREFIX, THINKING_PREFIX};
 use crate::markdown::render_markdown;
 
@@ -79,14 +82,22 @@ impl AssistantThinking {
     }
 
     /// Renders thinking still streaming in, headed by `spinner` and `Thinking`, with its body in
-    /// either view.
+    /// either view. `cache` holds the rendered blocks the body has already closed.
     pub(crate) fn render_streaming(
         text: &str,
         spinner: char,
         ctx: &RenderCtx<'_>,
+        cache: &mut MarkdownCache,
     ) -> Vec<Line<'static>> {
         let header = format!("{spinner} {THINKING_LABEL}");
-        bar_section(ctx, THINKING_PREFIX, &thinking_styles(ctx), &header, text)
+        streaming_bar_section(
+            ctx,
+            THINKING_PREFIX,
+            &thinking_styles(ctx),
+            &header,
+            text,
+            cache,
+        )
     }
 }
 
@@ -206,7 +217,8 @@ mod tests {
             let style = theme.thinking();
 
             for ctx in [RenderCtx::new(60, &theme), expanded_at(60, &theme)] {
-                let lines = AssistantThinking::render_streaming("hello", '⣷', &ctx);
+                let mut cache = MarkdownCache::default();
+                let lines = AssistantThinking::render_streaming("hello", '⣷', &ctx, &mut cache);
 
                 assert_eq!(
                     lines,
@@ -222,6 +234,38 @@ mod tests {
                         ]),
                     ]
                 );
+            }
+        }
+
+        #[test]
+        fn matches_the_committed_body_at_every_char() {
+            let body = indoc! {"
+                para one
+                #tag
+
+                - item 1
+                - item 2
+
+                ```c
+                #include <a.h>
+                ```
+
+                | a | b |
+                | - | - |
+                | 1 | 2 |
+
+                Done.
+            "};
+            let theme = Theme::default();
+            let ctx = expanded_at(60, &theme);
+            let mut cache = MarkdownCache::default();
+            for (i, ch) in body.char_indices() {
+                let prefix = &body[..i + ch.len_utf8()];
+
+                let streaming = AssistantThinking::render_streaming(prefix, '⣷', &ctx, &mut cache);
+                let committed = AssistantThinking::new(prefix).render(&ctx);
+
+                assert_eq!(streaming[1..], committed[1..], "after {prefix:?}");
             }
         }
     }
