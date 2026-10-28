@@ -76,7 +76,6 @@ mpsc
 MSRV
 msvc
 msys
-mtimes
 MULT
 nfkd
 nixfmt
@@ -84,14 +83,11 @@ nixos
 nixpkgs
 nlink
 nocapture
-noclobber
 nohup
-nonewline
 noprefix
 NOTADB
 nptu
 NTFS
-numtide
 OCSP
 okdir
 onig
@@ -110,7 +106,6 @@ PYTHONDONTWRITEBYTECODE
 PYTHONUNBUFFERED
 rects
 replacen
-reserialized
 rfind
 riscv
 rollup
