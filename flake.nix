@@ -120,17 +120,8 @@
 
           shellcheck.enable = true;
 
-          rustfmt = {
-            enable = true;
-            packageOverrides = {
-              cargo = rustToolchain;
-              rustfmt = rustToolchain;
-            };
-          };
-
           comment-width = {
             enable = true;
-            name = "comment-width";
             entry = pkgs.lib.getExe (
               pkgs.writeShellApplication {
                 name = "check-comment-width";
@@ -138,7 +129,21 @@
                 text = builtins.readFile ./scripts/check-comment-width.sh;
               }
             );
-            files = "\\.(nix|rs|sh|toml|ya?ml)$";
+            types_or = [
+              "nix"
+              "rust"
+              "shell"
+              "toml"
+              "yaml"
+            ];
+          };
+
+          rustfmt = {
+            enable = true;
+            packageOverrides = {
+              cargo = rustToolchain;
+              rustfmt = rustToolchain;
+            };
           };
         };
 

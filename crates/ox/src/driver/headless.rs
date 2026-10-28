@@ -28,8 +28,8 @@ use super::{Exit, decode_input, shutdown_signal};
 const STDIN_NOTICE_DELAY: Duration = Duration::from_secs(3);
 
 /// Runs `prompt` as a single turn, printed in `format`. An incomplete turn or failed output exits
-/// with failure, and a signal exits with its own status. If the engine panics, it returns the
-/// panic after printing the failed result.
+/// with failure, and a signal exits with its own status. An engine panic is returned after the
+/// failed result prints.
 pub(crate) async fn run(
     engine: Engine,
     show_thinking: bool,

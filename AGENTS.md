@@ -21,7 +21,7 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 ├── Formula/                                # Homebrew formula, served from this repo as a tap
 ├── licenses/                               # Licenses for bundled syntax definitions and themes
 ├── nix/                                    # Nix package and Home Manager module with its tests
-└── scripts/                                # Distribution notices, Homebrew formula updater, and credential leak check
+└── scripts/                                # Distribution notices, Homebrew formula updater, credential leak check, and comment width check
 ```
 
 ## Read Before You Edit
