@@ -38,7 +38,7 @@ pub(super) struct ConfirmDeleteSessionModal {
     /// The [`format_metadata_line`](crate::slash::sessions::format_metadata_line) row, such as
     /// `abcd1234 · 2 hours ago · 14 msgs`, which carries the ID prefix.
     metadata: String,
-    /// Whether a delete went to the engine and has not reported back, which ignores another Y.
+    /// Whether the engine accepted a delete that has not reported back, which ignores another Y.
     pending: bool,
     /// Error from the last failed delete, shown until a retry replaces it or the modal closes.
     error: Option<String>,
@@ -58,8 +58,7 @@ impl ConfirmDeleteSessionModal {
         }
     }
 
-    fn confirm(&mut self) -> ModalKey {
-        self.pending = true;
+    fn confirm(&self) -> ModalKey {
         ModalKey::Emit(ModalAction::Dispatch(Action::Op(Op::DeleteSaved {
             session_id: self.session_id.clone(),
         })))
@@ -111,6 +110,12 @@ impl Modal for ConfirmDeleteSessionModal {
 
     fn binds_modified_key(&self, _event: &KeyEvent) -> bool {
         self.acceptance.is_guarded()
+    }
+
+    fn delete_started(&mut self, id: &str) {
+        if id == self.session_id {
+            self.pending = true;
+        }
     }
 
     fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> DeleteReply {
@@ -230,7 +235,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn y_sends_the_delete_once_until_the_result_arrives() {
+        fn y_sends_the_delete_and_ignores_another_once_it_starts() {
             for event in [
                 KeyEvent::from(KeyCode::Char('y')),
                 KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
@@ -239,6 +244,7 @@ mod tests {
                 show_and_arm(&mut modal);
 
                 let outcome = modal.handle_key(&event);
+                modal.delete_started(&stamped_id(0xab));
                 let repeat = modal.handle_key(&event);
 
                 assert!(
@@ -364,14 +370,34 @@ mod tests {
         }
     }
 
+    mod delete_started {
+        use super::*;
+
+        #[test]
+        fn another_sessions_delete_leaves_y_sending() {
+            let mut modal = modal(0xab, "Fix auth flow");
+            show_and_arm(&mut modal);
+            modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+
+            modal.delete_started(&stamped_id(0xcd));
+
+            let repeat = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            assert!(
+                matches!(&repeat, ModalKey::Emit(action) if deletes(Some(action))),
+                "{repeat:?}"
+            );
+        }
+    }
+
     mod saved_deleted {
         use super::*;
 
-        /// The modal of the session stamped `0xab`, with its delete sent to the engine.
+        /// The modal of the session stamped `0xab`, with its delete accepted by the engine.
         fn pending_modal() -> ConfirmDeleteSessionModal {
             let mut modal = modal(0xab, "Fix auth flow");
             show_and_arm(&mut modal);
             modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
+            modal.delete_started(&stamped_id(0xab));
             modal
         }
 
