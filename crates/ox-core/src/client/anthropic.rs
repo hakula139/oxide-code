@@ -38,10 +38,10 @@ use self::wire::{
     RequestMetadata, SystemBlock, ThinkingConfig,
 };
 use super::{Request, ResponseEvent, Wire};
+use crate::auth::oauth::ClaudeCodeKeychain;
+use crate::auth::{self, Auth, LoginUnavailable};
 use crate::config::Config;
-use crate::config::auth::{self, Auth, LoginUnavailable};
 use crate::config::gateway::GatewayCompat;
-use crate::config::oauth::ClaudeCodeKeychain;
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::ModelSpec;
 use crate::tool::ToolDefinition;
@@ -429,9 +429,9 @@ mod tests {
     };
     use super::testing::{DEVICE_ID, api_key, sse_body, sse_response, text_stream_body};
     use super::*;
+    use crate::auth::AuthSource;
+    use crate::auth::oauth::testing::{HeldRefresh, ok_refresh_body, ox_login_in, write_creds};
     use crate::client::{Response, StopReason};
-    use crate::config::auth::AuthSource;
-    use crate::config::oauth::testing::{HeldRefresh, ok_refresh_body, ox_login_in, write_creds};
     use crate::config::testing::{base_url, test_config};
     use crate::model::{Effort, ModelSettings, PromptCacheTtl, TokenUsage};
     use crate::prompt::SystemPrompt;

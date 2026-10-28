@@ -7,7 +7,7 @@ use serde::Deserialize;
 use super::transport::{post_messages, with_retry};
 use super::wire::{ContentBlockInfo, OutputConfig, OutputFormat, RequestMessages};
 use super::{Client, RequestKind, RequestSpec};
-use crate::config::auth::Auth;
+use crate::auth::Auth;
 use crate::message::Message;
 use crate::model::{Effort, ModelSpec, TokenUsage};
 

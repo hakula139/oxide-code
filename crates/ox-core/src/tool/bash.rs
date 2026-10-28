@@ -28,7 +28,7 @@ use super::view::{ApprovalBody, ApprovalPreview};
 use super::{
     Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field, pascal_case,
 };
-use crate::config::auth::withhold_secrets;
+use crate::config::credentials::withhold_secrets;
 use crate::permission::{Access, PermissionClass};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
@@ -825,7 +825,7 @@ mod tests {
 
     use super::testing::{record_pid, until_gone, until_recorded};
     use super::*;
-    use crate::config::auth::secret_env_vars;
+    use crate::config::credentials::secret_env_vars;
     use crate::tool::local_testing::{self, ctx, spill_path, temp_ctx};
     use crate::tool::spill::MAX_OUTPUT_BYTES;
     use crate::tool::testing::bash_preview;

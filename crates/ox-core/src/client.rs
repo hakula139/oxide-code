@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 
-use crate::config::auth::Auth;
+use crate::auth::Auth;
 use crate::message::{ContentBlock, Message};
 use crate::model::{ModelSettings, TokenUsage};
 use crate::prompt::SystemPrompt;
