@@ -91,7 +91,8 @@ pub(super) struct PromptQueue {
     /// Queued prompts the in-flight turn took in, which a rolled-back turn hands back.
     drained: Vec<QueuedPrompt>,
     /// How many leading `pending` prompts were queued before a requested session switch. They
-    /// belong to the session it leaves, and the queue only grows while the switch runs.
+    /// belong to the session it leaves, and the later ones to the session it reaches. A failed
+    /// switch keeps the count for a retry until the user releases the held queue.
     before_switch: Option<usize>,
 }
 
@@ -180,7 +181,10 @@ impl PromptQueue {
     /// Queues a line typed into the input, which releases a held queue.
     pub(super) fn push(&mut self, line: String) {
         self.pending.push_back(QueuedPrompt::typed(line));
-        self.held = false;
+        if std::mem::take(&mut self.held) {
+            // The user goes on in the current session, so no prompt waits for another one.
+            self.before_switch = None;
+        }
     }
 
     /// Holds the queued prompts until the user next submits one.
@@ -199,7 +203,11 @@ impl PromptQueue {
 
     /// Takes the most recently queued line back, for editing.
     pub(super) fn pop_last(&mut self) -> Option<String> {
-        self.pending.pop_back().map(|queued| queued.line)
+        let line = self.pending.pop_back()?.line;
+        if let Some(count) = &mut self.before_switch {
+            *count = (*count).min(self.pending.len());
+        }
+        Some(line)
     }
 
     /// Takes the oldest queued prompt to run as a turn of its own.
@@ -290,19 +298,24 @@ impl PromptQueue {
         self.hand_back = HandBack::Nothing;
         self.forwarded = 0;
         self.drained.clear();
-        self.before_switch = None;
     }
 
     /// Notes that a session switch starts. The prompts queued so far belong to the session it
-    /// leaves, and later ones to the session it reaches, so a failed switch holds them.
+    /// leaves, and later ones to the session it reaches, so a failed switch holds them. A retry
+    /// after a failed switch keeps its count, since the prompts typed during the failed attempt
+    /// still wait for the session the user is switching to. The switch settles an earlier hold,
+    /// so a prompt typed while it runs keeps the count.
     pub(super) fn mark_switch(&mut self) {
-        self.before_switch = Some(self.pending.len());
+        self.held = false;
+        self.before_switch.get_or_insert(self.pending.len());
         self.hand_back = HandBack::HeldQueue;
     }
 
     /// Drops the prompts that belong to the session just left, returning how many there were.
-    /// Without a [`Self::mark_switch`], that is every queued prompt.
+    /// Without a [`Self::mark_switch`], that is every queued prompt. The rest were typed for the
+    /// session reached, which releases a hold.
     pub(super) fn discard_left_behind(&mut self) -> usize {
+        self.held = false;
         let count = self.before_switch.take().unwrap_or(self.pending.len());
         self.pending.drain(..count).count()
     }
@@ -536,16 +549,57 @@ mod tests {
         }
 
         #[test]
-        fn drops_every_prompt_once_an_ended_turn_cleared_the_mark() {
+        fn a_retry_after_a_failed_switch_keeps_the_prompts_typed_during_it() {
             let mut queue = PromptQueue::default();
             queue.push("before".to_owned());
             queue.mark_switch();
-            queue.push("after".to_owned());
+            queue.push("during the failed switch".to_owned());
+            queue.fail_turn(true);
             queue.end_turn();
+            queue.hold();
+            queue.mark_switch();
 
             let dropped = queue.discard_left_behind();
 
-            assert_eq!(dropped, 2);
+            assert_eq!(dropped, 1);
+            assert_eq!(*queue.pending(), ["during the failed switch"]);
+            assert_eq!(
+                queue.next_to_forward().as_deref(),
+                Some("during the failed switch")
+            );
+        }
+
+        #[test]
+        fn drops_every_prompt_once_the_user_released_a_failed_switch() {
+            let mut queue = PromptQueue::default();
+            queue.push("before".to_owned());
+            queue.mark_switch();
+            queue.push("during the failed switch".to_owned());
+            queue.end_turn();
+            queue.hold();
+            queue.push("after".to_owned());
+            queue.mark_switch();
+
+            let dropped = queue.discard_left_behind();
+
+            assert_eq!(dropped, 3);
+            assert_eq!(*queue.pending(), [] as [&str; 0]);
+        }
+
+        #[test]
+        fn recalling_a_prompt_keeps_the_count_within_the_queue() {
+            let mut queue = PromptQueue::default();
+            queue.push("first".to_owned());
+            queue.push("second".to_owned());
+            queue.mark_switch();
+            queue.end_turn();
+            queue.hold();
+            queue.pop_last();
+            queue.mark_switch();
+
+            let dropped = queue.discard_left_behind();
+
+            assert_eq!(dropped, 1);
             assert_eq!(*queue.pending(), [] as [&str; 0]);
         }
     }

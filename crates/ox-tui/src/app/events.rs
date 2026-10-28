@@ -2515,6 +2515,34 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_retried_resume_runs_the_prompt_typed_during_the_failed_one() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.queue.push("for the old session".to_owned());
+            app.queue.hold();
+            app.dispatch_op(Op::Resume {
+                target: ResumeTarget::Id("missing".to_owned()),
+            });
+            rx.try_recv().expect("resume forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.handle_engine_event(Event::TurnFailed("No session matches".to_owned()));
+            app.dispatch_op(Op::Resume {
+                target: ResumeTarget::Id("abcd".to_owned()),
+            });
+            rx.try_recv().expect("retry forwarded");
+
+            app.handle_engine_event(Event::SessionResumed {
+                id: "abcd".to_owned(),
+                title: None,
+                prior: ArchiveState::Active,
+                history: Vec::new(),
+            });
+            app.handle_engine_event(Event::SessionReady);
+
+            assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
+            assert_eq!(*app.queue.pending(), [] as [&str; 0]);
+        }
+
+        #[tokio::test]
         async fn a_cancel_holds_the_queue_past_an_archive() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             start_op(&mut app, &Op::prompt("running"));
