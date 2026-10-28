@@ -12,17 +12,14 @@ use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use time::{OffsetDateTime, Time};
 
-use ox_core::client::RateLimits;
 use ox_core::config::StatusLineSegment;
-use ox_core::model::Effort;
-use ox_core::permission::Mode;
-use ox_core::protocol::UsageSnapshot;
 use ox_core::tool::tasks::Progress;
 use ox_core::util::git;
 use ox_core::util::time::now_local;
 
 use self::line::{RenderedStatusLine, StatusLine, StatusLineState};
 use crate::glyphs::SPINNER_FRAMES;
+use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
 
 pub(crate) const SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(80);
@@ -71,25 +68,24 @@ impl RunLabel {
 
 // ── StatusBar ──
 
-/// Status bar at the top of the TUI.
+/// The App's state one status-bar render shows.
+pub(crate) struct StatusView<'a> {
+    pub(crate) session: &'a LiveSessionInfo,
+    pub(crate) run: RunLabel,
+    pub(crate) queued_prompts: usize,
+    /// `None` while the session keeps no task list.
+    pub(crate) task_progress: Option<Progress>,
+}
+
+/// Status bar at the top of the TUI. It renders a [`StatusView`] of the App's state and keeps only
+/// what it owns: the spinner, the clock, the git probe results, and the links it last drew.
 pub(crate) struct StatusBar {
     line: StatusLine,
-    /// Minute of the local day the current-time segment shows, or `None` when the line has no such
-    /// segment.
+    /// Minute of the local day the current-time segment shows, or `None` when the line has none.
     current_minute: Option<u16>,
-    model: String,
-    effort: Option<Effort>,
-    title: Option<String>,
-    usage: Option<UsageSnapshot>,
-    cwd: String,
     git_branch: Option<String>,
     pull_request: Option<git::PullRequest>,
-    rate_limits: Option<RateLimits>,
-    permission_mode: Mode,
-    queued_prompts: usize,
-    task_progress: Option<Progress>,
-    session_id: String,
-    theme_name: String,
+    /// The run state of the last render, which drives the spinner.
     run: RunLabel,
     spinner_frame: usize,
     next_spinner_frame: Instant,
@@ -97,73 +93,25 @@ pub(crate) struct StatusBar {
     pending_hyperlinks: Vec<StatusHyperlink>,
 }
 
-/// The segments a [`StatusBar`] shows and the session values it starts with.
-pub(crate) struct StatusBarInit {
-    pub(crate) segments: Vec<StatusLineSegment>,
-    /// Display label, such as `Opus 5.5`.
-    pub(crate) model: String,
-    pub(crate) effort: Option<Effort>,
-    /// Already shortened with `~` by `tildify`.
-    pub(crate) cwd: String,
-    pub(crate) git_branch: Option<String>,
-}
-
 impl StatusBar {
     /// Rows the bar fills: the status line and the border under it.
     pub(crate) const HEIGHT: u16 = 2;
 
-    pub(crate) fn new(init: StatusBarInit) -> Self {
-        let StatusBarInit {
-            segments,
-            model,
-            effort,
-            cwd,
-            git_branch,
-        } = init;
+    /// Shows `segments`, with `git_branch` as the branch until the first git probe reports.
+    pub(crate) fn new(segments: Vec<StatusLineSegment>, git_branch: Option<String>) -> Self {
         let current_minute = segments
             .contains(&StatusLineSegment::CurrentTime)
             .then(local_minute);
         Self {
             line: StatusLine::new(segments),
             current_minute,
-            model,
-            effort,
-            title: None,
-            usage: None,
-            cwd,
             git_branch,
             pull_request: None,
-            rate_limits: None,
-            permission_mode: Mode::default(),
-            queued_prompts: 0,
-            task_progress: None,
-            session_id: String::new(),
-            theme_name: String::new(),
             run: RunLabel::READY,
             spinner_frame: 0,
             next_spinner_frame: crate::now(),
             pending_hyperlinks: Vec::new(),
         }
-    }
-
-    pub(crate) fn set_title(&mut self, title: Option<String>) {
-        self.title = title.filter(|t| !t.trim().is_empty());
-    }
-
-    pub(crate) fn set_model(&mut self, model: String) {
-        debug_assert!(
-            !model.trim().is_empty(),
-            "set_model received empty / whitespace-only label",
-        );
-        self.model = model;
-    }
-
-    pub(crate) fn set_effort(&mut self, effort: Option<Effort>) {
-        self.effort = effort;
-    }
-
-    pub(crate) fn set_usage(&mut self, usage: Option<UsageSnapshot>) {
-        self.usage = usage;
     }
 
     /// Returns `true` when the branch changed and the caller should repaint.
@@ -184,56 +132,9 @@ impl StatusBar {
         true
     }
 
-    pub(crate) fn set_rate_limits(&mut self, rate_limits: Option<RateLimits>) {
-        self.rate_limits = rate_limits;
-    }
-
-    pub(crate) fn set_permission_mode(&mut self, mode: Mode) {
-        self.permission_mode = mode;
-    }
-
-    pub(crate) fn set_queued_prompts(&mut self, count: usize) {
-        self.queued_prompts = count;
-    }
-
-    pub(crate) fn set_task_progress(&mut self, progress: Option<Progress>) {
-        self.task_progress = progress;
-    }
-
-    pub(crate) fn set_session_id(&mut self, session_id: &str) {
-        session_id.clone_into(&mut self.session_id);
-    }
-
-    pub(crate) fn set_theme_name(&mut self, theme_name: &str) {
-        theme_name.clone_into(&mut self.theme_name);
-    }
-
-    /// Shows `run` in the run-state segment, restarting the spinner when the text changes.
-    pub(crate) fn set_run_label(&mut self, run: RunLabel) {
-        if run.text != self.run.text {
-            self.spinner_frame = 0;
-            self.next_spinner_frame = crate::now() + SPINNER_FRAME_INTERVAL;
-        }
-        self.run = run;
-    }
-
     /// The spinner frame the bar shows while work is in flight.
     pub(crate) fn spinner(&self) -> char {
         SPINNER_FRAMES[self.spinner_frame]
-    }
-
-    pub(crate) fn title(&self) -> Option<&str> {
-        self.title.as_deref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn model(&self) -> &str {
-        &self.model
-    }
-
-    #[cfg(test)]
-    pub(crate) fn usage(&self) -> Option<UsageSnapshot> {
-        self.usage
     }
 
     #[cfg(test)]
@@ -246,16 +147,9 @@ impl StatusBar {
         self.pull_request.as_ref()
     }
 
-    #[cfg(test)]
-    pub(crate) fn rate_limits(&self) -> Option<RateLimits> {
-        self.rate_limits
-    }
-
-    /// Returns `true` when the time, the usage limits, or the spinner changed and the caller should
-    /// repaint.
+    /// Returns `true` when the time or the spinner changed and the caller should repaint.
     pub(crate) fn tick(&mut self, now: Instant) -> bool {
         let mut dirty = self.refresh_current_time(local_minute());
-        dirty |= self.expire_rate_limits();
         if self.run.tone == RunTone::Busy && now >= self.next_spinner_frame {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
             self.next_spinner_frame = now + SPINNER_FRAME_INTERVAL;
@@ -265,7 +159,7 @@ impl StatusBar {
     }
 
     /// When [`Self::tick`] next changes the bar, on the event loop's clock: the next spinner frame
-    /// while busy, the next minute the current-time segment shows, or the next usage-limit reset.
+    /// while busy, or the next minute the current-time segment shows.
     pub(crate) fn next_tick(&self, now: Instant) -> Option<Instant> {
         self.next_tick_at(now, now_local())
     }
@@ -275,17 +169,7 @@ impl StatusBar {
         let minute = self
             .current_minute
             .map(|_| now + until_next_minute(wall_now.time()));
-        let unix_now = wall_now.unix_timestamp();
-        let reset = self.rate_limits.iter().flat_map(|limits| {
-            [limits.five_hour, limits.seven_day]
-                .into_iter()
-                .flatten()
-                .map(|window| {
-                    let wait = u64::try_from(window.resets_at - unix_now).unwrap_or(0);
-                    now + Duration::from_secs(wait)
-                })
-        });
-        spinner.into_iter().chain(minute).chain(reset).min()
+        spinner.into_iter().chain(minute).min()
     }
 
     fn refresh_current_time(&mut self, current: u16) -> bool {
@@ -299,28 +183,29 @@ impl StatusBar {
         true
     }
 
-    /// Drops each usage-limit window whose reset has passed, since its spent share no longer
-    /// applies until a response reports the new window.
-    fn expire_rate_limits(&mut self) -> bool {
-        let Some(limits) = &mut self.rate_limits else {
-            return false;
-        };
-        let now = OffsetDateTime::now_utc().unix_timestamp();
-        let mut expired = false;
-        for window in [&mut limits.five_hour, &mut limits.seven_day] {
-            expired |= window.take_if(|window| window.resets_at <= now).is_some();
+    /// Takes `run` as the run state, restarting the spinner when the text changes.
+    fn follow_run(&mut self, run: RunLabel) {
+        if run.text != self.run.text {
+            self.spinner_frame = 0;
+            self.next_spinner_frame = crate::now() + SPINNER_FRAME_INTERVAL;
         }
-        expired
+        self.run = run;
     }
 }
 
 impl StatusBar {
-    pub(crate) fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    pub(crate) fn render(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        theme: &Theme,
+        view: StatusView<'_>,
+    ) {
         let block = Block::default()
             .borders(Borders::BOTTOM)
             .border_style(theme.border_unfocused())
             .style(theme.surface());
-        let rendered = self.render_line(area.width, theme);
+        let rendered = self.render_line(area.width, theme, view);
         frame.render_widget(Paragraph::new(rendered.line).block(block), area);
         // Snapshot link cells after the paint so emit_status_hyperlinks can replay them.
         self.pending_hyperlinks.clear();
@@ -365,24 +250,37 @@ impl StatusBar {
         }
     }
 
-    fn render_line(&self, width: u16, theme: &Theme) -> RenderedStatusLine {
+    fn render_line(
+        &mut self,
+        width: u16,
+        theme: &Theme,
+        view: StatusView<'_>,
+    ) -> RenderedStatusLine {
+        let StatusView {
+            session,
+            run,
+            queued_prompts,
+            task_progress,
+        } = view;
+        self.follow_run(run);
+        let config = &session.config;
         self.line.render(
             theme,
             &StatusLineState {
-                model: &self.model,
-                effort: self.effort,
-                title: self.title.as_deref(),
-                usage: self.usage,
-                cwd: &self.cwd,
+                model: config.model.short_display_name(),
+                effort: config.effort,
+                title: session.title.as_deref(),
+                usage: session.usage,
+                cwd: &session.display_cwd,
                 git_branch: self.git_branch.as_deref(),
                 pull_request: self.pull_request.as_ref(),
-                rate_limits: self.rate_limits,
-                permission_mode: self.permission_mode,
+                rate_limits: session.rate_limits,
+                permission_mode: config.permission_mode,
                 status_span: self.status_span(theme),
-                queued_prompts: self.queued_prompts,
-                task_progress: self.task_progress,
-                session_id: &self.session_id,
-                theme_name: &self.theme_name,
+                queued_prompts,
+                task_progress,
+                session_id: &session.session_id,
+                theme_name: &config.theme_name,
                 current_minute: self.current_minute,
             },
             width,
@@ -403,72 +301,105 @@ fn until_next_minute(time: Time) -> Duration {
 // ── Testing ──
 
 #[cfg(test)]
-pub(crate) mod testing {
-    use super::{StatusBarInit, StatusLineSegment};
-
-    /// A `test-model` session in `~/test` with no effort or branch, showing `segments`.
-    pub(crate) fn status_bar_init(segments: Vec<StatusLineSegment>) -> StatusBarInit {
-        StatusBarInit {
-            segments,
-            model: "test-model".to_owned(),
-            effort: None,
-            cwd: "~/test".to_owned(),
-            git_branch: None,
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use time::macros::{datetime, time};
 
-    use ox_core::client::RateLimitWindow;
+    use ox_core::client::{RateLimitWindow, RateLimits};
+    use ox_core::model::{Effort, ModelSpec};
+    use ox_core::protocol::UsageSnapshot;
     use ox_core::util::git::testing::pull_request;
 
-    use super::testing::status_bar_init;
     use super::*;
+    use crate::session_info::testing::test_session_info;
 
     /// 2100-01-01, a reset no test run reaches.
     const FUTURE_RESET: i64 = 4_102_444_800;
 
-    fn test_bar() -> StatusBar {
-        StatusBar::new(StatusBarInit {
-            effort: Some(Effort::High),
-            git_branch: Some("main".to_owned()),
-            ..status_bar_init(StatusLineSegment::DEFAULT.to_vec())
-        })
+    /// A bar and the App state it renders.
+    struct Scene {
+        bar: StatusBar,
+        session: LiveSessionInfo,
+        run: RunLabel,
+        queued_prompts: usize,
+        task_progress: Option<Progress>,
     }
 
-    fn pr_bar() -> StatusBar {
-        StatusBar::new(status_bar_init(vec![
-            StatusLineSegment::PullRequest,
-            StatusLineSegment::RunState,
-        ]))
-    }
+    impl Scene {
+        /// An idle `test-model` session at `High` effort in `~/test` on `main`, showing `segments`.
+        fn new(segments: Vec<StatusLineSegment>) -> Self {
+            let mut session = test_session_info();
+            session.config.model = ModelSpec::resolve("test-model");
+            Self {
+                bar: StatusBar::new(segments, Some("main".to_owned())),
+                session,
+                run: RunLabel::READY,
+                queued_prompts: 0,
+                task_progress: None,
+            }
+        }
 
-    fn render_status(bar: &mut StatusBar, width: u16) -> TestBackend {
-        let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
-        terminal
-            .draw(|frame| {
-                bar.render(frame, frame.area(), &Theme::default());
-            })
-            .unwrap();
-        terminal.backend().clone()
-    }
+        /// The default segments on an `Opus 5.5` session at `Xhigh` effort in `cwd`.
+        fn opus(cwd: &str) -> Self {
+            let mut scene = Self::new(StatusLineSegment::DEFAULT.to_vec());
+            scene.session.config.model = ModelSpec::resolve("claude-opus-5-5");
+            scene.session.config.effort = Some(Effort::Xhigh);
+            cwd.clone_into(&mut scene.session.display_cwd);
+            scene
+        }
 
-    fn render_top_row(bar: &mut StatusBar, width: u16) -> String {
-        let backend = render_status(bar, width);
-        let buf = backend.buffer();
-        (0..width)
-            .map(|x| {
-                buf.cell((x, 0))
-                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-            })
-            .collect::<String>()
-            .trim_end()
-            .to_owned()
+        /// Shows `segment` between the directory and the model, with no branch.
+        fn segment(segment: StatusLineSegment) -> Self {
+            let mut scene = Self::opus("~/projects/demo");
+            scene.bar = StatusBar::new(
+                vec![
+                    StatusLineSegment::CurrentDir,
+                    segment,
+                    StatusLineSegment::ModelWithEffort,
+                    StatusLineSegment::RunState,
+                ],
+                None,
+            );
+            scene
+        }
+
+        fn render(&mut self, width: u16) -> TestBackend {
+            let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
+            let view = StatusView {
+                session: &self.session,
+                run: self.run.clone(),
+                queued_prompts: self.queued_prompts,
+                task_progress: self.task_progress,
+            };
+            terminal
+                .draw(|frame| {
+                    self.bar
+                        .render(frame, frame.area(), &Theme::default(), view);
+                })
+                .unwrap();
+            terminal.backend().clone()
+        }
+
+        fn top_row(&mut self, width: u16) -> String {
+            let backend = self.render(width);
+            let buf = backend.buffer();
+            (0..width)
+                .map(|x| {
+                    buf.cell((x, 0))
+                        .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                })
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        }
+
+        /// Renders the bar 100 columns wide, then 40.
+        fn wide_and_narrow(&mut self) -> String {
+            [100, 40]
+                .map(|width| self.render(width).to_string())
+                .join("\n")
+        }
     }
 
     /// A busy run state showing `text`.
@@ -479,56 +410,17 @@ mod tests {
         }
     }
 
+    /// A bar whose last render showed `run`.
+    fn bar_showing(run: RunLabel) -> StatusBar {
+        let mut bar = StatusBar::new(vec![StatusLineSegment::RunState], None);
+        bar.follow_run(run);
+        bar
+    }
+
     /// Ticks the busy bar at each of its next `frames` spinner frames.
     fn advance_spinner(bar: &mut StatusBar, frames: usize) {
         for _ in 0..frames {
             assert!(bar.tick(bar.next_spinner_frame));
-        }
-    }
-
-    mod set_title {
-        use super::*;
-
-        #[test]
-        fn stores_non_empty_title() {
-            let mut bar = test_bar();
-            bar.set_title(Some("Fix auth bug".to_owned()));
-            assert_eq!(bar.title.as_deref(), Some("Fix auth bug"));
-        }
-
-        #[test]
-        fn clears_a_stored_title() {
-            let mut bar = test_bar();
-            bar.set_title(Some("something".to_owned()));
-            bar.set_title(None);
-            assert!(bar.title.is_none());
-        }
-
-        #[test]
-        fn drops_whitespace_only() {
-            let mut bar = test_bar();
-            bar.set_title(Some("   \n".to_owned()));
-            assert!(bar.title.is_none());
-        }
-    }
-
-    mod set_model {
-        use super::*;
-
-        #[test]
-        fn replaces_displayed_model_label() {
-            let mut bar = test_bar();
-            bar.set_model("Opus 5.5".to_owned());
-            assert_eq!(bar.model(), "Opus 5.5");
-            let output = render_top_row(&mut bar, 80);
-            assert!(
-                output.contains("Opus 5.5"),
-                "new label must reach the rendered bar: {output:?}",
-            );
-            assert!(
-                !output.contains("test-model"),
-                "old label must not survive: {output:?}",
-            );
         }
     }
 
@@ -537,7 +429,8 @@ mod tests {
 
         #[test]
         fn reports_only_real_changes() {
-            let mut bar = test_bar();
+            let mut bar =
+                StatusBar::new(StatusLineSegment::DEFAULT.to_vec(), Some("main".to_owned()));
             assert!(!bar.set_git_branch(Some("main".to_owned())));
             assert!(bar.set_git_branch(Some("feat/x".to_owned())));
             assert_eq!(bar.git_branch(), Some("feat/x"));
@@ -551,7 +444,7 @@ mod tests {
 
         #[test]
         fn reports_only_real_changes() {
-            let mut bar = pr_bar();
+            let mut bar = StatusBar::new(vec![StatusLineSegment::PullRequest], None);
             assert!(!bar.set_pull_request(None));
             assert!(bar.set_pull_request(Some(pull_request(1))));
             assert!(!bar.set_pull_request(Some(pull_request(1))));
@@ -560,41 +453,52 @@ mod tests {
         }
     }
 
-    mod set_run_label {
+    mod follow_run {
         use super::*;
 
         #[test]
         fn resets_spinner_on_transition() {
-            let mut bar = test_bar();
-            bar.set_run_label(busy("Streaming"));
+            let mut bar = bar_showing(busy("Streaming"));
             advance_spinner(&mut bar, 3);
 
-            bar.set_run_label(busy("Running bash"));
+            bar.follow_run(busy("Running bash"));
 
             assert_eq!(bar.spinner_frame, 0);
         }
 
         #[test]
         fn same_label_preserves_spinner() {
-            let mut bar = test_bar();
-            bar.set_run_label(busy("Streaming"));
+            let mut bar = bar_showing(busy("Streaming"));
             advance_spinner(&mut bar, 2);
 
-            bar.set_run_label(busy("Streaming"));
+            bar.follow_run(busy("Streaming"));
 
             assert_eq!(bar.spinner_frame, 2);
         }
 
         #[test]
         fn to_ready_resets_spinner() {
-            let mut bar = test_bar();
-            bar.set_run_label(busy("Streaming"));
+            let mut bar = bar_showing(busy("Streaming"));
             advance_spinner(&mut bar, 2);
 
-            bar.set_run_label(RunLabel::READY);
+            bar.follow_run(RunLabel::READY);
 
             assert_eq!(bar.spinner_frame, 0);
             assert!(!bar.tick(bar.next_spinner_frame));
+        }
+
+        #[test]
+        fn render_takes_the_run_state_of_its_view() {
+            let mut scene = Scene::new(vec![StatusLineSegment::RunState]);
+            scene.run = busy("Streaming");
+
+            let row = scene.top_row(40);
+
+            assert_eq!(row, format!("  {} Streaming", SPINNER_FRAMES[0]));
+            assert_eq!(
+                scene.bar.next_tick(crate::now()),
+                Some(scene.bar.next_spinner_frame)
+            );
         }
     }
 
@@ -603,8 +507,7 @@ mod tests {
 
         #[test]
         fn follows_the_animation_frame() {
-            let mut bar = test_bar();
-            bar.set_run_label(busy("Streaming"));
+            let mut bar = bar_showing(busy("Streaming"));
 
             advance_spinner(&mut bar, 3);
 
@@ -617,7 +520,7 @@ mod tests {
 
         #[test]
         fn idle_needs_no_repaint() {
-            let mut bar = test_bar();
+            let mut bar = bar_showing(RunLabel::READY);
 
             assert!(!bar.tick(bar.next_spinner_frame));
             assert_eq!(bar.spinner_frame, 0);
@@ -625,10 +528,10 @@ mod tests {
 
         #[test]
         fn without_current_time_segment_skips_minute_refresh() {
-            let mut bar = StatusBar::new(status_bar_init(vec![
-                StatusLineSegment::Model,
-                StatusLineSegment::RunState,
-            ]));
+            let mut bar = StatusBar::new(
+                vec![StatusLineSegment::Model, StatusLineSegment::RunState],
+                None,
+            );
 
             assert_eq!(bar.current_minute, None);
             assert!(!bar.tick(crate::now()));
@@ -636,34 +539,8 @@ mod tests {
         }
 
         #[test]
-        fn drops_a_usage_limit_window_once_it_resets() {
-            let mut bar = test_bar();
-            let window = |resets_at| {
-                Some(RateLimitWindow {
-                    utilization: 0.97,
-                    resets_at,
-                })
-            };
-            bar.set_rate_limits(Some(RateLimits {
-                five_hour: window(0),
-                seven_day: window(FUTURE_RESET),
-            }));
-
-            assert!(bar.tick(crate::now()));
-            assert_eq!(
-                bar.rate_limits(),
-                Some(RateLimits {
-                    five_hour: None,
-                    seven_day: window(FUTURE_RESET),
-                }),
-            );
-            assert!(!bar.tick(crate::now()), "the open window stays");
-        }
-
-        #[test]
         fn streaming_keeps_the_frame_until_the_frame_interval_passes() {
-            let mut bar = test_bar();
-            bar.set_run_label(busy("Streaming"));
+            let mut bar = bar_showing(busy("Streaming"));
             let before = bar.next_spinner_frame.checked_sub(Duration::from_millis(1));
 
             assert!(!bar.tick(before.unwrap()));
@@ -672,8 +549,7 @@ mod tests {
 
         #[test]
         fn streaming_advances_the_frame_once_the_interval_passes() {
-            let mut bar = test_bar();
-            bar.set_run_label(busy("Streaming"));
+            let mut bar = bar_showing(busy("Streaming"));
             let due = bar.next_spinner_frame;
 
             assert!(bar.tick(due));
@@ -683,8 +559,7 @@ mod tests {
 
         #[test]
         fn wraps_spinner_frames() {
-            let mut bar = test_bar();
-            bar.set_run_label(busy("Running bash"));
+            let mut bar = bar_showing(busy("Running bash"));
 
             advance_spinner(&mut bar, SPINNER_FRAMES.len());
 
@@ -697,15 +572,14 @@ mod tests {
 
         #[test]
         fn is_the_next_spinner_frame_while_busy() {
-            let mut bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::RunState]));
-            bar.set_run_label(busy("Streaming"));
+            let bar = bar_showing(busy("Streaming"));
 
             assert_eq!(bar.next_tick(crate::now()), Some(bar.next_spinner_frame));
         }
 
         #[test]
-        fn never_changes_an_idle_bar_without_a_clock_or_usage_limits() {
-            let bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::Model]));
+        fn never_changes_an_idle_bar_without_a_clock() {
+            let bar = StatusBar::new(vec![StatusLineSegment::Model], None);
 
             assert_eq!(bar.next_tick(Instant::now()), None);
         }
@@ -722,7 +596,7 @@ mod tests {
                 (time!(12:34:00), Duration::from_mins(1)),
                 (time!(12:34:59.950), Duration::from_millis(50)),
             ] {
-                let bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::CurrentTime]));
+                let bar = StatusBar::new(vec![StatusLineSegment::CurrentTime], None);
                 let now = crate::now();
 
                 assert_eq!(
@@ -734,56 +608,23 @@ mod tests {
         }
 
         #[test]
-        fn is_the_earliest_usage_limit_reset() {
-            for (five_hour_wait, seven_day_wait) in [(120, 240), (240, 120)] {
-                let mut bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::Model]));
-                let window = |wait| {
-                    Some(RateLimitWindow {
-                        utilization: 0.5,
-                        resets_at: WALL_NOW.unix_timestamp() + wait,
-                    })
-                };
-                bar.set_rate_limits(Some(RateLimits {
-                    five_hour: window(five_hour_wait),
-                    seven_day: window(seven_day_wait),
-                }));
-                let now = crate::now();
-
-                assert_eq!(
-                    bar.next_tick_at(now, WALL_NOW),
-                    Some(now + Duration::from_secs(120)),
-                    "{five_hour_wait} / {seven_day_wait}",
-                );
-            }
-        }
-
-        #[test]
-        fn selects_the_earliest_spinner_minute_or_reset() {
-            for (time, reset_wait, wait) in [
-                (time!(12:34:00), 120, SPINNER_FRAME_INTERVAL),
-                (time!(12:34:59.950), 120, Duration::from_millis(50)),
-                (time!(12:34:59.950), -1, Duration::ZERO),
+        fn selects_the_earlier_of_the_spinner_and_the_minute() {
+            for (time, wait) in [
+                (time!(12:34:00), SPINNER_FRAME_INTERVAL),
+                (time!(12:34:59.950), Duration::from_millis(50)),
             ] {
-                let mut bar = StatusBar::new(status_bar_init(vec![
-                    StatusLineSegment::RunState,
-                    StatusLineSegment::CurrentTime,
-                ]));
+                let mut bar = StatusBar::new(
+                    vec![StatusLineSegment::RunState, StatusLineSegment::CurrentTime],
+                    None,
+                );
+                bar.follow_run(busy("Streaming"));
                 let now = crate::now();
-                let wall_now = WALL_NOW.replace_time(time);
-                bar.set_run_label(busy("Streaming"));
                 bar.next_spinner_frame = now + SPINNER_FRAME_INTERVAL;
-                bar.set_rate_limits(Some(RateLimits {
-                    five_hour: Some(RateLimitWindow {
-                        utilization: 0.5,
-                        resets_at: wall_now.unix_timestamp() + reset_wait,
-                    }),
-                    seven_day: None,
-                }));
 
                 assert_eq!(
-                    bar.next_tick_at(now, wall_now),
+                    bar.next_tick_at(now, WALL_NOW.replace_time(time)),
                     Some(now + wait),
-                    "{time} / {reset_wait}",
+                    "{time}",
                 );
             }
         }
@@ -796,7 +637,7 @@ mod tests {
         fn updates_only_when_the_displayed_minute_changes() {
             for (shown, current, changed) in [(720, 720, false), (720, 721, true), (1439, 0, true)]
             {
-                let mut bar = StatusBar::new(status_bar_init(vec![StatusLineSegment::CurrentTime]));
+                let mut bar = StatusBar::new(vec![StatusLineSegment::CurrentTime], None);
                 bar.current_minute = Some(shown);
 
                 let dirty = bar.refresh_current_time(current);
@@ -809,41 +650,6 @@ mod tests {
 
     mod render {
         use super::*;
-
-        fn bar_idle(title: Option<&str>, cwd: &str) -> StatusBar {
-            let mut bar = StatusBar::new(StatusBarInit {
-                segments: StatusLineSegment::DEFAULT.to_vec(),
-                model: "Opus 5.5".to_owned(),
-                effort: Some(Effort::Xhigh),
-                cwd: cwd.into(),
-                git_branch: Some("main".to_owned()),
-            });
-            bar.set_title(title.map(ToOwned::to_owned));
-            bar
-        }
-
-        /// Shows `segment` between the directory and the model.
-        fn segment_bar(segment: StatusLineSegment) -> StatusBar {
-            StatusBar::new(StatusBarInit {
-                segments: vec![
-                    StatusLineSegment::CurrentDir,
-                    segment,
-                    StatusLineSegment::ModelWithEffort,
-                    StatusLineSegment::RunState,
-                ],
-                model: "Opus 5.5".to_owned(),
-                effort: Some(Effort::Xhigh),
-                cwd: "~/projects/demo".to_owned(),
-                git_branch: None,
-            })
-        }
-
-        /// Renders the bar 100 columns wide, then 40.
-        fn render_wide_and_narrow(bar: &mut StatusBar) -> String {
-            [100, 40]
-                .map(|width| render_status(bar, width).to_string())
-                .join("\n")
-        }
 
         fn rate_limits() -> RateLimits {
             let window = |utilization| {
@@ -860,54 +666,55 @@ mod tests {
 
         #[test]
         fn idle_with_title_shows_model_title_and_cwd() {
-            let mut bar = bar_idle(Some("Fix login flow"), "~/projects/demo");
-            insta::assert_snapshot!(render_status(&mut bar, 100));
+            let mut scene = Scene::opus("~/projects/demo");
+            scene.session.set_title(Some("Fix login flow".to_owned()));
+            insta::assert_snapshot!(scene.render(100));
         }
 
         #[test]
         fn idle_without_title_leaves_slot_unused() {
-            let mut bar = bar_idle(None, "~/projects/demo");
-            insta::assert_snapshot!(render_status(&mut bar, 80));
+            let mut scene = Scene::opus("~/projects/demo");
+            insta::assert_snapshot!(scene.render(80));
         }
 
         #[test]
         fn puts_the_run_state_after_the_model() {
-            let mut bar = bar_idle(None, "~/projects/demo");
+            let mut scene = Scene::opus("~/projects/demo");
 
-            bar.set_run_label(busy("Streaming · Esc to interrupt"));
+            scene.run = busy("Streaming · Esc to interrupt");
 
-            insta::assert_snapshot!(render_status(&mut bar, 80));
+            insta::assert_snapshot!(scene.render(80));
         }
 
         #[test]
         fn pull_request_checks_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::PullRequestChecks);
-            bar.set_pull_request(Some(git::PullRequest {
+            let mut scene = Scene::segment(StatusLineSegment::PullRequestChecks);
+            scene.bar.set_pull_request(Some(git::PullRequest {
                 checks: Some(git::Checks::Failing(2)),
                 ..pull_request(86)
             }));
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+            insta::assert_snapshot!(scene.wide_and_narrow());
         }
 
         #[test]
         fn pull_request_review_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::PullRequestReview);
-            bar.set_pull_request(Some(git::PullRequest {
+            let mut scene = Scene::segment(StatusLineSegment::PullRequestReview);
+            scene.bar.set_pull_request(Some(git::PullRequest {
                 review: Some(git::ReviewDecision::ChangesRequested),
                 ..pull_request(86)
             }));
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+            insta::assert_snapshot!(scene.wide_and_narrow());
         }
 
         #[test]
         fn usage_shows_context_and_session_cost() {
-            let mut bar = bar_idle(None, "~/projects/demo");
-            bar.set_usage(Some(UsageSnapshot {
+            let mut scene = Scene::opus("~/projects/demo");
+            scene.session.usage = Some(UsageSnapshot {
                 context_tokens: Some(124_000),
                 context_window: Some(1_000_000),
                 estimated_cost_usd: Some(0.4321),
-            }));
-            let output = render_top_row(&mut bar, 120);
+            });
+            let output = scene.top_row(120);
             assert!(
                 output.contains("Ctx: 12% (124k/1M)"),
                 "usage slot should render before status: {output:?}",
@@ -918,63 +725,61 @@ mod tests {
 
         #[test]
         fn five_hour_limit_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::FiveHourLimit);
-            bar.set_rate_limits(Some(rate_limits()));
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+            let mut scene = Scene::segment(StatusLineSegment::FiveHourLimit);
+            scene.session.rate_limits = Some(rate_limits());
+            insta::assert_snapshot!(scene.wide_and_narrow());
         }
 
         #[test]
         fn weekly_limit_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::WeeklyLimit);
-            bar.set_rate_limits(Some(rate_limits()));
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+            let mut scene = Scene::segment(StatusLineSegment::WeeklyLimit);
+            scene.session.rate_limits = Some(rate_limits());
+            insta::assert_snapshot!(scene.wide_and_narrow());
         }
 
         #[test]
         fn queued_prompts_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::QueuedPrompts);
-            bar.set_queued_prompts(2);
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+            let mut scene = Scene::segment(StatusLineSegment::QueuedPrompts);
+            scene.queued_prompts = 2;
+            insta::assert_snapshot!(scene.wide_and_narrow());
         }
 
         #[test]
         fn task_progress_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::TaskProgress);
-            bar.set_task_progress(Some(Progress {
+            let mut scene = Scene::segment(StatusLineSegment::TaskProgress);
+            scene.task_progress = Some(Progress {
                 completed: 2,
                 total: 5,
-            }));
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+            });
+            insta::assert_snapshot!(scene.wide_and_narrow());
         }
 
         #[test]
         fn session_id_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::SessionId);
-            bar.set_session_id("3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b");
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+            let mut scene = Scene::segment(StatusLineSegment::SessionId);
+            scene.session.session_id = "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b".to_owned();
+            insta::assert_snapshot!(scene.wide_and_narrow());
         }
 
         #[test]
         fn theme_at_wide_and_narrow_widths() {
-            let mut bar = segment_bar(StatusLineSegment::Theme);
-            bar.set_theme_name("mocha");
-            insta::assert_snapshot!(render_wide_and_narrow(&mut bar));
+            let mut scene = Scene::segment(StatusLineSegment::Theme);
+            scene.session.config.theme_name = "mocha".to_owned();
+            insta::assert_snapshot!(scene.wide_and_narrow());
         }
 
         #[test]
         fn configured_segments_control_order() {
-            let mut bar = StatusBar::new(StatusBarInit {
-                segments: vec![
+            let mut scene = Scene::opus("~/projects/demo");
+            scene.bar = StatusBar::new(
+                vec![
                     StatusLineSegment::RunState,
                     StatusLineSegment::Model,
                     StatusLineSegment::CurrentDir,
                 ],
-                model: "Opus 5.5".to_owned(),
-                effort: Some(Effort::Xhigh),
-                cwd: "~/projects/demo".to_owned(),
-                git_branch: Some("main".to_owned()),
-            });
-            let output = render_top_row(&mut bar, 120);
+                Some("main".to_owned()),
+            );
+            let output = scene.top_row(120);
             let state_at = output.find("Ready").unwrap();
             let model_at = output.find("Opus 5.5").unwrap();
             let cwd_at = output.find("~/projects/demo").unwrap();
@@ -988,19 +793,17 @@ mod tests {
 
         #[test]
         fn uses_theme_separator_and_segment_labels() {
-            let mut bar = StatusBar::new(StatusBarInit {
-                segments: vec![
+            let mut scene = Scene::opus("~/projects/demo");
+            scene.bar = StatusBar::new(
+                vec![
                     StatusLineSegment::CurrentDir,
                     StatusLineSegment::GitBranch,
                     StatusLineSegment::ModelWithEffort,
                     StatusLineSegment::RunState,
                 ],
-                model: "Opus 5.5".to_owned(),
-                effort: Some(Effort::Xhigh),
-                cwd: "~/projects/demo".to_owned(),
-                git_branch: Some("feat/status-line".to_owned()),
-            });
-            let output = render_top_row(&mut bar, 120);
+                Some("feat/status-line".to_owned()),
+            );
+            let output = scene.top_row(120);
             assert!(
                 output.contains("~/projects/demo │ feat/status-line │ Opus 5.5 (xhigh) │ Ready")
             );
@@ -1008,15 +811,18 @@ mod tests {
 
         #[test]
         fn narrow_width_preserves_model_and_run_state() {
-            let mut bar = bar_idle(Some("A rather long session title"), "~/projects/demo/long");
-            insta::assert_snapshot!(render_status(&mut bar, 40));
+            let mut scene = Scene::opus("~/projects/demo/long");
+            scene
+                .session
+                .set_title(Some("A rather long session title".to_owned()));
+            insta::assert_snapshot!(scene.render(40));
         }
 
         #[test]
         fn wide_shows_title_after_status() {
-            let mut bar = test_bar();
-            bar.set_title(Some("Fix auth bug".to_owned()));
-            let output = render_top_row(&mut bar, 120);
+            let mut scene = Scene::new(StatusLineSegment::DEFAULT.to_vec());
+            scene.session.set_title(Some("Fix auth bug".to_owned()));
+            let output = scene.top_row(120);
             let model_at = output.find("test-model").unwrap();
             let status_at = output.find("Ready").unwrap();
             let title_at = output.find("Fix auth bug").unwrap();
@@ -1029,11 +835,11 @@ mod tests {
 
         #[test]
         fn truncates_long_title_with_ellipsis() {
-            let mut bar = test_bar();
+            let mut scene = Scene::new(StatusLineSegment::DEFAULT.to_vec());
             let long =
                 "A very long session title that keeps going well past any reasonable width limit";
-            bar.set_title(Some(long.to_owned()));
-            let output = render_top_row(&mut bar, 200);
+            scene.session.set_title(Some(long.to_owned()));
+            let output = scene.top_row(200);
             assert!(
                 output.contains("..."),
                 "expected truncated title: {output:?}"
@@ -1046,8 +852,8 @@ mod tests {
 
         #[test]
         fn no_title_still_shows_cwd_wide() {
-            let mut bar = test_bar();
-            let output = render_top_row(&mut bar, 120);
+            let mut scene = Scene::new(StatusLineSegment::DEFAULT.to_vec());
+            let output = scene.top_row(120);
             assert!(output.contains("~/test"));
             assert!(
                 !output.contains("..."),
@@ -1057,11 +863,9 @@ mod tests {
 
         #[test]
         fn empty_cwd_drops_cwd_slot_entirely() {
-            let mut bar = StatusBar::new(StatusBarInit {
-                cwd: String::new(),
-                ..status_bar_init(StatusLineSegment::DEFAULT.to_vec())
-            });
-            let output = render_top_row(&mut bar, 120);
+            let mut scene = Scene::new(StatusLineSegment::DEFAULT.to_vec());
+            scene.session.display_cwd = String::new();
+            let output = scene.top_row(120);
             assert!(output.contains("test-model"));
             assert!(output.contains("Ready"));
             assert!(
@@ -1072,10 +876,13 @@ mod tests {
 
         #[test]
         fn records_pull_request_hyperlink_rect_for_post_flush_emission() {
-            let mut bar = pr_bar();
-            bar.pull_request = Some(pull_request(86));
-            render_status(&mut bar, 40);
-            let links = bar.take_pending_hyperlinks();
+            let mut scene = Scene::new(vec![
+                StatusLineSegment::PullRequest,
+                StatusLineSegment::RunState,
+            ]);
+            scene.bar.pull_request = Some(pull_request(86));
+            scene.render(40);
+            let links = scene.bar.take_pending_hyperlinks();
             assert_eq!(
                 links.len(),
                 1,
@@ -1091,17 +898,20 @@ mod tests {
 
         #[test]
         fn records_no_hyperlinks_when_pull_request_absent() {
-            let mut bar = test_bar();
-            render_status(&mut bar, 40);
-            assert!(bar.take_pending_hyperlinks().is_empty());
+            let mut scene = Scene::new(StatusLineSegment::DEFAULT.to_vec());
+            scene.render(40);
+            assert!(scene.bar.take_pending_hyperlinks().is_empty());
         }
 
         #[test]
         fn drops_the_hyperlink_when_the_bar_is_too_narrow_for_its_segment() {
-            let mut bar = pr_bar();
-            bar.pull_request = Some(pull_request(86));
-            render_status(&mut bar, 10);
-            assert!(bar.take_pending_hyperlinks().is_empty());
+            let mut scene = Scene::new(vec![
+                StatusLineSegment::PullRequest,
+                StatusLineSegment::RunState,
+            ]);
+            scene.bar.pull_request = Some(pull_request(86));
+            scene.render(10);
+            assert!(scene.bar.take_pending_hyperlinks().is_empty());
         }
     }
 
@@ -1110,12 +920,15 @@ mod tests {
 
         #[test]
         fn drains_after_first_call() {
-            let mut bar = pr_bar();
-            bar.pull_request = Some(pull_request(86));
-            render_status(&mut bar, 40);
-            assert_eq!(bar.take_pending_hyperlinks().len(), 1);
+            let mut scene = Scene::new(vec![
+                StatusLineSegment::PullRequest,
+                StatusLineSegment::RunState,
+            ]);
+            scene.bar.pull_request = Some(pull_request(86));
+            scene.render(40);
+            assert_eq!(scene.bar.take_pending_hyperlinks().len(), 1);
             assert!(
-                bar.take_pending_hyperlinks().is_empty(),
+                scene.bar.take_pending_hyperlinks().is_empty(),
                 "second take leaves nothing behind",
             );
         }
@@ -1126,7 +939,7 @@ mod tests {
 
         #[test]
         fn ready_reads_in_the_muted_style() {
-            let bar = test_bar();
+            let bar = bar_showing(RunLabel::READY);
 
             assert_eq!(
                 bar.status_span(&Theme::default()),
@@ -1136,8 +949,7 @@ mod tests {
 
         #[test]
         fn busy_label_follows_the_spinner_in_the_info_style() {
-            let mut bar = test_bar();
-            bar.set_run_label(busy("Streaming"));
+            let mut bar = bar_showing(busy("Streaming"));
             advance_spinner(&mut bar, 1);
 
             assert_eq!(
@@ -1151,9 +963,7 @@ mod tests {
 
         #[test]
         fn alert_reads_as_a_warning() {
-            let mut bar = test_bar();
-
-            bar.set_run_label(RunLabel {
+            let bar = bar_showing(RunLabel {
                 text: "Press Ctrl+C again to exit".into(),
                 tone: RunTone::Alert,
             });

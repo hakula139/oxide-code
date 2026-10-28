@@ -50,7 +50,9 @@ impl SlashCommand for RenameCmd {
 
     fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
         if args.is_empty() {
-            return Ok(SlashOutcome::Modal(Box::new(RenameModal::new(ctx.title))));
+            return Ok(SlashOutcome::Modal(Box::new(RenameModal::new(
+                ctx.info.title.as_deref(),
+            ))));
         }
         Ok(SlashOutcome::Forward(Action::Op(command::rename(args)?)))
     }
@@ -169,9 +171,10 @@ mod tests {
 
         #[test]
         fn bare_form_opens_modal_pre_filled_with_current_title() {
-            let info = test_session_info();
+            let mut info = test_session_info();
+            info.set_title(Some("Existing title".to_owned()));
             let mut modal = RenameCmd
-                .execute("", &SlashContext::new(&info, Some("Existing title")))
+                .execute("", &SlashContext::new(&info))
                 .unwrap()
                 .into_modal();
             let result = modal.handle_key(&KeyEvent::from(KeyCode::Enter));

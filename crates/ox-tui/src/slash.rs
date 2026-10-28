@@ -169,7 +169,7 @@ mod tests {
 
         fn run_dispatch(name: &str) -> Result<SlashOutcome, String> {
             let parsed = parsed(name, "");
-            dispatch(&parsed, &SlashContext::new(&test_session_info(), None))
+            dispatch(&parsed, &SlashContext::new(&test_session_info()))
         }
 
         #[test]
@@ -194,7 +194,7 @@ mod tests {
                     ..FakeCmd::DEFAULT
                 }],
                 &parsed,
-                &SlashContext::new(&info, None),
+                &SlashContext::new(&info),
             )
             .unwrap_err()
         }
@@ -223,7 +223,7 @@ mod tests {
                 ("clear", "/clear: Explicit failure."),
                 ("reset", "/reset: Explicit failure."),
             ] {
-                let ctx = SlashContext::new(&info, None);
+                let ctx = SlashContext::new(&info);
                 let task = dispatch_with(&[&cmd], &parsed(typed, ""), &ctx)
                     .unwrap()
                     .into_background();

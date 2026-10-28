@@ -6,7 +6,7 @@ The status line is the TUI's top row, a user-ordered roster of built-in segments
 
 `StatusLineSegment` in `config.rs` defines the roster. `[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
 
-`StatusBar` keeps component state and delegates segment formatting to `ox_tui::components::status::line`. `App` copies the run label, the queued prompt count, the task list's progress, the session ID, the theme name, and the permission mode into it before each frame, since it owns that state.
+`StatusBar` keeps only its own state (the spinner, the clock minute, the git probe results, and the links it last drew) and delegates segment formatting to `ox_tui::components::status::line`. Each frame, `App` hands it a `StatusView` that borrows `LiveSessionInfo` for the session's values, such as the model, title, usage, and usage limits, and adds the run state, the queued prompt count, and the task list's progress, so every value the bar shows has one owner.
 
 Segment render rules:
 
@@ -36,7 +36,7 @@ A Claude subscription sign-in's responses carry `anthropic-ratelimit-unified-5h-
 
 The SSE pump reads the headers of each attempt's response and forwards them as `ResponseEvent::RateLimits`, ahead of the stream's events. The agent loop emits `Event::RateLimitsUpdated`, and the status bar keeps the latest. The summarization requests behind a compaction report their limits the same way.
 
-A window renders its utilization floored to a whole percent, after rounding to basis points so a share like `0.29` keeps its exact percent. The status bar's tick drops a window once its reset time passes, since the spent share no longer applies until the next response reports the new window. A sign-in or sign-out drops both windows, which belonged to the previous credential.
+A window renders its utilization floored to a whole percent, after rounding to basis points so a share like `0.29` keeps its exact percent. The App's tick drops a window once its reset time passes, since the spent share no longer applies until the next response reports the new window. A sign-in or sign-out drops both windows, which belonged to the previous credential.
 
 ## Default Order
 
@@ -83,7 +83,7 @@ The status line retains the highest-priority segment, truncating it if needed, t
 - `crates/ox-core/src/session/store.rs`: `UsageRecord`, the per-request record a resume prices.
 - `crates/ox-core/src/session/title_generator.rs`: `spawn`, which records the title request's usage and hands it to the engine.
 - `crates/ox-core/src/util/git.rs`: `current_branch` and `current_pull_request` probes, and the checks summary.
-- `crates/ox-tui/src/app/render.rs`: `App::draw_frame`, which copies App-owned state, the permission mode included, into the status bar.
-- `crates/ox-tui/src/components/status.rs`: `StatusBar` state and `RunLabel`, the run-state segment's text and tone.
+- `crates/ox-tui/src/app/render.rs`: `App::draw_frame`, which builds the `StatusView` the status bar renders.
+- `crates/ox-tui/src/components/status.rs`: `StatusBar`, `StatusView`, and `RunLabel`, the run-state segment's text and tone.
 - `crates/ox-tui/src/components/status/line.rs`: `StatusLine` segment rendering and width fitting.
 - `crates/ox-tui/src/git_probes.rs`: `GitProbes` background branch and pull-request polling, at the detail the roster needs.

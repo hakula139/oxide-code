@@ -486,7 +486,7 @@ impl App {
     /// Runs `parsed`, the command the user typed as `line`, and applies its outcome, returning the
     /// action it asks the caller to route.
     fn run_slash(&mut self, parsed: &Parsed, line: &str) -> Option<Action> {
-        let ctx = SlashContext::new(&self.session_info, self.status_bar.title());
+        let ctx = SlashContext::new(&self.session_info);
         let outcome = slash::dispatch(parsed, &ctx);
         self.apply_slash_outcome(outcome, line)
     }
