@@ -74,9 +74,10 @@ pub(super) fn test_app_with(
     (app, op_rx, event_tx)
 }
 
-/// Puts `op` in flight as if [`App::dispatch_op`] had sent it.
+/// Puts `op` in flight with no other local effect of [`App::dispatch_op`], such as the queue marks
+/// a compaction or session switch sets.
 pub(super) fn start_op(app: &mut App, op: &Op) {
-    app.in_flight = InFlight::new(op);
+    app.in_flight = InFlight::new(op, app.modals.is_active());
 }
 
 /// What the in-flight operation does, or `None` while idle.

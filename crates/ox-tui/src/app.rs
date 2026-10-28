@@ -53,8 +53,12 @@ pub(crate) struct App {
     theme_overrides: ThemeOverrides,
     /// Theme saved when a `/theme` picker opens. Restored if the modal cancels.
     preview_theme_snapshot: Option<Theme>,
-    /// The operation the engine runs, which keeps idle-only input local until its terminal event.
+    /// The idle-only operation the engine runs, until its terminal event. While it runs, the App
+    /// keeps other idle-only input local.
     in_flight: Option<InFlight>,
+    /// Whether the last operation left a modal open that may send the next one, which defers the
+    /// queue head until the user closes it.
+    head_awaits_modal: bool,
     /// When the window for a second exit key closes, while one is open.
     exit_armed: Option<Instant>,
     status_bar: StatusBar,
@@ -142,6 +146,7 @@ impl App {
             theme_overrides,
             preview_theme_snapshot: None,
             in_flight: None,
+            head_awaits_modal: false,
             exit_armed: None,
             status_bar,
             git_probes,

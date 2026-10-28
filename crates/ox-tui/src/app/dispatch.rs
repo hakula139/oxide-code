@@ -147,6 +147,10 @@ impl App {
         if let Some(action) = self.modals.handle_key(key) {
             self.apply_modal_action(action);
         }
+        if self.head_awaits_modal && self.in_flight.is_none() && !self.modals.is_active() {
+            self.head_awaits_modal = false;
+            self.drain_pending_prompt();
+        }
         self.dirty = true;
     }
 
@@ -295,7 +299,7 @@ impl App {
 
     /// Puts `op` in flight when it runs until a terminal event, which also closes an exit window.
     fn begin(&mut self, op: &Op) {
-        if let Some(in_flight) = InFlight::new(op) {
+        if let Some(in_flight) = InFlight::new(op, self.modals.is_active()) {
             self.in_flight = Some(in_flight);
             self.exit_armed = None;
         }
@@ -395,7 +399,7 @@ impl App {
             }
             self.queue.push(text.to_owned());
             if idle {
-                // Prompts a cancel left queued run before this one.
+                // Prompts a cancel or failure held run before this one.
                 self.drain_pending_prompt();
             } else {
                 self.forward_queued_prompts();
@@ -1984,6 +1988,18 @@ mod tests {
 
     mod dispatch_op {
         use super::*;
+
+        #[tokio::test]
+        async fn an_operation_closes_the_exit_window() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+            assert!(app.exit_armed.is_some(), "Ctrl+C arms the exit window");
+
+            app.dispatch_action(Action::Submit("hello".to_owned()));
+
+            assert_eq!(rx.try_recv(), Ok(Op::prompt("hello")));
+            assert_eq!(app.exit_armed, None);
+        }
 
         #[tokio::test]
         async fn interrupt_flips_status_to_cancelling_and_forwards() {

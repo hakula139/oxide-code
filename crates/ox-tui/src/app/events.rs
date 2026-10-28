@@ -30,11 +30,13 @@ impl App {
     /// Shows `event`, then ends the in-flight operation if `event` is its terminal event.
     pub(super) fn handle_engine_event(&mut self, event: Event) {
         let end = self.in_flight.as_ref().and_then(|op| op.end(&event));
+        let modal_was_open = self.modals.is_active();
         self.apply_event(event);
         if let Some(end) = end
             && let Some(ended) = self.in_flight.take()
         {
-            self.end_operation(&ended, end);
+            let opened_modal = !modal_was_open && self.modals.is_active();
+            self.end_operation(&ended, end, opened_modal);
         }
         self.dirty = true;
     }
@@ -140,10 +142,11 @@ impl App {
         }
     }
 
-    /// Ends the in-flight operation as `end` reports, then starts the queue head unless the user
-    /// cancelled the operation, its failure holds the queue, or it ran no turn and left a modal
-    /// open, which may send the next operation.
-    fn end_operation(&mut self, ended: &InFlight, end: TurnEnd) {
+    /// Ends the in-flight operation as `end` reports, then starts the queue head. A cancel or a
+    /// failure that holds the queue holds it until the user next submits a prompt. An operation
+    /// that ran no turn defers the head while a modal it came from or `opened_modal` stays open,
+    /// since that modal may send the next operation.
+    fn end_operation(&mut self, ended: &InFlight, end: TurnEnd, opened_modal: bool) {
         self.chat.commit_streaming();
         let goes_on = match end {
             TurnEnd::Completed => true,
@@ -159,8 +162,13 @@ impl App {
         };
         self.queue.end_turn();
         self.chat.clear_pending_calls();
-        let modal_waits = !ended.runs_turn() && self.modals.is_active();
-        if goes_on && !ended.cancelling() && !modal_waits {
+        if !goes_on || ended.cancelling() {
+            self.queue.hold();
+        }
+        self.head_awaits_modal = !ended.runs_turn()
+            && self.modals.is_active()
+            && (ended.sent_from_modal() || opened_modal);
+        if !self.head_awaits_modal {
             self.drain_pending_prompt();
         }
     }
@@ -432,8 +440,11 @@ impl App {
         self.chat.push_system_message(format!("{outcome} {active}"));
     }
 
-    /// Starts a turn with the oldest queued prompt.
+    /// Starts a turn with the oldest queued prompt, unless the queue is held.
     pub(super) fn drain_pending_prompt(&mut self) {
+        if self.queue.held() {
+            return;
+        }
         if let Some(next) = self.queue.pop_next() {
             self.start_turn(next);
         }
@@ -510,6 +521,7 @@ mod tests {
 
     use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
     use indoc::indoc;
+    use tokio::sync::mpsc;
     use tokio::sync::mpsc::error::TryRecvError;
 
     use ox_core::config::StatusLineSegment;
@@ -536,7 +548,9 @@ mod tests {
 
     use super::*;
     use crate::action::Action;
-    use crate::app::testing::{activity, five_hour_limit, rendered_text, start_op, test_app};
+    use crate::app::testing::{
+        FakeModal, activity, five_hour_limit, rendered_text, start_op, test_app,
+    };
     use crate::clipboard::CopyError;
     use crate::glyphs::INTERRUPTED_MARKER;
     use crate::modal::ModalAction;
@@ -2348,7 +2362,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_modal_the_operation_leaves_open_holds_the_queue_until_it_closes() {
+        async fn a_modal_the_lookup_opens_defers_the_queue_until_the_delete_ends() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
             rx.try_recv().expect("lookup forwarded");
@@ -2371,6 +2385,142 @@ mod tests {
 
             assert!(!app.modals.is_active(), "the delete closes the modal");
             assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
+        }
+
+        #[tokio::test]
+        async fn a_modal_the_lookup_opens_defers_the_queue_until_the_user_closes_it() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
+            rx.try_recv().expect("lookup forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+            let deferred = rx.try_recv();
+
+            app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
+
+            assert_eq!(deferred, Err(TryRecvError::Empty));
+            assert!(!app.modals.is_active(), "N declines the delete");
+            assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
+        }
+
+        #[tokio::test]
+        async fn a_modal_the_user_opened_meanwhile_leaves_the_queue_going() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Clear);
+            assert_eq!(rx.try_recv(), Ok(Op::Clear));
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.push_modal(Box::new(FakeModal::new("help")));
+
+            app.handle_engine_event(Event::SessionReady);
+
+            assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
+        }
+
+        #[tokio::test]
+        async fn a_turn_a_modal_started_goes_on_to_the_queue_head() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.push_modal(Box::new(FakeModal::new("picker")));
+            start_op(&mut app, &Op::prompt("running"));
+            app.queue.push("next".to_owned());
+
+            app.handle_engine_event(Event::TurnComplete);
+
+            assert_eq!(rx.try_recv(), Ok(Op::prompt("next")));
+        }
+
+        /// Runs `op` to its `end` on an app whose queue holds "typed meanwhile", then checks that
+        /// nothing started.
+        fn assert_stays_held(
+            app: &mut App,
+            rx: &mut mpsc::Receiver<Op>,
+            op: &Op,
+            end: Event,
+            label: &str,
+        ) {
+            app.dispatch_op(op.clone());
+            assert_eq!(rx.try_recv().as_ref(), Ok(op), "{label}");
+
+            app.handle_engine_event(end);
+
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{label}");
+            assert_eq!(*app.queue.pending(), ["typed meanwhile"], "{label}");
+        }
+
+        #[tokio::test]
+        async fn a_failed_compaction_holds_the_queue_past_a_rename() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Compact { instructions: None });
+            rx.try_recv().expect("compaction forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.handle_engine_event(Event::TurnFailed("Compaction failed".to_owned()));
+
+            assert_stays_held(
+                &mut app,
+                &mut rx,
+                &Op::Rename {
+                    title: "x".to_owned(),
+                },
+                Event::SessionTitleUpdated {
+                    id: "test-session".to_owned(),
+                    title: "x".to_owned(),
+                },
+                "rename",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_failed_resume_holds_the_queue_past_a_model_change() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            app.dispatch_op(Op::Resume {
+                target: ResumeTarget::Id("missing".to_owned()),
+            });
+            rx.try_recv().expect("resume forwarded");
+            app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+            app.handle_engine_event(Event::TurnFailed("No session matches".to_owned()));
+            let end = Event::ConfigChanged {
+                model: app.session_info.config.model.clone(),
+                effort: Some(Effort::Low),
+                requested: ConfigPick::Effort(Effort::Low),
+                auto_compaction: app.session_info.config.compaction.auto,
+                notice: "Effort set to low".to_owned(),
+            };
+
+            assert_stays_held(
+                &mut app,
+                &mut rx,
+                &Op::SetModel(ConfigPick::Effort(Effort::Low)),
+                end,
+                "model",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_cancel_holds_the_queue_past_an_archive() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            start_op(&mut app, &Op::prompt("running"));
+            app.queue.push("typed meanwhile".to_owned());
+            app.handle_esc();
+            assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
+            app.handle_engine_event(Event::Cancelled);
+            let target = SavedTarget::Prefix("saved".to_owned());
+
+            assert_stays_held(
+                &mut app,
+                &mut rx,
+                &Op::SetArchive {
+                    target: target.clone(),
+                    state: ArchiveState::Archived,
+                },
+                Event::ArchiveUpdated {
+                    target,
+                    state: ArchiveState::Archived,
+                    result: Ok(ArchiveUpdate {
+                        id: "saved".to_owned(),
+                        changed: true,
+                    }),
+                },
+                "archive",
+            );
         }
 
         #[tokio::test]

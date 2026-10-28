@@ -238,7 +238,8 @@ pub struct UsageSnapshot {
 /// - [`Op::Clear`] ends with `SessionReady`.
 /// - [`Op::Login`] ends with [`Self::SignedIn`], `TurnFailed`, or `Cancelled`.
 /// - [`Op::Logout`] ends with [`Self::SignedOut`] or `TurnFailed`.
-/// - [`Op::Rename`] ends with [`Self::SessionTitleUpdated`] or [`Self::RenameFailed`].
+/// - [`Op::Rename`] ends with [`Self::SessionTitleUpdated`] carrying its title, or
+///   [`Self::RenameFailed`].
 /// - [`Op::SetModel`] ends with [`Self::ConfigChanged`].
 /// - [`Op::SetMode`] ends with [`Self::ModeChanged`].
 ///
@@ -458,11 +459,16 @@ impl TurnEnd {
                 Op::Compact { .. } | Op::Clear | Op::Archive | Op::Resume { .. },
                 Event::SessionReady,
             )
-            | (Op::Rename { .. }, Event::SessionTitleUpdated { .. })
             | (Op::Login, Event::SignedIn { .. })
             | (Op::Logout, Event::SignedOut { .. })
             | (Op::SetModel(_), Event::ConfigChanged { .. })
             | (Op::SetMode(_), Event::ModeChanged(_)) => Some(Self::Completed),
+            // A background title can land while the rename runs, so only the requested title ends it.
+            (Op::Rename { title: requested }, Event::SessionTitleUpdated { title, .. })
+                if title == requested =>
+            {
+                Some(Self::Completed)
+            }
             (Op::Prompt { .. } | Op::Compact { .. } | Op::Login, Event::Cancelled) => {
                 Some(Self::Cancelled)
             }
@@ -753,6 +759,10 @@ mod tests {
                 };
                 let notice = Event::Error("Session write failed".to_owned());
                 let failed = Event::TurnFailed("failure".to_owned());
+                let titled = |title: &str| Event::SessionTitleUpdated {
+                    id: "live".to_owned(),
+                    title: title.to_owned(),
+                };
 
                 for (op, event, end) in [
                     (&prompt, Event::TurnComplete, Some(TurnEnd::Completed)),
@@ -779,14 +789,8 @@ mod tests {
                     (&Op::Clear, notice.clone(), None),
                     (&Op::Clear, rolled.clone(), None),
                     (&Op::Clear, Event::SessionReady, Some(TurnEnd::Completed)),
-                    (
-                        &rename,
-                        Event::SessionTitleUpdated {
-                            id: "live".to_owned(),
-                            title: "Fix login".to_owned(),
-                        },
-                        Some(TurnEnd::Completed),
-                    ),
+                    (&rename, titled("Fix login"), Some(TurnEnd::Completed)),
+                    (&rename, titled("Generated title"), None),
                     (&rename, notice.clone(), None),
                     (
                         &rename,

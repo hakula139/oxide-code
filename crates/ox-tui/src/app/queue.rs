@@ -80,9 +80,12 @@ pub(super) struct PromptQueue {
     /// handed back if the turn fails before it is sent or is rolled back, and dropped once a
     /// mid-turn compaction summarizes it.
     active: Option<QueuedPrompt>,
-    /// What a failure of the active prompt hands back to the user.
+    /// What a failure of the in-flight operation hands back to the user.
     hand_back: HandBack,
     pending: VecDeque<QueuedPrompt>,
+    /// Whether the queued prompts wait for the user's next submit, since an operation ended
+    /// without starting them.
+    held: bool,
     /// How many leading `pending` prompts the in-flight turn already holds.
     forwarded: usize,
     /// Queued prompts the in-flight turn took in, which a rolled-back turn hands back.
@@ -92,7 +95,7 @@ pub(super) struct PromptQueue {
     before_switch: Option<usize>,
 }
 
-/// What a failure of the active prompt hands back to the user.
+/// What a failure of the in-flight operation hands back to the user.
 #[derive(Clone, Copy, Default)]
 enum HandBack {
     /// Nothing, since the prompt ran and the queue goes on.
@@ -113,7 +116,7 @@ enum HandBack {
 pub(super) enum FailedTurn {
     /// The prompt ran, so nothing comes back and the queue goes on.
     Ran,
-    /// The prompt ran, but the queue waits for the user.
+    /// The operation ran, but the queue waits for the user.
     Held,
     /// The prompts came back to the queue, apart from the one returned for the empty input.
     HandedBack(Option<QueuedPrompt>),
@@ -174,9 +177,19 @@ impl PromptQueue {
         self.hand_back = HandBack::RolledBackTurn;
     }
 
-    /// Queues a line typed into the input.
+    /// Queues a line typed into the input, which releases a held queue.
     pub(super) fn push(&mut self, line: String) {
         self.pending.push_back(QueuedPrompt::typed(line));
+        self.held = false;
+    }
+
+    /// Holds the queued prompts until the user next submits one.
+    pub(super) fn hold(&mut self) {
+        self.held = true;
+    }
+
+    pub(super) fn held(&self) -> bool {
+        self.held
     }
 
     /// Returns a prompt whose turn could not start to the head of the queue.
@@ -194,8 +207,12 @@ impl PromptQueue {
         self.pending.pop_front()
     }
 
-    /// The text of the oldest queued prompt the in-flight turn lacks.
+    /// The text of the oldest queued prompt the in-flight turn lacks, or `None` while the queue is
+    /// held.
     pub(super) fn next_to_forward(&self) -> Option<String> {
+        if self.held {
+            return None;
+        }
         self.pending
             .get(self.forwarded)
             .map(|queued| queued.prompt().to_owned())
@@ -308,6 +325,26 @@ mod tests {
             queue.confirm_drained((*prompt).to_owned());
         }
         queue
+    }
+
+    mod hold {
+        use super::*;
+
+        #[test]
+        fn keeps_the_queue_from_the_turn_until_the_user_submits() {
+            let mut queue = queue_with("running", &[], &["held"]);
+
+            queue.hold();
+            let while_held = queue.next_to_forward();
+            queue.end_turn();
+            let after_the_turn = queue.held();
+            queue.push("next".to_owned());
+
+            assert_eq!(while_held, None);
+            assert!(after_the_turn, "only a submit releases the queue");
+            assert!(!queue.held());
+            assert_eq!(queue.next_to_forward().as_deref(), Some("held"));
+        }
     }
 
     mod confirm_drained {

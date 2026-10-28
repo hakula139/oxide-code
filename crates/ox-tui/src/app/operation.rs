@@ -3,19 +3,27 @@
 
 use std::borrow::Cow;
 
+use crossterm::event::KeyCode;
+
 use ox_core::protocol::{Event, Op, TurnEnd};
+
+use crate::keymap::{KeyChord, hint};
+
+const ESC: KeyChord = KeyChord::plain(KeyCode::Esc);
 
 /// An idle-only op the engine runs, from its dispatch to the terminal event that ends it.
 #[derive(Debug)]
 pub(super) struct InFlight {
     op: Op,
     activity: Activity,
+    /// Whether a modal sent the op, which may send the next one once the op ends.
+    from_modal: bool,
 }
 
 impl InFlight {
-    /// Tracks `op` until its terminal event, or `None` for an op the engine takes at any time,
-    /// which has no terminal event of its own.
-    pub(super) fn new(op: &Op) -> Option<Self> {
+    /// Tracks `op`, sent from a modal when `from_modal`, until its terminal event. `None` for an op
+    /// the engine takes at any time, which the TUI never waits on.
+    pub(super) fn new(op: &Op, from_modal: bool) -> Option<Self> {
         let activity = match op {
             Op::Prompt { .. } => Activity::Streaming,
             Op::Compact { .. } => Activity::Compacting,
@@ -38,6 +46,7 @@ impl InFlight {
         Some(Self {
             op: op.clone(),
             activity,
+            from_modal,
         })
     }
 
@@ -54,6 +63,10 @@ impl InFlight {
     /// prompts were typed for.
     pub(super) const fn runs_turn(&self) -> bool {
         matches!(self.op, Op::Prompt { .. })
+    }
+
+    pub(super) const fn sent_from_modal(&self) -> bool {
+        self.from_modal
     }
 
     /// Returns whether a sign-in waits for the code the sign-in page shows.
@@ -109,11 +122,14 @@ pub(super) enum Activity {
 impl Activity {
     /// The status text, naming the key that stops the work where one does.
     pub(super) fn label(&self) -> Cow<'static, str> {
+        let esc = |work: &str, effect: &str| -> Cow<'static, str> {
+            format!("{work} · {}", hint(ESC, effect)).into()
+        };
         match self {
-            Self::Streaming => "Streaming · Esc to interrupt".into(),
-            Self::ToolRunning { name } => format!("Running {name} · Esc to interrupt").into(),
-            Self::Compacting => "Compacting · Esc to interrupt".into(),
-            Self::SigningIn => "Signing in · Esc to cancel".into(),
+            Self::Streaming => esc("Streaming", "interrupt"),
+            Self::ToolRunning { name } => esc(&format!("Running {name}"), "interrupt"),
+            Self::Compacting => esc("Compacting", "interrupt"),
+            Self::SigningIn => esc("Signing in", "cancel"),
             Self::SigningOut => "Signing out".into(),
             Self::Clearing => "Clearing".into(),
             Self::Resuming => "Resuming".into(),
@@ -179,7 +195,11 @@ mod tests {
                     Op::Shutdown,
                 ];
                 for op in ops {
-                    assert_eq!(InFlight::new(&op).is_some(), op.is_idle_only(), "{op:?}");
+                    assert_eq!(
+                        InFlight::new(&op, false).is_some(),
+                        op.is_idle_only(),
+                        "{op:?}"
+                    );
                 }
             }
         }
@@ -189,7 +209,7 @@ mod tests {
 
             #[test]
             fn releases_held_prompts_only_when_a_turn_leaves_its_compaction() {
-                let mut turn = InFlight::new(&Op::prompt("hello")).unwrap();
+                let mut turn = InFlight::new(&Op::prompt("hello"), false).unwrap();
                 assert!(turn.takes_queued_prompts());
 
                 assert!(!turn.set_activity(Activity::Compacting));
@@ -201,7 +221,7 @@ mod tests {
 
             #[test]
             fn keeps_a_pending_cancel() {
-                let mut turn = InFlight::new(&Op::prompt("hello")).unwrap();
+                let mut turn = InFlight::new(&Op::prompt("hello"), false).unwrap();
                 turn.set_activity(Activity::Compacting);
                 turn.cancel();
 
@@ -218,7 +238,7 @@ mod tests {
 
             #[test]
             fn only_a_running_turn_takes_them() {
-                let compact = InFlight::new(&Op::Compact { instructions: None }).unwrap();
+                let compact = InFlight::new(&Op::Compact { instructions: None }, false).unwrap();
 
                 assert!(!compact.takes_queued_prompts());
             }
