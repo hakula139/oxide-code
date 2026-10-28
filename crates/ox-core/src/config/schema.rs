@@ -269,6 +269,15 @@ mod tests {
     use indoc::formatdoc;
 
     use super::*;
+    use crate::util::path::testing::HOME_VAR;
+
+    /// The message the TOML parser reports for `body`, which must fail to parse as a config file.
+    fn rejection(body: &str) -> String {
+        toml::from_str::<FileConfig>(body)
+            .expect_err(body)
+            .message()
+            .to_owned()
+    }
 
     mod file_config {
         use super::*;
@@ -294,6 +303,136 @@ mod tests {
                 assert!(!debug.contains("private-header-sentinel"), "{debug}");
                 assert!(debug.contains("claude-haiku-5-5"), "{debug}");
             }
+        }
+    }
+
+    mod login_auth {
+        use super::*;
+
+        mod try_from {
+            use super::*;
+
+            #[test]
+            fn accepts_the_type_alone() {
+                let config: FileConfig =
+                    toml::from_str("client.auth = { type = 'login' }").unwrap();
+
+                assert!(matches!(config.client.auth, Some(ClientAuth::Login(_))));
+            }
+
+            #[test]
+            fn rejects_any_other_key() {
+                for body in [
+                    "client.auth = { type = 'login', value = 'token' }",
+                    "client.auth = { type = 'login', file = '/token' }",
+                ] {
+                    assert_eq!(
+                        rejection(body),
+                        "client.auth type login takes no other keys",
+                        "{body}"
+                    );
+                }
+            }
+        }
+    }
+
+    mod auth_value {
+        use super::*;
+
+        mod try_from {
+            use super::*;
+
+            fn bearer_auth(fields: &str) -> Option<ClientAuth> {
+                let body = format!("client.auth = {{ type = 'bearer', {fields} }}");
+                let config: FileConfig = toml::from_str(&body).unwrap();
+                config.client.auth
+            }
+
+            #[test]
+            fn takes_an_inline_value() {
+                assert!(matches!(
+                    bearer_auth("value = 'token'"),
+                    Some(ClientAuth::Bearer(AuthValue::Value(value))) if value == "token"
+                ));
+            }
+
+            #[test]
+            fn takes_an_absolute_or_home_relative_file() {
+                let dir = tempfile::tempdir().unwrap();
+                let absolute = dir.path().join("token");
+                let raw = toml::Value::String(absolute.display().to_string());
+
+                temp_env::with_var(HOME_VAR, Some(dir.path()), || {
+                    for (fields, expected) in [
+                        (format!("file = {raw}"), &absolute),
+                        ("file = '~/token'".to_owned(), &absolute),
+                    ] {
+                        assert!(
+                            matches!(
+                                bearer_auth(&fields),
+                                Some(ClientAuth::Bearer(AuthValue::File(ref path))) if path == expected
+                            ),
+                            "{fields}"
+                        );
+                    }
+                });
+            }
+
+            #[test]
+            fn rejects_neither_or_both_sources() {
+                for fields in ["", ", value = 'token', file = '/token'"] {
+                    let body = format!("client.auth = {{ type = 'bearer'{fields} }}");
+
+                    assert_eq!(
+                        rejection(&body),
+                        "client.auth requires exactly one of value or file",
+                        "{body}"
+                    );
+                }
+            }
+
+            #[test]
+            fn rejects_a_file_path_that_is_not_absolute_or_under_home() {
+                for file in ["token", "./token", "../token", "~other/token", ""] {
+                    let body = format!("client.auth = {{ type = 'bearer', file = '{file}' }}");
+
+                    assert_eq!(
+                        rejection(&body),
+                        "client.auth.file must be an absolute or ~/ path",
+                        "{file:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    mod inline_secret {
+        use super::*;
+
+        #[test]
+        fn passes_a_header_safe_value_through() {
+            assert_eq!(
+                inline_secret("client.auth.value", "token".to_owned()).unwrap(),
+                "token"
+            );
+        }
+
+        #[test]
+        fn rejects_an_empty_value_naming_the_key() {
+            let err = inline_secret("client.auth.value", String::new()).unwrap_err();
+
+            assert_eq!(format!("{err:#}"), "client.auth.value must not be empty");
+        }
+
+        #[test]
+        fn rejects_a_value_no_header_can_carry() {
+            let err = inline_secret("client.auth.value", "bad\u{7}key".to_owned()).unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                "invalid client.auth.value: expected an HTTP header value: \
+                 failed to parse header value"
+            );
         }
     }
 }
