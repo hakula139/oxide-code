@@ -264,10 +264,10 @@ fn bottom_row(area: Rect, x: u16, width: u16) -> Rect {
 }
 
 fn jump_overlay_label(new_count: u32, width: usize) -> String {
-    let jump = hint(CTRL_END, "jump to bottom");
     if width < JUMP_LABEL_FULL_MIN_WIDTH {
         return CTRL_END.to_string();
     }
+    let jump = hint(CTRL_END, "jump to bottom");
     let label = match new_count {
         0 => jump,
         1 => format!("1 new message · {jump}"),
