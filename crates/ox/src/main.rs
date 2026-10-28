@@ -6,7 +6,7 @@ mod session_list;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal as _, Write as _};
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
@@ -35,7 +35,7 @@ use ox_core::util::tls::PlatformTrust;
 use ox_tui::Startup;
 use ox_tui::slash::is_built_in;
 use ox_tui::terminal;
-use ox_tui::theme::resolve_theme;
+use ox_tui::theme::{ResolvedTheme, resolve_theme};
 
 use self::driver::Exit;
 use self::driver::headless::OutputFormat;
@@ -88,9 +88,53 @@ struct Cli {
     #[arg(value_parser = non_blank)]
     prompt: Option<String>,
 
+    /// Answer the prompt and any piped stdin without the TUI, print the reply, and exit.
+    #[arg(short, long)]
+    print: bool,
+
+    /// With `--print`, print the reply as text, one JSON result, or a JSON line per event.
+    #[arg(
+        long,
+        value_enum,
+        value_name = "FORMAT",
+        default_value_t,
+        requires = "print"
+    )]
+    output: OutputFormat,
+
+    /// Use a bare REPL that reads one prompt per line in place of the TUI.
+    #[arg(long)]
+    no_tui: bool,
+
+    /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
+    #[arg(long, value_name = "MODE", value_parser = ModeParser::new())]
+    mode: Option<Mode>,
+
+    /// Continue the most recent session in this project.
+    #[arg(short = 'c', long = "continue", conflicts_with = "resume")]
+    r#continue: bool,
+
+    /// Resume the session with this ID prefix or in this `ox export` file, or pick one from a list
+    /// without a value.
+    #[expect(
+        clippy::option_option,
+        reason = "encodes three CLI states: \
+                  absent (None), flag only (Some(None)), flag with value (Some(Some))"
+    )]
+    #[arg(short, long, value_name = "SESSION", num_args = 0..=1, value_parser = non_blank)]
+    resume: Option<Option<String>>,
+
     /// Widen `--list`, `--continue`, and `--resume` from this project to every project.
     #[arg(short, long, requires = "scope")]
     all: bool,
+
+    /// List recent sessions and exit.
+    #[arg(
+        short,
+        long,
+        conflicts_with_all = SESSION_ARGS
+    )]
+    list: bool,
 
     /// With `--list`, show only archived sessions.
     #[arg(
@@ -99,10 +143,6 @@ struct Cli {
         conflicts_with_all = SESSION_ARGS
     )]
     archived: bool,
-
-    /// Continue the most recent session in this project.
-    #[arg(short = 'c', long = "continue", conflicts_with = "resume")]
-    r#continue: bool,
 
     /// Cap `--list` to the N most-recent sessions, or `0` for no cap.
     #[arg(
@@ -115,46 +155,6 @@ struct Cli {
         default_value_t = DEFAULT_SESSION_LIST_LIMIT
     )]
     limit: usize,
-
-    /// List recent sessions and exit.
-    #[arg(
-        short,
-        long,
-        conflicts_with_all = SESSION_ARGS
-    )]
-    list: bool,
-
-    /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
-    #[arg(long, value_name = "MODE", value_parser = ModeParser::new())]
-    mode: Option<Mode>,
-
-    /// Use a bare REPL that reads one prompt per line in place of the TUI.
-    #[arg(long)]
-    no_tui: bool,
-
-    /// With `--print`, print the reply as text, one JSON result, or a JSON line per event.
-    #[arg(
-        long,
-        value_enum,
-        value_name = "FORMAT",
-        default_value_t,
-        requires = "print"
-    )]
-    output: OutputFormat,
-
-    /// Answer the prompt and any piped stdin without the TUI, print the reply, and exit.
-    #[arg(short, long)]
-    print: bool,
-
-    /// Resume the session with this ID prefix or in this `ox export` file, or pick one from a list
-    /// without a value.
-    #[expect(
-        clippy::option_option,
-        reason = "encodes three CLI states: \
-                  absent (None), flag only (Some(None)), flag with value (Some(Some))"
-    )]
-    #[arg(short, long, value_name = "SESSION", num_args = 0..=1, value_parser = non_blank)]
-    resume: Option<Option<String>>,
 }
 
 impl Cli {
@@ -225,32 +225,48 @@ impl Cli {
         matches!(self.resume, Some(None))
     }
 
-    /// Returns whether the run opens the TUI, which needs a terminal on stdout. Fails when the
-    /// session picker needs the TUI but stdout is not a terminal, or when the TUI would open with
-    /// stdin piped, since it reads keys from stdin.
-    fn tui_mode(&self, stdin_is_terminal: bool, stdout_is_terminal: bool) -> Result<bool> {
-        let tui_mode = !self.no_tui && !self.print && !self.list && stdout_is_terminal;
-        if tui_mode && !stdin_is_terminal {
+    /// What the run does. A session opens the TUI only with a terminal on stdout, and fails when
+    /// the TUI would open with stdin piped, since it reads keys from stdin, or when the session
+    /// picker needs the TUI but cannot have it.
+    fn run(&self, stdin_is_terminal: bool, stdout_is_terminal: bool) -> Result<Run> {
+        match &self.command {
+            Some(Command::Config {
+                action: ConfigAction::Check,
+            }) => return Ok(Run::CheckConfig),
+            Some(Command::Export { session }) => return Ok(Run::Export(session.clone())),
+            None => {}
+        }
+        if self.list {
+            return Ok(Run::List);
+        }
+        if self.print {
+            return Ok(Run::Session(Frontend::Print));
+        }
+        if self.no_tui || !stdout_is_terminal {
+            if self.opens_picker() {
+                bail!(
+                    "`--resume` without a session opens the picker in the TUI, which needs a \
+                     terminal on stdout. Pass the session's ID prefix to resume it directly."
+                );
+            }
+            return Ok(Run::Session(Frontend::Repl {
+                unattended: !stdin_is_terminal,
+            }));
+        }
+        if !stdin_is_terminal {
             bail!(
                 "stdin is not a terminal, so the TUI cannot read keys. Pass `-p` to answer the \
                  piped input, or `--no-tui` to read prompts from it."
             );
         }
-        if self.opens_picker() && !tui_mode {
-            bail!(
-                "`--resume` without a session opens the picker in the TUI, which needs a terminal \
-                 on stdout. Pass the session's ID prefix to resume it directly."
-            );
-        }
-        Ok(tui_mode)
+        Ok(Run::Session(Frontend::Tui {
+            picker: self.opens_picker().then(|| self.projects()),
+        }))
     }
 
-    /// The prompt a `--print` run answers, or `None` without `--print`. Exits with a usage error
-    /// when `--print` has neither a prompt argument nor text on stdin.
-    async fn headless_prompt(&self) -> Result<Option<String>> {
-        if !self.print {
-            return Ok(None);
-        }
+    /// The prompt a `--print` run answers. Exits with a usage error when there is neither a prompt
+    /// argument nor text on stdin.
+    async fn print_prompt(&self) -> Result<String> {
         let Some(prompt) = driver::headless::read_prompt(self.prompt.as_deref()).await? else {
             Self::command()
                 .error(
@@ -259,7 +275,7 @@ impl Cli {
                 )
                 .exit()
         };
-        Ok(Some(prompt))
+        Ok(prompt)
     }
 
     /// The projects `--list`, `--continue`, `--resume`, and the picker search.
@@ -389,6 +405,47 @@ enum ConfigAction {
     Check,
 }
 
+/// What a run of `ox` does, resolved once from its arguments and standard streams.
+#[derive(Debug, PartialEq, Eq)]
+enum Run {
+    CheckConfig,
+    /// `ox export`, with the ID prefix of the session to print.
+    Export(String),
+    /// `--list`, which prints and exits before reading stdin.
+    List,
+    Session(Frontend),
+}
+
+/// The frontend a session runs in.
+#[derive(Debug, PartialEq, Eq)]
+enum Frontend {
+    /// `--print`, which answers one prompt and never waits for approval.
+    Print,
+    /// The bare REPL, which nobody attends when its prompts come from piped stdin.
+    Repl { unattended: bool },
+    /// The TUI, with the projects the session picker searches when bare `--resume` opens it.
+    Tui { picker: Option<ProjectScope> },
+}
+
+impl Frontend {
+    /// Returns whether nobody can answer an approval request during the session.
+    fn unattended(&self) -> bool {
+        matches!(self, Self::Print | Self::Repl { unattended: true })
+    }
+}
+
+/// A frontend with what it reads before the engine starts.
+enum Launch {
+    Print {
+        prompt: String,
+    },
+    Repl,
+    Tui {
+        theme: Box<ResolvedTheme>,
+        picker: Option<ProjectScope>,
+    },
+}
+
 fn main() -> ExitCode {
     try_main().unwrap_or_else(|e| {
         _ = writeln!(
@@ -421,40 +478,44 @@ fn try_main() -> Result<ExitCode> {
 
 async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     let cli = Cli::parse_valid();
-    match &cli.command {
-        Some(Command::Config {
-            action: ConfigAction::Check,
-        }) => return check_config(),
-        Some(Command::Export { session }) => return export(session),
-        None => {}
+    match cli.run(io::stdin().is_terminal(), io::stdout().is_terminal())? {
+        Run::CheckConfig => check_config(),
+        Run::Export(session) => export(&session),
+        Run::List => list_sessions(&cli, offset_error),
+        Run::Session(frontend) => run_session(cli, frontend, offset_error).await,
     }
+}
 
-    let tui_mode = cli.tui_mode(io::stdin().is_terminal(), io::stdout().is_terminal())?;
-    let _log_guard = util::log::init_tracing(tui_mode)?;
-    if let Some(e) = offset_error {
-        warn!(error = %e, "failed to read the local timezone offset, so times show in UTC");
-    }
-    let cwd = env::current_dir().context("failed to read the current working directory")?;
+async fn run_session(
+    cli: Cli,
+    frontend: Frontend,
+    offset_error: Option<IndeterminateOffset>,
+) -> Result<Exit> {
+    let tui = matches!(frontend, Frontend::Tui { .. });
+    let _log_guard = start_logging(tui, offset_error)?;
+    let cwd = current_dir()?;
     let project_root = util::path::project_root(&cwd);
-
-    if cli.list {
-        list_sessions(&cli, &cwd, &project_root)?;
-        return Ok(Exit::Success);
-    }
-
-    let headless_prompt = cli.headless_prompt().await?;
 
     let mut config = Config::load(&cwd)?;
     if let Some(mode) = cli.mode {
         config.apply_mode_flag(mode);
     }
-    if headless_prompt.is_some() || !io::stdin().is_terminal() {
+    if frontend.unattended() {
         config.set_unattended();
     }
     let show_thinking = config.show_thinking;
-    let theme = tui_mode.then(|| resolve_theme(&config.theme)).transpose()?;
+    let launch = match frontend {
+        Frontend::Print => Launch::Print {
+            prompt: cli.print_prompt().await?,
+        },
+        Frontend::Repl { .. } => Launch::Repl,
+        Frontend::Tui { picker } => Launch::Tui {
+            theme: Box::new(resolve_theme(&config.theme)?),
+            picker,
+        },
+    };
     // Before resolving the session, since resuming an archived session unarchives it.
-    config.resolve_auth(tui_mode).await?;
+    config.resolve_auth(tui).await?;
 
     let store = SessionStore::open(&cwd, &project_root)?;
     let git_branch = git::current_branch(&cwd).await;
@@ -471,16 +532,15 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         cli.projects(),
     )
     .await?;
-    if prior == ArchiveState::Archived && !tui_mode {
+    if prior == ArchiveState::Archived && !tui {
         _ = writeln!(
             io::stderr(),
             "{}",
             archive_notice(&handle.session_id(), ArchiveState::Active)
         );
     }
-    let picker = cli.opens_picker().then(|| cli.projects());
 
-    let generates_titles = tui_mode;
+    let generates_titles = tui;
     let engine = Engine::new(
         &config,
         PlatformTrust(config.extra_ca_certs.clone()),
@@ -494,12 +554,12 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     )
     .await?;
 
-    if let Some(prompt) = headless_prompt {
-        return Ok(driver::headless::run(engine, show_thinking, &prompt, cli.output).await?);
-    }
-
-    let Some(theme) = theme else {
-        return driver::repl::run(engine, show_thinking, cli.prompt).await;
+    let (theme, picker) = match launch {
+        Launch::Print { prompt } => {
+            return Ok(driver::headless::run(engine, show_thinking, &prompt, cli.output).await?);
+        }
+        Launch::Repl => return driver::repl::run(engine, show_thinking, cli.prompt).await,
+        Launch::Tui { theme, picker } => (theme, picker),
     };
 
     let startup = Startup {
@@ -512,7 +572,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     // Boxed, since on Windows this future passes clippy's 16 KiB `large_futures` threshold.
     let signal = Box::pin(ox_tui::run(
         engine,
-        theme,
+        *theme,
         config.snapshot(),
         startup,
         driver::shutdown_signal(),
@@ -525,8 +585,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
 /// it prints the startup and theme notices, each file read, and a verdict.
 fn check_config() -> Result<Exit> {
     _ = util::log::init_tracing(false)?;
-    let cwd = env::current_dir().context("failed to read the current working directory")?;
-    let check = Config::check(&cwd)?;
+    let check = Config::check(&current_dir()?)?;
     let theme = resolve_theme(&check.theme)?;
 
     let mut stderr = io::stderr().lock();
@@ -543,21 +602,38 @@ fn check_config() -> Result<Exit> {
 
 fn export(prefix: &str) -> Result<Exit> {
     _ = util::log::init_tracing(false)?;
-    let cwd = env::current_dir().context("failed to read the current working directory")?;
+    let cwd = current_dir()?;
     let store = SessionStore::open(&cwd, &util::path::project_root(&cwd))?;
     export_session(&store, prefix, &mut io::BufWriter::new(io::stdout().lock()))?;
     Ok(Exit::Success)
 }
 
-fn list_sessions(cli: &Cli, cwd: &Path, project_root: &Path) -> Result<()> {
-    let store = SessionStore::open(cwd, project_root)?;
+fn list_sessions(cli: &Cli, offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
+    let _log_guard = start_logging(false, offset_error)?;
+    let cwd = current_dir()?;
+    let store = SessionStore::open(&cwd, &util::path::project_root(&cwd))?;
     session_list::write(
         &mut io::stdout().lock(),
         &store,
         cli.list_scope(),
         cli.limit,
         terminal::stdout_width(),
-    )
+    )?;
+    Ok(Exit::Success)
+}
+
+/// Starts logging, to the log file under the TUI and to stderr otherwise, and reports a failed
+/// local offset lookup. Returns the guard that must live until exit to flush the log file.
+fn start_logging(tui: bool, offset_error: Option<IndeterminateOffset>) -> Result<impl Sized> {
+    let guard = util::log::init_tracing(tui)?;
+    if let Some(e) = offset_error {
+        warn!(error = %e, "failed to read the local timezone offset, so times show in UTC");
+    }
+    Ok(guard)
+}
+
+fn current_dir() -> Result<PathBuf> {
+    env::current_dir().context("failed to read the current working directory")
 }
 
 #[cfg(test)]
@@ -885,27 +961,66 @@ mod tests {
             }
         }
 
-        mod tui_mode {
+        mod run {
             use super::*;
 
-            /// A case: its arguments, whether stdin and stdout are terminals, and the mode or the
+            /// A case: its arguments, whether stdin and stdout are terminals, and the run or the
             /// message it rejects with.
-            type ModeCase = (
+            type RunCase = (
                 &'static [&'static str],
                 bool,
                 bool,
-                Result<bool, &'static str>,
+                Result<Run, &'static str>,
             );
 
             #[test]
-            fn opens_the_tui_only_with_the_terminals_it_needs() {
-                let cases: [ModeCase; 9] = [
-                    (&["ox"], true, true, Ok(true)),
+            fn follows_the_flags_and_opens_the_tui_only_with_the_terminals_it_needs() {
+                let tui = |picker| Ok(Run::Session(Frontend::Tui { picker }));
+                let repl = |unattended| Ok(Run::Session(Frontend::Repl { unattended }));
+                let cases: [RunCase; 16] = [
+                    (
+                        &["ox", "config", "check"],
+                        false,
+                        false,
+                        Ok(Run::CheckConfig),
+                    ),
+                    (
+                        &["ox", "export", "abc"],
+                        false,
+                        false,
+                        Ok(Run::Export("abc".to_owned())),
+                    ),
+                    (&["ox", "--list"], false, true, Ok(Run::List)),
+                    (
+                        &["ox", "-p", "hi"],
+                        true,
+                        true,
+                        Ok(Run::Session(Frontend::Print)),
+                    ),
+                    (
+                        &["ox", "-p"],
+                        false,
+                        false,
+                        Ok(Run::Session(Frontend::Print)),
+                    ),
+                    (&["ox"], true, true, tui(None)),
+                    (&["ox", "-c", "hi"], true, true, tui(None)),
                     (&["ox"], false, true, Err("stdin is not a terminal")),
-                    (&["ox"], true, false, Ok(false)),
-                    (&["ox", "--no-tui"], true, true, Ok(false)),
-                    (&["ox", "-p", "hi"], true, true, Ok(false)),
-                    (&["ox", "--resume"], true, true, Ok(true)),
+                    (&["ox"], true, false, repl(false)),
+                    (&["ox", "--no-tui"], true, true, repl(false)),
+                    (&["ox", "--no-tui"], false, true, repl(true)),
+                    (
+                        &["ox", "--resume"],
+                        true,
+                        true,
+                        tui(Some(ProjectScope::Current)),
+                    ),
+                    (
+                        &["ox", "--resume", "--all"],
+                        true,
+                        true,
+                        tui(Some(ProjectScope::Every)),
+                    ),
                     (
                         &["ox", "--resume"],
                         true,
@@ -929,10 +1044,10 @@ mod tests {
                 for (args, stdin_is_terminal, stdout_is_terminal, expected) in cases {
                     let cli = Cli::try_parse_from(args).unwrap();
 
-                    let result = cli.tui_mode(stdin_is_terminal, stdout_is_terminal);
+                    let result = cli.run(stdin_is_terminal, stdout_is_terminal);
 
                     match (result, expected) {
-                        (Ok(mode), Ok(expected)) => assert_eq!(mode, expected, "{args:?}"),
+                        (Ok(run), Ok(expected)) => assert_eq!(run, expected, "{args:?}"),
                         (Err(error), Err(message)) => {
                             assert!(error.to_string().contains(message), "{args:?}: {error}");
                         }
@@ -1019,6 +1134,26 @@ mod tests {
                 ),
                 "{error}",
             );
+        }
+    }
+
+    mod frontend {
+        use super::*;
+
+        mod unattended {
+            use super::*;
+
+            #[test]
+            fn holds_for_print_and_a_repl_on_piped_stdin() {
+                for (frontend, expected) in [
+                    (Frontend::Print, true),
+                    (Frontend::Repl { unattended: true }, true),
+                    (Frontend::Repl { unattended: false }, false),
+                    (Frontend::Tui { picker: None }, false),
+                ] {
+                    assert_eq!(frontend.unattended(), expected, "{frontend:?}");
+                }
+            }
         }
     }
 }
