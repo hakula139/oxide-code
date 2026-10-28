@@ -184,13 +184,12 @@ impl App {
 
     pub(super) fn apply_modal_action(&mut self, action: ModalAction) {
         match action {
-            ModalAction::Cancelled => self.cancel_theme_preview(),
             ModalAction::Dispatch(action) => self.dispatch_action(action),
             ModalAction::SystemMessage(msg) => self.chat.push_system_message(msg),
         }
     }
 
-    fn cancel_theme_preview(&mut self) {
+    fn revert_theme_preview(&mut self) {
         if let Some(theme) = self.preview_theme_snapshot.take() {
             self.apply_theme(&theme);
         }
@@ -209,7 +208,6 @@ impl App {
     }
 
     pub(super) fn clear_modals(&mut self) {
-        self.cancel_theme_preview();
         for action in self.modals.clear() {
             self.apply_modal_action(action);
         }
@@ -265,6 +263,7 @@ impl App {
             }
             Action::CycleMode(direction) => self.cycle_mode(direction),
             Action::PreviewTheme(theme) => self.preview_theme(theme),
+            Action::RevertThemePreview => self.revert_theme_preview(),
             Action::SwapTheme(theme) => self.swap_theme(theme),
         }
     }
@@ -729,7 +728,7 @@ mod tests {
         #[tokio::test]
         async fn a_modal_takes_keys_before_the_input() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Dispatch(
+            app.push_modal(Box::new(ScriptedModal::submitting(ModalAction::Dispatch(
                 Action::Op(Op::Interrupt),
             ))));
 
@@ -830,7 +829,7 @@ mod tests {
         #[test]
         fn cancelling_a_modal_closes_it_without_dispatching() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            app.push_modal(Box::new(ScriptedModal::new()));
 
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
 
@@ -1290,13 +1289,13 @@ mod tests {
         use super::*;
 
         #[test]
-        fn cancel_without_snapshot_is_a_noop() {
-            // Modals that never previewed (e.g. /model picker) cancel through the same
-            // ModalAction::Cancelled path, so the rollback arm must skip cleanly with no snapshot.
+        fn a_revert_without_a_preview_keeps_the_theme() {
+            // The `/theme` modal reverts on every cancel, including Enter on its original row
+            // before any preview.
             let (mut app, _rx, _event_tx) = test_app(None);
             let original_text = app.theme.text;
 
-            app.apply_modal_action(ModalAction::Cancelled);
+            app.apply_modal_action(ModalAction::Dispatch(Action::RevertThemePreview));
 
             assert!(app.preview_theme_snapshot.is_none());
             assert_eq!(app.theme.text, original_text);
@@ -1357,7 +1356,9 @@ mod tests {
         fn rolls_back_theme_preview() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let original = app.theme.clone();
-            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            let mut picker = ScriptedModal::new();
+            picker.cancel_action = Some(ModalAction::Dispatch(Action::RevertThemePreview));
+            app.push_modal(Box::new(picker));
             app.dispatch_action(Action::PreviewTheme(latte()));
 
             app.clear_modals();
@@ -2215,7 +2216,7 @@ mod tests {
         #[test]
         fn saved_archive_retains_ownership_and_reports_after_the_picker_closes() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            let modal = ScriptedModal::new(ModalAction::Cancelled);
+            let modal = ScriptedModal::new();
             let observed = Arc::clone(&modal.updates);
             app.push_modal(Box::new(modal));
             let target = SavedTarget::Prefix("saved".to_owned());
@@ -2570,14 +2571,13 @@ mod tests {
         }
 
         #[test]
-        fn then_modal_cancel_restores_the_theme_from_before_the_first_preview() {
-            // Esc / Ctrl+C surface as ModalAction::Cancelled, so the snapshot must roll back.
+        fn then_a_revert_restores_the_theme_from_before_the_first_preview() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let original = app.theme.clone();
             app.dispatch_action(Action::PreviewTheme(latte()));
             app.dispatch_action(Action::PreviewTheme(built_in_theme("frappe")));
 
-            app.apply_modal_action(ModalAction::Cancelled);
+            app.dispatch_action(Action::RevertThemePreview);
 
             assert!(
                 app.preview_theme_snapshot.is_none(),
@@ -2614,7 +2614,7 @@ mod tests {
             assert_eq!(app.session_info.config.provenance.theme, Source::Session);
             assert_eq!(app.theme.text, previewed.text);
 
-            app.apply_modal_action(ModalAction::Cancelled);
+            app.dispatch_action(Action::RevertThemePreview);
 
             assert_eq!(
                 app.session_info.config.theme_name, "latte",

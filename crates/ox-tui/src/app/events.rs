@@ -556,7 +556,6 @@ mod tests {
     };
     use crate::clipboard::CopyError;
     use crate::glyphs::INTERRUPTED_MARKER;
-    use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
     use crate::session_info::testing::unknown_model_session_info;
     use crate::slash::{ResumePicker, SlashOutcome, WorkingTreeDiff};
@@ -1822,7 +1821,7 @@ mod tests {
         fn session_compacted_mid_turn_keeps_the_open_modal_and_its_theme_preview() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let latte = builtin::find("latte").expect("a built-in theme");
-            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            app.push_modal(Box::new(ScriptedModal::new()));
             app.dispatch_action(Action::PreviewTheme(latte));
             let previewed = app.theme.text;
 

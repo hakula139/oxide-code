@@ -159,6 +159,10 @@ impl Modal for ThemePicker {
         let theme = self.list.selected().theme;
         ModalKey::Emit(ModalAction::Dispatch(Action::PreviewTheme(theme)))
     }
+
+    fn on_cancel(&mut self) -> Option<ModalAction> {
+        Some(ModalAction::Dispatch(Action::RevertThemePreview))
+    }
 }
 
 #[cfg(test)]
@@ -390,6 +394,22 @@ mod tests {
                         "{code:?} must be consumed",
                     );
                 }
+            }
+        }
+
+        mod on_cancel {
+            use super::*;
+
+            #[test]
+            fn reverts_the_preview() {
+                let mut p = ThemePicker::new("mocha");
+
+                let action = p.on_cancel();
+
+                assert!(matches!(
+                    action,
+                    Some(ModalAction::Dispatch(Action::RevertThemePreview))
+                ));
             }
         }
     }

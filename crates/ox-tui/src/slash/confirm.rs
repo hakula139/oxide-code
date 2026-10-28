@@ -379,10 +379,7 @@ mod tests {
 
                 let outcome = stack.handle_key(&event);
 
-                assert!(
-                    matches!(outcome, Some(ModalAction::Cancelled)),
-                    "{event:?}: {outcome:?}"
-                );
+                assert!(outcome.is_none(), "{event:?}: {outcome:?}");
                 assert!(!stack.is_active());
             }
         }
