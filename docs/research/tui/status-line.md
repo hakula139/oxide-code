@@ -16,8 +16,6 @@ The useful data split is provider-local versus external:
 
 Codex exposes a roster-style `tui.status_line` array of built-in item names. At Codex commit ce0323f2f (2026-10-17), the default roster is `model-with-reasoning`, `current-dir`, and `thread-name`. Other items include the git branch, PR number, run state, context used, five-hour and weekly limits, thread title, and task progress (`StatusLineItem` in `codex-rs/tui/src/bottom_pane/status_line_setup.rs`).
 
-The useful part for oxide-code is the ordered roster, where users can place trustworthy built-in segments without adopting a command DSL.
-
 ## opencode (TypeScript)
 
 opencode keeps usage in a fixed prompt footer with no configurable status line. It derives context from the latest assistant message usage, includes cache read and cache write tokens, and sums assistant-message cost across the session. Context percentage disappears when the provider model has no advertised context limit.
@@ -37,17 +35,3 @@ Anthropic's [pricing page](https://platform.claude.com/docs/en/about-claude/pric
 Haiku 5.5 picks its tier per request from the prompt size (input + cache creation + cache read), so session cost has to be summed request by request.
 
 Cost display should stay best-effort because account discounts, marketplace billing, data residency, fast mode, and server-side tool pricing can change the final bill.
-
-## Patterns Worth Borrowing for oxide-code
-
-1. **Typed ordered roster.** A list of built-in segment names is simpler and safer than a command DSL for the first version.
-2. **Local usage first.** Context use and in-process session cost should come from provider usage already observed by oxide-code.
-3. **Cache-aware accounting.** Context and cost should include cache creation and cache read tokens because prompt caching is part of the real request shape.
-4. **Graceful omission.** Segments with no data should disappear entirely.
-5. **Theme-owned colors.** Status-line colors should come from the active theme.
-6. **Header-borne account limits.** Claude Code reads a subscription's five-hour and weekly utilization from the `anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}` headers on every response. That keeps the limits current without the extra `/api/oauth/usage` request its `/usage` screen makes.
-
-## Patterns Not Adopted
-
-1. **ccusage integration.** Block and daily billing are useful, but shelling out to an external npm package adds installation, trust, cache, and schema concerns.
-2. **Command-based status lines.** Claude Code's command hook moves rendering, errors, and latency outside the Rust UI loop. Tracked in [#166](https://github.com/hakula139/oxide-code/issues/166).

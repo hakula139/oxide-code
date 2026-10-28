@@ -4,7 +4,7 @@ Research on mouse handling in terminal AI CLIs: capture defaults, click affordan
 
 ## Claude Code (TypeScript)
 
-The most polished mouse layer of the three peers. Claude Code's `src/utils/fullscreen.ts` reads `CLAUDE_CODE_DISABLE_MOUSE` to gate the entire mouse pipeline, with a separate `CLAUDE_CODE_DISABLE_MOUSE_CLICKS` env var that lets wheel work while blocking click events.
+The most polished mouse layer of Claude Code, Codex, and opencode. Claude Code's `src/utils/fullscreen.ts` reads `CLAUDE_CODE_DISABLE_MOUSE` to gate the entire mouse pipeline, with a separate `CLAUDE_CODE_DISABLE_MOUSE_CLICKS` env var that lets wheel work while blocking click events.
 
 The mode bundle enabled by `src/ink/termio/dec.ts` is `?1000h`, `?1002h`, `?1003h`, `?1006h`, the same shape as crossterm's `EnableMouseCapture`. Disabled via the matching `...l` set on suspend or exit.
 
@@ -84,15 +84,3 @@ The clean workaround: emit the OSC 8 envelope **out-of-band**, after `terminal.d
 Some terminals skip `?1003` for performance. SGR (`?1006`) is the only encoding modern crossterm reads, but the others are needed for older terminals that don't speak SGR. There's no portable terminal primitive that delivers wheel only without click / drag, so claiming wheel implies claiming the rest.
 
 Terminal-side wheel translation through DECSET 1007 doesn't survive tmux. With `mouse on`, tmux receives the wheel itself and forwards it to a pane only when the pane reports the mouse (`#{mouse_any_flag}`). Otherwise tmux 3.6's default binding passes the event to a pane that drops it, and older defaults or custom bindings enter copy mode.
-
-## User-Environment Signal
-
-oxide-code has to work inside tmux with `mouse on`. With `set -g set-clipboard on`, OSC 52 from an inner app passes through to the outer terminal. Wheel-up enters copy-mode when the pane isn't already receiving mouse events. An app that captures mouse intercepts those gestures. It also has to work in VS Code's and Cursor's integrated terminals, which are xterm.js-based. Those have looser OSC parsing than xterm proper, so any per-cell escape sequence has to use the safest forms, such as the BEL terminator.
-
-## Patterns Worth Borrowing for oxide-code
-
-Wheel scrolling has to work inside tmux with `mouse on`, and DECSET 1007 can't deliver that. Claude Code and Codex both capture the mouse in fullscreen, so oxide-code does the same:
-
-- **Mouse capture.** `enter_tui_mode` enables `EnableMouseCapture`, and the chat scrolls on wheel events. Clicks and drags reach the app, and the terminal's bypass modifier still gives native selection.
-- **App-side selection.** Both peers keep selection usable under capture by implementing it in the app, so oxide-code selects chat text itself and copies on release. Like Codex, a local session writes the native clipboard through `arboard`, which works under iTerm2's and Terminal.app's default settings, where OSC 52 does not, and avoids Cursor's non-ASCII mangling. Inside tmux it also hands the text to `tmux load-buffer -w`, which works under the default `set-clipboard external`. A remote session outside tmux writes OSC 52.
-- **OSC 8 on the PR segment, emitted out-of-band after `terminal.draw()` flushes.** Capturing the link rect + visible cells at render time and writing the envelope directly to the crossterm backend avoids both ratatui traps: `Buffer::set_string` no longer filters our control chars, and `Buffer::diff` no longer sees a 30-byte URL as one cell symbol. BEL (`\x07`) avoids xterm.js ST parsing leaks in self-contained per-cell closers.

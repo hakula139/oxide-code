@@ -21,7 +21,7 @@ The tool returns its list in `ToolOutput::tasks`. Immediately after the call's `
 
 - **TUI.** A task panel above the queued-prompt preview opens with a blank row that sets it apart from the chat, then uses up to six rows for tasks. For longer lists, it shows five tasks and a final row counting the rest, such as `... +3 tasks`. The window starts one task before the task in progress, or before the first unfinished task if none is in progress, keeping the step just finished beside the work ahead. The input, popup, modal, and queued-prompt preview get their rows first. A shorter panel keeps its count row and gives up the gap if retaining it would leave no room for a task row. Markers are `○` for pending, `●` for in progress, and `✓` for completed. The opt-in `task-progress` status-line segment shows `Tasks: 1/3` while the list contains a task.
 - **REPL.** `--no-tui` prints the list to stderr after each update, under a `Tasks: 1/3` header.
-- **Headless.** Every output format prints the list to stderr, as the REPL does. `stream-json` output also includes the `tasks_updated` event and the `tasks` result view, as described in the [headless guide](../../guide/headless.md#events).
+- **Headless.** Every output format prints the list to stderr, as the REPL does. `stream-json` output also includes the `tasks_updated` event and the `tasks` result view, as described in the [headless guide](../guide/headless.md#events).
 
 ## Persistence
 

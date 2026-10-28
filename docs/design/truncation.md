@@ -2,14 +2,12 @@
 
 Two-layer truncation combines per-tool view-shape caps with a centralized byte-budget safety net. Output cut by the dispatcher cap or a `bash` pipe capture is saved in full to a spill file the model can read back.
 
-## Implementation
-
-### Centralized Dispatcher Cap
+## Centralized Dispatcher Cap
 
 - `MAX_OUTPUT_BYTES = 128 KiB`: enforced on every tool output via `cap_output()`.
 - `cap_output(content, spill) -> String`: for content over the cap, writes the whole content to the call's spill file, then keeps up to half the cap left after the marker from each end around a `... [N bytes omitted, full output saved to <path>] ...` marker, preserving setup context and the final outcome. The head ends and the tail starts at a line boundary when a line break lies within `LINE_SNAP_BYTES = 1 KiB` of the cut, so the lines beside the marker are whole, while a line longer than that window keeps the UTF-8 boundary cut. A cut that already falls at a line boundary stays put. The dropped partial lines, and the line break beside the marker, count in its omitted total. Because the marker counts against the cap, a long spill path or a failure note leaves less room for the head and tail and never pushes the result past `MAX_OUTPUT_BYTES`. `run_capped` calls it on the blocking thread pool because it writes the whole content at once.
 
-### Spill Files
+## Spill Files
 
 - **Location**: `store::artifact_dir` designates the directory beside a session file, named after the session ID, that holds the session's artifacts, with spill files placed in its `tool-results/` child. For a session in the store, this is `$XDG_DATA_HOME/ox/sessions/<project>/<session-id>/`, and a session resumed from a file outside the store spills beside that file. Because the session handle derives the directory from the file its writer creates or resumes and the engine passes the live handle's directory with each dispatch, new spills land with the session in use after `/clear` or `/resume`.
 - **Names**: Each file name begins with the call's tool use ID, replacing every character other than an ASCII letter, digit, `-`, or `_` with `_`. The dispatcher writes `<id>.txt`, a foreground `bash` call writes `<id>.stdout.txt` and `<id>.stderr.txt`, and the `n`th read of a background shell by `bash_output` or `bash_stop` writes `<id>.<n>.stdout.txt` and `<id>.<n>.stderr.txt`, where `<id>` is the call that started the shell.
@@ -17,7 +15,7 @@ Two-layer truncation combines per-tool view-shape caps with a centralized byte-b
 - **Size**: A file keeps at most `MAX_SPILL_BYTES`, equal to `MAX_TRACKED_FILE_SIZE` so `read` can open every spill, and beyond that limit the marker says `first 10 MiB of output saved to <path>`. If creating or writing the file fails, the result is still truncated, and the marker names the error in place of the path.
 - **Access and cleanup**: `read` and `grep` open spill files without prompting, while editing prompts only when the file lies in oxide-code's data directory, so the spills of a session resumed from a file elsewhere lack that protection ([permissions](permissions.md#shipped-defaults)). `/delete` removes the session's directory along with its session file, and archiving keeps both.
 
-### Per-Tool View-Shape Caps
+## Per-Tool View-Shape Caps
 
 The per-line caps below go through `truncate_line(line, max_chars)`, which appends a `[N chars]` suffix with the line's full length.
 

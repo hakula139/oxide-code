@@ -28,7 +28,7 @@ Whenever a shell starts, exits, or stops, the engine emits `Event::BackgroundShe
 
 - **TUI.** `/status` lists each shell under a Background Shells heading, along with its state and command's first line.
 - **REPL.** `--no-tui` ignores the event, and the model receives output through `bash_output` results.
-- **Headless.** `stream-json` output includes the `background_shells_updated` event, as described in the [headless guide](../../guide/headless.md#events).
+- **Headless.** `stream-json` output includes the `background_shells_updated` event, as described in the [headless guide](../guide/headless.md#events).
 
 ## Design Decisions
 

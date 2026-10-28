@@ -177,7 +177,7 @@ Segments with no data, such as a missing git branch, an unopened pull request, c
 
 The usage limits come from Claude subscription sign-ins, which report how much of each window is spent with every response. A window disappears when it resets and remains gone until the next response reports it again. The [theming guide](theming.md#status-line-segments) lists the colors used by the context and usage-limit segments as a window fills.
 
-On a narrow row, lower-priority segments drop first, and the highest-priority segment is truncated if needed. [Status Line](../design/tui/status-line.md#narrow-rows) lists the utility order.
+On a narrow row, lower-priority segments drop first, and the highest-priority segment is truncated if needed. [Status Line](../design/status-line.md#narrow-rows) lists the utility order.
 
 `OX_STATUS_LINE` accepts the same segment names, comma-separated, with optional whitespace (`OX_STATUS_LINE="model, run-state"`). A value with no segments (`","`), an empty entry between commas (`"model,,run-state"`), or an unknown segment name fails startup with a parse error.
 
