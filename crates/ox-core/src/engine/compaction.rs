@@ -1203,7 +1203,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.transcript.set_messages(tool_heavy_transcript());
-                start_shell(&engine.shells, "sleep 30");
+                start_shell(&engine.shells, "sleep 30").await;
                 let mut ops = inert_ops();
 
                 let end = engine

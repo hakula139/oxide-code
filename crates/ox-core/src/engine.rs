@@ -1671,7 +1671,7 @@ mod tests {
                 let shells = Arc::clone(&engine.shells);
                 let mut handle = engine.spawn();
 
-                start_shell(&shells, "sleep 30");
+                start_shell(&shells, "sleep 30").await;
                 let listed = next_matching(&mut handle.events, |event| match event {
                     Event::BackgroundShellsUpdated(list) => Some(list),
                     _ => None,
