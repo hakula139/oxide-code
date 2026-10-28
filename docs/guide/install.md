@@ -8,7 +8,7 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 - **Linux**: x86_64 Linux with glibc 2.39 or later, such as Ubuntu 24.04, Debian 13, Fedora 40, or RHEL 10.
 - **Windows**: 10 or later on x86_64, with [Git for Windows](https://git-scm.com/downloads/win) and `git.exe` on `PATH`. The `bash` tool runs the `bash.exe` included with Git for Windows.
 - **Other platforms**: ARM Linux, Linux with an older glibc, and musl-based Linux such as Alpine need a source build through [Cargo](#from-source-via-cargo) or [Nix](#nix). Intel Macs need a source build through Cargo, since the flake does not support them.
-- **Network**: Outbound HTTPS access to `api.anthropic.com` or your [LLM gateway](configuration.md#llm-gateways). Claude account logins also exchange and refresh tokens through `platform.claude.com`.
+- **Network**: Outbound HTTPS access to `api.anthropic.com` or your [LLM gateway](authentication.md#llm-gateways). Claude account logins also exchange and refresh tokens through `platform.claude.com`.
 
 ## Install `ox`
 
@@ -37,11 +37,13 @@ sudo mv ox /usr/local/bin/
 # Windows x86_64 (Git Bash / MSYS). Under WSL, use the Linux commands above.
 curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-x86_64-pc-windows-msvc.zip"
 unzip oxide-code-x86_64-pc-windows-msvc.zip
+mkdir -p ~/bin
+mv ox.exe ~/bin/
 ```
 
 Each archive contains `ox`, `LICENSE`, and `THIRD-PARTY-NOTICES`. Each release also publishes an `oxide-code-<target>.sha256` checksum alongside the archive.
 
-Releases after `v0.1.0-alpha.2` also include a build provenance attestation linking each archive to the release workflow run that built it. To verify an archive with the GitHub CLI, download it to disk before extracting it:
+Each release includes a build provenance attestation linking each archive to the release workflow run that built it. To verify an archive with the GitHub CLI, download it to disk before extracting it:
 
 ```bash
 curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz"
@@ -129,11 +131,11 @@ File paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. A 
 
 The default `package` is built from the flake directly, so an override applied to `pkgs.oxide-code` does not reach it. To wrap or patch the package, apply `inputs.oxide-code.overlays.default` to your package set and set `programs.oxide-code.package` to your wrapper around `pkgs.oxide-code`.
 
-With `checkConfig` on, the build runs the configured package's [`ox config check`](configuration.md#checking-the-config) on the generated `config.toml`, so a typo or an invalid value fails `home-manager switch` with ox's own error. The check runs as a Nix build user with an empty scratch home directory and no credentials, inside the build sandbox where Nix enables one (macOS does not by default), so a wrapper `package` must start without your home directory or secrets.
+With `checkConfig` on, the build runs the configured package's [`ox config check`](configuration.md#checking-the-config) on the generated `config.toml`, so a typo or an invalid value fails `home-manager switch` with `ox`'s own error. The check runs as a Nix build user with an empty scratch home directory and no credentials, inside the build sandbox where Nix enables one (macOS does not by default), so a wrapper `package` must start without your home directory or secrets.
 
 Paths in `settings` resolve in that environment, where `~` names the scratch home and your own home directory is out of reach. Give a theme file as a Nix path, such as `tui.theme.base = ./theme.toml`, and write an extra root under your home directory with `~/`. Set `checkConfig = false` if the check still rejects a path that exists where `ox` runs.
 
-Generated settings enter the Nix store, so keep credentials in a separate secret file. Set `client.auth.file` to a quoted runtime path, and select its scheme as described in [Authentication](configuration.md#authentication):
+Generated settings enter the Nix store, so keep credentials in a separate secret file. Set `client.auth.file` to a quoted runtime path, and select its scheme as described in [Authentication](authentication.md):
 
 ```nix
 settings.client.auth = {

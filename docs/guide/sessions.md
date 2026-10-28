@@ -93,7 +93,7 @@ Inside the TUI, `/resume` (alias `/continue`) opens a session picker without res
 
 ### Deleting a Session
 
-Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm modal. Once the target is visible and the input burst has ended, **Y** deletes the session file and its saved tool output, and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirmation for any saved session except the live one.
+Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm modal. The modal ignores keys until you pause typing for 300 ms, so a keystroke typed ahead cannot confirm it. **Y** deletes the session file and its saved tool output, and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirmation for any saved session except the live one.
 
 ### Archiving a Session
 
@@ -116,18 +116,10 @@ In the TUI, `/rename` opens a title editor pre-filled with the current title, an
 
 Every title, whether it comes from the first prompt, the AI, or a typed `/rename <title>`, keeps only its first non-blank line and is cut short with `...` past 80 columns. The `/rename` editor stops taking input at 80 columns.
 
-## Session ID in Commands
-
-Each `bash` command the agent runs sees the session's ID in `OX_SESSION_ID`, so a script can tell which session started it.
-
 ## Security
 
 On Unix, session files are created with user-only permissions (`0600`) because they contain verbatim tool output, which may include secrets from bash commands.
 
 ## Headless and REPL Modes
 
-Sessions are recorded in every mode:
-
-- **TUI** (`ox`): Saved automatically.
-- **Bare REPL** (`ox --no-tui`): Saved automatically.
-- **Headless** (`ox -p "prompt"`): One turn, saved in a new session or appended to the one `-c` or `-r` names, useful for audit trails.
+Both the bare REPL (`ox --no-tui`) and headless runs (`ox -p`) save sessions. [Headless Mode](headless.md) describes how a headless run starts or continues one.

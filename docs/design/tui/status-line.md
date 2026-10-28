@@ -13,7 +13,6 @@ Segment render rules:
 - Return `None` when data is unavailable, so an absent branch, title, usage, or price renders no placeholder.
 - Use active theme styles, leaving color customization to theme overrides.
 - Join only rendered segments, so omitted segments do not leave extra separators.
-- Retain the highest-priority segment, truncating it if needed, then fit other segments from highest to lowest utility and render them in configured order. Smaller segments can use space left after a larger one is omitted. Run state has the highest utility. The permission mode ranks above the model in `plan` and `yolo`, and below it in `manual`.
 - The `model` and `model-with-effort` segments drop the `Claude` family prefix to save width (e.g., `Opus 5.5 (xhigh)`). Other surfaces (welcome screen, prompt environment, error blocks) keep the full `Claude Opus 5.5` label.
 - The pull request checks and review segments color their state with the theme's `success`, `warning`, `error`, and `muted` slots, and link the PR's checks and changed-files pages.
 - The review segment appears only when branch protection requires a review, because GitHub otherwise reports no review decision.
@@ -61,6 +60,10 @@ Claude Code's status line is a command you configure, and each line it prints be
 
 The default order tracks reading flow: location and branch orient the user, model and usage describe cost and context pressure, the permission mode says what the next call may do, and run state sits near the end because it changes most often.
 
+## Narrow Rows
+
+The status line retains the highest-priority segment, truncating it if needed, then fits the other segments from highest to lowest utility and renders them in configured order. A smaller segment can use space left after a larger one is omitted. From lowest to highest utility, the order is `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `permission-mode` in `manual` → `model` → `model-with-effort` → `permission-mode` in `plan` or `yolo` → `run-state`.
+
 ## Design Decisions
 
 1. **Typed segment roster.** A typed segment list is enough for first-party data and keeps rendering inside Ratatui, so the config needs no format DSL.
@@ -77,7 +80,8 @@ The default order tracks reading flow: location and branch orient the user, mode
 
 ## Related Issues
 
-A user-command segment is [#166](https://github.com/hakula139/oxide-code/issues/166), and pricing for other providers comes with the data-driven model catalog in [#152](https://github.com/hakula139/oxide-code/issues/152).
+- **A user-command segment** ([#166](https://github.com/hakula139/oxide-code/issues/166)).
+- **Pricing for other providers** ([#152](https://github.com/hakula139/oxide-code/issues/152)), with the data-driven model catalog.
 
 ## Sources
 

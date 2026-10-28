@@ -1,12 +1,12 @@
 # Terminal UI
 
-Running `ox` opens the terminal UI, which shows the chat, the input box, and the status line. [Configuration](configuration.md#tui-terminal-ui) covers the `[tui]` settings and the status-line segments, and [Theming](theming.md) covers the colors.
+Running `ox` opens the terminal UI, which shows the status line across the top row, the chat, and the input box. [Configuration](configuration.md#tui-terminal-ui) covers the `[tui]` settings and the status-line segments, and [Theming](theming.md) covers the colors.
 
 ## Write a Prompt
 
 - **Send**: Press **Enter** to send the prompt.
 - **New line**: Press **Shift+Enter** in terminals that report it, such as kitty, WezTerm, and Ghostty. **Alt+Enter** also inserts a new line. Elsewhere, Shift+Enter arrives as a plain Enter and sends the prompt. VS Code and Cursor support it once a keybinding sends ESC followed by Enter for Shift+Enter, as Claude Code's `/terminal-setup` installs. A paste inserts its text, line breaks included, without sending it.
-- **Edit**: **Ctrl+A** and **Ctrl+E** move to the start and end of the line, and **Alt+B** and **Alt+F** move by word. **Ctrl+W** deletes the word before the cursor, **Ctrl+K** deletes to the end of the line, and **Ctrl+Y** pastes the text they deleted. **Ctrl+U** undoes an edit, and **Ctrl+R** redoes it. **Ctrl+J** deletes to the start of the line, which readline binds to **Ctrl+U**.
+- **Edit**: **Ctrl+A** and **Ctrl+E** move to the start and end of the line, and **Alt+B** and **Alt+F** move by word. **Ctrl+W** deletes the word before the cursor, **Ctrl+K** deletes to the end of the line, and **Ctrl+Y** pastes the text they deleted. Three bindings differ from readline: **Ctrl+U** undoes an edit, **Ctrl+R** redoes it, and **Ctrl+J** deletes to the start of the line, where readline kills to the line start, searches history, and inserts a newline respectively.
 - **Alt keys on macOS**: Terminal.app, iTerm2, and VS Code send Alt shortcuts only once the Option key is set to act as Meta in their settings.
 - **Move between lines**: **Up** and **Down** move the cursor through a multi-line prompt. Where the cursor cannot move further, they scroll the chat.
 - **Slash commands**: Typing `/` at the start of the input opens the command popup. [Slash Commands](slash-commands.md) lists the commands and the popup keys.
