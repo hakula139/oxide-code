@@ -342,7 +342,9 @@ pub(crate) struct CommandTarget {
     segments: Vec<Segment>,
     /// The files its output redirections write, resolved like an edit's path.
     writes: Vec<Access>,
-    /// The files its input redirections read, resolved like a read's path.
+    /// The files it reads for certain, resolved like a read's path: each input redirection, each
+    /// file a wrapper option names, and each [certain](Operand::certain) operand of one of
+    /// [`READERS`] that names no tree it traverses.
     reads: Vec<Access>,
     /// The first construct the analysis does not recognize, as [`construct`] cuts it for a prompt.
     unrecognized: Option<String>,
@@ -430,13 +432,14 @@ pub(super) struct Segment {
     /// Where the program may start in `named`, first past every assignment and wrapper, then at
     /// each word past a wrapper option the analysis does not know.
     programs: Vec<usize>,
-    /// The files one of [`READERS`] may read, resolved like a read's path: each literal operand,
-    /// and each file a globbing one matches when the analysis runs. Empty for any other command.
+    /// The files one of [`READERS`] may read beyond those the command reads for certain, resolved
+    /// like a read's path: each tree it may traverse and each word whose role or matches the
+    /// analysis cannot pin. Empty for any other command.
     reads: Vec<ReaderPath<Access>>,
     /// Whether one of [`READERS`] takes a word whose files the analysis cannot list, such as one
     /// that expands a variable, so it may read any file.
     reads_anything: bool,
-    /// Whether it is a shipped known-safe read-only command, whose `reads` are all it reads, in a
+    /// Whether it is a shipped known-safe read-only command, whose reads the analysis lists, in a
     /// command that expands no variable anywhere.
     safe: bool,
 }
@@ -451,9 +454,9 @@ impl Segment {
         self.programs.iter().map(|&start| &self.named[start..])
     }
 
-    /// The files a known-safe read-only command reads, or `None` for any other command.
-    pub(super) fn safe_reads(&self) -> Option<&[ReaderPath<Access>]> {
-        self.safe.then_some(self.reads.as_slice())
+    /// Returns whether this is a known-safe read-only command.
+    pub(super) const fn is_safe(&self) -> bool {
+        self.safe
     }
 
     pub(super) fn reads(&self) -> &[ReaderPath<Access>] {
@@ -509,7 +512,7 @@ pub(super) struct ReaderPath<T> {
 }
 
 impl<T> ReaderPath<T> {
-    fn exact(path: T) -> Self {
+    const fn exact(path: T) -> Self {
         Self {
             path,
             recursive: false,
@@ -526,6 +529,31 @@ impl ReaderPath<String> {
                 .expect("a reader operand resolves to a path")
                 .is_file();
         ReaderPath { path, recursive }
+    }
+}
+
+/// A path a command may read, as its words name it, and how sure the analysis is that it does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Operand {
+    read: ReaderPath<String>,
+    /// Whether the word is a literal file argument in every supported argument order and build,
+    /// so the command reads it for certain unless it traverses a tree there.
+    certain: bool,
+}
+
+impl Operand {
+    const fn certain(path: String) -> Self {
+        Self {
+            read: ReaderPath::exact(path),
+            certain: true,
+        }
+    }
+
+    const fn possible(read: ReaderPath<String>) -> Self {
+        Self {
+            read,
+            certain: false,
+        }
     }
 }
 
@@ -949,7 +977,7 @@ impl Walk<'_> {
             .reads
             .iter()
             .cloned()
-            .map(ReaderPath::exact)
+            .map(Operand::certain)
             .collect();
         let mut reads_anything = false;
         let mut finds = Vec::new();
@@ -979,13 +1007,7 @@ impl Walk<'_> {
                 _ => {}
             }
         }
-        self.relative_path |= operands
-            .iter()
-            .any(|read| Path::new(&read.path).is_relative());
-        let reads = operands
-            .iter()
-            .map(|read| read.resolve(&mut self.paths))
-            .collect();
+        let reads = self.resolve_operands(&operands);
 
         let mut words: Vec<ShellWord> = all
             .iter()
@@ -1025,6 +1047,24 @@ impl Walk<'_> {
         for args in finds {
             self.find_actions(&all[args..], src);
         }
+    }
+
+    /// Resolves the `operands` of one simple command, recording each file it reads for certain as
+    /// the command's read and returning the rest.
+    fn resolve_operands(&mut self, operands: &[Operand]) -> Vec<ReaderPath<Access>> {
+        self.relative_path |= operands
+            .iter()
+            .any(|operand| Path::new(&operand.read.path).is_relative());
+        let mut possible = Vec::new();
+        for operand in operands {
+            let read = operand.read.resolve(&mut self.paths);
+            if operand.certain && !read.recursive {
+                self.reads.push(read.path);
+            } else {
+                possible.push(read);
+            }
+        }
+        possible
     }
 
     /// Weighs the program `name` that `words` run with their arguments: a shell whose literal
@@ -2613,7 +2653,7 @@ const TEST_OPERATORS: &[&str] = &["!", "!=", "(", ")", "<", "=", "==", ">", "]"]
 /// be literal and free of globs, so each file it reads is one the gate can check. Every word of a
 /// `test` or `[` call other than an option or a [`TEST_OPERATORS`] word counts as a file, so a
 /// string it compares reads as one too.
-fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<ReaderPath<String>>> {
+fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<Operand>> {
     let values = args
         .iter()
         .map(|word| word.value.as_deref().filter(|_| !word.glob))
@@ -2621,7 +2661,7 @@ fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<ReaderPath<String>>> {
     let files = || {
         let known: Vec<Option<&str>> = values.iter().copied().map(Some).collect();
         let operands = reader_args(name, &known);
-        (!operands.unknown).then(|| operands.files.into_iter().map(|(_, file)| file).collect())
+        (!operands.unknown).then(|| operands.reads().collect())
     };
     match name {
         ":" | "echo" | "export" | "false" | "printf" | "pwd" | "true" => Some(Vec::new()),
@@ -2630,13 +2670,13 @@ fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<ReaderPath<String>>> {
             values
                 .iter()
                 .filter(|value| !value.starts_with('-') && !TEST_OPERATORS.contains(value))
-                .map(|&value| ReaderPath::exact(value.to_owned()))
+                .map(|&value| Operand::possible(ReaderPath::exact(value.to_owned())))
                 .collect(),
         ),
         "cat" | "head" | "ls" | "tail" | "wc" => files(),
         "find" if !values.iter().any(|value| FIND_ACTIONS.contains(value)) => files(),
         "grep" if !values.iter().any(|value| is_recursive_grep(value)) => files(),
-        "sed" => sed_files(&values).map(|files| files.into_iter().map(ReaderPath::exact).collect()),
+        "sed" => sed_files(&values).map(|files| files.into_iter().map(Operand::certain).collect()),
         _ => None,
     }
 }
@@ -2720,8 +2760,9 @@ fn long_option(arg: &str) -> Option<&str> {
 
 /// The paths reader `name` may read, expanding whole words before assigning their argument roles.
 /// A multi-match expansion that can change roles leaves the reads unknown and keeps every possible
-/// named operand. Glob match ordering is not assumed, since bash's locale can change it.
-fn reader_operands(name: &str, args: &[Word], cwd: &Path) -> (Vec<ReaderPath<String>>, bool) {
+/// named operand, none of them certain. Glob match ordering is not assumed, since bash's locale can
+/// change it.
+fn reader_operands(name: &str, args: &[Word], cwd: &Path) -> (Vec<Operand>, bool) {
     let written: Vec<_> = args.iter().map(|word| word.value.as_deref()).collect();
     let written = reader_args(name, &written);
     let mut anything = written.unknown;
@@ -2753,7 +2794,7 @@ fn expanded_reader_paths(
     written: &ReaderArgs,
     values: &[Option<&str>],
     groups: &[(Range<usize>, usize)],
-) -> (Vec<ReaderPath<String>>, bool) {
+) -> (Vec<Operand>, bool) {
     let grammar = reader_grammar(name);
     let expanded = reader_args(name, values);
     let ambiguous = groups
@@ -2771,14 +2812,21 @@ fn expanded_reader_paths(
         })
         .map(|(range, _)| range.start);
     let anything = written.unknown || expanded.unknown || ambiguous.is_some();
-    let mut files: Vec<_> = expanded
-        .files
-        .iter()
-        .chain(&written.files)
-        .map(|(_, path)| path.clone())
+    let mut files: Vec<Operand> = expanded
+        .reads()
+        .map(|operand| Operand {
+            certain: operand.certain && ambiguous.is_none(),
+            ..operand
+        })
+        .chain(
+            written
+                .files
+                .iter()
+                .map(|(_, path)| Operand::possible(path.clone())),
+        )
         .collect();
     if let Some(start) = ambiguous {
-        let recursive = files.iter().any(|path| path.recursive)
+        let recursive = files.iter().any(|operand| operand.read.recursive)
             || grammar.may_recurse(values, start, &expanded);
         for (index, value) in values.iter().enumerate() {
             if index < start && expanded.fixed_values.contains(&index) {
@@ -2787,10 +2835,10 @@ fn expanded_reader_paths(
             if let Some(path) = value.filter(|path| {
                 !path.is_empty() && (grammar.operands != OperandKind::Stream || *path != "-")
             }) {
-                files.push(ReaderPath {
+                files.push(Operand::possible(ReaderPath {
                     path: path.to_owned(),
                     recursive,
-                });
+                }));
             }
         }
         let consumes_operand = expanded.options_at(values, start)
@@ -2805,17 +2853,18 @@ fn expanded_reader_paths(
                 .flatten()
                 .any(|value| grammar.find_expression(value));
         if recursive && (consumes_operand || expression) {
-            files.push(ReaderPath {
+            files.push(Operand::possible(ReaderPath {
                 path: ".".to_owned(),
                 recursive: true,
-            });
+            }));
         }
     }
-    files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    files.sort_unstable_by(|left, right| left.read.path.cmp(&right.read.path));
     files.dedup_by(|next, current| {
-        let same = next.path == current.path;
+        let same = next.read.path == current.read.path;
         if same {
-            current.recursive |= next.recursive;
+            current.read.recursive |= next.read.recursive;
+            current.certain |= next.certain;
         }
         same
     });
@@ -2832,6 +2881,8 @@ struct ReaderArgs {
     fixed_values: Vec<usize>,
     /// Words that are ordinary file operands in every supported argument order and build.
     operands: Vec<usize>,
+    /// Words that every supported argument order and build reads as a file.
+    read_everywhere: Vec<usize>,
     /// Words that supply an option's value in any supported argument order or build.
     option_values: Vec<usize>,
     /// Whether it may read a file the arguments do not name: a word expands, or an option names a
@@ -2840,6 +2891,14 @@ struct ReaderArgs {
 }
 
 impl ReaderArgs {
+    /// Each path in `files`, certain when its word is in `read_everywhere`.
+    fn reads(&self) -> impl Iterator<Item = Operand> + '_ {
+        self.files.iter().map(|(index, read)| Operand {
+            read: read.clone(),
+            certain: index.is_some_and(|index| self.read_everywhere.contains(&index)),
+        })
+    }
+
     fn options_at(&self, values: &[Option<&str>], index: usize) -> bool {
         !values[..index]
             .iter()
@@ -2860,6 +2919,7 @@ fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
         files: Vec::new(),
         fixed_values: (0..values.len()).collect(),
         operands: (0..values.len()).collect(),
+        read_everywhere: (0..values.len()).collect(),
         option_values: Vec::new(),
         unknown: values.iter().any(Option::is_none)
             || name == "find" && values.contains(&Some("-files0-from")),
@@ -2875,6 +2935,8 @@ fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
             args.fixed_values
                 .retain(|index| read.option_values.contains(index));
             args.operands.retain(|index| read.operands.contains(index));
+            args.read_everywhere
+                .retain(|index| read.files.iter().any(|(file, _)| *file == Some(*index)));
             args.files.extend(read.files);
             args.option_values.extend(read.option_values);
             args.unknown |= read.unknown;
@@ -2942,6 +3004,7 @@ impl ReaderGrammar {
             files: Vec::new(),
             fixed_values: Vec::new(),
             operands: Vec::new(),
+            read_everywhere: Vec::new(),
             option_values: Vec::new(),
             unknown: false,
         };
@@ -3507,7 +3570,7 @@ mod tests {
     }
 
     fn is_safe(command: &str) -> bool {
-        parse(command).segments[0].safe_reads().is_some()
+        parse(command).segments[0].is_safe()
     }
 
     fn joined(words: &[ShellWord]) -> String {
@@ -3618,7 +3681,7 @@ mod tests {
                     let segment = &command.segments[0];
                     assert_eq!(joined(segment.named()), text, "{command:?}");
                     assert_eq!(program(segment)[0].text(), name, "{command:?}");
-                    assert!(segment.safe_reads().is_none(), "{command:?}");
+                    assert!(!segment.is_safe(), "{command:?}");
                     assert!(command.unrecognized().is_none(), "{command:?}");
                 }
                 assert!(is_safe("LANG=C TZ=UTC env NO_COLOR=1 cat a"));
@@ -3988,7 +4051,7 @@ mod tests {
 
                     assert_eq!(joined(segment.named()), named, "{command:?}");
                     assert_eq!(joined(program(segment)), runs, "{command:?}");
-                    assert!(segment.safe_reads().is_none(), "{command:?}");
+                    assert!(!segment.is_safe(), "{command:?}");
                 }
             }
 
@@ -4012,7 +4075,7 @@ mod tests {
                         joined(segment.named()).ends_with(&format!(" {runs}")),
                         "{command:?}"
                     );
-                    assert!(segment.safe_reads().is_none(), "{command:?}");
+                    assert!(!segment.is_safe(), "{command:?}");
                     assert!(parsed.unrecognized().is_none(), "{command:?}");
                 }
                 assert_eq!(texts("nice sudo nohup cat a"), ["sudo nohup cat a"]);
@@ -4141,7 +4204,7 @@ mod tests {
             fn reads_the_arguments_file_xargs_names() {
                 let parsed = parse("xargs -a .env echo");
 
-                let Access::Path { requested, .. } = &parsed.segments[0].reads()[0].path else {
+                let Access::Path { requested, .. } = &parsed.reads[0] else {
                     panic!("expected a path read");
                 };
                 assert_eq!(Path::new(requested), Path::new("/repo/.env"));
@@ -4616,7 +4679,7 @@ mod tests {
                     parse(command)
                         .segments
                         .iter()
-                        .map(|segment| segment.safe_reads().is_some())
+                        .map(Segment::is_safe)
                         .collect()
                 };
                 for (literal, expanding) in [
@@ -4824,15 +4887,13 @@ mod tests {
                 "grep -fpats --file=more -e x -- -y src",
                 &Workspace::new(Path::new("/repo")),
             );
-            let at = |name: &str| {
-                ReaderPath::exact(Access::for_path(name, &Workspace::new(Path::new("/repo"))))
-            };
-            assert_eq!(
-                command.segments[0].safe_reads(),
-                Some(&[at("pats"), at("more"), at("-y"), at("src")][..])
-            );
+            let at = |name: &str| Access::for_path(name, &Workspace::new(Path::new("/repo")));
+            assert!(command.segments[0].is_safe());
+            assert_eq!(command.reads, [at("pats"), at("more"), at("-y"), at("src")]);
             assert!(!is_safe("wc --files0-from=list"));
-            assert_eq!(parse("echo done").segments[0].safe_reads(), Some(&[][..]));
+            let echo = parse("echo done");
+            assert!(echo.segments[0].is_safe());
+            assert_eq!(echo.reads, []);
         }
 
         #[test]
@@ -4879,7 +4940,8 @@ mod tests {
             ] {
                 let parsed = parse(command);
 
-                assert_eq!(parsed.segments[0].safe_reads(), Some(reads), "{command:?}");
+                assert!(parsed.segments[0].is_safe(), "{command:?}");
+                assert_eq!(parsed.segments[0].reads(), reads, "{command:?}");
                 assert!(parsed.unrecognized().is_none(), "{command:?}");
             }
             for command in ["set -o posix", "set -a", "[ -f $F ]"] {
@@ -4960,13 +5022,15 @@ mod tests {
         #[test]
         fn reads_the_files_past_the_script() {
             for command in ["sed -n 1p a.rs", "sed -e 1p -- a.rs"] {
-                let reads = parse(command).segments[0].safe_reads().unwrap().to_vec();
+                let parsed = parse(command);
+
+                assert!(parsed.segments[0].is_safe(), "{command:?}");
                 assert_eq!(
-                    reads,
-                    [ReaderPath::exact(Access::for_path(
+                    parsed.reads,
+                    [Access::for_path(
                         "a.rs",
                         &Workspace::new(Path::new("/repo"))
-                    ))],
+                    )],
                     "{command:?}"
                 );
             }
@@ -5089,10 +5153,10 @@ mod tests {
 
                 assert!(unknown, "{reader} {expanded:?}");
                 assert!(
-                    paths.contains(&ReaderPath {
+                    paths.contains(&Operand::possible(ReaderPath {
                         path: root.to_owned(),
                         recursive: true,
-                    }),
+                    })),
                     "{reader} {expanded:?}: {paths:?}"
                 );
             }
@@ -5109,20 +5173,15 @@ mod tests {
             let command = CommandTarget::parse("grep -r x src/*.rs docs", &workspace);
 
             let segment = &command.segments[0];
-            assert_eq!(segment.safe_reads(), None);
-            let at = |name: &str, recursive| ReaderPath {
-                path: Access::for_path(name, &workspace),
-                recursive,
+            assert!(!segment.is_safe());
+            let at = |name: &str| Access::for_path(name, &workspace);
+            let tree = |name: &str| ReaderPath {
+                path: at(name),
+                recursive: true,
             };
+            assert_eq!(segment.reads(), [tree("docs"), tree("src/*.rs")]);
             let main = Path::new("src").join("main.rs");
-            assert_eq!(
-                segment.reads(),
-                [
-                    at("docs", true),
-                    at("src/*.rs", true),
-                    at(&main.to_string_lossy(), false)
-                ]
-            );
+            assert_eq!(command.reads, [at(&main.to_string_lossy())]);
         }
     }
 
