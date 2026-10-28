@@ -24,7 +24,7 @@ expression: recovered
   },
   "context": {
     "environment": {
-      "cwd": "/repo",
+      "cwd": "",
       "is_git": false,
       "os_version": "",
       "platform": "",
@@ -70,6 +70,7 @@ expression: recovered
     "message_count": 7,
     "title": "Fix f.rs"
   },
+  "manual_title_set": true,
   "messages": [
     {
       "content": [

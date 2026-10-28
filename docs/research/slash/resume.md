@@ -2,7 +2,7 @@
 
 Research on session-resume UX: CLI flag plumbing, picker rendering, search and pagination, mid-session reload. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
-Companion to [commands.md](commands.md) and [modals.md](modals.md). Storage-layer decisions (JSONL shapes, the `parent_uuid` chain, listing scans) live in [persistence.md](../../design/persistence.md). This file focuses on the _user-facing_ resume surface.
+Companion to [commands.md](commands.md) and [modals.md](modals.md). Storage-layer decisions (the schema, the message chain, listing queries) live in [persistence.md](../../design/persistence.md). This file focuses on the _user-facing_ resume surface.
 
 ## Claude Code (TypeScript)
 

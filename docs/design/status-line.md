@@ -24,11 +24,11 @@ Segment render rules:
 
 `TokenUsage` reads Anthropic's `usage` payload directly, including `cache_creation_input_tokens` and `cache_read_input_tokens`. `TokenUsage::context_tokens()` returns input + cache creation + cache read. Auto-compaction reads the context tokens of the latest request plus an estimate of the messages appended since it went out.
 
-Each `agent_turn` reports the latest provider usage and the total across its requests, including a request the user cancelled or that failed partway. `Engine` keeps the turn's estimate of the next request for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `Event::UsageUpdated(UsageSnapshot)` before the turn's terminal event. The summarization requests behind `/compact` and auto-compaction add their estimated cost the same way. Each of these requests also lands in the session file as a `usage` entry carrying its model ID and prompt-cache TTL, so a resumed session can price each request at the rates it ran with. The background title request runs alongside the first turn, and once its response reports usage, it appends its own entry and hands the record to `Engine`, which adds the Haiku-priced cost the next time it emits `UsageUpdated`.
+Each `agent_turn` reports the latest provider usage and the total across its requests, including a request the user cancelled or that failed partway. `Engine` keeps the turn's estimate of the next request for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, then emits `Event::UsageUpdated(UsageSnapshot)` before the turn's terminal event. The summarization requests behind `/compact` and auto-compaction add their estimated cost the same way. Each of these requests also lands in the session's `usage` rows as a record carrying its model ID and prompt-cache TTL, so a resumed session can price each request at the rates it ran with. The background title request runs alongside the first turn, and once its response reports usage, it records its own row and hands the record to `Engine`, which adds the Haiku-priced cost the next time it emits `UsageUpdated`.
 
 Known first-party Claude API rates live in `model/pricing.rs`, and the `model.rs` catalog attaches them to each model. Unknown models render context without session cost. The estimate excludes account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
 
-On model swap, recompute the snapshot with the new model's context window. The session cost remains the accumulated estimate from requests that reported usage. Manual and automatic compaction clear the context usage because the visible transcript basis changed, and keep the session cost, which [Session Cost](persistence.md#session-cost) accounts for along with `/clear` and resume. Each compaction emits `UsageUpdated` once its summary requests end, so the summary's cost shows before the next request, and the context segment stays hidden until the next request reports usage. `/clear` resets both, and a title cost already recorded but not yet shown stays in the file of the session it titled. `/resume` and `ox -c` clear the context usage and restore the session cost as Session Cost describes.
+On model swap, recompute the snapshot with the new model's context window. The session cost remains the accumulated estimate from requests that reported usage. Manual and automatic compaction clear the context usage because the visible transcript basis changed, and keep the session cost, which [Session Cost](persistence.md#session-cost) accounts for along with `/clear` and resume. Each compaction emits `UsageUpdated` once its summary requests end, so the summary's cost shows before the next request, and the context segment stays hidden until the next request reports usage. `/clear` resets both, and a title cost already recorded but not yet shown stays with the session it titled. `/resume` and `ox -c` clear the context usage and restore the session cost as Session Cost describes.
 
 ## Usage Limits
 
@@ -54,7 +54,7 @@ The status line retains the highest-priority segment, truncating it if needed, t
 
 1. **Typed segment roster.** A typed segment list is enough for first-party data and keeps rendering inside Ratatui, so the config needs no format DSL.
 2. **Implemented segments only.** Unsupported names fail config parsing, so the accepted vocabulary matches the shipped segments.
-3. **Local usage first.** Context and session cost use provider usage that oxide-code observed, either in the current process or recorded in the session file.
+3. **Local usage first.** Context and session cost use provider usage that oxide-code observed, either in the current process or recorded in the session store.
 4. **Segment omission.** Missing usage, unknown pricing, absent branch, and blank titles disappear cleanly with no placeholder.
 5. **Background probes.** `git-branch` and the pull request segments re-probe as background child processes, 5 s and 60 s respectively after the previous probe finishes, with at most one run of each in flight, and each probe runs only while the roster has a segment that reads it. One `gh pr view` call serves all three PR segments. It reads the checks and review state only when the roster shows them, since those fields add every check on the head commit to the query. The bar stays current after `git checkout` or `gh pr create`, and a slow `gh` network round-trip never stalls input or rendering.
 6. **A branch change clears the pull request.** The segments clear and probe again at once, so the bar never pairs the new branch with the previous branch's link, checks, or review state.
@@ -67,7 +67,7 @@ The status line retains the highest-priority segment, truncating it if needed, t
 ## Out of Scope
 
 - **A user-command segment.** It would run a shell command on each refresh, which needs its own failure and refresh policy ([#166](https://github.com/hakula139/oxide-code/issues/166)).
-- **ccusage integration.** It would re-read session files to total cost, while the status line already shows the response's own usage.
+- **ccusage integration.** It would re-read stored sessions to total cost, while the status line already shows the response's own usage.
 - **Pricing for other providers.** It waits for the data-driven model catalog ([#152](https://github.com/hakula139/oxide-code/issues/152)).
 
 ## Sources
@@ -80,7 +80,7 @@ The status line retains the highest-priority segment, truncating it if needed, t
 - `crates/ox-core/src/engine/usage.rs`: `Engine` usage accounting, `UsageUpdated` emission, and restored-cost pricing.
 - `crates/ox-core/src/model/pricing.rs`: `TokenCostRates`, the per-model rate cards and the request estimate.
 - `crates/ox-core/src/model/usage.rs`: `TokenUsage`, the token counts one request reports.
-- `crates/ox-core/src/session/entry.rs`: `Entry::Usage` and `UsageRecord`, the per-request record a resume prices.
+- `crates/ox-core/src/session/store.rs`: `UsageRecord`, the per-request record a resume prices.
 - `crates/ox-core/src/session/title_generator.rs`: `spawn`, which records the title request's usage and hands it to the engine.
 - `crates/ox-core/src/util/git.rs`: `current_branch` and `current_pull_request` probes, and the checks summary.
 - `crates/ox-tui/src/app/render.rs`: `App::draw_frame`, which copies App-owned state, the permission mode included, into the status bar.

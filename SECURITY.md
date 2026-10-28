@@ -48,7 +48,7 @@ In scope:
 - A `bash` command that runs without approval in `manual` mode although it breaks the `manual` property above
 - Approval prompts that misrepresent a call, or allow rules that match commands or paths excluded by their documented grammar
 - Repository content, such as a project `.ox/config.toml`, that widens permissions, redirects credentials, extends the TLS trust store, or reads files outside the permission gate
-- `ox` writing your API key or OAuth token to logs, session files, or files accessible to other users, passing it to a `bash` command or a `git` or `gh` process, or sending it to any endpoint other than the configured endpoint or Anthropic's OAuth token endpoint
+- `ox` writing your API key or OAuth token to logs, the session store or its exports, or files accessible to other users, passing it to a `bash` command or a `git` or `gh` process, or sending it to any endpoint other than the configured endpoint or Anthropic's OAuth token endpoint
 - Flaws in the release workflow, the Homebrew formula, the Nix flake, or the `cargo install --git` path that let someone other than the maintainer change what you install
 
 Out of scope:

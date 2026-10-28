@@ -4,7 +4,7 @@
 
 use ox_core::command;
 use ox_core::protocol::{Op, SavedTarget};
-use ox_core::session::entry::ArchiveState;
+use ox_core::session::store::listing::ArchiveState;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};

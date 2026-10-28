@@ -20,10 +20,10 @@ Each page covers one topic, and [`docs/research/`](../research/) holds the exter
 
 ## Session
 
-| Document                                 | Description                                                                   |
-| ---------------------------------------- | ----------------------------------------------------------------------------- |
-| [Persistence](persistence.md)            | JSONL schema, writes and recovery, prompt context, archiving, titles, listing |
-| [File Change Tracking](file-tracking.md) | Read-before-Edit gate, staleness detection, persistence                       |
+| Document                                 | Description                                                                |
+| ---------------------------------------- | -------------------------------------------------------------------------- |
+| [Persistence](persistence.md)            | SQLite schema, writes, lazy forks, export, prompt context, titles, listing |
+| [File Change Tracking](file-tracking.md) | Read-before-Edit gate, staleness detection, persistence                    |
 
 ## Commands
 

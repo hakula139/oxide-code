@@ -105,6 +105,7 @@ pub(super) fn wire(event: &Event) -> Option<HeadlessEvent<'_>> {
         | Event::SavedDeleted { .. }
         | Event::SessionRolled { .. }
         | Event::SessionResumed { .. }
+        | Event::SessionForked { .. }
         | Event::SessionReady
         | Event::ConfigChanged { .. }
         | Event::ModeChanged(_)

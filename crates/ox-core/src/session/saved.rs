@@ -4,10 +4,9 @@
 use tracing::warn;
 
 use super::display::id_prefix;
-use super::entry::{ArchiveState, SessionInfo};
 use super::resolver::{ResolveError, resolve_id, resolve_prefix};
 use super::store::SessionStore;
-use super::store::listing::ProjectScope;
+use super::store::listing::{ArchiveState, ProjectScope, SessionInfo};
 use crate::protocol::SavedTarget;
 
 /// Why an operation on a saved session failed, where `id` is the session's [`id_prefix`]. Resume
@@ -21,7 +20,7 @@ pub enum SavedError {
     /// The target is the live session, which only a roll to a new session can leave.
     #[error("session {id} is the live session")]
     Live { id: String },
-    /// The action failed on the session's file.
+    /// The action failed in the store.
     #[error("failed to {action} session {id}: {cause}")]
     Failed {
         action: SavedAction,
@@ -99,8 +98,8 @@ pub(crate) fn find(
 
 /// Archives or unarchives the saved session `target` names, keeping its last-active time, and
 /// leaves a session already in `state` alone. Refuses the live session, since only bare `/archive`
-/// can roll it to a new one and resuming it already unarchived it. Blocks while another writer owns
-/// the directory's lock, so async callers must use a blocking worker.
+/// can roll it to a new one and resuming it already unarchived it. Blocks while another process
+/// writes to the store, so async callers must use a blocking worker.
 pub(crate) fn set_archived(
     store: &SessionStore,
     target: &SavedTarget,
@@ -128,8 +127,8 @@ pub(crate) fn set_archived(
     })
 }
 
-/// Deletes saved session `session_id` and its artifact directory. Refuses the live session, so a
-/// stale target cannot unlink the file under its open writer.
+/// Deletes saved session `session_id` and its artifact directory. Refuses the live session, and the
+/// store refuses a session another process holds open.
 pub(crate) fn delete(
     store: &SessionStore,
     session_id: &str,
@@ -168,13 +167,36 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::session::store::local_testing::test_session_file;
+    use crate::session::store::local_testing::fail_writes;
     use crate::session::store::testing::{listed_ids, seed_test_session, test_store};
-    use crate::util::fs::testing::make_read_only;
     use crate::util::log::testing::LogCapture;
 
     const LIVE_ID: &str = "live-session";
     const SAVED_ID: &str = "saved-session";
+
+    fn archive_times(store: &SessionStore, session_id: &str) -> (Option<i64>, i64) {
+        store
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT archived_at, updated_at FROM sessions WHERE id = ?1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    fn message_row_count(store: &SessionStore, session_id: &str) -> i64 {
+        store
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
 
     /// A store holding the live session and one saved session, both unarchived.
     fn seeded_store(dir: &std::path::Path) -> SessionStore {
@@ -184,7 +206,7 @@ mod tests {
                 &store,
                 id,
                 Some(title),
-                Some(1),
+                1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
         }
@@ -208,10 +230,10 @@ mod tests {
         use super::*;
 
         #[test]
-        fn resolves_the_target_and_writes_only_a_change() {
+        fn resolves_the_target_and_writes_only_a_change_keeping_the_last_active_time() {
             let dir = tempfile::tempdir().unwrap();
             let store = seeded_store(dir.path());
-            let file = test_session_file(dir.path(), SAVED_ID);
+            let (_, last_active) = archive_times(&store, SAVED_ID);
 
             for (target, state, changed) in [
                 (
@@ -235,7 +257,7 @@ mod tests {
                     false,
                 ),
             ] {
-                let len = fs::metadata(&file).unwrap().len();
+                let (before, _) = archive_times(&store, SAVED_ID);
 
                 let update = set_archived(&store, &target, state, LIVE_ID);
 
@@ -248,7 +270,10 @@ mod tests {
                     }),
                     "{case}",
                 );
-                assert_eq!(fs::metadata(&file).unwrap().len() > len, changed, "{case}");
+                let (after, updated_at) = archive_times(&store, SAVED_ID);
+                assert_eq!(after != before, changed, "{case}");
+                assert_eq!(after.is_some(), state == ArchiveState::Archived, "{case}");
+                assert_eq!(updated_at, last_active, "{case}");
                 let expected: &[&str] = match state {
                     ArchiveState::Archived => &[SAVED_ID],
                     ArchiveState::Active => &[],
@@ -303,7 +328,7 @@ mod tests {
         fn names_the_action_the_session_and_the_cause_of_a_failed_write() {
             let dir = tempfile::tempdir().unwrap();
             let store = seeded_store(dir.path());
-            make_read_only(&test_session_file(dir.path(), SAVED_ID));
+            fail_writes(&store);
             let target = SavedTarget::Id(SAVED_ID.to_owned());
 
             let err = set_archived(&store, &target, ArchiveState::Archived, LIVE_ID).unwrap_err();
@@ -322,15 +347,58 @@ mod tests {
         use super::*;
 
         #[test]
-        fn deletes_a_saved_session_and_refuses_the_live_one() {
+        fn removes_the_rows_artifacts_and_lock_and_refuses_the_live_session() {
             let dir = tempfile::tempdir().unwrap();
             let store = seeded_store(dir.path());
+            let artifacts = store.artifact_dir(SAVED_ID);
+            fs::create_dir_all(artifacts.join("tool-results")).unwrap();
+            fs::write(artifacts.join("tool-results/x.txt"), "spilled").unwrap();
+            drop(store.hold(SAVED_ID).unwrap());
+            let lock = dir.path().join(format!("locks/{SAVED_ID}.lock"));
+            assert!(lock.exists(), "holding the session creates its lock file");
 
             delete(&store, SAVED_ID, LIVE_ID).unwrap();
             let err = delete(&store, LIVE_ID, LIVE_ID).unwrap_err();
 
             assert_eq!(err.to_string(), "session live-ses is the live session");
             assert_eq!(listed_ids(&store, ArchiveState::Active), [LIVE_ID]);
+            assert_eq!(message_row_count(&store, SAVED_ID), 0);
+            assert_eq!(message_row_count(&store, LIVE_ID), 1);
+            assert!(!artifacts.exists());
+            assert!(!lock.exists());
+        }
+
+        #[test]
+        fn keeps_the_artifacts_of_a_session_whose_rows_survive() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = seeded_store(dir.path());
+            let artifacts = store.artifact_dir(SAVED_ID);
+            fs::create_dir_all(&artifacts).unwrap();
+            fail_writes(&store);
+
+            delete(&store, SAVED_ID, LIVE_ID).unwrap_err();
+
+            assert_eq!(message_row_count(&store, SAVED_ID), 1);
+            assert!(artifacts.exists());
+        }
+
+        #[test]
+        fn refuses_a_session_another_process_holds_open() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = seeded_store(dir.path());
+            let held = store.hold(SAVED_ID).unwrap();
+
+            let err = delete(&store, SAVED_ID, LIVE_ID).unwrap_err();
+            drop(held);
+
+            assert_eq!(
+                err.to_string(),
+                "failed to delete session saved-se: \
+                 it is open in another ox process. Quit that process first."
+            );
+            assert_eq!(listed_ids(&store, ArchiveState::Active).len(), 2);
+            assert_eq!(message_row_count(&store, SAVED_ID), 1);
+            delete(&store, SAVED_ID, LIVE_ID).unwrap();
         }
 
         #[test]

@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 
 use super::env;
-use super::fs::{FileLock, create_private_dir_all, open_private_append, open_private_lock};
+use super::fs::{FileLock, create_private_dir_all, open_private_append, open_private_file};
 use super::path::{XdgBase, app_dir};
 
 const LOG_SUBDIR: &str = "log";
@@ -93,7 +93,7 @@ impl RotatingFile {
     }
 
     fn lock(&self) -> io::Result<FileLock> {
-        FileLock::lock(open_private_lock(&self.lock_path)?)
+        FileLock::lock(open_private_file(&self.lock_path)?)
     }
 
     fn append<T>(
@@ -275,7 +275,7 @@ mod tests {
 
             impl Write for ShortWriter<'_> {
                 fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                    let contender = open_private_lock(self.lock_path)?;
+                    let contender = open_private_file(self.lock_path)?;
                     assert!(matches!(
                         contender.try_lock(),
                         Err(fs::TryLockError::WouldBlock)
@@ -473,7 +473,7 @@ mod tests {
                     let mut proceed = String::new();
                     io::stdin().read_line(&mut proceed).unwrap();
                     assert_eq!(proceed, "check\n");
-                    let contender = open_private_lock(&file.lock_path).unwrap();
+                    let contender = open_private_file(&file.lock_path).unwrap();
                     assert!(matches!(
                         contender.try_lock(),
                         Err(fs::TryLockError::WouldBlock)

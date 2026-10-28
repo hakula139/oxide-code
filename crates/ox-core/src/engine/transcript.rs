@@ -12,12 +12,11 @@ use crate::message::Message;
 use crate::model::ModelSpec;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::ResumeTarget;
-use crate::session::entry::{CompactBoundary, CompactInfo, UsageRecord};
 use crate::session::handle::{
-    self, Checkpoint, CompactOutcome, LoadedTranscript, RecordOutcome, RollIntoOutcome,
-    RollOutcome, SessionHandle,
+    self, Checkpoint, CompactBoundary, CompactOutcome, LoadedTranscript, RecordOutcome,
+    RollIntoOutcome, RollOutcome, SessionHandle, WriteReport,
 };
-use crate::session::store::SessionStore;
+use crate::session::store::{CompactInfo, SessionStore, UsageRecord};
 use crate::tool::tasks::Task;
 use crate::tool::{ToolDefinition, ToolMetadata};
 
@@ -131,20 +130,20 @@ impl LiveTranscript {
     }
 
     /// Returns the transcript and the session to `start` and `checkpoint`, dropping what the turn
-    /// after them added. Returns the session's write failure.
+    /// after them added. Returns the session's write report.
     pub(super) async fn roll_back(
         &mut self,
         start: TranscriptStart,
         checkpoint: Option<Checkpoint>,
-    ) -> Option<String> {
+    ) -> WriteReport {
         self.file_tracker.drain_writes().await;
         self.messages.truncate(start.len);
         self.prompt.seen = start.seen;
         self.prompt_unrecorded = start.prompt_unrecorded;
         self.file_tracker.reset_to(start.files);
         match checkpoint {
-            Some(checkpoint) => self.session.rewind(checkpoint).await.failure,
-            None => None,
+            Some(checkpoint) => self.session.rewind(checkpoint).await,
+            None => WriteReport::default(),
         }
     }
 
@@ -174,44 +173,44 @@ impl LiveTranscript {
         outcome
     }
 
-    /// Records `msg`, then appends it. Returns the session's write failure.
-    pub(super) async fn record_message(&mut self, msg: Message) -> Option<String> {
+    /// Records `msg`, then appends it. Returns the session's write report.
+    pub(super) async fn record_message(&mut self, msg: Message) -> WriteReport {
         let outcome = self.session.record_message(msg.clone()).await;
         self.messages.push(msg);
-        outcome.failure
+        outcome.report
     }
 
     /// Records one tool round, then appends the assistant message and the results answering it.
-    /// Returns the session's write failure.
+    /// Returns the session's write report.
     pub(super) async fn record_round(
         &mut self,
         assistant: Message,
         tool_results: Message,
         metadata: Vec<(String, ToolMetadata)>,
-    ) -> Option<String> {
-        let outcome = self
+    ) -> WriteReport {
+        let report = self
             .session
             .record_round(assistant.clone(), tool_results.clone(), metadata)
             .await;
         self.messages.push(assistant);
         self.messages.push(tool_results);
-        outcome.failure
+        report
     }
 
     /// Records `records` against the session without changing the messages. Returns the session's
-    /// write failure.
-    pub(super) async fn record_usage(&self, records: Vec<UsageRecord>) -> Option<String> {
-        self.session.record_usage(records).await.failure
+    /// write report.
+    pub(super) async fn record_usage(&self, records: Vec<UsageRecord>) -> WriteReport {
+        self.session.record_usage(records).await
     }
 
-    /// Renames the session, returning its write failure.
-    pub(super) async fn set_manual_title(&self, title: String) -> Option<String> {
-        self.session.set_manual_title(title).await.failure
+    /// Renames the session, returning its write report.
+    pub(super) async fn set_manual_title(&self, title: String) -> WriteReport {
+        self.session.set_manual_title(title).await
     }
 
-    /// Archives the session, returning its write failure.
-    pub(super) async fn archive(&self) -> Option<String> {
-        self.session.archive().await.failure
+    /// Archives the session, returning its write report.
+    pub(super) async fn archive(&self) -> WriteReport {
+        self.session.archive().await
     }
 
     /// Saves `boundary` and swaps the transcript to `synthetic`, which adopts the boundary's
@@ -252,11 +251,13 @@ impl LiveTranscript {
     }
 
     /// Finalizes the session with the files the transcript read and swaps in the saved session
-    /// `target` names, without swapping when it cannot be resolved or loaded.
+    /// `target` names, without swapping when it cannot be resolved or loaded. A fork of the resumed
+    /// session records `model`.
     pub(super) async fn roll_into(
         &mut self,
         store: &SessionStore,
         target: ResumeTarget,
+        model: &str,
     ) -> Result<RollIntoOutcome> {
         self.file_tracker.drain_writes().await;
         handle::roll_into(
@@ -264,13 +265,14 @@ impl LiveTranscript {
             store,
             self.file_tracker.snapshot_all(),
             target,
+            model,
         )
         .await
     }
 
     /// Closes the session with a snapshot of the files the transcript read. Returns the session's
-    /// write failure.
-    pub(super) async fn finalize(self) -> Option<String> {
+    /// write report.
+    pub(super) async fn finalize(self) -> WriteReport {
         self.file_tracker.drain_writes().await;
         self.session
             .finalize(self.file_tracker.snapshot_all())

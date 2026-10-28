@@ -24,7 +24,7 @@ use tokio::task::JoinSet;
 use ox_core::permission::Mode;
 use ox_core::protocol::{Event, Interaction, Op};
 use ox_core::session::display::archive_notice;
-use ox_core::session::entry::ArchiveState;
+use ox_core::session::store::listing::ArchiveState;
 
 use self::operation::InFlight;
 use self::queue::PromptQueue;

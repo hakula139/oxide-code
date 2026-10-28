@@ -1546,8 +1546,7 @@ pub mod testing {
 mod tests {
     use super::*;
     use crate::permission::rule::escaped;
-    use crate::session::store::local_testing::sample_header;
-    use crate::session::store::{SessionStore, artifact_dir};
+    use crate::session::store::SessionStore;
     use crate::util::fs::testing::{symlink_dir, symlink_file};
     use crate::util::path::local_testing::{abs, canonical_tempdir};
     use crate::util::path::slash_separated;
@@ -2008,7 +2007,7 @@ mod tests {
                     || {
                         for raw in [
                             "config/ox/config.toml",
-                            "data/ox/sessions/s.jsonl",
+                            "data/ox/sessions.db",
                             "state/ox/log/oxide-code.log",
                         ] {
                             let target = Access::for_path(raw, &Workspace::new(root));
@@ -3566,9 +3565,7 @@ mod tests {
                     || {
                         let workspace = Workspace::new(&cwd);
                         let store = SessionStore::open(&cwd, &cwd).unwrap();
-                        store.create(&sample_header("s1"), &[]).unwrap();
-                        let session_file = store.find_session_path("s1").unwrap();
-                        let spill = artifact_dir(&session_file, "s1").join("tool-results/x.txt");
+                        let spill = store.artifact_dir("s1").join("tool-results/x.txt");
                         let target = Access::for_path(slash_separated(&spill), &workspace);
 
                         for mode in [Mode::Manual, Mode::Yolo] {
