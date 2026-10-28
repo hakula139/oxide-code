@@ -2,7 +2,7 @@
 
 Read-before-Edit gate, xxh64 staleness detection, persistence across session resume.
 
-## Implementation
+## Tracking State
 
 The `FileTracker` is shared across a session's tool calls. Read populates its mutex-protected map, keyed by the canonical path so every spelling of one file, symlinks included, shares an entry. Edit and Write enforce the Read-before-Edit gate and verify the current bytes against the stored hash before mutation. Each write, including parent-directory creation, and its tracker record run in one tracked task. The engine stops tool admission and waits for those tasks before reporting cancellation, clearing or restoring tracker state, changing sessions, or capturing final snapshots. Tracker state persists to JSONL on session finish and verifies by content hash on resume.
 

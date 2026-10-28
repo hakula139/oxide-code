@@ -1,8 +1,8 @@
 # Status Line
 
-The status line is the TUI's top row, a user-ordered roster of built-in segments. Most segments read in-process state, `git-branch` and the pull request segments probe `git` and the GitHub CLI, the context and session-cost segments count prompt-cache tokens, and the usage-limit segments read response headers. The [`[tui]` section of the configuration guide](../../guide/configuration.md#tui-terminal-ui) lists each segment, what it renders, and how often it refreshes, and segments outside the [default order](#default-order) are opt-in. The [status line research](../../research/tui/status-line.md) compares how other agents build theirs.
+The status line is the TUI's top row, a user-ordered roster of built-in segments. Most segments read in-process state, `git-branch` and the pull request segments probe `git` and the GitHub CLI, the context and session-cost segments count prompt-cache tokens, and the usage-limit segments read response headers. The [`[tui]` section of the configuration guide](../guide/configuration.md#tui-terminal-ui) lists each segment, what it renders, and how often it refreshes, and segments outside the [default order](#default-order) are opt-in. The [status line research](../research/tui/status-line.md) compares how other agents build theirs.
 
-## Implementation
+## Segments
 
 `StatusLineSegment` in `config.rs` defines the roster. `[tui] status_line = [...]` controls the order. `OX_STATUS_LINE` accepts the same comma-separated names. Segment colors and the separator glyph come from the active theme.
 
@@ -18,7 +18,7 @@ Segment render rules:
 - The review segment appears only when branch protection requires a review, because GitHub otherwise reports no review decision.
 - The context and usage-limit segments use the `text` slot, switch to `warning` at 70%, and switch to `error` at 90%. Session cost stays `muted` because it has no limit to approach.
 - `permission-mode` shows `manual` in the `muted` slot, `plan` in the `accent` slot, and `yolo` in the `error` slot.
-- `task-progress` counts the completed tasks on the session's [task list](../tools/tasks.md) and shows only while the list holds a task.
+- `task-progress` counts the completed tasks on the session's [task list](tasks.md) and shows only while the list holds a task.
 
 ## Usage Data
 
@@ -76,12 +76,13 @@ The status line retains the highest-priority segment, truncating it if needed, t
 8. **Checks like `gh pr checks`.** The checks segment buckets each check's state the way the GitHub CLI does and counts only the latest run of a re-run check, so a passing re-run clears an earlier failure. Cancelled checks get their own bucket, below failing and pending. A workflow that failed to start counts as failing, where `gh` leaves it pending even though it will never run.
 9. **Usage limits from response headers.** Every response already reports the account's utilization, so the segments add no extra request and refresh with each turn.
 10. **Show every configured permission mode.** The segment confirms the active mode after a switch, including a return to `manual`. In a narrow row, `manual` drops before the model, while `plan` and `yolo` rank just below run state so the active restriction or bypass stays visible. `manual` takes `muted`, `yolo` takes `error`, as Claude Code colors its bypass mode, and `plan` takes `accent`, since it only restricts.
-11. **Escalate usage by the percent shown.** The context and limit segments use the same pair of thresholds and compare the floored percent in their labels, keeping each label's color aligned with its number. The 70% warning matches Claude Code's `WARNING_THRESHOLD` in `src/services/rateLimitMessages.ts`. Below that threshold, Claude Code shows no usage-limit warning. Default [auto-compaction](../agent/auto-compaction.md) begins near 97% of the window, which puts context at 90% about as close to its end as a limit at 90%. oh-my-pi changes its context color at 50%, 70%, and 90%, as well as at 150k, 270k, and 500k tokens. On a 1M window, those token thresholds would flag most of a long session. Its quota windows change color at 50% and 80%.
+11. **Escalate usage by the percent shown.** The context and limit segments use the same pair of thresholds and compare the floored percent in their labels, keeping each label's color aligned with its number. The 70% warning matches Claude Code's `WARNING_THRESHOLD` in `src/services/rateLimitMessages.ts`. Below that threshold, Claude Code shows no usage-limit warning. Default [auto-compaction](compaction.md) begins near 97% of the window, which puts context at 90% about as close to its end as a limit at 90%. oh-my-pi changes its context color at 50%, 70%, and 90%, as well as at 150k, 270k, and 500k tokens. On a 1M window, those token thresholds would flag most of a long session. Its quota windows change color at 50% and 80%.
 
-## Related Issues
+## Out of Scope
 
-- **A user-command segment** ([#166](https://github.com/hakula139/oxide-code/issues/166)).
-- **Pricing for other providers** ([#152](https://github.com/hakula139/oxide-code/issues/152)), with the data-driven model catalog.
+- **A user-command segment.** It would run a shell command on each refresh, which needs its own failure and refresh policy ([#166](https://github.com/hakula139/oxide-code/issues/166)).
+- **ccusage integration.** It would re-read session files to total cost, while the status line already shows the response's own usage.
+- **Pricing for other providers.** It waits for the data-driven model catalog ([#152](https://github.com/hakula139/oxide-code/issues/152)).
 
 ## Sources
 

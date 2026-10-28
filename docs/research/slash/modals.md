@@ -70,25 +70,3 @@ Imperative single-modal API.
 | Reusable primitive | none (each modal hand-rolled)        | `ListSelectionView` (generic)       | Kobalte Dialog primitives      |
 | Lazy load          | `load: () => import(...)`            | n/a (compiled binary)               | `void import(...).then()`      |
 | Agent-triggered    | no first-class path                  | `try_consume_approval_request()`    | no first-class path            |
-
-## Patterns Worth Borrowing for oxide-code
-
-1. **Codex's `BottomPaneView` trait plus view stack.** Idiomatic Rust+Ratatui shape, with a small trait, single owner, and stack semantics that give nesting for free without adding focus-flag bookkeeping. Direct port target.
-
-2. **Codex's generic `ListSelectionView`.** A single picker primitive parameterized by an item trait is what `/model`, `/effort`, `/theme`, and selection-based prompts all want. Beats hand-rolling per command (Claude Code's path).
-
-3. **Two open paths from day one.** Slash-triggered plus agent-triggered. The trait shape is identical for both, with only the call site differing. Codex already does this with `try_consume_approval_request`. oxide-code uses its modal stack for both slash commands and tool approvals.
-
-4. **Typed result for completion.** A modal that returns a typed action for the App to apply avoids the `Box<dyn FnOnce>` and lifetime gymnastics of a callback-based design.
-
-5. **Lazy live-data getters on slash command metadata.** Claude Code's dynamic `description()` lets the popup show `(currently sonnet)` without a refresh hook. Cheap, useful, doesn't require the modal infrastructure.
-
-## Patterns Not Adopted
-
-1. **opencode's single-modal-only.** Saves ~30 lines of stack code, but costs every confirm-inside-picker flow forever.
-
-2. **Claude Code's per-command UI hand-rolling.** With ~50 modal commands they need either a shared kit or a lot of duplication. A generic picker primitive scales better.
-
-3. **opencode's imperative `dialog.show()` with side-effecting components.** State-mutation-as-result is hard to test in Rust. Prefer typed `ModalAction` returns.
-
-4. **Codex's permanent `ChatComposer` behind every view.** Useful for "preserve typed text across modal dismiss" but adds layout complexity. Only worth it if oxide-code's typing-during-modal turns out to be common.

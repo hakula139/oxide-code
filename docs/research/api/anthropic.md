@@ -79,7 +79,7 @@ Haiku is the one family whose beta set differs: Claude Code moves `claude-code-2
 
 On agentic Opus 5.5 and Sonnet 5.5 requests, and by inference Fable 5.1, Claude Code 2.1.296 sends `claude-code-20250219, interleaved-thinking-2025-05-14, thinking-token-count-2026-05-13, context-management-2025-06-27, prompt-caching-scope-2026-01-05, mid-conversation-system-2026-04-07, per-turn-control-2026-07-01, advisor-tool-2026-03-01, effort-2025-11-24`. On Haiku 5.5 it moves `claude-code-20250219` to just after `mid-conversation-system-2026-04-07`. Both sequences were captured from `claude --bare -p` with an API key on 2026-10-15. Fable 5.1 was not captured on 2.1.296, but on Claude Code 2.1.301 `claude --bare -p` sent Fable 5.1 and Opus 5.5 identical betas against a local listener on 2026-10-17. Under OAuth, the frozen 2.1.87 source puts `oauth-2025-04-20` right after the leading `claude-code-20250219`, or first on Haiku. That slot was not captured.
 
-This client supports the Claude 5.5 models and Fable 5.1, where effort, interleaved thinking, the 1M window, and structured outputs are GA. On 2026-10-18, [What's new in Claude Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1) listed Fable 5.1 as available to all customers on the Claude API and partner platforms, except under zero data retention unless Anthropic expressly authorizes it. Claude Code's [model configuration docs](https://code.claude.com/docs/en/model-config), read the same day, add that organization admins can restrict which models members run, that Fable usage can bill to usage credits depending on the plan and seat tier, and that a gateway not configured to serve `claude-fable-5-1` rejects requests for it. On agentic turns, `client::anthropic::compute_betas` sends the sequence above, which includes betas for features this client leaves unused. Its test pins `CLAUDE_CLI_VERSION`, the release the user agent and billing block report, so a version bump fails until the sequence is recaptured for every model, Fable 5.1 included. It then appends `thinking-binding-controls-2026-08-01`, plus `thinking-display-updates-2026-08-18` when the request sets `thinking.display = "updates"`. Agentic turns on other model IDs carry `claude-code-20250219`, `oauth-2025-04-20` (OAuth only), and `prompt-caching-scope-2026-01-05`, and go without effort, thinking, or context management. Side queries, such as session titles, carry `claude-code-20250219` (skipped on Haiku) and `oauth-2025-04-20` (OAuth only). The body-side `cache_control.scope: "global"` stays gated on the base URL, as [Prompt Caching Scope](#prompt-caching-scope) describes.
+The Claude 5.5 models and Fable 5.1 make effort, interleaved thinking, the 1M window, and structured outputs GA. On 2026-10-18, [What's new in Claude Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1) listed Fable 5.1 as available to all customers on the Claude API and partner platforms, except under zero data retention unless Anthropic expressly authorizes it. Claude Code's [model configuration docs](https://code.claude.com/docs/en/model-config), read the same day, add that organization admins can restrict which models members run, that Fable usage can bill to usage credits depending on the plan and seat tier, and that a gateway not configured to serve `claude-fable-5-1` rejects requests for it. [Client](../../design/client.md) covers the beta sets this client derives from those captures.
 
 ### 2. System Prompt Prefix (as a Separate Block)
 
@@ -197,16 +197,7 @@ On 2026-04-23, a third-party gateway rejected agentic requests whose static syst
 
 Other servers accept the same layout. The Anthropic API accepted `scope: "global"` after tool definitions in [#123](https://github.com/hakula139/oxide-code/issues/123)'s live run on 2026-10-17 with oxide-code at 01b4823, and so did the relay gateway probed that day (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
 
-### oxide-code Gating
-
-oxide-code ships `prompt-caching-scope-2026-01-05` on every agentic request, as Claude Code does, and gates only the body-side `cache_control.scope` on `BaseUrl::is_first_party`:
-
-- Base URL host matches `api.anthropic.com` or `api-staging.anthropic.com` → `{"type": "ephemeral", "scope": "global"}`.
-- Any other host (gateways, self-hosted) → `{"type": "ephemeral"}`. The header still ships, and without the scope field it is a server-side no-op.
-
-Shape is otherwise identical in both modes. Only the body-side `scope` field toggles.
-
-This mirrors the Claude Code 2.1.301 bundle, which, as read on 2026-10-17, sends `scope: "global"` and the `cch` placeholder only when the base URL is `api.anthropic.com`. The 2.1.87 source checked only the provider, which still reads as first-party when `ANTHROPIC_BASE_URL` points at a gateway. The gate also keeps requests valid on gateways like the one in [#23](https://github.com/hakula139/oxide-code/pull/23) that reject the global scope after tool definitions, though the relay gateway probed on 2026-10-17 accepted it.
+Claude Code 2.1.301, as read on 2026-10-17, sends `scope: "global"` and the `cch` placeholder only when the base URL is `api.anthropic.com`, while the 2.1.87 source checked only the provider, which still reads as first-party when `ANTHROPIC_BASE_URL` points at a gateway.
 
 ## Agentic Request Body Fields
 
@@ -239,8 +230,6 @@ Partners the `context-management-2025-06-27` beta header. Claude Code 2.1.301 sh
 }
 ```
 
-oxide-code applies the body-header coupling as an invariant: the body field is populated on every request whose model is in the supported catalog, the same condition that enables the beta header. Side queries (the `complete` path in `client::anthropic`) skip both, matching the reference wire and keeping the title-generation path minimal.
-
 ### `cache_control.ttl`
 
 Anthropic silently dropped the default ephemeral-cache TTL from 1 hour to 5 minutes on 2026-03-06, a 40-55% savings regression on any session longer than 5 minutes. The opt-in uses a body field:
@@ -253,9 +242,7 @@ Anthropic silently dropped the default ephemeral-cache TTL from 1 hour to 5 minu
 
 Accepted values: `"5m"` (server default, equivalent to omitting the field) and `"1h"` (opt-in at higher write premium). No beta header is required because the field is GA.
 
-**oxide-code default.** `prompt_cache_ttl = "1h"`. The hit-rate recovery on real agent sessions (tool-use loops, resumed conversations) dominates the write premium, so 1 hour is the default. Users opt down via `[client].prompt_cache_ttl = "5m"` or `OX_PROMPT_CACHE_TTL=5m`.
-
-Invalidation order (from the Anthropic caching docs) is `tools → system → messages`: any change at a level busts that level and every level after it. oxide-code sends two breakpoints with the configured TTL. The first sits on the static system-prompt prefix block (with `scope: "global"` only on first-party base URLs, as [oxide-code Gating](#oxide-code-gating) describes). The second sits on the last content block of the final message, without `scope`, so each turn reads the previous turn's transcript from cache. The prompt context is built once per session, which keeps that prefix stable from turn to turn. Compaction summaries are one-off requests that no later request extends, so they skip the second breakpoint.
+Invalidation order (from the Anthropic caching docs) is `tools → system → messages`: any change at a level busts that level and every level after it. [Client](../../design/client.md) covers the breakpoints this client sends with the configured TTL.
 
 ### `thinking.display`
 

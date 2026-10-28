@@ -1,8 +1,8 @@
 # Research Notes
 
-External research and API reference for oxide-code development. The notes cite [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode) as reference implementations, along with Anthropic's API documentation. The terminal UI notes also cover terminal emulators and other TUI apps.
+External research and API reference for oxide-code development. The surveys compare [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode), and the API notes summarize Anthropic's documentation. The terminal UI surveys also cover terminal emulators and other TUI apps. Each survey records the date and versions it was verified against.
 
-Organized by topic. Each subdirectory except `api/` shares its topic with a directory in [`docs/design/`](../design/), where shipped decisions live.
+Each note informs the matching page in [`docs/design/`](../design/), where the shipped decisions live.
 
 ## API References
 
@@ -14,39 +14,30 @@ Organized by topic. Each subdirectory except `api/` shares its topic with a dire
 
 ## Agent Loop
 
-| Document                                    | Description                                                                |
-| ------------------------------------------- | -------------------------------------------------------------------------- |
-| [Auto-Compaction](agent/auto-compaction.md) | Reference triggers, token signals, thresholds, summaries, failure handling |
+| Document                          | Description                                                                                     |
+| --------------------------------- | ----------------------------------------------------------------------------------------------- |
+| [Compaction](agent/compaction.md) | Manual and automatic triggers, token signals, prompts, replacement strategies, failure handling |
 
-## Session
+## Commands
 
-| Document                                         | Description                                  |
-| ------------------------------------------------ | -------------------------------------------- |
-| [Persistence](session/persistence.md)            | JSONL format, storage layout, write strategy |
-| [File Change Tracking](session/file-tracking.md) | Read-before-Edit gates, staleness detection  |
-
-## Slash Commands
-
-| Document                      | Description                                                   |
-| ----------------------------- | ------------------------------------------------------------- |
-| [Commands](slash/commands.md) | Registry shape, popup UX, execution models                    |
-| [Compact](slash/compact.md)   | Context-compression triggers, prompts, replacement strategies |
-| [Modals](slash/modals.md)     | Picker / dialog primitives across the three CLIs              |
-| [Resume](slash/resume.md)     | CLI flags, picker UX, search / pagination, mid-session reload |
+| Document                      | Description                                                      |
+| ----------------------------- | ---------------------------------------------------------------- |
+| [Commands](slash/commands.md) | Registry shape, popup UX, execution models                       |
+| [Modals](slash/modals.md)     | Picker and dialog primitives in Claude Code, Codex, and opencode |
+| [Resume](slash/resume.md)     | CLI flags, picker UX, search and pagination, mid-session reload  |
 
 ## Tools
 
 | Document                                 | Description                                                   |
 | ---------------------------------------- | ------------------------------------------------------------- |
-| [Output Truncation](tools/truncation.md) | Per-tool vs central caps, spillover strategies                |
+| [Output Truncation](tools/truncation.md) | Per-tool and central caps, spillover strategies               |
 | [Permissions](tools/permissions.md)      | Approval modes, rules, decision precedence, grant persistence |
 
 ## Terminal UI
 
 | Document                                             | Description                                                                              |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| [Overview](tui/overview.md)                          | Reference TUI patterns, flickering prevention, ecosystem                                 |
 | [Cancellation and Queued Input](tui/cancellation.md) | Cancel, exit, and input queueing patterns                                                |
 | [Mouse Interactions](tui/mouse-interactions.md)      | Mouse capture, click handling, OSC 8 / OSC 52 across coding CLIs, xterm.js parser quirks |
 | [Status Line](tui/status-line.md)                    | Segment ordering, usage, and billing patterns across coding CLIs                         |
-| [Welcome Screen](tui/welcome.md)                     | Empty-state surfaces and layout primitives across the three CLIs                         |
+| [Welcome Screen](tui/welcome.md)                     | Empty-state surfaces and layout primitives across coding CLIs                            |

@@ -1,16 +1,8 @@
 # Welcome Screen
 
-The welcome screen paints in the chat region while the chat has no blocks, showing the app's identity, the session environment, and a short list of starter slash commands.
+The welcome screen paints in the chat region while the chat has no blocks, showing the app's identity, the session environment, and a short list of starter slash commands. It answers three questions: what is running (the name, version, active model and effort, and auth source), where the session runs, and what to do next (three sampled starter commands plus a randomized tip).
 
-## Goals
-
-The welcome answers three questions:
-
-1. **What am I running?** Name, version, active model + effort, auth source.
-2. **Where am I?** Working directory.
-3. **What can I do?** Three sampled starter commands plus a randomized tip.
-
-## Implementation
+## Rendering
 
 `ox_tui::components::welcome` is a stateless renderer, `paint`, that reads `&LiveSessionInfo`. `App::draw_frame` paints it into the chat region when:
 
@@ -73,10 +65,10 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 
 ## Out of Scope
 
-- **Live feeds** (recent sessions, release notes, upsells). Claude Code ships them, but the result is an onboarding dashboard with ongoing maintenance cost.
-- **ASCII mascot / animations**: Codex / Claude Code both ship them, but static text carries the value with less complexity.
-- **Tab-into-the-welcome navigation**: The welcome is read-only, and the user types in the input below it.
-- **Branch / git status on welcome**: Orthogonal to onboarding. `/diff` and the trailer hint cover the "what changed" angle.
+- **Live feeds.** Recent sessions, release notes, and upsells would make an onboarding dashboard with ongoing maintenance cost, though Claude Code ships them.
+- **An ASCII mascot or animations.** Codex and Claude Code both ship them, but static text carries the value with less complexity.
+- **Tab-into-the-welcome navigation.** The welcome is read-only, and the user types in the input below it.
+- **Branch or git status.** It is orthogonal to onboarding, and `/diff` and the trailer hint cover the "what changed" angle.
 
 ## Sources
 
