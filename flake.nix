@@ -176,12 +176,12 @@
         };
 
         preCommit = git-hooks-nix.lib.${system}.run {
-          src = ./.;
           hooks = hooks // nodeHooks;
+          src = ./.;
         };
 
+        # The flake check leaves rustfmt to CI's Rust job, so it never fetches the pinned toolchain.
         preCommitCheck = git-hooks-nix.lib.${system}.run {
-          # The flake check leaves rustfmt to CI's Rust job, so it never fetches the pinned toolchain.
           hooks = removeAttrs hooks [ "rustfmt" ];
           src = ./.;
         };
