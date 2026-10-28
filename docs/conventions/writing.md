@@ -63,12 +63,22 @@ These rules apply to errors, warnings, notices, and other strings shown to users
 - Keep every command shown in the docs minimal. When a command would need extra flags or environment variables, move the setting into the tool's config, rely on its default, or add a project script, then document the short form.
 - Organize each page around the questions its readers bring. Keep each paragraph focused on one idea, and verify every claim against the code before citing it.
 - Add a row to the configuration guide's [Reference](../guide/configuration.md#reference) for each new config key and each new environment variable that configures `ox`. The `config::tests::reference` tests catch a missing key or `ANTHROPIC_`, `CLAUDE_`, or `OX_` variable, but not a variable with another prefix.
-- When you add or edit a claim in a research note, record when you verified it and which version you checked. Delete the claim if a newer test contradicts it or you can no longer verify it.
 - Cite Claude Code, [Codex](https://github.com/openai/codex), [pi](https://github.com/badlogic/pi-mono), and [oh-my-pi](https://github.com/can1357/oh-my-pi) as reference implementations in new research and design notes. Existing notes may retain their opencode citations.
-- Open a feature's design doc with a sentence saying what the feature does, then describe its mechanism in sections named for their topics. Follow with `## Design Decisions`, a numbered list of the choices that need a rationale, each giving its reason, and with `## Out of Scope`, whose bullets open with a bold label naming the deferred feature, link its issue when one exists, and give the reason. End each one with `## Sources`.
+
+### Design Docs
+
+- A design doc explains how a mechanism works at module level and why it works that way, for the maintainer who changes it next. Leave per-function walkthroughs to the code, and leave sets the code enumerates, such as accepted options, builtin names, or enum variants, to the rustdoc beside the constant or type, where tests keep them current. Link the user guide for user-facing behavior, such as commands, keys, and config keys, and keep the design doc to what that behavior means for the mechanism.
+- Open the doc with a sentence saying what the feature does, then describe its mechanism in sections named for their topics.
+- Follow with `## Design Decisions`, a numbered list of the choices a maintainer could plausibly make differently, each giving its reason. A design the page rejects belongs here with the reason it lost. Leave out facts that had no alternative, such as a trait implementation the compiler requires.
+- Add `## Out of Scope` when the page defers a feature. Each bullet opens with a bold label naming the deferred feature, links its issue when one exists, and gives the reason.
 - Cite a design decision by its bold title, since inserting a decision renumbers the list and leaves every numeric reference pointing at a different choice. Use `(**Title**)` in the same page and `[**Title**](page.md#design-decisions)` from another page.
-- In a design doc's `## Sources` section, list each source file it describes by full path, in alphabetical order, with a one-clause annotation and no line numbers:
+- End the doc with `## Sources`, listing the files that own the mechanism by full path, in alphabetical order, with a one-clause annotation and no line numbers. Files that only call into the mechanism stay out, since the [module map](../design/architecture.md) already places them:
 
   ```markdown
   - `crates/ox-core/src/tool/read.rs`: `DEFAULT_LINE_LIMIT`, `MAX_LINE_CHARS`, `OUTPUT_BUDGET`.
   ```
+
+### Research Notes
+
+- `docs/research/` holds API references and surveys that inform open design questions. Once a survey's decisions ship, move any comparison a decision still depends on into that decision's reason, then delete the survey, since nobody re-verifies a survey whose question is closed and its claims drift as the reference implementations change.
+- Follow each survey's opening paragraph with a `Verified <date> against <versions>.` line naming the reference implementations and versions it read. When you add or edit a claim in any research note, record when you verified it and which version you checked. Delete a claim if a newer test contradicts it or you can no longer verify it.
