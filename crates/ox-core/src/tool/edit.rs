@@ -515,6 +515,47 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn updates_every_hard_link_and_records_the_write() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("notes.txt");
+            let alias = dir.path().join("alias.txt");
+            fs::write(&path, "one\ntwo\n").unwrap();
+            fs::hard_link(&path, &alias).unwrap();
+            let ctx = seeded_ctx(&path);
+
+            let first = local_testing::run(
+                &EditTool,
+                serde_json::json!({
+                    "file_path": path,
+                    "old_string": "two",
+                    "new_string": "three",
+                }),
+                &ctx,
+            )
+            .await;
+
+            assert!(!first.is_error, "{}", first.content);
+            assert_eq!(fs::read_to_string(&path).unwrap(), "one\nthree\n");
+            assert_eq!(fs::read_to_string(&alias).unwrap(), "one\nthree\n");
+
+            // The second edit passes the Read-before-Edit gate without another read, which shows
+            // the first recorded its write.
+            let second = local_testing::run(
+                &EditTool,
+                serde_json::json!({
+                    "file_path": path,
+                    "old_string": "one",
+                    "new_string": "zero",
+                }),
+                &ctx,
+            )
+            .await;
+
+            assert!(!second.is_error, "{}", second.content);
+            assert_eq!(fs::read_to_string(&alias).unwrap(), "zero\nthree\n");
+        }
+
+        #[tokio::test]
         async fn replace_all_reports_every_replaced_occurrence() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");

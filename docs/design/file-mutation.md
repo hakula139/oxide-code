@@ -8,23 +8,23 @@ Companion docs: [Permissions](permissions.md), [File Tracking](file-tracking.md)
 
 The path gate resolves the target and the tools open it with `open_no_follow`, which refuses a symlink at the final component, with `O_NONBLOCK` so a swapped-in FIFO cannot hang the open. `validate_regular_file` requires a regular file at or below `MAX_TRACKED_FILE_SIZE` (10 MiB), and the tracker's Read-before-Edit gate supplies the bytes the tool expects to replace.
 
-`commit::write` compares the current content with those bytes before changing anything, and `Original::verify` repeats the identity and byte checks immediately before publication. A changed file reports "the file changed while preparing the write. Read it again." and a replaced inode reports "the file was replaced while preparing the write", so the tool never records success for content another writer already replaced. On Unix, a file with set-ID permissions is refused, because a write can clear the bits while the tool would still report success.
+`commit::write` compares the current content with those bytes before changing anything, and `Original::verify` repeats the identity and byte checks immediately before publication. A changed file reports "the file changed while preparing the write. Read it again." and a replaced inode reports "the file was replaced while preparing the write", so the tool never records success for content another writer already replaced. On Unix, a file with set-ID permissions or a capability is refused, because a write can clear either while the tool would still report success.
 
 ## Publication
 
 ### Atomic Replacement
 
-On Linux, `replace_atomically` stages a `0o600` file in the destination's parent, writes and syncs it, gives it the original's mode, and captures a `Snapshot` of the staged file's owner, group, mode, and extended attributes, including the POSIX access ACL and the SELinux label. When the snapshot equals the original's, the staged file already carries that metadata, so the rename publishes it without recreating any of it. Before the rename, the tool rechecks the staged bytes and name, so a substituted or removed stage cannot be published, and rechecks the original's identity and bytes, so a concurrent change is reported.
+On Linux, `replace_atomically` stages a `0600` file in the destination's parent, writes and syncs it, gives it the original's mode, and captures a `Snapshot` of the staged file's owner, group, mode, and extended attributes, including the POSIX access ACL and the SELinux label. When the snapshot equals the original's, the staged file already carries that metadata, so the rename publishes it without recreating any of it. Before the rename, the tool rechecks the staged bytes and name, so a substituted or removed stage cannot be published, and rechecks the original's identity and bytes, so a concurrent change is reported.
 
 A file with more than one hard link, a parent that refuses a new entry, a different owner or group, or any attribute the staged copy does not inherit takes the in-place path instead. A `Snapshot` comparison leaves the decision to the filesystem: a parent's default ACL, an inherited label, and a filesystem that cannot store an ACL all need no case of their own.
 
 ### In-Place Write
 
-`write_in_place` rewrites through the original's held handle with `set_len(0)`, `write_all`, and `sync_all`. On Unix the inode keeps its owner, group, mode, ACLs, extended attributes, flags, and every hard link without recreating any of them. On Windows the file keeps its owner, DACL, native attributes, and alternate streams, while content-dependent NTFS compression follows native write behavior. A final `Original::verify` confirms that the path still holds the written bytes. macOS and Windows always take this path, since reproducing macOS ACLs and BSD flags or Windows access-control state needs platform calls outside Rust's safe standard library.
+`write_in_place` rewrites through the original's held handle with `set_len(0)`, `write_all`, and `sync_all`. On Unix the inode keeps its owner, group, mode, ACLs, extended attributes, flags, and every hard link without recreating any of them, while the kernel clears set-ID bits and capabilities on a content write, so files carrying either are refused. On Windows the file keeps its owner, DACL, native attributes, and alternate streams, while content-dependent NTFS compression follows native write behavior. A final `Original::verify` confirms that the path still holds the written bytes. macOS and Windows always take this path, since reproducing macOS ACLs and BSD flags or Windows access-control state needs platform calls outside Rust's safe standard library.
 
 ### New Files
 
-`create` stages a file in the parent, writes and syncs it, sets it to the mode a plain creation in that directory receives, which a `0o666` probe reports through the umask, and publishes it with `hard_link`. A hard link never replaces an existing entry, including a dangling link, and the staging guard removes its name afterwards.
+`create` stages a file in the parent, writes and syncs it, sets it to the mode a plain creation in that directory receives, which a `0666` probe reports through the umask, verifies the staged name, and publishes it with a no-clobber persist. A no-clobber publish never replaces an existing entry, including a dangling link.
 
 ## Design Decisions
 
@@ -36,9 +36,9 @@ A file with more than one hard link, a parent that refuses a new entry, a differ
 
 4. **Write through the held handle, not a reopened path.** The handle was opened without following a symlink and checked against the tracked bytes, so rewriting through it cannot land on a different file, and every hard link keeps seeing one inode.
 
-5. **In-place publication trades crash atomicity for preservation.** A crash, a full disk, or a kill mid-write can leave partial content, while the atomic path publishes either the complete bytes or none of them. Ordinary workspace files keep the atomic path. A file whose metadata the copy cannot inherit is now written in place, which gives up the crash atomicity that recreating that metadata used to provide, while files that the recreation refused now succeed.
+5. **In-place publication trades crash atomicity for preservation.** A crash, a full disk, or a kill mid-write can leave partial content, while the atomic path publishes either the complete bytes or none of them. Ordinary workspace files keep the atomic path, while a file whose metadata the copy cannot inherit is written in place and gives up crash atomicity for that write.
 
-6. **Hard links and set-ID files.** A file with several links can sit inside the workspace while another link sits outside every root, so the workspace gate never auto-allows it, but an explicit rule or approval writes it in place and every link sees the new content. Set-ID files stay refused because a write can clear the bits and the tool cannot report what the file system did with them.
+6. **Hard links, set-ID files, and capability files.** A file with several links can sit inside the workspace while another link sits outside every root, so the workspace gate never auto-allows it, but an explicit rule or approval writes it in place and every link sees the new content. Set-ID files and files carrying a capability stay refused because a write can clear either and the tool cannot report what the file system did with them.
 
 ## Sources
 

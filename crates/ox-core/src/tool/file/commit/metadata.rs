@@ -50,21 +50,9 @@ fn attributes(file: &File) -> io::Result<BTreeMap<OsString, Vec<u8>>> {
     Ok(attributes)
 }
 
-/// Whether a staged copy can reproduce every attribute the file carries. Attributes that
-/// `list_xattr` leaves out, such as a capability or an `NFSv4` ACL, are invisible to [`Snapshot`],
-/// so a rename would drop them and the file has to be written in place instead.
-pub(super) fn reproducible(file: &File) -> io::Result<bool> {
-    for name in [
-        "security.capability",
-        "security.ima",
-        "security.evm",
-        "system.nfs4_acl",
-    ] {
-        if supported_attribute(file, name)?.is_some() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+/// Returns whether the file carries `security.capability`, which an in-place write clears.
+pub(super) fn has_capability(file: &File) -> io::Result<bool> {
+    Ok(supported_attribute(file, "security.capability")?.is_some())
 }
 
 fn supported_attribute(file: &File, name: &str) -> io::Result<Option<Vec<u8>>> {
