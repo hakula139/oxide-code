@@ -102,7 +102,7 @@ Archiving hides a session from `ox --list`, the `/resume` picker, and `ox -c`, w
 - `/archive` archives the live session and starts a fresh one, as `/clear` does. A note in the new chat names the archived session.
 - `/archive <id-prefix>` archives another saved session. If the prefix matches only the live session, the command is refused and points to bare `/archive`.
 - `/unarchive <id-prefix>` makes a saved session visible in the list again.
-- In the `/resume` picker, **Ctrl+X** archives the highlighted session or unarchives it when viewing archived sessions. The session disappears from the list immediately, the highlight moves to the next session, and the footer names the session that was moved for a few seconds. The filter and scope remain unchanged.
+- In the `/resume` picker, **Ctrl+X** archives the highlighted session or unarchives it when viewing archived sessions. The session disappears from the list once the archive completes, the highlight moves to the next session, and the footer names the session that was moved for a few seconds. The filter and scope remain unchanged.
 
 The typed commands and **Ctrl+X** leave a session's last-active time unchanged, so an unarchived session returns to its previous position in the list.
 

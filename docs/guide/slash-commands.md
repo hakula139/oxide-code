@@ -47,7 +47,7 @@ See [`effort`](configuration.md#effort-reasoning-effort) for each model's defaul
 
 ## Permission Mode
 
-`/mode` opens a picker of the [permission modes](permissions.md#modes). Use **Up / Down** or a number key to move, **Enter** to switch, and **Esc** to cancel. `/mode <mode>` switches directly, and **Tab** or **Shift+Tab** changes the mode in the cycle that page describes. **Tab** completes a selection while the command popup is open.
+`/mode` opens a picker of the [permission modes](permissions.md#modes). Use **Up / Down** or a number key to move, **Enter** to switch, and **Esc** to cancel. `/mode <mode>` switches directly, and **Tab** or **Shift+Tab** changes the mode in the cycle that page describes.
 
 ## Compaction
 
@@ -60,6 +60,8 @@ After compaction:
 - **Session state**: Queued prompts, the task list, and background shells carry over.
 
 `/compact` refuses conversations shorter than about 1,000 tokens. It counts messages, tool calls, and tool output, but not instructions or tool definitions. If the model returns an empty summary, compaction fails and leaves the conversation unchanged.
+
+Automatic compaction runs before a prompt and between the tool rounds of a long turn, which then continues from the summary on its own. If the compaction before a prompt fails, oxide-code does not send the prompt, and the TUI puts it back in the input. Sending it again retries the compaction. If the compaction between tool rounds fails, the turn stops, so run `/compact`, then send a message to continue. After 3 failures in a row, automatic compaction pauses, so the next prompt goes out without it, and `/status` shows it as paused. A successful `/compact`, a `/model` or `/effort` change, `/clear`, `/archive`, or `/resume` turns it back on.
 
 ## Sessions
 

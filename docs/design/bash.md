@@ -48,5 +48,5 @@ A [known-safe command](permissions.md#command-targets) never expands a variable,
 
 - `crates/ox-core/src/config/auth.rs`: `secret_env_vars`, derived from `AuthSource::EXPLICIT` and `CUSTOM_HEADERS_VAR`, and `withhold_secrets`, which removes them from a child's environment.
 - `crates/ox-core/src/tool/bash.rs`: `ShellTree`, `SESSION_ID_VAR`, `EDITOR_VARS`, `CDPATH_VAR`, `bash`, which finds Git Bash on Windows, and `Bash::ready`, which waits for the MSYS runtime before a shell starts.
-- `crates/ox-core/src/tool/bash/msys.rs`: `MsysRuntime`, which holds the MSYS runtime.
 - `crates/ox-core/src/tool/bash/background.rs`: `BackgroundShells::start`, which spawns a background shell through the same `ShellTree`.
+- `crates/ox-core/src/tool/bash/msys.rs`: `MsysRuntime`, which holds the MSYS runtime.

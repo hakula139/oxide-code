@@ -169,8 +169,8 @@ Listings sort rows and render them as follows:
 
 ## Sources
 
-- `crates/ox-core/src/engine/sessions.rs`: `adopt_session`, which sums the session cost from the resumed `usage` entries.
-- `crates/ox-core/src/engine/turn.rs`: the joined writes that put a tool round's records in one batch.
+- `crates/ox-core/src/engine/turn.rs`: the tool round it records through `record_round`, which sends the assistant message, its tool results, and their sidecars as one `SessionCmd::RecordRound`.
+- `crates/ox-core/src/engine/usage.rs`: `UsageLedger::for_session`, which sums the session cost from the resumed `usage` entries.
 - `crates/ox-core/src/message.rs`: the message and content-block types that the entry schema stores.
 - `crates/ox-core/src/session/actor.rs`: the actor that owns the session state and flushes each wakeup's commands through a blocking operation.
 - `crates/ox-core/src/session/chain.rs`: message chain reconstruction from the `parent_uuid` DAG.
