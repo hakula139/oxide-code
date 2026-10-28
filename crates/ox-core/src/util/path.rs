@@ -3,7 +3,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use strum::VariantArray;
 use unicode_normalization::UnicodeNormalization as _;
 
@@ -101,6 +101,15 @@ pub fn expand_user(raw: &str) -> Result<PathBuf> {
     }
     // `join` replaces `home` with an absolute argument, such as the `//foo` tail of `~//foo`.
     Ok(home.join(tail.trim_start_matches(std::path::is_separator)))
+}
+
+/// Expands `raw` like [`expand_user`] and requires an absolute result, so a configured path cannot
+/// depend on the working directory. Errors never quote `raw`, which may hold a pasted secret.
+pub(crate) fn expand_absolute(raw: &str) -> Result<PathBuf> {
+    let path =
+        expand_user(raw).map_err(|_| anyhow!("cannot expand `~` without a home directory"))?;
+    ensure!(path.is_absolute(), "expected an absolute or `~/` path");
+    Ok(path)
 }
 
 /// Resolves `.` and `..` components without touching the filesystem, so two spellings of one path
@@ -371,6 +380,34 @@ mod tests {
                 expand_user("~alice/foo").unwrap(),
                 PathBuf::from("~alice/foo")
             );
+        }
+    }
+
+    mod expand_absolute {
+        use super::*;
+
+        #[test]
+        fn accepts_absolute_and_home_rooted_paths() {
+            let home = std::env::temp_dir();
+            let absolute = home.join("ca.pem");
+            temp_env::with_var(HOME_VAR, Some(&home), || {
+                for raw in [absolute.to_str().unwrap(), "~/ca.pem"] {
+                    assert_eq!(expand_absolute(raw).unwrap(), absolute, "{raw:?}");
+                }
+            });
+        }
+
+        #[test]
+        fn rejects_a_relative_path_without_quoting_it() {
+            for raw in ["certs/ca.pem", "~alice/ca.pem"] {
+                let err = expand_absolute(raw).unwrap_err();
+
+                assert_eq!(
+                    err.to_string(),
+                    "expected an absolute or `~/` path",
+                    "{raw:?}"
+                );
+            }
         }
     }
 

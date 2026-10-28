@@ -296,7 +296,7 @@ impl FileTracker {
 
 /// Checks that the file at `path` is still trackable and holds the content `content_hash` names.
 fn verify_on_disk(path: &Path, content_hash: u64) -> anyhow::Result<()> {
-    let (_, bytes) = read_regular_file(path, MAX_TRACKED_FILE_SIZE).context("read failed")?;
+    let bytes = read_regular_file(path, MAX_TRACKED_FILE_SIZE).context("read failed")?;
     ensure!(xxh64(&bytes, HASH_SEED) == content_hash, "content changed");
     Ok(())
 }
@@ -435,7 +435,9 @@ pub(crate) const CACHE_HIT_STUB: &str =
 #[cfg(test)]
 pub(crate) mod testing {
     use std::path::Path;
+    use std::pin::Pin;
     use std::sync::Arc;
+    use std::task::Poll;
 
     use tokio::sync::oneshot;
 
@@ -472,6 +474,26 @@ pub(crate) mod testing {
     pub(crate) fn assert_writes_draining(tracker: &FileTracker) {
         assert!(tracker.writes.is_closed());
         assert!(!tracker.writes.is_empty());
+    }
+
+    /// Polls `operation` until it waits on `tracker`'s writes, panicking if it finishes instead.
+    pub(crate) async fn poll_until_draining<F: Future + ?Sized>(
+        tracker: &FileTracker,
+        mut operation: Pin<&mut F>,
+    ) {
+        std::future::poll_fn(|cx| {
+            let finished = operation.as_mut().poll(cx).is_ready();
+            assert!(
+                !finished,
+                "the operation finished before draining the writes"
+            );
+            if tracker.writes.is_closed() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
     }
 
     pub(crate) fn seed_full_read(tracker: &FileTracker, path: &Path) {

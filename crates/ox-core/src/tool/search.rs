@@ -12,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::spill::MAX_SPILL_BYTES;
 use super::view::{GrepFileGroup, GrepMatchLine};
-use super::{Prepared, ToolCtx, display_path, extract_input_field, tool_path};
+use super::{
+    Prepared, StoredView, ToolCtx, ToolOutput, display_path, extract_input_field, tool_path,
+};
 use crate::permission::{Access, WalkFilter, Workspace};
 use crate::util::text::{ELLIPSIS, format_size, plural};
 
@@ -288,6 +290,45 @@ impl SearchRows {
             }
         }
         groups
+    }
+}
+
+// ── Search Output ──
+
+/// A finished search's result.
+#[derive(Debug)]
+pub(super) struct SearchOutput {
+    pub(super) content: String,
+    /// A one-line summary of the call, which the UI shows on its result.
+    pub(super) title: String,
+    /// The rows to store, or [`StoredView::Text`] when notes follow them so the result renders as
+    /// text. `None` stores no view.
+    pub(super) view: Option<StoredView>,
+}
+
+impl SearchOutput {
+    /// A result that stores no view.
+    pub(super) fn plain(content: String, title: String) -> Self {
+        Self {
+            content,
+            title,
+            view: None,
+        }
+    }
+}
+
+impl From<SearchOutput> for ToolOutput {
+    fn from(output: SearchOutput) -> Self {
+        let SearchOutput {
+            content,
+            title,
+            view,
+        } = output;
+        let output = Self::success(content).with_title(title);
+        match view {
+            Some(view) => output.with_stored_view(view),
+            None => output,
+        }
     }
 }
 

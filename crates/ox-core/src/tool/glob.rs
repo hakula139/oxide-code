@@ -8,9 +8,11 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use super::search::{NO_FILES_FOUND, SearchRoot, SearchRow, SearchRows};
+use super::search::{NO_FILES_FOUND, SearchOutput, SearchRoot, SearchRow, SearchRows};
 use super::view::ToolResultView;
-use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field};
+use super::{
+    Prepared, StoredView, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field,
+};
 use crate::permission::{PermissionClass, ReadFilter};
 use crate::util::text::plural;
 
@@ -104,34 +106,12 @@ async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> Tool
 
     let workspace = Arc::clone(&ctx.workspace);
     let cancel = ctx.cancel.clone();
-    match super::run_blocking(move || {
+    super::run_blocking(move || {
         let root = SearchRoot::new(&access, path.as_deref(), workspace)?;
         glob_files(&pattern, &root, &read_filter, &cancel)
     })
     .await
-    {
-        Ok(GlobOutput {
-            content,
-            title,
-            view,
-        }) => {
-            let output = ToolOutput::success(content).with_title(title);
-            match view {
-                Some(view) => output.with_result_view(view),
-                None => output.with_text_view(),
-            }
-        }
-        Err(msg) => ToolOutput::error(msg),
-    }
-}
-
-#[derive(Debug)]
-struct GlobOutput {
-    content: String,
-    /// A one-line summary of the call, which the UI shows on its result.
-    title: String,
-    /// The listed files, or `None` when notes in `content` keep it from parsing as rows.
-    view: Option<ToolResultView>,
+    .map_or_else(ToolOutput::error, ToolOutput::from)
 }
 
 /// Lists up to [`MAX_RESULTS`] files under `root` that match `pattern`, newest first and relative
@@ -143,7 +123,7 @@ fn glob_files(
     root: &SearchRoot,
     read_filter: &ReadFilter,
     cancel: &CancellationToken,
-) -> Result<GlobOutput, String> {
+) -> Result<SearchOutput, String> {
     let SearchRoot {
         base,
         spelled,
@@ -196,16 +176,20 @@ fn glob_files(
     }
     super::search::push_unreadable_note(&mut content, &unreadable, cwd);
     super::search::push_withheld_note(&mut content, withheld);
-    let view = (unreadable.is_empty() && withheld == 0).then(|| ToolResultView::GlobFiles {
-        pattern: pattern.to_owned(),
-        files: rows.kept.iter().map(ToString::to_string).collect(),
-        total,
-    });
+    let view = if unreadable.is_empty() && withheld == 0 {
+        StoredView::View(ToolResultView::GlobFiles {
+            pattern: pattern.to_owned(),
+            files: rows.kept.iter().map(ToString::to_string).collect(),
+            total,
+        })
+    } else {
+        StoredView::Text
+    };
 
-    Ok(GlobOutput {
+    Ok(SearchOutput {
         content,
         title,
-        view,
+        view: Some(view),
     })
 }
 
@@ -242,7 +226,7 @@ mod tests {
     use super::*;
     use crate::permission::Access;
     use crate::tool::local_testing::{self, ctx, deny_reads, search_root, temp_ctx};
-    use crate::tool::{StoredView, ToolMetadata, ToolRegistry};
+    use crate::tool::{ToolMetadata, ToolRegistry};
     use crate::util::fs::testing::deny_read_access;
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::slash_separated;
@@ -436,7 +420,7 @@ mod tests {
             path: Option<&str>,
             cwd: &Path,
             read_filter: &ReadFilter,
-        ) -> Result<GlobOutput, String> {
+        ) -> Result<SearchOutput, String> {
             let root = search_root(cwd, path)?;
             glob_files(pattern, &root, read_filter, &CancellationToken::new())
         }
@@ -454,7 +438,7 @@ mod tests {
             assert_eq!(files, ["bar.txt", "foo.txt"]);
             assert!(matches!(
                 result.view,
-                Some(ToolResultView::GlobFiles { total, .. }) if total == 2
+                Some(StoredView::View(ToolResultView::GlobFiles { total, .. })) if total == 2
             ));
         }
 
@@ -551,11 +535,11 @@ mod tests {
             assert_eq!(result.title, "No files found");
             assert_eq!(
                 result.view,
-                Some(ToolResultView::GlobFiles {
+                Some(StoredView::View(ToolResultView::GlobFiles {
                     pattern: "*.rs".to_owned(),
                     files: Vec::new(),
                     total: 0,
-                }),
+                })),
             );
         }
 
@@ -621,7 +605,8 @@ mod tests {
             );
             assert!(matches!(
                 result.view,
-                Some(ToolResultView::GlobFiles { total, .. }) if total == MAX_RESULTS + 10
+                Some(StoredView::View(ToolResultView::GlobFiles { total, .. }))
+                    if total == MAX_RESULTS + 10
             ));
             assert_eq!(result.title, format!("Found {MAX_RESULTS} files"));
         }
@@ -643,7 +628,7 @@ mod tests {
                     (1 file withheld by read deny or ask rules)"
                 }
             );
-            assert_eq!(result.view, None);
+            assert_eq!(result.view, Some(StoredView::Text));
             assert_eq!(result.title, "Found 1 file");
 
             let result = glob_in("secrets/*", None, dir.path(), &read_filter).unwrap();

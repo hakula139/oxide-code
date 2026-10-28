@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
-use serde::{Deserialize, Serialize};
 use tokio_util::task::TaskTracker;
 use tracing::warn;
 
@@ -54,9 +53,8 @@ impl AuthKind {
 // ── AuthSource ──
 
 /// Where the active credential came from, listed in resolution order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(strum::VariantArray))]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AuthSource {
     AuthTokenEnv,
     ApiKeyEnv,
@@ -74,7 +72,7 @@ pub enum AuthSource {
 
 /// One slot in [`AuthSource::EXPLICIT`].
 #[derive(Debug, Clone, Copy)]
-pub(super) enum Explicit {
+enum Explicit {
     /// A credential environment variable.
     Env(AuthSource),
     /// The `[client.auth]` credential, whichever type it selects.
@@ -84,7 +82,7 @@ pub(super) enum Explicit {
 impl AuthSource {
     /// The explicit credential slots in the order they win over each other and over the stored
     /// logins: the environment variables around the one config slot.
-    pub(super) const EXPLICIT: [Explicit; 4] = [
+    const EXPLICIT: [Explicit; 4] = [
         Explicit::Env(Self::AuthTokenEnv),
         Explicit::Env(Self::ApiKeyEnv),
         Explicit::Config,

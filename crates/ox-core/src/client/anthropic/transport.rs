@@ -37,6 +37,8 @@ const MAX_RETRY_AFTER: Duration = Duration::from_mins(1);
 const OVERLOADED: &str = "Anthropic API overloaded";
 /// Headline of a server failure, reported as a 5xx status or an in-band `api_error`.
 const SERVER_ERROR: &str = "Anthropic API server error";
+/// Headline of a transport failure, where no response arrived.
+const CONNECTION_FAILED: &str = "Anthropic API connection failed";
 /// Advice for an overload or a server failure, both of which usually pass.
 const TRANSIENT_ADVICE: &str = "Retry in a few seconds.";
 /// Advice for a transport failure, which a wrong base URL or proxy often causes.
@@ -134,9 +136,9 @@ async fn send(
                 AttemptError::Fatal(e.into())
             } else {
                 AttemptError::retryable(
-                    "Anthropic API connection failed",
+                    CONNECTION_FAILED,
                     anyhow!(with_details(
-                        "Anthropic API connection failed",
+                        CONNECTION_FAILED,
                         Some(&format!("{:#}", anyhow::Error::new(e))),
                         Some(CONNECTION_ADVICE),
                     )),

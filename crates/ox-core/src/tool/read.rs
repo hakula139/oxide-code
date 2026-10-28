@@ -100,11 +100,9 @@ async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
         Ok(v) => v,
         Err(msg) => return ToolOutput::error(msg),
     };
-    let shown = path.display().to_string();
-
     match read_file(&path, input.offset, input.limit, ctx).await {
         Ok(content) => {
-            ToolOutput::success(content).with_title(format!("Read {}", super::file_name(&shown)))
+            ToolOutput::success(content).with_title(format!("Read {}", super::file_name(&path)))
         }
         Err(msg) => ToolOutput::error(msg),
     }
@@ -122,7 +120,7 @@ async fn read_file(
     limit: Option<usize>,
     ctx: &ToolCtx,
 ) -> Result<String, String> {
-    let (_, bytes) = super::file::read_validated(path, FileVerb::Read).await?;
+    let bytes = super::file::read_validated(path, FileVerb::Read).await?;
 
     if super::file::is_binary(&bytes) {
         return Err(

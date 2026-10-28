@@ -66,15 +66,7 @@ fn create(
     checkpoint(Phase::Written, staged.as_file())?;
     #[cfg(unix)]
     staged.as_file().set_permissions(creation_mode(parent)?)?;
-    staged.as_file().sync_all()?;
-    checkpoint(Phase::Synced, staged.as_file())?;
-    if !bytes_match(staged.as_file_mut(), bytes)? {
-        return Err(io::Error::other(
-            "the prepared file changed before publication",
-        ));
-    }
-    checkpoint(Phase::Validated, staged.as_file())?;
-    verify_name(staged.as_file(), staged.path())?;
+    seal(&mut staged, bytes, checkpoint)?;
     staged
         .persist_noclobber(path)
         .map(|_| ())
@@ -113,15 +105,7 @@ fn replace_atomically(
     if metadata::Snapshot::capture(staged.as_file())? != original.snapshot {
         return Ok(false);
     }
-    staged.as_file().sync_all()?;
-    checkpoint(Phase::Synced, staged.as_file())?;
-    if !bytes_match(staged.as_file_mut(), bytes)? {
-        return Err(io::Error::other(
-            "the prepared file changed before publication",
-        ));
-    }
-    checkpoint(Phase::Validated, staged.as_file())?;
-    verify_name(staged.as_file(), staged.path())?;
+    seal(&mut staged, bytes, checkpoint)?;
     original.verify(path, expected)?;
     fs::rename(staged.path(), path).map(|()| true)
 }
@@ -145,6 +129,23 @@ fn write_in_place(
     checkpoint(Phase::Synced, &original.file)?;
     original.verify(path, bytes)?;
     checkpoint(Phase::Validated, &original.file)
+}
+
+/// Syncs the staged copy, then checks that it still holds `bytes` under its own name.
+fn seal(
+    staged: &mut NamedTempFile,
+    bytes: &[u8],
+    checkpoint: &mut impl FnMut(Phase, &File) -> io::Result<()>,
+) -> io::Result<()> {
+    staged.as_file().sync_all()?;
+    checkpoint(Phase::Synced, staged.as_file())?;
+    if !bytes_match(staged.as_file_mut(), bytes)? {
+        return Err(io::Error::other(
+            "the prepared file changed before publication",
+        ));
+    }
+    checkpoint(Phase::Validated, staged.as_file())?;
+    verify_name(staged.as_file(), staged.path())
 }
 
 fn staged_file(parent: &Path) -> io::Result<NamedTempFile> {
@@ -286,8 +287,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-
-    use crate::tool::local_testing::WorkspaceWrite;
+    use crate::util::fs::testing::symlink_file;
 
     fn entries(path: &Path) -> Vec<std::ffi::OsString> {
         let mut names: Vec<_> = fs::read_dir(path)
@@ -357,6 +357,68 @@ mod tests {
             assert_eq!(identity_of(&path), before);
             assert_eq!(fs::read(&path).unwrap(), b"new");
             assert_eq!(fs::read(&alias).unwrap(), b"new");
+        }
+
+        #[test]
+        fn create_new_refuses_existing_entries_and_dangling_links() {
+            let identity = |path: &Path| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+
+                    let metadata = fs::symlink_metadata(path).unwrap();
+                    (metadata.dev(), metadata.ino())
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt as _;
+
+                    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+                    let file = fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                        .open(path)
+                        .unwrap();
+                    crate::util::fs::file_id(&file).unwrap()
+                }
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let existing = dir.path().join("existing.txt");
+            fs::write(&existing, "original").unwrap();
+            let target = dir.path().join("target.txt");
+            let link = dir.path().join("link.txt");
+            symlink_file(&target, &link);
+            let before_entries = entries(dir.path());
+
+            for path in [&existing, &link] {
+                let before = identity(path);
+
+                let error = write(path, b"x", None).unwrap_err();
+
+                assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+                assert_eq!(identity(path), before);
+                assert_eq!(fs::read(&existing).unwrap(), b"original");
+                assert_eq!(entries(dir.path()), before_entries);
+                assert_eq!(fs::read_link(&link).unwrap(), target);
+                assert!(!target.exists(), "the link target must not be created");
+            }
+        }
+
+        #[test]
+        fn overwrite_refuses_a_symlink() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("target.txt");
+            fs::write(&target, "original").unwrap();
+            let link = dir.path().join("link.txt");
+            symlink_file(&target, &link);
+
+            let err = write(&link, b"x", Some(b"original")).unwrap_err();
+            #[cfg(unix)]
+            assert_eq!(err.raw_os_error(), Some(nix::errno::Errno::ELOOP as i32));
+            #[cfg(windows)]
+            assert_eq!(err.to_string(), "the final path component is a symlink");
+            assert_eq!(fs::read_to_string(&target).unwrap(), "original");
         }
 
         #[cfg(target_os = "linux")]
@@ -666,7 +728,6 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("target");
             fs::write(&path, b"original").unwrap();
-            let attempt = WorkspaceWrite::new(&path);
 
             let error = write(&path, b"new", Some(b"stale")).unwrap_err();
 
@@ -676,7 +737,6 @@ mod tests {
             );
             assert_eq!(fs::read(&path).unwrap(), b"original");
             assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-            attempt.assert_unchanged();
         }
 
         #[test]
@@ -744,8 +804,6 @@ mod tests {
 
         #[test]
         fn refuses_substituted_stage_names() {
-            use crate::util::fs::testing::symlink_file;
-
             // Off Linux a replacement checkpoints the original file's handle, so only a new file
             // has a staged copy whose name can change there.
             let targets: &[bool] = if cfg!(target_os = "linux") {

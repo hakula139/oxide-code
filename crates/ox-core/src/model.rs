@@ -12,7 +12,7 @@ pub(crate) use self::usage::TokenUsage;
 
 use std::fmt::Write as _;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 
 use self::pricing::{
@@ -231,24 +231,11 @@ impl PartialEq for ModelSpec {
 
 impl Eq for ModelSpec {}
 
-impl Serialize for ModelSpec {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.id)
-    }
-}
-
-impl<'de> Deserialize<'de> for ModelSpec {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(Self::resolve)
-    }
-}
-
 // ── ResolvedModelId ──
 
 /// A model ID a frontend picked, such as the `/model` resolver's match. The engine accepts any ID,
 /// since [`ModelSpec::resolve`] keeps an unknown one without catalog info.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedModelId(String);
 
 impl ResolvedModelId {

@@ -11,7 +11,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::error;
 
@@ -134,8 +134,7 @@ impl Op {
 
 /// The `code#state` an [`Op::LoginCode`] carries, as the user pasted it. `Debug` leaves it out, so
 /// a logged op never records the code.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SignInCode(pub String);
 
 impl fmt::Debug for SignInCode {
@@ -167,8 +166,7 @@ pub enum SavedTarget {
 }
 
 /// The answer to an [`Event::ApprovalRequested`], carried back on [`Op::Resolve`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalDecision {
     Approve,
     /// Approve, and allow every later call `rule` matches for the rest of the session. The engine
@@ -187,8 +185,7 @@ pub enum ApprovalDecision {
 
 /// The model, the effort, or both that an [`Op::SetModel`] picks. An omitted model keeps its
 /// current value, and an omitted effort carries over where the new model supports it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigPick {
     /// A model, with the effort to use on it when one was picked alongside.
     Model {
@@ -212,7 +209,7 @@ impl ConfigPick {
 // ── Events ──
 
 /// Token and cost snapshot for status-line rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct UsageSnapshot {
     /// Input tokens of the latest request, cache writes and reads included. `None` after a
     /// compaction, manual or automatic, until the next request reports usage, which hides the
@@ -408,7 +405,7 @@ pub enum Event {
 }
 
 /// What started a compaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactTrigger {
     /// The user ran `/compact`.
@@ -483,7 +480,7 @@ impl TurnEnd {
 /// A tool call as the row a frontend shows for it, live in [`Event::ToolCallStart`] and resumed in
 /// [`Interaction::ToolCall`]. `input` carries the model's raw arguments for consumers of the
 /// serialized protocol, and `icon` / `label` are their display form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -495,7 +492,7 @@ pub struct ToolCall {
 /// A tool call's result, live in [`Event::ToolCallEnd`] and resumed in [`Interaction::ToolResult`].
 /// `content` is what the model sees, `title` the tool's own header for the result, and `view` its
 /// structured body.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolResult {
     pub id: String,
     pub content: String,
@@ -507,8 +504,7 @@ pub struct ToolResult {
 // ── History ──
 
 /// A unit of a resumed transcript as a frontend shows it, in display order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Interaction {
     /// The boundary a compaction left, which the rest of the transcript continues from. Renders
     /// like a live [`Event::SessionCompacted`].

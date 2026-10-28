@@ -117,14 +117,14 @@ pub(crate) struct StopDetails {
 // ── Rate Limits ──
 
 /// An account's subscription usage limits. A window the provider did not report is `None`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct RateLimits {
     pub five_hour: Option<RateLimitWindow>,
     pub seven_day: Option<RateLimitWindow>,
 }
 
 /// One rolling usage window.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct RateLimitWindow {
     /// Share of the window's allowance spent, where 1 is all of it.
     pub utilization: f64,

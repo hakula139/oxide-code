@@ -23,16 +23,12 @@ pub(crate) enum FileReadError {
 
 /// Reads a regular file through a no-follow handle, consuming at most `limit + 1` bytes and
 /// rejecting overflow even if the file grew after its metadata was checked.
-pub(crate) fn read_regular_file(
-    path: &Path,
-    limit: u64,
-) -> Result<(Metadata, Vec<u8>), FileReadError> {
+pub(crate) fn read_regular_file(path: &Path, limit: u64) -> Result<Vec<u8>, FileReadError> {
     let mut options = OpenOptions::new();
     options.read(true);
     let file = open_no_follow(path, options)?;
     let metadata = file.metadata()?;
-    let bytes = read_regular_contents(file, &metadata, limit)?;
-    Ok((metadata, bytes))
+    read_regular_contents(file, &metadata, limit)
 }
 
 fn read_regular_contents(
@@ -425,9 +421,8 @@ mod tests {
             for (name, content, limit) in cases {
                 fs::write(&path, content).unwrap();
 
-                let (metadata, bytes) = read_regular_file(&path, limit).unwrap();
+                let bytes = read_regular_file(&path, limit).unwrap();
 
-                assert_eq!(metadata.len(), content.len() as u64, "{name}");
                 assert_eq!(bytes, content, "{name}");
             }
         }

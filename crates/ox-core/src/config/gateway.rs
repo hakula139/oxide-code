@@ -66,8 +66,9 @@ impl GatewayCompat {
                 parse_headers(&raw.value).context("invalid ANTHROPIC_CUSTOM_HEADERS")?,
                 raw.source,
             ),
-            None => Sourced::from_option(origins.sourced("client.headers", client.headers.clone()))
-                .map(Option::unwrap_or_default),
+            None => origins
+                .sourced("client.headers", client.headers.clone())
+                .unwrap_or_else(|| Sourced::fallback(HeaderMap::new())),
         };
         let attribution = resolve_flag(
             "CLAUDE_CODE_ATTRIBUTION_HEADER",
@@ -186,12 +187,8 @@ mod tests {
     use crate::config::provenance::Layer;
     use crate::config::schema::FileConfig;
 
-    /// The client table and origins a single config file produces, merged as the loader does.
-    fn loaded(body: &str) -> (ClientTable, Origins) {
-        let layer = Layer::User(PathBuf::from("/ox/config.toml"));
-        let (merged, origins) = merge(vec![(layer, body.parse().unwrap())]);
-        let config: FileConfig = merged.try_into().unwrap();
-        (config.client, origins)
+    fn layer() -> Layer {
+        Layer::User(PathBuf::from("/ox/config.toml"))
     }
 
     fn pairs(headers: &HeaderMap) -> Vec<(&str, &str)> {
@@ -207,14 +204,16 @@ mod tests {
         "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
     ];
 
-    fn load_with(vars: &[(&str, &str)]) -> Result<ResolvedGateway> {
+    /// Resolves the gateway from a single config file `body`, merged as the loader does, with the
+    /// gateway variables set to `vars` alone.
+    fn resolve_with(body: &str, vars: &[(&str, &str)]) -> Result<ResolvedGateway> {
+        let (merged, origins) = merge(vec![(layer(), body.parse().unwrap())]);
+        let config: FileConfig = merged.try_into().unwrap();
         let vars = ENV_KEYS.map(|key| {
             let value = vars.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
             (key, value)
         });
-        temp_env::with_vars(vars, || {
-            GatewayCompat::resolve(&ClientTable::default(), &Origins::default())
-        })
+        temp_env::with_vars(vars, || GatewayCompat::resolve(&config.client, &origins))
     }
 
     mod resolve {
@@ -222,8 +221,17 @@ mod tests {
 
         #[test]
         fn file_values_supply_defaults_and_environment_replaces_each_setting() {
-            for (body, vars, expected_headers, attribution, structured_outputs) in [
-                ("", vec![], vec![], true, true),
+            let file = Source::File(layer());
+            let env = Source::Env;
+            for (body, vars, expected_headers, attribution, structured_outputs, sources) in [
+                (
+                    "",
+                    vec![],
+                    vec![],
+                    true,
+                    true,
+                    [Source::Default, Source::Default, Source::Default],
+                ),
                 (
                     indoc! {"
                         client.headers = { x-file = 'private-header-sentinel' }
@@ -234,6 +242,7 @@ mod tests {
                     vec![("x-file", "private-header-sentinel")],
                     false,
                     false,
+                    [file.clone(), file.clone(), file.clone()],
                 ),
                 (
                     indoc! {"
@@ -249,6 +258,11 @@ mod tests {
                     vec![("x-env", "env")],
                     true,
                     true,
+                    [
+                        env(CUSTOM_HEADERS_VAR),
+                        env("CLAUDE_CODE_ATTRIBUTION_HEADER"),
+                        env("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS"),
+                    ],
                 ),
                 (
                     indoc! {"
@@ -263,6 +277,11 @@ mod tests {
                     vec![],
                     false,
                     false,
+                    [
+                        file.clone(),
+                        env("CLAUDE_CODE_ATTRIBUTION_HEADER"),
+                        env("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS"),
+                    ],
                 ),
                 (
                     "client.headers = { x-file = 'private-header-sentinel' }",
@@ -270,20 +289,10 @@ mod tests {
                     vec![],
                     true,
                     true,
+                    [env(CUSTOM_HEADERS_VAR), Source::Default, Source::Default],
                 ),
             ] {
-                let (client, origins) = loaded(body);
-                let vars = ENV_KEYS.map(|key| {
-                    let value = vars
-                        .iter()
-                        .find(|(k, _)| *k == key)
-                        .map(|(_, value)| *value);
-                    (key, value)
-                });
-
-                let gateway = temp_env::with_vars(vars, || {
-                    GatewayCompat::resolve(&client, &origins).unwrap()
-                });
+                let gateway = resolve_with(body, &vars).unwrap();
 
                 assert_eq!(
                     pairs(&gateway.custom_headers.value),
@@ -296,38 +305,27 @@ mod tests {
                     "{body}"
                 );
                 assert!(!format!("{gateway:?}").contains("private-header-sentinel"));
+                assert_eq!(
+                    [
+                        gateway.custom_headers.source,
+                        gateway.attribution.source,
+                        gateway.structured_outputs.source,
+                    ],
+                    sources,
+                    "{body}"
+                );
             }
         }
 
         #[test]
-        fn environment_settings_name_the_variable_that_supplied_them() {
-            let gateway = load_with(&[
-                (CUSTOM_HEADERS_VAR, "x-env: env"),
-                ("CLAUDE_CODE_ATTRIBUTION_HEADER", "1"),
-                ("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS", "0"),
-            ])
-            .unwrap();
-
-            assert_eq!(
-                gateway.custom_headers.source,
-                Source::Env(CUSTOM_HEADERS_VAR)
-            );
-            assert_eq!(
-                gateway.attribution.source,
-                Source::Env("CLAUDE_CODE_ATTRIBUTION_HEADER")
-            );
-            assert_eq!(
-                gateway.structured_outputs.source,
-                Source::Env("CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS")
-            );
-        }
-
-        #[test]
         fn malformed_headers_name_the_variable_and_line() {
-            let err = load_with(&[(
-                "ANTHROPIC_CUSTOM_HEADERS",
-                "x-team: platform\nmissing colon",
-            )])
+            let err = resolve_with(
+                "",
+                &[(
+                    "ANTHROPIC_CUSTOM_HEADERS",
+                    "x-team: platform\nmissing colon",
+                )],
+            )
             .expect_err("malformed header must fail startup");
             assert_eq!(
                 format!("{err:#}"),
@@ -341,7 +339,7 @@ mod tests {
                 "CLAUDE_CODE_ATTRIBUTION_HEADER",
                 "CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS",
             ] {
-                let err = load_with(&[(key, "maybe")]).expect_err(key);
+                let err = resolve_with("", &[(key, "maybe")]).expect_err(key);
                 assert!(
                     err.to_string()
                         .starts_with(&format!("invalid {key} \"maybe\"")),
@@ -356,10 +354,13 @@ mod tests {
 
         #[test]
         fn rejects_only_the_active_credential_header() {
-            let gateway = load_with(&[(
-                "ANTHROPIC_CUSTOM_HEADERS",
-                "Authorization: Bearer gateway-jwt",
-            )])
+            let gateway = resolve_with(
+                "",
+                &[(
+                    "ANTHROPIC_CUSTOM_HEADERS",
+                    "Authorization: Bearer gateway-jwt",
+                )],
+            )
             .unwrap();
             gateway
                 .check_credential_header(Some(AuthSource::ApiKeyEnv))
@@ -379,11 +380,8 @@ mod tests {
 
         #[test]
         fn names_the_file_setting_for_a_file_header() {
-            let (client, origins) = loaded("client.headers = { x-api-key = 'gateway-key' }");
-            let gateway = temp_env::with_vars(ENV_KEYS.map(|key| (key, None::<&str>)), || {
-                GatewayCompat::resolve(&client, &origins)
-            })
-            .unwrap();
+            let gateway =
+                resolve_with("client.headers = { x-api-key = 'gateway-key' }", &[]).unwrap();
 
             let err = gateway
                 .check_credential_header(Some(AuthSource::ApiKeyEnv))
@@ -399,8 +397,11 @@ mod tests {
 
         #[test]
         fn names_a_stored_login_when_no_explicit_credential_is_set() {
-            let gateway =
-                load_with(&[(CUSTOM_HEADERS_VAR, "Authorization: Bearer gateway-jwt")]).unwrap();
+            let gateway = resolve_with(
+                "",
+                &[(CUSTOM_HEADERS_VAR, "Authorization: Bearer gateway-jwt")],
+            )
+            .unwrap();
 
             let err = gateway.check_credential_header(None).unwrap_err();
 

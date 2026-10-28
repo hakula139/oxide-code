@@ -76,7 +76,7 @@ pub struct GrepMatchLine {
 // ── Approval Preview ──
 
 /// What a pending approval shows the user, rendered by the tool so the modal only displays it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalPreview {
     /// Tool display label, such as `Bash` or `Write(src/main.rs)`.
     pub title: String,
@@ -84,8 +84,7 @@ pub struct ApprovalPreview {
 }
 
 /// The renderable body of an [`ApprovalPreview`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalBody {
     /// The call's label, which for `bash` is the whole command and may span lines.
     Command(String),

@@ -23,7 +23,8 @@ use crate::tool::{ToolDefinition, ToolMetadata};
 
 /// The live session and the transcript it holds. Only its methods write either one, so the
 /// in-memory messages always match what the session recorded, and a resumed session reads what the
-/// turn showed.
+/// turn showed. Methods that snapshot, reset, or close the tracked files first wait for pending
+/// workspace writes.
 pub(super) struct LiveTranscript {
     session: SessionHandle,
     messages: Vec<Message>,
@@ -136,6 +137,7 @@ impl LiveTranscript {
         start: TranscriptStart,
         checkpoint: Option<Checkpoint>,
     ) -> Option<String> {
+        self.file_tracker.drain_writes().await;
         self.messages.truncate(start.len);
         self.prompt.seen = start.seen;
         self.prompt_unrecorded = start.prompt_unrecorded;
@@ -219,6 +221,7 @@ impl LiveTranscript {
         boundary: CompactBoundary,
         synthetic: Message,
     ) -> CompactOutcome {
+        self.file_tracker.drain_writes().await;
         let context = boundary.context.clone();
         let outcome = self.session.compact(boundary, synthetic.clone()).await;
         if outcome.checkpoint.is_some() {
@@ -237,6 +240,7 @@ impl LiveTranscript {
         model: &str,
         git_branch: Option<String>,
     ) -> RollOutcome {
+        self.file_tracker.drain_writes().await;
         handle::roll(
             &mut self.session,
             store,
@@ -254,6 +258,7 @@ impl LiveTranscript {
         store: &SessionStore,
         target: ResumeTarget,
     ) -> Result<RollIntoOutcome> {
+        self.file_tracker.drain_writes().await;
         handle::roll_into(
             &mut self.session,
             store,
@@ -263,9 +268,10 @@ impl LiveTranscript {
         .await
     }
 
-    /// Closes the session with a snapshot of the files the transcript read, after the caller drains
-    /// the pending writes. Returns the session's write failure.
+    /// Closes the session with a snapshot of the files the transcript read. Returns the session's
+    /// write failure.
     pub(super) async fn finalize(self) -> Option<String> {
+        self.file_tracker.drain_writes().await;
         self.session
             .finalize(self.file_tracker.snapshot_all())
             .await
