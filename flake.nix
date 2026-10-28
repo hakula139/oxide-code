@@ -127,6 +127,19 @@
               rustfmt = rustToolchain;
             };
           };
+
+          comment-width = {
+            enable = true;
+            name = "comment-width";
+            entry = pkgs.lib.getExe (
+              pkgs.writeShellApplication {
+                name = "check-comment-width";
+                runtimeInputs = [ pkgs.gawk ];
+                text = builtins.readFile ./scripts/check-comment-width.sh;
+              }
+            );
+            files = "\\.(nix|rs|sh|toml|ya?ml)$";
+          };
         };
 
         # These hooks run tools pinned in node_modules, which the Nix sandbox lacks. The flake check

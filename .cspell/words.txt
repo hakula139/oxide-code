@@ -51,6 +51,7 @@ getpgid
 Ghostty
 GOARCH
 GOEXPERIMENT
+gsub
 hakula
 idna
 illumos
