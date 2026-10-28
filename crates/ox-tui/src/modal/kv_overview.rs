@@ -1,7 +1,6 @@
 //! Read-only key-value overview modal with a title, multi-section body, and fixed footer.
 //! `/status`, `/config`, and `/help` supply the sections, and the modal lays them out.
 
-use std::cell::Cell;
 use std::iter;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -16,6 +15,7 @@ use ox_core::util::text::{center_truncate_to_width, pad_to_width};
 
 use super::chrome::{COLUMN_GAP, FOOTER_HEIGHT, Header, KEY_UP_DOWN, render_footer};
 use super::{Modal, ModalKey};
+use crate::keymap::hint;
 use crate::saturating_u16;
 use crate::theme::Theme;
 use crate::viewport::Viewport;
@@ -159,7 +159,7 @@ pub(crate) struct KvOverview {
     sections: Vec<KvSection>,
     viewport: Viewport,
     /// The width of the last render, which sets how many lines the wrapped rows take.
-    width: Cell<usize>,
+    width: usize,
 }
 
 impl KvOverview {
@@ -168,7 +168,7 @@ impl KvOverview {
             header: Header::new(title),
             sections,
             viewport: Viewport::default(),
-            width: Cell::new(0),
+            width: 0,
         }
     }
 
@@ -230,9 +230,8 @@ impl KvOverview {
             .collect()
     }
 
-    fn scroll(&self, delta: isize) {
-        self.viewport
-            .scroll_by(delta, self.body_len(self.width.get()));
+    fn scroll(&mut self, delta: isize) {
+        self.viewport.scroll_by(delta, self.body_len(self.width));
     }
 
     fn page(&self) -> isize {
@@ -259,18 +258,18 @@ fn note_column(section: &KvSection, label_width: usize, width: usize) -> usize {
 }
 
 impl Modal for KvOverview {
-    fn height(&self, width: u16, max_height: u16) -> u16 {
+    fn height(&mut self, width: u16, max_height: u16) -> u16 {
         let body = saturating_u16(self.body_len(usize::from(width)));
         (self.header.height() + FOOTER_HEIGHT)
             .saturating_add(body)
             .min(max_height)
     }
 
-    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let rows = area
             .height
             .saturating_sub(self.header.height() + FOOTER_HEIGHT);
-        self.width.set(usize::from(area.width));
+        self.width = usize::from(area.width);
         let body = self.body_lines(theme, usize::from(area.width));
         let window = self.viewport.window(body.len(), usize::from(rows), None);
         let scrollable = window.len() < body.len();
@@ -280,7 +279,7 @@ impl Modal for KvOverview {
         lines.extend(body.into_iter().skip(window.start).take(window.len()));
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
 
-        let scroll_hint = format!("{KEY_UP_DOWN} to scroll");
+        let scroll_hint = hint(KEY_UP_DOWN, "scroll");
         let hints: &[&str] = if scrollable {
             &[&scroll_hint, CLOSE_HINT]
         } else {
@@ -309,11 +308,17 @@ mod tests {
     use super::*;
     use crate::modal::testing::render_rows;
 
-    fn trimmed_rows(modal: &KvOverview, width: u16, height: u16) -> Vec<String> {
+    fn trimmed_rows(modal: &mut KvOverview, width: u16, height: u16) -> Vec<String> {
         render_rows(modal, width, height)
             .into_iter()
             .map(|row| row.trim_end().to_owned())
             .collect()
+    }
+
+    /// [`trimmed_rows`] at the height the modal asks for within `max_height`.
+    fn rendered(modal: &mut KvOverview, width: u16, max_height: u16) -> Vec<String> {
+        let height = modal.height(width, max_height);
+        trimmed_rows(modal, width, height)
     }
 
     fn row(k: &str, v: &str) -> (String, String) {
@@ -442,7 +447,7 @@ mod tests {
 
         #[test]
         fn counts_the_lines_a_wrapped_value_takes() {
-            let m = KvOverview::new(
+            let mut m = KvOverview::new(
                 "Config",
                 vec![KvSection::new(vec![row(
                     "Status",
@@ -488,9 +493,9 @@ mod tests {
 
         #[test]
         fn lays_out_every_row_with_a_close_hint_when_it_fits() {
-            let m = flat_overview();
+            let mut m = flat_overview();
 
-            let rows = trimmed_rows(&m, 40, m.height(40, 40));
+            let rows = rendered(&mut m, 40, 40);
 
             assert_eq!(
                 rows,
@@ -507,9 +512,9 @@ mod tests {
 
         #[test]
         fn clips_the_body_between_pinned_header_and_scroll_hint() {
-            let m = long_overview();
+            let mut m = long_overview();
 
-            let rows = trimmed_rows(&m, 40, 7);
+            let rows = trimmed_rows(&mut m, 40, 7);
 
             assert_eq!(
                 rows,
@@ -520,7 +525,7 @@ mod tests {
                     "k1  v1",
                     "k2  v2",
                     "",
-                    "↑ / ↓ to scroll  ·  Esc to close"
+                    "Up / Down to scroll  ·  Esc to close"
                 ]
             );
         }
@@ -528,9 +533,9 @@ mod tests {
         #[test]
         fn aligns_notes_in_a_column_when_they_fit() {
             // 35 columns is exactly label + gap + value + gap + note for this fixture.
-            let m = annotated_overview();
+            let mut m = annotated_overview();
 
-            let rows = trimmed_rows(&m, 35, m.height(35, 40));
+            let rows = rendered(&mut m, 35, 40);
 
             assert_eq!(
                 rows[2..6],
@@ -545,9 +550,9 @@ mod tests {
 
         #[test]
         fn puts_notes_after_their_values_when_the_column_would_overflow() {
-            let m = annotated_overview();
+            let mut m = annotated_overview();
 
-            let rows = trimmed_rows(&m, 34, m.height(34, 40));
+            let rows = rendered(&mut m, 34, 40);
 
             assert_eq!(
                 rows[2..4],
@@ -561,7 +566,7 @@ mod tests {
         #[test]
         fn keeps_the_other_notes_aligned_beside_a_value_too_wide_for_the_column() {
             let note_row = |k: &str, v: &str, n: &str| (k.to_owned(), v.to_owned(), n.to_owned());
-            let m = KvOverview::new(
+            let mut m = KvOverview::new(
                 "Config",
                 vec![KvSection::annotated(vec![
                     note_row("Model", "Opus", "user"),
@@ -570,7 +575,7 @@ mod tests {
                 ])],
             );
 
-            let rows = trimmed_rows(&m, 44, m.height(44, 40));
+            let rows = rendered(&mut m, 44, 40);
 
             assert_eq!(
                 rows[2..5],
@@ -584,9 +589,9 @@ mod tests {
 
         #[test]
         fn separates_headed_sections_with_blank_rows() {
-            let m = sectioned_overview();
+            let mut m = sectioned_overview();
 
-            let rows = trimmed_rows(&m, 40, m.height(40, 40));
+            let rows = rendered(&mut m, 40, 40);
 
             assert_eq!(
                 rows,
@@ -613,16 +618,16 @@ mod tests {
         #[test]
         fn scrolls_the_clipped_body_within_its_bounds() {
             let mut m = long_overview();
-            trimmed_rows(&m, 40, 7);
+            trimmed_rows(&mut m, 40, 7);
 
             m.handle_key(&KeyEvent::from(KeyCode::Down));
 
-            assert_eq!(trimmed_rows(&m, 40, 7)[2], "k1  v1");
+            assert_eq!(trimmed_rows(&mut m, 40, 7)[2], "k1  v1");
 
             m.handle_key(&KeyEvent::from(KeyCode::PageDown));
 
             assert_eq!(
-                trimmed_rows(&m, 40, 7)[2],
+                trimmed_rows(&mut m, 40, 7)[2],
                 "k4  v4",
                 "a page is the three body rows"
             );
@@ -630,7 +635,7 @@ mod tests {
             m.handle_key(&KeyEvent::from(KeyCode::End));
 
             assert_eq!(
-                trimmed_rows(&m, 40, 7)[4],
+                trimmed_rows(&mut m, 40, 7)[4],
                 "k9  v9",
                 "End pins the last row"
             );
@@ -638,22 +643,22 @@ mod tests {
             m.handle_key(&KeyEvent::from(KeyCode::Down));
 
             assert_eq!(
-                trimmed_rows(&m, 40, 7)[4],
+                trimmed_rows(&mut m, 40, 7)[4],
                 "k9  v9",
                 "no scrolling past the end"
             );
 
             m.handle_key(&KeyEvent::from(KeyCode::Char('k')));
 
-            assert_eq!(trimmed_rows(&m, 40, 7)[4], "k8  v8");
+            assert_eq!(trimmed_rows(&mut m, 40, 7)[4], "k8  v8");
 
             m.handle_key(&KeyEvent::from(KeyCode::PageUp));
 
-            assert_eq!(trimmed_rows(&m, 40, 7)[2], "k3  v3");
+            assert_eq!(trimmed_rows(&mut m, 40, 7)[2], "k3  v3");
 
             m.handle_key(&KeyEvent::from(KeyCode::Home));
 
-            assert_eq!(trimmed_rows(&m, 40, 7)[2], "k0  v0");
+            assert_eq!(trimmed_rows(&mut m, 40, 7)[2], "k0  v0");
         }
 
         #[test]

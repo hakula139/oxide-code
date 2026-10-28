@@ -34,10 +34,10 @@ const TOP_BORDER_HEIGHT: u16 = 1;
 pub(crate) trait Modal: Send {
     /// Rows the modal wants at `width`, before the separator. Scrollable modals fit within
     /// `max_height`, and the stack clips anything taller.
-    fn height(&self, width: u16, max_height: u16) -> u16;
+    fn height(&mut self, width: u16, max_height: u16) -> u16;
 
     /// Updates the current view even when `area` has no cells, invalidating hidden acceptance.
-    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme);
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme);
 
     /// Routes one key event. Returns whether the modal consumed it, was cancelled, or submitted a
     /// typed action. The stack pops on cancel or submit.
@@ -99,9 +99,9 @@ pub(crate) enum ModalKey {
     Consumed,
     Cancelled,
     Submitted(ModalAction),
-    /// Emits `action` without popping. Live-preview modals use this so cursor moves can mutate app
-    /// state without committing.
-    Preview(ModalAction),
+    /// Emits `action` without popping, for a key that changes app state without committing the
+    /// modal, such as a theme preview or an archive toggle inside the `/resume` picker.
+    Emit(ModalAction),
     /// Pushes `modal` onto the stack as a nested overlay. The current modal stays beneath, so a
     /// picker can open a confirm dialog without losing its own state.
     Push(Box<dyn Modal>),
@@ -113,7 +113,7 @@ impl fmt::Debug for ModalKey {
             Self::Consumed => f.write_str("Consumed"),
             Self::Cancelled => f.write_str("Cancelled"),
             Self::Submitted(action) => f.debug_tuple("Submitted").field(action).finish(),
-            Self::Preview(action) => f.debug_tuple("Preview").field(action).finish(),
+            Self::Emit(action) => f.debug_tuple("Emit").field(action).finish(),
             Self::Push(_) => f.write_str("Push(<modal>)"),
         }
     }
@@ -174,8 +174,8 @@ impl ModalStack {
     }
 
     /// Rows above the input: the top modal's body plus a one-row separator, within `max_height`.
-    pub(crate) fn height(&self, width: u16, max_height: u16) -> u16 {
-        let Some(top) = self.stack.last() else {
+    pub(crate) fn height(&mut self, width: u16, max_height: u16) -> u16 {
+        let Some(top) = self.stack.last_mut() else {
             return 0;
         };
         let body_max = max_height.saturating_sub(TOP_BORDER_HEIGHT);
@@ -184,8 +184,8 @@ impl ModalStack {
     }
 
     /// Renders the top modal into `area` below a one-row separator. No-op when empty.
-    pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let Some(top) = self.stack.last() else {
+    pub(crate) fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let Some(top) = self.stack.last_mut() else {
             return;
         };
         let border_area = Rect {
@@ -210,7 +210,7 @@ impl ModalStack {
 
     /// Routes `event` to the top modal. Returns `None` when the key was consumed, dropped, or the
     /// stack is empty, `Some(ModalAction::Cancelled)` for a silent close, and `Some(action)` for a
-    /// Submit or Preview. Esc and Ctrl+C short-circuit before delegation as a universal cancel, so
+    /// Submit or Emit. Esc and Ctrl+C short-circuit before delegation as a universal cancel, so
     /// individual modals don't reimplement the gesture, except that Esc reaches a modal whose
     /// [`Modal::captures_esc`] is set. A modified key the modal does not bind is dropped.
     pub(crate) fn handle_key(&mut self, event: &KeyEvent) -> Option<ModalAction> {
@@ -229,7 +229,7 @@ impl ModalStack {
                 self.pop_and_notify();
                 Some(action)
             }
-            ModalKey::Preview(action) => Some(action),
+            ModalKey::Emit(action) => Some(action),
             ModalKey::Push(modal) => {
                 self.stack.push(modal);
                 None
@@ -297,13 +297,19 @@ pub(crate) mod testing {
     use crate::testing::buffer_rows;
 
     /// Renders `modal` at `width` and the height it requests.
-    pub(crate) fn rendered_text(modal: &dyn Modal, width: u16) -> String {
+    pub(crate) fn rendered_text(modal: &mut dyn Modal, width: u16) -> String {
         let height = modal.height(width, u16::MAX);
         render_rows(modal, width, height).join("\n")
     }
 
+    /// [`rendered_text`] as rows.
+    pub(crate) fn render_modal(modal: &mut dyn Modal, width: u16) -> Vec<String> {
+        let height = modal.height(width, u16::MAX);
+        render_rows(modal, width, height)
+    }
+
     /// Renders `modal` into a `width` x `height` buffer and returns each row as displayed.
-    pub(crate) fn render_rows(modal: &dyn Modal, width: u16, height: u16) -> Vec<String> {
+    pub(crate) fn render_rows(modal: &mut dyn Modal, width: u16, height: u16) -> Vec<String> {
         render_rows_with(width, height, |frame, area, theme| {
             modal.render(frame, area, theme);
         })
@@ -326,10 +332,10 @@ pub(crate) mod testing {
     pub(crate) struct ScriptedModal {
         pub(crate) on_submit_key: char,
         pub(crate) on_cancel_key: char,
-        pub(crate) on_preview_key: char,
+        pub(crate) on_emit_key: char,
         pub(crate) on_push_key: char,
         pub(crate) submit_action: ModalAction,
-        pub(crate) preview_action: ModalAction,
+        pub(crate) emit_action: ModalAction,
         /// Take-once action returned from [`Modal::on_cancel`]. `None` leaves the default (silent
         /// close), matching pickers that don't override the hook.
         pub(crate) cancel_action: Option<ModalAction>,
@@ -354,10 +360,10 @@ pub(crate) mod testing {
             Self {
                 on_submit_key: 's',
                 on_cancel_key: 'c',
-                on_preview_key: 'p',
+                on_emit_key: 'p',
                 on_push_key: 'h',
                 submit_action,
-                preview_action: ModalAction::Cancelled,
+                emit_action: ModalAction::Cancelled,
                 cancel_action: None,
                 push_child: None,
                 captures_esc: false,
@@ -386,11 +392,11 @@ pub(crate) mod testing {
                 .push(format!("completed:{id}:{result:?}"));
         }
 
-        fn height(&self, _width: u16, _max_height: u16) -> u16 {
+        fn height(&mut self, _width: u16, _max_height: u16) -> u16 {
             self.declared_height
         }
 
-        fn render(&self, _frame: &mut Frame<'_>, _area: Rect, _theme: &Theme) {}
+        fn render(&mut self, _frame: &mut Frame<'_>, _area: Rect, _theme: &Theme) {}
 
         fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
             match event.code {
@@ -398,9 +404,10 @@ pub(crate) mod testing {
                     std::mem::replace(&mut self.submit_action, ModalAction::Cancelled),
                 ),
                 KeyCode::Char(c) if c == self.on_cancel_key => ModalKey::Cancelled,
-                KeyCode::Char(c) if c == self.on_preview_key => ModalKey::Preview(
-                    std::mem::replace(&mut self.preview_action, ModalAction::Cancelled),
-                ),
+                KeyCode::Char(c) if c == self.on_emit_key => ModalKey::Emit(std::mem::replace(
+                    &mut self.emit_action,
+                    ModalAction::Cancelled,
+                )),
                 KeyCode::Char(c) if c == self.on_push_key => {
                     let child = self
                         .push_child
@@ -456,11 +463,11 @@ mod tests {
     struct BareModal;
 
     impl Modal for BareModal {
-        fn height(&self, _w: u16, _max: u16) -> u16 {
+        fn height(&mut self, _w: u16, _max: u16) -> u16 {
             1
         }
 
-        fn render(&self, _f: &mut Frame<'_>, _a: Rect, _t: &Theme) {}
+        fn render(&mut self, _f: &mut Frame<'_>, _a: Rect, _t: &Theme) {}
 
         fn handle_key(&mut self, _e: &KeyEvent) -> ModalKey {
             ModalKey::Consumed
@@ -469,7 +476,7 @@ mod tests {
 
     #[test]
     fn empty_stack_is_inactive_with_zero_height() {
-        let stack = ModalStack::default();
+        let mut stack = ModalStack::default();
 
         assert!(!stack.is_active());
         assert_eq!(stack.height(80, 40), 0);
@@ -523,8 +530,8 @@ mod tests {
                 "Submitted(Cancelled)"
             );
             assert_eq!(
-                format!("{:?}", ModalKey::Preview(ModalAction::Cancelled)),
-                "Preview(Cancelled)"
+                format!("{:?}", ModalKey::Emit(ModalAction::Cancelled)),
+                "Emit(Cancelled)"
             );
             let push: ModalKey =
                 ModalKey::Push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
@@ -677,7 +684,7 @@ mod tests {
 
         #[test]
         fn no_ops_when_stack_empty_or_area_smaller_than_body() {
-            let empty = ModalStack::default();
+            let mut empty = ModalStack::default();
             let mut stack = ModalStack::default();
             stack.push(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
 
@@ -847,7 +854,7 @@ mod tests {
         fn preview_yields_action_without_popping_stack() {
             let mut stack = ModalStack::default();
             let mut modal = ScriptedModal::new(ModalAction::Cancelled);
-            modal.preview_action = ModalAction::Dispatch(Action::Op(Op::Interrupt));
+            modal.emit_action = ModalAction::Dispatch(Action::Op(Op::Interrupt));
             stack.push(Box::new(modal));
 
             let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Char('p')));

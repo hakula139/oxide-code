@@ -80,11 +80,11 @@ impl RenameModal {
 }
 
 impl Modal for RenameModal {
-    fn height(&self, _width: u16, _max_height: u16) -> u16 {
+    fn height(&mut self, _width: u16, _max_height: u16) -> u16 {
         self.header.height() + 1 + FOOTER_HEIGHT
     }
 
-    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let mut lines = Vec::new();
         self.header.push_lines(&mut lines, area.width, theme);
         lines.push(self.editor.line(area.width, theme));
@@ -124,7 +124,7 @@ mod tests {
 
     use super::*;
     use crate::modal::ModalStack;
-    use crate::modal::testing::render_rows;
+    use crate::modal::testing::render_modal;
     use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
 
@@ -209,9 +209,8 @@ mod tests {
 
             #[test]
             fn lays_out_title_prompt_and_footer_in_order() {
-                let modal = RenameModal::new(Some("Fix auth"));
-                let width: u16 = 40;
-                let rows = render_rows(&modal, width, modal.height(width, u16::MAX));
+                let mut modal = RenameModal::new(Some("Fix auth"));
+                let rows = render_modal(&mut modal, 40);
 
                 let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();
                 assert_eq!(
@@ -229,9 +228,8 @@ mod tests {
             #[test]
             fn scrolls_a_title_wider_than_the_row_to_its_tail() {
                 let long = format!("{}tail", "x".repeat(60));
-                let modal = RenameModal::new(Some(&long));
-                let width: u16 = 20;
-                let rows = render_rows(&modal, width, modal.height(width, u16::MAX));
+                let mut modal = RenameModal::new(Some(&long));
+                let rows = render_modal(&mut modal, 20);
 
                 let input = &rows[2];
                 assert_eq!(input.trim_end(), format!("/ {}tail", "x".repeat(13)));
@@ -240,7 +238,7 @@ mod tests {
             #[test]
             fn places_cursor_after_visible_buffer_text() {
                 let theme = Theme::default();
-                let modal = RenameModal::new(Some("ab"));
+                let mut modal = RenameModal::new(Some("ab"));
                 let width: u16 = 40;
                 let h = modal.height(width, u16::MAX);
                 let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
@@ -261,7 +259,7 @@ mod tests {
             fn clamps_cursor_when_buffer_overflows_visible_row() {
                 let theme = Theme::default();
                 let long: String = "x".repeat(100);
-                let modal = RenameModal::new(Some(&long));
+                let mut modal = RenameModal::new(Some(&long));
                 let width: u16 = 20;
                 let h = modal.height(width, u16::MAX);
                 let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
@@ -276,7 +274,7 @@ mod tests {
             #[test]
             fn skips_cursor_when_area_too_short_for_input_row() {
                 let theme = Theme::default();
-                let modal = RenameModal::new(Some("ab"));
+                let mut modal = RenameModal::new(Some("ab"));
                 let width: u16 = 40;
                 let mut terminal = Terminal::new(TestBackend::new(width, 5)).unwrap();
                 terminal
@@ -404,7 +402,7 @@ mod tests {
             fn inserts_one_line_at_the_cursor() {
                 let mut modal = RenameModal::new(Some("Fix"));
                 modal.handle_paste(" auth\r\nflow");
-                let rows = render_rows(&modal, 40, modal.height(40, u16::MAX));
+                let rows = render_modal(&mut modal, 40);
                 assert_eq!(rows[2].trim_end(), "/ Fix auth flow");
             }
         }

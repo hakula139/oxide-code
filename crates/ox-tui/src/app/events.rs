@@ -2190,7 +2190,7 @@ mod tests {
             });
 
             let text = rendered_text(&mut app, 100, 24);
-            assert!(text.contains("[A] allow for session"), "{text}");
+            assert!(text.contains("A to allow for the session"), "{text}");
         }
 
         #[test]

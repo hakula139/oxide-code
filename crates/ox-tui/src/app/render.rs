@@ -15,6 +15,7 @@ use crate::components::overflow_count;
 use crate::components::status::StatusBar;
 use crate::components::welcome;
 use crate::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
+use crate::keymap::{CTRL_END, hint};
 use crate::saturating_u16;
 use crate::terminal::{TuiBackend, synchronized_update, write_status_hyperlinks};
 use crate::theme::Theme;
@@ -29,14 +30,17 @@ const FOOTER_MIN_CHAT_HEIGHT: u16 = 2;
 /// Maximum queued prompts shown in the preview before collapsing into `... +N prompts`.
 const PREVIEW_VISIBLE: usize = 3;
 
+/// Column left free at the end of a queued prompt row, so its text never touches the edge.
+const PREVIEW_RIGHT_MARGIN: usize = 1;
+
 /// Cells a pill's padding takes, one on each side of its label.
 const PILL_PADDING: u16 = 2;
 
 /// Narrowest chat that shows the jump-to-bottom pill.
 const JUMP_PILL_MIN_WIDTH: u16 = 25;
 
-/// Narrowest chat whose jump-to-bottom pill spells out its label.
-const JUMP_LABEL_FULL_MIN_WIDTH: usize = 40;
+/// Narrowest chat whose jump-to-bottom pill spells out its label and new-message count.
+const JUMP_LABEL_FULL_MIN_WIDTH: usize = 46;
 
 impl App {
     pub(super) fn render<B: TuiBackend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
@@ -106,6 +110,7 @@ impl App {
         self.status_bar
             .set_queued_prompts(self.queue.pending().len());
         self.status_bar.set_task_progress(self.tasks.progress());
+        self.status_bar.set_input_empty(self.input.is_empty());
         self.status_bar
             .set_session_id(&self.session_info.session_id);
         self.status_bar
@@ -154,7 +159,7 @@ impl App {
     fn render_preview(&self, frame: &mut Frame<'_>, area: Rect) {
         let body_width = usize::from(area.width)
             .saturating_sub(usize::from(USER_PROMPT_PREFIX_WIDTH))
-            .saturating_sub(1);
+            .saturating_sub(PREVIEW_RIGHT_MARGIN);
 
         let queued = self.queue.pending();
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(PREVIEW_VISIBLE + 1);
@@ -242,13 +247,14 @@ fn bottom_row(area: Rect, x: u16, width: u16) -> Rect {
 }
 
 fn jump_overlay_label(new_count: u32, width: usize) -> String {
+    let jump = hint(CTRL_END, "jump to bottom");
     if width < JUMP_LABEL_FULL_MIN_WIDTH {
-        return "↓ (ctrl+End)".to_owned();
+        return CTRL_END.to_string();
     }
     let label = match new_count {
-        0 => "Jump to bottom (ctrl+End) ↓".to_owned(),
-        1 => "1 new message (ctrl+End) ↓".to_owned(),
-        n => format!("{n} new messages (ctrl+End) ↓"),
+        0 => jump,
+        1 => format!("1 new message · {jump}"),
+        n => format!("{n} new messages · {jump}"),
     };
     center_truncate_to_width(&label, width.saturating_sub(usize::from(PILL_PADDING)))
 }
@@ -623,10 +629,10 @@ mod tests {
             for (width, footer) in [
                 (
                     80,
-                    "  Tab → plan · Enter send · Shift+Enter newline · / commands",
+                    "  Tab to plan · Enter to send · Shift+Enter to add a line · / to show commands",
                 ),
-                (40, "  Tab → plan · Enter send"),
-                (22, "  Tab → plan"),
+                (40, "  Tab to plan · Enter to send"),
+                (22, "  Tab to plan"),
             ] {
                 let (mut app, _rx, _event_tx) = test_app(None);
                 app.chat.push_system_message("Chat stays visible");
@@ -661,7 +667,7 @@ mod tests {
             let rows = buffer_rows(backend.buffer());
             assert_eq!(
                 rows.last().unwrap().trim_end(),
-                "  Tab → yolo · Enter send · Shift+Enter newline · / commands",
+                "  Tab to yolo · Enter to send · Shift+Enter to add a line · / to show commands",
             );
         }
 
@@ -676,7 +682,7 @@ mod tests {
             let rows = buffer_rows(backend.buffer());
             assert_eq!(
                 rows.last().unwrap().trim_end(),
-                "  Tab → manual · Enter send · Shift+Enter newline · / commands",
+                "  Tab to manual · Enter to send · Shift+Enter to add a line · / to show commands",
             );
         }
 
@@ -711,7 +717,7 @@ mod tests {
             assert_eq!(rows[7], "─".repeat(80));
             assert_eq!(
                 rows[8],
-                "  Tab → plan · Enter queue · Shift+Enter newline · / commands",
+                "  Tab to plan · Enter to queue · Shift+Enter to add a line · / to show commands",
             );
         }
 
@@ -724,7 +730,7 @@ mod tests {
 
             assert_eq!(
                 text.lines().last().unwrap().trim_end(),
-                "  Tab complete · ↑/↓ select · Esc close · Enter run",
+                "  Tab to complete · Up / Down to select · Esc to close · Enter to run",
             );
             assert!(text.contains("/mode"), "{text}");
             assert!(text.contains("/model"), "{text}");
@@ -734,7 +740,7 @@ mod tests {
             let text = rendered_text(&mut app, 80, 18);
             assert_eq!(
                 text.lines().last().unwrap().trim_end(),
-                "  Tab → plan · Enter send · Shift+Enter newline · / commands",
+                "  Tab to plan · Enter to send · Shift+Enter to add a line · / to show commands",
             );
             assert_eq!(app.input.lines(), ["/mo"]);
         }
@@ -763,7 +769,7 @@ mod tests {
                     if show_footer {
                         assert_eq!(
                             *rows.last().unwrap(),
-                            "  Tab → plan · Enter send · Shift+Enter newline · / commands",
+                            "  Tab to plan · Enter to send · Shift+Enter to add a line · / to show commands",
                             "{draft:?} at {height}",
                         );
                     } else {
@@ -772,7 +778,7 @@ mod tests {
                             "─".repeat(80),
                             "{draft:?} at {height}"
                         );
-                        assert!(!text.contains("Tab → plan"), "{text}");
+                        assert!(!text.contains("Tab to plan"), "{text}");
                     }
                 }
             }
@@ -789,7 +795,7 @@ mod tests {
 
             assert!(modal.contains("Chat stays visible"), "{modal}");
             assert_eq!(modal.lines().last().unwrap().trim_end(), "Modal controls");
-            assert!(!modal.contains("Tab → plan"), "{modal}");
+            assert!(!modal.contains("Tab to plan"), "{modal}");
             assert!(!modal.contains("❯ draft"), "{modal}");
         }
 
@@ -812,7 +818,7 @@ mod tests {
             assert!(text.contains("queued prompt"), "{text}");
             assert!(text.contains("draft"), "{text}");
             assert_eq!(text.lines().last().unwrap(), "─".repeat(80));
-            assert!(!text.contains("Tab → plan"), "{text}");
+            assert!(!text.contains("Tab to plan"), "{text}");
         }
 
         #[test]
@@ -959,9 +965,9 @@ mod tests {
 
             let row = text
                 .lines()
-                .find(|row| row.contains("Jump to bottom"))
+                .find(|row| row.contains("Ctrl+End to jump to bottom"))
                 .expect("pill shown");
-            let pill = row.find(" Jump to bottom").unwrap();
+            let pill = row.find(" Ctrl+End to jump to bottom").unwrap();
             assert!(row.starts_with(" Not copied: Terminal"), "{row}");
             assert!(
                 row[..pill].ends_with("...  "),
@@ -976,7 +982,7 @@ mod tests {
 
             let text = rendered_text(&mut app, 60, 10);
 
-            assert!(!text.contains("Jump to bottom"), "{text}");
+            assert!(!text.contains("jump to bottom"), "{text}");
         }
 
         #[test]
@@ -989,7 +995,7 @@ mod tests {
                 .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
 
             assert_eq!(
-                Some(label_fg(&mut app, "Jump to bottom")),
+                Some(label_fg(&mut app, "Ctrl+End to jump to bottom")),
                 app.theme.dim().fg
             );
         }
@@ -1090,7 +1096,7 @@ mod tests {
                     "  aaaaaaaaaaaa",
                     "  a",
                     &*rule,
-                    "  Tab → plan",
+                    "  Tab to plan",
                 ]
             );
         }
@@ -1167,6 +1173,22 @@ mod tests {
             );
 
             insta::assert_snapshot!(render_app(&mut app, 60, 14));
+        }
+
+        #[test]
+        fn approval_footer_with_a_session_grant_wraps_to_keep_every_key() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.push_approval_modal(
+                "call-1".to_owned(),
+                ApprovalPreview {
+                    title: "Bash".to_owned(),
+                    body: ApprovalBody::Command("cargo test".to_owned()),
+                },
+                &Basis::Mode(Mode::Manual),
+                Some(Box::new(exec_grant("cargo test"))),
+            );
+
+            insta::assert_snapshot!(render_app(&mut app, 80, 14));
         }
 
         #[test]
@@ -1258,8 +1280,8 @@ mod tests {
             let (pill, line) = app.jump_pill(area).expect("pill shown");
 
             assert_eq!(narrow, None);
-            assert_eq!(line.to_string(), " ↓ (ctrl+End) ");
-            assert_eq!(pill, Rect::new(13, 5, 14, 1));
+            assert_eq!(line.to_string(), " Ctrl+End ");
+            assert_eq!(pill, Rect::new(17, 5, 10, 1));
         }
     }
 
@@ -1268,24 +1290,30 @@ mod tests {
 
         #[test]
         fn idle_reads_jump_to_bottom() {
-            assert_eq!(jump_overlay_label(0, 60), "Jump to bottom (ctrl+End) ↓");
+            assert_eq!(jump_overlay_label(0, 60), "Ctrl+End to jump to bottom");
         }
 
         #[test]
         fn pluralizes_new_message_count() {
-            assert_eq!(jump_overlay_label(1, 60), "1 new message (ctrl+End) ↓");
-            assert_eq!(jump_overlay_label(3, 60), "3 new messages (ctrl+End) ↓");
+            assert_eq!(
+                jump_overlay_label(1, 60),
+                "1 new message · Ctrl+End to jump to bottom"
+            );
+            assert_eq!(
+                jump_overlay_label(3, 60),
+                "3 new messages · Ctrl+End to jump to bottom"
+            );
         }
 
         #[test]
-        fn uses_short_form_below_full_width() {
+        fn names_only_the_key_below_full_width() {
             assert_eq!(
                 jump_overlay_label(3, JUMP_LABEL_FULL_MIN_WIDTH - 1),
-                "↓ (ctrl+End)"
+                "Ctrl+End"
             );
             assert_eq!(
                 jump_overlay_label(3, JUMP_LABEL_FULL_MIN_WIDTH),
-                "3 new messages (ctrl+End) ↓"
+                "3 new messages · Ctrl+End to jump to bottom"
             );
         }
     }

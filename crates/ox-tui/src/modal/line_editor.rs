@@ -1,19 +1,16 @@
-//! Single-line text field for modals. `ratatui-textarea` supplies cursor movement and the
-//! readline-style editing keys the main input already uses.
-
-use std::cell::Cell;
+//! Single-line text field for modals, drawing on the editor table the prompt shares.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui_textarea::{CursorMove, TextArea};
-use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
 use ox_core::util::text::take_head;
 
 use crate::cursor::place_clamped;
+use crate::grapheme::{self, GraphemeStops};
 use crate::saturating_u16;
 use crate::theme::Theme;
 
@@ -25,9 +22,8 @@ pub(crate) struct LineEditor {
     textarea: TextArea<'static>,
     max_width: usize,
     placeholder: Option<&'static str>,
-    /// First grapheme cluster shown when the text overflows its row. `Cell` because it settles at
-    /// render.
-    scroll: Cell<usize>,
+    /// First grapheme cluster shown when the text overflows its row.
+    scroll: usize,
 }
 
 impl LineEditor {
@@ -38,7 +34,7 @@ impl LineEditor {
             textarea,
             max_width: usize::MAX,
             placeholder: None,
-            scroll: Cell::new(0),
+            scroll: 0,
         }
     }
 
@@ -67,25 +63,13 @@ impl LineEditor {
         self.textarea.move_cursor(CursorMove::End);
     }
 
-    /// Applies one editing key and returns whether the text changed. Cursor moves and single
-    /// deletions step over whole grapheme clusters.
+    /// Applies one editing key and returns whether the text changed, dropping a change that would
+    /// grow past the width cap.
     pub(crate) fn handle_key(&mut self, event: &KeyEvent) -> bool {
         if is_blocked_key(event) {
             return false;
         }
-        let mut changed = match char_deletion(event) {
-            Some(side) => self.delete_grapheme(side),
-            None => self.textarea.input(*event),
-        };
-
-        while !changed && !self.cursor_on_boundary() {
-            let before = self.textarea.cursor();
-            changed = self.textarea.input(*event);
-            if self.textarea.cursor() == before {
-                break;
-            }
-        }
-
+        let changed = grapheme::edit(&mut self.textarea, event);
         if !changed {
             return false;
         }
@@ -93,57 +77,11 @@ impl LineEditor {
             self.textarea.undo();
             return false;
         }
-        self.advance_cursor_to_boundary();
         true
     }
 
-    fn delete_grapheme(&mut self, side: Side) -> bool {
-        let selected = self
-            .textarea
-            .selection_range()
-            .is_some_and(|(start, end)| start != end);
-
-        if !selected {
-            let stops = GraphemeStops::new(self.text());
-            let at = stops.at_char(self.textarea.cursor().1);
-            let (movement, chars) = match side {
-                Side::Before => (
-                    CursorMove::Back,
-                    stops.char(at) - stops.char(at.saturating_sub(1)),
-                ),
-                Side::After => (
-                    CursorMove::Forward,
-                    stops.char((at + 1).min(stops.len())) - stops.char(at),
-                ),
-            };
-
-            self.textarea.start_selection();
-            for _ in 0..chars {
-                self.textarea.move_cursor(movement);
-            }
-        }
-
-        // A selection is one history entry and leaves the yank buffer intact.
-        self.textarea.delete_str(0)
-    }
-
-    fn advance_cursor_to_boundary(&mut self) {
-        // An edit can join neighboring graphemes around the cursor.
-        let char = self.textarea.cursor().1;
-        let stops = GraphemeStops::new(self.text());
-        for _ in char..stops.char(stops.at_char(char)) {
-            self.textarea.move_cursor(CursorMove::Forward);
-        }
-    }
-
-    fn cursor_on_boundary(&self) -> bool {
-        let char = self.textarea.cursor().1;
-        let stops = GraphemeStops::new(self.text());
-        stops.char(stops.at_char(char)) == char
-    }
-
     /// Returns whether the editor takes `event`, a modified key: every one but a line break or an
-    /// indent, which the textarea maps to its own edits or ignores.
+    /// indent, neither of which fits a one-line field.
     pub(crate) fn binds_modified_key(event: &KeyEvent) -> bool {
         !is_blocked_key(event)
     }
@@ -188,12 +126,12 @@ impl LineEditor {
             return false;
         }
         let changed = self.textarea.insert_str(prefix);
-        self.advance_cursor_to_boundary();
+        grapheme::advance_cursor_to_boundary(&mut self.textarea);
         changed
     }
 
     /// The prompt plus the slice of the text that fits `width`, or the placeholder while empty.
-    pub(crate) fn line(&self, width: u16, theme: &Theme) -> Line<'static> {
+    pub(crate) fn line(&mut self, width: u16, theme: &Theme) -> Line<'static> {
         let prompt = Span::styled(PROMPT, theme.accent());
         let body = match self.placeholder {
             Some(placeholder) if self.text().is_empty() => Span::styled(placeholder, theme.dim()),
@@ -203,7 +141,7 @@ impl LineEditor {
     }
 
     /// Places the terminal cursor at the editing position on row `y`, clamped inside `area`.
-    pub(crate) fn place_cursor(&self, frame: &mut Frame<'_>, area: Rect, y: u16) {
+    pub(crate) fn place_cursor(&mut self, frame: &mut Frame<'_>, area: Rect, y: u16) {
         let column = saturating_u16(self.visible(area.width).1);
         let raw_x = area.x.saturating_add(PROMPT_WIDTH).saturating_add(column);
         place_clamped(frame, raw_x, y, area);
@@ -211,7 +149,7 @@ impl LineEditor {
 
     /// The text shown in a `width`-column row and the cursor's column within it. The shown slice
     /// scrolls as little as possible to keep the cursor in view.
-    fn visible(&self, width: u16) -> (String, usize) {
+    fn visible(&mut self, width: u16) -> (String, usize) {
         let budget = usize::from(width.saturating_sub(PROMPT_WIDTH + 1));
         let text = self.text();
         let stops = GraphemeStops::new(text);
@@ -219,94 +157,28 @@ impl LineEditor {
         let len = stops.len();
         let cursor = stops.at_char(self.textarea.cursor().1);
 
-        let mut start = self.scroll.get().min(cursor);
+        let mut start = self.scroll.min(cursor);
         while span(start, cursor) > budget {
             start += 1;
         }
         while start > 0 && span(start - 1, len) <= budget {
             start -= 1;
         }
-        self.scroll.set(start);
-
         let mut end = start;
         while end < len && span(start, end + 1) <= budget {
             end += 1;
         }
-        (
-            text[stops.byte(start)..stops.byte(end)].to_owned(),
-            span(start, cursor),
-        )
+        let shown = text[stops.byte(start)..stops.byte(end)].to_owned();
+        self.scroll = start;
+        (shown, span(start, cursor))
     }
 }
 
-/// The boundary before each grapheme cluster of a text, then its end, with the byte offset, char
-/// index, and display column of each. Columns sum grapheme widths, as ratatui paints them.
-struct GraphemeStops(Vec<(usize, usize, usize)>);
-
-impl GraphemeStops {
-    fn new(text: &str) -> Self {
-        let mut stops = Vec::new();
-        let (mut chars, mut column) = (0, 0);
-        for (byte, grapheme) in text.grapheme_indices(true) {
-            stops.push((byte, chars, column));
-            chars += grapheme.chars().count();
-            column += grapheme.width();
-        }
-        stops.push((text.len(), chars, column));
-        Self(stops)
-    }
-
-    /// The number of grapheme clusters, which is also the index of the end stop.
-    fn len(&self) -> usize {
-        self.0.len() - 1
-    }
-
-    fn byte(&self, stop: usize) -> usize {
-        self.0[stop].0
-    }
-
-    fn char(&self, stop: usize) -> usize {
-        self.0[stop].1
-    }
-
-    fn column(&self, stop: usize) -> usize {
-        self.0[stop].2
-    }
-
-    /// The first stop at or after char index `char`.
-    fn at_char(&self, char: usize) -> usize {
-        self.0.partition_point(|&(_, start, _)| start < char)
-    }
-}
-
-/// Which side of the cursor a deletion removes from.
-#[derive(Debug, Clone, Copy)]
-enum Side {
-    Before,
-    After,
-}
-
-/// The side of the cursor from which the textarea deletes one char for the key, mirroring
-/// `TextArea::input`'s Backspace / Ctrl+H and Delete / Ctrl+D bindings.
-fn char_deletion(event: &KeyEvent) -> Option<Side> {
-    let modifiers = event.modifiers - KeyModifiers::SHIFT;
-    match (event.code, modifiers) {
-        (KeyCode::Backspace, KeyModifiers::NONE) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
-            Some(Side::Before)
-        }
-        (KeyCode::Delete, KeyModifiers::NONE) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-            Some(Side::After)
-        }
-        _ => None,
-    }
-}
-
-/// Returns whether the textarea maps the key to a line break or an indent, neither of which fits a
-/// one-line field.
+/// Returns whether the key adds a line break or indent that a one-line field cannot hold.
 fn is_blocked_key(event: &KeyEvent) -> bool {
     match event.code {
         KeyCode::Enter | KeyCode::Tab | KeyCode::Char('\n' | '\r') => true,
-        KeyCode::Char('m') => event.modifiers.contains(KeyModifiers::CONTROL),
+        KeyCode::Char('j' | 'm') => event.modifiers.contains(KeyModifiers::CONTROL),
         _ => false,
     }
 }
@@ -325,7 +197,7 @@ mod tests {
         }
     }
 
-    fn cursor_x(editor: &LineEditor, width: u16) -> u16 {
+    fn cursor_x(editor: &mut LineEditor, width: u16) -> u16 {
         let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
         terminal
             .draw(|frame| editor.place_cursor(frame, Rect::new(0, 0, width, 1), 0))
@@ -493,7 +365,7 @@ mod tests {
                     assert_eq!(editor.textarea.cursor(), (0, 1), "{name}: {grapheme:?}");
 
                     let undone = editor
-                        .handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                        .handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
                     assert!(undone, "{name}: {grapheme:?}");
 
                     assert_eq!(editor.text(), text, "{name}: {grapheme:?}");
@@ -550,7 +422,7 @@ mod tests {
                     assert_eq!(editor.text(), expected, "{code:?}: {start} → {end}");
 
                     let undone = editor
-                        .handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                        .handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
                     assert!(undone, "{code:?}: {start} → {end}");
 
                     assert_eq!(editor.text(), "a❤️xb", "{code:?}: {start} → {end}");
@@ -571,7 +443,7 @@ mod tests {
                 assert_eq!(editor.textarea.cursor(), (0, 2), "{code:?}");
 
                 let undone =
-                    editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
                 assert!(undone, "{code:?}");
 
                 assert_eq!(editor.text(), "🇦x🇧", "{code:?}");
@@ -597,7 +469,7 @@ mod tests {
             assert_eq!(editor.textarea.cursor(), (0, 3));
 
             let undone =
-                editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                editor.handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
             assert!(undone);
 
             assert_eq!(editor.text(), "👨👩");
@@ -616,7 +488,7 @@ mod tests {
             type_str(&mut editor, "\u{fe0f}");
 
             let undone =
-                editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                editor.handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
 
             assert!(undone);
             assert_eq!(editor.text(), "❤");
@@ -652,7 +524,7 @@ mod tests {
                 assert_eq!(editor.textarea.cursor(), (0, end), "{initial:?}: {text:?}");
 
                 let undone =
-                    editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
                 assert!(undone, "{initial:?}: {text:?}");
 
                 assert_eq!(editor.text(), initial, "{initial:?}: {text:?}");
@@ -746,7 +618,7 @@ mod tests {
                 assert_eq!(editor.textarea.yank_text(), "saved", "cap {cap}: {text:?}");
 
                 let undone =
-                    editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
 
                 assert_eq!(undone, changed, "cap {cap}: {text:?}");
                 assert_eq!(editor.text(), "❤", "cap {cap}: {text:?}");
@@ -770,7 +642,7 @@ mod tests {
             ] {
                 let mut editor = LineEditor::new(initial).with_max_width(cap);
                 type_str(&mut editor, "\u{301}");
-                editor.handle_key(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                editor.handle_key(&KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
                 editor.textarea.move_cursor(CursorMove::Jump(0, start));
                 editor.textarea.start_selection();
                 editor.textarea.move_cursor(CursorMove::Jump(0, end));
@@ -798,7 +670,7 @@ mod tests {
         use super::*;
 
         /// The rendered row and the cursor column at width 12.
-        fn shown(editor: &LineEditor) -> (String, u16) {
+        fn shown(editor: &mut LineEditor) -> (String, u16) {
             let line = editor.line(12, &Theme::default()).to_string();
             (line, cursor_x(editor, 12))
         }
@@ -820,24 +692,24 @@ mod tests {
             // Width 12 leaves 9 columns for text beside the prompt and the end-of-line cursor.
             let mut editor = LineEditor::new("abcdefghijklmnopqrstuvwxyz");
 
-            assert_eq!(shown(&editor), ("/ rstuvwxyz".to_owned(), 11));
+            assert_eq!(shown(&mut editor), ("/ rstuvwxyz".to_owned(), 11));
 
             editor.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
 
-            assert_eq!(shown(&editor), ("/ abcdefghi".to_owned(), 2));
+            assert_eq!(shown(&mut editor), ("/ abcdefghi".to_owned(), 2));
 
             for _ in 0..10 {
                 editor.handle_key(&KeyEvent::from(KeyCode::Right));
             }
 
-            assert_eq!(shown(&editor), ("/ bcdefghij".to_owned(), 11));
+            assert_eq!(shown(&mut editor), ("/ bcdefghij".to_owned(), 11));
 
             for _ in 0..5 {
                 editor.handle_key(&KeyEvent::from(KeyCode::Left));
             }
 
             assert_eq!(
-                shown(&editor),
+                shown(&mut editor),
                 ("/ bcdefghij".to_owned(), 6),
                 "moving back inside the row keeps the slice",
             );
@@ -847,31 +719,31 @@ mod tests {
         fn refills_the_row_when_the_tail_shrinks() {
             let mut editor = LineEditor::new("abcdefghijklmnopqrstuvwxyz");
 
-            assert_eq!(shown(&editor).0, "/ rstuvwxyz");
+            assert_eq!(shown(&mut editor).0, "/ rstuvwxyz");
 
             for _ in 0..5 {
                 editor.handle_key(&KeyEvent::from(KeyCode::Backspace));
             }
 
-            assert_eq!(shown(&editor), ("/ mnopqrstu".to_owned(), 11));
+            assert_eq!(shown(&mut editor), ("/ mnopqrstu".to_owned(), 11));
         }
 
         #[test]
         fn slices_wide_text_by_display_width() {
-            let editor = LineEditor::new("日本語テキスト");
+            let mut editor = LineEditor::new("日本語テキスト");
 
-            let row = shown(&editor);
+            let row = shown(&mut editor);
 
             assert_eq!(row, ("/ テキスト".to_owned(), 10));
         }
 
         #[test]
         fn slices_emoji_sequences_as_whole_clusters() {
-            let hearts = LineEditor::new(&"❤️".repeat(12));
-            let family = LineEditor::new("👨‍👩‍👧x");
+            let mut hearts = LineEditor::new(&"❤️".repeat(12));
+            let mut family = LineEditor::new("👨‍👩‍👧x");
 
-            assert_eq!(shown(&hearts), (format!("/ {}", "❤️".repeat(4)), 10));
-            assert_eq!(shown(&family), ("/ 👨‍👩‍👧x".to_owned(), 5));
+            assert_eq!(shown(&mut hearts), (format!("/ {}", "❤️".repeat(4)), 10));
+            assert_eq!(shown(&mut family), ("/ 👨‍👩‍👧x".to_owned(), 5));
         }
     }
 
@@ -883,26 +755,26 @@ mod tests {
             let mut editor = LineEditor::new("日本");
 
             assert_eq!(
-                cursor_x(&editor, 20),
+                cursor_x(&mut editor, 20),
                 PROMPT_WIDTH + 4,
                 "wide glyphs count twice"
             );
 
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
 
-            assert_eq!(cursor_x(&editor, 20), PROMPT_WIDTH + 2);
+            assert_eq!(cursor_x(&mut editor, 20), PROMPT_WIDTH + 2);
         }
 
         #[test]
         fn measures_emoji_sequences_as_ratatui_paints_them() {
             let mut editor = LineEditor::new("❤️x");
 
-            assert_eq!(cursor_x(&editor, 20), PROMPT_WIDTH + 3);
+            assert_eq!(cursor_x(&mut editor, 20), PROMPT_WIDTH + 3);
 
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
 
             assert_eq!(
-                cursor_x(&editor, 20),
+                cursor_x(&mut editor, 20),
                 PROMPT_WIDTH + 2,
                 "the cursor sits on the x"
             );
@@ -910,7 +782,7 @@ mod tests {
             editor.handle_key(&KeyEvent::from(KeyCode::Left));
 
             assert_eq!(
-                cursor_x(&editor, 20),
+                cursor_x(&mut editor, 20),
                 PROMPT_WIDTH,
                 "Left steps over the whole emoji"
             );

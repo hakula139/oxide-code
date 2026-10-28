@@ -7,6 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr as _;
 
 use ox_core::util::text::truncate_to_width;
 
@@ -15,8 +16,8 @@ use crate::theme::Theme;
 // ── Constants ──
 
 pub(crate) const HINT_SEPARATOR: &str = "  ·  ";
-pub(super) const KEY_UP_DOWN: &str = "↑ / ↓";
-pub(crate) const KEY_LEFT_RIGHT: &str = "← / →";
+pub(crate) const KEY_UP_DOWN: &str = "Up / Down";
+pub(crate) const KEY_LEFT_RIGHT: &str = "Left / Right";
 
 /// Footer hints for pickers that commit on Enter.
 pub(crate) const CONFIRM_HINTS: [&str; 2] = ["Enter to confirm", "Esc to cancel"];
@@ -94,6 +95,23 @@ pub(crate) fn render_footer<S: Borrow<str>>(
     theme: &Theme,
 ) {
     render_footer_text(frame, area, &hints.join(HINT_SEPARATOR), theme.dim(), theme);
+}
+
+/// Packs `hints` into rows of at most `width` columns joined by [`HINT_SEPARATOR`], breaking only
+/// between hints, so no hint loses its key to a cut. A hint wider than a whole row is truncated.
+pub(crate) fn wrap_hints<S: Borrow<str>>(hints: &[S], width: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    for hint in hints {
+        let hint = hint.borrow();
+        match rows.last_mut() {
+            Some(row) if row.width() + HINT_SEPARATOR.width() + hint.width() <= width => {
+                row.push_str(HINT_SEPARATOR);
+                row.push_str(hint);
+            }
+            _ => rows.push(truncate_to_width(hint, width)),
+        }
+    }
+    rows
 }
 
 /// Paints `text` in `style` where [`render_footer`] paints its hints, truncated to the row.
@@ -187,6 +205,23 @@ mod tests {
             });
 
             assert_eq!(rows[0].trim_end(), "");
+        }
+    }
+
+    mod wrap_hints {
+        use super::*;
+
+        #[test]
+        fn breaks_rows_between_hints_and_cuts_only_an_oversized_hint() {
+            let hints = ["Y to approve", "N to deny", "Esc to abort"];
+            for (width, expected) in [
+                (60, vec!["Y to approve  ·  N to deny  ·  Esc to abort"]),
+                (30, vec!["Y to approve  ·  N to deny", "Esc to abort"]),
+                (12, vec!["Y to approve", "N to deny", "Esc to abort"]),
+                (10, vec!["Y to ap...", "N to deny", "Esc to ..."]),
+            ] {
+                assert_eq!(wrap_hints(&hints, width), expected, "width {width}");
+            }
         }
     }
 

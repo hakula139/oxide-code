@@ -212,8 +212,7 @@ mod tests {
     use ox_core::util::path::testing::HOME_VAR;
 
     use super::*;
-    use crate::modal::Modal as _;
-    use crate::modal::testing::{render_rows, rendered_text};
+    use crate::modal::testing::{render_modal, rendered_text};
     use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
 
@@ -239,9 +238,9 @@ mod tests {
 
         #[test]
         fn lists_every_resolved_key_with_its_source() {
-            let modal = build_modal(&test_session_info(), None);
+            let mut modal = build_modal(&test_session_info(), None);
 
-            insta::assert_debug_snapshot!(render_rows(&modal, 80, modal.height(80, u16::MAX)));
+            insta::assert_debug_snapshot!(render_modal(&mut modal, 80));
         }
 
         #[test]
@@ -275,16 +274,16 @@ mod tests {
                 value: Shipped::Git,
                 source: Source::File(user),
             }];
-            let modal = build_modal(&info, None);
+            let mut modal = build_modal(&info, None);
 
-            insta::assert_debug_snapshot!(render_rows(&modal, 80, modal.height(80, u16::MAX)));
+            insta::assert_debug_snapshot!(render_modal(&mut modal, 80));
         }
 
         #[test]
         fn renders_resolved_auto_compaction() {
             let info = test_session_info();
-            let m = build_modal(&info, None);
-            let rendered = rendered_text(&m, 80);
+            let mut m = build_modal(&info, None);
+            let rendered = rendered_text(&mut m, 80);
 
             assert!(rendered.contains("Auto-Compaction"), "{rendered}");
             assert!(rendered.contains("at 155000 tokens"), "{rendered}");
@@ -296,8 +295,8 @@ mod tests {
                 let mut info = test_session_info();
                 info.config.extra_ca_certs =
                     Some(PathBuf::from("/tmp/oxide-fake-home/certs/corp.pem"));
-                let m = build_modal(&info, None);
-                let rendered = rendered_text(&m, 80);
+                let mut m = build_modal(&info, None);
+                let rendered = rendered_text(&mut m, 80);
 
                 assert!(rendered.contains("Extra CA Certs"), "{rendered}");
                 assert!(rendered.contains("~/certs/corp.pem"), "{rendered}");
@@ -308,8 +307,8 @@ mod tests {
         fn shows_none_for_unset_extra_ca_certs() {
             let info = test_session_info();
             assert!(info.config.extra_ca_certs.is_none(), "precondition: unset");
-            let m = build_modal(&info, None);
-            let rendered = rendered_text(&m, 80);
+            let mut m = build_modal(&info, None);
+            let rendered = rendered_text(&mut m, 80);
 
             assert!(
                 row(&rendered, "Extra CA Certs").contains(" none "),
@@ -320,7 +319,7 @@ mod tests {
         #[test]
         fn shows_gateway_settings() {
             let mut info = test_session_info();
-            let rendered = rendered_text(&build_modal(&info, None), 80);
+            let rendered = rendered_text(&mut build_modal(&info, None), 80);
             assert!(
                 row(&rendered, "Custom Headers").contains(" none "),
                 "{rendered}"
@@ -328,14 +327,14 @@ mod tests {
 
             info.config.gateway.custom_header_names =
                 vec!["x-team".to_owned(), "x-gateway-key".to_owned()];
-            let rendered = rendered_text(&build_modal(&info, None), 80);
+            let rendered = rendered_text(&mut build_modal(&info, None), 80);
             assert!(
                 row(&rendered, "Custom Headers").contains("x-team, x-gateway-key"),
                 "{rendered}"
             );
 
             info.config.gateway.attribution = false;
-            let rendered = rendered_text(&build_modal(&info, None), 80);
+            let rendered = rendered_text(&mut build_modal(&info, None), 80);
             assert!(
                 row(&rendered, "Attribution Header").contains(" off "),
                 "{rendered}"
@@ -350,7 +349,7 @@ mod tests {
         fn resolves_max_tokens_for_the_current_model() {
             let mut info = test_session_info();
             let assert_max_tokens = |info: &LiveSessionInfo, expected: &str| {
-                let rendered = rendered_text(&build_modal(info, None), 80);
+                let rendered = rendered_text(&mut build_modal(info, None), 80);
                 let row = row(&rendered, "Max Tokens");
                 assert!(row.contains(&format!(" {expected} ")), "{row}");
             };
@@ -371,7 +370,7 @@ mod tests {
             info.config.provenance.model = Source::Env("OX_MODEL");
             info.config.provenance.effort = Source::Session;
             info.config.provenance.max_tokens = Source::File(drop_in);
-            let rendered = rendered_text(&build_modal(&info, None), 100);
+            let rendered = rendered_text(&mut build_modal(&info, None), 100);
 
             assert!(
                 row(&rendered, "Model ID").ends_with("claude-opus-5-5              $OX_MODEL"),

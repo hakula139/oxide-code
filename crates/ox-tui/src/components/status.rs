@@ -82,7 +82,9 @@ impl Status {
         )
     }
 
-    fn label(&self) -> Cow<'static, str> {
+    /// The status text. An armed exit names Ctrl+D only while `input_empty`, since Ctrl+D deletes
+    /// forward in a prompt that holds text.
+    fn label(&self, input_empty: bool) -> Cow<'static, str> {
         match self {
             Self::Idle => "Ready".into(),
             Self::Streaming => "Streaming · Esc to interrupt".into(),
@@ -94,6 +96,7 @@ impl Status {
             Self::Resuming => "Resuming".into(),
             Self::Archiving => "Archiving".into(),
             Self::Cancelling => "Cancelling".into(),
+            Self::ExitArmed { .. } if input_empty => "Press Ctrl+C or Ctrl+D again to exit".into(),
             Self::ExitArmed { .. } => "Press Ctrl+C again to exit".into(),
         }
     }
@@ -121,6 +124,8 @@ pub(crate) struct StatusBar {
     session_id: String,
     theme_name: String,
     status: Status,
+    /// Whether the prompt is empty, which lets Ctrl+D confirm an armed exit.
+    input_empty: bool,
     spinner_frame: usize,
     next_spinner_frame: Instant,
     /// Hyperlink cells captured during the most recent render.
@@ -170,6 +175,7 @@ impl StatusBar {
             session_id: String::new(),
             theme_name: String::new(),
             status: Status::Idle,
+            input_empty: true,
             spinner_frame: 0,
             next_spinner_frame: crate::now(),
             pending_hyperlinks: Vec::new(),
@@ -228,6 +234,10 @@ impl StatusBar {
 
     pub(crate) fn set_task_progress(&mut self, progress: Option<Progress>) {
         self.task_progress = progress;
+    }
+
+    pub(crate) fn set_input_empty(&mut self, empty: bool) {
+        self.input_empty = empty;
     }
 
     pub(crate) fn set_session_id(&mut self, session_id: &str) {
@@ -383,7 +393,7 @@ impl StatusBar {
 
 impl StatusBar {
     fn status_span(&self, theme: &Theme) -> Span<'static> {
-        let label = self.status.label();
+        let label = self.status.label(self.input_empty);
         if self.status.is_busy() {
             let spinner = SPINNER_FRAMES[self.spinner_frame];
             return Span::styled(format!("{spinner} {label}"), theme.info());
@@ -1195,16 +1205,23 @@ mod tests {
         }
 
         #[test]
-        fn armed_exit_hint_reads_as_a_warning() {
-            let mut bar = test_bar();
-            bar.set_status(Status::ExitArmed {
-                until: Instant::now(),
-            });
+        fn armed_exit_hint_names_only_the_keys_that_confirm_and_reads_as_a_warning() {
+            for (input_empty, label) in [
+                (true, "Press Ctrl+C or Ctrl+D again to exit"),
+                (false, "Press Ctrl+C again to exit"),
+            ] {
+                let mut bar = test_bar();
+                bar.set_status(Status::ExitArmed {
+                    until: Instant::now(),
+                });
+                bar.set_input_empty(input_empty);
 
-            assert_eq!(
-                bar.status_span(&Theme::default()),
-                Span::styled("Press Ctrl+C again to exit", Theme::default().warning())
-            );
+                assert_eq!(
+                    bar.status_span(&Theme::default()),
+                    Span::styled(label, Theme::default().warning()),
+                    "input_empty={input_empty}"
+                );
+            }
         }
     }
 

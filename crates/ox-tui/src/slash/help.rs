@@ -85,8 +85,7 @@ fn display_label(cmd: &dyn SlashCommand) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modal::Modal as _;
-    use crate::modal::testing::render_rows;
+    use crate::modal::testing::render_modal;
     use crate::slash::registry::testing::run_execute;
 
     #[test]
@@ -110,9 +109,9 @@ mod tests {
 
         #[test]
         fn lists_every_built_in_with_its_aliases_usage_and_description() {
-            let modal = build_modal();
+            let mut modal = build_modal();
 
-            insta::assert_debug_snapshot!(render_rows(&modal, 100, modal.height(100, u16::MAX)));
+            insta::assert_debug_snapshot!(render_modal(&mut modal, 100));
         }
     }
 }

@@ -44,7 +44,7 @@ In the chat:
 - **Expand output**: Press **Ctrl+O** to show long tool output and finished thinking in full, and again to collapse them.
 - **Switch modes**: Press **Tab** or **Shift+Tab** to change the [permission mode](permissions.md#modes), and the footer names the mode **Tab** selects next. **Tab** completes a selection while the command popup is open.
 - **Select and copy**: Drag over chat text to select it, and release to copy it to the clipboard.
-- **Interrupt and exit**: Press **Esc** to stop a running turn, and **Ctrl+C** twice to exit.
+- **Interrupt and exit**: Press **Esc** to stop a running turn, and **Ctrl+C** twice, or **Ctrl+D** twice with an empty input, to exit.
 
 [Terminal UI](terminal-ui.md) covers new lines and the other input keys, queued prompts, and copying over SSH.
 

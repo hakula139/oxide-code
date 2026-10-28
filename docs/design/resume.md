@@ -71,7 +71,7 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 
 19. **One keymap drives keys and hints.** Each named action carries its key and a footer label that can depend on the view, so `handle_key` dispatches through the table that renders the footer, and adding a key adds its hint. The picker captures Esc so dismissal is one of those actions. The scope status stays out of the table. [#278](https://github.com/hakula139/oxide-code/issues/278) tracks rebinding these actions, and [#281](https://github.com/hakula139/oxide-code/issues/281) tracks fitting their hints to narrow footers.
 
-20. **Ctrl+X moves a session between views in place.** Clearing out a long list takes one key per session, with no ID prefix to read off and type. Ctrl+X is free among the picker's keys. The filter's `LineEditor` maps it to cutting a selection, which the editor never draws, so the picker shadows it just as it shadows the editor's Ctrl+A (line start), Ctrl+D (delete forward), and Ctrl+U (undo). The highlight moves to the next row, so repeated presses work through a run of sessions.
+20. **Ctrl+X moves a session between views in place.** Clearing out a long list takes one key per session, with no ID prefix to read off and type. Ctrl+X is free among the picker's keys. The filter's `LineEditor` maps it to cutting a selection, which the editor never draws, so the picker shadows it just as it shadows the editor's Ctrl+A (line start), Ctrl+D (delete forward), and Ctrl+U (kill to line start). The highlight moves to the next row, so repeated presses work through a run of sessions.
 
 ## Out of Scope
 
