@@ -11,7 +11,7 @@ use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::{Effort, ModelSpec};
 use ox_core::permission::{Basis, Mode, SessionGrant};
 use ox_core::protocol::{CompactTrigger, Event, Interaction, SavedTarget, notice};
-use ox_core::session::display::archive_notice;
+use ox_core::session::display::{archive_notice, id_prefix};
 use ox_core::session::entry::{ArchiveState, SessionInfo};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::tool::view::ApprovalPreview;
@@ -171,7 +171,7 @@ impl App {
         result: &Result<ArchiveUpdate, SavedError>,
     ) {
         self.modals.archive_updated(target, state, result);
-        match slash::archive_message(state, result) {
+        match slash::archive_message(target, state, result) {
             Ok(note) => self.chat.push_system_message(note),
             Err(error) => self.chat.push_error(&error),
         }
@@ -182,19 +182,30 @@ impl App {
     fn apply_saved_found(&mut self, result: Result<Box<SessionInfo>, SavedError>) {
         match result {
             Ok(info) => self.push_modal(slash::delete_confirm_modal(&info)),
-            Err(error) => self.chat.push_error(&slash::saved_error_message(
-                &error,
-                Some(slash::CLEAR_THEN_DELETE_HINT),
-            )),
+            Err(error) => self.chat.push_error(&slash::delete_lookup_error(&error)),
         }
         self.enter_idle();
     }
 
     /// Hands a delete result to the confirm modal, which closes with its chat line on success and
-    /// shows the error on failure.
+    /// shows the error on failure. Reports the result in chat when no modal claims it, as after the
+    /// user dismissed the confirm modal while the delete ran.
     fn apply_saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) {
-        for action in self.modals.saved_deleted(id, result) {
-            self.apply_modal_action(action);
+        match self.modals.saved_deleted(id, result) {
+            Some(actions) => {
+                for action in actions {
+                    self.apply_modal_action(action);
+                }
+            }
+            None => match result {
+                Ok(()) => self
+                    .chat
+                    .push_system_message(format!("Deleted session {}", id_prefix(id))),
+                Err(error) => self.chat.push_error(&slash::saved_error_message(
+                    error,
+                    Some(slash::CLEAR_THEN_DELETE_HINT),
+                )),
+            },
         }
         self.enter_idle();
     }
@@ -506,9 +517,8 @@ impl App {
             .is_some()
     }
 
-    /// Applies what a background slash command resolved to through the same path as a typed one,
-    /// after re-checking the idle gate the command passed at submit. A panicked task only logs,
-    /// since the panic hook already reports the panic.
+    /// Applies what a background slash command resolved to through the same path as a typed one. A
+    /// panicked task only logs, since the panic hook already reports the panic.
     pub(super) fn apply_slash_task(&mut self, finished: Result<SlashTask, JoinError>) {
         match finished {
             Ok(task) => {
@@ -544,7 +554,9 @@ mod tests {
     use ox_core::session::entry::TitleInfo;
     use ox_core::session::resolver::ResolveError;
     use ox_core::session::saved::SavedAction;
-    use ox_core::session::store::testing::{isolated_store, listed_session, seed_test_session};
+    use ox_core::session::store::testing::{
+        isolated_store, listed_session, seed_test_session, stamped_id,
+    };
     use ox_core::tool::bash::background::ShellState;
     use ox_core::tool::bash::background::testing::{shell, shells_in_each_state};
     use ox_core::tool::tasks::TaskStatus;
@@ -2401,7 +2413,7 @@ mod tests {
             assert_eq!(
                 app.chat.last_error_text(),
                 Some(
-                    "Session prefix `test-` matches the live session. \
+                    "/delete: Session prefix `test-` matches the live session. \
                      Run `/clear` to start a new one, then delete it."
                 )
             );
@@ -2445,6 +2457,41 @@ mod tests {
                 let note = closes.then_some("Deleted session saved: Old work");
                 assert_eq!(app.chat.last_system_text(), note, "{result:?}");
             }
+        }
+
+        #[test]
+        fn reports_the_result_in_chat_once_the_confirm_modal_is_gone() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let id = stamped_id(0xab);
+            app.set_status(Status::Deleting);
+
+            app.handle_engine_event(Event::SavedDeleted {
+                id: id.clone(),
+                result: Ok(()),
+            });
+
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(
+                app.chat.last_system_text(),
+                Some("Deleted session abababab")
+            );
+
+            app.set_status(Status::Deleting);
+            app.handle_engine_event(Event::SavedDeleted {
+                id,
+                result: Err(SavedError::Live {
+                    id: "abababab".to_owned(),
+                }),
+            });
+
+            assert_eq!(app.status, Status::Idle);
+            assert_eq!(
+                app.chat.last_error_text(),
+                Some(
+                    "Session abababab is the live session. \
+                     Run `/clear` to start a new one, then delete it."
+                )
+            );
         }
     }
 

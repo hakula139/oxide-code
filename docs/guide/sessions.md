@@ -93,7 +93,7 @@ Inside the TUI, `/resume` (alias `/continue`) opens a session picker without res
 
 ### Deleting a Session
 
-Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm modal. The modal ignores keys until you pause typing for 300 ms, so a keystroke typed ahead cannot confirm it. **Y** deletes the session file and its saved tool output, and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirmation for any saved session except the live one.
+Inside the `/resume` picker, **Ctrl+D** on the cursor row opens a Y/N confirm modal. The modal ignores keys until you pause typing for 300 ms, so a keystroke typed ahead cannot confirm it. **Y** deletes the session file and its saved tool output, and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. Dismissing the modal after **Y** does not stop the delete, which still reports its result in chat, and ox drops other session actions until it finishes. `/delete <id-prefix>` opens the same confirmation for any saved session except the live one.
 
 ### Archiving a Session
 

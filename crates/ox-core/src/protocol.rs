@@ -32,11 +32,9 @@ use crate::tool::view::{ApprovalPreview, ToolResultView};
 /// Commands from a frontend to the engine. Multiplexed onto a single `mpsc`, so a running turn can
 /// race them against its in-flight stream and tool futures with one biased `select!`.
 ///
-/// [`Self::Prompt`], [`Self::SetModel`], [`Self::Compact`], [`Self::Clear`], [`Self::Archive`],
-/// [`Self::SetArchive`], [`Self::FindSaved`], [`Self::DeleteSaved`], [`Self::Resume`],
-/// [`Self::Rename`], [`Self::Login`], and [`Self::Logout`] require an idle engine. Frontends wait
-/// for the preceding operation's terminal event before submitting them. An idle-only op received
-/// during another operation is dropped without a terminal event.
+/// The ops [`Self::is_idle_only`] names require an idle engine. Frontends wait for the preceding
+/// operation's terminal event before submitting them. An idle-only op received during another
+/// operation is dropped without a terminal event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     /// Starts a turn with `text`. On a fresh session, `title` supplies the first-prompt title, so a
@@ -107,6 +105,31 @@ impl Op {
             title: None,
         }
     }
+
+    /// Returns whether the op requires an idle engine, so a frontend must not send it before the
+    /// preceding operation's terminal event.
+    pub fn is_idle_only(&self) -> bool {
+        match self {
+            Self::Prompt { .. }
+            | Self::SetModel(_)
+            | Self::Compact { .. }
+            | Self::Clear
+            | Self::Archive
+            | Self::SetArchive { .. }
+            | Self::FindSaved { .. }
+            | Self::DeleteSaved { .. }
+            | Self::Resume { .. }
+            | Self::Rename { .. }
+            | Self::Login
+            | Self::Logout => true,
+            Self::Queue(_)
+            | Self::Interrupt
+            | Self::Resolve { .. }
+            | Self::LoginCode(_)
+            | Self::SetMode(_)
+            | Self::Shutdown => false,
+        }
+    }
 }
 
 /// The `code#state` an [`Op::LoginCode`] carries, as the user pasted it. `Debug` leaves it out, so
@@ -122,8 +145,7 @@ impl fmt::Debug for SignInCode {
 }
 
 /// The session an [`Op::Resume`] or `ox --resume` continues.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeTarget {
     /// The session file at this path, which need not be in the session store.
     Path(PathBuf),
@@ -135,8 +157,7 @@ pub enum ResumeTarget {
 }
 
 /// The saved session an [`Op::SetArchive`] acts on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SavedTarget {
     /// The saved session with this ID.
     Id(String),

@@ -61,13 +61,8 @@ pub(crate) trait Modal: Send {
     }
 
     /// Receives the result of deleting saved session `id` while this modal remains on the stack.
-    /// Returns the action that replaces the modal when the result closes it.
-    fn saved_deleted(
-        &mut self,
-        _id: &str,
-        _result: &Result<(), SavedError>,
-    ) -> Option<ModalAction> {
-        None
+    fn saved_deleted(&mut self, _id: &str, _result: &Result<(), SavedError>) -> DeleteReply {
+        DeleteReply::Unclaimed
     }
 
     /// Fires on frame ticks while the modal is on top, for state that changes with time, such as a
@@ -144,6 +139,17 @@ pub(crate) enum ModalAction {
     SystemMessage(String),
 }
 
+/// How a modal took the result of a saved-session delete.
+#[derive(Debug)]
+pub(crate) enum DeleteReply {
+    /// The modal leaves the result for the App to report.
+    Unclaimed,
+    /// The modal shows the result and stays open.
+    Shown,
+    /// The modal closes, replaced by the action that reports the result.
+    Closed(ModalAction),
+}
+
 // ── ModalStack ──
 
 /// LIFO stack of modal overlays. Only the top modal renders and receives keys. Nested entries
@@ -179,23 +185,30 @@ impl ModalStack {
         }
     }
 
-    /// Passes a delete result to every modal, dropping each one the result closes, and returns
-    /// their replacement actions in stack order.
+    /// Passes a delete result to every modal, dropping each one the result closes. Returns the
+    /// closed modals' replacement actions in stack order, or `None` when no modal shows the result,
+    /// so the caller reports it.
     pub(crate) fn saved_deleted(
         &mut self,
         id: &str,
         result: &Result<(), SavedError>,
-    ) -> Vec<ModalAction> {
+    ) -> Option<Vec<ModalAction>> {
+        let mut claimed = false;
         let mut actions = Vec::new();
         self.stack
             .retain_mut(|modal| match modal.saved_deleted(id, result) {
-                Some(action) => {
+                DeleteReply::Unclaimed => true,
+                DeleteReply::Shown => {
+                    claimed = true;
+                    true
+                }
+                DeleteReply::Closed(action) => {
+                    claimed = true;
                     actions.push(action);
                     false
                 }
-                None => true,
             });
-        actions
+        claimed.then_some(actions)
     }
 
     /// Drops every modal on the stack, firing each modal's [`Modal::on_cancel`] hook first, and
@@ -376,8 +389,8 @@ pub(crate) mod testing {
         pub(crate) tick_count: Arc<AtomicU32>,
         /// Deadline returned from [`Modal::next_tick`].
         pub(crate) next_tick: Option<Instant>,
-        /// Take-once action returned from [`Modal::saved_deleted`], which closes the modal.
-        pub(crate) delete_action: Option<ModalAction>,
+        /// Take-once reply from [`Modal::saved_deleted`], which is otherwise unclaimed.
+        pub(crate) delete_reply: Option<DeleteReply>,
         /// The saved-session results received, shared like `tick_count`.
         pub(crate) saved_events: Arc<std::sync::Mutex<Vec<String>>>,
     }
@@ -398,7 +411,7 @@ pub(crate) mod testing {
                 declared_height: 3,
                 tick_count: Arc::new(AtomicU32::new(0)),
                 next_tick: None,
-                delete_action: None,
+                delete_reply: None,
                 saved_events: Arc::default(),
             }
         }
@@ -424,16 +437,12 @@ pub(crate) mod testing {
                 .push(format!("completed:{target:?}:{state:?}:{result:?}"));
         }
 
-        fn saved_deleted(
-            &mut self,
-            id: &str,
-            result: &Result<(), SavedError>,
-        ) -> Option<ModalAction> {
+        fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> DeleteReply {
             self.saved_events
                 .lock()
                 .unwrap()
                 .push(format!("deleted:{id}:{result:?}"));
-            self.delete_action.take()
+            self.delete_reply.take().unwrap_or(DeleteReply::Unclaimed)
         }
 
         fn height(&mut self, _width: u16, _max_height: u16) -> u16 {
@@ -641,14 +650,16 @@ mod tests {
             let observed = Arc::clone(&picker.saved_events);
             let mut confirm = ScriptedModal::new(ModalAction::Cancelled);
             confirm.declared_height = 5;
-            confirm.delete_action = Some(ModalAction::SystemMessage("Deleted".to_owned()));
+            confirm.delete_reply = Some(DeleteReply::Closed(ModalAction::SystemMessage(
+                "Deleted".to_owned(),
+            )));
             stack.push(Box::new(picker));
             stack.push(Box::new(confirm));
 
             let actions = stack.saved_deleted("saved", &Ok(()));
 
             assert!(
-                matches!(actions.as_slice(), [ModalAction::SystemMessage(msg)] if msg == "Deleted"),
+                matches!(actions.as_deref(), Some([ModalAction::SystemMessage(msg)]) if msg == "Deleted"),
                 "{actions:?}"
             );
             assert_eq!(*observed.lock().unwrap(), ["deleted:saved:Ok(())"]);
@@ -657,6 +668,30 @@ mod tests {
                 3 + TOP_BORDER_HEIGHT,
                 "the picker is back on top"
             );
+        }
+
+        #[test]
+        fn claims_the_result_only_when_a_modal_shows_or_closes_on_it() {
+            let cases: [(&str, Option<DeleteReply>, Option<usize>); 3] = [
+                ("unclaimed", None, None),
+                ("shown", Some(DeleteReply::Shown), Some(0)),
+                (
+                    "closed",
+                    Some(DeleteReply::Closed(ModalAction::Cancelled)),
+                    Some(1),
+                ),
+            ];
+            for (name, reply, expected) in cases {
+                let mut stack = ModalStack::default();
+                let mut modal = ScriptedModal::new(ModalAction::Cancelled);
+                modal.delete_reply = reply;
+                stack.push(Box::new(modal));
+
+                let actions = stack.saved_deleted("saved", &Ok(()));
+
+                assert_eq!(actions.map(|a| a.len()), expected, "{name}");
+                assert_eq!(stack.is_active(), expected != Some(1), "{name}");
+            }
         }
     }
 

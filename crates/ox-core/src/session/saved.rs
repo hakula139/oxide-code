@@ -100,7 +100,7 @@ pub(crate) fn find(
 /// Archives or unarchives the saved session `target` names, keeping its last-active time, and
 /// leaves a session already in `state` alone. Refuses the live session, since only bare `/archive`
 /// can roll it to a new one and resuming it already unarchived it. Blocks while another writer owns
-/// the session's lock, so async callers must use a blocking worker.
+/// the directory's lock, so async callers must use a blocking worker.
 pub(crate) fn set_archived(
     store: &SessionStore,
     target: &SavedTarget,

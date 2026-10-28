@@ -99,7 +99,7 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 - `crates/ox-tui/src/components/chat.rs`: `ChatView::load_history`.
 - `crates/ox-tui/src/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`, behind the picker's keys and footer hints.
 - `crates/ox-tui/src/lib.rs`: `Startup::picker`, pushed over the first frame, and `NOTICE_DURATION`, shared by the copy notice and the picker's notice.
-- `crates/ox-tui/src/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items` and `cursor_to`, which keep the cursor when rows drop.
+- `crates/ox-tui/src/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items`, which keeps the cursor when rows drop.
 - `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal` pushed by Ctrl+D.
 - `crates/ox-tui/src/slash/registry.rs`: `BUILT_INS` entry `&ResumeCmd`.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, `Pages`, and `SessionRow` with its `Column` layout.

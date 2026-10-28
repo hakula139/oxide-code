@@ -1595,6 +1595,113 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn finds_a_saved_session_by_prefix_and_deletes_it_only_on_the_delete_op() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                seed_test_session(
+                    &store,
+                    "saved-session",
+                    Some("Saved"),
+                    Some(1),
+                    time::macros::datetime!(2026-04-18 09:00:00 UTC),
+                );
+                let path = store.find_session_path("saved-session").unwrap();
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let mut handle = engine.spawn();
+
+                handle
+                    .ops
+                    .send(Op::FindSaved {
+                        prefix: "saved".to_owned(),
+                    })
+                    .await
+                    .unwrap();
+                let found = next_matching(&mut handle.events, |event| {
+                    matches!(event, Event::SavedFound(_) | Event::SavedDeleted { .. })
+                        .then_some(event)
+                })
+                .await;
+
+                assert!(
+                    matches!(&found, Event::SavedFound(Ok(info)) if info.session_id == "saved-session"),
+                    "{found:?}"
+                );
+                assert!(path.exists(), "a lookup leaves the session in place");
+
+                handle
+                    .ops
+                    .send(Op::DeleteSaved {
+                        session_id: "saved-session".to_owned(),
+                    })
+                    .await
+                    .unwrap();
+                let deleted = next_matching(&mut handle.events, |event| {
+                    matches!(event, Event::SavedFound(_) | Event::SavedDeleted { .. })
+                        .then_some(event)
+                })
+                .await;
+                handle.shutdown().await.unwrap();
+
+                assert_eq!(
+                    deleted,
+                    Event::SavedDeleted {
+                        id: "saved-session".to_owned(),
+                        result: Ok(()),
+                    }
+                );
+                assert!(!path.exists());
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn resumes_a_prefix_in_the_current_project_over_another_projects_match() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let other =
+                    SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+                for (store, id, at) in [
+                    (
+                        &store,
+                        "shared-local",
+                        time::macros::datetime!(2026-04-18 09:00:00 UTC),
+                    ),
+                    (
+                        &other,
+                        "shared-other",
+                        time::macros::datetime!(2026-04-18 10:00:00 UTC),
+                    ),
+                ] {
+                    seed_test_session(store, id, Some(id), Some(1), at);
+                }
+                let engine = engine(server.uri(), &store, dir.path()).await;
+                let mut handle = engine.spawn();
+
+                handle
+                    .ops
+                    .send(Op::Resume {
+                        target: ResumeTarget::Prefix("shared".to_owned()),
+                    })
+                    .await
+                    .unwrap();
+                let resumed = next_matching(&mut handle.events, |event| match event {
+                    Event::SessionResumed { id, .. } => Some(Ok(id)),
+                    Event::TurnFailed(msg) => Some(Err(msg)),
+                    _ => None,
+                })
+                .await;
+                handle.shutdown().await.unwrap();
+
+                assert_eq!(resumed, Ok("shared-local".to_owned()));
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn applies_rename_and_config_ops_until_shutdown() {
             with_pinned_home(async {
                 let server = MockServer::start().await;

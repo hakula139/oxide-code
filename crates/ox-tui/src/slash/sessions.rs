@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 
 use time::OffsetDateTime;
 
+use ox_core::protocol::SavedTarget;
 use ox_core::session::display::{archive_notice, id_prefix};
 use ox_core::session::entry::ArchiveState;
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
@@ -36,9 +37,11 @@ pub(crate) fn saved_error_message(error: &SavedError, live_recovery: Option<&str
     }
 }
 
-/// The chat line for the result of setting a saved session's archive state to `state`, as a note
-/// or, for a failure, as an error.
+/// The chat line for the result of setting the archive state of the saved session `target` names
+/// to `state`, as a note or, for a failure, as an error. An error for a typed prefix names the
+/// command that sent it.
 pub(crate) fn archive_message(
+    target: &SavedTarget,
     state: ArchiveState,
     result: &Result<ArchiveUpdate, SavedError>,
 ) -> Result<String, String> {
@@ -54,8 +57,23 @@ pub(crate) fn archive_message(
         Err(error) if error.is_live() && state == ArchiveState::Active => {
             Ok("The live session is not archived".to_owned())
         }
-        Err(error) => Err(saved_error_message(error, Some(BARE_ARCHIVE_HINT))),
+        Err(error) => {
+            let message = saved_error_message(error, Some(BARE_ARCHIVE_HINT));
+            Err(match (target, state) {
+                (SavedTarget::Id(_), _) => message,
+                (SavedTarget::Prefix(_), ArchiveState::Archived) => format!("/archive: {message}"),
+                (SavedTarget::Prefix(_), ArchiveState::Active) => format!("/unarchive: {message}"),
+            })
+        }
     }
+}
+
+/// The chat error for a `/delete` prefix that names no session it can delete.
+pub(crate) fn delete_lookup_error(error: &SavedError) -> String {
+    format!(
+        "/delete: {}",
+        saved_error_message(error, Some(CLEAR_THEN_DELETE_HINT))
+    )
 }
 
 // ── Metadata ──
@@ -250,49 +268,78 @@ mod tests {
                 cause: "disk full".to_owned(),
             });
 
-            for (state, result, expected) in [
+            let typed = SavedTarget::Prefix("abab".to_owned());
+            let picked = SavedTarget::Id(ID.to_owned());
+            let no_match = || {
+                Err(SavedError::Resolve(ResolveError::NoMatch {
+                    prefix: "zzzz".to_owned(),
+                }))
+            };
+
+            for (target, state, result, expected) in [
                 (
+                    &typed,
                     ArchiveState::Archived,
                     update(true),
                     Ok(archive_notice(ID, ArchiveState::Archived)),
                 ),
                 (
+                    &picked,
                     ArchiveState::Active,
                     update(true),
                     Ok(archive_notice(ID, ArchiveState::Active)),
                 ),
                 (
+                    &typed,
                     ArchiveState::Archived,
                     update(false),
                     Ok("Session abababab is already archived".to_owned()),
                 ),
                 (
+                    &typed,
                     ArchiveState::Active,
                     update(false),
                     Ok("Session abababab is not archived".to_owned()),
                 ),
                 (
+                    &typed,
                     ArchiveState::Active,
                     live_prefix(),
                     Ok("The live session is not archived".to_owned()),
                 ),
                 (
+                    &typed,
                     ArchiveState::Archived,
                     live_prefix(),
-                    Err("Session prefix `test-` matches the live session. \
+                    Err(
+                        "/archive: Session prefix `test-` matches the live session. \
                          Use bare `/archive` to archive it and start a new one."
-                        .to_owned()),
+                            .to_owned(),
+                    ),
                 ),
                 (
+                    &typed,
+                    ArchiveState::Active,
+                    no_match(),
+                    Err("/unarchive: No session matching `zzzz`".to_owned()),
+                ),
+                (
+                    &typed,
+                    ArchiveState::Archived,
+                    no_match(),
+                    Err("/archive: No session matching `zzzz`".to_owned()),
+                ),
+                (
+                    &picked,
                     ArchiveState::Active,
                     failed,
                     Err("Failed to unarchive session abababab: disk full".to_owned()),
                 ),
             ] {
                 assert_eq!(
-                    archive_message(state, &result),
+                    archive_message(target, state, &result),
                     expected,
-                    "{state:?}: {result:?}"
+                    "{target:?} {state:?}: {result:?}"
                 );
             }
         }

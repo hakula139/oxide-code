@@ -47,7 +47,7 @@ use crate::modal::chrome::{
 };
 use crate::modal::line_editor::LineEditor;
 use crate::modal::searchable_list::{SearchableItem, SearchableList};
-use crate::modal::{Modal, ModalAction, ModalKey};
+use crate::modal::{DeleteReply, Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
 use crate::{NOTICE_DURATION, now};
 
@@ -797,12 +797,12 @@ impl Modal for ResumePicker {
         });
     }
 
-    fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> Option<ModalAction> {
+    fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> DeleteReply {
         if result.is_ok() {
             self.list.retain_items(|row| row.session_id != id);
             self.load_ahead();
         }
-        None
+        DeleteReply::Unclaimed
     }
 
     fn tick(&mut self, now: Instant) -> bool {
@@ -2029,8 +2029,8 @@ mod tests {
 
             assert!(
                 matches!(
-                    actions.as_slice(),
-                    [ModalAction::SystemMessage(msg)] if msg == "Deleted session 22222222: second"
+                    actions.as_deref(),
+                    Some([ModalAction::SystemMessage(msg)]) if msg == "Deleted session 22222222: second"
                 ),
                 "{actions:?}",
             );
@@ -2351,13 +2351,36 @@ mod tests {
 
             let action = picker.saved_deleted(&target, &Ok(()));
 
-            assert!(action.is_none(), "the picker stays open: {action:?}");
+            assert!(
+                matches!(action, DeleteReply::Unclaimed),
+                "the picker stays open: {action:?}"
+            );
             assert_eq!(row_ids(&picker), [stamped_id(0x33), stamped_id(0x11)]);
             assert_eq!(
                 picker.list.selected().unwrap().session_id,
                 stamped_id(0x11),
                 "the row that followed takes the highlight",
             );
+        }
+
+        #[test]
+        fn loads_the_next_page_once_the_delete_leaves_too_few_rows_below_the_cursor() {
+            let (_dir, store) = isolated_store();
+            let ids = seed_many(&store, PAGE_SIZE + 5);
+            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            while picker.list.rows_below_cursor() > LOAD_AHEAD {
+                picker.handle_key(&KeyEvent::from(KeyCode::Down));
+            }
+            picker.settle();
+            assert_eq!(row_ids(&picker), ids[..PAGE_SIZE]);
+
+            let action = picker.saved_deleted(&ids[PAGE_SIZE - 1], &Ok(()));
+            picker.settle();
+
+            assert!(matches!(action, DeleteReply::Unclaimed), "{action:?}");
+            let mut remaining = ids.clone();
+            remaining.remove(PAGE_SIZE - 1);
+            assert_eq!(row_ids(&picker), remaining);
         }
 
         #[test]
@@ -2375,7 +2398,7 @@ mod tests {
 
             let action = picker.saved_deleted(&target, &Err(failure));
 
-            assert!(action.is_none(), "{action:?}");
+            assert!(matches!(action, DeleteReply::Unclaimed), "{action:?}");
             assert_eq!(row_ids(&picker), [stamped_id(0x22), target.clone()]);
             assert_eq!(picker.list.selected().unwrap().session_id, target);
         }

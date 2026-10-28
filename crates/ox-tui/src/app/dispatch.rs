@@ -27,6 +27,8 @@ use crate::theme::Theme;
 use crate::theme::builtin::BuiltinTheme;
 use crate::viewport::Direction;
 
+const BUSY_DROPPED: &str = "ox is busy, so the request was dropped. Try again.";
+
 impl App {
     pub(super) fn handle_crossterm_event(&mut self, event: &CrosstermEvent) {
         // Windows also reports key releases, which would otherwise act as a second press.
@@ -250,11 +252,17 @@ impl App {
         }
     }
 
-    /// Reserves delivery before applying the op's local state change. Prompts reach the engine
-    /// only through the prompt queue, by [`Self::start_turn`] and [`Self::forward_queued_prompts`].
+    /// Reserves delivery before applying the op's local state change, and drops an idle-only op
+    /// with a chat error while another operation runs, since the engine would drop it silently.
+    /// Prompts reach the engine only through the prompt queue, by [`Self::start_turn`] and
+    /// [`Self::forward_queued_prompts`].
     pub(super) fn dispatch_op(&mut self, op: Op) {
         if op == Op::Shutdown {
             self.should_quit = true;
+        }
+        if op.is_idle_only() && !self.status.is_idle() {
+            self.chat.push_error(BUSY_DROPPED);
+            return;
         }
         let Some((permit, op)) = self.reserve_op(op) else {
             return;
@@ -326,10 +334,7 @@ impl App {
                      or submit another prompt to retry.",
                 );
             }
-            TrySendError::Full(_) => {
-                self.chat
-                    .push_error("ox is busy, so the request was dropped. Try again.");
-            }
+            TrySendError::Full(_) => self.chat.push_error(BUSY_DROPPED),
         }
     }
 
@@ -2156,6 +2161,33 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_saved_session_delete_holds_prompts_typed_during_its_lookup_and_delete() {
+            let delete = Op::DeleteSaved {
+                session_id: "saved".to_owned(),
+            };
+            for (action, busy, sent) in [
+                (
+                    Action::Submit("/delete abcd".to_owned()),
+                    Status::Searching,
+                    Op::FindSaved {
+                        prefix: "abcd".to_owned(),
+                    },
+                ),
+                (Action::Op(delete.clone()), Status::Deleting, delete.clone()),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.dispatch_action(action);
+                assert_eq!(rx.try_recv(), Ok(sent), "{busy:?}");
+
+                app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
+
+                assert_eq!(app.status, busy, "{busy:?}");
+                assert_eq!(*app.queue.pending(), ["typed meanwhile"], "{busy:?}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{busy:?}");
+            }
+        }
+
+        #[tokio::test]
         async fn forwards_engine_ops_unchanged() {
             // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
             for op in [
@@ -2240,9 +2272,43 @@ mod tests {
             assert_eq!(app.status, Status::Idle);
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("Failed to archive session saved: disk full")
+                Some("/archive: Failed to archive session saved: disk full")
             );
             assert_eq!(*observed.lock().unwrap(), [started, completed, started]);
+        }
+
+        #[test]
+        fn drops_an_idle_only_op_while_another_operation_runs() {
+            for (op, busy) in [
+                (
+                    Op::Resume {
+                        target: ResumeTarget::Id("saved".to_owned()),
+                    },
+                    Status::Deleting,
+                ),
+                (
+                    Op::SetArchive {
+                        target: SavedTarget::Id("saved".to_owned()),
+                        state: ArchiveState::Archived,
+                    },
+                    Status::Resuming,
+                ),
+                (
+                    Op::DeleteSaved {
+                        session_id: "saved".to_owned(),
+                    },
+                    Status::Streaming,
+                ),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.set_status(busy.clone());
+
+                app.dispatch_op(op.clone());
+
+                assert_eq!(app.status, busy, "{op:?}");
+                assert_eq!(app.chat.last_error_text(), Some(BUSY_DROPPED), "{op:?}");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{op:?}");
+            }
         }
 
         #[test]

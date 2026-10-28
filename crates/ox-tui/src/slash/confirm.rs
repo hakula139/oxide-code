@@ -16,7 +16,7 @@ use crate::action::Action;
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::modal::acceptance::Acceptance;
 use crate::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
-use crate::modal::{Modal, ModalAction, ModalKey};
+use crate::modal::{DeleteReply, Modal, ModalAction, ModalKey};
 use crate::theme::Theme;
 
 // ── Constants ──
@@ -113,20 +113,20 @@ impl Modal for ConfirmDeleteSessionModal {
         self.acceptance.is_guarded()
     }
 
-    fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> Option<ModalAction> {
+    fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> DeleteReply {
         if id != self.session_id {
-            return None;
+            return DeleteReply::Unclaimed;
         }
         self.pending = false;
         match result {
-            Ok(()) => Some(ModalAction::SystemMessage(format!(
+            Ok(()) => DeleteReply::Closed(ModalAction::SystemMessage(format!(
                 "Deleted session {}: {}",
                 id_prefix(id),
                 self.display_title,
             ))),
             Err(error) => {
                 self.error = Some(saved_error_message(error, Some(CLEAR_THEN_DELETE_HINT)));
-                None
+                DeleteReply::Shown
             }
         }
     }
@@ -389,7 +389,7 @@ mod tests {
             let action = modal.saved_deleted(&stamped_id(0xab), &Ok(()));
 
             assert!(
-                matches!(&action, Some(ModalAction::SystemMessage(msg))
+                matches!(&action, DeleteReply::Closed(ModalAction::SystemMessage(msg))
                     if msg == "Deleted session abababab: Fix auth flow"),
                 "{action:?}",
             );
@@ -405,7 +405,7 @@ mod tests {
 
             let action = modal.saved_deleted(&stamped_id(0xab), &Err(live));
 
-            assert!(action.is_none(), "{action:?}");
+            assert!(matches!(action, DeleteReply::Shown), "{action:?}");
             assert_eq!(modal.error.as_deref(), Some(LIVE_REFUSAL));
             let retry = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
             assert!(
@@ -420,7 +420,7 @@ mod tests {
 
             let action = modal.saved_deleted(&stamped_id(0xcd), &Ok(()));
 
-            assert!(action.is_none(), "{action:?}");
+            assert!(matches!(action, DeleteReply::Unclaimed), "{action:?}");
             let repeat = modal.handle_key(&KeyEvent::from(KeyCode::Char('y')));
             assert!(
                 matches!(repeat, ModalKey::Consumed),
