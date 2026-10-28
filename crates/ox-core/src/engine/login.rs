@@ -681,13 +681,13 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let sink = CapturingSink::default();
-                let ox_login = || Auth::new(AuthSource::OxLogin, "ox-token");
+                let ox_login = || Auth::test(AuthSource::OxLogin, "ox-token");
 
                 engine.adopt_login(&sink, ox_login());
                 assert_eq!(engine.client.auth_source(), Some(AuthSource::ApiKeyEnv));
                 for before in [
                     None,
-                    Some(Auth::new(AuthSource::ClaudeCodeLogin, "claude-code-token")),
+                    Some(Auth::test(AuthSource::ClaudeCodeLogin, "claude-code-token")),
                 ] {
                     engine.client.set_auth(before);
                     engine.retry_login = true;
@@ -768,7 +768,7 @@ mod tests {
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                     engine
                         .client
-                        .set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                        .set_auth(Some(Auth::test(AuthSource::OxLogin, "ox-token")));
                     let sink = CapturingSink::default();
                     let claude_code_file = std::env::home_dir()
                         .unwrap()
@@ -869,7 +869,7 @@ mod tests {
                     .await;
                     engine
                         .client
-                        .set_auth(Some(Auth::new(AuthSource::OxLogin, "ox-token")));
+                        .set_auth(Some(Auth::test(AuthSource::OxLogin, "ox-token")));
                     let sink = CapturingSink::default();
 
                     engine.logout(&sink).await;

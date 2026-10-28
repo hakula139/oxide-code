@@ -316,7 +316,7 @@ pub enum Event {
     /// [`Op::LoginCode`].
     LoginStarted { url: String, manual_url: String },
     /// An [`Op::Login`] stored a new oxide-code login. `auth` is the credential requests now use,
-    /// which stays an env var or `client.api_key` when one outranks the login.
+    /// which stays an env var or `client.auth` when one outranks the login.
     SignedIn { auth: AuthSource },
     /// A stored login recovered from a transient failure. The pending prompt or compaction
     /// continues with `auth`.
