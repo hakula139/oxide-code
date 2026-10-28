@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use super::compaction::request_tokens;
 use crate::file_tracker::{FileSnapshot, FileTracker};
-use crate::message::Message;
+use crate::message::{ContentBlock, Message, TextOrigin};
 use crate::model::ModelSpec;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::ResumeTarget;
@@ -41,11 +41,21 @@ pub(super) struct LiveTranscript {
     /// The tracked files the loaded session read that changed on disk since, until
     /// [`Engine::emit_session_start`](super::Engine::emit_session_start) reports them.
     pub(super) drifted: Vec<PathBuf>,
+    /// Where the open turn rolls back to, `None` between turns.
+    turn: Option<RollbackPoint>,
 }
 
-/// The transcript state before a turn's prompt: its length, what the model had seen of the user
-/// context and whether the prompt context awaits recording, and the tracked files.
-pub(super) struct TranscriptStart {
+/// Where a refused turn rolls back to: the transcript before its prompt, or right after its last
+/// compaction, and the session's checkpoint at the same point.
+struct RollbackPoint {
+    transcript: TranscriptStart,
+    /// `None` when the session writer is gone, so the rollback leaves the session alone.
+    checkpoint: Option<Checkpoint>,
+}
+
+/// The transcript state at a turn's rollback point: its length, what the model had seen of the
+/// user context and whether the prompt context awaits recording, and the tracked files.
+struct TranscriptStart {
     len: usize,
     seen: UserContext,
     prompt_unrecorded: bool,
@@ -84,6 +94,7 @@ impl LiveTranscript {
             prompt_unrecorded,
             file_tracker: Arc::new(file_tracker),
             drifted,
+            turn: None,
         };
         (live, usage, warnings)
     }
@@ -119,23 +130,47 @@ impl LiveTranscript {
         request_tokens(&self.prompt, tools, &self.messages)
     }
 
-    /// The state [`Self::roll_back`] returns to before a turn's prompt.
-    pub(super) fn start_of_turn(&self) -> TranscriptStart {
-        TranscriptStart {
-            len: self.messages.len(),
-            seen: self.prompt.seen.clone(),
-            prompt_unrecorded: self.prompt_unrecorded,
-            files: self.file_tracker.snapshot_all(),
+    /// Opens a turn with the user message `text`: moves the prompt to `fresh`, telling the model
+    /// what changed in a reminder on the message, records the message, and keeps the point the turn
+    /// rolls back to. A fresh session takes `title` as its first-prompt title.
+    pub(super) async fn begin_turn(
+        &mut self,
+        text: &str,
+        fresh: UserContext,
+        title: Option<String>,
+    ) -> RecordOutcome {
+        let transcript = self.start_of_turn();
+        let mut msg = Message::user(text);
+        if let Some(reminder) = self.catch_up(fresh) {
+            msg.content.push(ContentBlock::generated_text(
+                reminder,
+                TextOrigin::SystemReminder,
+            ));
         }
+        let outcome = self.record_prompt(msg, title).await;
+        self.turn = Some(RollbackPoint {
+            transcript,
+            checkpoint: outcome.checkpoint,
+        });
+        outcome
     }
 
-    /// Returns the transcript and the session to `start` and `checkpoint`, dropping what the turn
-    /// after them added. Returns the session's write report.
-    pub(super) async fn roll_back(
-        &mut self,
-        start: TranscriptStart,
-        checkpoint: Option<Checkpoint>,
-    ) -> WriteReport {
+    /// Closes the open turn, which then can no longer roll back.
+    pub(super) fn end_turn(&mut self) {
+        self.turn = None;
+    }
+
+    /// Returns the transcript and the session to the open turn's rollback point, dropping what the
+    /// turn added after it, and closes the turn. Returns the session's write report.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no turn is open.
+    pub(super) async fn roll_back(&mut self) -> WriteReport {
+        let RollbackPoint {
+            transcript: start,
+            checkpoint,
+        } = self.turn.take().expect("only an open turn rolls back");
         self.file_tracker.drain_writes().await;
         self.messages.truncate(start.len);
         self.prompt.seen = start.seen;
@@ -147,9 +182,18 @@ impl LiveTranscript {
         }
     }
 
+    fn start_of_turn(&self) -> TranscriptStart {
+        TranscriptStart {
+            len: self.messages.len(),
+            seen: self.prompt.seen.clone(),
+            prompt_unrecorded: self.prompt_unrecorded,
+            files: self.file_tracker.snapshot_all(),
+        }
+    }
+
     /// Moves the prompt to `fresh`, returning the reminder that explains the change to the model.
     /// The next user message records the prompt again.
-    pub(super) fn catch_up(&mut self, fresh: UserContext) -> Option<String> {
+    fn catch_up(&mut self, fresh: UserContext) -> Option<String> {
         let reminder = self.prompt.catch_up(fresh);
         if reminder.is_some() {
             self.prompt_unrecorded = true;
@@ -158,11 +202,7 @@ impl LiveTranscript {
     }
 
     /// Records `msg` with the prompt context it may carry, then appends it.
-    pub(super) async fn record_prompt(
-        &mut self,
-        msg: Message,
-        title: Option<String>,
-    ) -> RecordOutcome {
+    async fn record_prompt(&mut self, msg: Message, title: Option<String>) -> RecordOutcome {
         let context =
             std::mem::take(&mut self.prompt_unrecorded).then(|| self.prompt.session_context());
         let outcome = self
@@ -214,7 +254,8 @@ impl LiveTranscript {
     }
 
     /// Saves `boundary` and swaps the transcript to `synthetic`, which adopts the boundary's
-    /// prompt context. Clears the tracked files with the transcript.
+    /// prompt context. Clears the tracked files with the transcript, and moves an open turn's
+    /// rollback point to the summary.
     pub(super) async fn compact(
         &mut self,
         boundary: CompactBoundary,
@@ -228,6 +269,12 @@ impl LiveTranscript {
             self.prompt.adopt(context);
             self.prompt_unrecorded = false;
             self.file_tracker.clear();
+            if self.turn.is_some() {
+                self.turn = Some(RollbackPoint {
+                    transcript: self.start_of_turn(),
+                    checkpoint: outcome.checkpoint,
+                });
+            }
         }
         outcome
     }
@@ -294,6 +341,7 @@ impl LiveTranscript {
             prompt_unrecorded: false,
             file_tracker: Arc::new(FileTracker::default()),
             drifted: Vec::new(),
+            turn: None,
         }
     }
 

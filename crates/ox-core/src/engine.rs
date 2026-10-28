@@ -23,7 +23,7 @@ use tokio::task::{JoinError, JoinHandle};
 
 use self::abort::{Inbox, TurnAbort};
 use self::login::SignIn;
-use self::transcript::{LiveTranscript, TranscriptStart};
+use self::transcript::LiveTranscript;
 use self::turn::{TurnContext, TurnOutcome, TurnReport, TurnStop};
 use self::usage::UsageLedger;
 use crate::auth::Auth;
@@ -31,13 +31,12 @@ use crate::auth::oauth::{self, ClaudeCodeKeychain};
 use crate::client::anthropic::Client;
 use crate::config::Config;
 use crate::config::compaction::CompactionConfig;
-use crate::message::{ContentBlock, Message, TextOrigin};
 use crate::model::ModelSettings;
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::UserContext;
 use crate::protocol::notice::{self, ConfigSettings};
 use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, TurnEnd};
-use crate::session::handle::{Checkpoint, LoadedTranscript, SessionHandle};
+use crate::session::handle::{LoadedTranscript, SessionHandle};
 use crate::session::store::SessionStore;
 use crate::session::{history, title_generator};
 use crate::tool::ToolRegistry;
@@ -322,16 +321,8 @@ impl Engine {
             return report_unsent(sink, abort, "auto-compact-failed");
         }
 
-        let mut start = self.transcript.start_of_turn();
-        let mut user_msg = Message::user(text);
         let fresh = self.load_user_context(sink).await;
-        if let Some(reminder) = self.transcript.catch_up(fresh) {
-            user_msg.content.push(ContentBlock::generated_text(
-                reminder,
-                TextOrigin::SystemReminder,
-            ));
-        }
-        let outcome = self.transcript.record_prompt(user_msg, title).await;
+        let outcome = self.transcript.begin_turn(text, fresh, title).await;
         sink.session_write(&outcome.report);
         turn::record_drained_prompts(inbox.prompts.drain(..), &mut self.transcript, sink).await;
 
@@ -348,14 +339,13 @@ impl Engine {
             ));
         }
 
-        let mut checkpoint = outcome.checkpoint;
         let mut rounds_run = 0;
         let result = loop {
             let TurnOutcome { mut report, result } = self
                 .run_turn(&auth, sink, ops, &mut inbox, rounds_run)
                 .await;
             if let Err(TurnAbort::Refused(notice)) = result {
-                self.roll_back(sink, start, checkpoint, &report).await;
+                self.roll_back(sink, &report).await;
                 break Err(TurnAbort::Refused(notice));
             }
             self.account_usage(sink, &report).await;
@@ -368,14 +358,13 @@ impl Engine {
 
             let compacted = self.compact_mid_turn(&auth, sink, ops, &mut inbox).await;
             self.adopt_mode(&mut inbox);
-            match compacted {
-                Ok(summary) => checkpoint = Some(summary),
-                Err(abort) => break Err(abort),
+            if let Err(abort) = compacted {
+                break Err(abort);
             }
-            start = self.transcript.start_of_turn();
             rounds_run = run;
             turn::record_drained_prompts(inbox.prompts.drain(..), &mut self.transcript, sink).await;
         };
+        self.transcript.end_turn();
         match result {
             Ok(_) => {
                 sink.emit(Event::TurnComplete, "turn-complete");
@@ -423,18 +412,12 @@ impl Engine {
         outcome
     }
 
-    /// Returns the transcript and the session to `start` and `checkpoint` after the model refused
+    /// Returns the transcript and the session to the turn's rollback point after the model refused
     /// the turn `report` describes. Keeps context usage from before the turn, as the transcript its
     /// requests measured is gone.
-    async fn roll_back(
-        &mut self,
-        sink: &dyn EventSink,
-        start: TranscriptStart,
-        checkpoint: Option<Checkpoint>,
-        report: &TurnReport,
-    ) {
+    async fn roll_back(&mut self, sink: &dyn EventSink, report: &TurnReport) {
         self.bill(sink, &report.billable_rounds).await;
-        let written = self.transcript.roll_back(start, checkpoint).await;
+        let written = self.transcript.roll_back().await;
         sink.session_write(&written);
         if report.tasks.is_some() {
             let tasks = self.transcript.tasks.clone();
@@ -601,7 +584,7 @@ mod tests {
         seed_full_read,
     };
     use crate::file_tracker::{FileSnapshot, FileTracker, GateError, GatePurpose};
-    use crate::message::{Replay, Role};
+    use crate::message::{ContentBlock, Message, Replay, Role};
     use crate::model;
     use crate::model::{Effort, ModelSpec, PromptCacheTtl, TokenUsage};
     use crate::permission::PermissionClass;
@@ -3679,13 +3662,14 @@ mod tests {
                 let path = dir.path().join("notes.txt");
                 std::fs::write(&path, b"original").unwrap();
                 seed_full_read(&engine.transcript.file_tracker, &path);
-                let start = engine.transcript.start_of_turn();
+                let seen = engine.transcript.prompt().seen.clone();
+                engine.transcript.begin_turn("edit it", seen, None).await;
                 let snapshots = engine.transcript.file_tracker.snapshot_all();
                 let tracker = Arc::clone(&engine.transcript.file_tracker);
                 let release = blocked_write(&tracker, &path, b"committed", "toolu_write").await;
                 let sink = CapturingSink::default();
                 let report = TurnReport::default();
-                let mut rollback = std::pin::pin!(engine.roll_back(&sink, start, None, &report));
+                let mut rollback = std::pin::pin!(engine.roll_back(&sink, &report));
 
                 poll_until_draining(&tracker, rollback.as_mut()).await;
                 assert_writes_draining(&tracker);
