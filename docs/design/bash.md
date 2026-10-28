@@ -1,6 +1,6 @@
 # Shell Execution
 
-The `bash` tool runs each command as `bash -c <command>` in the session's working directory, with empty stdin and with stdout and stderr piped back into the result. This page describes the process that runs the command and the environment it sees. [Background Shells](background-shells.md) covers commands that outlive their call, while [Output Truncation](truncation.md#spill-files) explains how the pipes are capped and spilled.
+The `bash` tool runs each command as `bash -c <command>` in the session's working directory, with empty stdin and with stdout and stderr sharing one pipe back into the result, so their lines keep the order the command wrote them in. This page describes the process that runs the command and the environment it sees. [Background Shells](background-shells.md) covers commands that outlive their call, while [Output Truncation](truncation.md#spill-files) explains how the output is capped and spilled.
 
 ## Process Tree
 
