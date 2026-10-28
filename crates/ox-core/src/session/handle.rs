@@ -572,6 +572,7 @@ mod tests {
         testing::{record_tracked_file, seed_full_read},
     };
     use crate::message::{ContentBlock, Replay, Role, TextOrigin};
+    use crate::model::PromptCacheTtl;
     use crate::prompt::PromptParts;
     use crate::session::entry::{CompactInfo, CompactRecord, Entry, ExitInfo, SessionInfo};
     use crate::session::handle::testing::record_write_call;
@@ -906,7 +907,8 @@ mod tests {
             session.cmd_tx = cmd_tx;
             let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
             title_generator::spawn(
-                test_client(server.uri(), api_key(), "claude-haiku-5-5"),
+                test_client(server.uri(), api_key()),
+                PromptCacheTtl::OneHour,
                 session.clone(),
                 TitleSink(tx),
                 "prompt".to_owned(),
@@ -1028,7 +1030,8 @@ mod tests {
             let (cmd_tx, mut commands) = mpsc::channel(8);
             session.cmd_tx = cmd_tx;
             let usage = title_generator::spawn(
-                test_client(server.uri(), api_key(), "claude-haiku-5-5"),
+                test_client(server.uri(), api_key()),
+                PromptCacheTtl::OneHour,
                 session.clone(),
                 CapturingSink::default(),
                 "prompt".to_owned(),

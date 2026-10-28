@@ -37,14 +37,13 @@ use self::wire::{
     CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMessages,
     RequestMetadata, SystemBlock, ThinkingConfig,
 };
-use super::{ResponseEvent, Wire};
+use super::{Request, ResponseEvent, Wire};
 use crate::config::Config;
 use crate::config::auth::{self, Auth, AuthSource, LoginUnavailable};
 use crate::config::gateway::GatewayCompat;
 use crate::config::oauth::ClaudeCodeKeychain;
 use crate::message::{ContentBlock, Message, Role};
-use crate::model::{Effort, ModelSpec, PromptCacheTtl};
-use crate::prompt::SystemPrompt;
+use crate::model::ModelSpec;
 use crate::tool::ToolDefinition;
 use crate::util::tls::Trust;
 
@@ -80,20 +79,12 @@ pub(crate) struct Client {
     trust: Arc<dyn Trust>,
     /// Stored-login reloads that outlive their requests, which the session waits for at exit.
     reloads: TaskTracker,
-    model: ModelSpec,
-    /// `None` for models outside the catalog.
-    effort: Option<Effort>,
-    /// User-set output cap. `None` defers to [`ModelSpec::resolve_max_tokens`].
-    max_tokens: Option<u32>,
-    prompt_cache_ttl: PromptCacheTtl,
-    /// Whether adaptive thinking opts into summarized text.
-    show_thinking: bool,
     device_id: String,
 }
 
 impl Client {
-    /// Builds a client for the endpoint, credential, and request settings in `config`, using
-    /// `trust` to verify servers.
+    /// Builds a client for the endpoint and credential in `config`, using `trust` to verify
+    /// servers.
     pub(crate) fn new(
         config: &Config,
         trust: impl Trust + 'static,
@@ -103,11 +94,6 @@ impl Client {
             base_url,
             gateway,
             auth,
-            model,
-            effort,
-            max_tokens,
-            prompt_cache_ttl,
-            show_thinking,
             ..
         } = config;
         Ok(Self {
@@ -118,30 +104,8 @@ impl Client {
             auth: auth.clone(),
             trust: Arc::new(trust),
             reloads: TaskTracker::new(),
-            model: model.clone(),
-            effort: *effort,
-            max_tokens: *max_tokens,
-            prompt_cache_ttl: *prompt_cache_ttl,
-            show_thinking: *show_thinking,
             device_id,
         })
-    }
-
-    pub(crate) fn model(&self) -> &ModelSpec {
-        &self.model
-    }
-
-    pub(crate) fn effort(&self) -> Option<Effort> {
-        self.effort
-    }
-
-    /// The output cap that requests to the active model carry.
-    pub(crate) fn max_tokens(&self) -> u32 {
-        self.model.resolve_max_tokens(self.max_tokens)
-    }
-
-    pub(crate) fn prompt_cache_ttl(&self) -> PromptCacheTtl {
-        self.prompt_cache_ttl
     }
 
     /// Where the credential came from, `None` while signed out.
@@ -157,20 +121,6 @@ impl Client {
     /// The credential used by requests, or an error while signed out.
     pub(crate) fn auth(&self) -> Result<&Auth> {
         self.auth.as_ref().context("not signed in")
-    }
-
-    /// Swaps the active model and re-resolves effort. Thinking, betas, context management, and the
-    /// default `max_tokens` derive from the model per request.
-    pub(crate) fn set_model(&mut self, id: String) {
-        let model = ModelSpec::resolve(id);
-        self.effort = model.resolve_effort(self.effort);
-        self.model = model;
-    }
-
-    /// Swaps the active effort. Stays `None` on unknown models.
-    pub(crate) fn set_effort(&mut self, pick: Effort) -> Option<Effort> {
-        self.effort = self.model.resolve_effort(Some(pick));
-        self.effort
     }
 
     /// Swaps the credential for later requests, `None` to sign out. Callers install a stored login
@@ -203,41 +153,42 @@ impl Client {
         self.reloads.close();
         self.reloads.wait().await;
     }
+}
 
-    /// Streams one conversation request. The receiver closes when the stream ends, the receiver is
-    /// dropped, or an unrecoverable error is forwarded as a final `Err`.
-    ///
+impl Wire for Client {
     /// The stable `system` text always carries a `cache_control` breakpoint, shared across
-    /// sessions. `breakpoint` marks the last content block of the final message. `user_context`
-    /// rides as a synthetic leading user message to keep dynamic content such as CLAUDE.md out of
-    /// the `system` parameter.
-    fn stream(
-        &self,
-        session_id: &str,
-        messages: &[Message],
-        system: &SystemPrompt,
-        user_context: Option<&str>,
-        tools: &[&ToolDefinition],
-        breakpoint: Option<CacheControl>,
-    ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        let prefix_cache = CacheControl::static_prefix(self.is_first_party, self.prompt_cache_ttl);
-        let thinking = ThinkingConfig::for_model(&self.model, self.show_thinking);
+    /// sessions, and `cache_tail` adds one on the last content block of the final message. The
+    /// user context rides as a synthetic leading user message.
+    fn stream(&self, request: Request<'_>) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
+        let Request {
+            session_id,
+            settings,
+            system,
+            user_context,
+            messages,
+            tools,
+            cache_tail,
+        } = request;
+        let model = settings.model();
+        let cache_ttl = settings.prompt_cache_ttl();
+        let prefix_cache = CacheControl::static_prefix(self.is_first_party, cache_ttl);
+        let thinking = ThinkingConfig::for_model(model, settings.show_thinking());
         let request = self.prepare(RequestSpec {
             kind: RequestKind::Agentic,
             session_id,
-            model: &self.model,
+            model,
             thinking: thinking.as_ref(),
-            max_tokens: self.max_tokens(),
+            max_tokens: settings.max_tokens(),
             system: &[
                 (&system.stable, Some(prefix_cache)),
                 (&system.dynamic, None),
             ],
             tools: (!tools.is_empty()).then_some(tools),
-            output_config: OutputConfig::new(None, self.effort),
+            output_config: OutputConfig::new(None, settings.effort()),
             messages: RequestMessages {
                 user_context,
                 messages,
-                breakpoint,
+                breakpoint: cache_tail.then(|| CacheControl::conversation(cache_ttl)),
             },
         })?;
 
@@ -245,46 +196,12 @@ impl Client {
             self.http.clone(),
             request,
             ReplySpec {
-                model: self.model.id().to_owned(),
+                model: model.id().to_owned(),
                 thinking_text: thinking
                     .as_ref()
-                    .map_or(self.show_thinking, ThinkingConfig::asks_for_text),
+                    .map_or(settings.show_thinking(), ThinkingConfig::asks_for_text),
             },
         ))
-    }
-}
-
-impl Wire for Client {
-    /// Marks the transcript tail with a `cache_control` breakpoint, so the next request in the
-    /// conversation reads the whole transcript from cache.
-    fn stream_message(
-        &self,
-        session_id: &str,
-        messages: &[Message],
-        system: &SystemPrompt,
-        user_context: Option<&str>,
-        tools: &[&ToolDefinition],
-    ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        let breakpoint = CacheControl::conversation(self.prompt_cache_ttl);
-        self.stream(
-            session_id,
-            messages,
-            system,
-            user_context,
-            tools,
-            Some(breakpoint),
-        )
-    }
-
-    fn stream_one_shot(
-        &self,
-        session_id: &str,
-        messages: &[Message],
-        system: &SystemPrompt,
-        user_context: Option<&str>,
-        tools: &[&ToolDefinition],
-    ) -> Result<mpsc::Receiver<Result<ResponseEvent>>> {
-        self.stream(session_id, messages, system, user_context, tools, None)
     }
 }
 
@@ -524,7 +441,7 @@ mod tests {
 
     use indoc::writedoc;
     use wiremock::matchers::{body_partial_json, header, method, path, query_param};
-    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request as HttpRequest, ResponseTemplate};
 
     use super::completion::SideQuery;
     use super::local_testing::{
@@ -535,7 +452,8 @@ mod tests {
     use crate::client::{Response, StopReason};
     use crate::config::oauth::testing::{HeldRefresh, ok_refresh_body, ox_login_in, write_creds};
     use crate::config::testing::{base_url, test_config};
-    use crate::model::TokenUsage;
+    use crate::model::{Effort, ModelSettings, PromptCacheTtl, TokenUsage};
+    use crate::prompt::SystemPrompt;
     use crate::util::tls::PlatformTrust;
     use crate::util::tls::testing::TEST_CA_PATH;
 
@@ -556,65 +474,73 @@ mod tests {
             Ok(out)
         }
 
-        /// Streams one `hi` turn through `client` and collects its events.
-        async fn stream_hi(client: &Client) -> Result<Vec<ResponseEvent>> {
-            let rx = client.stream_message(
-                SESSION_ID,
-                &[Message::user("hi")],
-                &SystemPrompt::default(),
-                None,
-                &[],
-            )?;
+        /// The settings [`test_config`] resolves for `model`.
+        fn settings_for(model: &str) -> ModelSettings {
+            test_config(OFFLINE_URL, api_key(), model).model_settings()
+        }
+
+        /// A request for `messages` under `settings` without tools, caching its tail.
+        fn request<'a>(
+            settings: &'a ModelSettings,
+            messages: &'a [Message],
+            system: &'a SystemPrompt,
+            user_context: Option<&'a str>,
+        ) -> Request<'a> {
+            Request {
+                session_id: SESSION_ID,
+                settings,
+                system,
+                user_context,
+                messages,
+                tools: &[],
+                cache_tail: true,
+            }
+        }
+
+        /// Streams one `hi` turn under `settings` through `client` and collects its events.
+        async fn stream_hi(
+            client: &Client,
+            settings: &ModelSettings,
+        ) -> Result<Vec<ResponseEvent>> {
+            let messages = [Message::user("hi")];
+            let system = SystemPrompt::default();
+            let rx = client.stream(request(settings, &messages, &system, None))?;
             collect_events(rx).await
         }
 
-        /// Streams `messages` through `client` against a mock server and returns the request it
-        /// received.
-        async fn capture_stream(
-            mut client: Client,
-            messages: &[Message],
-            system: &SystemPrompt,
-            user_context: Option<&str>,
-        ) -> Request {
+        /// Streams `request` through `client` against a mock server and returns the HTTP request
+        /// it received.
+        async fn capture_stream(mut client: Client, request: Request<'_>) -> HttpRequest {
             let server = serve(vec![sse_response(text_stream_body("", "Hi"))]).await;
             client.messages_url = base_url(server.uri()).messages_url();
-            collect_events(
-                client
-                    .stream_message(SESSION_ID, messages, system, user_context, &[])
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+            collect_events(client.stream(request).unwrap())
+                .await
+                .unwrap();
 
             let mut received = server.received_requests().await.expect("recorded requests");
             assert_eq!(received.len(), 1, "exactly one streamed call");
             received.remove(0)
         }
 
-        /// [`capture_stream`] for one `hi` turn without a system prompt or user context.
-        async fn capture_stream_request(client: Client) -> Request {
-            capture_stream(
-                client,
-                &[Message::user("hi")],
-                &SystemPrompt::default(),
-                None,
-            )
-            .await
+        /// [`capture_stream`] for one `hi` turn under `settings` without a system prompt or user
+        /// context.
+        async fn capture_stream_request(client: Client, settings: &ModelSettings) -> HttpRequest {
+            let messages = [Message::user("hi")];
+            let system = SystemPrompt::default();
+            capture_stream(client, request(settings, &messages, &system, None)).await
         }
 
-        fn request_header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+        fn request_header<'a>(request: &'a HttpRequest, name: &str) -> Option<&'a str> {
             request.headers.get(name).map(|v| v.to_str().unwrap())
         }
 
-        fn client_with(model: &str, effort: Option<Effort>) -> Client {
-            let mut cfg = test_config(OFFLINE_URL, api_key(), model);
-            cfg.effort = effort;
-            client_for(&cfg)
-        }
-
-        /// Body and `anthropic-beta` header of one streamed turn sent through `client`.
-        async fn capture_stream_turn(client: Client) -> (serde_json::Value, String) {
-            let request = capture_stream_request(client).await;
+        /// Body and `anthropic-beta` header of one streamed turn under `settings` sent through
+        /// `client`.
+        async fn capture_stream_turn(
+            client: Client,
+            settings: &ModelSettings,
+        ) -> (serde_json::Value, String) {
+            let request = capture_stream_request(client, settings).await;
             let betas = request_header(&request, "anthropic-beta")
                 .unwrap_or_default()
                 .to_owned();
@@ -623,23 +549,6 @@ mod tests {
 
         mod new {
             use super::*;
-
-            #[test]
-            fn exposes_the_model() {
-                let client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
-
-                assert_eq!(client.model().id(), TEST_MODEL);
-            }
-
-            #[test]
-            fn exposes_the_prompt_cache_ttl() {
-                let mut config = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
-                config.prompt_cache_ttl = PromptCacheTtl::FiveMin;
-
-                let client = client_for(&config);
-
-                assert_eq!(client.prompt_cache_ttl(), PromptCacheTtl::FiveMin);
-            }
 
             #[tokio::test]
             async fn joins_the_messages_path_under_a_base_url_with_a_trailing_slash() {
@@ -652,9 +561,9 @@ mod tests {
                     .mount(&server)
                     .await;
                 let base_url = format!("{}/anthropic/", server.uri());
-                let client = test_client(base_url, api_key(), TEST_MODEL);
+                let client = test_client(base_url, api_key());
 
-                stream_hi(&client).await.unwrap();
+                stream_hi(&client, &settings_for(TEST_MODEL)).await.unwrap();
             }
 
             #[test]
@@ -684,134 +593,19 @@ mod tests {
             }
         }
 
-        mod max_tokens {
-            use super::*;
-
-            #[tokio::test]
-            async fn sends_the_user_cap_over_the_model_default() {
-                let mut cfg = test_config(OFFLINE_URL, api_key(), "claude-opus-5-5");
-                cfg.max_tokens = Some(4_096);
-                let client = client_for(&cfg);
-
-                let (body, _) = capture_stream_turn(client.clone()).await;
-
-                assert_eq!(client.max_tokens(), 4_096);
-                assert_eq!(body["max_tokens"], 4_096);
-            }
-        }
-
-        mod set_model {
-            use super::*;
-
-            #[test]
-            fn resolves_effort_and_persists_full_state() {
-                for (from_model, from_effort, swap_to, expect) in [
-                    (
-                        "claude-opus-5-5",
-                        Some(Effort::Xhigh),
-                        "claude-sonnet-5-5",
-                        Some(Effort::Xhigh),
-                    ),
-                    (
-                        "custom-model",
-                        None,
-                        "claude-sonnet-5-5",
-                        Some(Effort::High),
-                    ),
-                    ("claude-opus-5-5", Some(Effort::High), "custom-model", None),
-                ] {
-                    let mut client = client_with(from_model, from_effort);
-                    client.set_model(swap_to.to_owned());
-                    assert_eq!(
-                        client.effort, expect,
-                        "{from_model} → {swap_to}: stored effort",
-                    );
-                    assert_eq!(client.model().id(), swap_to, "{swap_to}: stored id");
-                }
-            }
-
-            #[tokio::test]
-            async fn rederives_every_model_gated_request_field() {
-                let mut cfg = test_config(OFFLINE_URL, api_key(), "custom-model");
-                cfg.max_tokens = None;
-                cfg.show_thinking = true;
-                let mut client = client_for(&cfg);
-
-                let (unknown, unknown_betas) = capture_stream_turn(client.clone()).await;
-                for field in ["thinking", "output_config", "context_management"] {
-                    assert!(unknown.get(field).is_none(), "{field} absent: {unknown}");
-                }
-                assert_eq!(unknown["max_tokens"], 16_000);
-                for beta in ["context-management", "thinking-binding-controls"] {
-                    assert!(!unknown_betas.contains(beta), "{beta}: {unknown_betas}");
-                }
-
-                client.set_model("claude-opus-5-5".to_owned());
-                let (known, known_betas) = capture_stream_turn(client).await;
-                assert_eq!(known["model"], "claude-opus-5-5");
-                assert_eq!(known["max_tokens"], 64_000);
-                assert_eq!(
-                    known["thinking"],
-                    serde_json::json!({
-                        "type": "adaptive",
-                        "display": "summarized",
-                        "block_binding": {"prefix_mismatch_behavior": "drop_block"},
-                    }),
-                );
-                assert_eq!(known["output_config"]["effort"], "medium");
-                assert_eq!(
-                    known["context_management"]["edits"][0]["type"],
-                    "clear_thinking_20251015",
-                );
-                assert!(
-                    known_betas.contains("context-management-2025-06-27"),
-                    "{known_betas}"
-                );
-            }
-        }
-
-        mod set_effort {
-            use super::*;
-
-            #[test]
-            fn resolves_pick_against_active_model() {
-                for (model, initial, pick, expect) in [
-                    (
-                        "claude-sonnet-5-5",
-                        Some(Effort::High),
-                        Effort::Max,
-                        Some(Effort::Max),
-                    ),
-                    ("custom-model", None, Effort::High, None),
-                ] {
-                    let mut client = client_with(model, initial);
-                    assert_eq!(client.set_effort(pick), expect, "{model} pick={pick:?}");
-                    assert_eq!(
-                        client.effort, expect,
-                        "{model} pick={pick:?}: stored effort",
-                    );
-                }
-            }
-        }
-
         mod set_auth {
             use super::*;
 
             #[tokio::test]
             async fn sends_the_new_credential_and_signing_out_stops_requests() {
-                let mut client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
+                let mut client = test_client(OFFLINE_URL, api_key());
+                let settings = settings_for(TEST_MODEL);
 
                 client.set_auth(Some(Auth::test(AuthSource::OxLogin, "ox-token")));
-                let request = capture_stream_request(client.clone()).await;
+                let request = capture_stream_request(client.clone(), &settings).await;
                 client.set_auth(None);
-                let signed_out = client
-                    .stream_message(
-                        SESSION_ID,
-                        &[Message::user("hi")],
-                        &SystemPrompt::default(),
-                        None,
-                        &[],
-                    )
+                let signed_out = stream_hi(&client, &settings)
+                    .await
                     .expect_err("a signed-out client must not send");
 
                 assert_eq!(
@@ -836,7 +630,7 @@ mod tests {
                     let creds = dir.path().join("credentials.json");
                     write_creds(&creds, token, Some("old-refresh"), expires_at);
                     let replaced = ox_login_in(&creds, &server.uri(), token, expires_at);
-                    let mut client = test_client(server.uri(), replaced.clone(), TEST_MODEL);
+                    let mut client = test_client(server.uri(), replaced.clone());
 
                     refresh
                         .abort_mid_refresh({
@@ -860,7 +654,7 @@ mod tests {
             }
         }
 
-        mod stream_message {
+        mod stream {
             use super::*;
 
             fn system_prompt(stable: &str, dynamic: &str) -> SystemPrompt {
@@ -886,15 +680,16 @@ mod tests {
             }
 
             async fn capture_stream_body(config: Config) -> serde_json::Value {
-                capture_stream_turn(client_for(&config)).await.0
+                let settings = config.model_settings();
+                capture_stream_turn(client_for(&config), &settings).await.0
             }
 
             #[tokio::test]
             async fn streams_usage_and_text_then_completes_the_reply() {
                 let server = serve(vec![sse_response(text_stream_body("", "Hi"))]).await;
-                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let client = test_client(server.uri(), api_key());
 
-                let events = stream_hi(&client).await.unwrap();
+                let events = stream_hi(&client, &settings_for(TEST_MODEL)).await.unwrap();
 
                 assert_eq!(
                     events,
@@ -914,16 +709,17 @@ mod tests {
             #[tokio::test]
             async fn attributes_the_request_to_the_caller_session() {
                 let server = serve(vec![sse_response(text_stream_body("", "Hi"))]).await;
-                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let client = test_client(server.uri(), api_key());
+
+                let settings = settings_for(TEST_MODEL);
+                let messages = [Message::user("hi")];
+                let system = SystemPrompt::default();
 
                 let rx = client
-                    .stream_message(
-                        "sid-live",
-                        &[Message::user("hi")],
-                        &SystemPrompt::default(),
-                        None,
-                        &[],
-                    )
+                    .stream(Request {
+                        session_id: "sid-live",
+                        ..request(&settings, &messages, &system, None)
+                    })
                     .unwrap();
                 collect_events(rx).await.unwrap();
 
@@ -955,9 +751,9 @@ mod tests {
                     ("message_stop", r#"{"type":"message_stop"}"#),
                 ]);
                 let server = serve(vec![sse_response(body)]).await;
-                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let client = test_client(server.uri(), api_key());
 
-                let events = stream_hi(&client).await.unwrap();
+                let events = stream_hi(&client, &settings_for(TEST_MODEL)).await.unwrap();
 
                 assert_eq!(
                     events,
@@ -992,8 +788,8 @@ mod tests {
                     ),
                 ] {
                     let source = auth.source();
-                    let client = test_client(OFFLINE_URL, auth, TEST_MODEL);
-                    let request = capture_stream_request(client).await;
+                    let client = test_client(OFFLINE_URL, auth);
+                    let request = capture_stream_request(client, &settings_for(TEST_MODEL)).await;
                     assert_eq!(request_header(&request, "x-api-key"), api_key, "{source:?}");
                     assert_eq!(
                         request_header(&request, "authorization"),
@@ -1037,7 +833,8 @@ mod tests {
                         .insert(name, HeaderValue::from_static(value));
                 }
 
-                let request = capture_stream_request(client_for(&config)).await;
+                let request =
+                    capture_stream_request(client_for(&config), &config.model_settings()).await;
 
                 assert_eq!(request_header(&request, "x-team"), Some("platform"));
                 assert_eq!(
@@ -1073,13 +870,14 @@ mod tests {
             async fn with_user_context_prepends_it_and_fingerprints_the_prompt() {
                 let prompt = "Say 'hello' and nothing else.";
                 let context = "<system-reminder>CLAUDE.md content here</system-reminder>";
-                let client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
+                let client = test_client(OFFLINE_URL, api_key());
+                let settings = settings_for(TEST_MODEL);
+                let messages = [Message::user(prompt)];
+                let system = SystemPrompt::default();
 
                 let request = capture_stream(
                     client,
-                    &[Message::user(prompt)],
-                    &SystemPrompt::default(),
-                    Some(context),
+                    request(&settings, &messages, &system, Some(context)),
                 )
                 .await;
 
@@ -1108,15 +906,13 @@ mod tests {
             async fn third_party_base_url_drops_global_scope_keeps_its_beta() {
                 // As in Claude Code, the beta ships on every base URL, while the body-side
                 // `scope: "global"` goes only to the Anthropic API.
-                let client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
+                let client = test_client(OFFLINE_URL, api_key());
+                let settings = settings_for(TEST_MODEL);
+                let messages = [Message::user("hi")];
+                let system = system_prompt("static", "");
 
-                let request = capture_stream(
-                    client,
-                    &[Message::user("hi")],
-                    &system_prompt("static", ""),
-                    None,
-                )
-                .await;
+                let request =
+                    capture_stream(client, request(&settings, &messages, &system, None)).await;
 
                 let betas = request_header(&request, "anthropic-beta").unwrap();
                 assert_eq!(
@@ -1152,9 +948,11 @@ mod tests {
 
             #[tokio::test]
             async fn breakpoints_cover_static_prefix_and_conversation_tail() {
-                let mut client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
+                let mut client = test_client(OFFLINE_URL, api_key());
                 // The conversation breakpoint omits `scope` even where the system prefix is global.
                 client.is_first_party = true;
+                let settings = settings_for(TEST_MODEL);
+                let system = system_prompt("static", "dynamic");
                 let messages = [
                     Message::user("question"),
                     Message::assistant("answer"),
@@ -1170,9 +968,12 @@ mod tests {
 
                 let request = capture_stream(
                     client,
-                    &messages,
-                    &system_prompt("static", "dynamic"),
-                    Some("<system-reminder>context</system-reminder>"),
+                    request(
+                        &settings,
+                        &messages,
+                        &system,
+                        Some("<system-reminder>context</system-reminder>"),
+                    ),
                 )
                 .await;
 
@@ -1200,6 +1001,86 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn without_cache_tail_marks_only_the_static_prefix() {
+                let client = test_client(OFFLINE_URL, api_key());
+                let settings = settings_for(TEST_MODEL);
+                let messages = [Message::user("question"), Message::assistant("answer")];
+                let system = system_prompt("static", "");
+
+                let request = capture_stream(
+                    client,
+                    Request {
+                        cache_tail: false,
+                        ..request(&settings, &messages, &system, None)
+                    },
+                )
+                .await;
+
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(
+                    body["system"][2]["cache_control"],
+                    serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
+                );
+                assert_eq!(
+                    body["messages"],
+                    serde_json::json!([
+                        {"role": "user", "content": [{"type": "text", "text": "question"}]},
+                        {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
+                    ]),
+                );
+            }
+
+            #[tokio::test]
+            async fn sends_the_settings_output_cap_over_the_model_default() {
+                let mut cfg = test_config(OFFLINE_URL, api_key(), "claude-opus-5-5");
+                cfg.max_tokens = Some(4_096);
+
+                let body = capture_stream_body(cfg).await;
+
+                assert_eq!(body["max_tokens"], 4_096);
+            }
+
+            #[tokio::test]
+            async fn derives_every_model_gated_field_from_the_settings_model() {
+                let mut cfg = test_config(OFFLINE_URL, api_key(), "custom-model");
+                cfg.max_tokens = None;
+                cfg.show_thinking = true;
+                let client = client_for(&cfg);
+                let mut settings = cfg.model_settings();
+
+                let (unknown, unknown_betas) = capture_stream_turn(client.clone(), &settings).await;
+                for field in ["thinking", "output_config", "context_management"] {
+                    assert!(unknown.get(field).is_none(), "{field} absent: {unknown}");
+                }
+                assert_eq!(unknown["max_tokens"], 16_000);
+                for beta in ["context-management", "thinking-binding-controls"] {
+                    assert!(!unknown_betas.contains(beta), "{beta}: {unknown_betas}");
+                }
+
+                settings.set_model("claude-opus-5-5".to_owned());
+                let (known, known_betas) = capture_stream_turn(client, &settings).await;
+                assert_eq!(known["model"], "claude-opus-5-5");
+                assert_eq!(known["max_tokens"], 64_000);
+                assert_eq!(
+                    known["thinking"],
+                    serde_json::json!({
+                        "type": "adaptive",
+                        "display": "summarized",
+                        "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+                    }),
+                );
+                assert_eq!(known["output_config"]["effort"], "medium");
+                assert_eq!(
+                    known["context_management"]["edits"][0]["type"],
+                    "clear_thinking_20251015",
+                );
+                assert!(
+                    known_betas.contains("context-management-2025-06-27"),
+                    "{known_betas}"
+                );
+            }
+
+            #[tokio::test]
             async fn malformed_frame_fails_the_stream() {
                 let body = raw_sse_body(&[
                     (
@@ -1214,9 +1095,9 @@ mod tests {
                     ("message_stop", r#"{"type":"message_stop"}"#),
                 ]);
                 let server = serve(vec![sse_response(body)]).await;
-                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let client = test_client(server.uri(), api_key());
 
-                let error = stream_hi(&client)
+                let error = stream_hi(&client, &settings_for(TEST_MODEL))
                     .await
                     .expect_err("corrupt data fails the stream");
 
@@ -1234,9 +1115,9 @@ mod tests {
                     r#"{"type":"error","error":{"type":"invalid_request_error","message":"Bad block"}}"#,
                 )]);
                 let server = serve(vec![sse_response(body)]).await;
-                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let client = test_client(server.uri(), api_key());
 
-                let err = stream_hi(&client)
+                let err = stream_hi(&client, &settings_for(TEST_MODEL))
                     .await
                     .expect_err("an in-band error fails the stream");
 
@@ -1260,9 +1141,11 @@ mod tests {
                         format!("{}/v1/messages", elsewhere.uri()),
                     )])
                     .await;
-                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let client = test_client(server.uri(), api_key());
 
-                let err = stream_hi(&client).await.expect_err("redirect must fail");
+                let err = stream_hi(&client, &settings_for(TEST_MODEL))
+                    .await
+                    .expect_err("redirect must fail");
 
                 assert_eq!(
                     format!("{err:#}"),
@@ -1297,9 +1180,11 @@ mod tests {
                             .set_body_string(body),
                     ])
                     .await;
-                    let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                    let client = test_client(server.uri(), api_key());
 
-                    let err = stream_hi(&client).await.expect_err("expected HTTP error");
+                    let err = stream_hi(&client, &settings_for(TEST_MODEL))
+                        .await
+                        .expect_err("expected HTTP error");
 
                     assert_eq!(format!("{err:#}"), expected);
                 }
@@ -1314,10 +1199,11 @@ mod tests {
                 let client = test_client(
                     server.uri(),
                     Auth::test(AuthSource::OAuthTokenEnv, "oat-env"),
-                    TEST_MODEL,
                 );
 
-                let err = stream_hi(&client).await.expect_err("expected 401");
+                let err = stream_hi(&client, &settings_for(TEST_MODEL))
+                    .await
+                    .expect_err("expected 401");
 
                 assert_eq!(
                     format!("{err:#}"),
@@ -1337,9 +1223,11 @@ mod tests {
                         .set_body_string("Too many requests"),
                 ])
                 .await;
-                let client = test_client(server.uri(), api_key(), TEST_MODEL);
+                let client = test_client(server.uri(), api_key());
 
-                let err = stream_hi(&client).await.expect_err("expected 429");
+                let err = stream_hi(&client, &settings_for(TEST_MODEL))
+                    .await
+                    .expect_err("expected 429");
 
                 assert_eq!(
                     format!("{err:#}"),
@@ -1381,13 +1269,10 @@ mod tests {
                 let file = dir.path().join("credentials.json");
                 write_creds(&file, "expired", Some("old-refresh"), 0);
                 let token_url = format!("{}/token", server.uri());
-                let client = test_client(
-                    server.uri(),
-                    ox_login_in(&file, &token_url, "expired", 0),
-                    TEST_MODEL,
-                );
+                let client =
+                    test_client(server.uri(), ox_login_in(&file, &token_url, "expired", 0));
 
-                stream_hi(&client).await.unwrap();
+                stream_hi(&client, &settings_for(TEST_MODEL)).await.unwrap();
                 let stored: serde_json::Value =
                     serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
                 std::fs::remove_file(&file).unwrap();
@@ -1456,8 +1341,8 @@ mod tests {
                     ("claude-opus-5-5", "updates", true),
                     ("claude-haiku-5-5", "omitted", false),
                 ] {
-                    let client = test_client(OFFLINE_URL, api_key(), id);
-                    let (body, betas) = capture_stream_turn(client).await;
+                    let client = test_client(OFFLINE_URL, api_key());
+                    let (body, betas) = capture_stream_turn(client, &settings_for(id)).await;
                     assert_eq!(body["thinking"]["display"], display, "{id}");
                     assert_eq!(
                         betas.contains("thinking-display-updates-2026-08-18"),
@@ -1493,7 +1378,9 @@ mod tests {
                     let mut cfg = test_config(server.uri(), api_key(), id);
                     cfg.show_thinking = show_thinking;
 
-                    let events = stream_hi(&client_for(&cfg)).await.unwrap();
+                    let events = stream_hi(&client_for(&cfg), &cfg.model_settings())
+                        .await
+                        .unwrap();
 
                     assert_eq!(
                         events.contains(&ResponseEvent::Thinking("Plan.".to_owned())),
@@ -1506,8 +1393,8 @@ mod tests {
             #[tokio::test]
             async fn known_model_drops_stale_thinking_blocks_under_binding_beta() {
                 for info in crate::model::MODELS {
-                    let client = test_client(OFFLINE_URL, api_key(), info.id);
-                    let (body, betas) = capture_stream_turn(client).await;
+                    let client = test_client(OFFLINE_URL, api_key());
+                    let (body, betas) = capture_stream_turn(client, &settings_for(info.id)).await;
                     assert_eq!(
                         body["thinking"]["block_binding"],
                         serde_json::json!({"prefix_mismatch_behavior": "drop_block"}),
@@ -1533,14 +1420,14 @@ mod tests {
                 let messages = [Message::user("hi")];
                 for kind in [RequestKind::Agentic, RequestKind::SideQuery] {
                     for is_first_party in [true, false] {
-                        let mut client = test_client(OFFLINE_URL, api_key(), TEST_MODEL);
+                        let mut client = test_client(OFFLINE_URL, api_key());
                         client.is_first_party = is_first_party;
 
                         let request = client
                             .prepare(RequestSpec {
                                 kind,
                                 session_id: SESSION_ID,
-                                model: client.model(),
+                                model: &ModelSpec::resolve(TEST_MODEL),
                                 thinking: None,
                                 max_tokens: 40,
                                 system: &[],

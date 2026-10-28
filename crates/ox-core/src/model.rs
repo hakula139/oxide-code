@@ -6,8 +6,10 @@
 //! Explicit token thresholds still apply.
 
 mod pricing;
+mod settings;
 mod usage;
 
+pub(crate) use self::settings::ModelSettings;
 pub(crate) use self::usage::TokenUsage;
 
 use std::fmt::Write as _;

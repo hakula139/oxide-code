@@ -36,7 +36,7 @@ use self::merge::Origins;
 use self::oauth::ClaudeCodeKeychain;
 use self::provenance::{Provenance, Source, Sourced, TierPattern};
 use self::schema::{ClientAuth, FileConfig, PermissionTable, ThemeTable, TierTable, TuiTable};
-use crate::model::{Effort, ModelSpec, PromptCacheTtl};
+use crate::model::{Effort, ModelSettings, ModelSpec, PromptCacheTtl};
 use crate::permission::defaults::Shipped;
 use crate::permission::{Mode, Policy, Tier, Workspace};
 use crate::util::env;
@@ -394,6 +394,17 @@ impl Config {
             Err(e) => return Err(e.into()),
         }
         Ok(())
+    }
+
+    /// The model settings a session built from this config starts with.
+    pub(crate) fn model_settings(&self) -> ModelSettings {
+        ModelSettings::new(
+            self.model.clone(),
+            self.effort,
+            self.max_tokens,
+            self.prompt_cache_ttl,
+            self.show_thinking,
+        )
     }
 
     /// Startup notices: an unsupported model, then why the session is signed out.
@@ -2725,6 +2736,25 @@ mod tests {
                     ..Provenance::default()
                 },
             );
+        }
+    }
+
+    mod model_settings {
+        use super::*;
+
+        #[test]
+        fn carries_the_model_request_settings() {
+            let mut cfg = sample_config();
+            cfg.model = ModelSpec::resolve("claude-opus-5-5");
+            cfg.max_tokens = Some(2_048);
+
+            let settings = cfg.model_settings();
+
+            assert_eq!(settings.model().id(), "claude-opus-5-5");
+            assert_eq!(settings.effort(), Some(Effort::Xhigh));
+            assert_eq!(settings.max_tokens(), 2_048);
+            assert_eq!(settings.prompt_cache_ttl(), PromptCacheTtl::FiveMin);
+            assert!(settings.show_thinking());
         }
     }
 
