@@ -562,7 +562,7 @@ mod tests {
             seed_full_read(&ctx.tracker, &path);
             let input = serde_json::json!({"file_path": "notes.txt", "content": "new\n"});
 
-            let prepared = WriteTool.prepare(input.clone(), &ctx);
+            let prepared = WriteTool.prepare(input.clone(), &ctx).unwrap();
             let preview = WriteTool.approval_preview("write", &prepared, &cwd).await;
 
             assert_eq!(
