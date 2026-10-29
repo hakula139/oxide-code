@@ -27,12 +27,10 @@ The app's global key, Ctrl+O, lives in `APP_KEYMAP` in `ox_tui::action`, a table
 
 ```text
 tokio::select! {
-    event = crossterm_events.next()               => { /* keyboard, mouse, resize */ }
-    event = self.events.recv()                    => { /* Event: stream tokens, tool calls, session updates */ }
-    Some(update) = self.git_probes.recv()         => { /* branch / PR probe results for the status line */ }
-    Some(report) = self.clipboard.recv()          => { /* outcome of a copy, shown as a notice */ }
-    Some(finished) = self.slash_tasks.join_next() => { /* output of a background slash command, such as /diff */ }
-    () = sleep_until(self.next_tick(last_tick))   => { /* spinner frame, probe scheduling, exit-arm expiry, selection edge scroll, copy-notice expiry, top-modal tick, render when dirty */ }
+    event = crossterm_events.next()             => { /* keyboard, mouse, resize */ }
+    event = self.events.recv()                  => { /* Event: stream tokens, tool calls, session updates */ }
+    Some(event) = self.background.recv()        => { /* AppEvent: git probe results, copy outcomes, background slash command output, /resume picker pages */ }
+    () = sleep_until(self.next_tick(last_tick)) => { /* spinner frame, probe scheduling, exit-arm expiry, selection edge scroll, copy-notice expiry, top-modal tick, render when dirty */ }
 }
 ```
 
@@ -103,7 +101,7 @@ A chat region shorter than 13 rows hides the starters and the tip at any width.
 1. **ratatui + crossterm + tokio.** Codex builds its TUI on the same stack, which diffs a double buffer and streams terminal events into the async loop, so oxide-code writes no renderer or input reader of its own.
 2. **Concrete component structs.** `App` composes chat, input, status, and modal surfaces directly. They share nothing beyond rendering into an area, so a component trait would add dynamic dispatch with nothing to abstract over.
 3. **Synchronized output by default.** A terminal that supports mode 2026 presents each frame at once, so a large repaint never shows half drawn, and a terminal without it ignores the mode.
-4. **Render throttling at ~60 FPS, and a sleeping idle loop.** Tokens can stream faster than a terminal can repaint, so the tick batches them into one frame, which keeps the event loop free for input. The tick runs every frame while a redraw or a modal's page load is pending, and otherwise only at the earliest timed change, such as the busy spinner's next frame, a git probe falling due, the clock segment's next minute, a usage-limit reset, or an expiring notice, so an idle session wakes about once every 5 s for the branch probe while the roster shows the branch. Each component that changes with time reports its next deadline beside its `tick`.
+4. **Render throttling at ~60 FPS, and a sleeping idle loop.** Tokens can stream faster than a terminal can repaint, so the tick batches them into one frame, which keeps the event loop free for input. Background work, such as a git probe or a `/resume` picker's page read, reports on one channel, so its result wakes the loop as an event and nothing polls for it. The tick runs every frame while a redraw is pending, and otherwise only at the earliest timed change, such as the busy spinner's next frame, a git probe falling due, the clock segment's next minute, a usage-limit reset, or an expiring notice, so an idle session wakes about once every 5 s for the branch probe while the roster shows the branch. Each component that changes with time reports its next deadline beside its `tick`.
 5. **Block-based markdown commit with a stable-prefix cache.** Re-parsing a whole reply on every frame costs more as the reply grows, so complete blocks render once and each frame re-parses only the tail.
 6. **Custom pulldown-cmark + syntect renderer.** Uses Codex's `pending_marker` pattern for correct list handling.
 7. **Two-tier tool display.** An inline summary with a per-tool icon keeps a long tool loop scannable, while the output body, which the compact view caps, shows what a reader needs to judge the call.
@@ -130,6 +128,7 @@ A chat region shorter than 13 rows hides the starters and the tip at any width.
 - `crates/ox-tui/src/action.rs`: `APP_KEYMAP`, the app's global key and its hint.
 - `crates/ox-tui/src/app.rs`: `App`, its `tokio::select!` loop, `TICK_INTERVAL`, the shortest gap between ticks, and `App::next_tick`, which picks when the loop wakes.
 - `crates/ox-tui/src/app/render.rs`: `App::draw_frame`, which paints the welcome while the chat is empty.
+- `crates/ox-tui/src/app_event.rs`: `AppEvent`, the result of background work, and `AppEventSender`, which the work reports through.
 - `crates/ox-tui/src/components/chat.rs`: `ChatView` and the compact and expanded views.
 - `crates/ox-tui/src/components/chat/blocks.rs`: `ChatBlock` and `RenderCtx`, the render contract of a chat block.
 - `crates/ox-tui/src/components/chat/blocks/live_markdown.rs`: `LiveMarkdown`, the text of a section that grows while it streams, with its stable-prefix cache.

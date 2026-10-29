@@ -16,8 +16,9 @@ use ox_core::protocol::{Op, SignInCode};
 
 use super::operation::InFlight;
 use super::queue::{QueuedPrompt, SwitchTo};
-use super::{App, EXIT_WINDOW, SlashTask};
+use super::{App, EXIT_WINDOW, SlashEnd};
 use crate::action::{APP_KEYMAP, Action, AppAction, next_mode};
+use crate::app_event::AppEvent;
 use crate::components::input::InputOutcome;
 use crate::keymap::{CTRL_C, CTRL_D};
 use crate::modal::{EngineUpdate, ModalAction};
@@ -529,12 +530,16 @@ impl App {
             }
             Ok(SlashOutcome::Modal(modal)) => self.modals.push(modal),
             Ok(SlashOutcome::Background(task)) => {
+                let epoch = self.session_epoch;
                 let line = line.to_owned();
-                _ = self.slash_tasks.spawn(async move {
-                    SlashTask {
+                let events = self.session_info.app_events.clone();
+                tokio::spawn(async move {
+                    let outcome = task.await;
+                    _ = events.send(AppEvent::Slash(SlashEnd {
+                        epoch,
                         line,
-                        outcome: task.await,
-                    }
+                        outcome,
+                    }));
                 });
             }
             Err(msg) => self.chat.push_error(&msg),
@@ -581,8 +586,9 @@ mod tests {
     use super::*;
     use crate::app::operation::Activity;
     use crate::app::testing::{
-        FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, activity, cell_of, long_chat_block,
-        push_answerable_approval, render_app, rendered_text, start_op, test_app,
+        FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, activity, apply_next_app_event, cell_of,
+        copy_report, long_chat_block, push_answerable_approval, render_app, rendered_text,
+        start_op, test_app,
     };
     use crate::components::status::StatusHyperlink;
     use crate::modal::UpdateReply;
@@ -671,7 +677,7 @@ mod tests {
             {
                 app.handle_crossterm_event(&mouse_event_at(kind, x, y));
             }
-            app.clipboard.recv().await.expect("the release copied");
+            copy_report(app).await;
         }
 
         #[test]
@@ -704,7 +710,7 @@ mod tests {
             select_word(&mut app, "this").await;
 
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-            let report = app.clipboard.recv().await.expect("Ctrl+C copied");
+            let report = copy_report(&mut app).await;
 
             assert_eq!(report.chars, 4);
             assert!(!app.chat.has_selection(), "the copy clears the selection");
@@ -1200,8 +1206,7 @@ mod tests {
             ] {
                 app.handle_crossterm_event(&mouse_event_at(kind, column, y));
             }
-            let report = app.clipboard.recv().await.expect("the copy reports back");
-            app.apply_copy_report(report);
+            apply_next_app_event(&mut app).await;
 
             let encoded = base64::engine::general_purpose::STANDARD.encode("this");
             assert_eq!(
@@ -1252,8 +1257,7 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             let mut terminal = capture_terminal(60, 8);
             app.copy_selection("old".to_owned());
-            let earlier = app.clipboard.recv().await.unwrap();
-            app.apply_copy_report(earlier);
+            apply_next_app_event(&mut app).await;
 
             app.copy_selection("latest".to_owned());
 
@@ -1261,8 +1265,7 @@ mod tests {
             assert!(app.copy_notice.is_none());
 
             app.render(&mut terminal).unwrap();
-            let latest = app.clipboard.recv().await.unwrap();
-            app.apply_copy_report(latest);
+            apply_next_app_event(&mut app).await;
             app.render(&mut terminal).unwrap();
 
             assert_eq!(
@@ -2954,8 +2957,7 @@ mod tests {
             assert_eq!(app.chat.entry_count(), 0);
 
             tx.send("done".to_owned()).unwrap();
-            let finished = app.slash_tasks.join_next().await.expect("the task runs");
-            app.apply_slash_task(finished);
+            apply_next_app_event(&mut app).await;
 
             assert_eq!(app.chat.last_system_text(), Some("done"));
         }
