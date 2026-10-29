@@ -18,8 +18,8 @@ use regex_syntax::hir::literal::Extractor;
 
 use super::shell::{PatternWord, Segment, ShellWord, bare_program, pattern_words};
 use super::{
-    DirectoryAliases, PermissionClass, Target, fold_name, folded_components, relative_to_folded,
-    resolve, walk_spelling,
+    Access, DirectoryAliases, PathTarget, PermissionClass, fold_name, folded_components,
+    relative_to_folded, resolve, walk_spelling,
 };
 use crate::util::path::{lexical_normalize, slash_separated};
 use crate::util::text::is_hidden;
@@ -106,23 +106,19 @@ impl Rule {
     /// name an MCP or network call targets. `None` when no pattern names the call alone, as for a
     /// command that runs several or has a word that expands, or when a character of it would not
     /// paint as itself, so the user always sees the exact rule they grant.
-    pub(super) fn for_call(class: PermissionClass, target: &Target<'_>) -> Option<Self> {
+    pub(super) fn for_call(class: PermissionClass, target: &Access) -> Option<Self> {
         let pattern = match target {
-            Target::Command(command) => match command.segments() {
+            Access::Command(command) => match command.segments() {
                 [segment] => command_pattern(segment.named())?,
                 _ => return None,
             },
-            Target::Path {
-                canonical,
-                relative,
-                ..
-            } => match relative {
+            Access::Path(path) => match path.relative.as_deref() {
                 Some("") => return None,
                 Some(relative) => format!("./{}", escaped(Path::new(relative))),
-                None => escaped(Path::new(canonical)),
+                None => escaped(Path::new(&path.canonical)),
             },
-            Target::Name(name) => globset::escape(name),
-            Target::None => return None,
+            Access::Name(name) => globset::escape(name),
+            Access::None => return None,
         };
         if !pattern.chars().all(paints_as_itself) {
             return None;
@@ -145,14 +141,15 @@ impl Rule {
     pub(super) fn matches(
         &self,
         class: PermissionClass,
-        target: &Target<'_>,
+        target: &Access,
         discipline: MatchDiscipline,
     ) -> bool {
         if self.class != class {
             return false;
         }
         match (&self.pattern, target) {
-            (_, Target::Command(command)) if discipline == MatchDiscipline::Allow => {
+            (_, Access::Path(path)) => self.path_matches(path, discipline),
+            (_, Access::Command(command)) if discipline == MatchDiscipline::Allow => {
                 command.unrecognized().is_none()
                     && !command.segments().is_empty()
                     && command
@@ -161,22 +158,30 @@ impl Rule {
                         .all(|segment| self.allows(segment))
             }
             (Pattern::Any, _) => true,
-            (Pattern::Exec(words), Target::Command(command)) => command
+            (Pattern::Exec(words), Access::Command(command)) => command
                 .segments()
                 .iter()
                 .any(|segment| segment_held(words, segment)),
-            (
-                Pattern::Path(glob),
-                Target::Path {
-                    canonical,
-                    rooted,
-                    requested,
-                    deny_rooted,
-                    ..
-                },
-            ) => glob.is_match(canonical, rooted, requested, deny_rooted, discipline),
-            (Pattern::Host(glob) | Pattern::Tool(glob), Target::Name(name)) => glob.is_match(name),
+            (Pattern::Host(glob) | Pattern::Tool(glob), Access::Name(name)) => glob.is_match(name),
             _ => false,
+        }
+    }
+
+    /// Returns whether this rule matches an access of `path` in `class` under `discipline`.
+    pub(super) fn matches_path(
+        &self,
+        class: PermissionClass,
+        path: &PathTarget,
+        discipline: MatchDiscipline,
+    ) -> bool {
+        self.class == class && self.path_matches(path, discipline)
+    }
+
+    fn path_matches(&self, path: &PathTarget, discipline: MatchDiscipline) -> bool {
+        match &self.pattern {
+            Pattern::Any => true,
+            Pattern::Path(glob) => glob.is_match(path, discipline),
+            Pattern::Exec(_) | Pattern::Host(_) | Pattern::Tool(_) => false,
         }
     }
 
@@ -190,23 +195,16 @@ impl Rule {
         }
     }
 
-    /// Returns whether a deny or ask `read` rule may match this path or a recursive descendant.
-    pub(super) fn holds_read(&self, target: &Target<'_>, recursive: bool) -> bool {
-        if self.matches(PermissionClass::Read, target, MatchDiscipline::Deny) {
+    /// Returns whether a deny or ask `read` rule may match `path` or a recursive descendant.
+    pub(super) fn holds_read(&self, path: &PathTarget, recursive: bool) -> bool {
+        if self.matches_path(PermissionClass::Read, path, MatchDiscipline::Deny) {
             return true;
         }
         if self.class != PermissionClass::Read || !recursive {
             return false;
         }
-        match (&self.pattern, target) {
-            (
-                Pattern::Path(glob),
-                Target::Path {
-                    canonical,
-                    requested,
-                    ..
-                },
-            ) => glob.may_match_below([canonical, requested]),
+        match &self.pattern {
+            Pattern::Path(glob) => glob.may_match_below([&path.canonical, &path.requested]),
             _ => false,
         }
     }
@@ -442,16 +440,15 @@ impl PathGlob {
         })
     }
 
-    /// Returns whether this glob matches a path target under `discipline`, given the target's
-    /// spellings as [`Target::Path`] holds them.
-    fn is_match(
-        &self,
-        canonical: &str,
-        rooted: &[String],
-        requested: &str,
-        deny_rooted: &[String],
-        discipline: MatchDiscipline,
-    ) -> bool {
+    /// Returns whether this glob matches `path` under `discipline`.
+    fn is_match(&self, path: &PathTarget, discipline: MatchDiscipline) -> bool {
+        let PathTarget {
+            canonical,
+            rooted,
+            requested,
+            deny_rooted,
+            ..
+        } = path;
         let deny = discipline == MatchDiscipline::Deny;
         let hit = |path: &str| {
             self.exact.is_match(path) || (deny && self.folded.is_match(fold_path(path)))
@@ -605,28 +602,25 @@ mod tests {
     }
 
     fn allows(rule: &Rule, command: &str) -> bool {
-        rule.matches(
-            PermissionClass::Exec,
-            &cmd(command).as_target(),
-            MatchDiscipline::Allow,
-        )
+        rule.matches(PermissionClass::Exec, &cmd(command), MatchDiscipline::Allow)
     }
 
     /// A path target with `canonical` resolved, rooted at the given relative spellings.
-    fn path<'a>(canonical: &'a str, rooted: &'a [String]) -> Target<'a> {
-        Target::Path {
-            canonical,
-            relative: rooted.first().map(String::as_str),
-            rooted,
-            requested: canonical,
-            deny_rooted: &[],
+    fn path(canonical: &str, rooted: &[String]) -> PathTarget {
+        PathTarget {
+            canonical: canonical.to_owned(),
+            exact: None,
+            relative: rooted.first().cloned(),
+            rooted: rooted.to_vec(),
+            requested: canonical.to_owned(),
+            deny_rooted: Vec::new(),
             zone: Zone::Outside,
-            protected: &[],
+            protected: Vec::new(),
         }
     }
 
-    fn matches_path(rule: &Rule, target: &Target<'_>, discipline: MatchDiscipline) -> bool {
-        rule.matches(rule.class(), target, discipline)
+    fn matches_path(rule: &Rule, path: &PathTarget, discipline: MatchDiscipline) -> bool {
+        rule.matches_path(rule.class(), path, discipline)
     }
 
     mod parse {
@@ -636,13 +630,13 @@ mod tests {
         fn star_covers_the_whole_class_including_a_call_without_a_target() {
             let any = rule(PermissionClass::Read, " * ");
             assert_eq!(any.pattern(), "*");
-            for target in [Target::None, path("/anywhere/x", &[])] {
+            for target in [Access::None, Access::Path(path("/anywhere/x", &[]))] {
                 assert!(
-                    matches_path(&any, &target, MatchDiscipline::Allow),
+                    any.matches(any.class(), &target, MatchDiscipline::Allow),
                     "{target:?}"
                 );
             }
-            assert!(!any.matches(PermissionClass::Edit, &Target::None, MatchDiscipline::Deny));
+            assert!(!any.matches(PermissionClass::Edit, &Access::None, MatchDiscipline::Deny));
         }
 
         #[test]
@@ -790,7 +784,7 @@ mod tests {
                 ("echo '*' ''", "echo '*' ''"),
             ] {
                 let target = cmd(command);
-                let rule = Rule::for_call(PermissionClass::Exec, &target.as_target()).unwrap();
+                let rule = Rule::for_call(PermissionClass::Exec, &target).unwrap();
                 assert_eq!(rule.pattern(), expected, "{command:?}");
                 assert!(allows(&rule, command), "{command:?}");
             }
@@ -801,7 +795,11 @@ mod tests {
         fn names_the_path_under_dot_slash_inside_cwd_and_absolute_outside() {
             let canonical = abs("/repo/src/a[1].rs");
             let rooted = ["src/a[1].rs".to_owned()];
-            let rule = Rule::for_call(PermissionClass::Edit, &path(&canonical, &rooted)).unwrap();
+            let rule = Rule::for_call(
+                PermissionClass::Edit,
+                &Access::Path(path(&canonical, &rooted)),
+            )
+            .unwrap();
             assert_eq!(rule.pattern(), "./src/a[[]1[]].rs");
             let other = ["src/a1.rs".to_owned()];
             assert!(!matches_path(
@@ -811,8 +809,11 @@ mod tests {
             ));
 
             let top = ["a.rs".to_owned()];
-            let rule =
-                Rule::for_call(PermissionClass::Edit, &path(&abs("/repo/a.rs"), &top)).unwrap();
+            let rule = Rule::for_call(
+                PermissionClass::Edit,
+                &Access::Path(path(&abs("/repo/a.rs"), &top)),
+            )
+            .unwrap();
             assert_eq!(
                 rule.pattern(),
                 "./a.rs",
@@ -820,7 +821,8 @@ mod tests {
             );
 
             let outside = abs("/etc/hosts");
-            let rule = Rule::for_call(PermissionClass::Edit, &path(&outside, &[])).unwrap();
+            let rule =
+                Rule::for_call(PermissionClass::Edit, &Access::Path(path(&outside, &[]))).unwrap();
             assert_eq!(rule.pattern(), slash_separated(Path::new(&outside)));
         }
 
@@ -836,7 +838,7 @@ mod tests {
                 "echo 'a\tb'",
             ] {
                 assert!(
-                    Rule::for_call(PermissionClass::Exec, &cmd(command).as_target()).is_none(),
+                    Rule::for_call(PermissionClass::Exec, &cmd(command)).is_none(),
                     "{command:?}"
                 );
             }
@@ -844,9 +846,9 @@ mod tests {
             let hidden = ["a\u{200b}.rs".to_owned()];
             let hidden_path = abs("/repo/a\u{200b}.rs");
             for target in [
-                path(&abs("/repo"), &empty),
-                path(&hidden_path, &hidden),
-                Target::None,
+                Access::Path(path(&abs("/repo"), &empty)),
+                Access::Path(path(&hidden_path, &hidden)),
+                Access::None,
             ] {
                 assert!(
                     Rule::for_call(PermissionClass::Edit, &target).is_none(),
@@ -857,19 +859,14 @@ mod tests {
 
         #[test]
         fn names_a_host_or_tool_by_its_escaped_name() {
-            let host =
-                Rule::for_call(PermissionClass::Net, &Target::Name("api.example.com")).unwrap();
+            let name = |name: &str| Access::Name(name.to_owned());
+            let host = Rule::for_call(PermissionClass::Net, &name("api.example.com")).unwrap();
             assert_eq!(host.pattern(), "api.example.com");
 
-            let tool = Rule::for_call(PermissionClass::Mcp, &Target::Name("srv/a*b")).unwrap();
+            let tool = Rule::for_call(PermissionClass::Mcp, &name("srv/a*b")).unwrap();
             assert_eq!(tool.pattern(), "srv/a[*]b");
-            let matches = |name| {
-                tool.matches(
-                    PermissionClass::Mcp,
-                    &Target::Name(name),
-                    MatchDiscipline::Allow,
-                )
-            };
+            let matches =
+                |called| tool.matches(PermissionClass::Mcp, &name(called), MatchDiscipline::Allow);
             assert!(matches("srv/a*b"));
             assert!(!matches("srv/axb"));
         }
@@ -879,11 +876,7 @@ mod tests {
         use super::*;
 
         fn holds(rule: &Rule, command: &str) -> bool {
-            rule.matches(
-                PermissionClass::Exec,
-                &cmd(command).as_target(),
-                MatchDiscipline::Deny,
-            )
+            rule.matches(PermissionClass::Exec, &cmd(command), MatchDiscipline::Deny)
         }
 
         #[test]
@@ -1165,14 +1158,12 @@ mod tests {
             // not reach a target that resolves elsewhere.
             let (canonical, requested) = (abs("/shared/.env"), abs("/repo/.env"));
             let deny_rooted = [".env".to_owned()];
-            let env = Target::Path {
-                canonical: &canonical,
+            let env = PathTarget {
                 relative: None,
-                rooted: &[],
-                requested: &requested,
-                deny_rooted: &deny_rooted,
-                zone: Zone::Outside,
-                protected: &[],
+                rooted: Vec::new(),
+                requested,
+                deny_rooted: deny_rooted.to_vec(),
+                ..path(&canonical, &[])
             };
             let absolute = edit(&abs("/repo/.env"));
             for rule in [edit(".env"), absolute] {
@@ -1230,7 +1221,7 @@ mod tests {
                 assert_eq!(
                     host.matches(
                         PermissionClass::Net,
-                        &Target::Name(name),
+                        &Access::Name(name.to_owned()),
                         MatchDiscipline::Allow
                     ),
                     expected,
@@ -1248,7 +1239,7 @@ mod tests {
                 assert_eq!(
                     tool.matches(
                         PermissionClass::Mcp,
-                        &Target::Name(name),
+                        &Access::Name(name.to_owned()),
                         MatchDiscipline::Deny
                     ),
                     expected,
@@ -1293,14 +1284,13 @@ mod tests {
         }
 
         #[test]
-        fn keeps_class_and_target_requirements() {
+        fn keeps_class_requirements() {
+            let vault = path(&abs("/repo/vault"), &["vault".to_owned()]);
             let any = rule(PermissionClass::Read, "*");
             let edit = rule(PermissionClass::Edit, "*");
-            let read = rule(PermissionClass::Read, "./vault/key");
 
-            assert!(any.holds_read(&Target::None, false));
-            assert!(!edit.holds_read(&Target::None, true));
-            assert!(!read.holds_read(&Target::Name("vault"), true));
+            assert!(any.holds_read(&vault, false));
+            assert!(!edit.holds_read(&vault, true));
         }
     }
 

@@ -626,7 +626,7 @@ mod tests {
     use super::view::NumberedLine;
     use super::*;
     use crate::permission::rule::Rule;
-    use crate::permission::{Decision, Mode, PermissionClass, Policy, Zone};
+    use crate::permission::{Decision, Mode, PathTarget, PermissionClass, Policy, Zone};
     use crate::util::fs::testing::symlink_file;
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::testing::HOME_VAR;
@@ -731,7 +731,7 @@ mod tests {
                 let (spec, t) = tools.get(name).unwrap();
                 let prepared = t.prepare(input.clone(), &ctx).unwrap();
                 assert_eq!(
-                    policy.decide(spec.class, &prepared.access.as_target()),
+                    policy.decide(spec.class, &prepared.access),
                     Decision::Deny,
                     "tool {name}",
                 );
@@ -763,12 +763,12 @@ mod tests {
 
                 let prepared = t.prepare(input.clone(), &ctx).unwrap();
 
-                let Access::Path {
+                let Access::Path(PathTarget {
                     canonical,
                     relative,
                     zone,
                     ..
-                } = &prepared.access
+                }) = &prepared.access
                 else {
                     panic!("tool {name}: expected a path target, got {prepared:?}");
                 };
@@ -864,7 +864,7 @@ mod tests {
                 }
                 for path in ["~/.aws/credentials", "~/.ssh/id_ed25519"] {
                     assert_eq!(
-                        policy.decide(spec.class, &prepare(path).access.as_target()),
+                        policy.decide(spec.class, &prepare(path).access),
                         Decision::Deny,
                         "{path}"
                     );
@@ -885,7 +885,7 @@ mod tests {
                 let prepared = ReadTool
                     .prepare(serde_json::json!({"file_path": name}), &ctx)
                     .unwrap();
-                let Access::Path { zone, .. } = &prepared.access else {
+                let Access::Path(PathTarget { zone, .. }) = &prepared.access else {
                     panic!("expected a path target, got {prepared:?}");
                 };
                 assert_eq!(*zone, Zone::Outside, "{name}");
@@ -961,7 +961,7 @@ mod tests {
                 .prepare(input.clone(), &ctx(dir.path()))
                 .unwrap();
 
-            let Access::Path { canonical, .. } = &prepared.access else {
+            let Access::Path(PathTarget { canonical, .. }) = &prepared.access else {
                 panic!("expected a path target, got {prepared:?}");
             };
             assert_eq!(canonical, dir.path().to_str().unwrap());
@@ -986,12 +986,12 @@ mod tests {
                 )
                 .unwrap();
 
-            let Access::Path {
+            let Access::Path(PathTarget {
                 canonical,
                 relative,
                 zone,
                 ..
-            } = &prepared.access
+            }) = &prepared.access
             else {
                 panic!("expected a path target, got {prepared:?}");
             };
