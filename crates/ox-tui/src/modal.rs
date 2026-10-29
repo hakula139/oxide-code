@@ -636,7 +636,7 @@ mod tests {
             stack.push(Box::new(ScriptedModal::new()));
             stack.push(Box::new(confirm));
 
-            let actions = stack.notify(EngineUpdate::Event(&Event::SessionReady));
+            let actions = stack.notify(EngineUpdate::Event(&Event::AutoCompactionResumed));
 
             assert!(
                 matches!(actions.as_deref(), Some([ModalAction::SystemMessage(msg)]) if msg == "Deleted"),
@@ -668,7 +668,7 @@ mod tests {
                 modal.reply = reply;
                 stack.push(Box::new(modal));
 
-                let actions = stack.notify(EngineUpdate::Event(&Event::SessionReady));
+                let actions = stack.notify(EngineUpdate::Event(&Event::AutoCompactionResumed));
 
                 assert_eq!(actions.map(|a| a.len()), expected, "{name}");
                 assert_eq!(stack.is_active(), expected != Some(1), "{name}");

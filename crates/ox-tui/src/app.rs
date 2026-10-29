@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 
 use ox_core::config::StatusLineSegment;
 use ox_core::permission::Mode;
-use ox_core::protocol::{Event, Interaction, Op};
+use ox_core::protocol::{Event, Interaction, OpSender};
 use ox_core::session::display::archive_notice;
 use ox_core::session::store::listing::ArchiveState;
 
@@ -56,7 +56,7 @@ pub(crate) struct App {
     theme_overrides: ThemeOverrides,
     /// Theme saved when a `/theme` picker opens. Restored if the modal cancels.
     preview_theme_snapshot: Option<Theme>,
-    /// The idle-only operation the engine runs, until its terminal event. While it runs, the App
+    /// The idle-only operation the engine runs, until the engine ends it. While it runs, the App
     /// keeps other idle-only input local.
     in_flight: Option<InFlight>,
     /// Whether the last operation left a modal open that may send the next one, which defers the
@@ -75,7 +75,7 @@ pub(crate) struct App {
     /// second press does not repeat a switch still awaiting its confirmation.
     requested_mode: Mode,
     events: mpsc::UnboundedReceiver<Event>,
-    ops: mpsc::Sender<Op>,
+    ops: OpSender,
     background: mpsc::UnboundedReceiver<AppEvent>,
     /// Opens a URL in the system browser.
     open_browser: fn(&str) -> io::Result<()>,
@@ -143,7 +143,7 @@ pub(crate) struct Channels {
     pub(crate) events: mpsc::UnboundedReceiver<Event>,
     /// The engine's op queue, which the App never waits on, so an op that finds it full is dropped
     /// with a notice.
-    pub(crate) ops: mpsc::Sender<Op>,
+    pub(crate) ops: OpSender,
     /// What background work reports through the senders that the session info and the host hold.
     pub(crate) background: mpsc::UnboundedReceiver<AppEvent>,
 }
@@ -340,6 +340,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
     use ox_core::client::{RateLimitWindow, RateLimits};
+    use ox_core::protocol::Op;
 
     use super::testing::{
         long_chat_block, render_app, rendered_text, start_op, test_app, test_app_from,

@@ -537,6 +537,7 @@ mod tests {
     use crate::permission::defaults::Shipped;
     use crate::permission::testing::exec_grant;
     use crate::permission::{PermissionClass, Tier};
+    use crate::protocol::OpSender;
     use crate::protocol::local_testing::{CapturingSink, FailingSink};
     use crate::tool::ToolDefinition;
     use crate::tool::edit::EditTool;
@@ -666,8 +667,8 @@ mod tests {
             ]);
             let sink = CapturingSink::default();
             let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
-            tx.try_send(Op::Interrupt).unwrap();
+            let (tx, mut rx) = OpSender::channel(1);
+            tx.try_submit(Op::Interrupt).unwrap();
             let calls = vec![
                 call("tool_1", "meet", json!({"v": 1})),
                 call("tool_2", "probe", json!({})),
@@ -790,7 +791,7 @@ mod tests {
             ]);
             let sink = CapturingSink::default();
             let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let (tx, mut rx) = OpSender::channel(1);
             let mut mailbox = Mailbox::new(&mut rx);
             let calls = vec![
                 call("tool_1", "meet", json!({"v": 1})),
@@ -801,7 +802,7 @@ mod tests {
             let interrupt = async {
                 let tokens = [started.recv().await.unwrap(), started.recv().await.unwrap()];
                 assert!(tokens.iter().all(|token| !token.is_cancelled()));
-                tx.send(Op::Interrupt).await.unwrap();
+                tx.submit(Op::Interrupt).await.unwrap();
                 tokens
             };
 
@@ -1017,8 +1018,8 @@ mod tests {
                 let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
                 let sink = CapturingSink::default();
                 let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-                let (tx, mut rx) = mpsc::channel::<Op>(1);
-                tx.try_send(Op::Resolve {
+                let (tx, mut rx) = OpSender::channel(1);
+                tx.try_submit(Op::Resolve {
                     id: "tool_1".to_owned(),
                     decision: ApprovalDecision::Approve,
                 })
@@ -1057,8 +1058,8 @@ mod tests {
                 let sink = CapturingSink::default();
                 let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
                 let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
-                let (tx, mut rx) = mpsc::channel::<Op>(1);
-                tx.try_send(Op::Resolve {
+                let (tx, mut rx) = OpSender::channel(1);
+                tx.try_submit(Op::Resolve {
                     id: "tool_1".to_owned(),
                     decision: ApprovalDecision::AllowForSession {
                         rule: Box::new(rule.clone()),
@@ -1132,8 +1133,8 @@ mod tests {
                     let sink = CapturingSink::default();
                     let mut dispatch_ctx =
                         dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-                    let (tx, mut rx) = mpsc::channel::<Op>(1);
-                    tx.try_send(Op::Resolve {
+                    let (tx, mut rx) = OpSender::channel(1);
+                    tx.try_submit(Op::Resolve {
                         id: "tool_1".to_owned(),
                         decision: ApprovalDecision::AllowForSession {
                             rule: Box::new(rule),
@@ -1186,7 +1187,7 @@ mod tests {
             async fn ask_undeliverable_event_fails_closed() {
                 let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
                 let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-                let (_tx, mut rx) = mpsc::channel::<Op>(1);
+                let (_tx, mut rx) = OpSender::channel(1);
 
                 let denial = gate_call(
                     &tools,
@@ -1215,8 +1216,8 @@ mod tests {
                 let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
                 let sink = CapturingSink::default();
                 let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
-                let (tx, mut rx) = mpsc::channel::<Op>(1);
-                tx.try_send(Op::Resolve {
+                let (tx, mut rx) = OpSender::channel(1);
+                tx.try_submit(Op::Resolve {
                     id: "tool_1".to_owned(),
                     decision: ApprovalDecision::Deny,
                 })
@@ -1273,7 +1274,7 @@ mod tests {
                         dispatch_with(Mode::Manual, &[], allow, Path::new("/repo"));
                     dispatch_ctx.policy.set_unattended();
                     // A closed op channel aborts on a stray approval request instead of waiting.
-                    let (_, mut ops) = mpsc::channel(1);
+                    let (_, mut ops) = OpSender::channel(1);
 
                     let denial = gate_call(
                         &tools,
@@ -1387,8 +1388,8 @@ mod tests {
                     ("outside", outside.join("new.md"), true),
                 ] {
                     let sink = CapturingSink::default();
-                    let (tx, mut rx) = mpsc::channel::<Op>(1);
-                    tx.try_send(Op::Resolve {
+                    let (tx, mut rx) = OpSender::channel(1);
+                    tx.try_submit(Op::Resolve {
                         id: id.to_owned(),
                         decision: ApprovalDecision::Deny,
                     })
@@ -1497,13 +1498,13 @@ mod tests {
 
         #[tokio::test]
         async fn ignores_a_stale_decision_for_another_call() {
-            let (tx, mut rx) = mpsc::channel::<Op>(2);
-            tx.try_send(Op::Resolve {
+            let (tx, mut rx) = OpSender::channel(2);
+            tx.try_submit(Op::Resolve {
                 id: "other".to_owned(),
                 decision: ApprovalDecision::Approve,
             })
             .unwrap();
-            tx.try_send(Op::Resolve {
+            tx.try_submit(Op::Resolve {
                 id: "tool_1".to_owned(),
                 decision: ApprovalDecision::Deny,
             })

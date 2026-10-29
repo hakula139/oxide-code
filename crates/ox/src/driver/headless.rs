@@ -11,9 +11,9 @@ use tokio::io::{AsyncRead, AsyncReadExt as _};
 use ox_core::command;
 use ox_core::engine::{Engine, EngineHandle, EnginePanic};
 use ox_core::protocol::notice::ENGINE_STOPPED;
-use ox_core::protocol::{Event, Op, TurnEnd};
+use ox_core::protocol::{Event, Op, OpEnd};
 
-use super::stdio::{OpEnd, Output, OutputFormat, Unattended, run_op};
+use super::stdio::{Output, OutputFormat, RunEnd, Unattended, run_op};
 use super::{Exit, Shutdown, Signals, decode_input};
 
 /// How long [`read_prompt`] waits on an open stdin before saying what it waits for.
@@ -116,13 +116,13 @@ async fn drive<O: Write, E: Write>(
     )
     .await
     {
-        OpEnd::Ended(TurnEnd::Completed) => (TurnEnd::Completed, Exit::Success),
-        OpEnd::Ended(end) => (end, Exit::Failure),
-        OpEnd::EngineStopped => {
+        RunEnd::Ended(OpEnd::Completed) => (OpEnd::Completed, Exit::Success),
+        RunEnd::Ended(end) => (end, Exit::Failure),
+        RunEnd::EngineStopped => {
             output.render(Event::TurnFailed(ENGINE_STOPPED.to_owned()));
-            (TurnEnd::Failed, Exit::Failure)
+            (OpEnd::Failed, Exit::Failure)
         }
-        OpEnd::Signal(signal) => (TurnEnd::Shutdown, Exit::Signal(signal)),
+        RunEnd::Signal(signal) => (OpEnd::Shutdown, Exit::Signal(signal)),
     };
     let finished = handle.shutdown().await;
     let session_failure = finished.as_ref().ok().and_then(Option::as_deref);

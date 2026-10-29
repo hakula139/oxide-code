@@ -1,27 +1,28 @@
-//! The one operation the engine runs for the TUI, from its dispatch to its terminal event, and what
-//! the status bar shows while it runs.
+//! The one operation the engine runs for the TUI, from its dispatch to its end, and what the status
+//! bar shows while it runs.
 
 use std::borrow::Cow;
 
 use crossterm::event::KeyCode;
 
-use ox_core::protocol::{Event, Op, TurnEnd};
+use ox_core::protocol::{Event, Op, OpEnd, OpId};
 
 use crate::keymap::{KeyChord, hint};
 
 const ESC: KeyChord = KeyChord::plain(KeyCode::Esc);
 
-/// An idle-only op the engine runs, from its dispatch to the terminal event that ends it.
+/// An idle-only op the engine runs, from its dispatch to the [`Event::OpEnded`] that ends it.
 #[derive(Debug)]
 pub(super) struct InFlight {
     op: Op,
+    id: OpId,
     activity: Activity,
 }
 
 impl InFlight {
-    /// Tracks `op` until its terminal event. `None` for an op the engine takes at any time, which
-    /// the TUI never waits on.
-    pub(super) fn new(op: &Op) -> Option<Self> {
+    /// Tracks `op`, submitted as `id`, until the engine ends it. `None` for an op the engine takes
+    /// at any time, which the TUI never waits on.
+    pub(super) fn new(op: &Op, id: OpId) -> Option<Self> {
         let activity = match op {
             Op::Prompt { .. } => Activity::Streaming,
             Op::Compact { .. } => Activity::Compacting,
@@ -43,13 +44,19 @@ impl InFlight {
         };
         Some(Self {
             op: op.clone(),
+            id,
             activity,
         })
     }
 
-    /// How `event` ends the op, if it is one of the op's terminal events.
-    pub(super) fn end(&self, event: &Event) -> Option<TurnEnd> {
-        TurnEnd::of(&self.op, event)
+    /// How `event` ends the op, if it is the op's [`Event::OpEnded`].
+    pub(super) fn end(&self, event: &Event) -> Option<OpEnd> {
+        event.end_of(self.id)
+    }
+
+    #[cfg(test)]
+    pub(super) const fn id(&self) -> OpId {
+        self.id
     }
 
     pub(super) const fn activity(&self) -> &Activity {
@@ -70,7 +77,7 @@ impl InFlight {
         self.activity == Activity::Cancelling
     }
 
-    /// Marks the op cancelled, which the status shows until its terminal event.
+    /// Marks the op cancelled, which the status shows until the op ends.
     pub(super) fn cancel(&mut self) {
         self.activity = Activity::Cancelling;
     }
@@ -139,6 +146,7 @@ impl Activity {
 mod tests {
     use ox_core::model::Effort;
     use ox_core::permission::Mode;
+    use ox_core::protocol::testing::op_id;
     use ox_core::protocol::{ApprovalDecision, ConfigPick, ResumeTarget, SavedTarget, SignInCode};
     use ox_core::session::store::listing::ArchiveState;
 
@@ -187,7 +195,40 @@ mod tests {
                     Op::Shutdown,
                 ];
                 for op in ops {
-                    assert_eq!(InFlight::new(&op).is_some(), op.is_idle_only(), "{op:?}");
+                    assert_eq!(
+                        InFlight::new(&op, op_id(0)).is_some(),
+                        op.is_idle_only(),
+                        "{op:?}"
+                    );
+                }
+            }
+        }
+
+        mod end {
+            use super::*;
+
+            #[test]
+            fn ends_only_on_the_op_ended_event_of_its_own_id() {
+                let compact = InFlight::new(&Op::Compact { instructions: None }, op_id(1)).unwrap();
+
+                for (event, expected) in [
+                    (
+                        Event::OpEnded {
+                            id: op_id(1),
+                            end: OpEnd::Cancelled,
+                        },
+                        Some(OpEnd::Cancelled),
+                    ),
+                    (
+                        Event::OpEnded {
+                            id: op_id(0),
+                            end: OpEnd::Completed,
+                        },
+                        None,
+                    ),
+                    (Event::TurnFailed("Compaction failed".to_owned()), None),
+                ] {
+                    assert_eq!(compact.end(&event), expected, "{event:?}");
                 }
             }
         }
@@ -197,7 +238,7 @@ mod tests {
 
             #[test]
             fn releases_held_prompts_only_when_a_turn_leaves_its_compaction() {
-                let mut turn = InFlight::new(&Op::prompt("hello")).unwrap();
+                let mut turn = InFlight::new(&Op::prompt("hello"), op_id(0)).unwrap();
                 assert!(turn.takes_queued_prompts());
 
                 assert!(!turn.set_activity(Activity::Compacting));
@@ -209,7 +250,7 @@ mod tests {
 
             #[test]
             fn keeps_a_pending_cancel() {
-                let mut turn = InFlight::new(&Op::prompt("hello")).unwrap();
+                let mut turn = InFlight::new(&Op::prompt("hello"), op_id(0)).unwrap();
                 turn.set_activity(Activity::Compacting);
                 turn.cancel();
 
@@ -226,7 +267,7 @@ mod tests {
 
             #[test]
             fn only_a_running_turn_takes_them() {
-                let compact = InFlight::new(&Op::Compact { instructions: None }).unwrap();
+                let compact = InFlight::new(&Op::Compact { instructions: None }, op_id(0)).unwrap();
 
                 assert!(!compact.takes_queued_prompts());
             }
