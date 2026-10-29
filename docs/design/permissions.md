@@ -2,7 +2,7 @@
 
 Every tool call passes through a permission gate. Rules place calls in one of three tiers: deny, ask, or allow. The mode decides the calls the rules leave open, and `plan` also denies every `edit`, `exec`, and `net` call.
 
-Companion docs: [Modals](modals.md), [File Tracking](file-tracking.md).
+Companion docs: [Modals](modals.md), [File Edits](file-edits.md).
 
 ## Rule Tables
 
@@ -82,7 +82,7 @@ A path tool's target is resolved before any rules run. The tool's `Tool::prepare
 
 An approval names the resolved path, in the title for `edit` and `write` and in the body for `read`, and so do the tool's messages. `read`, `edit`, and `write` open the file at `Access::resolved()`, so a workspace or symlink target whose path holds a non-UTF-8 byte opens as it exists on disk. `grep` and `glob` retain the `path` as written in the call, with only `~` expanded, because read deny rules match it, then walk from the root resolved by `prepare`. `read`, `edit`, and `write` check file size and type both by path and on the opened file whenever they read a file. Their opens refuse a symlink that replaces the resolved final component. On Unix, opens use `O_NOFOLLOW` and `O_NONBLOCK`, preventing a swapped-in FIFO from hanging the open. On Windows, opens use `FILE_FLAG_OPEN_REPARSE_POINT` and fail if the handle is a symlink or junction. Other reparse points need a second open through their filesystem filter, whose handle must reach the same file. On every platform, a symlink swapped into an intermediate directory between the gate and the open is not covered.
 
-Edit and Write recheck the original before publishing and report a concurrent change instead of overwriting it, as [File Mutation](file-mutation.md) describes.
+Edit and Write recheck the original before publishing and report a concurrent change instead of overwriting it, as [File Edits](file-edits.md) describes.
 
 Each resolved target belongs to one zone:
 
