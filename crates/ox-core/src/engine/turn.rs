@@ -536,11 +536,9 @@ mod tests {
     };
     use crate::engine::testing::MODEL;
     use crate::message::{Replay, Role};
-    use crate::model::{Effort, ResolvedModelId};
-    use crate::protocol::testing::CapturingSink;
-    use crate::protocol::{
-        ApprovalDecision, ConfigPick, ResumeTarget, SavedTarget, ToolCall, ToolResult,
-    };
+    use crate::model::Effort;
+    use crate::protocol::testing::{CapturingSink, model_pick};
+    use crate::protocol::{ApprovalDecision, ResumeTarget, SavedTarget, ToolCall, ToolResult};
     use crate::session::handle;
     use crate::session::handle::SessionHandle;
     use crate::session::store::testing::test_store;
@@ -1474,10 +1472,7 @@ mod tests {
                     id: "stale".to_owned(),
                     decision: ApprovalDecision::Approve,
                 },
-                Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5"),
-                    effort: Some(Effort::High),
-                }),
+                Op::SetModel(model_pick("claude-opus-5-5", Some(Effort::High))),
                 Op::Compact { instructions: None },
                 Op::Clear,
                 Op::Archive,

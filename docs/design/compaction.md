@@ -153,11 +153,11 @@ In the bare REPL and headless runs, `driver::stdio::StdioSink` writes `Compactin
 
 - `crates/ox-core/src/client/anthropic/transport.rs`: `prompt_too_long_message`, which types an HTTP 400 `prompt is too long` as `PromptTooLong`.
 - `crates/ox-core/src/config/compaction.rs`: `CompactionConfig`, which resolves the threshold and its snapping.
-- `crates/ox-core/src/engine.rs`: `Engine::submit_prompt`, which compacts between the segments of a turn, and `Engine::account_usage`.
+- `crates/ox-core/src/engine.rs`: `Engine::submit_prompt`, which compacts between the segments of a turn.
 - `crates/ox-core/src/engine/compaction.rs`: `Engine::compact`, `Engine::run_compaction`, `Engine::replace_with_summary`, `request_summary`, the `SummaryStream` sink, the context-window retries, `AutoCompactFailures`, and `request_tokens`.
 - `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::compact`, which saves the boundary and swaps the transcript to the synthetic continuation.
 - `crates/ox-core/src/engine/turn.rs`: `agent_turn`, `TurnStop::Compact`, `collect_response`, and `TurnReport::context_estimate`.
-- `crates/ox-core/src/engine/usage.rs`: session-cost accounting and `Engine::reset_context_usage`.
+- `crates/ox-core/src/engine/usage.rs`: `UsageLedger`, which accounts the session cost and context usage, and `Engine::account_usage` and `Engine::reset_context_usage`, which feed it.
 - `crates/ox-core/src/protocol.rs`: `Op::Compact`, the `SessionCompacted`, `SummaryToken`, `SummaryDiscarded`, `AutoCompactionStarted`, and `AutoCompactionPaused` events, and `CompactTrigger`.
 - `crates/ox-core/src/protocol/notice.rs`: `compacted`, the boundary header every frontend shows.
 - `crates/ox-core/src/session/actor.rs`: the `SessionCmd::Compact` handler.
