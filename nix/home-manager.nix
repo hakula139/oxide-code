@@ -33,7 +33,7 @@ let
       '') checkedFiles
     )}
     ${lib.optionalString cfg.checkConfig ''
-      # crates/ox/tests/cli.rs runs `ox config check` in this same scratch environment.
+      # crates/ox/tests/cli/config_check.rs runs `ox config check` in this scratch environment too.
       export HOME=$TMPDIR/home XDG_CONFIG_HOME=$out \
         XDG_DATA_HOME=$TMPDIR/data XDG_STATE_HOME=$TMPDIR/state
       mkdir "$HOME" "$TMPDIR/work"
