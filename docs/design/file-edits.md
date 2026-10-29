@@ -1,26 +1,26 @@
 # File Edits
 
-`edit` and `write` change a file only after the session has read its current content, and they replace that content while keeping the file's metadata, hard links, and ownership. A session-scoped tracker records what each Read showed, every existing file is rewritten in place through the handle that was checked, and a new file is created with an exclusive open.
+`edit` and `write` change a file only while the session knows its current content, from a Read or its own earlier write, and they replace that content while keeping the file's metadata, hard links, and ownership. A session-scoped tracker records what each Read showed and what each write left, every existing file is rewritten in place through the handle that was checked, and a new file is created with an exclusive open.
 
 Companion docs: [Permissions](permissions.md).
 
 ## Tracking
 
-The `FileTracker` is shared across a session's tool calls. Read records the content hash and the lines it showed in a mutex-protected map, keyed by the canonical path so every spelling of one file, symlinks included, shares an entry. Edit and Write refuse a file the session has not read, and verify the current bytes against the stored hash before they change anything (**Strict Read-before-Edit gate**, **Content hash is the gate**).
+The `FileTracker` is shared across a session's tool calls. Read records the content hash and the lines it showed, and each write records the content it left, in a mutex-protected map, keyed by the canonical path so every spelling of one file, symlinks included, shares an entry. Edit and Write refuse a file the tracker holds no state for, and verify the current bytes against the stored hash before they change anything (**Strict Read-before-Edit gate**, **Content hash is the gate**).
 
 Each write, including parent-directory creation, and its tracker record run in one tracked task. The engine stops tool admission and waits for those tasks before it reports a cancellation, clears or restores tracker state, changes sessions, or captures the final snapshots. The tracker state persists to the session's row when the session finishes and verifies by content hash on resume (**Persist the tracker on session finish, verify on resume**).
 
 ## Checks Before Writing
 
-The path gate resolves the target, and the tools open it with `open_no_follow`, which refuses a symlink at the final component and opens without blocking, so a swapped-in FIFO cannot hang the open. `validate_regular_file` requires a regular file at or below `MAX_TRACKED_FILE_SIZE` (10 MiB), and the tracker supplies the bytes the tool expects to replace.
+The tools open the target the path gate resolved without following a symlink at its final component and without blocking on a swapped-in FIFO, and accept only a regular file within the 10 MiB tracked-file cap. The Read-before-Edit gate supplies the bytes the tool expects to replace, read from disk and matched against the tracked hash.
 
-`commit::write` compares the current content with those bytes before changing anything, and `Original::verify` repeats the identity and byte checks immediately before publication. A changed file reports "the file changed while preparing the write. Read it again.", and a replaced inode reports "the file was replaced while preparing the write", so the tool never records success for content another writer already replaced. A writer with access can still change the file between that last check and publication. A file with set-ID permissions on Unix, or with a capability on Linux, is refused, because a write can clear either while the tool would still report success.
+The `commit` module compares the current content with those bytes before changing anything, and repeats the identity and byte checks immediately before publication. A changed file reports "the file changed while preparing the write. Read it again.", and a replaced inode reports "the file was replaced while preparing the write", so the tool never records success for content another writer already replaced. A writer with access can still change the file between that last check and publication. A file with set-ID permissions on Unix, or with a capability on Linux, is refused, because a write can clear either while the tool would still report success.
 
 ## Publication
 
-`write_in_place` rewrites an existing file through the original's held handle with `set_len(0)`, `write_all`, and `sync_all`, on every platform (**Write every existing file in place**). On Unix, the inode keeps its owner, group, mode, ACLs, extended attributes, flags, and every hard link. On Windows, the file keeps its owner, DACL, native attributes, and alternate streams, while content-dependent NTFS compression follows native write behavior. A final `Original::verify` confirms that the path still holds the written bytes.
+An existing file is truncated and rewritten through the original's held handle, then synced, on every platform (**Write every existing file in place**). On Unix, the inode keeps its owner, group, mode, ACLs, extended attributes, flags, and every hard link. On Windows, the file keeps its owner, DACL, native attributes, and alternate streams, while content-dependent NTFS compression follows native write behavior. A final check confirms that the path still holds the written bytes.
 
-`create` opens a new path with `create_new`, then writes and syncs the file. The exclusive open (`O_EXCL` on Unix, `CREATE_NEW` on Windows) never replaces an existing entry, including a dangling link, and the kernel gives the file the mode and default ACL a plain creation in that directory receives.
+A new file is created with an exclusive open, then written and synced. The exclusive open (`O_EXCL` on Unix, `CREATE_NEW` on Windows) never replaces an existing entry, including a dangling link, and the kernel gives the file the mode and default ACL a plain creation in that directory receives.
 
 When a write or sync fails after the truncation or the creation, the error says a partial file remains and asks the model to read it before writing again.
 
@@ -37,7 +37,7 @@ When a write or sync fails after the truncation or the creation, the error says 
    - Read emits complete rows within its output budget and reports the lines it showed, so omitted content never counts as full. A line larger than the entire budget returns an explicit error when requested and cannot earn full coverage through line pagination.
    - A full re-Read of unchanged content returns a cache stub that names the earlier Read only when a Read recorded the state. A Write or Edit supplies content through its tool input, so deduplicating a Read against it would point the model at pre-edit text.
 
-4. **Persist the tracker on session finish, verify on resume.** The session row's `file_snapshots` column stores the tracker state, written only while the session's head is still the one the process last committed or loaded, and each snapshot names the tool call that recorded it. On resume, a snapshot is discarded when its call has no result left in the repaired transcript, since the model cannot see that content. Of the rest, the newest snapshot per path is selected, regular files at or below the size cap are rehashed, and the survivors seed the session's new tracker. The engine restores them on every resume, at startup and on `/resume`, and reports the paths that fail the rehash in a notice, so every frontend tells the user to read them again before changing them.
+4. **Persist the tracker on session finish, verify on resume.** The session row's `file_snapshots` column stores the tracker state, written only while the session's head is still the one the process last committed or loaded, and each snapshot names the tool call that recorded it. On resume, a snapshot is discarded when its call has no result left in the repaired transcript, since the model cannot see that content. Of the rest, the newest snapshot per path is selected, regular files at or below the size cap are rehashed, and the survivors seed the session's new tracker. The engine restores them on every resume, at startup and on `/resume`, and reports the paths that fail the rehash in a notice when it starts on the session, so every frontend tells the user to read them again before changing them.
 
 5. **Per-session scope.** The tracker starts and ends with its session, and no other process shares it. The engine builds a new tracker whenever it starts on a session, at startup, on `/clear`, and on `/resume`, and pending writes finish before that session's snapshots are captured and before the next session starts.
 
@@ -64,8 +64,8 @@ When a write or sync fails after the truncation or the creation, the error says 
 - `crates/ox-core/src/session/sanitize.rs`: `retain_visible_file_snapshots`, the resume-time provenance filter.
 - `crates/ox-core/src/session/store/commit.rs`: `commit`, which writes the snapshots only while the head is the process's own.
 - `crates/ox-core/src/tool/edit.rs`: the Read-before-Edit gate and current-content verification.
-- `crates/ox-core/src/tool/file.rs`: `tracker_key` and `write_file`, which resolves the tracker key before publication and returns the committed bytes to recording.
+- `crates/ox-core/src/tool/file.rs`: `tracker_key`, and `write_file`, which resolves the tracker key before publication and returns the committed bytes to recording.
 - `crates/ox-core/src/tool/file/commit.rs`: `write`, `write_in_place`, `create`, and `Original::verify`.
 - `crates/ox-core/src/tool/read.rs`: `FileTracker::record_read` and the cache-hit stub.
 - `crates/ox-core/src/tool/write.rs`: the Read-before-Write gate.
-- `crates/ox-core/src/util/fs.rs`: `open_no_follow`, `validate_regular_file`, and `file_id`, the bounded no-follow reads that tools and resume verification share.
+- `crates/ox-core/src/util/fs.rs`: `read_regular_file`, the bounded no-follow read that tools and resume verification share, and `open_no_follow`, `validate_regular_file`, and `file_id`, which the publication checks use.
