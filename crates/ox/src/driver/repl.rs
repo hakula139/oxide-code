@@ -1,10 +1,16 @@
 //! Bare REPL driver for `--no-tui`: prompts and slash commands from stdin, replies on stdout.
 
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
+use std::mem;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::mpsc as std_mpsc;
+use std::task::{Context, Poll, ready};
+use std::thread;
 
 use anyhow::{Context as _, Result, bail};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncRead, ReadBuf};
+use tokio::sync::mpsc;
 
 use ox_core::command::{self, Parsed};
 use ox_core::engine::{Engine, EngineHandle};
@@ -41,7 +47,9 @@ pub(crate) async fn run(
         io::stdout(),
         io::stderr(),
     );
-    let prompter = Prompter::new(BufReader::new(tokio::io::stdin()), io::stderr());
+    let input =
+        LineReader::spawn(|| io::stdin().lock()).context("failed to start reading stdin")?;
+    let prompter = Prompter::new(input, io::stderr());
     let mut signals = Signals::new();
     drive(
         handle,
@@ -346,14 +354,106 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
     Ok(())
 }
 
+// ── Input ──
+
+/// Lines that a dedicated thread reads from a blocking reader, one per request. A read on tokio's
+/// blocking pool, as `tokio::io::stdin` makes, cannot be cancelled and holds the runtime's shutdown
+/// until a line arrives, so tokio recommends a thread for interactive input. The thread reads only
+/// while a caller waits for a line, so a line typed during a turn stays with the terminal, which
+/// discards it on Ctrl+C. An end of input ends only the read that meets it, as a read of the file
+/// descriptor does. A read pending at exit does not delay it.
+struct LineReader {
+    requests: std_mpsc::Sender<()>,
+    lines: mpsc::UnboundedReceiver<io::Result<Vec<u8>>>,
+    /// Whether the thread owes a line, which a cancelled read leaves to the next one.
+    requested: bool,
+    line: Vec<u8>,
+    consumed: usize,
+    /// Whether `line` stopped at the input's end, which the next read then reports.
+    ended: bool,
+}
+
+impl LineReader {
+    /// Starts the thread, which reads from the input `open` returns.
+    fn spawn<R: BufRead>(open: impl FnOnce() -> R + Send + 'static) -> io::Result<Self> {
+        let (requests, requested) = std_mpsc::channel();
+        let (sender, lines) = mpsc::unbounded_channel();
+        thread::Builder::new()
+            .name("ox-input".to_owned())
+            .spawn(move || {
+                let mut input = open();
+                while requested.recv().is_ok() {
+                    let mut line = Vec::new();
+                    let read = input.read_until(b'\n', &mut line).map(|_| line);
+                    if sender.send(read).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            requests,
+            lines,
+            requested: false,
+            line: Vec::new(),
+            consumed: 0,
+            ended: false,
+        })
+    }
+}
+
+impl AsyncRead for LineReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let available = ready!(self.as_mut().poll_fill_buf(cx))?;
+        let len = available.len().min(buf.remaining());
+        buf.put_slice(&available[..len]);
+        self.consume(len);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncBufRead for LineReader {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        let this = self.get_mut();
+        if this.consumed < this.line.len() {
+            return Poll::Ready(Ok(&this.line[this.consumed..]));
+        }
+        if mem::take(&mut this.ended) {
+            return Poll::Ready(Ok(&[]));
+        }
+        if !this.requested {
+            // A thread that is gone has also closed `lines`, which reads as the input's end.
+            _ = this.requests.send(());
+            this.requested = true;
+        }
+        let read = ready!(this.lines.poll_recv(cx));
+        this.requested = false;
+        match read {
+            Some(Ok(line)) if !line.is_empty() => {
+                this.ended = !line.ends_with(b"\n");
+                this.line = line;
+                this.consumed = 0;
+                Poll::Ready(Ok(&this.line))
+            }
+            Some(Ok(_)) | None => Poll::Ready(Ok(&[])),
+            Some(Err(e)) => Poll::Ready(Err(e)),
+        }
+    }
+
+    fn consume(self: Pin<&mut Self>, amt: usize) {
+        self.get_mut().consumed += amt;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
 
     use indoc::{formatdoc, indoc};
-    use tokio::io::ReadBuf;
+    use tokio::io::BufReader;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -371,6 +471,23 @@ mod tests {
 
     use super::*;
     use crate::driver::testing::{ClosedPipe, FailingWriter, Failure, Screen, no_signal, output};
+
+    /// Serves one chunk per read, as a terminal serves one line. An empty chunk ends the input for
+    /// one read, as Ctrl+D at a terminal does, and the input stays ended after the last chunk.
+    struct Chunks(std::vec::IntoIter<&'static str>);
+
+    impl Chunks {
+        fn new<const N: usize>(chunks: [&'static str; N]) -> Self {
+            Self(Vec::from(chunks).into_iter())
+        }
+    }
+
+    impl io::Read for Chunks {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let chunk = self.0.next().unwrap_or_default();
+            io::Read::read(&mut chunk.as_bytes(), buf)
+        }
+    }
 
     mod drive {
         use super::*;
@@ -928,6 +1045,44 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn an_input_end_at_an_approval_aborts_only_that_turn() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_tool_call_once(&server, "call-1", "bash", r#"{"command":"git push"}"#).await;
+                mount_reply(&server, "Done.").await;
+                let dir = tempfile::tempdir().unwrap();
+                let engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                    .await
+                    .with_tools(bash_registry(Vec::new()));
+                let (mut output, stdout, _) = output(OutputFormat::Text);
+                let input = LineReader::spawn(|| {
+                    io::BufReader::new(Chunks::new(["push it\n", "", "and then?\n"]))
+                })
+                .unwrap();
+
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    dir.path(),
+                    &mut output,
+                    None,
+                    Prompter::new(input, io::sink()),
+                    true,
+                    &mut no_signal,
+                ))
+                .await
+                .unwrap();
+
+                assert_eq!(exit, Exit::Success);
+                assert_eq!(stdout.text(), "Done.\n");
+                let requests = request_bodies(&server).await;
+                assert_eq!(requests.len(), 2, "the aborted call never runs");
+                let last = requests[1]["messages"].as_array().unwrap().last().unwrap();
+                assert_eq!(last["content"][0]["text"], "and then?");
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn retains_approval_output_failures_after_aborting_and_saving_the_turn() {
             with_pinned_home(async {
                 for failure in [
@@ -1459,6 +1614,153 @@ mod tests {
                     Asks because of the `ask.edit` pattern `src/\u{200b}*.rs`
                 "},
             );
+        }
+    }
+
+    mod line_reader {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use tokio::io::AsyncReadExt as _;
+
+        use super::*;
+
+        /// Serves one line per read and counts the reads.
+        struct Counted(Arc<AtomicUsize>);
+
+        impl io::Read for Counted {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                io::Read::read(&mut &b"line\n"[..], buf)
+            }
+        }
+
+        #[tokio::test]
+        async fn yields_each_line_then_ends_with_the_input() {
+            let reader = LineReader::spawn(|| &b"one\r\ntwo\nthree"[..]).unwrap();
+            let mut prompter = Prompter::new(reader, io::sink());
+
+            let mut lines = Vec::new();
+            while let Some(line) = prompter.next_line().await.unwrap() {
+                lines.push(line);
+            }
+
+            assert_eq!(lines, ["one", "two", "three"]);
+        }
+
+        #[tokio::test]
+        async fn an_input_end_ends_only_the_read_that_meets_it() {
+            let reader =
+                LineReader::spawn(|| io::BufReader::new(Chunks::new(["a\n", "", "b", "", "c\n"])))
+                    .unwrap();
+            let mut prompter = Prompter::new(reader, io::sink());
+
+            let mut lines = Vec::new();
+            for _ in 0..5 {
+                lines.push(prompter.next_line().await.unwrap());
+            }
+
+            assert_eq!(
+                lines,
+                [
+                    Some("a".to_owned()),
+                    None,
+                    Some("b".to_owned()),
+                    Some("c".to_owned()),
+                    None,
+                ],
+                "a line the input's end cuts short never runs into the next one",
+            );
+        }
+
+        #[tokio::test]
+        async fn reads_from_the_input_only_while_a_line_is_awaited() {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let counted = Counted(Arc::clone(&reads));
+            let reader = LineReader::spawn(|| io::BufReader::new(counted)).unwrap();
+            let mut prompter = Prompter::new(reader, io::sink());
+            let settle = || tokio::time::sleep(Duration::from_millis(50));
+
+            settle().await;
+            let reads_before = reads.load(Ordering::SeqCst);
+            let line = prompter.next_line().await.unwrap();
+            settle().await;
+
+            assert_eq!(reads_before, 0, "nothing reads before a line is awaited");
+            assert_eq!(line.as_deref(), Some("line"));
+            assert_eq!(reads.load(Ordering::SeqCst), 1, "one read per awaited line");
+        }
+
+        #[tokio::test]
+        async fn keeps_the_rest_of_a_line_a_short_read_leaves() {
+            let mut reader = LineReader::spawn(|| &b"one\ntwo\n"[..]).unwrap();
+
+            let mut head = [0; 2];
+            reader.read_exact(&mut head).await.unwrap();
+            let mut rest = Vec::new();
+            reader.read_to_end(&mut rest).await.unwrap();
+
+            assert_eq!(&head, b"on");
+            assert_eq!(rest, b"e\ntwo\n");
+        }
+
+        #[tokio::test]
+        async fn passes_a_read_error_on_and_keeps_reading() {
+            /// Fails its first read, then reads `rest`.
+            struct FailsOnce {
+                failed: bool,
+                rest: &'static [u8],
+            }
+
+            impl io::Read for FailsOnce {
+                fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                    if !self.failed {
+                        self.failed = true;
+                        return Err(io::Error::other("read failed"));
+                    }
+                    io::Read::read(&mut self.rest, buf)
+                }
+            }
+
+            let reader = LineReader::spawn(|| {
+                io::BufReader::new(FailsOnce {
+                    failed: false,
+                    rest: b"after\n",
+                })
+            })
+            .unwrap();
+            let mut prompter = Prompter::new(reader, io::sink());
+
+            let error = prompter.next_line().await.unwrap_err();
+            let line = prompter.next_line().await.unwrap();
+
+            assert_eq!(error.to_string(), "read failed");
+            assert_eq!(line.as_deref(), Some("after"));
+        }
+
+        #[test]
+        fn a_pending_read_never_holds_the_runtime_shutdown() {
+            let (input, _writer) = io::pipe().unwrap();
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let reader = LineReader::spawn(|| io::BufReader::new(input)).unwrap();
+                let mut prompter = Prompter::new(reader, io::sink());
+                let read = tokio::time::timeout(Duration::from_millis(50), prompter.next_line());
+                assert!(read.await.is_err(), "no line arrives");
+            });
+
+            let (dropped, done) = std_mpsc::channel();
+            thread::spawn(move || {
+                drop(runtime);
+                dropped.send(()).unwrap();
+            });
+
+            done.recv_timeout(Duration::from_secs(10))
+                .expect("the runtime shuts down while the read waits for a line");
         }
     }
 }

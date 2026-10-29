@@ -1043,19 +1043,6 @@ mod tests {
 
         #[tokio::test]
         async fn interrupts_once_only_when_stdout_loses_its_reader() {
-            /// A stdout that fails for a reason other than a closed reader.
-            struct FullDisk;
-
-            impl Write for FullDisk {
-                fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-                    Err(io::Error::other("disk full"))
-                }
-
-                fn flush(&mut self) -> io::Result<()> {
-                    Ok(())
-                }
-            }
-
             type Stream = Box<dyn Write>;
 
             let cases: [(&str, Stream, Stream, bool); 3] = [
@@ -1065,7 +1052,12 @@ mod tests {
                     Box::new(io::sink()),
                     true,
                 ),
-                ("full disk", Box::new(FullDisk), Box::new(io::sink()), false),
+                (
+                    "failed write",
+                    Box::new(FailingWriter::new(Failure::Write("first"))),
+                    Box::new(io::sink()),
+                    false,
+                ),
                 (
                     "closed stderr",
                     Box::new(io::sink()),
@@ -1508,10 +1500,6 @@ mod tests {
         mod render {
             use super::*;
 
-            fn text_state(show_thinking: bool) -> TextState {
-                TextState::new(show_thinking)
-            }
-
             fn render_one(state: &mut TextState, event: Event) -> (String, String) {
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
@@ -1526,7 +1514,7 @@ mod tests {
 
             /// Renders `events` with stdout and stderr sharing one screen, as on a terminal.
             fn render_on_screen(events: impl IntoIterator<Item = Event>) -> String {
-                let mut state = text_state(false);
+                let mut state = TextState::new(false);
                 let screen = Screen::default();
                 for event in events {
                     state
@@ -1539,7 +1527,7 @@ mod tests {
             #[test]
             fn stream_token_writes_text_verbatim_to_stdout() {
                 let (stdout, stderr) = render_one(
-                    &mut text_state(false),
+                    &mut TextState::new(false),
                     Event::StreamToken("hello".to_owned()),
                 );
                 assert_eq!(stdout, "hello");
@@ -1548,7 +1536,7 @@ mod tests {
 
             #[test]
             fn escapes_terminal_sequences_in_model_and_tool_text() {
-                let mut state = text_state(false);
+                let mut state = TextState::new(false);
                 let (stdout, _) =
                     render_one(&mut state, Event::StreamToken("a\n\u{1b}[2Kb".to_owned()));
                 assert_eq!(stdout, "a\n\\u{1b}[2Kb");
@@ -1581,7 +1569,7 @@ mod tests {
             #[test]
             fn thinking_token_wraps_in_dim_when_enabled() {
                 let (stdout, _) = render_one(
-                    &mut text_state(true),
+                    &mut TextState::new(true),
                     Event::ThinkingToken("plan".to_owned()),
                 );
                 assert_eq!(stdout, "\x1b[2mplan\x1b[22m");
@@ -1589,7 +1577,7 @@ mod tests {
 
             #[test]
             fn reply_after_shown_thinking_starts_on_its_own_line() {
-                let mut state = text_state(true);
+                let mut state = TextState::new(true);
                 render_one(&mut state, Event::ThinkingToken("plan".to_owned()));
 
                 let (first, _) = render_one(&mut state, Event::StreamToken("Done".to_owned()));
@@ -1601,7 +1589,7 @@ mod tests {
             #[test]
             fn thinking_token_swallowed_when_disabled() {
                 let (stdout, stderr) = render_one(
-                    &mut text_state(false),
+                    &mut TextState::new(false),
                     Event::ThinkingToken("plan".to_owned()),
                 );
                 assert_eq!(stdout, "");
@@ -1611,13 +1599,13 @@ mod tests {
             #[test]
             fn progress_update_writes_to_stderr_only_when_thinking_hidden() {
                 let event = || Event::ProgressUpdate("Found the loader.\n".to_owned());
-                let (stdout, stderr) = render_one(&mut text_state(false), event());
+                let (stdout, stderr) = render_one(&mut TextState::new(false), event());
                 assert_eq!(stdout, "");
                 assert_eq!(stderr, "Found the loader.\n");
 
                 // The same text already streamed as dim thinking on stdout.
                 assert_eq!(
-                    render_one(&mut text_state(true), event()),
+                    render_one(&mut TextState::new(true), event()),
                     (String::new(), String::new()),
                 );
             }
@@ -1625,7 +1613,7 @@ mod tests {
             #[test]
             fn tool_call_start_writes_icon_label_to_stderr() {
                 let (stdout, stderr) =
-                    render_one(&mut text_state(false), Event::ToolCallStart(ls_call()));
+                    render_one(&mut TextState::new(false), Event::ToolCallStart(ls_call()));
                 assert_eq!(stdout, "");
                 assert_eq!(stderr, "$ ls\n");
             }
@@ -1643,7 +1631,7 @@ mod tests {
             #[test]
             fn tool_call_end_with_title_writes_title_then_content() {
                 let (_, stderr) = render_one(
-                    &mut text_state(false),
+                    &mut TextState::new(false),
                     Event::ToolCallEnd(text_result("t1", "file1\nfile2\n", false, Some("Listed"))),
                 );
                 assert_eq!(
@@ -1659,7 +1647,7 @@ mod tests {
 
             #[test]
             fn tool_call_end_after_another_call_started_repeats_its_header() {
-                let mut state = text_state(false);
+                let mut state = TextState::new(false);
                 let start = |id: &str| {
                     Event::ToolCallStart(ToolCall {
                         id: id.to_owned(),
@@ -1696,7 +1684,7 @@ mod tests {
             #[test]
             fn tool_call_end_without_title_skips_header_and_whitespace_content() {
                 let (_, stderr) = render_one(
-                    &mut text_state(false),
+                    &mut TextState::new(false),
                     Event::ToolCallEnd(text_result("t2", "   \n", true, None)),
                 );
                 assert_eq!(stderr, "\n");
@@ -1704,7 +1692,7 @@ mod tests {
 
             #[test]
             fn tasks_updated_marks_each_task_under_its_progress_and_skips_a_cleared_list() {
-                let mut state = text_state(false);
+                let mut state = TextState::new(false);
 
                 let (stdout, stderr) = render_one(&mut state, Event::TasksUpdated(plan()));
                 assert_eq!(stdout, "");
@@ -1727,7 +1715,7 @@ mod tests {
             #[test]
             fn auto_compaction_started_explains_the_pause() {
                 let (stdout, stderr) =
-                    render_one(&mut text_state(false), Event::AutoCompactionStarted);
+                    render_one(&mut TextState::new(false), Event::AutoCompactionStarted);
 
                 assert_eq!(stdout, "");
                 assert_eq!(stderr, "Compacting the conversation to free up context\n");
@@ -1736,7 +1724,7 @@ mod tests {
             #[test]
             fn session_compacted_writes_the_boundary_with_its_focus_escaped() {
                 let (stdout, stderr) = render_one(
-                    &mut text_state(false),
+                    &mut TextState::new(false),
                     Event::SessionCompacted {
                         summary: "summary".to_owned(),
                         pre_count: 4,
@@ -1807,7 +1795,7 @@ mod tests {
                 ];
 
                 for (event, expected) in cases {
-                    let (stdout, stderr) = render_one(&mut text_state(false), event);
+                    let (stdout, stderr) = render_one(&mut TextState::new(false), event);
 
                     assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
                     assert_eq!(stderr, expected);
@@ -1824,7 +1812,7 @@ mod tests {
                     notice: "Effort set to low".to_owned(),
                 };
 
-                let (stdout, stderr) = render_one(&mut text_state(false), event);
+                let (stdout, stderr) = render_one(&mut TextState::new(false), event);
 
                 assert_eq!(stdout, "");
                 assert_eq!(stderr, "Effort set to low\n");
@@ -1833,7 +1821,7 @@ mod tests {
             #[test]
             fn mode_changed_names_the_mode_in_use() {
                 let (stdout, stderr) =
-                    render_one(&mut text_state(false), Event::ModeChanged(Mode::Plan));
+                    render_one(&mut TextState::new(false), Event::ModeChanged(Mode::Plan));
 
                 assert_eq!(stdout, "");
                 assert_eq!(stderr, "Switched to plan mode\n");
@@ -1873,7 +1861,7 @@ mod tests {
                     },
                     Event::BackgroundShellsUpdated(shells_in_each_state()),
                 ] {
-                    let (stdout, stderr) = render_one(&mut text_state(false), event);
+                    let (stdout, stderr) = render_one(&mut TextState::new(false), event);
                     assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
                     assert!(stderr.is_empty(), "stderr must stay empty: {stderr:?}");
                 }
@@ -1881,7 +1869,7 @@ mod tests {
 
             #[test]
             fn turn_complete_ends_the_open_reply_line_once() {
-                let mut state = text_state(true);
+                let mut state = TextState::new(true);
                 render_one(&mut state, Event::ThinkingToken("plan".to_owned()));
 
                 let ended = render_one(&mut state, Event::TurnComplete);
@@ -1893,7 +1881,7 @@ mod tests {
 
             #[test]
             fn turn_complete_leaves_a_closed_reply_line_alone() {
-                let mut state = text_state(false);
+                let mut state = TextState::new(false);
                 render_one(&mut state, Event::StreamToken("Done.\n".to_owned()));
                 render_one(&mut state, Event::StreamToken(String::new()));
 
@@ -1916,10 +1904,12 @@ mod tests {
                 let retry = "HTTP 529 overloaded_error. Retrying in 1 s (retry 1 of 5).";
                 let notice = "Skipped instruction file /repo/CLAUDE.md: Permission denied";
 
-                let (retry_stdout, retry_stderr) =
-                    render_one(&mut text_state(false), Event::Retrying(retry.to_owned()));
+                let (retry_stdout, retry_stderr) = render_one(
+                    &mut TextState::new(false),
+                    Event::Retrying(retry.to_owned()),
+                );
                 let (notice_stdout, notice_stderr) =
-                    render_one(&mut text_state(false), Event::Notice(notice.to_owned()));
+                    render_one(&mut TextState::new(false), Event::Notice(notice.to_owned()));
 
                 assert_eq!(retry_stdout, "");
                 assert_eq!(retry_stderr, format!("{retry}\n"));
@@ -1939,7 +1929,7 @@ mod tests {
 
             #[test]
             fn turn_failed_still_writes_stderr_when_stdout_is_closed() {
-                let mut state = text_state(false);
+                let mut state = TextState::new(false);
                 render_one(&mut state, Event::StreamToken("partial reply".to_owned()));
                 let mut stderr = Vec::new();
 
@@ -1962,10 +1952,10 @@ mod tests {
             #[test]
             fn errors_prefix_with_error_label() {
                 let (_, stderr) =
-                    render_one(&mut text_state(false), Event::Error("boom".to_owned()));
+                    render_one(&mut TextState::new(false), Event::Error("boom".to_owned()));
                 assert_eq!(stderr, "Error: boom\n");
                 let (_, stderr) = render_one(
-                    &mut text_state(false),
+                    &mut TextState::new(false),
                     Event::RenameFailed("lost".to_owned()),
                 );
                 assert_eq!(stderr, "Error: lost\n");

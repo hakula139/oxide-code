@@ -84,7 +84,8 @@ impl Shutdown {
 }
 
 /// The SIGINT / SIGTERM / SIGHUP listeners of one run, registered once so a signal arriving
-/// between two waits is still delivered. A signal ox cannot listen for is logged and ignored.
+/// between two waits is still delivered. A failed registration is logged, and that signal keeps
+/// its default action, which ends ox without finishing the session.
 pub(crate) struct Signals {
     #[cfg(unix)]
     interrupt: Option<tokio::signal::unix::Signal>,
@@ -141,7 +142,7 @@ impl Signals {
 /// The listener `registered` made, or `None` after logging why `name` cannot be heard.
 fn listen<T>(name: &str, registered: std::io::Result<T>) -> Option<T> {
     registered
-        .inspect_err(|e| tracing::warn!(error = %e, "failed to listen for {name}"))
+        .inspect_err(|e| tracing::warn!(signal = name, error = %e, "failed to listen for a signal"))
         .ok()
 }
 

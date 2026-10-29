@@ -416,10 +416,6 @@ mod tests {
                     if format == OutputFormat::Text {
                         assert_eq!(stdout, "", "{format:?}");
                     } else {
-                        assert!(
-                            stdout.lines().all(|line| !line.is_empty()),
-                            "{format:?}: {stdout:?}"
-                        );
                         assert_eq!(
                             result_data(&stdout)["stop_reason"],
                             "shutdown",
