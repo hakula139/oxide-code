@@ -1,6 +1,6 @@
 # Slash Commands
 
-A slash command is an input line that starts with `/`, which the TUI runs itself by opening a modal, printing a note, forwarding an op to the engine, or starting a turn with a prompt the command builds. [Slash Commands](../guide/slash-commands.md) lists the commands and what each one does, and [Compaction](compaction.md), [Init](init.md), [Login](login.md), [Modals](modals.md), [Permissions](permissions.md), [Persistence](persistence.md#archiving), and [Resume](resume.md) cover the commands with mechanisms of their own.
+A slash command is an input line that starts with `/`, which the TUI runs itself by opening a modal, printing a note, forwarding an op to the engine, or starting a turn with a prompt the command builds. [Slash Commands](../guide/slash-commands.md) lists the commands and what each one does, and [Compaction](compaction.md), [Init](init.md), [Login](login.md), [Modals](modals.md), [Permissions](permissions.md#mode-switches), [Persistence](persistence.md#archiving), and [Resume](resume.md) cover the commands with mechanisms of their own.
 
 ## Registry
 

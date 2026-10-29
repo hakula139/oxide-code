@@ -13,7 +13,7 @@ Two-layer truncation combines per-tool view-shape caps with a centralized byte-b
 - **Names**: Each file name begins with the call's tool use ID, replacing every character other than an ASCII letter, digit, `-`, or `_` with `_`. The dispatcher writes `<id>.txt`, a foreground `bash` call writes `<id>.output.txt`, and the `n`th read of a background shell by `bash_output` or `bash_stop` writes `<id>.<n>.output.txt`, where `<id>` is the call that started the shell.
 - **Creation**: The first write creates the directory and the file and refuses to replace an existing file, so a result that fits leaves nothing on disk. On Unix, the directory gets `0700` perms and the file gets `0600`.
 - **Size**: A file keeps at most `MAX_SPILL_BYTES`, equal to `MAX_TRACKED_FILE_SIZE` so `read` can open every spill, and beyond that limit the marker says `first 10 MiB of output saved to <path>`. If creating or writing the file fails, the result is still truncated, and the marker names the error in place of the path.
-- **Access and cleanup**: `read` and `grep` open spill files without prompting, while editing them prompts, since they lie in oxide-code's data directory ([permissions](permissions.md#shipped-defaults)). `/delete` removes the session's directory along with its rows, and archiving keeps both.
+- **Access and cleanup**: `read` and `grep` open spill files without prompting, while editing them prompts, since they lie in oxide-code's data directory ([built-in rules](../guide/permissions.md#built-in-rules)). `/delete` removes the session's directory along with its rows, and archiving keeps both.
 
 ## Per-Tool View-Shape Caps
 
