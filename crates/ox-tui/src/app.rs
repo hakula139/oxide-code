@@ -298,7 +298,6 @@ mod tests {
     use crate::components::status::SPINNER_FRAME_INTERVAL;
     use crate::git_probes::GitUpdate;
     use crate::glyphs::SPINNER_FRAMES;
-    use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
     use crate::session_info::testing::unknown_model_session_info;
     use crate::terminal::testing::capture_terminal;
@@ -425,7 +424,7 @@ mod tests {
         #[tokio::test(start_paused = true)]
         async fn sleeps_while_idle() {
             let (mut app, _rx, event_tx) = test_app(None);
-            let modal = ScriptedModal::new(ModalAction::Cancelled);
+            let modal = ScriptedModal::new();
             let ticks = Arc::clone(&modal.tick_count);
             app.modals.push(Box::new(modal));
             let mut terminal = capture_terminal(60, 8);
@@ -722,7 +721,7 @@ mod tests {
         fn wakes_for_the_top_modal() {
             let last_tick = now();
             let mut app = settled_app();
-            let mut modal = ScriptedModal::new(ModalAction::Cancelled);
+            let mut modal = ScriptedModal::new();
             modal.next_tick = Some(last_tick + Duration::from_secs(2));
             app.modals.push(Box::new(modal));
 

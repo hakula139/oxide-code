@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use strum::VariantArray;
 use time::OffsetDateTime;
 
-use ox_core::protocol::{Op, ResumeTarget, SavedTarget};
+use ox_core::protocol::{Event, Op, ResumeTarget, SavedTarget};
 use ox_core::session::display::{DisplayTitle, ID_PREFIX_WIDTH, id_prefix};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::session::store::SessionStore;
@@ -44,7 +44,7 @@ use crate::modal::chrome::{
 };
 use crate::modal::line_editor::LineEditor;
 use crate::modal::searchable_list::{SearchableItem, SearchableList};
-use crate::modal::{DeleteReply, Modal, ModalAction, ModalKey};
+use crate::modal::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
 use crate::theme::Theme;
 use crate::{NOTICE_DURATION, now};
 
@@ -471,7 +471,7 @@ pub struct ResumePicker {
     list: SearchableList<SessionRow>,
     scope: ListScope,
     dismissal: Dismissal,
-    /// Filtered out of every page so the user can't self-resume onto the open append-writer.
+    /// Filtered out of every page, since resume, archive, and delete all refuse the live session.
     live_session_id: String,
     pages: Pages,
     /// When the last reload started, in local time, which every page's rows count from.
@@ -658,6 +658,68 @@ impl ResumePicker {
         self.archive.is_none() && self.list.selected().is_some()
     }
 
+    /// Notes an archive toggle of the highlighted row that left for the engine.
+    fn archive_started(&mut self, target: &SavedTarget) {
+        let selected = self
+            .list
+            .selected()
+            .filter(|row| matches!(target, SavedTarget::Id(id) if *id == row.session_id));
+        if let Some(row) = selected {
+            self.archive = Some(PendingArchive {
+                session_id: row.session_id.clone(),
+                title: row.title.to_string(),
+                listed_at: self.listed_at,
+            });
+        }
+    }
+
+    /// Shows how the noted archive toggle ended, dropping or reloading its row on success.
+    fn archive_updated(
+        &mut self,
+        target: &SavedTarget,
+        state: ArchiveState,
+        result: &Result<ArchiveUpdate, SavedError>,
+    ) {
+        let Some(pending) = self
+            .archive
+            .take_if(|pending| matches!(target, SavedTarget::Id(id) if *id == pending.session_id))
+        else {
+            return;
+        };
+        let id = pending.session_id.as_str();
+        let (text, failed) = match result {
+            Ok(_) => {
+                if self.listed_at == pending.listed_at {
+                    self.list.retain_items(|row| row.session_id != id);
+                } else {
+                    self.reload();
+                }
+                let verb = match state {
+                    ArchiveState::Active => "Unarchived",
+                    ArchiveState::Archived => "Archived",
+                };
+                (
+                    format!("{verb} session {}: {}", id_prefix(id), pending.title),
+                    false,
+                )
+            }
+            Err(error) => (saved_error_message(error, BARE_ARCHIVE_HINT), true),
+        };
+        self.notice = Some(Notice {
+            text,
+            failed,
+            until: now() + NOTICE_DURATION,
+        });
+    }
+
+    /// Drops a deleted session's row.
+    fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) {
+        if result.is_ok() {
+            self.list.retain_items(|row| row.session_id != id);
+            self.load_ahead();
+        }
+    }
+
     /// Loads every page the picker asks for, waiting on each worker.
     #[cfg(test)]
     fn settle(&mut self) {
@@ -716,63 +778,20 @@ impl Modal for ResumePicker {
         self.load_ahead();
     }
 
-    fn archive_started(&mut self, target: &SavedTarget) {
-        let SavedTarget::Id(id) = target else {
-            return;
-        };
-        if let Some(row) = self.list.selected().filter(|row| row.session_id == *id) {
-            self.archive = Some(PendingArchive {
-                session_id: id.clone(),
-                title: row.title.to_string(),
-                listed_at: self.listed_at,
-            });
-        }
-    }
-
-    fn archive_updated(
-        &mut self,
-        target: &SavedTarget,
-        state: ArchiveState,
-        result: &Result<ArchiveUpdate, SavedError>,
-    ) {
-        let Some(pending) = self
-            .archive
-            .take_if(|pending| matches!(target, SavedTarget::Id(id) if *id == pending.session_id))
-        else {
-            return;
-        };
-        let id = pending.session_id.as_str();
-        let (text, failed) = match result {
-            Ok(_) => {
-                if self.listed_at == pending.listed_at {
-                    self.list.retain_items(|row| row.session_id != id);
-                } else {
-                    self.reload();
-                }
-                let verb = match state {
-                    ArchiveState::Active => "Unarchived",
-                    ArchiveState::Archived => "Archived",
-                };
-                (
-                    format!("{verb} session {}: {}", id_prefix(id), pending.title),
-                    false,
-                )
+    fn on_engine(&mut self, update: EngineUpdate<'_>) -> UpdateReply {
+        match update {
+            EngineUpdate::Admitted(Op::SetArchive { target, .. }) => self.archive_started(target),
+            EngineUpdate::Event(Event::ArchiveUpdated {
+                target,
+                state,
+                result,
+            }) => self.archive_updated(target, *state, result),
+            EngineUpdate::Event(Event::SavedDeleted { id, result }) => {
+                self.saved_deleted(id, result);
             }
-            Err(error) => (saved_error_message(error, BARE_ARCHIVE_HINT), true),
-        };
-        self.notice = Some(Notice {
-            text,
-            failed,
-            until: now() + NOTICE_DURATION,
-        });
-    }
-
-    fn saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) -> DeleteReply {
-        if result.is_ok() {
-            self.list.retain_items(|row| row.session_id != id);
-            self.load_ahead();
+            _ => {}
         }
-        DeleteReply::Unclaimed
+        UpdateReply::Unclaimed
     }
 
     fn tick(&mut self, now: Instant) -> bool {
@@ -875,14 +894,23 @@ mod tests {
         if let ModalKey::Emit(ModalAction::Dispatch(Action::Op(Op::SetArchive { target, state }))) =
             &outcome
         {
-            picker.archive_started(target);
+            let target = target.clone();
+            let state = *state;
+            picker.on_engine(EngineUpdate::Admitted(&Op::SetArchive {
+                target: target.clone(),
+                state,
+            }));
             let result = saved::testing::set_archived(
                 &picker.store,
-                target,
-                *state,
+                &target,
+                state,
                 &picker.live_session_id,
             );
-            picker.archive_updated(target, *state, &result);
+            picker.on_engine(EngineUpdate::Event(&Event::ArchiveUpdated {
+                target,
+                state,
+                result,
+            }));
         }
         outcome
     }
@@ -1906,7 +1934,10 @@ mod tests {
                 "{confirmed:?}",
             );
 
-            let actions = stack.saved_deleted(&stamped_id(0x22), &Ok(()));
+            let actions = stack.notify(EngineUpdate::Event(&Event::SavedDeleted {
+                id: stamped_id(0x22),
+                result: Ok(()),
+            }));
 
             assert!(
                 matches!(
@@ -2217,7 +2248,7 @@ mod tests {
         }
     }
 
-    mod saved_deleted {
+    mod on_engine {
         use super::*;
 
         #[test]
@@ -2232,11 +2263,14 @@ mod tests {
             picker.handle_key(&KeyEvent::from(KeyCode::Down));
             assert_eq!(picker.list.selected().unwrap().session_id, target);
 
-            let action = picker.saved_deleted(&target, &Ok(()));
+            let reply = picker.on_engine(EngineUpdate::Event(&Event::SavedDeleted {
+                id: target,
+                result: Ok(()),
+            }));
 
             assert!(
-                matches!(action, DeleteReply::Unclaimed),
-                "the picker stays open: {action:?}"
+                matches!(reply, UpdateReply::Unclaimed),
+                "the picker stays open: {reply:?}"
             );
             assert_eq!(row_ids(&picker), [stamped_id(0x33), stamped_id(0x11)]);
             assert_eq!(
@@ -2257,10 +2291,13 @@ mod tests {
             picker.settle();
             assert_eq!(row_ids(&picker), ids[..PAGE_SIZE]);
 
-            let action = picker.saved_deleted(&ids[PAGE_SIZE - 1], &Ok(()));
+            let reply = picker.on_engine(EngineUpdate::Event(&Event::SavedDeleted {
+                id: ids[PAGE_SIZE - 1].clone(),
+                result: Ok(()),
+            }));
             picker.settle();
 
-            assert!(matches!(action, DeleteReply::Unclaimed), "{action:?}");
+            assert!(matches!(reply, UpdateReply::Unclaimed), "{reply:?}");
             let mut remaining = ids.clone();
             remaining.remove(PAGE_SIZE - 1);
             assert_eq!(row_ids(&picker), remaining);
@@ -2279,11 +2316,31 @@ mod tests {
                 cause: "permission denied".to_owned(),
             };
 
-            let action = picker.saved_deleted(&target, &Err(failure));
+            let reply = picker.on_engine(EngineUpdate::Event(&Event::SavedDeleted {
+                id: target.clone(),
+                result: Err(failure),
+            }));
 
-            assert!(matches!(action, DeleteReply::Unclaimed), "{action:?}");
+            assert!(matches!(reply, UpdateReply::Unclaimed), "{reply:?}");
             assert_eq!(row_ids(&picker), [stamped_id(0x22), target.clone()]);
             assert_eq!(picker.list.selected().unwrap().session_id, target);
+        }
+
+        #[test]
+        fn ignores_a_prefix_archive_and_events_about_other_work() {
+            let (_dir, store) = isolated_store();
+            seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
+            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+
+            picker.on_engine(EngineUpdate::Admitted(&Op::SetArchive {
+                target: SavedTarget::Prefix("2222".to_owned()),
+                state: ArchiveState::Archived,
+            }));
+            let reply = picker.on_engine(EngineUpdate::Event(&Event::TurnComplete));
+
+            assert!(picker.archive.is_none(), "a prefix names no listed row");
+            assert!(matches!(reply, UpdateReply::Unclaimed));
+            assert_eq!(row_ids(&picker), [stamped_id(0x22), stamped_id(0x11)]);
         }
     }
 

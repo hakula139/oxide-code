@@ -18,9 +18,11 @@ A modal is `Send` (App lives on tokio) but not `Sync`, since modals own mutable 
 
 The App's frame tick also calls `Modal::tick` on the top modal, which reports whether time-driven state such as an expiring notice or a page loaded in the background needs a repaint. `Modal::next_tick` tells the loop when that state next changes, so an idle modal does not keep the loop awake. Both default to no-ops.
 
-`Submitted` and `Emit` carry a `ModalAction`: `Dispatch(Action)` (dispatched like a keyboard action) or `SystemMessage(String)` (push a confirmation line into chat after pop). A close without an action of its own surfaces as `ModalAction::Cancelled`, which reverts any live preview.
+`Submitted` and `Emit` carry a `ModalAction`: `Dispatch(Action)` (dispatched like a keyboard action) or `SystemMessage(String)` (push a confirmation line into chat after pop).
 
 Dispatched actions flow through the same channel as keyboard input, so the modal never needs to know what handler will run on the other side.
+
+`Modal::on_engine` tells every open modal about each op `dispatch_op` admits (`EngineUpdate::Admitted`) and each event the engine reports (`EngineUpdate::Event`), so a modal that sent an op learns whether it left and how it ended. Prompts go through the prompt queue and never reach modals. Its `UpdateReply` says whether the modal shows the update, closes on it with a replacement action, or leaves it for the App to report. The App skips its own report of an archive or delete result that a modal shows, and applies the actions of the modals an admitted op closes only after it sends that op.
 
 Bracketed pastes reach `Modal::handle_paste`, which defaults to a no-op. Text fields such as `/rename`, the picker search, and the approval prompt's editors accept them, and a paste never answers a confirm or approval prompt.
 
@@ -28,7 +30,7 @@ Bracketed pastes reach `Modal::handle_paste`, which defaults to a no-op. Text fi
 
 Only a plain Esc cancels. The stack drops every other key held with Ctrl, Alt, or another modifier but Shift unless `Modal::binds_modified_key` claims it, so a picker's `j` or Enter never fires as Alt+J or Ctrl+Enter. A modal with a text field claims every modified key but a line break or an indent through `LineEditor::binds_modified_key`, which covers the `/resume` picker's Ctrl keymap, and that picker moves its cursor only on unmodified arrows. The approval prompt claims every key while its type-ahead guard is armed, so any key restarts the guard.
 
-`on_cancel` returns an optional `ModalAction` that the App dispatches in place of the silent close. The default returns `None`. `ApprovalModal` overrides it to emit an abort decision so the blocked agent always gets an answer. The `ox --resume` picker overrides it to emit `Op::Shutdown` because dismissing the picker quits `ox`.
+`on_cancel` returns an optional `ModalAction` that the App dispatches as the modal leaves, and a modal without one closes silently. `ApprovalModal` overrides it to emit an abort decision so the blocked agent always gets an answer. The `ox --resume` picker overrides it to emit `Op::Shutdown` because dismissing the picker quits `ox`, and the `/theme` picker emits `Action::RevertThemePreview` to restore the theme it previewed over.
 
 ## Shared Primitives
 
@@ -50,7 +52,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **`/mode` picker**: `ModePicker` wraps `ListPicker<ModeRow>` over `manual`, `plan`, and `yolo`, each with a short description, and seeds the cursor at the active mode. Enter forwards `Op::SetMode` for the highlighted row and cancels on the active one, and numeric `1`–`3` shortcuts jump to a row.
 
-- **`/theme` picker**: `ThemePicker` wraps `ListPicker<ThemeRow>` over the curated built-in roster and emits `Action::PreviewTheme` on every cursor move so the App repaints the chat in the candidate palette without committing. Esc snaps back via the cached `preview_theme_snapshot`, while Enter promotes the preview to an `Action::SwapTheme` swap. Numeric `1`–`9` shortcuts jump to a row to match the visual ladder.
+- **`/theme` picker**: `ThemePicker` wraps `ListPicker<ThemeRow>` over the curated built-in roster and emits `Action::PreviewTheme` on every cursor move so the App repaints the chat in the candidate palette without committing. Esc, and any other close without a commit, sends `Action::RevertThemePreview` through `on_cancel`, which restores the cached `preview_theme_snapshot`, while Enter promotes the preview to an `Action::SwapTheme` swap. Numeric `1`–`9` shortcuts jump to a row to match the visual ladder.
 
 - **`/init` picker**: `InitPicker` wraps `ListPicker<FileRow>` over `AGENTS.md` and `CLAUDE.md`, each described by the other tools that read it. Enter sends the prompt that creates the highlighted file, and numeric `1` / `2` shortcuts jump to a row. [init.md](init.md) covers when it opens.
 
@@ -58,7 +60,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 - **`/resume` picker**: `ResumePicker` wraps `SearchableList<SessionRow>`, adds a footer line, and pushes `ConfirmDeleteSessionModal` on Ctrl+D. [Resume](resume.md) covers its rows, paging, keys, and footer.
 
-- **Confirm-delete modal**: `ConfirmDeleteSessionModal` shows the session's title above its `format_metadata_line` row, which leads with the ID prefix. Y sends `Op::DeleteSaved` with the session's ID once the target is visible and the shared type-ahead guard expires. Once the app admits the op, `Modal::delete_started` makes the modal ignore another Y until the engine reports back, while a delete the app drops, because another operation runs or the op channel is full, leaves Y working. Enter does nothing, and repeated Y events restart the guard. The `SavedDeleted` result reaches every open modal through `Modal::saved_deleted`, whose `DeleteReply` tells the stack whether the modal showed the result, closed on it, or left it unclaimed. When no modal claims it, as after the user dismissed this modal mid-delete, the app reports the result in chat. Success closes this modal into a `ModalAction::SystemMessage` naming the deleted session by ID prefix and title, so the chat records the deletion. A failure shows an inline error that stays until a retry replaces it or the modal closes, so a stray key can't wipe the diagnostic. N cancels. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D.
+- **Confirm-delete modal**: `ConfirmDeleteSessionModal` shows the session's title above its `format_metadata_line` row, which leads with the ID prefix. Y sends `Op::DeleteSaved` with the session's ID once the target is visible and the shared type-ahead guard expires. Once the app admits the op, `Modal::on_engine` receives it as `EngineUpdate::Admitted`, and the modal ignores another Y until the engine reports back, while a delete the app drops, because another operation runs or the op channel is full, leaves Y working. Enter does nothing, and repeated Y events restart the guard. The `SavedDeleted` result reaches every open modal as an `EngineUpdate::Event`. When no modal claims it, as after the user dismissed this modal mid-delete, the app reports the result in chat. Success closes this modal into a `ModalAction::SystemMessage` naming the deleted session by ID prefix and title, so the chat records the deletion. A failure shows an inline error that stays until a retry replaces it or the modal closes, so a stray key can't wipe the diagnostic. N cancels. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D.
 
 - **Approval modal**: `ApprovalModal` is the approve-or-deny gate the App pushes when the agent asks to run a gated tool call. It holds the tool-use ID and renders the call summary as its title above the body: the command text for `bash`, or `-` / `+` diff rows for `edit` and `write`. The body shows at most 16 rows and scrolls when the call runs longer or the band is shorter. Y submits `Op::Resolve` with `Approve` while the first body row is visible and the type-ahead guard has expired, while Enter does nothing. [permissions.md](permissions.md) covers the guard. When the call offers a session grant, A opens a rule editor prefilled with the suggested rule, and Enter submits `AllowForSession` with the edited rule while the whole editor is visible and armed. N submits `Deny`. F opens a feedback editor whose Enter submits `DenyWithFeedback` with the typed text. Esc from the choice, Ctrl+C, and clearing the stack all resolve through `on_cancel` to `Abort`, which ends the turn.
 
@@ -90,7 +92,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 10. **Nested modals use `ModalKey::Push`.** A push outcome keeps `handle_key` returning one value and avoids threading a stack borrow through every modal. `Debug for ModalKey` is hand-rolled because `Box<dyn Modal>` cannot derive it.
 
-11. **Modals learn saved-session results from the engine's events.** The engine owns saved-session writes, so `ModalStack` passes `ArchiveUpdated` and `SavedDeleted` to every modal on the stack. A covered `/resume` picker updates its rows from the same result that closes the confirm-delete modal above it, without rereading the store when it regains focus.
+11. **Modals learn the fate of their ops through one hook.** The engine owns saved-session writes, so `ModalStack` passes every admitted op and every engine event to every modal on the stack through `Modal::on_engine`, so a new modal that sends an op needs only a match arm in that hook. The App does not filter updates per modal, because each modal matches the session ID it acted on and ignores the rest. A covered `/resume` picker updates its rows from the same result that closes the confirm-delete modal above it, without rereading the store when it regains focus. `Admitted` follows `dispatch_op`'s busy check and delivery reservation, so an op the App drops never reaches a modal, and a confirm modal whose delete was dropped still takes Y again.
 
 ## Out of Scope
 
@@ -108,11 +110,11 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 ## Sources
 
-- `crates/ox-tui/src/app/dispatch.rs`: `App::handle_crossterm_event` modal gate, `run_slash`, `apply_slash_outcome`, `apply_modal_action`, `dispatch_action`, `clear_modals`.
+- `crates/ox-tui/src/app/dispatch.rs`: `App::handle_crossterm_event` modal gate, `run_slash`, `apply_slash_outcome`, `apply_modal_action`, `dispatch_action`, `notify_modals`, `clear_modals`.
 - `crates/ox-tui/src/app/events.rs`: `push_approval_modal`, `apply_session_resumed`, and `apply_session_compacted`.
 - `crates/ox-tui/src/app/render.rs`: `draw_frame` modal layout band.
 - `crates/ox-tui/src/keymap.rs`: `Keymap`, `KeyAction`, and `KeyChord`.
-- `crates/ox-tui/src/modal.rs`: `Modal` (including the `on_cancel`, `captures_esc`, `binds_modified_key`, `sends_idle_only_ops`, `tick`, and `next_tick` hooks), `ModalKey`, `ModalAction`, `ModalStack`.
+- `crates/ox-tui/src/modal.rs`: `Modal` (including the `on_engine`, `on_cancel`, `captures_esc`, `binds_modified_key`, `sends_idle_only_ops`, `tick`, and `next_tick` hooks), `ModalKey`, `ModalAction`, `EngineUpdate`, `UpdateReply`, `ModalStack`.
 - `crates/ox-tui/src/modal/acceptance.rs`: shared visibility and type-ahead guard for destructive confirmation and approval.
 - `crates/ox-tui/src/modal/approval.rs`: `ApprovalModal` approve-or-deny gate for agent tool calls, plus the rule and feedback editors.
 - `crates/ox-tui/src/modal/chrome.rs`: shared `Header`, `render_footer`, and the hint fragments.

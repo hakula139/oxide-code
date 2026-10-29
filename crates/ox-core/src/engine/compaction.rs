@@ -155,8 +155,9 @@ enum CompactFailure {
     Aborted(TurnAbort),
     /// The summary request failed.
     Summary(anyhow::Error),
-    /// The summary succeeded but its boundary was not saved.
-    NotSaved,
+    /// The summary succeeded, but the session writer was gone, so its boundary was neither saved
+    /// nor applied.
+    WriterGone,
 }
 
 impl Engine {
@@ -232,7 +233,7 @@ impl Engine {
                 warn!(?point, error = %format_args!("{e:#}"), "auto-compaction failed");
                 Some(e)
             }
-            Err(CompactFailure::NotSaved) => None,
+            Err(CompactFailure::WriterGone) => None,
         };
         Err(self
             .usage
@@ -273,14 +274,14 @@ impl Engine {
             }
             Err(CompactFailure::Aborted(abort)) => abort,
             Err(CompactFailure::Summary(e)) => TurnAbort::Failed(e.context("Compaction failed")),
-            Err(CompactFailure::NotSaved) => TurnAbort::Failed(anyhow!(
+            Err(CompactFailure::WriterGone) => TurnAbort::Failed(anyhow!(
                 "Compaction was not saved, so the transcript is unchanged"
             )),
         };
         report_abort(sink, abort, "compact-failed")
     }
 
-    /// Summarizes the transcript and swaps the summary in once its boundary is saved, starting the
+    /// Summarizes the transcript and swaps the summary in as it saves the boundary, starting the
     /// new transcript from a fresh user context, and returns the summary's checkpoint. Bills each
     /// summary request and shows the usage once any request reported it or the transcript changed.
     async fn run_compaction(
@@ -323,7 +324,7 @@ impl Engine {
                 if compacted.is_some() {
                     self.show_instruction_warnings(sink, warnings);
                 }
-                compacted.ok_or(CompactFailure::NotSaved)
+                compacted.ok_or(CompactFailure::WriterGone)
             }
             Ok(Err(e)) => Err(CompactFailure::Summary(e)),
             Err(abort) => Err(CompactFailure::Aborted(abort)),
@@ -343,8 +344,9 @@ impl Engine {
     /// Saves the compaction boundary and swaps the transcript to the summary message, which lists
     /// the open background shells and, after a mid-turn `trigger`, asks the model to resume the
     /// turn. It then clears the file tracker, reports the compaction under `trigger`, and returns
-    /// the summary's checkpoint. A failed write discards the streamed summary and leaves the
-    /// transcript unchanged, unless persistence has stopped, when the swap happens in memory alone.
+    /// the summary's checkpoint. A failed write stops persistence, while the summary still replaces
+    /// the transcript in memory and the failure is reported after the compaction event. Only a
+    /// session writer that is gone discards the summary and leaves the transcript unchanged.
     async fn replace_with_summary(
         &mut self,
         sink: &dyn EventSink,
@@ -971,7 +973,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn fails_the_prompt_when_the_boundary_is_not_saved() {
+        async fn fails_the_prompt_when_the_writer_is_gone() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 mount_reply(&server, "auto summary").await;
@@ -1283,7 +1285,7 @@ mod tests {
                 assert_eq!(
                     end,
                     TurnEnd::Failed,
-                    "an unwritten boundary is a failed compaction"
+                    "a compaction whose writer is gone fails"
                 );
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
 
@@ -1595,7 +1597,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn keeps_the_transcript_and_tracker_when_the_write_fails() {
+        async fn keeps_the_transcript_and_tracker_when_the_writer_is_gone() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
@@ -1624,8 +1626,54 @@ mod tests {
                                            session writer task has stopped. \
                                            Conversation history may be incomplete."
                     ),
-                    "the unsaved summary is discarded before the write error: {events:?}",
+                    "a gone writer discards the summary before its error: {events:?}",
                 );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn reports_a_failed_write_after_the_compaction_event() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                let saved = engine
+                    .transcript
+                    .session()
+                    .record_message(Message::user("saved"))
+                    .await;
+                assert_eq!(saved.report.failure, None);
+                fail_writes(&store);
+                engine.transcript.set_messages(tool_heavy_transcript());
+                let sink = CapturingSink::default();
+
+                let compacted = engine
+                    .replace_with_summary(&sink, boundary(Vec::new()), CompactTrigger::Auto)
+                    .await;
+
+                assert!(compacted.is_some());
+                assert_eq!(
+                    engine.transcript.messages(),
+                    [synthesize_post_compact_message(
+                        "fixed login bug",
+                        &[],
+                        &[],
+                        CompactTrigger::Auto
+                    )]
+                );
+                let events = sink.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Event::SessionCompacted { .. }, Event::Error(failure)]
+                            if failure.starts_with("Session write failed: ")
+                                && failure.contains("disk full")
+                    ),
+                    "the failure follows the event that clears the chat: {events:?}",
+                );
+                engine.transcript.session().clone().shutdown().await;
             })
             .await;
         }

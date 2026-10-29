@@ -22,15 +22,24 @@ use super::queue::FailedTurn;
 use super::{App, CopyNotice, SlashTask};
 use crate::clipboard::{CopyReport, Delivery};
 use crate::git_probes::GitUpdate;
+use crate::modal::EngineUpdate;
 use crate::modal::approval::ApprovalModal;
 use crate::slash;
 use crate::{NOTICE_DURATION, now};
 
 impl App {
-    /// Shows `event`, then ends the in-flight operation if `event` is its terminal event.
+    /// Passes `event` to the open modals and shows it, leaving a saved-session result to a modal
+    /// that shows it, then ends the in-flight operation if `event` is its terminal event.
     pub(super) fn handle_engine_event(&mut self, event: Event) {
         let end = self.in_flight.as_ref().and_then(|op| op.end(&event));
-        self.apply_event(event);
+        let shown = self.notify_modals(EngineUpdate::Event(&event));
+        let saved_result = matches!(
+            event,
+            Event::ArchiveUpdated { .. } | Event::SavedDeleted { .. }
+        );
+        if !(shown && saved_result) {
+            self.apply_event(event);
+        }
         if let Some(end) = end
             && let Some(ended) = self.in_flight.take()
         {
@@ -39,6 +48,7 @@ impl App {
         self.dirty = true;
     }
 
+    /// Shows `event` in chat and the status bar.
     fn apply_event(&mut self, event: Event) {
         match event {
             Event::StreamToken(token) => {
@@ -75,18 +85,14 @@ impl App {
             Event::AutoCompactionResumed => self.session_info.auto_compaction_paused_after = None,
             Event::SummaryToken(token) => self.chat.append_summary_token(&token),
             Event::SummaryDiscarded => self.chat.discard_summary(),
-            Event::SessionTitleUpdated { id, title } => {
-                if id == self.session_info.session_id {
-                    self.session_info.set_title(Some(title));
-                }
-            }
+            Event::SessionTitleUpdated { id, title } => self.apply_title_updated(&id, title),
             Event::ArchiveUpdated {
                 target,
                 state,
                 result,
-            } => self.apply_archive_updated(&target, state, &result),
+            } => self.report_archive_updated(&target, state, &result),
             Event::SavedFound(result) => self.apply_saved_found(result),
-            Event::SavedDeleted { id, result } => self.apply_saved_deleted(&id, &result),
+            Event::SavedDeleted { id, result } => self.report_saved_deleted(&id, &result),
             Event::SessionRolled { id, old_session } => self.apply_session_rolled(id, old_session),
             Event::SessionResumed {
                 id,
@@ -216,13 +222,19 @@ impl App {
         )));
     }
 
-    fn apply_archive_updated(
+    /// Shows `title` when it names the current session.
+    fn apply_title_updated(&mut self, id: &str, title: String) {
+        if id == self.session_info.session_id {
+            self.session_info.set_title(Some(title));
+        }
+    }
+
+    fn report_archive_updated(
         &mut self,
         target: &SavedTarget,
         state: ArchiveState,
         result: &Result<ArchiveUpdate, SavedError>,
     ) {
-        self.modals.archive_updated(target, state, result);
         match slash::archive_message(target, state, result) {
             Ok(note) => self.chat.push_system_message(note),
             Err(error) => self.chat.push_error(&error),
@@ -237,25 +249,17 @@ impl App {
         }
     }
 
-    /// Hands a delete result to the confirm modal, which closes with its chat line on success and
-    /// shows the error on failure. Reports the result in chat when no modal claims it, as after the
-    /// user dismissed the confirm modal while the delete ran.
-    fn apply_saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) {
-        match self.modals.saved_deleted(id, result) {
-            Some(actions) => {
-                for action in actions {
-                    self.apply_modal_action(action);
-                }
-            }
-            None => match result {
-                Ok(()) => self
-                    .chat
-                    .push_system_message(format!("Deleted session {}", id_prefix(id))),
-                Err(error) => self.chat.push_error(&slash::saved_error_message(
-                    error,
-                    slash::CLEAR_THEN_DELETE_HINT,
-                )),
-            },
+    /// Reports a delete result no modal shows, as after the user dismissed the confirm modal while
+    /// the delete ran.
+    fn report_saved_deleted(&mut self, id: &str, result: &Result<(), SavedError>) {
+        match result {
+            Ok(()) => self
+                .chat
+                .push_system_message(format!("Deleted session {}", id_prefix(id))),
+            Err(error) => self.chat.push_error(&slash::saved_error_message(
+                error,
+                slash::CLEAR_THEN_DELETE_HINT,
+            )),
         }
     }
 
@@ -553,7 +557,7 @@ mod tests {
     };
     use crate::clipboard::CopyError;
     use crate::glyphs::INTERRUPTED_MARKER;
-    use crate::modal::ModalAction;
+    use crate::modal::UpdateReply;
     use crate::modal::testing::ScriptedModal;
     use crate::session_info::testing::unknown_model_session_info;
     use crate::slash::{ResumePicker, SlashOutcome, WorkingTreeDiff};
@@ -1812,7 +1816,7 @@ mod tests {
         fn session_compacted_mid_turn_keeps_the_open_modal_and_its_theme_preview() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let latte = builtin::find("latte").expect("a built-in theme");
-            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            app.push_modal(Box::new(ScriptedModal::new()));
             app.dispatch_action(Action::PreviewTheme(latte));
             let previewed = app.theme.text;
 
@@ -2287,6 +2291,48 @@ mod tests {
             assert_eq!(app.session_info.background_shells, shells_in_each_state());
             assert!(app.dirty);
         }
+
+        #[test]
+        fn leaves_a_saved_session_result_to_a_modal_that_shows_it() {
+            let target = SavedTarget::Id("saved".to_owned());
+            for (op, event) in [
+                (
+                    Op::SetArchive {
+                        target: target.clone(),
+                        state: ArchiveState::Archived,
+                    },
+                    Event::ArchiveUpdated {
+                        target: target.clone(),
+                        state: ArchiveState::Archived,
+                        result: Ok(ArchiveUpdate {
+                            id: "saved".to_owned(),
+                            changed: true,
+                        }),
+                    },
+                ),
+                (
+                    Op::DeleteSaved {
+                        session_id: "saved".to_owned(),
+                    },
+                    Event::SavedDeleted {
+                        id: "saved".to_owned(),
+                        result: Ok(()),
+                    },
+                ),
+            ] {
+                let (mut app, _rx, _event_tx) = test_app(None);
+                let mut modal = ScriptedModal::new();
+                modal.reply = Some(UpdateReply::Shown);
+                app.push_modal(Box::new(modal));
+                start_op(&mut app, &op);
+
+                app.handle_engine_event(event);
+
+                assert_eq!(activity(&app), None, "{op:?}");
+                assert!(app.modals.is_active(), "{op:?}");
+                assert_eq!(app.chat.last_system_text(), None, "{op:?}");
+            }
+        }
     }
 
     mod end_operation {
@@ -2662,7 +2708,7 @@ mod tests {
         }
     }
 
-    mod apply_archive_updated {
+    mod report_archive_updated {
         use super::*;
 
         #[test]
@@ -2779,7 +2825,7 @@ mod tests {
         }
     }
 
-    mod apply_saved_deleted {
+    mod report_saved_deleted {
         use super::*;
 
         fn delete_saved(id: &str) -> Op {

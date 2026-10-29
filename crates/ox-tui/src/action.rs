@@ -32,6 +32,9 @@ pub(crate) enum Action {
     /// A preview of the picker's highlighted theme, without committing it. Cursor moves in the
     /// `/theme` modal emit this, and cancelling the modal restores the open-time snapshot.
     PreviewTheme(&'static BuiltinTheme),
+    /// Restores the theme from before the first preview, which the `/theme` modal sends when it
+    /// closes without committing.
+    RevertThemePreview,
     /// A theme swap for the rest of the session. A restart returns to the configured theme.
     SwapTheme(&'static BuiltinTheme),
 }
