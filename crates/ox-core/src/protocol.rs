@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use serde::Serialize;
+use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 use tracing::error;
 
@@ -244,7 +245,8 @@ pub struct UsageSnapshot {
 ///
 /// [`Op::Queue`], [`Op::Interrupt`], [`Op::Resolve`], and [`Op::LoginCode`] act on the op in flight
 /// and have no terminal event of their own.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
 pub enum Event {
     /// Assistant text chunk to append to the in-flight reply.
     StreamToken(String),
@@ -543,9 +545,11 @@ pub enum Interaction {
 pub trait EventSink: Send + Sync {
     fn send(&self, event: Event) -> Result<()>;
 
-    /// Sends `event` and logs at `error!` if the channel rejects it. Use it for an event whose loss
-    /// would leave the frontend inconsistent, such as an error, a cancellation, or a turn's end.
-    fn emit(&self, event: Event, label: &'static str) {
+    /// Sends `event` and logs its variant at `error!` if the channel rejects it. Use it for an
+    /// event whose loss would leave the frontend inconsistent, such as an error, a cancellation,
+    /// or a turn's end.
+    fn emit(&self, event: Event) {
+        let label: &'static str = (&event).into();
         if let Err(e) = self.send(event) {
             error!(label, error = %format_args!("{e:#}"), "event dropped");
         }
@@ -555,19 +559,13 @@ pub trait EventSink: Send + Sync {
     /// [`Event::SessionForked`], each when present.
     fn session_write(&self, report: &WriteReport) {
         if let Some(failure) = &report.failure {
-            self.emit(
-                Event::Error(notice::session_write_failed(failure)),
-                "session-write-failed",
-            );
+            self.emit(Event::Error(notice::session_write_failed(failure)));
         }
         if let Some(fork) = &report.fork {
-            self.emit(
-                Event::SessionForked {
-                    id: fork.to.clone(),
-                    from: fork.from.clone(),
-                },
-                "session-forked",
-            );
+            self.emit(Event::SessionForked {
+                id: fork.to.clone(),
+                from: fork.from.clone(),
+            });
         }
     }
 }
@@ -660,12 +658,16 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
     use super::*;
     use crate::config::compaction::CompactionConfig;
+    use crate::protocol::testing::FailingSink;
     use crate::session::saved::SavedAction;
     use crate::session::store::testing::listed_session;
+    use crate::util::log::testing::LogCapture;
 
     mod op {
         use super::*;
@@ -892,6 +894,32 @@ mod tests {
                 ] {
                     assert_eq!(TurnEnd::of(op, &event), end, "{op:?} then {event:?}");
                 }
+            }
+        }
+    }
+
+    mod event_sink {
+        use super::*;
+
+        mod emit {
+            use super::*;
+
+            #[test]
+            fn logs_a_dropped_event_under_its_kebab_case_variant() {
+                let logs = LogCapture::default();
+
+                tracing::dispatcher::with_default(&logs.dispatch(), || {
+                    FailingSink.emit(Event::AutoCompactionPaused { failures: 3 });
+                });
+
+                assert_eq!(
+                    logs.events(),
+                    [BTreeMap::from([
+                        ("error".to_owned(), "sink closed".to_owned()),
+                        ("label".to_owned(), "auto-compaction-paused".to_owned()),
+                        ("message".to_owned(), "event dropped".to_owned()),
+                    ])],
+                );
             }
         }
     }

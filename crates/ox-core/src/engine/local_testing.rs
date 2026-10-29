@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::abort::TurnAbort;
+use super::abort::{Mailbox, TurnAbort};
 use super::dispatch::DispatchContext;
 use super::testing::MODEL;
 use super::{Engine, EngineHandle, TurnEnd};
@@ -194,11 +194,11 @@ impl Tool for EchoTool {
     }
 }
 
-/// Inert receiver whose `recv()` stays pending, its sender leaked so callers need not hold it.
-pub(super) fn inert_ops() -> mpsc::Receiver<Op> {
+/// Mailbox that never receives an op, its channel leaked so callers need not hold it.
+pub(super) fn inert_mailbox() -> Mailbox<'static> {
     let (tx, rx) = mpsc::channel(1);
     std::mem::forget(tx);
-    rx
+    Mailbox::new(Box::leak(Box::new(rx)))
 }
 
 /// Dispatch context in `cwd` over `exec` deny / allow patterns and the shipped defaults, leaking

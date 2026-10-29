@@ -2,7 +2,7 @@
 
 Every tool call passes through a permission gate. Rules place calls in one of three tiers: deny, ask, or allow. The mode decides the calls the rules leave open, and `plan` also denies every `edit`, `exec`, and `net` call.
 
-Companion docs: [Modals](modals.md), [File Tracking](file-tracking.md).
+Companion docs: [Modals](modals.md), [File Edits](file-edits.md).
 
 ## Rule Tables
 
@@ -48,7 +48,7 @@ The modes correspond to these settings in Claude Code and Codex:
 
 `Op::SetMode` switches the engine's policy. The TUI sends it from the `/mode` picker, `/mode <mode>`, Tab, or Shift+Tab, while the REPL sends it from `/mode <mode>`. Headless runs send none because `--mode` reaches the engine through `Config` before it starts. The engine confirms each switch with `Event::ModeChanged`, which the TUI records in its session snapshot, the status line shows, and the REPL prints. While idle, the engine applies the switch at once.
 
-During a turn, a compaction, or a sign-in, the op arrives at `await_unless_aborted`, `await_or_op`, or `await_approval`, which keep it in the operation's `Inbox` beside the queued prompts and confirm it on receipt. The gate takes a waiting switch before it weighs each call, so a switch applies from the turn's next gated call, including one in the same round. The engine applies any switch still waiting once the operation ends. Calls already gated keep their decisions, so switching to `plan` does not stop a running command.
+During a turn, a compaction, or a sign-in, the op arrives at the operation's `Mailbox`, which keeps it beside the queued prompts and confirms it on receipt. The gate takes a waiting switch before it weighs each call, so a switch applies from the turn's next gated call, including one in the same round. `Engine::serve` applies any switch still waiting once the operation ends, however it ends. Calls already gated keep their decisions, so switching to `plan` does not stop a running command.
 
 Tab and Shift+Tab step through the modes in a fixed cycle (**The keyboard cycle reaches `plan` before `yolo` and wraps at both ends**), and Tab completes the selected command or argument while the command popup is open. The TUI advances from the last mode it requested, so pressing again before the engine confirms the first request moves on to the next mode. The mode enum's declared order, safest first, also controls the picker, argument completion, and the messages that list the modes. The keys are fixed until configurable key bindings land with [#278](https://github.com/hakula139/oxide-code/issues/278).
 
@@ -82,7 +82,7 @@ A path tool's target is resolved before any rules run. The tool's `Tool::prepare
 
 An approval names the resolved path, in the title for `edit` and `write` and in the body for `read`, and so do the tool's messages. `read`, `edit`, and `write` open the file at `Access::resolved()`, so a workspace or symlink target whose path holds a non-UTF-8 byte opens as it exists on disk. `grep` and `glob` retain the `path` as written in the call, with only `~` expanded, because read deny rules match it, then walk from the root resolved by `prepare`. `read`, `edit`, and `write` check file size and type both by path and on the opened file whenever they read a file. Their opens refuse a symlink that replaces the resolved final component. On Unix, opens use `O_NOFOLLOW` and `O_NONBLOCK`, preventing a swapped-in FIFO from hanging the open. On Windows, opens use `FILE_FLAG_OPEN_REPARSE_POINT` and fail if the handle is a symlink or junction. Other reparse points need a second open through their filesystem filter, whose handle must reach the same file. On every platform, a symlink swapped into an intermediate directory between the gate and the open is not covered.
 
-Edit and Write recheck the original before publishing and report a concurrent change instead of overwriting it, as [File Mutation](file-mutation.md) describes.
+Edit and Write recheck the original before publishing and report a concurrent change instead of overwriting it, as [File Edits](file-edits.md) describes.
 
 Each resolved target belongs to one zone:
 
@@ -171,7 +171,7 @@ oxide-code ships named defaults, each a group of rules in one tier, which the [p
 
 When the gate asks, the decision travels through the `ops` channel the turn loop polls. `run_tool_round` gates calls one at a time, so at most one approval can be outstanding and no ID fan-out is needed. Consecutive calls whose `ToolSpec` marks them parallel-safe, namely the read-only `read`, `grep`, and `glob` tools, run together once each call passes the gate. This way, an approval never waits on a running call. If a batch is interrupted, results from finished calls are kept and each unfinished call's `ToolCtx` token is cancelled, stopping blocking `grep` and `glob` walks. The TUI places each result under its call. The REPL repeats a call's header above its result when another call's result was printed in between, so batches read the same in live and resumed sessions.
 
-For a call that asks, the dispatcher emits `Event::ApprovalRequested { id, preview, basis, grant }` with the ID, the basis that made the call ask, the session grant described below, and a small `Clone` preview. The preview is an edit diff from `edit::synthesize_chunk`, a diff against the file's current content for `write`, or the command string under the tool name for `bash`, titled `Bash (background)` for a background call. The gate intercepts the call before it runs, just as the parse-error short-circuit returns a synthetic `ToolOutput`. It waits for a decision in `await_approval`, which hands each op to `Inbox::absorb` as `await_unless_aborted` does. `absorb` maps `Op::Interrupt` to `Cancelled` and `Op::Shutdown` to `Shutdown`, and keeps `Op::Queue` and `Op::SetMode` in the turn's `Inbox`. The wait matches `Op::Resolve { id, decision }` and ignores decisions whose IDs do not match the outstanding call, and dropping the wait future is cancel-safe.
+For a call that asks, the dispatcher emits `Event::ApprovalRequested { id, preview, basis, grant }` with the ID, the basis that made the call ask, the session grant described below, and a small `Clone` preview. The preview is an edit diff from `edit::synthesize_chunk`, a diff against the file's current content for `write`, or the command string under the tool name for `bash`, titled `Bash (background)` for a background call. The gate intercepts the call before it runs, just as the parse-error short-circuit returns a synthetic `ToolOutput`. It waits for a decision in `await_approval` through `Mailbox::race_or`, which maps `Op::Interrupt` to `Cancelled` and `Op::Shutdown` to `Shutdown`, and keeps `Op::Queue` and `Op::SetMode` in the turn's `Mailbox`, as every other wait in the turn does. The wait matches `Op::Resolve { id, decision }` and ignores decisions whose IDs do not match the outstanding call, and dropping the wait future is cancel-safe.
 
 Every frontend responds with one of the `ApprovalDecision` variants:
 
@@ -262,7 +262,8 @@ The stdio sink escapes control characters other than tabs and line breaks in mod
 
 - `crates/ox-core/src/config.rs`: `Config::load`, `resolve_permission`, `Config::set_unattended`, `OX_PERMISSION_MODE`.
 - `crates/ox-core/src/config/load.rs`: `reject_project_keys` and the project allowlists.
-- `crates/ox-core/src/engine.rs`: the live policy, `Engine::set_mode`, and `Engine::adopt_mode`.
+- `crates/ox-core/src/engine.rs`: the live policy, `Engine::set_mode`, and `Engine::serve`, which applies a switch that arrived mid-operation.
+- `crates/ox-core/src/engine/abort.rs`: `Mailbox`, which keeps the mode switches and queued prompts that arrive mid-operation.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round` (parallel-safe batches), `Dispatcher::gate` (prepare, then decide), `check_permission`, `allow_for_session`, and `await_approval`.
 - `crates/ox-core/src/permission.rs`: `Mode`, `PermissionClass`, `Workspace`, `Access::for_path`, `Access::for_command`, `Verdict`, `Basis`, `Policy::verdict`, and `ReadFilter`.
 - `crates/ox-core/src/permission/defaults.rs`: the shipped defaults, `ShippedTier`, protected names and home locations, and `[permission.defaults]` names.

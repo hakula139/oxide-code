@@ -1,6 +1,6 @@
 //! Background git / `gh` probes that keep the status bar's branch and pull-request segments
-//! current. Probes run as tokio child processes and report back through a channel the event loop
-//! selects on, so a slow `git` or a network-bound `gh pr view` never stalls input or rendering.
+//! current. Probes run as tokio child processes and report back through the App's event channel,
+//! so a slow `git` or a network-bound `gh pr view` never stalls input or rendering.
 
 pub(crate) mod pull_request;
 
@@ -8,13 +8,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use futures::FutureExt as _;
-use tokio::sync::mpsc;
 
 use ox_core::config::StatusLineSegment;
 use ox_core::git;
 
 use self::pull_request::{PullRequest, PullRequestDetail};
-use crate::now;
+use crate::app_event::{AppEvent, AppEventSender};
 
 /// Gap between a branch probe finishing and the next one starting. Branch changes outside the
 /// session (manual `git checkout`) only become visible after one interval.
@@ -41,7 +40,11 @@ enum Probe {
 }
 
 /// One probe run's end, with no update when the run panicked or timed out.
-type Finished = (Probe, Option<GitUpdate>);
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ProbeEnd {
+    probe: Probe,
+    update: Option<GitUpdate>,
+}
 
 /// Schedules the probes and collects their results. At most one run per probe is in flight.
 pub(crate) struct GitProbes {
@@ -53,15 +56,19 @@ pub(crate) struct GitProbes {
     pull_request_detail: PullRequestDetail,
     /// Set while a pull-request run may still report a value from before a branch change.
     pull_request_stale: bool,
-    tx: mpsc::UnboundedSender<Finished>,
-    rx: mpsc::UnboundedReceiver<Finished>,
+    events: AppEventSender,
 }
 
 impl GitProbes {
     /// Probes the branch and the pull request only as far as `segments` read them. The first branch
     /// probe waits one interval, and the pull request probes on the first [`poll`](Self::poll).
-    pub(crate) fn new(cwd: PathBuf, segments: &[StatusLineSegment], now: Instant) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+    /// Each run reports its end to `events`, which the App hands back to [`Self::finish`].
+    pub(crate) fn new(
+        cwd: PathBuf,
+        segments: &[StatusLineSegment],
+        events: AppEventSender,
+        now: Instant,
+    ) -> Self {
         let detail = segments
             .iter()
             .filter_map(|segment| match segment {
@@ -80,8 +87,7 @@ impl GitProbes {
             pull_request: detail.map(|_| Schedule::new(PULL_REQUEST_REFRESH_INTERVAL, now)),
             pull_request_detail: detail.unwrap_or(PullRequestDetail::Link),
             pull_request_stale: false,
-            tx,
-            rx,
+            events,
         }
     }
 
@@ -91,7 +97,7 @@ impl GitProbes {
             && schedule.start(now)
         {
             let cwd = self.cwd.clone();
-            spawn_probe(&self.tx, Probe::Branch, async move {
+            spawn_probe(&self.events, Probe::Branch, async move {
                 GitUpdate::Branch(git::current_branch(&cwd).await)
             });
         }
@@ -101,7 +107,7 @@ impl GitProbes {
             self.pull_request_stale = false;
             let cwd = self.cwd.clone();
             let detail = self.pull_request_detail;
-            spawn_probe(&self.tx, Probe::PullRequest, async move {
+            spawn_probe(&self.events, Probe::PullRequest, async move {
                 GitUpdate::PullRequest(pull_request::current_pull_request(&cwd, detail).await)
             });
         }
@@ -116,30 +122,24 @@ impl GitProbes {
             .min()
     }
 
-    /// Waits for the next probe update, scheduling each finished probe's next run one interval out.
-    /// A stale pull-request run reports a clear and asks for a fresh one. Cancel-safe, so it can
-    /// sit in a `tokio::select!` arm.
-    pub(crate) async fn recv(&mut self) -> Option<GitUpdate> {
-        loop {
-            let (probe, update) = self.rx.recv().await?;
-            let current = now();
-            let schedule = match probe {
-                Probe::Branch => self.branch.as_mut(),
-                Probe::PullRequest => self.pull_request.as_mut(),
-            };
-            if let Some(schedule) = schedule {
-                schedule.finish(current);
-            }
-            if probe == Probe::PullRequest && self.pull_request_stale {
-                if let Some(schedule) = self.pull_request.as_mut() {
-                    schedule.next_due = Some(current);
-                }
-                return Some(GitUpdate::PullRequest(None));
-            }
-            if update.is_some() {
-                return update;
-            }
+    /// The update a finished run reports, scheduling its probe's next run one interval after `now`.
+    /// A stale pull-request run reports a clear and asks for a fresh one.
+    pub(crate) fn finish(&mut self, end: ProbeEnd, now: Instant) -> Option<GitUpdate> {
+        let ProbeEnd { probe, update } = end;
+        let schedule = match probe {
+            Probe::Branch => self.branch.as_mut(),
+            Probe::PullRequest => self.pull_request.as_mut(),
+        };
+        if let Some(schedule) = schedule {
+            schedule.finish(now);
         }
+        if probe == Probe::PullRequest && self.pull_request_stale {
+            if let Some(schedule) = self.pull_request.as_mut() {
+                schedule.next_due = Some(now);
+            }
+            return Some(GitUpdate::PullRequest(None));
+        }
+        update
     }
 
     /// Discards whatever a pull-request run in flight reports and asks for a fresh one, so a branch
@@ -160,7 +160,11 @@ impl GitProbes {
             GitUpdate::Branch(_) => Probe::Branch,
             GitUpdate::PullRequest(_) => Probe::PullRequest,
         };
-        self.tx.send((probe, Some(update))).unwrap();
+        let end = ProbeEnd {
+            probe,
+            update: Some(update),
+        };
+        self.events.send(AppEvent::Probe(end)).unwrap();
     }
 
     #[cfg(test)]
@@ -176,21 +180,21 @@ impl GitProbes {
     }
 }
 
-/// Runs `run` on its own task and reports its end to `tx`, so a run that panics or times out still
-/// frees its probe's schedule. A timed-out run is dropped, which kills its child process.
+/// Runs `run` on its own task and reports its end to `events`, so a run that panics or times out
+/// still frees its probe's schedule. A timed-out run is dropped, which kills its child process.
 fn spawn_probe(
-    tx: &mpsc::UnboundedSender<Finished>,
+    events: &AppEventSender,
     probe: Probe,
     run: impl Future<Output = GitUpdate> + Send + 'static,
 ) {
-    let tx = tx.clone();
+    let events = events.clone();
     tokio::spawn(async move {
         let run = std::panic::AssertUnwindSafe(run).catch_unwind();
         let update = tokio::time::timeout(PROBE_TIMEOUT, run)
             .await
             .ok()
             .and_then(Result::ok);
-        _ = tx.send((probe, update));
+        _ = events.send(AppEvent::Probe(ProbeEnd { probe, update }));
     });
 }
 
@@ -220,6 +224,8 @@ impl Schedule {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc;
+
     use ox_core::git::testing::with_isolated_git_env_async;
 
     use super::pull_request::testing::pull_request;
@@ -229,6 +235,15 @@ mod tests {
     const BOTH: &[StatusLineSegment] =
         &[StatusLineSegment::GitBranch, StatusLineSegment::PullRequest];
 
+    fn unread_probes(segments: &[StatusLineSegment], now: Instant) -> GitProbes {
+        GitProbes::new(
+            PathBuf::from("/repo"),
+            segments,
+            mpsc::unbounded_channel().0,
+            now,
+        )
+    }
+
     mod new {
         use super::*;
 
@@ -236,7 +251,7 @@ mod tests {
         fn defers_the_branch_probe_and_runs_the_pull_request_probe_first() {
             let now = Instant::now();
 
-            let probes = GitProbes::new(PathBuf::from("/repo"), BOTH, now);
+            let probes = unread_probes(BOTH, now);
 
             assert_eq!(
                 probes.branch.as_ref().and_then(|s| s.next_due),
@@ -251,7 +266,7 @@ mod tests {
         #[test]
         fn probes_only_what_the_segments_read() {
             let now = Instant::now();
-            let probes = |segments| GitProbes::new(PathBuf::from("/repo"), segments, now);
+            let probes = |segments| unread_probes(segments, now);
 
             let branch_only = probes(&[StatusLineSegment::GitBranch]);
             let pull_request_only = probes(PULL_REQUEST);
@@ -265,7 +280,7 @@ mod tests {
         #[test]
         fn reads_the_pull_request_status_only_for_a_segment_that_shows_it() {
             let detail = |segments: &[StatusLineSegment]| {
-                GitProbes::new(PathBuf::from("/repo"), segments, Instant::now()).pull_request_detail
+                unread_probes(segments, Instant::now()).pull_request_detail
             };
             assert_eq!(detail(PULL_REQUEST), PullRequestDetail::Link);
             for status_segment in [
@@ -288,7 +303,8 @@ mod tests {
         async fn claims_each_probe_once_it_is_due() {
             let dir = tempfile::tempdir().unwrap();
             let now = Instant::now();
-            let mut probes = GitProbes::new(dir.path().to_path_buf(), BOTH, now);
+            let (events, _rx) = mpsc::unbounded_channel();
+            let mut probes = GitProbes::new(dir.path().to_path_buf(), BOTH, events, now);
 
             probes.poll(now);
             assert_eq!(
@@ -303,34 +319,40 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn reports_a_finished_pull_request_probe_to_recv() {
-            let dir = tempfile::tempdir().unwrap();
-            let now = Instant::now();
-            let mut probes = GitProbes::new(dir.path().to_path_buf(), PULL_REQUEST, now);
+        async fn reports_each_finished_probe_to_the_app() {
+            let cases: [(&[StatusLineSegment], _, _); 2] = [
+                (
+                    PULL_REQUEST,
+                    Probe::PullRequest,
+                    GitUpdate::PullRequest(None),
+                ),
+                (
+                    &[StatusLineSegment::GitBranch],
+                    Probe::Branch,
+                    GitUpdate::Branch(None),
+                ),
+            ];
+            for (segments, probe, update) in cases {
+                let dir = tempfile::tempdir().unwrap();
+                let now = Instant::now();
+                let (events, mut rx) = mpsc::unbounded_channel();
+                let mut probes = GitProbes::new(dir.path().to_path_buf(), segments, events, now);
 
-            let update = with_isolated_git_env_async(async {
-                probes.poll(now);
-                probes.recv().await
-            })
-            .await;
+                let event = with_isolated_git_env_async(async {
+                    probes.poll(now + BRANCH_REFRESH_INTERVAL);
+                    rx.recv().await
+                })
+                .await;
 
-            assert_eq!(update, Some(GitUpdate::PullRequest(None)), "not a repo");
-        }
-
-        #[tokio::test]
-        async fn reports_a_finished_branch_probe_to_recv() {
-            let dir = tempfile::tempdir().unwrap();
-            let now = Instant::now();
-            let segments = &[StatusLineSegment::GitBranch];
-            let mut probes = GitProbes::new(dir.path().to_path_buf(), segments, now);
-
-            let update = with_isolated_git_env_async(async {
-                probes.poll(now + BRANCH_REFRESH_INTERVAL);
-                probes.recv().await
-            })
-            .await;
-
-            assert_eq!(update, Some(GitUpdate::Branch(None)), "not a repo");
+                let expected = ProbeEnd {
+                    probe,
+                    update: Some(update),
+                };
+                assert!(
+                    matches!(event, Some(AppEvent::Probe(end)) if end == expected),
+                    "not a repo",
+                );
+            }
         }
     }
 
@@ -340,7 +362,7 @@ mod tests {
         #[test]
         fn is_the_earliest_probe_not_yet_running() {
             let now = Instant::now();
-            let mut probes = GitProbes::new(PathBuf::from("/repo"), BOTH, now);
+            let mut probes = unread_probes(BOTH, now);
             assert_eq!(probes.next_poll(), Some(now));
 
             assert!(probes.pull_request.as_mut().unwrap().start(now));
@@ -349,13 +371,13 @@ mod tests {
         }
     }
 
-    mod recv {
+    mod finish {
         use super::*;
 
-        #[tokio::test(start_paused = true)]
-        async fn reschedules_only_the_probe_that_finished() {
-            let start = now();
-            let mut probes = GitProbes::new(PathBuf::from("/repo"), BOTH, start);
+        #[test]
+        fn reschedules_only_the_probe_that_finished() {
+            let start = Instant::now();
+            let mut probes = unread_probes(BOTH, start);
             assert!(
                 probes
                     .branch
@@ -364,51 +386,62 @@ mod tests {
                     .start(start + BRANCH_REFRESH_INTERVAL)
             );
             assert!(probes.pull_request.as_mut().unwrap().start(start));
+            let branch = || GitUpdate::Branch(Some("main".to_owned()));
+            let branch_end = ProbeEnd {
+                probe: Probe::Branch,
+                update: Some(branch()),
+            };
+            let pull_request_end = ProbeEnd {
+                probe: Probe::PullRequest,
+                update: Some(GitUpdate::PullRequest(None)),
+            };
 
-            tokio::time::advance(Duration::from_secs(1)).await;
-            probes.inject(GitUpdate::Branch(Some("main".to_owned())));
-            assert_eq!(
-                probes.recv().await,
-                Some(GitUpdate::Branch(Some("main".to_owned())))
-            );
-            let branch_due = now() + BRANCH_REFRESH_INTERVAL;
+            let branch_at = start + Duration::from_secs(1);
+            assert_eq!(probes.finish(branch_end, branch_at), Some(branch()));
+            let branch_due = branch_at + BRANCH_REFRESH_INTERVAL;
             assert_eq!(probes.branch.as_ref().unwrap().next_due, Some(branch_due));
             assert_eq!(probes.pull_request.as_ref().unwrap().next_due, None);
 
-            tokio::time::advance(Duration::from_secs(1)).await;
-            probes.inject(GitUpdate::PullRequest(None));
-            assert_eq!(probes.recv().await, Some(GitUpdate::PullRequest(None)));
+            let pull_request_at = branch_at + Duration::from_secs(1);
+            assert_eq!(
+                probes.finish(pull_request_end, pull_request_at),
+                Some(GitUpdate::PullRequest(None))
+            );
             assert_eq!(
                 probes.pull_request.unwrap().next_due,
-                Some(now() + PULL_REQUEST_REFRESH_INTERVAL)
+                Some(pull_request_at + PULL_REQUEST_REFRESH_INTERVAL)
             );
             assert_eq!(probes.branch.unwrap().next_due, Some(branch_due));
         }
 
-        #[tokio::test(start_paused = true)]
-        async fn a_stale_run_reports_a_clear_and_asks_for_a_fresh_one() {
-            let start = now();
-            let mut probes = GitProbes::new(PathBuf::from("/repo"), BOTH, start);
+        #[test]
+        fn a_stale_run_reports_a_clear_and_asks_for_a_fresh_one() {
+            let start = Instant::now();
+            let mut probes = unread_probes(BOTH, start);
             assert!(probes.pull_request.as_mut().unwrap().start(start));
-            probes.invalidate_pull_request(now());
+            probes.invalidate_pull_request(start);
+            let end = ProbeEnd {
+                probe: Probe::PullRequest,
+                update: Some(GitUpdate::PullRequest(Some(pull_request(7)))),
+            };
+            let finished = start + Duration::from_secs(1);
 
-            probes.inject(GitUpdate::PullRequest(Some(pull_request(7))));
             assert_eq!(
-                probes.recv().await,
+                probes.finish(end, finished),
                 Some(GitUpdate::PullRequest(None)),
                 "the stale run must not report its value",
             );
             assert_eq!(
                 probes.pull_request_due(),
-                Some(now()),
+                Some(finished),
                 "the fresh run is due immediately",
             );
         }
 
-        #[tokio::test]
-        async fn reschedules_a_panicked_run_and_returns_the_next_update() {
+        #[test]
+        fn reschedules_a_panicked_run_without_an_update() {
             let now = Instant::now();
-            let mut probes = GitProbes::new(PathBuf::from("/repo"), BOTH, now);
+            let mut probes = unread_probes(BOTH, now);
             assert!(
                 probes
                     .branch
@@ -416,12 +449,14 @@ mod tests {
                     .unwrap()
                     .start(now + BRANCH_REFRESH_INTERVAL)
             );
-            probes.tx.send((Probe::Branch, None)).unwrap();
-            probes.inject(GitUpdate::PullRequest(None));
+            let end = ProbeEnd {
+                probe: Probe::Branch,
+                update: None,
+            };
 
-            let update = probes.recv().await;
+            let update = probes.finish(end, now);
 
-            assert_eq!(update, Some(GitUpdate::PullRequest(None)));
+            assert_eq!(update, None);
             assert!(
                 probes.branch.unwrap().next_due.is_some(),
                 "branch probe stuck in flight"
@@ -432,6 +467,11 @@ mod tests {
     mod spawn_probe {
         use super::*;
 
+        const STOPPED: ProbeEnd = ProbeEnd {
+            probe: Probe::Branch,
+            update: None,
+        };
+
         #[tokio::test]
         async fn reports_a_panicked_run_without_an_update() {
             let (tx, mut rx) = mpsc::unbounded_channel();
@@ -439,7 +479,7 @@ mod tests {
             spawn_probe(&tx, Probe::Branch, async { panic!("probe failed") });
             drop(tx);
 
-            assert_eq!(rx.recv().await, Some((Probe::Branch, None)));
+            assert!(matches!(rx.recv().await, Some(AppEvent::Probe(end)) if end == STOPPED));
         }
 
         #[tokio::test(start_paused = true)]
@@ -454,7 +494,7 @@ mod tests {
             drop(tx);
             tokio::time::advance(PROBE_TIMEOUT).await;
 
-            assert_eq!(rx.recv().await, Some((Probe::Branch, None)));
+            assert!(matches!(rx.recv().await, Some(AppEvent::Probe(end)) if end == STOPPED));
             assert_eq!(
                 dropped_rx.try_recv(),
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed),

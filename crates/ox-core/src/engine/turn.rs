@@ -6,7 +6,7 @@
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 
-use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
+use super::abort::{AbortResult, Mailbox, TurnAbort};
 use super::compaction::{auto_compaction_due, request_tokens, transcript_tokens};
 use super::dispatch::{self, DispatchContext};
 use super::transcript::LiveTranscript;
@@ -16,7 +16,7 @@ use crate::config::compaction::AutoCompactionConfig;
 use crate::message::{ContentBlock, Message, Role};
 use crate::model::{ModelSettings, TokenUsage};
 use crate::prompt::PromptParts;
-use crate::protocol::{Event, EventSink, Op};
+use crate::protocol::{Event, EventSink};
 use crate::tool::tasks::Task;
 use crate::tool::{ToolDefinition, ToolMetadata, ToolRegistry};
 use crate::util::text::join_sentences;
@@ -139,8 +139,7 @@ pub(super) struct TurnContext<'a> {
 pub(super) async fn agent_turn(
     turn: TurnContext<'_>,
     transcript: &mut LiveTranscript,
-    ops: &mut mpsc::Receiver<Op>,
-    inbox: &mut Inbox,
+    mailbox: &mut Mailbox<'_>,
     dispatch_ctx: &mut DispatchContext<'_>,
 ) -> TurnOutcome {
     let TurnContext {
@@ -161,21 +160,20 @@ pub(super) async fn agent_turn(
     for round_index in rounds_run..cap {
         let sent_messages = transcript.messages().len();
         let mut round_usage = None;
-        let stream = await_unless_aborted(
-            stream_response(
-                client,
-                auth,
-                settings,
-                transcript,
-                &tool_defs,
+        let stream = mailbox
+            .race(
+                stream_response(
+                    client,
+                    auth,
+                    settings,
+                    transcript,
+                    &tool_defs,
+                    sink,
+                    &mut round_usage,
+                ),
                 sink,
-                &mut round_usage,
-            ),
-            ops,
-            inbox,
-            sink,
-        )
-        .await;
+            )
+            .await;
         report.record(round_usage, sent_messages);
         let Response {
             content: blocks,
@@ -206,16 +204,9 @@ pub(super) async fn agent_turn(
             return TurnOutcome::stopped(report, TurnStop::Replied);
         }
 
-        let round = dispatch::run_tool_round(
-            tools,
-            tool_uses,
-            &parse_errors,
-            sink,
-            ops,
-            inbox,
-            dispatch_ctx,
-        )
-        .await;
+        let round =
+            dispatch::run_tool_round(tools, tool_uses, &parse_errors, sink, mailbox, dispatch_ctx)
+                .await;
         if round.tasks.is_some() {
             report.tasks = round.tasks;
         }
@@ -225,7 +216,7 @@ pub(super) async fn agent_turn(
         if let Some(abort) = round.abort {
             return interrupt_turn(transcript, sink, report, abort).await;
         }
-        record_drained_prompts(inbox.prompts.drain(..), transcript, sink).await;
+        record_drained_prompts(mailbox.drain_prompts(), transcript, sink).await;
 
         let ran = round_index + 1;
         let estimate =
@@ -389,13 +380,10 @@ pub(super) fn notify_if_interrupted(messages: &[Message], sink: &dyn EventSink) 
         && last.role == Role::Assistant
         && ends_on_interrupted_work(&last.content)
     {
-        sink.emit(
-            Event::Error(
-                "The response was interrupted before it finished. Send a message to continue."
-                    .to_owned(),
-            ),
-            "interrupted-work",
-        );
+        sink.emit(Event::Error(
+            "The response was interrupted before it finished. Send a message to continue."
+                .to_owned(),
+        ));
     }
 }
 
@@ -442,7 +430,7 @@ pub(super) async fn record_drained_prompts(
     for text in texts {
         let report = transcript.record_message(Message::user(text.clone())).await;
         sink.session_write(&report);
-        sink.emit(Event::PromptDrained(text), "prompt-drained");
+        sink.emit(Event::PromptDrained(text));
     }
 }
 
@@ -503,9 +491,9 @@ pub(super) async fn collect_response(
             ResponseEvent::Progress(note) => _ = sink.send(Event::ProgressUpdate(note)),
             ResponseEvent::Usage(reported) => *usage = Some(reported),
             ResponseEvent::RateLimits(limits) => {
-                sink.emit(Event::RateLimitsUpdated(limits), "rate-limits");
+                sink.emit(Event::RateLimitsUpdated(limits));
             }
-            ResponseEvent::Retrying(notice) => sink.emit(Event::Retrying(notice), "retry-notice"),
+            ResponseEvent::Retrying(notice) => sink.emit(Event::Retrying(notice)),
             ResponseEvent::Completed(response) => return Ok(response),
         }
     }
@@ -531,14 +519,14 @@ mod tests {
     use crate::config::compaction::CompactionConfig;
     use crate::engine::dispatch::NOT_RUN;
     use crate::engine::local_testing::{
-        EchoTool, dead_test_session, dispatch_with, inert_ops, thinking_block,
+        EchoTool, dead_test_session, dispatch_with, inert_mailbox, thinking_block,
         tool_heavy_transcript,
     };
     use crate::engine::testing::MODEL;
     use crate::message::{Replay, Role};
     use crate::model::Effort;
     use crate::protocol::testing::{CapturingSink, model_pick};
-    use crate::protocol::{ApprovalDecision, ResumeTarget, SavedTarget, ToolCall, ToolResult};
+    use crate::protocol::{ApprovalDecision, Op, ResumeTarget, SavedTarget, ToolCall, ToolResult};
     use crate::session::handle;
     use crate::session::handle::SessionHandle;
     use crate::session::store::testing::test_store;
@@ -831,12 +819,11 @@ mod tests {
             turn: TurnContext<'_>,
             session: &SessionHandle,
             messages: &mut Vec<Message>,
-            ops: &mut mpsc::Receiver<Op>,
-            inbox: &mut Inbox,
+            mailbox: &mut Mailbox<'_>,
             dispatch_ctx: &mut DispatchContext<'_>,
         ) -> TurnOutcome {
             let mut transcript = LiveTranscript::with_messages(session, std::mem::take(messages));
-            let outcome = super::agent_turn(turn, &mut transcript, ops, inbox, dispatch_ctx).await;
+            let outcome = super::agent_turn(turn, &mut transcript, mailbox, dispatch_ctx).await;
             *messages = transcript.messages().to_vec();
             outcome
         }
@@ -908,8 +895,7 @@ mod tests {
                 turn_context(&client, tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await;
@@ -928,8 +914,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -963,8 +948,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -1007,8 +991,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -1044,8 +1027,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -1071,8 +1053,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -1150,8 +1131,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_in(cwd.path()),
             )
             .await
@@ -1209,8 +1189,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -1238,6 +1217,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("kick off")];
             let (tx, mut rx) = mpsc::channel::<Op>(4);
+            let mut mailbox = Mailbox::new(&mut rx);
             // Hold the sender so `recv()` stays pending after the queued submit.
             tx.send(Op::Queue("follow up".to_owned())).await.unwrap();
 
@@ -1245,8 +1225,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut rx,
-                &mut Inbox::default(),
+                &mut mailbox,
                 &mut yolo_dispatch(),
             )
             .await
@@ -1293,6 +1272,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("kick off")];
             let (tx, mut rx) = mpsc::channel::<Op>(4);
+            let mut mailbox = Mailbox::new(&mut rx);
             tx.send(Op::Queue("first".to_owned())).await.unwrap();
             tx.send(Op::Queue("second".to_owned())).await.unwrap();
 
@@ -1300,8 +1280,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut rx,
-                &mut Inbox::default(),
+                &mut mailbox,
                 &mut yolo_dispatch(),
             )
             .await
@@ -1342,14 +1321,14 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
             let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let mut mailbox = Mailbox::new(&mut rx);
             tx.try_send(Op::Interrupt).unwrap();
 
             let abort = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut rx,
-                &mut Inbox::default(),
+                &mut mailbox,
                 &mut yolo_dispatch(),
             )
             .await
@@ -1370,16 +1349,15 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("write a story")];
             let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let mut mailbox = Mailbox::new(&mut rx);
             let mut dispatch_ctx = yolo_dispatch();
-            let mut inbox = Inbox::default();
 
             let (outcome, ()) = tokio::join!(
                 run_on_messages(
                     turn_context(&client, &tools, &sink),
                     &session,
                     &mut messages,
-                    &mut rx,
-                    &mut inbox,
+                    &mut mailbox,
                     &mut dispatch_ctx
                 ),
                 async {
@@ -1413,14 +1391,14 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
             let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let mut mailbox = Mailbox::new(&mut rx);
             tx.try_send(Op::Shutdown).unwrap();
 
             let abort = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut rx,
-                &mut Inbox::default(),
+                &mut mailbox,
                 &mut yolo_dispatch(),
             )
             .await
@@ -1441,14 +1419,14 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
             let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let mut mailbox = Mailbox::new(&mut rx);
             drop(tx);
 
             let abort = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut rx,
-                &mut Inbox::default(),
+                &mut mailbox,
                 &mut yolo_dispatch(),
             )
             .await
@@ -1493,16 +1471,15 @@ mod tests {
                 let tools = ToolRegistry::new(vec![]);
                 let sink = CapturingSink::default();
                 let mut messages = vec![Message::user("hi")];
-                let mut inbox = Inbox::default();
                 let (tx, mut rx) = mpsc::channel::<Op>(1);
+                let mut mailbox = Mailbox::new(&mut rx);
                 tx.try_send(op.clone()).unwrap();
 
                 let outcome = run_on_messages(
                     turn_context(&client, &tools, &sink),
                     &session,
                     &mut messages,
-                    &mut rx,
-                    &mut inbox,
+                    &mut mailbox,
                     &mut yolo_dispatch(),
                 )
                 .await;
@@ -1513,8 +1490,12 @@ mod tests {
                     [Message::user("hi"), Message::assistant("Hello!")],
                     "the turn records only its own reply after {op:?}",
                 );
-                assert_eq!(inbox.prompts, [] as [String; 0], "{op:?}");
-                assert_eq!(inbox.mode, None, "{op:?}");
+                assert_eq!(
+                    mailbox.drain_prompts().collect::<Vec<_>>(),
+                    [] as [String; 0],
+                    "{op:?}"
+                );
+                assert_eq!(mailbox.take_mode(), None, "{op:?}");
                 assert_eq!(sink.events(), [Event::StreamToken("Hello!".to_owned())]);
                 drop(tx);
             }
@@ -1540,16 +1521,15 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("kick off")];
             let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let mut mailbox = Mailbox::new(&mut rx);
             let mut dispatch_ctx = yolo_dispatch();
-            let mut inbox = Inbox::default();
 
             let (turn_result, ()) = tokio::join!(
                 run_on_messages(
                     turn_context(&client, &tools, &sink),
                     &session,
                     &mut messages,
-                    &mut rx,
-                    &mut inbox,
+                    &mut mailbox,
                     &mut dispatch_ctx
                 ),
                 async {
@@ -1630,16 +1610,15 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("kick off")];
             let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let mut mailbox = Mailbox::new(&mut rx);
             let mut dispatch_ctx = yolo_dispatch();
-            let mut inbox = Inbox::default();
 
             let (outcome, ()) = tokio::join!(
                 run_on_messages(
                     turn_context(&client, &tools, &sink),
                     &session,
                     &mut messages,
-                    &mut rx,
-                    &mut inbox,
+                    &mut mailbox,
                     &mut dispatch_ctx
                 ),
                 async {
@@ -1678,8 +1657,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -1717,8 +1695,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -1771,8 +1748,7 @@ mod tests {
                 },
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -1806,8 +1782,7 @@ mod tests {
                 },
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await;
@@ -1854,8 +1829,7 @@ mod tests {
                     },
                     &session,
                     &mut messages,
-                    &mut inert_ops(),
-                    &mut Inbox::default(),
+                    &mut inert_mailbox(),
                     &mut yolo_dispatch(),
                 )
                 .await;
@@ -1891,8 +1865,7 @@ mod tests {
                 },
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await;
@@ -1925,8 +1898,7 @@ mod tests {
                 },
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -1961,8 +1933,7 @@ mod tests {
                 },
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -1995,8 +1966,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -2020,8 +1990,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -2051,8 +2020,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await;
@@ -2089,8 +2057,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -2123,8 +2090,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -2155,8 +2121,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -2205,8 +2170,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -2249,8 +2213,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -2275,8 +2238,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut yolo_dispatch(),
             )
             .await
@@ -2560,8 +2522,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut dispatch_with(
                     crate::permission::Mode::Manual,
                     &["*"],
@@ -2608,24 +2569,23 @@ mod tests {
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
             let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let mut mailbox = Mailbox::new(&mut rx);
             tx.try_send(Op::SetMode(crate::permission::Mode::Plan))
                 .unwrap();
-            let mut inbox = Inbox::default();
             let mut dispatch_ctx = yolo_dispatch();
 
             let outcome = run_on_messages(
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut rx,
-                &mut inbox,
+                &mut mailbox,
                 &mut dispatch_ctx,
             )
             .await;
 
             assert!(outcome.result.is_ok());
             assert_eq!(dispatch_ctx.policy.mode(), crate::permission::Mode::Plan);
-            assert_eq!(inbox.mode, None, "the gate took the switch");
+            assert_eq!(mailbox.take_mode(), None, "the gate took the switch");
             let ContentBlock::ToolResult { content, .. } = &messages[2].content[0] else {
                 panic!("expected ToolResult, got {:?}", messages[2].content[0]);
             };
@@ -2671,6 +2631,7 @@ mod tests {
                 ]);
                 let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
                 let (op_tx, mut ops) = mpsc::channel(4);
+                let mut mailbox = Mailbox::new(&mut ops);
                 let sink = ReplyingSink {
                     events: CapturingSink::default(),
                     op_tx,
@@ -2682,8 +2643,7 @@ mod tests {
                     turn_context(&client, &tools, &sink),
                     &session,
                     &mut messages,
-                    &mut ops,
-                    &mut Inbox::default(),
+                    &mut mailbox,
                     &mut dispatch_with(
                         crate::permission::Mode::Manual,
                         &[],
@@ -2749,6 +2709,7 @@ mod tests {
             let mut dispatch_ctx = dispatch_with(crate::permission::Mode::Manual, &[], &[], &cwd);
             let mut messages = vec![Message::user("take notes")];
             let (op_tx, mut ops) = mpsc::channel(4);
+            let mut mailbox = Mailbox::new(&mut ops);
             let sink = ReplyingSink {
                 events: CapturingSink::default(),
                 op_tx,
@@ -2759,8 +2720,7 @@ mod tests {
                 turn_context(&client, &tools, &sink),
                 &session,
                 &mut messages,
-                &mut ops,
-                &mut Inbox::default(),
+                &mut mailbox,
                 &mut dispatch_ctx,
             )
             .await
