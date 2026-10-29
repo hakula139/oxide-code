@@ -4285,6 +4285,10 @@ mod tests {
                 std::fs::write(cwd.join("vault/key"), "").unwrap();
                 std::fs::write(cwd.join("vault/readme"), "").unwrap();
                 std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
+                let sed_write = format!(
+                    "cd secrets && sed -n w\\ key {}",
+                    slash_separated(&cwd.join("notes"))
+                );
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
                     for mode in [Mode::Manual, Mode::Yolo] {
@@ -4322,7 +4326,7 @@ mod tests {
                             ("cd src && cd ../secrets && cat key", Decision::Deny),
                             ("cd secrets || cat key", Decision::Deny),
                             ("cd secrets && echo x > key", Decision::Deny),
-                            ("cd secrets && sed -n w\\ key notes", Decision::Deny),
+                            (&sed_write, Decision::Deny),
                             ("cd src && cat main.rs", moved),
                             ("cd $DIR && cat key", moved),
                         ] {
@@ -4347,6 +4351,7 @@ mod tests {
                 std::fs::write(cwd.join(".git/config"), "").unwrap();
                 std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
                 let key = slash_separated(&home.join(".ssh/id_rsa"));
+                let elsewhere = slash_separated(&root.join("elsewhere"));
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
                     for mode in [Mode::Manual, Mode::Yolo] {
@@ -4368,10 +4373,21 @@ mod tests {
                             (format!("sed -e p -e '$R {key}' README.md"), Decision::Deny),
                             (format!("sed --posix '1r {key}' README.md"), Decision::Deny),
                             (format!("sed --qu -s '1r {key}' README.md"), Decision::Deny),
+                            (format!("sed '1r {key}' README.md --x"), Decision::Deny),
                             ("sed 'w locked' README.md".to_owned(), Decision::Deny),
                             ("sed 's/a/b/w locked' README.md".to_owned(), Decision::Deny),
+                            (
+                                "sed -n $'w locked\\nk' README.md".to_owned(),
+                                Decision::Deny,
+                            ),
                             ("sed -i s/a/b/ locked".to_owned(), Decision::Deny),
                             ("sed --in-place=.bak 1d locked".to_owned(), Decision::Deny),
+                            (
+                                "sed -i'locked/*' s/a/b/ README.md".to_owned(),
+                                Decision::Deny,
+                            ),
+                            (format!("sed -i'{elsewhere}/*' s/a/b/ README.md"), held),
+                            ("sed -i $X s/a/b/ README.md".to_owned(), held),
                             ("sed -i s/a/b/ .git/config".to_owned(), held),
                             ("sed '1e date' README.md".to_owned(), held),
                             ("sed -f script.sed README.md".to_owned(), held),

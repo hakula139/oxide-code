@@ -1471,12 +1471,14 @@ impl Walk<'_> {
 
     /// Weighs what the `sed` call with `args` does beyond reading `files`, its operands, adding
     /// the files its scripts read to `operands` and returning whether it may read any file. An
-    /// in-place call writes each of `files`. A file a script reads is certain where every argument
-    /// order and build takes the script as one, and a file it writes is the command's write. A
-    /// script that may run a command or that the analysis cannot read, including one from a file,
-    /// leaves the command unrecognized. A word that only some order or build takes as the script
-    /// parses with the commands of GNU's build if one of its orders takes the word, and of BSD's
-    /// otherwise, and if it fails to parse it adds nothing, since that build rejects it too.
+    /// in-place call writes each of `files` and each backup a suffix makes of one, and a suffix
+    /// that expands leaves the command unrecognized. A file a script reads is certain where every
+    /// argument order and build takes the script as one, and a file it writes is the command's
+    /// write, even before a part the analysis cannot read. A script that may run a command or that
+    /// the analysis cannot read, including one from a file, leaves the command unrecognized. A
+    /// word that only some order or build takes as the script parses with the commands of GNU's
+    /// build if one of its orders takes the word, and of BSD's otherwise, and if it fails to parse
+    /// before writing it adds nothing, since that build rejects it too.
     fn sed_scripts(
         &mut self,
         args: &[Word],
@@ -1486,20 +1488,40 @@ impl Walk<'_> {
     ) -> bool {
         let values: Vec<_> = args.iter().map(|word| word.value.as_deref()).collect();
         let parsed = reader_args("sed", &values);
+        let backups = &parsed.script.backups;
+        let mut opaque = parsed.script.from_file
+            || backups
+                .iter()
+                .any(|backup| backup.suffix.is_none() || args[backup.index].glob);
         if parsed.script.in_place {
             for file in files {
                 self.open(&file.read.path, false);
+                for path in backups
+                    .iter()
+                    .filter_map(|backup| backup.path(&file.read.path))
+                {
+                    self.open(&path, false);
+                }
             }
         }
-        let mut opaque = parsed.script.from_file;
         for word in parsed.script.words {
             let certain = word.certain;
             let dialect = if word.gnu { Dialect::Gnu } else { Dialect::Bsd };
-            let Some(script) = word.value.and_then(|script| sed_script(&script, dialect)) else {
+            let Some(value) = word.value else {
                 opaque |= certain;
                 continue;
             };
-            opaque |= script.runs || !certain && !script.writes.is_empty();
+            let (script, complete) = match sed_script(&value, dialect) {
+                Ok(script) => (script, true),
+                Err(writes) => (
+                    SedScript {
+                        writes,
+                        ..SedScript::default()
+                    },
+                    false,
+                ),
+            };
+            opaque |= certain && !complete || script.runs || !certain && !script.writes.is_empty();
             operands.extend(script.reads.into_iter().map(|path| Operand {
                 read: ReaderPath::exact(path),
                 certain,
@@ -2935,20 +2957,33 @@ fn sed_files(values: &[&str]) -> Option<Vec<String>> {
     safe.then(|| files.into_iter().map(str::to_owned).collect())
 }
 
-/// The files a `sed` script reads and writes and whether it runs a command, or `None` for a script
-/// the parser cannot read, which may do any of these. It follows the commands of the `dialect`
-/// build: `r` and GNU's `R` read the file named by the rest of the line, `w`, GNU's `W`, and the
-/// `s///w` flag write one, and GNU's `e` and `s///e` flag run a command. GNU's commands cover
-/// BSD's, so a BSD script parses the same in GNU. Like [`SAFE_SED_SCRIPT`], it ends a regular
-/// expression at the first unescaped delimiter.
-fn sed_script(script: &str, dialect: Dialect) -> Option<SedScript> {
-    let gnu = dialect == Dialect::Gnu;
+/// The files a `sed` script reads and writes and whether it runs a command. It follows the
+/// commands of the `dialect` build: `r` and GNU's `R` read the file named by the rest of the line,
+/// `w`, GNU's `W`, and the `s///w` flag write one, and GNU's `e` and `s///e` flag run a command.
+/// GNU's commands cover BSD's, so a BSD script parses the same in GNU. Like [`SAFE_SED_SCRIPT`], it
+/// ends a regular expression at the first unescaped delimiter.
+///
+/// # Errors
+///
+/// For a script the parser cannot read, which may do anything, it returns the files the commands
+/// before the part it cannot read write, since both builds open them while compiling the script.
+fn sed_script(script: &str, dialect: Dialect) -> Result<SedScript, Vec<String>> {
     let mut parsed = SedScript::default();
+    match read_sed_script(script, dialect, &mut parsed) {
+        Some(()) => Ok(parsed),
+        None => Err(parsed.writes),
+    }
+}
+
+/// Adds what `script` does to `parsed`, as [`sed_script`] reads it, stopping with `None` at the
+/// first part it cannot read.
+fn read_sed_script(script: &str, dialect: Dialect, parsed: &mut SedScript) -> Option<()> {
+    let gnu = dialect == Dialect::Gnu;
     let mut chars = script.chars().peekable();
     loop {
         while chars.next_if(|c| c.is_whitespace() || *c == ';').is_some() {}
         let Some(&next) = chars.peek() else {
-            return Some(parsed);
+            return Some(());
         };
         if next == '#' {
             rest_of_line(&mut chars);
@@ -3289,6 +3324,31 @@ struct ScriptArgs {
     from_file: bool,
     /// Whether some supported argument order or build rewrites its file operands in place.
     in_place: bool,
+    /// Each backup suffix some supported argument order or build gives an in-place rewrite.
+    backups: Vec<Backup>,
+}
+
+/// The backup suffix one build gives an in-place rewrite, from the word at `index`.
+#[derive(Debug, PartialEq, Eq)]
+struct Backup {
+    dialect: Dialect,
+    index: usize,
+    /// The suffix, or `None` when its word expands.
+    suffix: Option<String>,
+}
+
+impl Backup {
+    /// Where this build moves `file` before rewriting it, unless the suffix expands. GNU's build
+    /// replaces each `*` in the suffix with `file` as written, while BSD's, which has no template,
+    /// and GNU's for a suffix without `*` append the suffix.
+    fn path(&self, file: &str) -> Option<String> {
+        let suffix = self.suffix.as_deref()?;
+        Some(if self.dialect == Dialect::Gnu && suffix.contains('*') {
+            suffix.replace('*', file)
+        } else {
+            format!("{file}{suffix}")
+        })
+    }
 }
 
 /// A word some supported argument order or build takes as a reader's pattern or script.
@@ -3367,7 +3427,9 @@ fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
     let mut patterns: Vec<(ScriptWord, usize)> = Vec::new();
     for dialect in [Dialect::Gnu, Dialect::Bsd] {
         for &permute in orders {
-            let read = grammar.read(dialect, permute, values);
+            let Some(read) = grammar.read(dialect, permute, values) else {
+                continue;
+            };
             reads += 1;
             for word in read.script.words {
                 match patterns
@@ -3383,6 +3445,7 @@ fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
             }
             args.script.from_file |= read.script.from_file;
             args.script.in_place |= read.script.in_place;
+            args.script.backups.extend(read.script.backups);
             args.fixed_values
                 .retain(|index| read.option_values.contains(index));
             args.operands.retain(|index| read.operands.contains(index));
@@ -3413,7 +3476,7 @@ fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
 }
 
 /// A build of the readers, whose option parsing and `sed` commands can differ.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dialect {
     /// GNU, as on Linux.
     Gnu,
@@ -3434,7 +3497,18 @@ struct ReaderGrammar {
     numeric: bool,
     /// Whether the first operand is a pattern or script unless an option gives one.
     pattern: bool,
+    unlisted_long: UnlistedLong,
     operands: OperandKind,
+}
+
+/// What a long option a [`ReaderGrammar`] does not list does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnlistedLong {
+    /// It may take a file as its `=` value or give the pattern.
+    Unknown,
+    /// It makes the reader exit before reading, since the grammar lists every long option either
+    /// build takes.
+    Exits,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3450,15 +3524,17 @@ impl ReaderGrammar {
         getopt: true,
         numeric: false,
         pattern: false,
+        unlisted_long: UnlistedLong::Unknown,
         operands: OperandKind::Stream,
     };
 
     /// The files the `dialect` build reads from `values`, taking options after operands until `--`
-    /// when it may `permute` them. A short option that takes a value takes the rest of its cluster
-    /// or the next word, and a long one its `=` value or the next word. A long option the grammar
-    /// does not list counts its `=` value as a file, and since it may be one that gives the
-    /// pattern, the leading operand then counts as a file too.
-    fn read(&self, dialect: Dialect, permute: bool, values: &[Option<&str>]) -> ReaderArgs {
+    /// when it may `permute` them, or `None` when it exits before reading. A short option that
+    /// takes a value takes the rest of its cluster or the next word, and a long one its `=` value
+    /// or the next word. A long option the grammar does not list does what its
+    /// [`UnlistedLong`] says: it exits, or it counts its `=` value as a file, and since it may be
+    /// one that gives the pattern, the leading operand then counts as a file too.
+    fn read(&self, dialect: Dialect, permute: bool, values: &[Option<&str>]) -> Option<ReaderArgs> {
         let mut args = ReaderArgs::default();
         let mut operands = Vec::new();
         let mut pattern_given = false;
@@ -3467,6 +3543,16 @@ impl ReaderGrammar {
             pattern_given |= matches!(role, Role::Pattern | Role::PatternFile);
             args.script.from_file |= matches!(role, Role::PatternFile);
             args.script.in_place |= matches!(role, Role::InPlace);
+            if matches!(role, Role::InPlace)
+                && value != Some("")
+                && (value.is_some() || values[index].is_none())
+            {
+                args.script.backups.push(Backup {
+                    dialect,
+                    index,
+                    suffix: value.map(str::to_owned),
+                });
+            }
             if matches!(role, Role::Pattern) {
                 args.script
                     .words
@@ -3513,6 +3599,9 @@ impl ReaderGrammar {
                     .split_once('=')
                     .map_or((long, None), |(name, value)| (name, Some(value)));
                 let Some(option) = self.long(name) else {
+                    if self.unlisted_long == UnlistedLong::Exits {
+                        return None;
+                    }
                     unplaced = true;
                     take(&mut args, Role::File, index, attached);
                     continue;
@@ -3541,7 +3630,7 @@ impl ReaderGrammar {
             }
         }
         let leading_pattern = self.pattern && !pattern_given && !unplaced;
-        self.place_operands(args, dialect, values, &operands, leading_pattern, recursive)
+        Some(self.place_operands(args, dialect, values, &operands, leading_pattern, recursive))
     }
 
     /// Completes `args` with the `operands` [`Self::read`] found among `values`, the first of them
@@ -3602,9 +3691,7 @@ impl ReaderGrammar {
         let recurses = |values: &[Option<&str>]| {
             [Dialect::Gnu, Dialect::Bsd].into_iter().any(|dialect| {
                 self.read(dialect, true, values)
-                    .files
-                    .iter()
-                    .any(|(_, path)| path.recursive)
+                    .is_some_and(|read| read.files.iter().any(|(_, path)| path.recursive))
             })
         };
         for (index, value) in values.iter().enumerate() {
@@ -3855,6 +3942,7 @@ const SED_GRAMMAR: ReaderGrammar = ReaderGrammar {
         switch("--zero-terminated"),
     ],
     pattern: true,
+    unlisted_long: UnlistedLong::Exits,
     ..ReaderGrammar::NONE
 };
 
@@ -5502,6 +5590,20 @@ mod tests {
         }
 
         #[test]
+        fn leaves_an_in_place_edit_unrecognized_when_its_backup_suffix_expands() {
+            for command in [
+                "sed -i $X s/a/b/ a.rs",
+                "sed -I \"$X\" s/a/b/ a.rs",
+                "sed -i bk/* s/a/b/ a.rs",
+            ] {
+                assert!(parse(command).unrecognized().is_some(), "{command:?}");
+            }
+            for command in ["sed -i.bak s/a/b/ a.rs", "sed -i 'bk/*' s/a/b/ a.rs"] {
+                assert!(parse(command).unrecognized().is_none(), "{command:?}");
+            }
+        }
+
+        #[test]
         fn refuses_in_place_edits_script_files_and_writing_or_running_commands() {
             for command in [
                 "sed -i 's/a/b/' a.rs",
@@ -5556,6 +5658,7 @@ mod tests {
                 ("p", effects(&[], &[], false)),
                 ("$!{N;s/\\n/ /};/^#/d", effects(&[], &[], false)),
                 ("2,+3p;3,~4d;\\,x,Ip;0~2p", effects(&[], &[], false)),
+                ("1,5d", effects(&[], &[], false)),
                 (":a;N;ba", effects(&[], &[], false)),
                 ("l 40;$q5", effects(&[], &[], false)),
                 ("y/abc/xyz/", effects(&[], &[], false)),
@@ -5563,16 +5666,13 @@ mod tests {
                 ("# r x\np", effects(&[], &[], false)),
                 ("1r /etc/hosts", effects(&["/etc/hosts"], &[], false)),
                 ("/x/ R notes\n$w out", effects(&["notes"], &["out"], false)),
+                ("/a/,/b/w out", effects(&[], &["out"], false)),
                 ("0~2 W even", effects(&[], &["even"], false)),
                 ("s/a/b/gw log", effects(&[], &["log"], false)),
                 ("s|a|b|e", effects(&[], &[], true)),
                 ("1e date", effects(&[], &[], true)),
             ] {
-                assert_eq!(
-                    sed_script(script, Dialect::Gnu),
-                    Some(expected),
-                    "{script:?}"
-                );
+                assert_eq!(sed_script(script, Dialect::Gnu), Ok(expected), "{script:?}");
             }
         }
 
@@ -5586,7 +5686,7 @@ mod tests {
 
             assert_eq!(
                 sed_script("1r in\n$w out\ns/a/b/w log", Dialect::Bsd),
-                Some(expected)
+                Ok(expected)
             );
             for script in [
                 "R in",
@@ -5598,14 +5698,27 @@ mod tests {
                 "Q",
                 "README.md",
             ] {
-                assert_eq!(sed_script(script, Dialect::Bsd), None, "{script:?}");
+                assert_eq!(sed_script(script, Dialect::Bsd), Err(vec![]), "{script:?}");
             }
         }
 
         #[test]
-        fn refuses_a_script_it_cannot_read() {
-            for script in ["k", "s/a/b", "r", "1r ", "pq", "s/a/b/x", "/x", "1,p"] {
-                assert_eq!(sed_script(script, Dialect::Gnu), None, "{script:?}");
+        fn refuses_a_script_it_cannot_read_keeping_the_files_it_writes_before() {
+            for (script, writes) in [
+                ("k", &[][..]),
+                ("s/a/b", &[]),
+                ("r", &[]),
+                ("1r ", &[]),
+                ("pq", &[]),
+                ("s/a/b/x", &[]),
+                ("/x", &[]),
+                ("1,p", &[]),
+                ("w locked\nk", &["locked"]),
+                ("1r in\ns/a/b/w log\n$k\nw out", &["log"]),
+            ] {
+                let writes = writes.iter().map(|&path| path.to_owned()).collect();
+
+                assert_eq!(sed_script(script, Dialect::Gnu), Err(writes), "{script:?}");
             }
         }
     }
