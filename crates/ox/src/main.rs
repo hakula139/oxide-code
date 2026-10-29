@@ -33,7 +33,7 @@ use ox_core::util;
 use ox_core::util::path::tildify;
 use ox_core::util::tls::PlatformTrust;
 use ox_tui::Startup;
-use ox_tui::slash::{ResumePicker, is_built_in};
+use ox_tui::slash::is_built_in;
 use ox_tui::terminal;
 use ox_tui::theme::resolve_theme;
 
@@ -478,9 +478,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
             archive_notice(&handle.session_id(), ArchiveState::Active)
         );
     }
-    let picker = cli
-        .opens_picker()
-        .then(|| ResumePicker::at_startup(store.clone(), handle.session_id(), cli.projects()));
+    let picker = cli.opens_picker().then(|| cli.projects());
 
     let generates_titles = tui_mode;
     let engine = Engine::new(
