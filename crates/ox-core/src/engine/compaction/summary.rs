@@ -52,7 +52,7 @@ const SUMMARIZATION_USER_RUBRIC: &str = indoc! {"
 ///
 /// The summary streams to `sink` as [`Event::SummaryToken`]s. A retry, a failure, or a dropped
 /// future ends them with [`Event::SummaryDiscarded`]. On success the caller must end them with
-/// [`Event::SessionCompacted`] or [`Event::SummaryDiscarded`].
+/// [`Event::SessionCompacted`].
 ///
 /// Errors when the transcript is too short to compact, a request fails, or the reply is empty or
 /// stops before the summary finishes.
@@ -172,7 +172,7 @@ impl<'a> SummaryStream<'a> {
         }
     }
 
-    /// Leaves the streamed summary for the compact boundary to commit or discard.
+    /// Leaves the streamed summary for the compact boundary to commit.
     fn keep(mut self) {
         *self.streamed.get_mut() = false;
     }

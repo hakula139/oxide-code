@@ -35,18 +35,18 @@ use crate::util::sync::lock_or_recover;
 /// commit that saves its change.
 #[derive(Clone)]
 pub struct SessionHandle {
-    /// Locked only on blocking threads, since a commit holds it while the store is busy.
-    state: Arc<Mutex<SessionState>>,
-    shared: Arc<Shared>,
-    title_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    inner: Arc<Inner>,
 }
 
-/// What every handle clone reads without the state's lock.
-struct Shared {
-    /// The session the handle writes to, which a fork replaces.
+/// What every handle clone shares.
+struct Inner {
+    /// Locked only on blocking threads, since a commit holds it while the store is busy.
+    state: Mutex<SessionState>,
+    /// The session the handle writes to, which a fork replaces. Readable without the state's lock.
     live: Mutex<Live>,
     /// Whether a write already reported a commit failure, which the next ones then omit.
     failure_surfaced: AtomicBool,
+    title_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// The live session's ID and artifact directory.
@@ -132,28 +132,28 @@ pub(super) struct AiTitleOutcome {
 impl SessionHandle {
     fn new(state: SessionState) -> Self {
         Self {
-            shared: Arc::new(Shared {
+            inner: Arc::new(Inner {
                 live: Mutex::new(Live::of(&state)),
+                state: Mutex::new(state),
                 failure_surfaced: AtomicBool::new(false),
+                title_task: Mutex::default(),
             }),
-            state: Arc::new(Mutex::new(state)),
-            title_task: Arc::default(),
         }
     }
 
     /// The live session's ID, which a fork replaces.
     pub fn session_id(&self) -> String {
-        lock_or_recover(&self.shared.live, "live").id.to_string()
+        lock_or_recover(&self.inner.live, "live").id.to_string()
     }
 
     /// The directory the live session's artifacts go to.
     pub(crate) fn artifact_dir(&self) -> Arc<Path> {
-        Arc::clone(&lock_or_recover(&self.shared.live, "live").artifact_dir)
+        Arc::clone(&lock_or_recover(&self.inner.live, "live").artifact_dir)
     }
 
     /// Ties the AI title request to this session, so `finalize` aborts it.
     pub(super) fn set_title_task(&self, task: JoinHandle<()>) {
-        *lock_or_recover(&self.title_task, "title_task") = Some(task);
+        *lock_or_recover(&self.inner.title_task, "title_task") = Some(task);
     }
 
     /// Records a conversation message.
@@ -222,13 +222,16 @@ impl SessionHandle {
     /// Records an AI-generated session title, which supersedes the first-prompt title but never a
     /// manual one, including a manual one the commit reads from the store.
     pub(super) async fn append_ai_title(&self, title: String) -> AiTitleOutcome {
-        let (applied, report) = self
-            .write_then(
+        let (applied, committed) = self
+            .commit(
                 move |state| state.set_ai_title(title),
                 |applied, state| applied && !state.title_manual(),
             )
             .await;
-        AiTitleOutcome { applied, report }
+        AiTitleOutcome {
+            applied,
+            report: self.report(committed),
+        }
     }
 
     /// Persists a user-supplied title, suppressing AI titles for the rest of the session.
@@ -264,8 +267,10 @@ impl SessionHandle {
     /// has no row to archive.
     pub(crate) async fn archive(&self) -> WriteReport {
         let ((), committed) = self.commit(SessionState::queue_archive, |(), _| ()).await;
-        let failure = committed.as_ref().err().map(|e| format!("{e:#}"));
-        _ = self.report(committed);
+        let failure = committed.err();
+        if let Some(failure) = &failure {
+            _ = self.surface(failure.clone());
+        }
         WriteReport {
             failure,
             fork: None,
@@ -283,10 +288,11 @@ impl SessionHandle {
         self.finish(snapshots).await
     }
 
-    /// Aborts the title request and waits for it to end, so it never writes to or reports on a
-    /// renamed or finalized session.
+    /// Aborts the title request and waits for it to end, so it never reports on a renamed or
+    /// finalized session. A write the request already started still commits, possibly after the
+    /// session ends.
     async fn stop_title_task(&self) {
-        let task = lock_or_recover(&self.title_task, "title_task").take();
+        let task = lock_or_recover(&self.inner.title_task, "title_task").take();
         if let Some(task) = task {
             task.abort();
             if let Err(e) = task.await
@@ -303,37 +309,30 @@ impl SessionHandle {
         &self,
         apply: impl FnOnce(&mut SessionState) -> T + Send + 'static,
     ) -> (T, WriteReport) {
-        self.write_then(apply, |value, _| value).await
-    }
-
-    /// Like [`Self::write`], but returns what `settle` makes of `apply`'s value and the committed
-    /// state.
-    async fn write_then<T: Send + 'static, U: Send + 'static>(
-        &self,
-        apply: impl FnOnce(&mut SessionState) -> T + Send + 'static,
-        settle: impl FnOnce(T, &SessionState) -> U + Send + 'static,
-    ) -> (U, WriteReport) {
-        let (value, committed) = self.commit(apply, settle).await;
+        let (value, committed) = self.commit(apply, |value, _| value).await;
         (value, self.report(committed))
     }
 
     /// Applies `apply`, commits, and settles under the state's lock on a blocking thread, so a
-    /// busy store never stalls the runtime. A fork points every clone at the new session. A panic
-    /// while the lock is held stops persistence, which the next write that saves anything reports.
-    /// A cancelled caller leaves the write to run to the end.
+    /// busy store never stalls the runtime, then returns what `settle` makes of `apply`'s value
+    /// and the committed state, with the commit's failure. A fork points every clone at the new
+    /// session. A panic while the lock is held stops persistence, which the next write that saves
+    /// anything reports. A cancelled caller leaves the write to run to the end, which still logs
+    /// its failure.
     async fn commit<T: Send + 'static, U: Send + 'static>(
         &self,
         apply: impl FnOnce(&mut SessionState) -> T + Send + 'static,
         settle: impl FnOnce(T, &SessionState) -> U + Send + 'static,
-    ) -> (U, Result<Option<Fork>>) {
-        let state = Arc::clone(&self.state);
-        let shared = Arc::clone(&self.shared);
+    ) -> (U, Result<Option<Fork>, String>) {
+        let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
-            let mut state = lock_state(&state);
+            let mut state = lock_state(&inner.state);
             let value = apply(&mut state);
-            let committed = state.flush();
-            if let Ok(Some(_)) = committed {
-                *lock_or_recover(&shared.live, "live") = Live::of(&state);
+            let committed = state.flush().map_err(|e| format!("{e:#}"));
+            match &committed {
+                Ok(Some(_)) => *lock_or_recover(&inner.live, "live") = Live::of(&state),
+                Ok(None) => {}
+                Err(failure) => warn!(error = %failure, "session write failed"),
             }
             (settle(value, &state), committed)
         })
@@ -343,33 +342,35 @@ impl SessionHandle {
 
     /// The report of a commit that returned `committed`, which carries a failure only the first
     /// time one occurs.
-    fn report(&self, committed: Result<Option<Fork>>) -> WriteReport {
+    fn report(&self, committed: Result<Option<Fork>, String>) -> WriteReport {
         match committed {
             Ok(fork) => WriteReport {
                 failure: None,
                 fork,
             },
-            Err(e) => {
-                let failure = format!("{e:#}");
-                warn!(error = %failure, "session write failed");
-                let first = !self.shared.failure_surfaced.swap(true, Ordering::AcqRel);
-                WriteReport {
-                    failure: first.then_some(failure),
-                    fork: None,
-                }
-            }
+            Err(failure) => WriteReport {
+                failure: self.surface(failure),
+                fork: None,
+            },
         }
     }
+
+    /// Marks a commit failure as reported, returning `failure` only if none was before.
+    fn surface(&self, failure: String) -> Option<String> {
+        (!self.inner.failure_surfaced.swap(true, Ordering::AcqRel)).then_some(failure)
+    }
 }
+
+const WRITE_PANICKED: &str = "a session write panicked";
 
 /// Locks `state`. A write that panicked while holding the lock may have left it half applied, so
 /// the lock recovers with persistence stopped.
 fn lock_state(state: &Mutex<SessionState>) -> MutexGuard<'_, SessionState> {
     state.lock().unwrap_or_else(|poisoned| {
-        error!("a session write panicked, so persistence stops");
+        error!("{WRITE_PANICKED}, so persistence stops");
         state.clear_poison();
         let mut guard = poisoned.into_inner();
-        guard.stop();
+        guard.stop(WRITE_PANICKED.to_owned());
         guard
     })
 }
@@ -589,51 +590,6 @@ mod tests {
         ended
     }
 
-    mod write {
-        use super::*;
-
-        #[tokio::test]
-        async fn surfaces_a_failed_commit_once_but_to_every_archive() {
-            let (_dir, store) = isolated_store();
-            let handle = start(&store, "m", None);
-            fail_writes(&store);
-
-            let first = handle.record_message(Message::user("a")).await;
-            let second = handle.record_message(Message::user("b")).await;
-            let archived = handle.archive().await;
-
-            assert_eq!(
-                first.report.failure.as_deref(),
-                Some("disk full: Error code 1811: constraint failed")
-            );
-            assert_eq!(second.report, WriteReport::default());
-            assert_eq!(archived.failure.as_deref(), Some(STOPPED));
-        }
-
-        #[tokio::test]
-        async fn a_panicked_write_stops_persistence_for_every_clone() {
-            let (_dir, store) = isolated_store();
-            let handle = start(&store, "m", None);
-            let sid = handle.session_id();
-            handle.record_message(Message::user("saved")).await;
-            let clone = handle.clone();
-
-            let panicked = tokio::spawn(async move {
-                clone
-                    .write(|_| -> u8 { panic!("deliberate write panic") })
-                    .await
-            })
-            .await;
-            let first = handle.record_message(Message::user("dropped")).await;
-            let second = handle.record_message(Message::user("also dropped")).await;
-
-            assert!(panicked.unwrap_err().is_panic());
-            assert_eq!(first.report.failure.as_deref(), Some(STOPPED));
-            assert_eq!(second.report, WriteReport::default());
-            assert_eq!(saved_message_count(&store, &sid), 1);
-        }
-    }
-
     mod record_message {
         use super::*;
 
@@ -790,7 +746,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn keeps_the_manual_title_beside_a_concurrent_fork() {
+        async fn keeps_the_manual_title_a_later_fork_copies() {
             let (_dir, store) = isolated_store();
             let stale = start(&store, "m", None);
             let source = stale.session_id();
@@ -799,10 +755,8 @@ mod tests {
             other.record_message(Message::user("elsewhere")).await;
             other.set_manual_title("Renamed".to_owned()).await;
 
-            let (forked, ai) = tokio::join!(
-                stale.record_message(Message::assistant("reply")),
-                stale.append_ai_title("AI title".to_owned()),
-            );
+            let ai = stale.append_ai_title("AI title".to_owned()).await;
+            let forked = stale.record_message(Message::assistant("reply")).await;
 
             assert!(!ai.applied);
             let fork = forked.report.fork.expect("the stale handle forks").to;
@@ -858,6 +812,19 @@ mod tests {
 
             assert_eq!(report, WriteReport::default());
             assert_eq!(listed_title(&store, &sid).as_deref(), Some("User wins"));
+        }
+
+        #[tokio::test]
+        async fn stops_the_title_request() {
+            let (_dir, store) = isolated_store();
+            let handle = start(&store, "m", None);
+            handle.record_message(Message::user("seed")).await;
+            let mut ended = pending_title_task(&handle).await;
+
+            let report = handle.set_manual_title("User wins".to_owned()).await;
+
+            assert_eq!(report, WriteReport::default());
+            assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Closed));
         }
 
         #[tokio::test]
@@ -1057,6 +1024,52 @@ mod tests {
                 saved_snapshot_paths(&store, &sid),
                 [PathBuf::from("/repo/f.rs")]
             );
+        }
+    }
+
+    mod write {
+        use super::*;
+
+        #[tokio::test]
+        async fn surfaces_a_failed_commit_once_but_to_every_archive() {
+            let (_dir, store) = isolated_store();
+            let handle = start(&store, "m", None);
+            fail_writes(&store);
+
+            let first = handle.record_message(Message::user("a")).await;
+            let second = handle.record_message(Message::user("b")).await;
+            let archived = handle.archive().await;
+
+            let disk_full = "disk full: Error code 1811: constraint failed";
+            assert_eq!(first.report.failure.as_deref(), Some(disk_full));
+            assert_eq!(second.report, WriteReport::default());
+            assert_eq!(archived.failure, Some(format!("{STOPPED}: {disk_full}")));
+        }
+
+        #[tokio::test]
+        async fn panicking_stops_persistence_for_every_clone() {
+            let (_dir, store) = isolated_store();
+            let handle = start(&store, "m", None);
+            let sid = handle.session_id();
+            handle.record_message(Message::user("saved")).await;
+            let clone = handle.clone();
+
+            let panicked = tokio::spawn(async move {
+                clone
+                    .write(|_| -> u8 { panic!("deliberate write panic") })
+                    .await
+            })
+            .await;
+            let first = handle.record_message(Message::user("dropped")).await;
+            let second = handle.record_message(Message::user("also dropped")).await;
+
+            assert!(panicked.unwrap_err().is_panic());
+            assert_eq!(
+                first.report.failure,
+                Some(format!("{STOPPED}: {WRITE_PANICKED}"))
+            );
+            assert_eq!(second.report, WriteReport::default());
+            assert_eq!(saved_message_count(&store, &sid), 1);
         }
     }
 

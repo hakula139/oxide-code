@@ -253,6 +253,7 @@ struct TitleEnvelope {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::pin::pin;
 
     use wiremock::matchers::{body_partial_json, header, method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -265,8 +266,9 @@ mod tests {
     use crate::config::testing::test_config;
     use crate::message::Message;
     use crate::protocol::local_testing::CapturingSink;
+    use crate::session::handle::WriteReport;
     use crate::session::store::local_testing::fail_writes;
-    use crate::session::store::testing::test_store;
+    use crate::session::store::testing::{WriterBarrier, isolated_store, test_store};
 
     fn title_client(base_url: String) -> Client {
         test_client(base_url)
@@ -368,6 +370,45 @@ mod tests {
 
             assert_eq!(rx.recv().await, None);
             assert!(usage.await.is_err(), "a failed request bills nothing");
+        }
+
+        #[tokio::test]
+        async fn delivers_the_usage_whose_write_a_rename_aborts() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(completion_body(r#"{"title":"AI title"}"#)),
+                )
+                .mount(&server)
+                .await;
+            let (_dir, store) = isolated_store();
+            let session = crate::session::handle::start(&store, HAIKU_MODEL, None);
+            let session_id = session.session_id();
+            session.record_message(Message::user("first prompt")).await;
+            let barrier = WriterBarrier::hold(&store);
+
+            let usage = spawn(
+                title_client(server.uri()),
+                api_key(),
+                CACHE_TTL,
+                session.clone(),
+                CapturingSink::default(),
+                "first prompt".to_owned(),
+            );
+            let billed = usage
+                .await
+                .expect("the usage arrives while its write waits for the store");
+            let mut rename = pin!(session.set_manual_title("Manual title".to_owned()));
+            assert!(futures::poll!(rename.as_mut()).is_pending());
+            barrier.release();
+
+            assert_eq!(rename.await, WriteReport::default());
+            assert_eq!(
+                store.load_session_data(&session_id).unwrap().usage,
+                [billed]
+            );
         }
     }
 

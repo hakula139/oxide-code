@@ -851,7 +851,8 @@ mod tests {
                             && first == "Archive failed: \
                                          disk full: Error code 1811: constraint failed"
                             && again == "Archive failed: \
-                                         session persistence stopped after an earlier write failed"
+                                         session persistence stopped after an earlier write \
+                                         failed: disk full: Error code 1811: constraint failed"
                     ),
                     "{events:?}",
                 );
