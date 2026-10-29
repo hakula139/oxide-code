@@ -114,7 +114,7 @@ impl<'a> Mailbox<'a> {
 mod tests {
     use super::*;
     use crate::protocol::SignInCode;
-    use crate::protocol::testing::CapturingSink;
+    use crate::protocol::local_testing::CapturingSink;
 
     mod mailbox {
         use super::*;

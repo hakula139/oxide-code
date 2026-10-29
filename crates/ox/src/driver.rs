@@ -5,6 +5,8 @@ pub(crate) mod headless;
 pub(crate) mod repl;
 mod stdio;
 
+pub(crate) use self::stdio::OutputFormat;
+
 use std::process::ExitCode;
 
 // ── Input ──
@@ -81,38 +83,75 @@ impl Shutdown {
     }
 }
 
-/// Resolves on the first SIGINT / SIGTERM / SIGHUP.
-pub(crate) async fn shutdown_signal() -> Shutdown {
+/// The SIGINT / SIGTERM / SIGHUP listeners of one run, registered once so a signal arriving
+/// between two waits is still delivered. A failed registration is logged, and that signal keeps
+/// its default action, which ends ox without finishing the session.
+pub(crate) struct Signals {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        use tracing::warn;
+    interrupt: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    terminate: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    hangup: Option<tokio::signal::unix::Signal>,
+    #[cfg(not(unix))]
+    interrupt: Option<tokio::signal::windows::CtrlC>,
+}
 
-        let ctrl_c = tokio::signal::ctrl_c();
-        let (mut sigterm, mut sighup) = match (
-            signal(SignalKind::terminate()),
-            signal(SignalKind::hangup()),
-        ) {
-            (Ok(sigterm), Ok(sighup)) => (sigterm, sighup),
-            (Err(e), _) | (_, Err(e)) => {
-                warn!(
-                    error = %e,
-                    "failed to listen for SIGTERM and SIGHUP, so only SIGINT stops ox"
-                );
-                _ = ctrl_c.await;
-                return Shutdown::Interrupt;
+impl Signals {
+    /// Starts listening. Must run inside the tokio runtime.
+    pub(crate) fn new() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            Self {
+                interrupt: listen("SIGINT", signal(SignalKind::interrupt())),
+                terminate: listen("SIGTERM", signal(SignalKind::terminate())),
+                hangup: listen("SIGHUP", signal(SignalKind::hangup())),
             }
-        };
-        tokio::select! {
-            _ = ctrl_c => Shutdown::Interrupt,
-            _ = sigterm.recv() => Shutdown::Terminate,
-            _ = sighup.recv() => Shutdown::Hangup,
+        }
+        #[cfg(not(unix))]
+        Self {
+            interrupt: listen("Ctrl+C", tokio::signal::windows::ctrl_c()),
         }
     }
-    #[cfg(not(unix))]
-    {
-        _ = tokio::signal::ctrl_c().await;
-        Shutdown::Interrupt
+
+    /// Waits for the next signal. Cancel safe, so a caller may race it against other work and call
+    /// it again without losing a signal.
+    pub(crate) async fn recv(&mut self) -> Shutdown {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                () = next(self.interrupt.as_mut()) => Shutdown::Interrupt,
+                () = next(self.terminate.as_mut()) => Shutdown::Terminate,
+                () = next(self.hangup.as_mut()) => Shutdown::Hangup,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if let Some(interrupt) = &mut self.interrupt {
+                _ = interrupt.recv().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+            Shutdown::Interrupt
+        }
+    }
+}
+
+/// The listener `registered` made, or `None` after logging why `name` cannot be heard.
+fn listen<T>(name: &str, registered: std::io::Result<T>) -> Option<T> {
+    registered
+        .inspect_err(|e| tracing::warn!(signal = name, error = %e, "failed to listen for a signal"))
+        .ok()
+}
+
+/// Waits for the next signal on `listener`, or forever without one.
+#[cfg(unix)]
+async fn next(listener: Option<&mut tokio::signal::unix::Signal>) {
+    match listener {
+        Some(listener) => _ = listener.recv().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -123,6 +162,29 @@ pub(crate) mod testing {
     use std::cell::RefCell;
     use std::io::{self, Write};
     use std::rc::Rc;
+
+    use super::Shutdown;
+    use super::stdio::{Output, OutputFormat};
+
+    /// An output in `format` with the screens its stdout and stderr show.
+    pub(super) fn output(format: OutputFormat) -> (Output<Screen, Screen>, Screen, Screen) {
+        let (stdout, stderr) = (Screen::default(), Screen::default());
+        let output = Output::new(format, false, stdout.clone(), stderr.clone());
+        (output, stdout, stderr)
+    }
+
+    /// The `data` of the result line that ends `stdout`.
+    pub(super) fn result_data(stdout: &str) -> serde_json::Value {
+        let line = stdout.lines().last().expect("a result line");
+        let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(record["type"], "result");
+        record["data"].take()
+    }
+
+    /// A signal that never arrives.
+    pub(super) async fn no_signal() -> Shutdown {
+        std::future::pending().await
+    }
 
     /// A stdout whose reader went away.
     pub(crate) struct ClosedPipe;
@@ -137,7 +199,61 @@ pub(crate) mod testing {
         }
     }
 
+    /// How a [`FailingWriter`] fails, once.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Failure {
+        /// The first write that contains the text.
+        Write(&'static str),
+        /// The first flush.
+        Flush,
+    }
+
+    impl Failure {
+        pub(super) fn message(self) -> &'static str {
+            match self {
+                Self::Write(_) => "write failed",
+                Self::Flush => "flush failed",
+            }
+        }
+    }
+
+    /// A writer that fails once as its [`Failure`] says and shows every other write on `screen`.
+    pub(super) struct FailingWriter {
+        pub(super) screen: Screen,
+        failure: Option<Failure>,
+    }
+
+    impl FailingWriter {
+        pub(super) fn new(failure: Failure) -> Self {
+            Self {
+                screen: Screen::default(),
+                failure: Some(failure),
+            }
+        }
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if let Some(failure @ Failure::Write(text)) = self.failure
+                && buf.windows(text.len()).any(|part| part == text.as_bytes())
+            {
+                self.failure = None;
+                return Err(io::Error::other(failure.message()));
+            }
+            self.screen.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if let Some(failure @ Failure::Flush) = self.failure {
+                self.failure = None;
+                return Err(io::Error::other(failure.message()));
+            }
+            Ok(())
+        }
+    }
+
     /// A terminal that stdout and stderr both write to, so a test sees the order of their lines.
+    /// Clones show the same screen, so a test keeps one to read what the code under test wrote.
     #[derive(Clone, Default)]
     pub(super) struct Screen(Rc<RefCell<Vec<u8>>>);
 

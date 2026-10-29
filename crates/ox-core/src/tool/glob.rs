@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use super::search::{NO_FILES_FOUND, SearchOutput, SearchRoot};
+use super::search::{NO_FILES_FOUND, SearchOutput, SearchRoot, search_arg};
 use super::view::ToolResultView;
 use super::{
     Prepared, StoredView, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field,
@@ -47,7 +47,7 @@ impl Tool for GlobTool {
 
     fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
         Prepared::parse(input, |input: &Input| {
-            Ok(super::search::root_access(input.path.as_deref(), ctx))
+            Ok(ctx.path_access(search_arg(input.path.as_deref())))
         })
     }
 
@@ -101,12 +101,12 @@ struct Input {
 // ── Execution ──
 
 async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> ToolOutput {
-    let (Input { pattern, path }, access) = prepared.into_parts();
+    let (Input { pattern, path }, base) = prepared.into_path_input();
 
     let workspace = Arc::clone(&ctx.workspace);
     let cancel = ctx.cancel.clone();
     super::run_blocking(move || {
-        let root = SearchRoot::new(&access, path.as_deref(), workspace)?;
+        let root = SearchRoot::new(base, path.as_deref(), workspace)?;
         glob_files(&pattern, &root, &read_filter, &cancel)
     })
     .await

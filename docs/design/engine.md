@@ -43,4 +43,4 @@ A turn is a loop of rounds. Each round sends the transcript to the model, stream
 - `crates/ox-core/src/protocol.rs`: `Op`, `Event`, the per-op terminal-event docs, and `TurnEnd::of`.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op`, which sends each frontend action as an op.
 - `crates/ox-tui/src/app/events.rs`: the TUI's event handling and operation teardown.
-- `crates/ox/src/driver/stdio.rs`: `render_op`, which renders until the op ends.
+- `crates/ox/src/driver/stdio.rs`: `run_op`, which sends an op and renders until it ends.

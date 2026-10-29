@@ -1,5 +1,5 @@
 ---
-source: crates/ox/src/driver/headless/wire.rs
+source: crates/ox/src/driver/stdio/wire.rs
 expression: "lines.join(\"\\n\")"
 ---
 {"type":"stream_token","data":"Done."}
