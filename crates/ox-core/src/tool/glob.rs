@@ -511,8 +511,8 @@ mod tests {
         #[test]
         fn modification_time_orders_newest_first() {
             let dir = canonical_tempdir();
-            local_testing::create_modified_at(&dir.path().join("a.txt"), 1_000_000);
-            local_testing::create_modified_at(&dir.path().join("b.txt"), 1_000_060);
+            local_testing::write_modified_at(&dir.path().join("a.txt"), "", 1_000_000);
+            local_testing::write_modified_at(&dir.path().join("b.txt"), "", 1_000_060);
 
             let result = glob_in("*.txt", None, dir.path(), &ReadFilter::default()).unwrap();
 

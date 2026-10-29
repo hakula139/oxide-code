@@ -69,13 +69,19 @@ fn file_read_error(path: &Path, error: FileReadError, verb: FileVerb) -> String 
     }
 }
 
-// ── Binary Detection ──
+// ── Text Rules ──
 
 const BINARY_CHECK_SIZE: usize = 8192;
 
-/// Returns whether `bytes` hold a NUL in the first 8 KiB, which Git takes to mean binary.
+/// Returns whether `bytes` hold a NUL in the first 8 KiB, which Git takes to mean binary. `read`
+/// refuses such a file, and `grep` skips it.
 pub(super) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
+}
+
+/// `text` without a leading UTF-8 BOM, which `read` and `grep` drop from a file's first line.
+pub(super) fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 // ── File Reading ──
@@ -169,6 +175,20 @@ mod tests {
                 tracker_key(&dir.path().join("link/a.rs")).await,
                 dir.path().join("real/a.rs"),
             );
+        }
+    }
+
+    mod strip_bom {
+        use super::*;
+
+        #[test]
+        fn removes_bom() {
+            assert_eq!(strip_bom("\u{feff}hello"), "hello");
+        }
+
+        #[test]
+        fn keeps_text_without_a_bom() {
+            assert_eq!(strip_bom("hello"), "hello");
         }
     }
 

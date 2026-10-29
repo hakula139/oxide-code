@@ -493,6 +493,7 @@ async fn run_blocking<T: Send + 'static>(
 #[cfg(test)]
 pub(crate) mod local_testing {
     use std::fs::File;
+    use std::io::Write as _;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
@@ -597,9 +598,10 @@ pub(crate) mod local_testing {
         }
     }
 
-    /// Creates an empty file at `path`, last modified `secs` seconds after the Unix epoch.
-    pub(super) fn create_modified_at(path: &Path, secs: u64) {
-        let file = File::create(path).unwrap();
+    /// Writes `contents` to `path`, last modified `secs` seconds after the Unix epoch.
+    pub(super) fn write_modified_at(path: &Path, contents: &str, secs: u64) {
+        let mut file = File::create(path).unwrap();
+        file.write_all(contents.as_bytes()).unwrap();
         file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
             .unwrap();
     }
