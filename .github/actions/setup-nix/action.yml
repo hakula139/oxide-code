@@ -17,7 +17,10 @@ runs:
           sandbox = true
           sandbox-fallback = false
 
+    # `continue-on-error` also covers the action's post step, which pushes the job's builds.
     - name: Set up Cachix
+      id: cachix
+      continue-on-error: true
       uses: cachix/cachix-action@v17
       with:
         name: hakula
@@ -25,3 +28,8 @@ runs:
         skipPush: >-
           ${{ !inputs.cachix_auth_token ||
           !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
+
+    - name: Report Cachix failure
+      if: ${{ steps.cachix.outcome == 'failure' }}
+      shell: bash
+      run: echo "::warning title=Cachix unavailable::Cachix setup failed, so this job builds without the hakula cache."
