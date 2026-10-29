@@ -13,8 +13,8 @@ use self::environment::Environment;
 use self::sections::{
     CAUTION, INTRO, OUTPUT_EFFICIENCY, STYLE, SYSTEM_SECTION, TASK_GUIDANCE, TOOL_GUIDANCE,
 };
+use crate::git::repo_root;
 use crate::model::ModelSpec;
-use crate::util::git::repo_root;
 
 /// Output of [`build_prompt`] or [`restore_prompt`], held for a whole session so every request
 /// shares a byte-identical prefix.
@@ -247,8 +247,8 @@ mod tests {
     use time::{Date, OffsetDateTime};
 
     use super::*;
-    use crate::util::git::local_testing::init_fixture_repo;
-    use crate::util::git::testing::with_isolated_git_env_async;
+    use crate::git::local_testing::init_fixture_repo;
+    use crate::git::testing::with_isolated_git_env_async;
     use crate::util::path::testing::pinned_home;
 
     const IDENTITY: &str = "You are powered by the model test-model.";

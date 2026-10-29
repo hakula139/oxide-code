@@ -14,10 +14,10 @@ use ox_core::permission::Mode;
 use ox_core::protocol::UsageSnapshot;
 use ox_core::session::display::id_prefix;
 use ox_core::tool::tasks::Progress;
-use ox_core::util::git::{Checks, PullRequest, ReviewDecision};
 use ox_core::util::text::{compact_count, truncate_to_width};
 
 use crate::components::LEFT_MARGIN;
+use crate::git_probes::pull_request::{Checks, PullRequest, ReviewDecision};
 use crate::saturating_u16;
 use crate::theme::Theme;
 
@@ -430,9 +430,8 @@ fn format_cost(cost: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ox_core::util::git::testing::pull_request;
-
     use super::*;
+    use crate::git_probes::pull_request::testing::pull_request;
 
     mod render {
         use super::*;

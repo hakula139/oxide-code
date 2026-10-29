@@ -158,7 +158,7 @@ struct Call<'r> {
 }
 
 impl Call<'_> {
-    /// Runs the call under the time cap and returns its output.
+    /// Runs the call and caps its output.
     async fn run(self) -> ToolOutput {
         run_capped(self.tool, self.prepared, &self.ctx).await
     }
@@ -319,7 +319,10 @@ impl<'r> Dispatcher<'r, '_> {
         };
 
         let ctx = self.dispatch_ctx.tool_ctx(id);
-        let prepared = tool.prepare(input, &ctx);
+        let prepared = match tool.prepare(input, &ctx) {
+            Ok(prepared) => prepared,
+            Err(message) => return Ok(Err(ToolOutput::error(message))),
+        };
         Ok(
             match self.check_permission(spec, tool, id, &prepared).await? {
                 None => Ok(Call {
@@ -555,8 +558,7 @@ mod tests {
     use crate::permission::{PermissionClass, Tier};
     use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::tool::ToolDefinition;
-    #[cfg(unix)]
-    use crate::tool::read::ReadTool;
+    use crate::tool::edit::EditTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_registry;
@@ -1350,32 +1352,32 @@ mod tests {
                 assert_eq!(approval_ids(&sink), [] as [&str; 0]);
             }
 
-            #[cfg(unix)]
             #[tokio::test]
-            async fn pins_a_path_input_to_the_resolved_target() {
-                let dir = canonical_tempdir();
-                let cwd = dir.path();
-                std::fs::write(cwd.join("real.txt"), "x").unwrap();
-                std::os::unix::fs::symlink("real.txt", cwd.join("link.txt")).unwrap();
-                let tools = ToolRegistry::new(vec![Box::new(ReadTool)]);
-                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], cwd);
+            async fn malformed_input_settles_without_asking() {
+                // An edit without a path has no workspace target, so in `manual` the policy would
+                // ask about a call that cannot run.
+                let tools = ToolRegistry::new(vec![Box::new(EditTool)]);
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
 
-                let gate = gate_call(
+                let output = gate_call(
                     &tools,
                     "tool_1",
-                    "read",
-                    json!({"file_path": "link.txt"}),
-                    &CapturingSink::default(),
+                    "edit",
+                    json!({"old_string": "a", "new_string": "b"}),
+                    &sink,
                     &mut inert_ops(),
                     &mut dispatch_ctx,
                 )
                 .await
-                .expect("a read resolves without abort");
+                .expect("malformed input resolves without abort");
+                let output = expect_settled(output);
 
                 assert_eq!(
-                    expect_ready(gate).input,
-                    json!({"file_path": cwd.join("real.txt")}),
+                    (output.content.as_str(), output.is_error),
+                    ("Invalid input: missing field `file_path`", true),
                 );
+                assert_eq!(approval_ids(&sink), [] as [&str; 0]);
             }
 
             #[cfg(unix)]
