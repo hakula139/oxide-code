@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use strum::Display;
 
+pub(super) use self::commit::Checked;
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::util::fs::{FileReadError, read_regular_file, validate_regular_file};
 use crate::util::path::lexical_normalize;
@@ -18,7 +19,9 @@ use crate::util::text::format_size;
 
 /// The [`FileTracker`](crate::file_tracker::FileTracker) key for the absolute `path` a file tool
 /// acts on. An existing path canonicalizes, so dotted and symlinked spellings of one file share an
-/// entry. A missing path falls back to its lexically clean form.
+/// entry. A missing path falls back to its lexically clean form. The gate's resolved path cannot
+/// stand in, since it keeps each name as spelled, while `canonicalize` returns the on-disk case on
+/// a case-insensitive volume.
 pub(super) async fn tracker_key(path: &Path) -> PathBuf {
     tokio::fs::canonicalize(path).await.map_or_else(
         |_| lexical_normalize(path),
@@ -103,26 +106,50 @@ pub(super) async fn read_validated(path: &Path, verb: FileVerb) -> Result<Vec<u8
 
 // ── File Writing ──
 
-/// Publishes `bytes` after checking the original `expected` bytes and metadata, rewriting an
-/// existing file in place. `None` requires a new path. The caller must use the tracker's owned
-/// write operation.
-pub(super) async fn write_file(
+/// Opens the existing file at `path` once for a rewrite, checking its metadata before the open and
+/// through the opened no-follow handle. Errors name `path` and phrase refusals for `verb`. Blocks,
+/// so callers run it on the blocking pool.
+pub(super) fn open_checked(path: &Path, verb: FileVerb) -> Result<Checked, String> {
+    let metadata =
+        std::fs::metadata(path).map_err(|e| format!("Failed to access {}: {e}", path.display()))?;
+    validate_file_target(path, &metadata, verb)?;
+    Checked::open(path).map_err(|error| match error {
+        FileReadError::Io(error) => format!("Failed to write {}: {error}", path.display()),
+        error => file_read_error(path, error, verb),
+    })
+}
+
+/// Rewrites the file `checked` holds with `bytes` and returns them under the tracker `key`. The
+/// caller must use the tracker's owned write operation.
+pub(super) async fn rewrite_file(
+    checked: Checked,
+    path: PathBuf,
+    key: PathBuf,
+    bytes: Vec<u8>,
+) -> anyhow::Result<(PathBuf, Vec<u8>)> {
+    tokio::task::spawn_blocking(move || {
+        checked
+            .rewrite(&path, &bytes)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+        Ok((key, bytes))
+    })
+    .await?
+}
+
+/// Creates the new file `path` holding `bytes` and returns them under its tracker key. The caller
+/// must use the tracker's owned write operation.
+pub(super) async fn create_file(
     path: PathBuf,
     bytes: Vec<u8>,
-    expected: Option<Vec<u8>>,
 ) -> anyhow::Result<(PathBuf, Vec<u8>)> {
-    let key = if expected.is_none() {
-        let parent = path
-            .parent()
-            .expect("prepare resolves an absolute file path");
-        let name = path.file_name().expect("a file path names a file");
-        let parent = tokio::fs::canonicalize(parent).await?;
-        dunce::simplified(&parent).join(name)
-    } else {
-        tracker_key(&path).await
-    };
+    let parent = path
+        .parent()
+        .expect("prepare resolves an absolute file path");
+    let name = path.file_name().expect("a file path names a file");
+    let parent = tokio::fs::canonicalize(parent).await?;
+    let key = dunce::simplified(&parent).join(name);
     tokio::task::spawn_blocking(move || {
-        commit::write(&path, &bytes, expected.as_deref())
+        commit::create(&path, &bytes)
             .with_context(|| format!("Failed to write {}", path.display()))?;
         Ok((key, bytes))
     })
@@ -235,29 +262,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    mod write_file {
-        use super::*;
-
-        #[tokio::test]
-        async fn overwrite_refuses_a_fifo_without_blocking() {
-            let dir = tempfile::tempdir().unwrap();
-            let fifo = dir.path().join("pipe");
-            nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
-
-            let write = write_file(fifo.clone(), b"x".to_vec(), Some(Vec::new()));
-            let error = tokio::time::timeout(std::time::Duration::from_secs(5), write)
-                .await
-                .expect("the open must not block")
-                .unwrap_err();
-
-            assert_eq!(
-                format!("{error:#}"),
-                format!("Failed to write {}: not a regular file", fifo.display()),
-            );
-        }
-    }
-
     #[cfg(windows)]
     mod compressed_files {
         use super::*;
@@ -283,7 +287,9 @@ mod tests {
 
             let bytes = read_validated(&path, FileVerb::Read).await.unwrap();
             assert_eq!(bytes, content.as_bytes());
-            commit::write(&path, b"rewritten", Some(content.as_bytes())).unwrap();
+            let checked = open_checked(&path, FileVerb::Write).unwrap();
+            assert_eq!(checked.content(), content.as_bytes());
+            checked.rewrite(&path, b"rewritten").unwrap();
             assert_eq!(fs::read(&path).unwrap(), b"rewritten");
         }
     }
