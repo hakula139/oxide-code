@@ -1,4 +1,4 @@
-//! In-memory session state owned by the actor, which turns absorbed commands into the records of
+//! In-memory session state behind the handle's lock, which turns each write into the records of
 //! the next [`Commit`]. It uses no tokio, so lifecycle transitions test without a runtime.
 
 use std::collections::BTreeMap;
@@ -21,17 +21,14 @@ use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 use crate::util::fs::FileLock;
 
-/// What every batch after a failed commit reports, since nothing is written once one fails.
+/// What every commit after a failed write reports before naming that failure, since nothing is
+/// written once one fails.
 pub(super) const STOPPED: &str = "session persistence stopped after an earlier write failed";
 
 // ── SessionState ──
 
-/// Session lifecycle that [`super::actor::run`] drives. The session row exists once the first
-/// message commits, and each commit writes the records absorbed since the last one.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "each bool tracks an independent part of the session lifecycle"
-)]
+/// Session lifecycle that [`super::handle::SessionHandle`] drives. The session row exists once the
+/// first message commits, and each commit writes the records queued since the last one.
 pub(super) struct SessionState {
     store: SessionStore,
     /// Opened by the first commit.
@@ -44,12 +41,13 @@ pub(super) struct SessionState {
     message_count: u32,
     /// Whether a prompt or compaction root on the branch used the first-prompt title opportunity.
     first_user_prompt_seen: bool,
-    /// Records absorbed since the last commit.
+    /// Records queued since the last commit.
     records: Vec<Record>,
     /// Whether a record since the last commit moved the head.
     head_moved: bool,
     finished: bool,
-    stopped: bool,
+    /// The failure that stopped persistence.
+    stopped: Option<String>,
 }
 
 /// A saved session: the head this process last committed or loaded, and the liveness lock it holds
@@ -127,7 +125,7 @@ impl SessionState {
             records: Vec::new(),
             head_moved: false,
             finished: false,
-            stopped: false,
+            stopped: None,
         }
     }
 
@@ -271,17 +269,24 @@ impl SessionState {
         }
     }
 
-    /// Commits the records absorbed since the last commit, returning the fork it made. A fresh
+    /// Stops persistence for good, as a failed commit does. Every later failure names `cause`
+    /// unless an earlier failure already stopped it.
+    pub(super) fn stop(&mut self, cause: String) {
+        self.stopped.get_or_insert(cause);
+    }
+
+    /// Commits the records queued since the last commit, returning the fork it made. A fresh
     /// session keeps its records until a message creates its row. The first failure stops
-    /// persistence for good, and every later batch with records fails with [`STOPPED`].
+    /// persistence for good, and every later commit with records fails with [`STOPPED`] and that
+    /// first failure.
     pub(super) fn flush(&mut self) -> Result<Option<Fork>> {
-        if self.stopped {
+        if let Some(cause) = &self.stopped {
             if self.records.is_empty() && !self.head_moved {
                 return Ok(None);
             }
             self.records.clear();
             self.head_moved = false;
-            return Err(anyhow!(STOPPED));
+            return Err(anyhow!("{STOPPED}: {cause}"));
         }
         let materializes = self
             .records
@@ -299,7 +304,7 @@ impl SessionState {
         match result {
             Ok(forked) => Ok(forked),
             Err(e) => {
-                self.stopped = true;
+                self.stopped = Some(format!("{e:#}"));
                 Err(e)
             }
         }
@@ -674,7 +679,7 @@ mod tests {
             let empty = state.flush();
 
             assert!(format!("{first:#}").contains("disk full"), "{first:#}");
-            assert_eq!(later.to_string(), STOPPED);
+            assert_eq!(later.to_string(), format!("{STOPPED}: {first:#}"));
             assert_eq!(
                 empty.unwrap(),
                 None,

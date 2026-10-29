@@ -49,8 +49,7 @@ pub(super) struct LiveTranscript {
 /// compaction, and the session's checkpoint at the same point.
 struct RollbackPoint {
     transcript: TranscriptStart,
-    /// `None` when the session writer is gone, so the rollback leaves the session alone.
-    checkpoint: Option<Checkpoint>,
+    checkpoint: Checkpoint,
 }
 
 /// The transcript state at a turn's rollback point: its length, what the model had seen of the
@@ -176,10 +175,7 @@ impl LiveTranscript {
         self.prompt.seen = start.seen;
         self.prompt_unrecorded = start.prompt_unrecorded;
         self.file_tracker.reset_to(start.files);
-        match checkpoint {
-            Some(checkpoint) => self.session.rewind(checkpoint).await,
-            None => WriteReport::default(),
-        }
+        self.session.rewind(checkpoint).await
     }
 
     fn start_of_turn(&self) -> TranscriptStart {
@@ -264,17 +260,15 @@ impl LiveTranscript {
         self.file_tracker.drain_writes().await;
         let context = boundary.context.clone();
         let outcome = self.session.compact(boundary, synthetic.clone()).await;
-        if outcome.checkpoint.is_some() {
-            self.messages = vec![synthetic];
-            self.prompt.adopt(context);
-            self.prompt_unrecorded = false;
-            self.file_tracker.clear();
-            if self.turn.is_some() {
-                self.turn = Some(RollbackPoint {
-                    transcript: self.start_of_turn(),
-                    checkpoint: outcome.checkpoint,
-                });
-            }
+        self.messages = vec![synthetic];
+        self.prompt.adopt(context);
+        self.prompt_unrecorded = false;
+        self.file_tracker.clear();
+        if self.turn.is_some() {
+            self.turn = Some(RollbackPoint {
+                transcript: self.start_of_turn(),
+                checkpoint: outcome.checkpoint,
+            });
         }
         outcome
     }
@@ -348,11 +342,6 @@ impl LiveTranscript {
     /// Replaces the messages without writing the session.
     pub(super) fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
-    }
-
-    /// Replaces the session without finalizing the one the transcript holds.
-    pub(super) fn set_session(&mut self, session: SessionHandle) {
-        self.session = session;
     }
 
     /// Whether the next user message records the prompt.

@@ -52,7 +52,7 @@ const SUMMARIZATION_USER_RUBRIC: &str = indoc! {"
 ///
 /// The summary streams to `sink` as [`Event::SummaryToken`]s. A retry, a failure, or a dropped
 /// future ends them with [`Event::SummaryDiscarded`]. On success the caller must end them with
-/// [`Event::SessionCompacted`] or [`Event::SummaryDiscarded`].
+/// [`Event::SessionCompacted`].
 ///
 /// Errors when the transcript is too short to compact, a request fails, or the reply is empty or
 /// stops before the summary finishes.
@@ -172,7 +172,7 @@ impl<'a> SummaryStream<'a> {
         }
     }
 
-    /// Leaves the streamed summary for the compact boundary to commit or discard.
+    /// Leaves the streamed summary for the compact boundary to commit.
     fn keep(mut self) {
         *self.streamed.get_mut() = false;
     }
@@ -353,13 +353,14 @@ mod tests {
     use crate::client::anthropic::local_testing::test_client;
     use crate::client::anthropic::testing::{api_key, sse_body, sse_response};
     use crate::client::testing::five_hour_limit;
-    use crate::engine::local_testing::{dead_test_session, tool_heavy_transcript};
+    use crate::engine::local_testing::tool_heavy_transcript;
     use crate::engine::testing::{MODEL, request_bodies};
     use crate::engine::transcript::LiveTranscript;
     use crate::engine::turn::conversation_request;
     use crate::message::Replay;
     use crate::model::ModelSettings;
     use crate::protocol::local_testing::CapturingSink;
+    use crate::session::handle;
     use crate::tool::ToolDefinition;
 
     fn to_json(messages: &[Message]) -> Vec<serde_json::Value> {
@@ -417,7 +418,7 @@ mod tests {
         /// The conversation a summary forks, holding `messages` under its own system prompt and
         /// user context.
         fn parent(messages: Vec<Message>) -> LiveTranscript {
-            let mut parent = LiveTranscript::with_messages(&dead_test_session(), messages);
+            let mut parent = LiveTranscript::with_messages(&handle::testing::unsaved(), messages);
             let prompt = parent.prompt_mut();
             prompt.system.stable = "You are the parent conversation.".to_owned();
             "Project instructions.".clone_into(&mut prompt.user_context);

@@ -778,7 +778,6 @@ mod tests {
 
             store.import(exported().as_slice()).unwrap();
             let next = resumed.handle.record_message(Message::user("m6")).await;
-            resumed.handle.shutdown().await;
 
             let fork = next.report.fork.expect("the stale handle forks");
             assert_eq!(fork.from, SESSION);

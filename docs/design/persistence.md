@@ -1,6 +1,6 @@
 # Session Persistence
 
-`ox` stores every session in one SQLite database, writes each session through a single actor task, and rebuilds the transcript on resume from the chain its head names. JSONL is the interchange form that `ox export` writes and `ox -r <file>` imports.
+`ox` stores every session in one SQLite database, commits each write to a session under its state's lock, and rebuilds the transcript on resume from the chain its head names. JSONL is the interchange form that `ox export` writes and `ox -r <file>` imports.
 
 ## Storage Layout
 
@@ -60,11 +60,11 @@ Tests in `session/handle.rs` enforce the guarantee for stable releases, using tw
 
 ## Session Lifecycle
 
-### Actor and Batched Writes
+### Locked Writes
 
-Each process uses a single `tokio::spawn`-ed actor task for its session. The rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, drains any queued commands with `try_recv()` into `SessionState`, then moves the state into a `spawn_blocking` task that commits the batch as one transaction and returns the state before the actor sends its acknowledgments, so waiting for another process's write lock leaves the async runtime available. The state owns one connection, opened by its first commit.
+Each open session keeps one `SessionState` behind a mutex that every `SessionHandle` clone shares. A write runs on a `spawn_blocking` thread, where it takes the lock, applies its change to the state, and commits what the change queued as one transaction, so waiting for another process's write lock leaves the async runtime available. The state owns one connection, opened by its first commit. The engine and the title task are the only writers, and each awaits its own writes in order, so writes from the two run in lock order, which the in-state manual-title check makes safe. A caller that stops waiting leaves its write to finish on the blocking thread. A write that panics while holding the lock stops persistence as a failed commit does, and the panic also reaches the caller, so a panicking engine write ends the engine and `ox` exits with the panic. The recovered lock mainly keeps the conversation going after a panicking title-task write.
 
-`agent_turn` records a tool round with one `SessionCmd::RecordRound`, which writes the assistant row and then the row of the tool results answering it, carrying their metadata. Because one command owns the whole round, a resumed session always reads the assistant turn before the results that answer it. Resume sanitization drops a tool call whose result is missing.
+`agent_turn` records a tool round with one `SessionHandle::record_round` write, which saves the assistant row and then the row of the tool results answering it, carrying their metadata. Because one commit holds the whole round, a resumed session always reads the assistant turn before the results that answer it. Resume sanitization drops a tool call whose result is missing.
 
 ### Lazy Materialization
 
@@ -72,13 +72,13 @@ A fresh session's row is inserted from the in-memory state in the transaction of
 
 ### Write Failures
 
-A failed commit rolls back its whole batch and stops persistence for the rest of the process's session, while the conversation continues in memory. Nothing is retried, since a later batch would chain onto rows that never landed and the failures SQLite still reports, such as a full disk, an I/O error, or a lock held past the busy timeout, do not clear on a blind retry. Every later batch with records fails with a stopped-persistence error, and resuming later continues from the last commit.
+A failed commit rolls back its whole transaction and stops persistence for the rest of the process's session, while the conversation continues in memory. Nothing is retried, since a later commit would chain onto rows that never landed and the failures SQLite still reports, such as a full disk, an I/O error, or a lock held past the busy timeout, do not clear on a blind retry. Every later commit with records fails with a stopped-persistence error that names the first failure, and resuming later continues from the last commit. Each failed commit is logged on its blocking thread, including one whose caller stopped waiting.
 
-Each ack carries a `WriteReport`, whose `failure` the engine turns into one `Event::Error`:
+Each write returns a `WriteReport`, whose `failure` the engine turns into one `Event::Error`:
 
-- A failure is reported once per session, by the first ack after it. Two sticky-once flags in `SharedState`, one for commit failures and one for an actor that is gone, keep the two kinds from masking each other.
-- Archive acks report every failure, since a bare `/archive` rolls to a fresh session only once its archive commits.
-- A compaction always takes effect in memory, and its boundary is on disk exactly when its batch committed. The engine reports a committed compaction's write error after `SessionCompacted`, which clears the TUI's chat, so the notice stays visible.
+- A failure is reported once per session, by the first write that fails, and the writes after it report none.
+- An archive reports every failure, since a bare `/archive` rolls to a fresh session only once its archive commits.
+- A compaction always takes effect in memory, and its boundary is on disk exactly when its commit landed. The engine reports the compaction's write error after `SessionCompacted`, which clears the TUI's chat, so the notice stays visible.
 
 ### Resume and Sanitization
 
@@ -103,11 +103,11 @@ The session's [task list](tasks.md) needs no column of its own. On resume, the l
 
 ### Archiving
 
-`archived_at` sets whether default listings and `ox -c` skip the session, and archiving leaves `updated_at` alone. One conditional update moves a session only out of the other state, so an archive keeps its first archive time, and the update's row count tells two processes archiving one session which of them changed it. Bare `/archive` queues the archive through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker update another session's row. Each of these names the session by an ID or a prefix, and the engine resolves it, owns the archive through completion, and runs the update on a blocking worker, keeping input and rendering available while another process holds the write lock. Later session operations wait for that completion, and the result reaches chat even after the picker closes. Resuming an archived session unarchives it.
+`archived_at` sets whether default listings and `ox -c` skip the session, and archiving leaves `updated_at` alone. One conditional update moves a session only out of the other state, so an archive keeps its first archive time, and the update's row count tells two processes archiving one session which of them changed it. Bare `/archive` writes the archive to the live session before the roll that finalizes it. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker update another session's row. Each of these names the session by an ID or a prefix, and the engine resolves it, owns the archive through completion, and runs the update on a blocking worker, keeping input and rendering available while another process holds the write lock. Later session operations wait for that completion, and the result reaches chat even after the picker closes. Resuming an archived session unarchives it.
 
 ### Liveness Locks
 
-A process that opens a session for writing takes a shared lock on `locks/{session-id}.lock` and holds it until the actor shuts down. The kernel releases the lock when the process dies, so no stale-lock cleanup exists. `/delete` takes a non-blocking exclusive lock on the same file and refuses a session another process has open. Resume takes the lock before it reads the row, so a racing delete either sees the lock or finishes first and the resume finds no session. Delete commits the removal of the rows first and then removes the artifacts and the lock file, so a failure leaves at most orphaned files.
+A process that opens a session for writing takes a shared lock on `locks/{session-id}.lock` and holds it until its last handle on the session drops, which finalizing the session on a roll or at exit does. The kernel releases the lock when the process dies, so no stale-lock cleanup exists. `/delete` takes a non-blocking exclusive lock on the same file and refuses a session another process has open. Resume takes the lock before it reads the row, so a racing delete either sees the lock or finishes first and the resume finds no session. Delete commits the removal of the rows first and then removes the artifacts and the lock file, so a failure leaves at most orphaned files.
 
 The lock serves delete alone. Two processes holding one session open is the normal case that the lazy fork handles.
 
@@ -124,9 +124,9 @@ A commit that moves the head first compares `head_id` with the head this process
 | B renames or archives S, then A writes                    | A continues S, since metadata does not move the head |
 | B rewinds S to exactly the head A last saw, then A writes | A continues S, since that head names A's branch      |
 
-In the same transaction, the forking process takes the fork's liveness lock, inserts the fork's row from its in-memory state with `forked_from` set to S and the title and manual flag copied from S, copies its base chain back to the nearest NULL parent into the fork with the message IDs unchanged, and writes its batch there. The process then takes the fork's title and manual flag as the batch left them, and releases S's lock. Pre-compaction rows, other branches, and usage stay in S, so every request is counted once, in the session that made it. Keeping the message IDs keeps the process's chain tip and rewind checkpoints valid in the fork.
+In the same transaction, the forking process takes the fork's liveness lock, inserts the fork's row from its in-memory state with `forked_from` set to S and the title and manual flag copied from S, copies its base chain back to the nearest NULL parent into the fork with the message IDs unchanged, and writes its records there. The process then takes the fork's title and manual flag as the commit left them, and releases S's lock. Pre-compaction rows, other branches, and usage stay in S, so every request is counted once, in the session that made it. Keeping the message IDs keeps the process's chain tip and rewind checkpoints valid in the fork.
 
-The handle's shared state holds the live session ID and artifact directory, so `session_id()` and `artifact_dir()` follow the fork, and the next request and tool call use them. New spills land under the fork, while spill paths in copied tool results still name S's directory. The ack of the first head-moving command in the batch carries `Fork { from, to }`, and the engine emits `Event::SessionForked`. The TUI shows `Another ox process wrote to session {from8}, so this conversation continues as session {to8}` and moves its status bar to the fork, the stdio drivers print the notice to stderr, and the headless result reports the fork's ID. Listings label the fork `fork of {from8}` beside its title. File snapshots at finish are written only while the session's head still equals the process's base, since they describe the files as of that head.
+The handle's shared state holds the live session ID and artifact directory, so `session_id()` and `artifact_dir()` follow the fork, and the next request and tool call use them. New spills land under the fork, while spill paths in copied tool results still name S's directory. The report of the write whose commit forked carries `Fork { from, to }`, and the engine emits `Event::SessionForked`. The TUI shows `Another ox process wrote to session {from8}, so this conversation continues as session {to8}` and moves its status bar to the fork, the stdio drivers print the notice to stderr, and the headless result reports the fork's ID. Listings label the fork `fork of {from8}` beside its title. File snapshots at finish are written only while the session's head still equals the process's base, since they describe the files as of that head.
 
 ### Export and Import
 
@@ -144,9 +144,9 @@ A session the import creates, new or a fork, records the importing store's proje
 
 ### AI-Generated Titles
 
-In the TUI, the first user prompt of a fresh session spawns a tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema unless `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` turns it off, and keeps the first line of the reply under the same 80-column cap as other titles. The request wraps the prompt in `<first_prompt>` tags, cutting a prompt over 2,000 characters to its first 1,500 and as much of its end as fits around a `... [N characters omitted] ...` line, so a request that leads a long paste survives. The turn ends with an instruction to title the prompt, so that an imperative prompt reads as text to title even without the schema. The session owns the task, and finalizing the session on a roll or at exit aborts it first, so a late title never writes to or reports on a session that has ended. Once the API answers and reports usage, the task records the request's usage before parsing the reply, since a reply without a usable title is billed too. Generation failures only log a warning, while a failed title or usage write surfaces like any other session write error.
+In the TUI, the first user prompt of a fresh session spawns a tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema unless `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` turns it off, and keeps the first line of the reply under the same 80-column cap as other titles. The request wraps the prompt in `<first_prompt>` tags, cutting a prompt over 2,000 characters to its first 1,500 and as much of its end as fits around a `... [N characters omitted] ...` line, so a request that leads a long paste survives. The turn ends with an instruction to title the prompt, so that an imperative prompt reads as text to title even without the schema. The session owns the task, and a rename, a rewind to before the first prompt, or finalizing the session on a roll or at exit aborts it first, so a late title never reports on a session that was renamed, rewound, or has ended. A write the task already started still commits, possibly after the session ends, and after a rename the manual flag refuses a late AI title. Once the API answers and reports usage, the task records the request's usage before parsing the reply, since a reply without a usable title is billed too. Generation failures only log a warning, while a failed title or usage write surfaces like any other session write error.
 
-The session state's row owns the manual flag, which `/rename`, a resume, or a fork's copy of its source sets, and while it is set, neither a first-prompt nor a generated title replaces the manual one. The title commit also refuses to replace a manual title with a generated one, and every commit that writes a title or forks reads the stored title back into the row, so a `/rename` from another process reaches this process at its next title write. The task announces its title only when the title is still the session's once its batch commits.
+The session state's row owns the manual flag, which `/rename`, a resume, or a fork's copy of its source sets, and while it is set, neither a first-prompt nor a generated title replaces the manual one. The title commit also refuses to replace a manual title with a generated one, and every commit that writes a title or forks reads the stored title back into the row, so a `/rename` from another process reaches this process at its next title write. The task announces its title only when the title is still the session's once its write commits.
 
 ### Session Cost
 
@@ -181,9 +181,10 @@ Listings render rows as follows:
 8. **Usage keyed by request and never copied.** Each request is stored once, so totals across sessions stay exact.
 9. **Liveness locks for delete only.** Kernel-held locks vanish with their process, so delete safety needs no stale-lock recovery.
 10. **No retry.** Without torn writes, the failures left are not transient, so a failed commit stops persistence with one report.
-11. **Derived title latch and a persisted manual flag.** The title opportunity follows from the chain, and `title_manual` alone gates every automatic title, so no second copy can disagree with either.
-12. **Fork labels from `forked_from`.** The fork keeps the user's title unchanged, and the label tells the two rows apart.
-13. **Search views preserve native result rows.** A result's `tool_metadata` records the call's title and, when the tool sets one, a `result_view`, which is either the structured view or a marker that the result reads as plain text. Grep in content mode, Glob, and Edit store their structured view, so complete filenames and line numbers survive even when a path contains colons, newlines, or trailing whitespace, and stored paths retain their search-time display spelling on replay. Search results that carry notes, and output capped into a spill file, store the text marker, so their warnings and spill locations render with the result text. Errors always render their error text. Read and Tasks store no view and derive it on every render, Read from the result text and Tasks from the call's input, since storing it would repeat the file content or the task list. A result without a stored view uses the tool's own derivation.
+11. **Writes under a lock.** Every caller needs its write's checkpoint, title seed, and report before it goes on, so a write channel would buy no pipelining. A lock taken on a blocking thread keeps one write at a time, and since there is no writer task, there is no path for a writer that is gone. Codex queues its rollout writes without an ack, which suits a loop that never waits on disk, and pi appends in the caller, the shape this lock keeps off the async runtime.
+12. **Derived title latch and a persisted manual flag.** The title opportunity follows from the chain, and `title_manual` alone gates every automatic title, so no second copy can disagree with either.
+13. **Fork labels from `forked_from`.** The fork keeps the user's title unchanged, and the label tells the two rows apart.
+14. **Search views preserve native result rows.** A result's `tool_metadata` records the call's title and, when the tool sets one, a `result_view`, which is either the structured view or a marker that the result reads as plain text. Grep in content mode, Glob, and Edit store their structured view, so complete filenames and line numbers survive even when a path contains colons, newlines, or trailing whitespace, and stored paths retain their search-time display spelling on replay. Search results that carry notes, and output capped into a spill file, store the text marker, so their warnings and spill locations render with the result text. Errors always render their error text. Read and Tasks store no view and derive it on every render, Read from the result text and Tasks from the call's input, since storing it would repeat the file content or the task list. A result without a stored view uses the tool's own derivation.
 
 ## Out of Scope
 
@@ -195,12 +196,11 @@ Listings render rows as follows:
 
 - `crates/ox-core/src/engine/history.rs`: the resumed transcript, whose tool results take their views from `ToolRegistry::result_view`.
 - `crates/ox-core/src/engine/post_compact.rs`: the synthetic post-compact root.
-- `crates/ox-core/src/engine/turn.rs`: `agent_turn`, which records each tool round with one `RecordRound` command.
+- `crates/ox-core/src/engine/turn.rs`: `agent_turn`, which records each tool round with one `record_round` write.
 - `crates/ox-core/src/engine/usage.rs`: `UsageLedger::for_session`, which sums the session cost from the resumed usage rows.
 - `crates/ox-core/src/message.rs`: the message and content-block types that the message rows store.
-- `crates/ox-core/src/session/actor.rs`: the actor that owns the session state and commits each wakeup's commands on a blocking task.
 - `crates/ox-core/src/session/display.rs`: the session ID and title formatting that listings use, including the fork label.
-- `crates/ox-core/src/session/handle.rs`: `SessionHandle`, `WriteReport`, and `Fork`, and the session-format tests.
+- `crates/ox-core/src/session/handle.rs`: `SessionHandle`, which commits each write under the state's lock, `WriteReport`, and `Fork`, and the session-format tests.
 - `crates/ox-core/src/session/resolver.rs`: the `--continue` and `--resume` targets, `ox export`, and session-ID prefix resolution.
 - `crates/ox-core/src/session/sanitize.rs`: resume-time transcript repair.
 - `crates/ox-core/src/session/saved.rs`: archiving and deleting saved sessions.
