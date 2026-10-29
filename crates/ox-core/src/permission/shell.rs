@@ -1258,8 +1258,9 @@ impl Walk<'_> {
         spellings
     }
 
-    /// Returns whether `name` with `args` enters one literal directory in a workspace root, with
-    /// no `..`, which bash's `cd` applies to the spelled path while the gate resolves links first.
+    /// Returns whether `name` with `args` stays inside a workspace root, either as a `pushd -n`
+    /// that enters nothing or by entering one literal directory in a root spelled without `..`,
+    /// which bash's `cd` applies to the spelled path while the gate resolves links first.
     fn enters_workspace(&mut self, name: &str, args: &[Word]) -> bool {
         let path = match dir_target(name, args) {
             DirTarget::Path(path) => path,
