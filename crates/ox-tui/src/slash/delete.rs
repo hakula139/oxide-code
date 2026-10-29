@@ -14,11 +14,11 @@ use ox_core::util::path::tildify;
 use ox_core::util::time::now_local;
 
 use super::confirm::ConfirmDeleteSessionModal;
-use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
 use super::sessions::format_metadata_line;
 use crate::action::Action;
 use crate::modal::Modal;
+use crate::session_info::LiveSessionInfo;
 
 // ── DeleteCmd ──
 
@@ -45,7 +45,7 @@ impl SlashCommand for DeleteCmd {
         !args.is_empty()
     }
 
-    fn execute(&self, arg: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, arg: &str, _info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         if arg.is_empty() {
             return Err(command::missing(
                 "session ID",

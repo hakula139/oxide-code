@@ -6,9 +6,9 @@ use ox_core::command;
 use ox_core::protocol::{Op, SavedTarget};
 use ox_core::session::store::listing::ArchiveState;
 
-use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::action::Action;
+use crate::session_info::LiveSessionInfo;
 
 // ── ArchiveCmd ──
 
@@ -31,7 +31,7 @@ impl SlashCommand for ArchiveCmd {
         Some("[<id-prefix>]")
     }
 
-    fn execute(&self, prefix: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, prefix: &str, _info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         if prefix.is_empty() {
             return Ok(SlashOutcome::Forward(Action::Op(Op::Archive)));
         }
@@ -64,7 +64,7 @@ impl SlashCommand for UnarchiveCmd {
         !args.is_empty()
     }
 
-    fn execute(&self, prefix: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, prefix: &str, _info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         if prefix.is_empty() {
             return Err(command::missing(
                 "session ID",

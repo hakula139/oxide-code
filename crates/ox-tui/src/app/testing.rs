@@ -1,6 +1,7 @@
 //! Test-only [`App`] fixtures shared by the app, dispatch, event, and render tests.
 
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -18,8 +19,9 @@ use ox_core::session::store::listing::ArchiveState;
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
 use super::operation::{Activity, InFlight};
-use super::{App, AppHistory};
-use crate::clipboard::{self, Clipboard, Environment};
+use super::{App, AppHistory, Host};
+use crate::clipboard::Clipboard;
+use crate::clipboard::testing::REMOTE;
 use crate::git_probes::GitProbes;
 use crate::modal::approval::ApprovalModal;
 use crate::modal::{Modal, ModalKey};
@@ -46,11 +48,11 @@ pub(super) fn test_app_with(
 ) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
     let (event_tx, events) = mpsc::unbounded_channel::<Event>();
     let (ops, op_rx) = mpsc::channel::<Op>(OP_CHANNEL_CAPACITY);
-    let mut app = App::new(
+    let app = App::new(
         Theme::default(),
         ThemeOverrides::default(),
         session_info,
-        Some("main".to_owned()),
+        test_host(),
         events,
         ops,
         AppHistory {
@@ -59,18 +61,20 @@ pub(super) fn test_app_with(
             prior: ArchiveState::Active,
         },
     );
-    app.open_browser = |_| Ok(());
-    // With no segments to serve, the probes never spawn `git` or `gh`.
-    app.git_probes = GitProbes::new(app.session_info.cwd.clone(), &[], now());
-    // A remote session outside tmux copies only through OSC 52, leaving the system clipboard and
-    // tmux alone.
-    app.clipboard = Clipboard::new(Environment {
-        local: false,
-        tmux: false,
-        screen: false,
-        terminal: clipboard::Terminal::Other,
-    });
     (app, op_rx, event_tx)
+}
+
+/// A [`Host`] on `main` that never spawns a process or touches the system clipboard.
+pub(super) fn test_host() -> Host {
+    Host {
+        git_branch: Some("main".to_owned()),
+        // With no segments to serve, the probes never spawn `git` or `gh`.
+        git_probes: GitProbes::new(PathBuf::from("/repo"), &[], now()),
+        // A remote session outside tmux copies only through OSC 52, leaving the system clipboard
+        // and tmux alone.
+        clipboard: Clipboard::new(REMOTE),
+        open_browser: |_| Ok(()),
+    }
 }
 
 /// Puts `op` in flight with no other local effect of [`App::dispatch_op`], such as the queue marks

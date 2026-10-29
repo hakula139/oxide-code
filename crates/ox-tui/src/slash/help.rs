@@ -2,11 +2,11 @@
 
 use ox_core::command;
 
-use super::context::SlashContext;
 use super::registry::{BUILT_INS, SlashCommand, SlashOutcome};
 use crate::action::TOGGLE_EXPANDED;
 use crate::keymap::{CTRL_C, CTRL_D};
 use crate::modal::kv_overview::{KvOverview, KvSection};
+use crate::session_info::LiveSessionInfo;
 
 // ── HelpCmd ──
 
@@ -25,7 +25,7 @@ impl SlashCommand for HelpCmd {
         false
     }
 
-    fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, _args: &str, _info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         Ok(SlashOutcome::Modal(Box::new(build_modal())))
     }
 }

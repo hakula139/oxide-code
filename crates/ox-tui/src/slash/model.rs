@@ -1,14 +1,16 @@
 //! `/model` opens the picker, or swaps with `/model <id>`, which
 //! [`ox_core::command::typed_form`] resolves.
 
+mod picker;
+
 use std::borrow::Cow;
 
 use ox_core::model::MODELS;
 
-use super::context::SlashContext;
+use self::picker::ModelEffortPicker;
 use super::matcher::rank_by_prefix;
-use super::picker::ModelEffortPicker;
 use super::registry::{ArgCompletion, SlashCommand, SlashOutcome, typed_form};
+use crate::session_info::LiveSessionInfo;
 
 // ── ModelCmd ──
 
@@ -45,13 +47,11 @@ impl SlashCommand for ModelCmd {
         !args.is_empty()
     }
 
-    fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, arg: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         if arg.is_empty() {
-            return Ok(SlashOutcome::Modal(Box::new(ModelEffortPicker::new(
-                ctx.info,
-            ))));
+            return Ok(SlashOutcome::Modal(Box::new(ModelEffortPicker::new(info))));
         }
-        typed_form(self.name(), arg, ctx)
+        typed_form(self.name(), arg, info)
     }
 }
 

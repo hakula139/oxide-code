@@ -5,13 +5,13 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
 use ox_core::util::text::ELLIPSIS;
 
 use super::RenderCtx;
 use crate::glyphs::{BAR, TOOL_BORDER_CONT};
-use crate::grapheme::head_end;
 use crate::wrap::{expand_tabs, wrap_line};
 
 const DEFAULT_SEPARATOR: &str = " │ ";
@@ -221,7 +221,12 @@ pub(super) fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_owned();
     }
-    let boundary = head_end(s, max_bytes);
+    let boundary = s
+        .grapheme_indices(true)
+        .map(|(byte, grapheme)| byte + grapheme.len())
+        .take_while(|&end| end <= max_bytes)
+        .last()
+        .unwrap_or(0);
     format!("{}{ELLIPSIS}", &s[..boundary])
 }
 
