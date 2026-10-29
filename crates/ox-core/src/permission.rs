@@ -181,6 +181,11 @@ impl Workspace {
         &self.cwd
     }
 
+    /// The cwd as resolved, or as given when it cannot be.
+    pub(crate) fn resolved_cwd(&self) -> &Path {
+        &self.anchors[0].resolved
+    }
+
     pub(crate) fn roots(&self) -> &[PathBuf] {
         &self.roots
     }
@@ -188,11 +193,6 @@ impl Workspace {
     /// Returns whether the resolved `path` sits inside one of the roots.
     fn contains(&self, path: &Path) -> bool {
         self.roots.iter().any(|root| path.starts_with(root))
-    }
-
-    /// The cwd as resolved, or as given when it cannot be.
-    fn resolved_cwd(&self) -> &Path {
-        &self.anchors[0].resolved
     }
 
     /// Every spelling of `path` relative to an anchor directory in either of its spellings, with
