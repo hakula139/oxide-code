@@ -127,8 +127,8 @@ A chat region shorter than 13 rows hides the starters and the tip at any width.
 
 - `crates/ox-tui/src/action.rs`: `APP_KEYMAP`, the app's global key and its hint.
 - `crates/ox-tui/src/app.rs`: `App`, its `tokio::select!` loop, `TICK_INTERVAL`, the shortest gap between ticks, and `App::next_tick`, which picks when the loop wakes.
-- `crates/ox-tui/src/app_event.rs`: `AppEvent`, the result of background work, and `AppEventSender`, which the work reports through.
 - `crates/ox-tui/src/app/render.rs`: `App::draw_frame`, which paints the welcome while the chat is empty.
+- `crates/ox-tui/src/app_event.rs`: `AppEvent`, the result of background work, and `AppEventSender`, which the work reports through.
 - `crates/ox-tui/src/components/chat.rs`: `ChatView` and the compact and expanded views.
 - `crates/ox-tui/src/components/chat/blocks.rs`: `ChatBlock` and `RenderCtx`, the render contract of a chat block.
 - `crates/ox-tui/src/components/chat/blocks/live_markdown.rs`: `LiveMarkdown`, the text of a section that grows while it streams, with its stable-prefix cache.

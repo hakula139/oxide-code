@@ -22,7 +22,7 @@ A modal is `Send`, since the App lives on tokio, but not `Sync`, since modals ow
 
 The stack routes keys before any component sees them. A modal whose `captures_esc` returns true takes Esc itself, while Ctrl+C still cancels. The stack drops every key held with a modifier other than Shift unless `binds_modified_key` claims it, so a picker's `j` or Enter never fires as Alt+J or Ctrl+Enter. Bracketed pastes reach `handle_paste`, which text fields implement, and a paste never answers a confirm or approval prompt. The frame tick calls `tick` on the top modal, and `next_tick` tells the loop when its time-driven state, such as an expiring notice, next changes, so an idle modal does not keep the loop awake.
 
-A page of sessions that a `/resume` picker's worker read reaches the stack as an app event, and `Modal::on_sessions_page` offers it to each open modal from the top until the picker whose request it answers takes it, so a picker keeps loading under a confirm dialog.
+A page of sessions that a `/resume` picker's worker read reaches the stack as an app event, and `ModalStack::deliver_sessions_page` offers it through `Modal::on_sessions_page` to each open modal from the top until the picker whose request it answers takes it, so a picker keeps loading under a confirm dialog.
 
 ## Shared Primitives
 
