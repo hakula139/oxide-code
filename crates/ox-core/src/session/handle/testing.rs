@@ -1,22 +1,14 @@
-//! Test-only [`SessionHandle`] constructors.
+//! Test-only [`SessionHandle`] fixtures.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-
-use super::{
-    AiTitleOutcome, Checkpoint, CompactBoundary, CompactOutcome, RecordOutcome, SessionHandle,
-    SharedState, WriteReport,
-};
+use super::{CompactBoundary, SessionHandle};
 use crate::file_tracker::FileTracker;
 use crate::file_tracker::testing::record_tracked_file;
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SessionContext;
-use crate::session::actor::{Record, SessionCmd};
-use crate::session::store::CompactRecord;
+use crate::session::store::testing::TEST_PROJECT;
+use crate::session::store::{CompactRecord, SessionStore};
 
 /// A `/compact` boundary for `summary` with no focus or task list.
 pub(crate) fn boundary(summary: &str) -> CompactBoundary {
@@ -60,90 +52,8 @@ pub(crate) async fn record_write_call(
     }
 }
 
-/// Handle whose actor channel is already closed, so every write fails as actor-gone.
-pub(crate) fn dead(session_id: &str) -> SessionHandle {
-    let (cmd_tx, _) = mpsc::channel(1);
-    handle(session_id, cmd_tx, None)
-}
-
-/// Handle whose actor task panicked.
-pub(crate) fn panicked(session_id: &str) -> SessionHandle {
-    let (cmd_tx, _) = mpsc::channel(1);
-    let join = tokio::spawn(async { panic!("deliberate actor panic for testing") });
-    handle(session_id, cmd_tx, Some(join))
-}
-
-/// Handle on a stand-in actor that acks the first `succeed` cmds, then drops each cmd without
-/// acking it. It always honors `Shutdown`.
-pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCmd>(8);
-    let count = Arc::new(AtomicUsize::new(0));
-    let count_clone = Arc::clone(&count);
-    let join = tokio::spawn(async move {
-        while let Some(cmd) = cmd_rx.recv().await {
-            if let SessionCmd::Shutdown { ack } = cmd {
-                _ = ack.send(());
-                break;
-            }
-            let n = count_clone.fetch_add(1, Ordering::SeqCst);
-            if n >= succeed {
-                drop(cmd);
-                continue;
-            }
-            match cmd {
-                SessionCmd::Record(Record { ack, .. }) => {
-                    _ = ack.send(RecordOutcome {
-                        checkpoint: None,
-                        ai_title_seed: None,
-                        report: WriteReport::default(),
-                    });
-                }
-                SessionCmd::Rewind { ack, .. }
-                | SessionCmd::RecordRound { ack, .. }
-                | SessionCmd::Usage { ack, .. }
-                | SessionCmd::SetManualTitle { ack, .. }
-                | SessionCmd::Archive { ack }
-                | SessionCmd::Finish { ack, .. } => {
-                    _ = ack.send(WriteReport::default());
-                }
-                SessionCmd::AppendAiTitle { ack, .. } => {
-                    _ = ack.send(AiTitleOutcome {
-                        applied: true,
-                        report: WriteReport::default(),
-                    });
-                }
-                SessionCmd::Compact { ack, .. } => {
-                    _ = ack.send(CompactOutcome {
-                        pre_count: 0,
-                        checkpoint: Some(Checkpoint {
-                            tip: None,
-                            message_count: 1,
-                            first_user_prompt_seen: true,
-                        }),
-                        report: WriteReport::default(),
-                    });
-                }
-                SessionCmd::Shutdown { .. } => unreachable!("filtered above"),
-            }
-        }
-    });
-
-    handle(session_id, cmd_tx, Some(join))
-}
-
-/// A handle on a stand-in session with no store, whose artifact directory is in the temp directory.
-fn handle(
-    session_id: &str,
-    cmd_tx: mpsc::Sender<SessionCmd>,
-    join: Option<JoinHandle<()>>,
-) -> SessionHandle {
-    SessionHandle {
-        cmd_tx,
-        shared: Arc::new(SharedState::new(
-            session_id,
-            std::env::temp_dir().join(session_id),
-        )),
-        actor_join: Arc::new(Mutex::new(join)),
-        title_task: Arc::default(),
-    }
+/// A fresh session on a store that was never set up, so its first write that saves a message
+/// fails.
+pub(crate) fn unsaved() -> SessionHandle {
+    super::start(&SessionStore::unopened(TEST_PROJECT), "m", None)
 }

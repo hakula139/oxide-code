@@ -520,8 +520,7 @@ mod tests {
     use crate::config::compaction::CompactionConfig;
     use crate::engine::dispatch::NOT_RUN;
     use crate::engine::local_testing::{
-        EchoTool, dead_test_session, dispatch_with, inert_mailbox, thinking_block,
-        tool_heavy_transcript,
+        EchoTool, dispatch_with, inert_mailbox, thinking_block, tool_heavy_transcript,
     };
     use crate::engine::testing::MODEL;
     use crate::message::{Replay, Role};
@@ -907,8 +906,8 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn dead_session_surfaces_write_failure_on_first_call() {
-            let session = dead_test_session();
+        async fn a_failed_write_surfaces_once() {
+            let session = handle::testing::unsaved();
             let client = FakeClient::new(vec![text_turn("Hello!")]);
             let tools = ToolRegistry::new(vec![]);
             let sink = CapturingSink::default();
@@ -938,8 +937,8 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn dropped_round_write_surfaces_one_error_and_the_turn_continues() {
-            let session = crate::session::handle::testing::acks_then_drops("round-write-fails", 0);
+        async fn failed_round_write_surfaces_one_error_and_the_turn_continues() {
+            let session = handle::testing::unsaved();
             let client = FakeClient::new(vec![
                 tool_use_turn("tool_1", "echo", r#"{"v":1}"#),
                 text_turn("Done"),
@@ -2982,7 +2981,7 @@ mod tests {
 
         #[test]
         fn sends_the_transcript_under_its_prompt_and_caches_the_tail() {
-            let session = dead_test_session();
+            let session = handle::testing::unsaved();
             let mut transcript = LiveTranscript::with_messages(&session, vec![Message::user("hi")]);
             let prompt = transcript.prompt_mut();
             "stable".clone_into(&mut prompt.system.stable);
@@ -3030,7 +3029,7 @@ mod tests {
 
         #[tokio::test]
         async fn returns_the_error_of_a_request_that_never_streamed() {
-            let session = dead_test_session();
+            let session = handle::testing::unsaved();
             let transcript = LiveTranscript::with_messages(&session, vec![Message::user("hi")]);
             let sink = CapturingSink::default();
             let mut usage = None;

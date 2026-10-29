@@ -562,9 +562,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::local_testing::{
-        TITLE_MODEL, dead_test_session, finished_session, greeting_title, inert_mailbox,
-        login_urls, mount_title, next_matching, service_log, submit, system_prompt, texts,
-        tool_heavy_transcript, tracked_paths, turn_events, write_unreadable_instructions,
+        TITLE_MODEL, finished_session, greeting_title, inert_mailbox, login_urls, mount_title,
+        next_matching, service_log, submit, system_prompt, texts, tool_heavy_transcript,
+        tracked_paths, turn_events, write_unreadable_instructions,
     };
     use super::sessions::format_drift_warning;
     use super::testing::{
@@ -602,6 +602,7 @@ mod tests {
     use crate::session::saved::ArchiveUpdate;
     use crate::session::store::UsageRecord;
     use crate::session::store::listing::ArchiveState;
+    use crate::session::store::local_testing::fail_writes;
     use crate::session::store::testing::{
         WriterBarrier, listed_ids, seed_test_session, test_store,
     };
@@ -637,18 +638,20 @@ mod tests {
                 with_pinned_home(async {
                     let server = MockServer::start().await;
                     let dir = tempfile::tempdir().unwrap();
-                    let mut engine =
-                        engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                    engine.transcript.set_session(dead_test_session());
+                    let store = test_store(dir.path());
+                    let engine = engine(server.uri(), &store, dir.path()).await;
+                    engine
+                        .transcript
+                        .session()
+                        .record_message(Message::user("saved"))
+                        .await;
+                    fail_writes(&store);
 
                     let failure = engine.spawn().shutdown().await.unwrap();
 
                     assert_eq!(
                         failure.as_deref(),
-                        Some(
-                            "session writer task has stopped. \
-                             Conversation history may be incomplete."
-                        ),
+                        Some("disk full: Error code 1811: constraint failed"),
                     );
                 })
                 .await;
@@ -2452,7 +2455,6 @@ mod tests {
                             .await
                             .unwrap();
                         other.record_message(Message::user("elsewhere")).await;
-                        other.shutdown().await;
                     }
                     ToolOutput::success("probed")
                 })
@@ -3272,14 +3274,15 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn rolls_back_a_refused_turn_in_memory_when_the_session_is_gone() {
+        async fn rolls_back_a_refused_turn_in_memory_once_persistence_stopped() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 mount_refusal_once(&server, 1_000).await;
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
-                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.transcript.set_session(dead_test_session());
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                fail_writes(&store);
                 let sink = CapturingSink::default();
                 let mut mailbox = inert_mailbox();
 

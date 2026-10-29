@@ -58,8 +58,9 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 
 /// Spawns a task that asks Haiku for a title, appends it to `session`, and emits
 /// `SessionTitleUpdated` through `sink`. The returned receiver gets the usage the response reports,
-/// even for a reply that holds no title. Finalizing `session` aborts the task. A generation failure
-/// only warns, while a write failure shows as a session write error.
+/// even for a reply that holds no title. A rename, a rewind to before the first prompt, or
+/// finalizing `session` aborts the task. A generation failure only warns, while a write failure
+/// shows as a session write error.
 pub(crate) fn spawn<S>(
     client: Client,
     auth: Auth,
@@ -253,6 +254,7 @@ struct TitleEnvelope {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::pin::pin;
 
     use wiremock::matchers::{body_partial_json, header, method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -265,9 +267,9 @@ mod tests {
     use crate::config::testing::test_config;
     use crate::message::Message;
     use crate::protocol::local_testing::CapturingSink;
-    use crate::session::handle::testing::dead;
+    use crate::session::handle::WriteReport;
     use crate::session::store::local_testing::fail_writes;
-    use crate::session::store::testing::test_store;
+    use crate::session::store::testing::{WriterBarrier, isolated_store, test_store};
 
     fn title_client(base_url: String) -> Client {
         test_client(base_url)
@@ -369,6 +371,45 @@ mod tests {
 
             assert_eq!(rx.recv().await, None);
             assert!(usage.await.is_err(), "a failed request bills nothing");
+        }
+
+        #[tokio::test]
+        async fn delivers_and_saves_the_usage_when_a_rename_aborts_mid_write() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(completion_body(r#"{"title":"AI title"}"#)),
+                )
+                .mount(&server)
+                .await;
+            let (_dir, store) = isolated_store();
+            let session = crate::session::handle::start(&store, HAIKU_MODEL, None);
+            let session_id = session.session_id();
+            session.record_message(Message::user("first prompt")).await;
+            let barrier = WriterBarrier::hold(&store);
+
+            let usage = spawn(
+                title_client(server.uri()),
+                api_key(),
+                CACHE_TTL,
+                session.clone(),
+                CapturingSink::default(),
+                "first prompt".to_owned(),
+            );
+            let billed = usage
+                .await
+                .expect("the usage arrives while its write waits for the store");
+            let mut rename = pin!(session.set_manual_title("Manual title".to_owned()));
+            assert!(futures::poll!(rename.as_mut()).is_pending());
+            barrier.release();
+
+            assert_eq!(rename.await, WriteReport::default());
+            assert_eq!(
+                store.load_session_data(&session_id).unwrap().usage,
+                [billed]
+            );
         }
     }
 
@@ -693,43 +734,6 @@ mod tests {
                         title: "Fix auth".to_owned(),
                     },
                 ],
-            );
-        }
-
-        #[tokio::test]
-        async fn skips_the_title_event_when_the_writer_is_gone() {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(wm_path("/v1/messages"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_string(body_without_usage(r#"{"title":"Fix auth"}"#)),
-                )
-                .mount(&server)
-                .await;
-            let session = dead("dead-session");
-            let client = title_client(server.uri());
-            let sink = CapturingSink::default();
-
-            generate_and_record(
-                &client,
-                &api_key(),
-                CACHE_TTL,
-                &session,
-                &sink,
-                "first prompt",
-                oneshot::channel().0,
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(
-                sink.events(),
-                [Event::Error(
-                    "Session write failed: session writer task has stopped. \
-                     Conversation history may be incomplete."
-                        .to_owned(),
-                )],
             );
         }
 
