@@ -3,8 +3,7 @@
 use std::time::Instant;
 
 use indoc::formatdoc;
-use tokio::task::{JoinError, JoinSet};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use ox_core::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
@@ -19,7 +18,8 @@ use ox_core::util::text::plural;
 
 use super::operation::{Activity, InFlight};
 use super::queue::FailedTurn;
-use super::{App, CopyNotice, SlashTask};
+use super::{App, CopyNotice, SlashEnd};
+use crate::app_event::AppEvent;
 use crate::clipboard::{CopyReport, Delivery};
 use crate::git_probes::GitUpdate;
 use crate::modal::EngineUpdate;
@@ -322,7 +322,7 @@ impl App {
         self.session_info.session_allow.clear();
         self.session_info.background_shells.clear();
         self.tasks.clear();
-        self.slash_tasks = JoinSet::new();
+        self.session_epoch += 1;
         self.session_info.set_title(title);
         self.session_info.usage = None;
         self.chat.clear_history();
@@ -467,6 +467,25 @@ impl App {
         }
     }
 
+    /// Hands a background result to the component that started the work, then applies what that
+    /// component reports.
+    pub(super) fn apply_app_event(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::Probe(end) => {
+                if let Some(update) = self.git_probes.finish(end, now()) {
+                    self.apply_git_update(update);
+                }
+            }
+            AppEvent::Copy(end) => {
+                if let Some(report) = self.clipboard.finish(end) {
+                    self.apply_copy_report(report);
+                }
+            }
+            AppEvent::Slash(end) => self.apply_slash_end(end),
+            AppEvent::SessionsPage(page) => self.dirty |= self.modals.deliver_sessions_page(page),
+        }
+    }
+
     pub(super) fn apply_git_update(&mut self, update: GitUpdate) {
         let changed = match update {
             GitUpdate::Branch(branch) => {
@@ -503,16 +522,14 @@ impl App {
             .is_some()
     }
 
-    /// Applies what a background slash command resolved to through the same path as a typed one. A
-    /// panicked task only logs, since the panic hook already reports the panic.
-    pub(super) fn apply_slash_task(&mut self, finished: Result<SlashTask, JoinError>) {
-        match finished {
-            Ok(task) => {
-                if let Some(action) = self.apply_slash_outcome(task.outcome, &task.line) {
-                    self.dispatch_action(action);
-                }
-            }
-            Err(e) => warn!(error = %e, "background slash command failed"),
+    /// Applies what a background slash command resolved to through the same path as a typed one,
+    /// dropping it when the session switched since the command was typed.
+    fn apply_slash_end(&mut self, end: SlashEnd) {
+        if end.epoch != self.session_epoch {
+            return;
+        }
+        if let Some(action) = self.apply_slash_outcome(end.outcome, &end.line) {
+            self.dispatch_action(action);
         }
         self.dirty = true;
     }
@@ -539,6 +556,7 @@ mod tests {
     use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
     use ox_core::session::resolver::ResolveError;
     use ox_core::session::saved::SavedAction;
+    use ox_core::session::store::listing::ProjectScope;
     use ox_core::session::store::testing::{
         isolated_store, listed_session, seed_test_session, stamped_id,
     };
@@ -1438,22 +1456,41 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn session_rolled_drops_the_old_session_slash_tasks() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            let task = SlashTask {
-                line: "/diff".to_owned(),
-                outcome: Ok(SlashOutcome::SystemMessage(
-                    "old session's output".to_owned(),
-                )),
-            };
-            app.slash_tasks.spawn(async move { task });
+        async fn session_rolled_drops_the_old_session_slash_output() {
+            for finished_before_the_switch in [true, false] {
+                let (mut app, _rx, _event_tx) = test_app(None);
+                let (release, wait) = tokio::sync::oneshot::channel::<()>();
+                let task = SlashOutcome::Background(Box::pin(async move {
+                    wait.await.unwrap();
+                    Ok(SlashOutcome::SystemMessage(
+                        "old session's output".to_owned(),
+                    ))
+                }));
+                let handed_back = app.apply_slash_outcome(Ok(task), "/diff");
+                assert_eq!(handed_back, None);
+                let rolled = Event::SessionRolled {
+                    id: "rolled-session".to_owned(),
+                    old_session: ArchiveState::Active,
+                };
 
-            app.handle_engine_event(Event::SessionRolled {
-                id: "rolled-session".to_owned(),
-                old_session: ArchiveState::Active,
-            });
+                let output = if finished_before_the_switch {
+                    release.send(()).unwrap();
+                    let output = app.background.recv().await.unwrap();
+                    app.handle_engine_event(rolled);
+                    output
+                } else {
+                    app.handle_engine_event(rolled);
+                    release.send(()).unwrap();
+                    app.background.recv().await.unwrap()
+                };
+                app.apply_app_event(output);
 
-            assert!(app.slash_tasks.join_next().await.is_none());
+                assert_eq!(
+                    app.chat.entry_count(),
+                    0,
+                    "finished before the switch: {finished_before_the_switch}",
+                );
+            }
         }
 
         #[test]
@@ -2735,8 +2772,14 @@ mod tests {
                 app.handle_esc();
                 assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
                 app.handle_engine_event(Event::Cancelled);
-                let picker = ResumePicker::loaded(store, app.session_info.session_id.clone());
+                app.session_info.store = store;
+                let picker = ResumePicker::at_startup(&app.session_info, ProjectScope::Current);
                 app.push_modal(Box::new(picker));
+                let page = app
+                    .background
+                    .blocking_recv()
+                    .expect("the App holds a sender");
+                app.apply_app_event(page);
 
                 app.handle_crossterm_event(&CrosstermEvent::Key(archive_key));
 
@@ -2911,6 +2954,7 @@ mod tests {
             app.git_probes = crate::git_probes::GitProbes::new(
                 PathBuf::from("/repo"),
                 &[StatusLineSegment::PullRequest],
+                app.session_info.app_events.clone(),
                 now(),
             );
             app.status_bar.set_git_branch(Some("main".to_owned()));
@@ -2996,52 +3040,39 @@ mod tests {
         }
     }
 
-    mod apply_slash_task {
+    mod apply_app_event {
         use super::*;
 
-        async fn finish(outcome: Result<SlashOutcome, String>) -> Result<SlashTask, JoinError> {
-            tokio::spawn(async move {
-                SlashTask {
-                    line: "/diff".to_owned(),
-                    outcome,
-                }
+        fn slash_end(app: &App, outcome: Result<SlashOutcome, String>) -> AppEvent {
+            AppEvent::Slash(SlashEnd {
+                epoch: app.session_epoch,
+                line: "/diff".to_owned(),
+                outcome,
             })
-            .await
         }
 
-        #[tokio::test]
-        async fn applies_the_message_diff_or_error_the_task_resolved_to() {
+        #[test]
+        fn applies_the_message_diff_or_error_a_slash_command_resolved_to() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let diff = WorkingTreeDiff {
                 untracked: vec!["new.txt".to_owned()],
                 ..WorkingTreeDiff::default()
             };
 
-            app.apply_slash_task(finish(Ok(SlashOutcome::SystemMessage("clean".to_owned()))).await);
+            let clean = Ok(SlashOutcome::SystemMessage("clean".to_owned()));
+            app.apply_app_event(slash_end(&app, clean));
 
             assert_eq!(app.chat.last_system_text(), Some("clean"));
 
             app.dirty = false;
-            app.apply_slash_task(finish(Ok(SlashOutcome::GitDiff(diff))).await);
+            app.apply_app_event(slash_end(&app, Ok(SlashOutcome::GitDiff(diff))));
 
             assert!(app.dirty);
             assert!(rendered_text(&mut app, 60, 24).contains("  new.txt"));
 
-            app.apply_slash_task(finish(Err("/diff: boom".to_owned())).await);
+            app.apply_app_event(slash_end(&app, Err("/diff: boom".to_owned())));
 
             assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
-        }
-
-        #[tokio::test]
-        async fn a_panicked_task_prints_nothing() {
-            let (mut app, _rx, _event_tx) = test_app(None);
-            let mut tasks = JoinSet::<SlashTask>::new();
-            tasks.spawn(async { panic!("task bug") });
-            let finished = tasks.join_next().await.expect("one task spawned");
-
-            app.apply_slash_task(finished);
-
-            assert_eq!(app.chat.entry_count(), 0);
         }
     }
 

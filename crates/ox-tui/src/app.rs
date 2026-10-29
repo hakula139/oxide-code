@@ -21,7 +21,6 @@ use futures::{Stream, StreamExt as _};
 use ratatui::Terminal;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 
 use ox_core::config::StatusLineSegment;
 use ox_core::permission::Mode;
@@ -31,6 +30,7 @@ use ox_core::session::store::listing::ArchiveState;
 
 use self::operation::InFlight;
 use self::queue::PromptQueue;
+use crate::app_event::{AppEvent, AppEventSender};
 use crate::clipboard::{Clipboard, Environment};
 use crate::components::chat::ChatView;
 use crate::components::input::InputArea;
@@ -76,6 +76,7 @@ pub(crate) struct App {
     requested_mode: Mode,
     events: mpsc::UnboundedReceiver<Event>,
     ops: mpsc::Sender<Op>,
+    background: mpsc::UnboundedReceiver<AppEvent>,
     /// Opens a URL in the system browser.
     open_browser: fn(&str) -> io::Result<()>,
     /// Status-bar links of the last frame, which a plain left click opens.
@@ -84,8 +85,9 @@ pub(crate) struct App {
     /// OSC 52 sequence the next frame writes to the terminal.
     pending_clipboard: Option<String>,
     copy_notice: Option<CopyNotice>,
-    /// Background slash commands still running for the live session.
-    slash_tasks: JoinSet<SlashTask>,
+    /// Counts session switches, so a background slash command's output reaches only the chat it
+    /// was typed in.
+    session_epoch: u64,
     queue: PromptQueue,
     should_quit: bool,
     dirty: bool,
@@ -98,8 +100,10 @@ struct CopyNotice {
     until: Instant,
 }
 
-/// What a background slash command yields, with the typed line a resolved prompt runs under.
-struct SlashTask {
+/// What a background slash command resolved to, with the typed line a resolved prompt runs under.
+pub(crate) struct SlashEnd {
+    /// The [`App::session_epoch`] the command was typed in.
+    epoch: u64,
     line: String,
     outcome: Result<SlashOutcome, String>,
 }
@@ -116,19 +120,30 @@ pub(crate) struct Host {
 }
 
 impl Host {
-    /// The host of a session in `cwd`, probing the git state that `status_line` reads.
+    /// The host of a session in `cwd`, probing the git state that `status_line` reads. Probes and
+    /// copies report to `app_events`.
     pub(crate) fn detect(
         cwd: &Path,
         status_line: &[StatusLineSegment],
         git_branch: Option<String>,
+        app_events: &AppEventSender,
     ) -> Self {
         Self {
             git_branch,
-            git_probes: GitProbes::new(cwd.to_owned(), status_line, now()),
-            clipboard: Clipboard::new(Environment::detect()),
+            git_probes: GitProbes::new(cwd.to_owned(), status_line, app_events.clone(), now()),
+            clipboard: Clipboard::new(Environment::detect(), app_events.clone()),
             open_browser: |url| open::that_detached(url),
         }
     }
+}
+
+/// The channels the App runs on besides the terminal.
+pub(crate) struct Channels {
+    /// What the engine reports.
+    pub(crate) events: mpsc::UnboundedReceiver<Event>,
+    pub(crate) ops: mpsc::Sender<Op>,
+    /// What background work reports through the senders that the session info and the host hold.
+    pub(crate) background: mpsc::UnboundedReceiver<AppEvent>,
 }
 
 pub(crate) struct AppHistory {
@@ -144,8 +159,7 @@ impl App {
         theme_overrides: ThemeOverrides,
         mut session_info: LiveSessionInfo,
         host: Host,
-        events: mpsc::UnboundedReceiver<Event>,
-        ops: mpsc::Sender<Op>,
+        channels: Channels,
         history: AppHistory,
     ) -> Self {
         let Host {
@@ -154,6 +168,11 @@ impl App {
             clipboard,
             open_browser,
         } = host;
+        let Channels {
+            events,
+            ops,
+            background,
+        } = channels;
         let mut chat = ChatView::new(&theme, session_info.config.show_thinking);
         chat.load_history(history.interactions);
         if history.prior == ArchiveState::Archived {
@@ -182,12 +201,13 @@ impl App {
             requested_mode,
             events,
             ops,
+            background,
             open_browser,
             status_links: Vec::new(),
             clipboard,
             pending_clipboard: None,
             copy_notice: None,
-            slash_tasks: JoinSet::new(),
+            session_epoch: 0,
             queue: PromptQueue::default(),
             should_quit: false,
             dirty: true,
@@ -241,9 +261,7 @@ impl App {
                         None => self.should_quit = true,
                     }
                 }
-                Some(update) = self.git_probes.recv() => self.apply_git_update(update),
-                Some(report) = self.clipboard.recv() => self.apply_copy_report(report),
-                Some(finished) = self.slash_tasks.join_next() => self.apply_slash_task(finished),
+                Some(event) = self.background.recv() => self.apply_app_event(event),
                 () = sleep_until(next_tick) => {
                     let now = now();
                     last_tick = now;
@@ -341,8 +359,14 @@ mod tests {
 
             #[tokio::test(start_paused = true)]
             async fn schedules_the_git_probes_the_status_line_reads() {
-                let host =
-                    Host::detect(Path::new("/repo"), &[StatusLineSegment::PullRequest], None);
+                let (app_events, _background) = mpsc::unbounded_channel();
+
+                let host = Host::detect(
+                    Path::new("/repo"),
+                    &[StatusLineSegment::PullRequest],
+                    None,
+                    &app_events,
+                );
 
                 assert_eq!(host.git_probes.next_poll(), Some(now()));
             }
@@ -356,13 +380,18 @@ mod tests {
         fn new_app(session_info: LiveSessionInfo, history: AppHistory) -> App {
             let (_event_tx, events) = mpsc::unbounded_channel::<Event>();
             let (ops, _op_rx) = mpsc::channel::<Op>(1);
+            let (_app_events, background) = mpsc::unbounded_channel();
+            let host = test_host(&session_info.app_events);
             App::new(
                 Theme::default(),
                 ThemeOverrides::default(),
                 session_info,
-                test_host(),
-                events,
-                ops,
+                host,
+                Channels {
+                    events,
+                    ops,
+                    background,
+                },
                 history,
             )
         }
@@ -652,6 +681,7 @@ mod tests {
             app.git_probes = GitProbes::new(
                 PathBuf::from("/repo"),
                 &[StatusLineSegment::GitBranch],
+                app.session_info.app_events.clone(),
                 last_tick,
             );
 

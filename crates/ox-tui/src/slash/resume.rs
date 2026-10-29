@@ -3,8 +3,9 @@
 //! startup.
 
 use std::borrow::Cow;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Instant;
 
@@ -36,6 +37,7 @@ use super::sessions::{
     saved_error_message,
 };
 use crate::action::Action;
+use crate::app_event::{AppEvent, AppEventSender};
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::keymap::{KeyAction, KeyChord, Keymap, is_unmodified};
 use crate::modal::chrome::{
@@ -100,10 +102,7 @@ impl SlashCommand for ResumeCmd {
         if !args.is_empty() {
             return typed_form(self.name(), args, info);
         }
-        Ok(SlashOutcome::Modal(Box::new(ResumePicker::new(
-            info.store.clone(),
-            info.session_id.clone(),
-        ))))
+        Ok(SlashOutcome::Modal(Box::new(ResumePicker::new(info))))
     }
 }
 
@@ -349,31 +348,35 @@ const ACTIONS: Keymap<PickerAction, ResumePicker> = Keymap::new(&[
 
 // ── Pages ──
 
+/// Numbers the page requests of every picker, so a page reaches only the request it answers.
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(0);
+
 /// The sessions still to load, read a page at a time on a worker thread so a slow store never
 /// stalls the render loop.
 enum Pages {
     /// Waiting for the next request.
     Idle(SessionWalk),
-    /// A worker is reading the next page.
-    Loading(Worker),
+    /// A worker is reading the next page for the request numbered here.
+    Loading(u64),
     /// Every session in scope is loaded.
     Done,
 }
 
-/// A worker reading one page, which hands the walk back with it. A reload or a closing picker
-/// drops the receiver, and the worker's page goes nowhere.
-struct Worker {
-    rx: Receiver<(SessionWalk, anyhow::Result<Vec<SessionInfo>>)>,
+/// A page a picker's worker read, which hands the walk back with it. Only the picker whose request
+/// is still in flight takes it, so a page from a reloaded or closed listing goes nowhere.
+pub(crate) struct SessionsPage {
+    request: u64,
+    walk: SessionWalk,
+    /// `None` when the worker panicked.
+    page: Option<anyhow::Result<Vec<SessionInfo>>>,
 }
 
-/// What [`Pages::poll`] found.
-enum Polled {
-    /// No page is ready.
-    Pending,
+/// What a [`SessionsPage`] brought.
+enum Loaded {
     Page(Vec<SessionInfo>),
     /// The store failed to read the page, which ends the listing.
     Failed(anyhow::Error),
-    /// The worker died without a page, which only a panic does.
+    /// The worker panicked without a page.
     Stopped,
 }
 
@@ -391,53 +394,50 @@ impl Pages {
         }
     }
 
-    /// Starts reading the next page when idle. No-op while loading or done.
-    fn request(&mut self) {
+    /// Starts reading the next page when idle, for a worker that sends it to `events`. No-op while
+    /// loading or done.
+    fn request(&mut self, events: &AppEventSender) {
         match std::mem::replace(self, Self::Done) {
             Self::Idle(mut walk) => {
-                let (tx, rx) = mpsc::channel();
+                let request = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+                let events = events.clone();
                 thread::spawn(move || {
-                    let page = walk.next_page(PAGE_SIZE);
-                    // A closed channel means the picker moved on to another view or closed.
-                    _ = tx.send((walk, page));
+                    let page = panic::catch_unwind(AssertUnwindSafe(|| walk.next_page(PAGE_SIZE)));
+                    let page = SessionsPage {
+                        request,
+                        walk,
+                        page: page.ok(),
+                    };
+                    _ = events.send(AppEvent::SessionsPage(page));
                 });
-                *self = Self::Loading(Worker { rx });
+                *self = Self::Loading(request);
             }
             pages => *self = pages,
         }
     }
 
-    /// The page a worker finished, if any, putting the walk back at rest.
-    fn poll(&mut self) -> Polled {
-        let Self::Loading(worker) = self else {
-            return Polled::Pending;
-        };
-        match worker.rx.try_recv() {
-            Ok((walk, Ok(page))) => {
-                *self = Self::rest(walk);
-                Polled::Page(page)
-            }
-            Ok((_, Err(err))) => {
-                *self = Self::Done;
-                Polled::Failed(err)
-            }
-            Err(TryRecvError::Empty) => Polled::Pending,
-            Err(TryRecvError::Disconnected) => {
-                *self = Self::Done;
-                Polled::Stopped
-            }
-        }
+    /// Whether `page` answers the request in flight.
+    fn awaits(&self, page: &SessionsPage) -> bool {
+        matches!(self, Self::Loading(request) if *request == page.request)
     }
 
-    /// [`Self::poll`] that waits for the worker, for tests that need the page now.
-    #[cfg(test)]
-    fn wait(&mut self) -> Option<Vec<SessionInfo>> {
-        let Self::Loading(worker) = self else {
-            return None;
-        };
-        let (walk, page) = worker.rx.recv().expect("page worker panicked");
-        *self = Self::rest(walk);
-        Some(page.expect("page read failed"))
+    /// What the awaited `page` brought, putting its walk back at rest.
+    fn finish(&mut self, page: SessionsPage) -> Loaded {
+        let SessionsPage { walk, page, .. } = page;
+        match page {
+            Some(Ok(page)) => {
+                *self = Self::rest(walk);
+                Loaded::Page(page)
+            }
+            Some(Err(err)) => {
+                *self = Self::Done;
+                Loaded::Failed(err)
+            }
+            None => {
+                *self = Self::Done;
+                Loaded::Stopped
+            }
+        }
     }
 }
 
@@ -466,7 +466,7 @@ struct PendingArchive {
     listed_at: OffsetDateTime,
 }
 
-pub struct ResumePicker {
+pub(crate) struct ResumePicker {
     store: SessionStore,
     list: SearchableList<SessionRow>,
     scope: ListScope,
@@ -474,6 +474,8 @@ pub struct ResumePicker {
     /// Filtered out of every page, since resume, archive, and delete all refuse the live session.
     live_session_id: String,
     pages: Pages,
+    /// Where page workers send what they read.
+    events: AppEventSender,
     /// When the last reload started, in local time, which every page's rows count from.
     listed_at: OffsetDateTime,
     /// Last reload's failure, surfaced inline so failures don't disguise themselves as "no sessions
@@ -484,32 +486,18 @@ pub struct ResumePicker {
 }
 
 impl ResumePicker {
-    pub(super) fn new(store: SessionStore, live_session_id: String) -> Self {
-        Self::open(
-            store,
-            live_session_id,
-            ProjectScope::Current,
-            Dismissal::Cancel,
-        )
+    pub(super) fn new(info: &LiveSessionInfo) -> Self {
+        Self::open(info, ProjectScope::Current, Dismissal::Cancel)
     }
 
     /// The picker `ox -r` opens without a session, which starts in `projects`.
-    pub fn at_startup(
-        store: SessionStore,
-        live_session_id: String,
-        projects: ProjectScope,
-    ) -> Self {
-        Self::open(store, live_session_id, projects, Dismissal::Quit)
+    pub(crate) fn at_startup(info: &LiveSessionInfo, projects: ProjectScope) -> Self {
+        Self::open(info, projects, Dismissal::Quit)
     }
 
-    fn open(
-        store: SessionStore,
-        live_session_id: String,
-        projects: ProjectScope,
-        dismissal: Dismissal,
-    ) -> Self {
+    fn open(info: &LiveSessionInfo, projects: ProjectScope, dismissal: Dismissal) -> Self {
         let mut picker = Self {
-            store,
+            store: info.store.clone(),
             list: SearchableList::new(PICKER_TITLE, Vec::new(), VIEWPORT_HEIGHT)
                 .with_description(PICKER_DESCRIPTION)
                 .with_empty_text(EMPTY_TEXT),
@@ -518,8 +506,9 @@ impl ResumePicker {
                 archive: ArchiveState::Active,
             },
             dismissal,
-            live_session_id,
+            live_session_id: info.session_id.clone(),
             pages: Pages::Done,
+            events: info.app_events.clone(),
             listed_at: now_local(),
             load_error: None,
             notice: None,
@@ -543,7 +532,7 @@ impl ResumePicker {
     /// cursor, so scrolling reaches the end and a search covers every session in scope.
     fn load_ahead(&mut self) {
         if self.list.rows_below_cursor() < LOAD_AHEAD {
-            self.pages.request();
+            self.pages.request(&self.events);
         }
         self.list.set_has_more(self.pages.has_more());
     }
@@ -720,11 +709,22 @@ impl ResumePicker {
         }
     }
 
-    /// Loads every page the picker asks for, waiting on each worker.
-    #[cfg(test)]
-    fn settle(&mut self) {
-        while let Some(page) = self.pages.wait() {
-            self.append_page(page);
+    /// Shows what a page brought, ending the listing on a failure.
+    fn page_loaded(&mut self, loaded: Loaded) {
+        match loaded {
+            Loaded::Page(page) => self.append_page(page),
+            Loaded::Failed(err) => {
+                tracing::warn!(
+                    error = %format_args!("{err:#}"),
+                    "resume picker failed to list sessions"
+                );
+                self.load_error = Some(format!("Failed to load sessions: {err:#}"));
+                self.list.set_has_more(false);
+            }
+            Loaded::Stopped => {
+                self.load_error = Some(LOADER_STOPPED.to_owned());
+                self.list.set_has_more(false);
+            }
         }
     }
 }
@@ -794,38 +794,20 @@ impl Modal for ResumePicker {
         UpdateReply::Unclaimed
     }
 
-    fn tick(&mut self, now: Instant) -> bool {
-        let expired = self.notice.as_ref().is_some_and(|n| n.until <= now);
-        if expired {
-            self.notice = None;
+    fn on_sessions_page(&mut self, page: SessionsPage) -> Option<SessionsPage> {
+        if !self.pages.awaits(&page) {
+            return Some(page);
         }
-        match self.pages.poll() {
-            Polled::Pending => expired,
-            Polled::Page(page) => {
-                self.append_page(page);
-                true
-            }
-            Polled::Failed(err) => {
-                tracing::warn!(
-                    error = %format_args!("{err:#}"),
-                    "resume picker failed to list sessions"
-                );
-                self.load_error = Some(format!("Failed to load sessions: {err:#}"));
-                self.list.set_has_more(false);
-                true
-            }
-            Polled::Stopped => {
-                self.load_error = Some(LOADER_STOPPED.to_owned());
-                self.list.set_has_more(false);
-                true
-            }
-        }
+        let loaded = self.pages.finish(page);
+        self.page_loaded(loaded);
+        None
     }
 
-    fn next_tick(&self, now: Instant) -> Option<Instant> {
-        if matches!(self.pages, Pages::Loading(_)) {
-            return Some(now);
-        }
+    fn tick(&mut self, now: Instant) -> bool {
+        self.notice.take_if(|notice| notice.until <= now).is_some()
+    }
+
+    fn next_tick(&self, _now: Instant) -> Option<Instant> {
         self.notice.as_ref().map(|notice| notice.until)
     }
 
@@ -848,30 +830,17 @@ impl Modal for ResumePicker {
     }
 }
 
-// ── Testing ──
-
-#[cfg(test)]
-mod testing {
-    use super::{ResumePicker, SessionStore};
-
-    impl ResumePicker {
-        pub(crate) fn loaded(store: SessionStore, live_session_id: String) -> Self {
-            let mut picker = Self::new(store, live_session_id);
-            picker.settle();
-            picker
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ops::{Deref, DerefMut};
     use std::time::Duration;
 
     use crossterm::event::KeyModifiers;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use time::macros::datetime;
+    use tokio::sync::mpsc;
 
     use ox_core::session::display::UNTITLED_MARKER;
     use ox_core::session::saved::{self, SavedAction};
@@ -886,7 +855,10 @@ mod tests {
     use crate::modal::ModalStack;
     use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::modal::chrome::HINT_SEPARATOR;
-    use crate::modal::testing::{render_modal, render_rows, render_rows_with, rendered_text};
+    use crate::modal::testing::{
+        ScriptedModal, render_modal, render_rows, render_rows_with, rendered_text,
+    };
+    use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
 
     fn archive(picker: &mut ResumePicker) -> ModalKey {
@@ -981,8 +953,92 @@ mod tests {
         ids
     }
 
-    /// `picker` once every page it asks for has loaded.
-    fn opened(mut picker: ResumePicker) -> ResumePicker {
+    /// A picker and the channel its page workers report to, which stands in for the App.
+    struct Harness {
+        picker: ResumePicker,
+        inbox: mpsc::UnboundedReceiver<AppEvent>,
+    }
+
+    impl Harness {
+        /// `open` beside the live session `live_session_id`, listing from `store`.
+        fn new(
+            store: SessionStore,
+            live_session_id: &str,
+            open: impl FnOnce(&LiveSessionInfo) -> ResumePicker,
+        ) -> Self {
+            let (app_events, inbox) = mpsc::unbounded_channel();
+            let info = LiveSessionInfo {
+                store,
+                app_events,
+                session_id: live_session_id.to_owned(),
+                ..test_session_info()
+            };
+            Self {
+                picker: open(&info),
+                inbox,
+            }
+        }
+
+        /// The next page a worker sent, waiting for it.
+        fn next_page(&mut self) -> SessionsPage {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match self.inbox.try_recv() {
+                    Ok(AppEvent::SessionsPage(page)) => return page,
+                    Ok(_) => panic!("expected a sessions page"),
+                    Err(_) => {
+                        assert!(Instant::now() < deadline, "the page never arrived");
+                        std::thread::yield_now();
+                    }
+                }
+            }
+        }
+
+        /// Hands the picker every page it asks for, waiting on each worker. A page from a listing
+        /// the picker reloaded since goes nowhere, as in the App.
+        fn settle(&mut self) {
+            while matches!(self.picker.pages, Pages::Loading(_)) {
+                let page = self.next_page();
+                _ = self.picker.on_sessions_page(page);
+            }
+        }
+    }
+
+    impl Deref for Harness {
+        type Target = ResumePicker;
+
+        fn deref(&self) -> &ResumePicker {
+            &self.picker
+        }
+    }
+
+    impl DerefMut for Harness {
+        fn deref_mut(&mut self) -> &mut ResumePicker {
+            &mut self.picker
+        }
+    }
+
+    /// The `/resume` picker beside the live session `live_session_id`, before any page loads.
+    fn unsettled(store: SessionStore, live_session_id: &str) -> Harness {
+        Harness::new(store, live_session_id, ResumePicker::new)
+    }
+
+    /// [`unsettled`] once every page it asks for has loaded.
+    fn opened(store: SessionStore, live_session_id: &str) -> Harness {
+        let mut picker = unsettled(store, live_session_id);
+        picker.settle();
+        picker
+    }
+
+    /// The startup picker over `projects`, once every page it asks for has loaded.
+    fn opened_at_startup(
+        store: SessionStore,
+        live_session_id: &str,
+        projects: ProjectScope,
+    ) -> Harness {
+        let mut picker = Harness::new(store, live_session_id, |info| {
+            ResumePicker::at_startup(info, projects)
+        });
         picker.settle();
         picker
     }
@@ -1305,7 +1361,7 @@ mod tests {
                 5,
                 datetime!(2026-04-18 09:05:00 UTC),
             );
-            let picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let picker = opened(store, "live-session-id");
             assert_eq!(row_ids(&picker), [stamped_id(0x22), stamped_id(0x11)]);
         }
 
@@ -1327,7 +1383,7 @@ mod tests {
                 1,
                 datetime!(2026-04-18 09:01:00 UTC),
             );
-            let picker = opened(ResumePicker::new(store, live_id.clone()));
+            let picker = opened(store, &live_id);
             assert_eq!(row_ids(&picker), [stamped_id(0x22)]);
         }
     }
@@ -1348,17 +1404,9 @@ mod tests {
                 datetime!(2026-04-18 09:00:00 UTC),
             );
 
-            let scoped = opened(ResumePicker::at_startup(
-                store.clone(),
-                "live-session-id".to_owned(),
-                ProjectScope::Current,
-            ));
+            let scoped = opened_at_startup(store.clone(), "live-session-id", ProjectScope::Current);
             assert_eq!(row_ids(&scoped), Vec::<String>::new());
-            let picker = opened(ResumePicker::at_startup(
-                store,
-                "live-session-id".to_owned(),
-                ProjectScope::Every,
-            ));
+            let picker = opened_at_startup(store, "live-session-id", ProjectScope::Every);
             assert_eq!(
                 picker.list.selected().map(|row| row.session_id.as_str()),
                 Some(stamped_id(0x22).as_str()),
@@ -1391,7 +1439,7 @@ mod tests {
                 3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
 
             let ctrl_enter =
                 picker.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
@@ -1410,7 +1458,7 @@ mod tests {
         #[test]
         fn enter_with_no_rows_keeps_picker_open() {
             let (_dir, store) = isolated_store();
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             assert!(matches!(
                 picker.handle_key(&KeyEvent::from(KeyCode::Enter)),
                 ModalKey::Consumed,
@@ -1431,7 +1479,7 @@ mod tests {
                 3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let picker = opened(store, "live-session-id");
             assert_eq!(
                 picker.footer_hints(),
                 [
@@ -1446,7 +1494,7 @@ mod tests {
             );
 
             let (_dir2, empty_store) = isolated_store();
-            let mut empty = opened(ResumePicker::new(empty_store, "live-session-id".to_owned()));
+            let mut empty = opened(empty_store, "live-session-id");
             empty.handle_key(&KeyEvent::from(KeyCode::Tab));
             empty.settle();
             assert_eq!(
@@ -1464,7 +1512,7 @@ mod tests {
         fn offer_to_clear_an_active_query() {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "auth fix"), (0x22, "ui tweak")]);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
 
             picker.handle_paste("fix");
 
@@ -1493,7 +1541,7 @@ mod tests {
         fn active_view_lists_only_active_sessions_with_every_hint() {
             let (_dir, store) = isolated_store();
             seed_active_and_archived(&store);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
 
             insta::assert_snapshot!(render_to_backend(&mut picker, 120));
         }
@@ -1502,11 +1550,7 @@ mod tests {
         fn fits_every_project_into_an_80_column_terminal() {
             let (_dir, store) = isolated_store();
             seed_active_and_archived(&store);
-            let mut picker = opened(ResumePicker::at_startup(
-                store,
-                "live-session-id".to_owned(),
-                ProjectScope::Every,
-            ));
+            let mut picker = opened_at_startup(store, "live-session-id", ProjectScope::Every);
 
             insta::assert_snapshot!(render_to_backend(&mut picker, 80));
         }
@@ -1515,7 +1559,7 @@ mod tests {
         fn keeps_the_title_and_the_time_in_a_narrow_terminal() {
             let (_dir, store) = isolated_store();
             seed_active_and_archived(&store);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
 
             insta::assert_snapshot!(render_to_backend(&mut picker, 48));
         }
@@ -1524,7 +1568,7 @@ mod tests {
         fn archived_view_after_ctrl_a_swaps_the_header_rows_and_hints() {
             let (_dir, store) = isolated_store();
             seed_active_and_archived(&store);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
 
             picker.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
             picker.settle();
@@ -1536,7 +1580,7 @@ mod tests {
         fn keeps_the_scope_beside_esc_on_medium_footers() {
             let (_dir, store) = isolated_store();
             seed_active_and_archived(&store);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
 
             let medium = footer_row(&mut picker, 80);
 
@@ -1549,9 +1593,9 @@ mod tests {
         #[test]
         fn skips_the_footer_in_an_area_too_short_for_it() {
             let (_dir, store) = isolated_store();
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
 
-            let rows = render_rows(&mut picker, 60, 1);
+            let rows = render_rows(&mut *picker, 60, 1);
 
             assert_eq!(rows, [" ".repeat(60)]);
         }
@@ -1566,8 +1610,8 @@ mod tests {
                 3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            let rows = render_modal(&mut picker, 40, 40);
+            let mut picker = opened(store, "live-session-id");
+            let rows = render_modal(&mut *picker, 40, 40);
             assert_eq!(
                 rows.last().unwrap(),
                 "Enter to resume  ·  Esc to cancel  · ..."
@@ -1577,10 +1621,10 @@ mod tests {
         #[test]
         fn surfaces_load_error_in_footer() {
             let (_dir, store) = isolated_store();
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             picker.load_error = Some("permission denied".to_owned());
 
-            let rows = render_modal(&mut picker, 60, 40);
+            let rows = render_modal(&mut *picker, 60, 40);
             assert_eq!(rows.last().unwrap(), "! permission denied");
         }
     }
@@ -1592,7 +1636,7 @@ mod tests {
         fn loads_the_next_page_as_the_cursor_nears_the_last_loaded_row() {
             let (_dir, store) = isolated_store();
             let ids = seed_many(&store, PAGE_SIZE + 5);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             assert_eq!(row_ids(&picker), ids[..PAGE_SIZE]);
             assert!(picker.pages.has_more());
 
@@ -1618,7 +1662,7 @@ mod tests {
                 1,
                 datetime!(2026-04-19 09:00:00 UTC),
             );
-            let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+            let mut picker = unsettled(store, "live-session-id");
 
             picker.handle_key(&KeyEvent::from(KeyCode::Tab));
             picker.settle();
@@ -1643,7 +1687,7 @@ mod tests {
                 5,
                 datetime!(2026-04-18 09:05:00 UTC),
             );
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             for c in "auth".chars() {
                 picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
             }
@@ -1669,7 +1713,7 @@ mod tests {
                 1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             for c in "ab".chars() {
                 picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
             }
@@ -1687,7 +1731,7 @@ mod tests {
                 3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             for c in "zzz".chars() {
                 picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
             }
@@ -1710,8 +1754,8 @@ mod tests {
                     datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(i)),
                 );
             }
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            render_rows(&mut picker, 60, 30);
+            let mut picker = opened(store, "live-session-id");
+            render_rows(&mut *picker, 60, 30);
             assert_eq!(picker.list.cursor_index(), 0);
             picker.handle_key(&KeyEvent::from(KeyCode::Down));
             assert_eq!(picker.list.cursor_index(), 1);
@@ -1737,7 +1781,7 @@ mod tests {
                 1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             assert_eq!(picker.scope.projects, ProjectScope::Current);
             picker.handle_key(&KeyEvent::from(KeyCode::Tab));
             picker.settle();
@@ -1785,7 +1829,7 @@ mod tests {
                 datetime!(2026-04-18 09:02:00 UTC),
             );
 
-            let mut picker = opened(ResumePicker::new(store, live_id.clone()));
+            let mut picker = opened(store, &live_id);
             assert_eq!(
                 row_ids(&picker),
                 [stamped_id(0x11)],
@@ -1813,9 +1857,9 @@ mod tests {
         fn ctrl_a_toggles_between_active_and_archived_sessions() {
             let (_dir, store) = isolated_store();
             seed_active_and_archived(&store);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             let ctrl_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
-            let active_view = rendered_text(&mut picker, 180);
+            let active_view = rendered_text(&mut *picker, 180);
 
             picker.handle_key(&ctrl_a);
             picker.settle();
@@ -1833,7 +1877,7 @@ mod tests {
             picker.handle_key(&ctrl_a);
             picker.settle();
             assert_eq!(
-                rendered_text(&mut picker, 180),
+                rendered_text(&mut *picker, 180),
                 active_view,
                 "a second Ctrl+A restores the active view",
             );
@@ -1849,7 +1893,7 @@ mod tests {
                 1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             let outcome = picker.handle_key(&KeyEvent::from(KeyCode::Insert));
             assert!(matches!(outcome, ModalKey::Consumed));
             assert_eq!(picker.list.query(), "");
@@ -1870,7 +1914,7 @@ mod tests {
                 3,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             for c in "auths".chars() {
                 picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
             }
@@ -1898,7 +1942,7 @@ mod tests {
         #[test]
         fn ctrl_d_with_no_rows_consumes_silently_instead_of_pushing() {
             let (_dir, store) = isolated_store();
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
 
             let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
             let outcome = picker.handle_key(&ctrl_d);
@@ -1909,9 +1953,9 @@ mod tests {
         async fn ctrl_d_then_y_deletes_the_cursor_session_through_the_modal_stack() {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
-            let picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let picker = opened(store, "live-session-id");
             let mut stack = ModalStack::default();
-            stack.push(Box::new(picker));
+            stack.push(Box::new(picker.picker));
             let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
             let shown = |stack: &mut ModalStack| {
                 render_rows_with(60, 10, |frame, area, theme| {
@@ -1966,10 +2010,7 @@ mod tests {
                     (0x44, "docs"),
                 ],
             );
-            let mut picker = opened(ResumePicker::new(
-                store.clone(),
-                "live-session-id".to_owned(),
-            ));
+            let mut picker = opened(store.clone(), "live-session-id");
             picker.handle_key(&KeyEvent::from(KeyCode::Tab));
             picker.settle();
             for c in "fix".chars() {
@@ -2021,7 +2062,7 @@ mod tests {
                     datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(i)),
                 );
             }
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             let first_shown = |picker: &mut ResumePicker| -> String {
                 let rows = render_modal(picker, 60, 40);
                 rows[5].split_whitespace().next().unwrap().to_owned()
@@ -2051,10 +2092,7 @@ mod tests {
             for byte in [0x11, 0x22] {
                 archive_test_session(&store, &stamped_id(byte));
             }
-            let mut picker = opened(ResumePicker::new(
-                store.clone(),
-                "live-session-id".to_owned(),
-            ));
+            let mut picker = opened(store.clone(), "live-session-id");
             picker.handle_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
             picker.settle();
             picker.handle_key(&KeyEvent::from(KeyCode::Down));
@@ -2082,10 +2120,7 @@ mod tests {
                 1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut picker = opened(ResumePicker::new(
-                store.clone(),
-                "live-session-id".to_owned(),
-            ));
+            let mut picker = opened(store.clone(), "live-session-id");
             picker.live_session_id.clone_from(&id);
 
             archive(&mut picker);
@@ -2103,7 +2138,7 @@ mod tests {
         fn ctrl_x_never_cuts_from_the_filter() {
             // The filter's editor binds Ctrl+X to cutting the selection, which the picker shadows.
             let (_dir, store) = isolated_store();
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             for c in "ab".chars() {
                 picker.handle_key(&KeyEvent::from(KeyCode::Char(c)));
             }
@@ -2127,7 +2162,7 @@ mod tests {
                 1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             let target = SavedTarget::Id(id.clone());
             picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
             picker.archive_started(&target);
@@ -2158,7 +2193,7 @@ mod tests {
             let (_dir, store) = isolated_store();
             let ids = seed_many(&store, 2 * PAGE_SIZE + 5);
             let oldest = ids.last().unwrap().clone();
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
 
             picker.handle_paste(&oldest);
             picker.settle();
@@ -2171,7 +2206,7 @@ mod tests {
         fn clears_the_notice() {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             archive(&mut picker);
             assert_eq!(
                 footer_row(&mut picker, 80),
@@ -2196,7 +2231,7 @@ mod tests {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
             let target = stamped_id(0x22);
-            let mut picker = opened(ResumePicker::new(store.clone(), "live".to_owned()));
+            let mut picker = opened(store.clone(), "live");
             let barrier = WriterBarrier::hold(&store);
 
             let action =
@@ -2259,7 +2294,7 @@ mod tests {
                 &[(0x11, "first"), (0x22, "doomed"), (0x33, "third")],
             );
             let target = stamped_id(0x22);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             picker.handle_key(&KeyEvent::from(KeyCode::Down));
             assert_eq!(picker.list.selected().unwrap().session_id, target);
 
@@ -2284,7 +2319,7 @@ mod tests {
         fn loads_the_next_page_once_the_delete_leaves_too_few_rows_below_the_cursor() {
             let (_dir, store) = isolated_store();
             let ids = seed_many(&store, PAGE_SIZE + 5);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             while picker.list.rows_below_cursor() > LOAD_AHEAD {
                 picker.handle_key(&KeyEvent::from(KeyCode::Down));
             }
@@ -2308,7 +2343,7 @@ mod tests {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
             let target = stamped_id(0x11);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             picker.handle_key(&KeyEvent::from(KeyCode::Down));
             let failure = SavedError::Failed {
                 action: SavedAction::Delete,
@@ -2330,7 +2365,7 @@ mod tests {
         fn ignores_a_prefix_archive_and_events_about_other_work() {
             let (_dir, store) = isolated_store();
             seed_titled(&store, &[(0x11, "first"), (0x22, "second")]);
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
 
             picker.on_engine(EngineUpdate::Admitted(&Op::SetArchive {
                 target: SavedTarget::Prefix("2222".to_owned()),
@@ -2357,7 +2392,7 @@ mod tests {
                 1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut picker = opened(store, "live-session-id");
             archive(&mut picker);
             let notice = "Archived session 11111111: only";
             assert_eq!(footer_row(&mut picker, 120), notice);
@@ -2376,44 +2411,110 @@ mod tests {
                 picker.footer_hints().join(HINT_SEPARATOR),
             );
         }
+    }
+
+    mod on_sessions_page {
+        use super::*;
+
+        /// A request number no worker uses, since workers count up from zero.
+        const AWAITED: u64 = u64::MAX;
+
+        /// `picker` waiting on [`AWAITED`], which `page` answers.
+        fn awaiting(
+            picker: &mut ResumePicker,
+            page: Option<anyhow::Result<Vec<SessionInfo>>>,
+        ) -> SessionsPage {
+            picker.pages = Pages::Loading(AWAITED);
+            picker.list.set_has_more(true);
+            SessionsPage {
+                request: AWAITED,
+                walk: picker.store.walk(ListScope::default()),
+                page,
+            }
+        }
 
         #[test]
-        fn appends_the_page_a_worker_finished_and_asks_for_a_repaint() {
+        fn appends_the_page_the_picker_asked_for() {
             let (_dir, store) = isolated_store();
             let ids = seed_many(&store, 2);
-            let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+            let mut picker = unsettled(store, "live-session-id");
             assert_eq!(
                 row_ids(&picker),
                 Vec::<String>::new(),
                 "the page is still loading"
             );
+            let page = picker.next_page();
 
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while !picker.tick(now()) {
-                assert!(Instant::now() < deadline, "the page never arrived");
-                std::thread::yield_now();
-            }
+            let unclaimed = picker.on_sessions_page(page);
 
+            assert!(unclaimed.is_none());
             assert_eq!(row_ids(&picker), ids);
-            assert!(!picker.tick(now()), "nothing left to load or expire");
+            assert!(!picker.pages.has_more(), "both sessions fit one page");
+        }
+
+        #[test]
+        fn ignores_a_page_from_a_listing_reloaded_since() {
+            let (_dir, store) = isolated_store();
+            let ids = seed_many(&store, 2);
+            let mut picker = unsettled(store, "live-session-id");
+            let superseded = picker.next_page();
+            picker.handle_key(&KeyEvent::from(KeyCode::Tab));
+
+            let unclaimed = picker.on_sessions_page(superseded);
+
+            assert!(unclaimed.is_some(), "the page answers the first listing");
+            assert_eq!(row_ids(&picker), Vec::<String>::new());
+            picker.settle();
+            assert_eq!(row_ids(&picker), ids, "the reload's own page still lands");
+        }
+
+        #[test]
+        fn ignores_a_page_another_picker_asked_for() {
+            let (_dir, store) = isolated_store();
+            seed_many(&store, 2);
+            let mut first = unsettled(store.clone(), "live-session-id");
+            let mut second = unsettled(store, "live-session-id");
+            let page = first.next_page();
+
+            let unclaimed = second.on_sessions_page(page);
+
+            assert!(unclaimed.is_some());
+            assert_eq!(row_ids(&second), Vec::<String>::new());
+        }
+
+        #[test]
+        fn reaches_a_picker_under_another_modal() {
+            let (_dir, store) = isolated_store();
+            seed_titled(&store, &[(0x11, "first")]);
+            let mut picker = unsettled(store, "live-session-id");
+            let page = picker.next_page();
+            let mut stack = ModalStack::default();
+            stack.push(Box::new(picker.picker));
+            stack.push(Box::new(ScriptedModal::new()));
+
+            let delivered = stack.deliver_sessions_page(page);
+
+            assert!(delivered);
+            stack.handle_key(&KeyEvent::from(KeyCode::Char('c')));
+            let rows = render_rows_with(60, 10, |frame, area, theme| {
+                stack.render(frame, area, theme);
+            })
+            .join("\n");
+            assert!(rows.contains("first"), "{rows}");
         }
 
         #[test]
         fn surfaces_and_logs_a_page_the_store_failed_to_read() {
             let (_dir, store) = isolated_store();
-            let walk = store.walk(ListScope::default());
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            let (tx, rx) = mpsc::channel();
-            tx.send((walk, Err(anyhow::anyhow!("disk I/O error"))))
-                .unwrap();
-            picker.pages = Pages::Loading(Worker { rx });
-            picker.list.set_has_more(true);
+            let mut picker = opened(store, "live-session-id");
+            let page = awaiting(&mut picker, Some(Err(anyhow::anyhow!("disk I/O error"))));
             let logs = LogCapture::default();
 
-            let repaint =
-                tracing::dispatcher::with_default(&logs.dispatch(), || picker.tick(now()));
+            let unclaimed = tracing::dispatcher::with_default(&logs.dispatch(), || {
+                picker.on_sessions_page(page)
+            });
 
-            assert!(repaint);
+            assert!(unclaimed.is_none());
             let error = "Failed to load sessions: disk I/O error";
             assert_eq!(picker.load_error.as_deref(), Some(error));
             assert_eq!(
@@ -2436,14 +2537,12 @@ mod tests {
         #[test]
         fn surfaces_a_page_loader_that_stopped_without_a_page() {
             let (_dir, store) = isolated_store();
-            let mut picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
-            let (tx, rx) = mpsc::channel();
-            drop(tx);
-            picker.pages = Pages::Loading(Worker { rx });
-            picker.list.set_has_more(true);
+            let mut picker = opened(store, "live-session-id");
+            let page = awaiting(&mut picker, None);
 
-            assert!(picker.tick(now()));
+            let unclaimed = picker.on_sessions_page(page);
 
+            assert!(unclaimed.is_none());
             assert_eq!(picker.load_error.as_deref(), Some(LOADER_STOPPED));
             assert_eq!(
                 footer_row(&mut picker, 80),
@@ -2457,12 +2556,16 @@ mod tests {
         use super::*;
 
         #[tokio::test(start_paused = true)]
-        async fn ticks_every_frame_while_a_page_loads_and_then_waits_for_the_notice() {
+        async fn waits_only_for_the_notice() {
             let (_dir, store) = isolated_store();
             seed_many(&store, 1);
-            let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+            let mut picker = unsettled(store, "live-session-id");
             let start = now();
-            assert_eq!(picker.next_tick(start), Some(start), "the first page loads");
+            assert_eq!(
+                picker.next_tick(start),
+                None,
+                "the loading page arrives as an event"
+            );
 
             picker.settle();
             assert_eq!(picker.next_tick(start), None);
@@ -2480,11 +2583,9 @@ mod tests {
         fn quits_from_the_startup_picker_only() {
             let (_dir, store) = isolated_store();
             let mut stack = ModalStack::default();
-            stack.push(Box::new(ResumePicker::at_startup(
-                store.clone(),
-                "live-session-id".to_owned(),
-                ProjectScope::Current,
-            )));
+            let startup =
+                opened_at_startup(store.clone(), "live-session-id", ProjectScope::Current);
+            stack.push(Box::new(startup.picker));
             let outcome = stack.handle_key(&KeyEvent::from(KeyCode::Esc));
             assert!(
                 matches!(
@@ -2495,7 +2596,7 @@ mod tests {
             );
             assert!(!stack.is_active());
 
-            let mut slash_picker = opened(ResumePicker::new(store, "live-session-id".to_owned()));
+            let mut slash_picker = opened(store, "live-session-id");
             assert!(slash_picker.on_cancel().is_none());
         }
     }

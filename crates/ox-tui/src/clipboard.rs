@@ -1,7 +1,7 @@
 //! Clipboard writes for chat selections. A local session writes the system clipboard directly and,
 //! inside tmux, also loads a tmux paste buffer. A remote session loads the tmux buffer, which tmux
 //! 3.2 and later forward to the outer terminal, or sends the terminal an OSC 52 sequence. Every
-//! route runs off the event loop and reports back through [`Clipboard::recv`].
+//! route runs off the event loop and reports back through [`Clipboard::finish`].
 
 use std::fmt;
 use std::pin::Pin;
@@ -14,7 +14,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio::time::Instant;
 use tracing::debug;
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -22,6 +22,8 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use ox_core::util::env;
 use ox_core::util::sync::lock_or_recover;
 use ox_core::util::text::plural;
+
+use crate::app_event::{AppEvent, AppEventSender};
 
 // ── Constants ──
 
@@ -200,8 +202,7 @@ pub(crate) struct Clipboard {
     tmux: Arc<dyn Runner>,
     pending: Option<watch::Sender<CopyRequest>>,
     generation: u64,
-    tx: mpsc::UnboundedSender<(u64, CopyReport)>,
-    rx: mpsc::UnboundedReceiver<(u64, CopyReport)>,
+    events: AppEventSender,
 }
 
 #[derive(Debug, Clone)]
@@ -210,17 +211,22 @@ struct CopyRequest {
     text: Arc<str>,
 }
 
+/// One copy's end, which [`Clipboard::finish`] reports only while no later copy is queued.
+pub(crate) struct CopyEnd {
+    generation: u64,
+    report: CopyReport,
+}
+
 impl Clipboard {
-    pub(crate) fn new(environment: Environment) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+    /// Copies in `environment`, reporting each copy's end to `events` for [`Self::finish`].
+    pub(crate) fn new(environment: Environment, events: AppEventSender) -> Self {
         Self {
             environment,
             native: Arc::new(SystemClipboard::default()),
             tmux: Arc::new(Program("tmux")),
             pending: None,
             generation: 0,
-            tx,
-            rx,
+            events,
         }
     }
 
@@ -243,17 +249,12 @@ impl Clipboard {
         };
         let (tx, rx) = watch::channel(request);
         self.pending = Some(tx);
-        tokio::spawn(route.run(rx, self.tx.clone()));
+        tokio::spawn(route.run(rx, self.events.clone()));
     }
 
-    /// Waits for the latest copy's report. Cancel-safe for a `tokio::select!` arm.
-    pub(crate) async fn recv(&mut self) -> Option<CopyReport> {
-        while let Some((generation, report)) = self.rx.recv().await {
-            if generation == self.generation {
-                return Some(report);
-            }
-        }
-        None
+    /// The report of a finished copy, or `None` when a later copy replaced it.
+    pub(crate) fn finish(&self, end: CopyEnd) -> Option<CopyReport> {
+        (end.generation == self.generation).then_some(end.report)
     }
 }
 
@@ -267,11 +268,7 @@ struct Route {
 }
 
 impl Route {
-    async fn run(
-        self,
-        mut requests: watch::Receiver<CopyRequest>,
-        reports: mpsc::UnboundedSender<(u64, CopyReport)>,
-    ) {
+    async fn run(self, mut requests: watch::Receiver<CopyRequest>, events: AppEventSender) {
         loop {
             let CopyRequest { generation, text } = requests.borrow_and_update().clone();
             let chars = text.graphemes(true).count();
@@ -279,16 +276,14 @@ impl Route {
             let delivery = self.deliver(text, deadline);
             tokio::pin!(delivery);
 
-            if let Ok(outcome) = tokio::time::timeout_at(deadline, &mut delivery).await {
-                _ = reports.send((generation, CopyReport { chars, outcome }));
-            } else {
-                _ = reports.send((
-                    generation,
-                    CopyReport {
-                        chars,
-                        outcome: Err(CopyError::TimedOut),
-                    },
-                ));
+            let finished = tokio::time::timeout_at(deadline, &mut delivery).await;
+            let timed_out = finished.is_err();
+            let report = CopyReport {
+                chars,
+                outcome: finished.unwrap_or(Err(CopyError::TimedOut)),
+            };
+            _ = events.send(AppEvent::Copy(CopyEnd { generation, report }));
+            if timed_out {
                 // Native writes cannot be cancelled, and a killed child must be reaped.
                 _ = delivery.await;
             }
@@ -523,7 +518,7 @@ mod tests {
     use anyhow::anyhow;
     use futures::poll;
     use tokio::sync::mpsc::error::TryRecvError;
-    use tokio::sync::{Semaphore, oneshot};
+    use tokio::sync::{Semaphore, mpsc, oneshot};
 
     use super::testing::REMOTE;
     use super::*;
@@ -580,6 +575,26 @@ mod tests {
                 tokio::time::sleep_until(deadline).await;
                 bail!("tmux timed out")
             })
+        }
+    }
+
+    fn test_clipboard(environment: Environment) -> (Clipboard, mpsc::UnboundedReceiver<AppEvent>) {
+        let (events, reports) = mpsc::unbounded_channel();
+        (Clipboard::new(environment, events), reports)
+    }
+
+    /// The report of the latest copy, as the App's event loop takes it from `reports`.
+    async fn next_report(
+        clipboard: &Clipboard,
+        reports: &mut mpsc::UnboundedReceiver<AppEvent>,
+    ) -> CopyReport {
+        loop {
+            let Some(AppEvent::Copy(end)) = reports.recv().await else {
+                panic!("expected a copy end");
+            };
+            if let Some(report) = clipboard.finish(end) {
+                return report;
+            }
         }
     }
 
@@ -859,19 +874,23 @@ mod tests {
                 native: Arc::clone(&clipboard.native),
                 tmux: Arc::clone(&clipboard.tmux),
             }
-            .run(rx, clipboard.tx.clone())
+            .run(rx, clipboard.events.clone())
         }
 
-        async fn copy_with(clipboard: &mut Clipboard, text: &str) -> CopyReport {
+        async fn copy_with(
+            clipboard: &mut Clipboard,
+            reports: &mut mpsc::UnboundedReceiver<AppEvent>,
+            text: &str,
+        ) -> CopyReport {
             clipboard.copy(text.to_owned());
-            clipboard.recv().await.expect("the copy reports back")
+            next_report(clipboard, reports).await
         }
 
         #[tokio::test]
         async fn in_a_remote_session_sends_osc52() {
-            let mut clipboard = Clipboard::new(REMOTE);
+            let (mut clipboard, mut reports) = test_clipboard(REMOTE);
 
-            let report = copy_with(&mut clipboard, "cafe\u{301}").await;
+            let report = copy_with(&mut clipboard, &mut reports, "cafe\u{301}").await;
 
             assert_eq!(
                 report,
@@ -889,13 +908,13 @@ mod tests {
         #[tokio::test]
         async fn inside_tmux_hands_the_text_to_tmux() {
             let tmux = FakeTmux::new([Ok(())]);
-            let mut clipboard = Clipboard::new(Environment {
+            let (mut clipboard, mut reports) = test_clipboard(Environment {
                 tmux: true,
                 ..REMOTE
             });
             clipboard.tmux = tmux.clone();
 
-            let report = copy_with(&mut clipboard, "text").await;
+            let report = copy_with(&mut clipboard, &mut reports, "text").await;
 
             assert_eq!(report.outcome, Ok(Delivery::Copied));
             assert_eq!(tmux.runs(), [load_buffer(&["-w", "-"], "text")]);
@@ -914,7 +933,7 @@ mod tests {
                         .into(),
                     contents: Mutex::default(),
                 });
-                let mut clipboard = Clipboard::new(Environment {
+                let (mut clipboard, mut reports) = test_clipboard(Environment {
                     tmux: true,
                     ..REMOTE
                 });
@@ -938,7 +957,7 @@ mod tests {
 
                 tmux.releases["first"].add_permits(1);
                 assert!(poll!(&mut worker).is_pending(), "{pending:?}");
-                let report = clipboard.recv().await.unwrap();
+                let report = next_report(&clipboard, &mut reports).await;
 
                 assert_eq!(
                     written.recv().await.as_deref(),
@@ -972,7 +991,7 @@ mod tests {
                 release: Mutex::new(Some(wait)),
                 contents: Mutex::default(),
             });
-            let mut clipboard = Clipboard::new(Environment {
+            let (mut clipboard, mut reports) = test_clipboard(Environment {
                 local: true,
                 ..REMOTE
             });
@@ -984,7 +1003,7 @@ mod tests {
             assert_eq!(started.recv().await.as_deref(), Some("first"));
             tokio::time::advance(COPY_TIMEOUT).await;
             assert!(poll!(&mut worker).is_pending());
-            let timed_out = clipboard.recv().await.unwrap();
+            let timed_out = next_report(&clipboard, &mut reports).await;
 
             assert_eq!(timed_out.outcome, Err(CopyError::TimedOut));
             assert_eq!(*native.contents.lock().unwrap(), "");
@@ -996,7 +1015,7 @@ mod tests {
 
             release.send(()).unwrap();
             tokio::spawn(worker);
-            let report = clipboard.recv().await.unwrap();
+            let report = next_report(&clipboard, &mut reports).await;
 
             assert_eq!(written.recv().await.as_deref(), Some("first"));
             assert_eq!(written.recv().await.as_deref(), Some("latest"));
@@ -1012,7 +1031,7 @@ mod tests {
                 events: Mutex::default(),
                 contents: Mutex::default(),
             });
-            let mut clipboard = Clipboard::new(Environment {
+            let (mut clipboard, mut reports) = test_clipboard(Environment {
                 tmux: true,
                 ..REMOTE
             });
@@ -1023,7 +1042,7 @@ mod tests {
             assert!(poll!(&mut worker).is_pending());
             tokio::time::advance(COPY_TIMEOUT).await;
             assert!(poll!(&mut worker).is_pending());
-            let timed_out = clipboard.recv().await.unwrap();
+            let timed_out = next_report(&clipboard, &mut reports).await;
 
             assert_eq!(timed_out.outcome, Err(CopyError::TimedOut));
 
@@ -1034,7 +1053,7 @@ mod tests {
 
             tmux.stopped.add_permits(1);
             assert!(poll!(&mut worker).is_pending());
-            let report = clipboard.recv().await.unwrap();
+            let report = next_report(&clipboard, &mut reports).await;
 
             assert_eq!(
                 *tmux.events.lock().unwrap(),
@@ -1056,7 +1075,7 @@ mod tests {
                     .into(),
                 contents: Mutex::default(),
             });
-            let mut clipboard = Clipboard::new(Environment {
+            let (mut clipboard, _reports) = test_clipboard(Environment {
                 tmux: true,
                 ..REMOTE
             });
@@ -1077,7 +1096,7 @@ mod tests {
         #[tokio::test]
         async fn inside_tmux_keeps_a_selection_over_the_limit_from_tmux() {
             let tmux = FakeTmux::new([Ok(())]);
-            let mut clipboard = Clipboard::new(Environment {
+            let (mut clipboard, mut reports) = test_clipboard(Environment {
                 tmux: true,
                 ..REMOTE
             });
@@ -1085,8 +1104,8 @@ mod tests {
             let at_limit = "x".repeat(MAX_TERMINAL_COPY_BYTES);
             let over_limit = "x".repeat(MAX_TERMINAL_COPY_BYTES + 1);
 
-            let fits = copy_with(&mut clipboard, &at_limit).await;
-            let too_large = copy_with(&mut clipboard, &over_limit).await;
+            let fits = copy_with(&mut clipboard, &mut reports, &at_limit).await;
+            let too_large = copy_with(&mut clipboard, &mut reports, &over_limit).await;
 
             assert_eq!(fits.outcome, Ok(Delivery::Copied));
             assert_eq!(
@@ -1098,23 +1117,23 @@ mod tests {
 
         #[tokio::test(start_paused = true)]
         async fn reports_a_route_that_outlasts_the_timeout() {
-            let mut clipboard = Clipboard::new(Environment {
+            let (mut clipboard, mut reports) = test_clipboard(Environment {
                 tmux: true,
                 ..REMOTE
             });
             clipboard.tmux = Arc::new(PendingTmux);
 
-            let report = copy_with(&mut clipboard, "text").await;
+            let report = copy_with(&mut clipboard, &mut reports, "text").await;
 
             assert_eq!(report.outcome, Err(CopyError::TimedOut));
         }
     }
 
-    mod recv {
+    mod finish {
         use super::*;
 
-        #[tokio::test]
-        async fn discards_superseded_success_fallback_and_failure_reports() {
+        #[test]
+        fn discards_superseded_success_fallback_and_failure_reports() {
             for (name, outcome) in [
                 ("native copy", Ok(Delivery::Copied)),
                 (
@@ -1126,35 +1145,23 @@ mod tests {
                 ),
                 ("timeout", Err(CopyError::TimedOut)),
             ] {
-                let mut clipboard = Clipboard::new(REMOTE);
+                let (mut clipboard, _reports) = test_clipboard(REMOTE);
                 clipboard.generation = 2;
-                clipboard
-                    .tx
-                    .send((1, CopyReport { chars: 3, outcome }))
-                    .unwrap();
-                let latest = CopyReport {
+                let latest = || CopyReport {
                     chars: 6,
                     outcome: Err(CopyError::AppleTerminal),
                 };
-                clipboard
-                    .tx
-                    .send((
-                        2,
-                        CopyReport {
-                            chars: latest.chars,
-                            outcome: Err(CopyError::AppleTerminal),
-                        },
-                    ))
-                    .unwrap();
+                let superseded = CopyEnd {
+                    generation: 1,
+                    report: CopyReport { chars: 3, outcome },
+                };
+                let current = CopyEnd {
+                    generation: 2,
+                    report: latest(),
+                };
 
-                let report = clipboard.recv().await.unwrap();
-
-                assert_eq!(report, latest, "{name}");
-                assert_eq!(
-                    report.notice(),
-                    (CopyError::AppleTerminal.to_string(), true),
-                    "{name}",
-                );
+                assert_eq!(clipboard.finish(superseded), None, "{name}");
+                assert_eq!(clipboard.finish(current), Some(latest()), "{name}");
             }
         }
     }

@@ -11,12 +11,16 @@ use ox_core::protocol::UsageSnapshot;
 use ox_core::session::store::SessionStore;
 use ox_core::tool::bash::background::BackgroundShell;
 
+use crate::app_event::AppEventSender;
+
 /// The running session's state, which the App keeps current from engine events and hands to every
 /// slash command and the status bar. The saved record `--list` reads is
 /// [`ox_core::session::store::listing::SessionInfo`].
 pub(crate) struct LiveSessionInfo {
     /// The process's session store, which the `/resume` picker lists from.
     pub(crate) store: SessionStore,
+    /// Where background work, such as a `/resume` picker's page reads, reports to the App.
+    pub(crate) app_events: AppEventSender,
     /// The working directory as shown, with the home directory as `~`.
     pub(crate) display_cwd: String,
     /// The session's project, which scopes the session store, where `/init` checks for instruction
@@ -84,6 +88,8 @@ impl LiveSessionInfo {
 pub(crate) mod testing {
     use std::path::PathBuf;
 
+    use tokio::sync::mpsc;
+
     use ox_core::config::ConfigSnapshot;
     use ox_core::config::compaction::CompactionConfig;
     use ox_core::config::testing::test_snapshot;
@@ -93,10 +99,12 @@ pub(crate) mod testing {
     use super::LiveSessionInfo;
 
     /// Fully populated [`LiveSessionInfo`] that the slash, welcome, and app tests share. Its store
-    /// was never set up, so a test that reads saved sessions supplies its own.
+    /// was never set up, so a test that reads saved sessions supplies its own, and nothing reads
+    /// what its background work reports, so a test that does supplies its own channel.
     pub(crate) fn test_session_info() -> LiveSessionInfo {
         LiveSessionInfo {
             store: SessionStore::unopened("repo"),
+            app_events: mpsc::unbounded_channel().0,
             display_cwd: "~/test".to_owned(),
             project_root: PathBuf::from("/repo"),
             version: "0.0.0-test",

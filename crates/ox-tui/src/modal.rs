@@ -22,6 +22,7 @@ use ox_core::protocol::{Event, Op};
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
 use crate::keymap::{CTRL_C, KeyChord, is_unmodified};
+use crate::slash::SessionsPage;
 use crate::theme::Theme;
 
 const TOP_BORDER_HEIGHT: u16 = 1;
@@ -51,10 +52,15 @@ pub(crate) trait Modal: Send {
         UpdateReply::Unclaimed
     }
 
+    /// Receives a page of sessions that a `/resume` picker's worker read, wherever the modal sits
+    /// on the stack. Returns the page when it answers another modal's request. Default returns it.
+    fn on_sessions_page(&mut self, page: SessionsPage) -> Option<SessionsPage> {
+        Some(page)
+    }
+
     /// Fires on frame ticks while the modal is on top, for state that changes with time, such as a
-    /// notice that expires or rows loading in the background. Returns whether the modal needs a
-    /// repaint. An override reports when it next has work through [`Self::next_tick`], since an
-    /// idle loop ticks only then. Default no-op.
+    /// notice that expires. Returns whether the modal needs a repaint. An override reports its next
+    /// work through [`Self::next_tick`], since an idle loop ticks only then. Default no-op.
     fn tick(&mut self, _now: Instant) -> bool {
         false
     }
@@ -192,6 +198,15 @@ impl ModalStack {
                 }
             });
         claimed.then_some(actions)
+    }
+
+    /// Hands `page` to the modal whose request it answers. Returns whether one took it, so the
+    /// caller repaints.
+    pub(crate) fn deliver_sessions_page(&mut self, page: SessionsPage) -> bool {
+        self.stack
+            .iter_mut()
+            .try_fold(page, |page, modal| modal.on_sessions_page(page))
+            .is_none()
     }
 
     /// Drops every modal on the stack, firing each modal's [`Modal::on_cancel`] hook first, and
