@@ -297,7 +297,8 @@ fn reject_project_keys(table: &Table, path: &Path) -> Result<()> {
     }
     bail!(
         "{} cannot set {}. \
-         A project file may only set {} in [client] and add deny and ask rules in [permission]. \
+         A project file may only set {} in [client], keys in [tui], \
+         and deny and ask rules in [permission]. \
          Set other keys in {} or a config.d drop-in, and credentials in environment variables.",
         path.display(),
         blocked.join(", "),
@@ -1264,7 +1265,7 @@ mod tests {
                      permission.mode. \
                      A project file may only set \
                      model, effort, max_tokens, max_tool_rounds, prompt_cache_ttl, and compaction \
-                     in [client] and add deny and ask rules in [permission]. \
+                     in [client], keys in [tui], and deny and ask rules in [permission]. \
                      Set other keys in ~/config-home/ox/config.toml or a config.d drop-in, \
                      and credentials in environment variables.",
                     path.display(),

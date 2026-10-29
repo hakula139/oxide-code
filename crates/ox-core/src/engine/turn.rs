@@ -2636,7 +2636,7 @@ mod tests {
                 panic!("expected ToolResult, got {:?}", messages[2].content[0]);
             };
             assert!(
-                content.starts_with("The echo call was denied by `plan` mode."),
+                content.starts_with("The echo call was denied by `plan` mode,"),
                 "{content}"
             );
             assert!(
