@@ -182,7 +182,7 @@ impl Engine {
     ) -> AbortResult<()> {
         if !auto_compaction_due(
             self.auto_compaction(),
-            self.usage.context_estimate,
+            self.usage.context_estimate(),
             self.transcript.messages(),
         ) {
             return Ok(());
@@ -892,7 +892,7 @@ mod tests {
         ) -> Engine {
             let mut engine = engine(server.uri(), &test_store(dir), dir).await;
             engine.compaction = CompactionConfig::with_threshold(50_000);
-            engine.usage.context_estimate = context_estimate;
+            engine.usage.set_context_estimate(context_estimate);
             engine.transcript.set_messages(transcript);
             engine
         }
@@ -1001,7 +1001,8 @@ mod tests {
                 );
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
                 assert_eq!(
-                    engine.usage.context_estimate, usage,
+                    engine.usage.context_estimate(),
+                    usage,
                     "the transcript the usage measured stays"
                 );
                 let events = sink.events();
@@ -1112,8 +1113,8 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.displayed_usage = Some(TokenUsage::new(90_000, 9));
-                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.set_displayed_usage(TokenUsage::new(90_000, 9));
+                engine.usage.set_total_estimated_cost_usd(1.23);
                 engine.usage.auto_compaction_failures = AutoCompactFailures::new(3);
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
@@ -1132,11 +1133,11 @@ mod tests {
                         CompactTrigger::Manual
                     )]
                 );
-                assert_eq!(engine.usage.displayed_usage, None);
+                assert_eq!(engine.usage.displayed_usage(), None);
                 assert!(
-                    (engine.usage.total_estimated_cost_usd - (1.23 + 0.006)).abs() < 1e-12,
+                    (engine.usage.total_estimated_cost_usd() - (1.23 + 0.006)).abs() < 1e-12,
                     "the session cost keeps earlier turns and adds the summary: {}",
-                    engine.usage.total_estimated_cost_usd,
+                    engine.usage.total_estimated_cost_usd(),
                 );
                 assert_ne!(
                     engine.transcript.prompt().user_context,
@@ -1262,7 +1263,7 @@ mod tests {
                 mount_reply(&server, "summary").await;
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.set_total_estimated_cost_usd(1.23);
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
 
@@ -1338,8 +1339,8 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.displayed_usage = Some(TokenUsage::new(90_000, 9));
-                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.set_displayed_usage(TokenUsage::new(90_000, 9));
+                engine.usage.set_total_estimated_cost_usd(1.23);
                 let sink = CapturingSink::default();
 
                 let end = engine.compact(&sink, &mut inert_ops(), None).await;
@@ -1469,8 +1470,8 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.displayed_usage = Some(TokenUsage::new(50_000, 1));
-                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.set_displayed_usage(TokenUsage::new(50_000, 1));
+                engine.usage.set_total_estimated_cost_usd(1.23);
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
@@ -1479,14 +1480,14 @@ mod tests {
                 assert_eq!(end, TurnEnd::Failed);
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
                 assert_eq!(
-                    engine.usage.displayed_usage,
+                    engine.usage.displayed_usage(),
                     Some(TokenUsage::new(50_000, 1))
                 );
                 let expected = 1.23 + 0.006;
                 assert!(
-                    (engine.usage.total_estimated_cost_usd - expected).abs() < 1e-12,
+                    (engine.usage.total_estimated_cost_usd() - expected).abs() < 1e-12,
                     "a rejected summary is still billed: {}",
-                    engine.usage.total_estimated_cost_usd,
+                    engine.usage.total_estimated_cost_usd(),
                 );
                 let events = sink.events();
                 let [
