@@ -4155,6 +4155,7 @@ mod tests {
                         ("grep --reg=x .env", Decision::Deny),
                         ("grep --binary x .env", Decision::Deny),
                         ("grep --unknown=x key .env", Decision::Deny),
+                        ("grep x README.md -e .env", Decision::Deny),
                     ] {
                         assert_eq!(
                             decide_command(&p, case, &workspace),
@@ -4162,16 +4163,6 @@ mod tests {
                             "{mode:?}: {case}"
                         );
                     }
-                    let possible = if mode == Mode::Yolo {
-                        Decision::Allow
-                    } else {
-                        Decision::Ask
-                    };
-                    assert_eq!(
-                        decide_command(&p, "grep x README.md -e .env", &workspace),
-                        possible,
-                        "{mode:?}: an option getopt may read as a file"
-                    );
                 }
             }
 
@@ -4346,9 +4337,11 @@ mod tests {
                 let root = root_dir.path();
                 let (cwd, home) = (root.join("repo"), root.join("home"));
                 std::fs::create_dir_all(cwd.join(".git")).unwrap();
+                std::fs::create_dir_all(cwd.join("docs")).unwrap();
                 std::fs::create_dir_all(home.join(".ssh")).unwrap();
                 std::fs::write(cwd.join("README.md"), "").unwrap();
                 std::fs::write(cwd.join(".git/config"), "").unwrap();
+                std::fs::write(cwd.join("docs/guide.md"), "").unwrap();
                 std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
                 let key = slash_separated(&home.join(".ssh/id_rsa"));
                 let elsewhere = slash_separated(&root.join("elsewhere"));
@@ -4357,9 +4350,9 @@ mod tests {
                     for mode in [Mode::Manual, Mode::Yolo] {
                         let p = resolved_policy(
                             mode,
-                            &[(EDIT, "./locked")],
+                            &[(EDIT, "./locked"), (EDIT, "./docs/old/guide.md")],
                             &[],
-                            &[(EXEC, "sed *")],
+                            &[(EXEC, "cd *"), (EXEC, "sed *")],
                             &[],
                             &workspace,
                         );
@@ -4374,7 +4367,11 @@ mod tests {
                             (format!("sed --posix '1r {key}' README.md"), Decision::Deny),
                             (format!("sed --qu -s '1r {key}' README.md"), Decision::Deny),
                             (format!("sed '1r {key}' README.md --x"), Decision::Deny),
+                            (format!("sed -i '1r {key}' README.md"), Decision::Deny),
+                            (format!("sed -l 5 '1r {key}' README.md"), Decision::Deny),
                             ("sed 'w locked' README.md".to_owned(), Decision::Deny),
+                            ("sed -i 'w locked' README.md".to_owned(), Decision::Deny),
+                            ("sed -e 'w locked' --x README.md".to_owned(), Decision::Deny),
                             ("sed 's/a/b/w locked' README.md".to_owned(), Decision::Deny),
                             (
                                 "sed -n $'w locked\\nk' README.md".to_owned(),
@@ -4386,12 +4383,18 @@ mod tests {
                                 "sed -i'locked/*' s/a/b/ README.md".to_owned(),
                                 Decision::Deny,
                             ),
+                            (
+                                "cd docs && sed -i'old/*' s/a/b/ g*.md".to_owned(),
+                                Decision::Deny,
+                            ),
                             (format!("sed -i'{elsewhere}/*' s/a/b/ README.md"), held),
                             ("sed -i $X s/a/b/ README.md".to_owned(), held),
                             ("sed -i s/a/b/ .git/config".to_owned(), held),
                             ("sed '1e date' README.md".to_owned(), held),
                             ("sed -f script.sed README.md".to_owned(), held),
+                            ("sed -f script.sed --x README.md".to_owned(), held),
                             ("sed 's/a/b/' README.md".to_owned(), Decision::Allow),
+                            ("sed -n 1,5p README.md".to_owned(), Decision::Allow),
                             ("sed -i s/a/b/ README.md".to_owned(), Decision::Allow),
                             ("sed -i s/a/b/ example.txt".to_owned(), Decision::Allow),
                             (

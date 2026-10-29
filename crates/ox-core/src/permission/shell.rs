@@ -536,8 +536,8 @@ impl ReaderPath<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Operand {
     read: ReaderPath<String>,
-    /// Whether every supported argument order and build opens the word as a file or as the root
-    /// of a tree it traverses, so the command reads it for certain.
+    /// Whether some supported argument order or build opens the word as a file or as the root of
+    /// a tree it traverses, so the deny and ask tiers weigh it as a read in every mode.
     certain: bool,
 }
 
@@ -554,6 +554,12 @@ impl Operand {
             read,
             certain: false,
         }
+    }
+
+    /// This operand as a command in `dir` names it.
+    fn spelled_from(mut self, dir: &Path) -> Self {
+        self.read.path = spelled_from(dir, &self.read.path);
+        self
     }
 }
 
@@ -1013,12 +1019,16 @@ impl Walk<'_> {
                 Some(files) if i == 0 => operands.extend(files.iter().cloned()),
                 _ if READERS.contains(&folded.as_str()) => {
                     let args = &all[start + 1..];
-                    let (files, anything) = self.reader_operands(&folded, args);
+                    let (runs, anything) = self.reader_operands(&folded, args);
                     reads_anything |= anything || unwrapped.passes_input();
                     if folded == "sed" {
-                        reads_anything |= self.sed_scripts(args, &files, &mut operands, src);
+                        reads_anything |= self.sed_scripts(args, &runs, &mut operands, src);
                     }
-                    operands.extend(files);
+                    operands.extend(runs.into_iter().flat_map(|(dir, files)| {
+                        files
+                            .into_iter()
+                            .map(move |operand| operand.spelled_from(&dir))
+                    }));
                 }
                 _ => {}
             }
@@ -1230,23 +1240,21 @@ impl Walk<'_> {
 
     /// The [`reader_operands`] of reader `name` with `args`, expanding each glob in the working
     /// directory and in each directory the walk may have entered, where a match is spelled from
-    /// that directory.
-    fn reader_operands(&self, name: &str, args: &[Word]) -> (Vec<Operand>, bool) {
+    /// that directory. Each run pairs the operands with the directory they are spelled from, empty
+    /// for the working directory.
+    fn reader_operands(&self, name: &str, args: &[Word]) -> (Vec<(PathBuf, Vec<Operand>)>, bool) {
         let cwd = self.workspace.cwd();
-        let (mut files, mut anything) = reader_operands(name, args, cwd);
+        let (files, mut anything) = reader_operands(name, args, cwd);
+        let mut runs = vec![(PathBuf::new(), files)];
         if args.iter().any(|word| word.glob) {
             for dir in &self.entered.dirs {
                 let base = cwd.join(dir);
-                let (entered, unknown) = reader_operands(name, args, &base);
+                let (files, unknown) = reader_operands(name, args, &base);
                 anything |= unknown;
-                files.extend(entered.into_iter().map(|mut operand| {
-                    operand.read.path =
-                        base.join(&operand.read.path).to_string_lossy().into_owned();
-                    operand
-                }));
+                runs.push((base, files));
             }
         }
-        (files, anything)
+        (runs, anything)
     }
 
     /// `path` as the working directory and each directory the walk may have entered name it.
@@ -1469,20 +1477,21 @@ impl Walk<'_> {
         }
     }
 
-    /// Weighs what the `sed` call with `args` does beyond reading `files`, its operands, adding
-    /// the files its scripts read to `operands` and returning whether it may read any file. An
-    /// in-place call writes each of `files` and each backup a suffix makes of one, and a suffix
-    /// that expands leaves the command unrecognized. A file a script reads is certain where every
-    /// argument order and build takes the script as one, and a file it writes is the command's
-    /// write, even before a part the analysis cannot read. A script that may run a command or that
-    /// the analysis cannot read, including one from a file, leaves the command unrecognized. A
-    /// word that only some order or build takes as the script parses with the commands of GNU's
-    /// build if one of its orders takes the word, and of BSD's otherwise, and if it fails to parse
-    /// before writing it adds nothing, since that build rejects it too.
+    /// Weighs what the `sed` call with `args` does beyond reading the operands in `runs`, adding
+    /// the files its scripts read to `operands` and returning whether it may read any file. Each
+    /// file any argument order or build reads or writes counts for certain. An in-place call
+    /// writes each operand and each backup a suffix makes of it, spelled from the operand's
+    /// directory, and a suffix that expands, or one GNU's build takes beside `--follow-symlinks`,
+    /// which backs up the link's target, leaves the command unrecognized. Each word some build
+    /// takes as the script parses with that build's commands, and the files it reads and writes
+    /// count, even those before a part the analysis cannot read. A script that expands, that may
+    /// run a command, or that comes from a file leaves the command unrecognized, as does one GNU's
+    /// build takes that does not parse, since another GNU release may accept it. A word BSD's
+    /// build fails to parse adds only the files it writes before the error, where BSD exits.
     fn sed_scripts(
         &mut self,
         args: &[Word],
-        files: &[Operand],
+        runs: &[(PathBuf, Vec<Operand>)],
         operands: &mut Vec<Operand>,
         src: &str,
     ) -> bool {
@@ -1490,46 +1499,38 @@ impl Walk<'_> {
         let parsed = reader_args("sed", &values);
         let backups = &parsed.script.backups;
         let mut opaque = parsed.script.from_file
+            || parsed.script.follows_links
+                && backups.iter().any(|backup| backup.dialect == Dialect::Gnu)
             || backups
                 .iter()
                 .any(|backup| backup.suffix.is_none() || args[backup.index].glob);
         if parsed.script.in_place {
-            for file in files {
-                self.open(&file.read.path, false);
-                for path in backups
-                    .iter()
-                    .filter_map(|backup| backup.path(&file.read.path))
-                {
-                    self.open(&path, false);
+            for (dir, files) in runs {
+                for file in files {
+                    let path = &file.read.path;
+                    self.open(&spelled_from(dir, path), false);
+                    for backup in backups.iter().filter_map(|backup| backup.path(path)) {
+                        self.open(&spelled_from(dir, &backup), false);
+                    }
                 }
             }
         }
         for word in parsed.script.words {
-            let certain = word.certain;
-            let dialect = if word.gnu { Dialect::Gnu } else { Dialect::Bsd };
             let Some(value) = word.value else {
-                opaque |= certain;
+                opaque = true;
                 continue;
             };
-            let (script, complete) = match sed_script(&value, dialect) {
-                Ok(script) => (script, true),
-                Err(writes) => (
-                    SedScript {
-                        writes,
-                        ..SedScript::default()
-                    },
-                    false,
-                ),
-            };
-            opaque |= certain && !complete || script.runs || !certain && !script.writes.is_empty();
-            operands.extend(script.reads.into_iter().map(|path| Operand {
-                read: ReaderPath::exact(path),
-                certain,
-            }));
-            if certain {
-                for path in &script.writes {
-                    self.open(path, false);
+            let script = sed_script(&value, word.dialect).unwrap_or_else(|writes| {
+                opaque |= word.dialect == Dialect::Gnu;
+                SedScript {
+                    writes,
+                    ..SedScript::default()
                 }
+            });
+            opaque |= script.runs;
+            operands.extend(script.reads.into_iter().map(Operand::certain));
+            for path in &script.writes {
+                self.open(path, false);
             }
         }
         if opaque {
@@ -1537,6 +1538,11 @@ impl Walk<'_> {
         }
         opaque
     }
+}
+
+/// `path` as a command in `dir` names it, which is `path` itself for an empty `dir`.
+fn spelled_from(dir: &Path, path: &str) -> String {
+    dir.join(path).to_string_lossy().into_owned()
 }
 
 /// Where a `cd`, `pushd`, or `popd` with `args` moves the working directory.
@@ -2965,8 +2971,8 @@ fn sed_files(values: &[&str]) -> Option<Vec<String>> {
 ///
 /// # Errors
 ///
-/// For a script the parser cannot read, which may do anything, it returns the files the commands
-/// before the part it cannot read write, since both builds open them while compiling the script.
+/// For a script the parser cannot read, which may do anything, it returns the files written by
+/// the commands before the unreadable part, since both builds open them while compiling the script.
 fn sed_script(script: &str, dialect: Dialect) -> Result<SedScript, Vec<String>> {
     let mut parsed = SedScript::default();
     match read_sed_script(script, dialect, &mut parsed) {
@@ -3243,7 +3249,7 @@ fn expanded_reader_paths(
         .chain(written.files.iter().map(|(index, path)| Operand {
             read: path.clone(),
             certain: index.is_some_and(|index| {
-                late_literals.contains(&index) && written.read_everywhere.contains(&index)
+                late_literals.contains(&index) && written.opened.contains(&index)
             }),
         }))
         .collect();
@@ -3303,10 +3309,10 @@ struct ReaderArgs {
     fixed_values: Vec<usize>,
     /// Words that are ordinary file operands in every supported argument order and build.
     operands: Vec<usize>,
-    /// Words that every supported argument order and build opens as a file.
-    read_everywhere: Vec<usize>,
-    /// Whether every supported argument order and build searches the implicit cwd.
-    cwd_everywhere: bool,
+    /// Words that some supported argument order or build opens as a file.
+    opened: Vec<usize>,
+    /// Whether some supported argument order or build searches the implicit cwd.
+    searches_cwd: bool,
     script: ScriptArgs,
     /// Words that supply an option's value in any supported argument order or build.
     option_values: Vec<usize>,
@@ -3324,6 +3330,8 @@ struct ScriptArgs {
     from_file: bool,
     /// Whether some supported argument order or build rewrites its file operands in place.
     in_place: bool,
+    /// Whether some supported argument order or build rewrites a symlink's target in place.
+    follows_links: bool,
     /// Each backup suffix some supported argument order or build gives an in-place rewrite.
     backups: Vec<Backup>,
 }
@@ -3351,42 +3359,27 @@ impl Backup {
     }
 }
 
-/// A word some supported argument order or build takes as a reader's pattern or script.
+/// The word at `index`, with its value or `None` when it expands, that some argument order of the
+/// `dialect` build takes as a reader's pattern or script.
 #[derive(Debug, PartialEq, Eq)]
 struct ScriptWord {
+    dialect: Dialect,
     index: usize,
     value: Option<String>,
-    /// Whether every supported argument order and build takes it.
-    certain: bool,
-    /// Whether some argument order of the GNU build takes it.
-    gnu: bool,
-}
-
-impl ScriptWord {
-    /// The word at `index` with `value` that the `dialect` build takes, as one argument order does.
-    fn new(dialect: Dialect, index: usize, value: Option<&str>) -> Self {
-        Self {
-            index,
-            value: value.map(str::to_owned),
-            certain: true,
-            gnu: dialect == Dialect::Gnu,
-        }
-    }
 }
 
 impl ReaderArgs {
-    /// Each path in `files`, certain when its word is in `read_everywhere` and comes before the
-    /// first match of an `ambiguous` glob, whose matches may shift the roles of later words, or
-    /// when it is an implicit cwd every order and build searches and no glob is ambiguous.
+    /// Each path in `files`, certain when its word is `opened` and comes before the first match
+    /// of an `ambiguous` glob, whose matches may shift the roles of later words, or when it is an
+    /// implicit cwd some order or build searches and no glob is ambiguous.
     fn reads(&self, ambiguous: Option<usize>) -> impl Iterator<Item = Operand> + '_ {
         self.files.iter().map(move |(index, read)| Operand {
             read: read.clone(),
             certain: match index {
                 Some(index) => {
-                    self.read_everywhere.contains(index)
-                        && ambiguous.is_none_or(|start| *index < start)
+                    self.opened.contains(index) && ambiguous.is_none_or(|start| *index < start)
                 }
-                None => self.cwd_everywhere && ambiguous.is_none(),
+                None => self.searches_cwd && ambiguous.is_none(),
             },
         })
     }
@@ -3402,68 +3395,45 @@ impl ReaderArgs {
 /// Reads the arguments of reader `name`, given each word's value or `None` for one that expands.
 /// The gate cannot tell whether a GNU or a BSD build of `name` runs, or whether getopt stops
 /// reading options at the first operand, as BSD and `POSIXLY_CORRECT` make it, so it counts each
-/// file any of them would read. A word that expands may split into any words, so it leaves what the
-/// reader reads unknown wherever it stands, as does `find -files0-from`, which reads the paths to
-/// search from a file.
+/// file any of them would read as one it reads. A word that expands may split into any words, so
+/// it leaves what the reader reads unknown wherever it stands, as does `find -files0-from`, which
+/// reads the paths to search from a file.
 fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
     let grammar = reader_grammar(name);
     let mut args = ReaderArgs {
-        files: Vec::new(),
         fixed_values: (0..values.len()).collect(),
         operands: (0..values.len()).collect(),
-        read_everywhere: (0..values.len()).collect(),
-        cwd_everywhere: true,
-        script: ScriptArgs::default(),
-        option_values: Vec::new(),
         unknown: values.iter().any(Option::is_none)
             || name == "find" && values.contains(&Some("-files0-from")),
+        ..ReaderArgs::default()
     };
     let orders: &[bool] = if grammar.getopt {
         &[true, false]
     } else {
         &[true]
     };
-    let mut reads = 0;
-    let mut patterns: Vec<(ScriptWord, usize)> = Vec::new();
     for dialect in [Dialect::Gnu, Dialect::Bsd] {
         for &permute in orders {
-            let Some(read) = grammar.read(dialect, permute, values) else {
-                continue;
-            };
-            reads += 1;
+            let read = grammar.read(dialect, permute, values);
             for word in read.script.words {
-                match patterns
-                    .iter_mut()
-                    .find(|(seen, _)| seen.index == word.index && seen.value == word.value)
-                {
-                    Some((seen, count)) => {
-                        seen.gnu |= word.gnu;
-                        *count += 1;
-                    }
-                    None => patterns.push((word, 1)),
+                if !args.script.words.contains(&word) {
+                    args.script.words.push(word);
                 }
             }
             args.script.from_file |= read.script.from_file;
             args.script.in_place |= read.script.in_place;
+            args.script.follows_links |= read.script.follows_links;
             args.script.backups.extend(read.script.backups);
             args.fixed_values
                 .retain(|index| read.option_values.contains(index));
             args.operands.retain(|index| read.operands.contains(index));
-            args.read_everywhere
-                .retain(|index| read.read_everywhere.contains(index));
-            args.cwd_everywhere &= read.cwd_everywhere;
+            args.opened.extend(read.opened);
+            args.searches_cwd |= read.searches_cwd;
             args.files.extend(read.files);
             args.option_values.extend(read.option_values);
             args.unknown |= read.unknown;
         }
     }
-    args.script.words = patterns
-        .into_iter()
-        .map(|(word, count)| ScriptWord {
-            certain: count == reads,
-            ..word
-        })
-        .collect();
     args.files.sort_unstable();
     args.files.dedup_by(|next, current| {
         if next.0 != current.0 || next.1.path != current.1.path {
@@ -3497,18 +3467,7 @@ struct ReaderGrammar {
     numeric: bool,
     /// Whether the first operand is a pattern or script unless an option gives one.
     pattern: bool,
-    unlisted_long: UnlistedLong,
     operands: OperandKind,
-}
-
-/// What a long option a [`ReaderGrammar`] does not list does.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum UnlistedLong {
-    /// It may take a file as its `=` value or give the pattern.
-    Unknown,
-    /// It makes the reader exit before reading, since the grammar lists every long option either
-    /// build takes.
-    Exits,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3524,17 +3483,15 @@ impl ReaderGrammar {
         getopt: true,
         numeric: false,
         pattern: false,
-        unlisted_long: UnlistedLong::Unknown,
         operands: OperandKind::Stream,
     };
 
     /// The files the `dialect` build reads from `values`, taking options after operands until `--`
-    /// when it may `permute` them, or `None` when it exits before reading. A short option that
-    /// takes a value takes the rest of its cluster or the next word, and a long one its `=` value
-    /// or the next word. A long option the grammar does not list does what its
-    /// [`UnlistedLong`] says: it exits, or it counts its `=` value as a file, and since it may be
-    /// one that gives the pattern, the leading operand then counts as a file too.
-    fn read(&self, dialect: Dialect, permute: bool, values: &[Option<&str>]) -> Option<ReaderArgs> {
+    /// when it may `permute` them. A short option that takes a value takes the rest of its cluster
+    /// or the next word, and a long one its `=` value or the next word. A long option the grammar
+    /// does not list counts its `=` value as a file, and since it may be one that gives the
+    /// pattern, the leading operand then counts as a file too.
+    fn read(&self, dialect: Dialect, permute: bool, values: &[Option<&str>]) -> ReaderArgs {
         let mut args = ReaderArgs::default();
         let mut operands = Vec::new();
         let mut pattern_given = false;
@@ -3543,6 +3500,7 @@ impl ReaderGrammar {
             pattern_given |= matches!(role, Role::Pattern | Role::PatternFile);
             args.script.from_file |= matches!(role, Role::PatternFile);
             args.script.in_place |= matches!(role, Role::InPlace);
+            args.script.follows_links |= matches!(role, Role::FollowsLinks);
             if matches!(role, Role::InPlace)
                 && value != Some("")
                 && (value.is_some() || values[index].is_none())
@@ -3554,9 +3512,11 @@ impl ReaderGrammar {
                 });
             }
             if matches!(role, Role::Pattern) {
-                args.script
-                    .words
-                    .push(ScriptWord::new(dialect, index, value));
+                args.script.words.push(ScriptWord {
+                    dialect,
+                    index,
+                    value: value.map(str::to_owned),
+                });
             }
             recursive |= role.recurses(value);
             if value.is_some() {
@@ -3599,9 +3559,6 @@ impl ReaderGrammar {
                     .split_once('=')
                     .map_or((long, None), |(name, value)| (name, Some(value)));
                 let Some(option) = self.long(name) else {
-                    if self.unlisted_long == UnlistedLong::Exits {
-                        return None;
-                    }
                     unplaced = true;
                     take(&mut args, Role::File, index, attached);
                     continue;
@@ -3630,7 +3587,7 @@ impl ReaderGrammar {
             }
         }
         let leading_pattern = self.pattern && !pattern_given && !unplaced;
-        Some(self.place_operands(args, dialect, values, &operands, leading_pattern, recursive))
+        self.place_operands(args, dialect, values, &operands, leading_pattern, recursive)
     }
 
     /// Completes `args` with the `operands` [`Self::read`] found among `values`, the first of them
@@ -3646,9 +3603,11 @@ impl ReaderGrammar {
     ) -> ReaderArgs {
         let skip = usize::from(leading_pattern);
         if let Some(&(index, value)) = operands.first().filter(|_| leading_pattern) {
-            args.script
-                .words
-                .push(ScriptWord::new(dialect, index, value));
+            args.script.words.push(ScriptWord {
+                dialect,
+                index,
+                value: value.map(str::to_owned),
+            });
         }
         let tree_given = args.files.iter().any(|(_, path)| path.recursive);
         let paths = self.operand_paths(
@@ -3661,12 +3620,12 @@ impl ReaderGrammar {
             .extend(paths.iter().filter_map(|(index, _)| *index));
         args.files.extend(paths);
         let tree_end = self.tree_end(values);
-        args.read_everywhere = args
+        args.opened = args
             .files
             .iter()
             .filter_map(|(index, _)| index.filter(|index| *index < tree_end))
             .collect();
-        args.cwd_everywhere = args.files.iter().any(|(index, _)| index.is_none());
+        args.searches_cwd = args.files.iter().any(|(index, _)| index.is_none());
         args.fixed_values.clone_from(&args.option_values);
         args
     }
@@ -3691,7 +3650,9 @@ impl ReaderGrammar {
         let recurses = |values: &[Option<&str>]| {
             [Dialect::Gnu, Dialect::Bsd].into_iter().any(|dialect| {
                 self.read(dialect, true, values)
-                    .is_some_and(|read| read.files.iter().any(|(_, path)| path.recursive))
+                    .files
+                    .iter()
+                    .any(|(_, path)| path.recursive)
             })
         };
         for (index, value) in values.iter().enumerate() {
@@ -3915,6 +3876,7 @@ const LS_GRAMMAR: ReaderGrammar = ReaderGrammar {
     ..ReaderGrammar::NONE
 };
 
+// Mirrors GNU sed 4.10, listing every long option it takes.
 const SED_GRAMMAR: ReaderGrammar = ReaderGrammar {
     options: &[
         takes("-e").with(Role::Pattern),
@@ -3926,7 +3888,7 @@ const SED_GRAMMAR: ReaderGrammar = ReaderGrammar {
         switch("--debug"),
         takes("--expression").with(Role::Pattern),
         takes("--file").with(Role::PatternFile),
-        switch("--follow-symlinks"),
+        switch("--follow-symlinks").with(Role::FollowsLinks),
         switch("--help"),
         attached("--in-place").with(Role::InPlace),
         takes("--line-length"),
@@ -3942,7 +3904,6 @@ const SED_GRAMMAR: ReaderGrammar = ReaderGrammar {
         switch("--zero-terminated"),
     ],
     pattern: true,
-    unlisted_long: UnlistedLong::Exits,
     ..ReaderGrammar::NONE
 };
 
@@ -4078,6 +4039,8 @@ enum Role {
     FileList,
     /// A suffix for the backup of each file it rewrites in place, given or not.
     InPlace,
+    /// A flag that rewrites a symlink's target in place.
+    FollowsLinks,
     /// A directory supplied through a `find -f` option.
     Directory,
     /// A flag that recursively traverses directory operands.
@@ -5590,15 +5553,23 @@ mod tests {
         }
 
         #[test]
-        fn leaves_an_in_place_edit_unrecognized_when_its_backup_suffix_expands() {
+        fn leaves_a_call_unrecognized_when_its_script_or_backup_is_unbounded() {
             for command in [
                 "sed -i $X s/a/b/ a.rs",
                 "sed -I \"$X\" s/a/b/ a.rs",
                 "sed -i bk/* s/a/b/ a.rs",
+                "sed --follow-symlinks -i.bak s/a/b/ a.rs",
+                "sed -e \"$S\" a.rs",
+                "sed k a.rs",
             ] {
                 assert!(parse(command).unrecognized().is_some(), "{command:?}");
             }
-            for command in ["sed -i.bak s/a/b/ a.rs", "sed -i 'bk/*' s/a/b/ a.rs"] {
+            for command in [
+                "sed -i.bak s/a/b/ a.rs",
+                "sed -i 'bk/*' s/a/b/ a.rs",
+                "sed --follow-symlinks -i s/a/b/ a.rs",
+                "sed -i s/a/b/ README.md",
+            ] {
                 assert!(parse(command).unrecognized().is_none(), "{command:?}");
             }
         }
@@ -5852,10 +5823,11 @@ mod tests {
 
                 assert!(unknown, "{reader} {expanded:?}");
                 assert!(
-                    paths.contains(&Operand::possible(ReaderPath {
-                        path: root.to_owned(),
-                        recursive: true,
-                    })),
+                    paths.iter().any(|operand| operand.read
+                        == ReaderPath {
+                            path: root.to_owned(),
+                            recursive: true,
+                        }),
                     "{reader} {expanded:?}: {paths:?}"
                 );
             }
