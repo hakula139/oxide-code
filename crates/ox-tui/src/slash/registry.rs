@@ -229,7 +229,6 @@ mod tests {
     use ox_core::protocol::Op;
 
     use super::*;
-    use crate::modal::ModalAction;
     use crate::modal::testing::ScriptedModal;
     use crate::session_info::testing::test_session_info;
 
@@ -242,7 +241,7 @@ mod tests {
 
         #[test]
         fn debug_names_each_variant() {
-            let modal = SlashOutcome::Modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            let modal = SlashOutcome::Modal(Box::new(ScriptedModal::new()));
             assert_eq!(
                 format!("{:?}", SlashOutcome::SystemMessage("clean".to_owned())),
                 r#"SystemMessage("clean")"#
