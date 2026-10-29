@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use super::file::FileVerb;
 use super::view::{ApprovalBody, ApprovalPreview};
-use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field};
+use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
 use crate::file_tracker::{FileTracker, GatePurpose, LastView};
 use crate::permission::PermissionClass;
 
@@ -39,6 +39,10 @@ impl Tool for WriteTool {
         Some("file_path")
     }
 
+    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |input: &Input| Ok(ctx.path_access(&input.file_path)))
+    }
+
     fn icon(&self) -> &'static str {
         "←"
     }
@@ -50,14 +54,11 @@ impl Tool for WriteTool {
         cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
         Box::pin(async move {
-            let content = extract_input_field(&prepared.input, "content").unwrap_or_default();
-            let current = match prepared.access.resolved() {
-                Some(path) => current_text(&path).await,
-                None => String::new(),
-            };
+            let input: Input = prepared.parsed();
+            let current = current_text(&prepared.path()).await;
             ApprovalPreview {
-                title: self.summarize_call(name, &prepared.input, cwd),
-                body: ApprovalBody::Diff(super::edit::synthesize_chunk(&current, content)),
+                title: prepared.path_title(name, cwd),
+                body: ApprovalBody::Diff(super::edit::synthesize_chunk(&current, &input.content)),
             }
         })
     }
@@ -95,22 +96,22 @@ fn input_schema() -> serde_json::Value {
                 "description": "The content to write to the file"
             }
         },
-        "required": ["file_path", "content"]
+        "required": ["file_path", "content"],
+        "additionalProperties": false
     })
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Input {
+    file_path: String,
     content: String,
 }
 
 // ── Execution ──
 
 async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
-    let (input, path): (Input, _) = match prepared.into_path_input() {
-        Ok(v) => v,
-        Err(msg) => return ToolOutput::error(msg),
-    };
+    let (input, path): (Input, _) = prepared.into_path_input();
     let shown = path.display();
     let name = super::file_name(&path);
 
@@ -180,8 +181,8 @@ where
     Ok(mode)
 }
 
-/// Refuses an existing target whose `metadata` shows a symlink. The gate pinned the path to its
-/// resolved location, so a symlink there appeared afterward.
+/// Refuses an existing target whose `metadata` shows a symlink. The gate resolved the path, so a
+/// symlink there appeared afterward.
 fn validate_write_target(path: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {
     if metadata.file_type().is_symlink() {
         return Err(format!(
@@ -266,7 +267,7 @@ mod tests {
         }
 
         fn prepare(input: serde_json::Value, cwd: &Path) -> Prepared {
-            WriteTool.prepare(input, &ctx(cwd))
+            WriteTool.prepare(input, &ctx(cwd)).unwrap()
         }
 
         #[tokio::test]
@@ -284,17 +285,6 @@ mod tests {
             let preview = WriteTool.approval_preview("write", &prepared, &cwd).await;
 
             assert_eq!(preview.title, "Write(src/new.rs)");
-            assert_eq!(preview.body, added_line("fn main() {}"));
-        }
-
-        #[tokio::test]
-        async fn without_a_file_path_renders_the_content_as_added() {
-            let cwd = Path::new("/repo");
-            let prepared = prepare(serde_json::json!({"content": "fn main() {}"}), cwd);
-
-            let preview = WriteTool.approval_preview("write", &prepared, cwd).await;
-
-            assert_eq!(preview.title, "Write");
             assert_eq!(preview.body, added_line("fn main() {}"));
         }
 
@@ -349,6 +339,7 @@ mod tests {
                 .approval_preview("write", &prepared, dir.path())
                 .await;
 
+            assert_eq!(preview.title, "Write(target.txt)");
             assert_eq!(
                 preview.body,
                 ApprovalBody::Diff(DiffChunk {
@@ -388,19 +379,6 @@ mod tests {
             );
             assert_eq!(output.metadata.title.as_deref(), Some("Created new.txt"));
             assert_eq!(fs::read_to_string(&path).unwrap(), "hello world");
-        }
-
-        #[tokio::test]
-        async fn missing_required_fields_reports_input_error() {
-            let output = local_testing::run(
-                &WriteTool,
-                serde_json::json!({"file_path": "/tmp/x"}),
-                &temp_ctx(),
-            )
-            .await;
-
-            assert!(output.is_error);
-            assert_eq!(output.content, "Invalid input: missing field `content`");
         }
 
         #[tokio::test]
@@ -573,7 +551,7 @@ mod tests {
             seed_full_read(&ctx.tracker, &path);
             let input = serde_json::json!({"file_path": "notes.txt", "content": "new\n"});
 
-            let prepared = WriteTool.prepare(input.clone(), &ctx);
+            let prepared = WriteTool.prepare(input.clone(), &ctx).unwrap();
             let preview = WriteTool.approval_preview("write", &prepared, &cwd).await;
 
             assert_eq!(

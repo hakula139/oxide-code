@@ -103,7 +103,7 @@ The session's [task list](tasks.md) needs no column of its own. On resume, the l
 
 ### Archiving
 
-`archived_at` sets whether default listings and `ox -c` skip the session, and archiving leaves `updated_at` alone. Bare `/archive` queues the archive through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker update another session's row. Each of these names the session by an ID or a prefix, and the engine resolves it, owns the archive through completion, and runs the update on a blocking worker, keeping input and rendering available while another process holds the write lock. Later session operations wait for that completion, and the result reaches chat even after the picker closes. Resuming an archived session unarchives it.
+`archived_at` sets whether default listings and `ox -c` skip the session, and archiving leaves `updated_at` alone. One conditional update moves a session only out of the other state, so an archive keeps its first archive time, and the update's row count tells two processes archiving one session which of them changed it. Bare `/archive` queues the archive through the actor before the roll that finalizes the session. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker update another session's row. Each of these names the session by an ID or a prefix, and the engine resolves it, owns the archive through completion, and runs the update on a blocking worker, keeping input and rendering available while another process holds the write lock. Later session operations wait for that completion, and the result reaches chat even after the picker closes. Resuming an archived session unarchives it.
 
 ### Liveness Locks
 

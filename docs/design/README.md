@@ -41,7 +41,7 @@ Each page covers one topic, and [`docs/research/`](../research/) holds the API r
 | Document                                  | Description                                                          |
 | ----------------------------------------- | -------------------------------------------------------------------- |
 | [Permissions](permissions.md)             | Tiered deny / ask / allow gate, modes, rule grammar                  |
-| [File Mutation](file-mutation.md)         | Edit and write publication, metadata preservation, in-place fallback |
+| [File Mutation](file-mutation.md)         | Edit and write publication in place, metadata preservation           |
 | [Shell Execution](bash.md)                | `bash` process tree, terminal detachment, and environment            |
 | [Background Shells](background-shells.md) | `bash` background runs, `bash_output`, and `bash_stop`               |
 | [Output Truncation](truncation.md)        | Per-tool view-shape caps, a centralized byte budget, and spill files |

@@ -71,7 +71,7 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 - `crates/ox-core/src/protocol.rs`: `Op::Resume`, `ResumeTarget`, `Event::SessionResumed`, `Interaction`.
 - `crates/ox-core/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
 - `crates/ox-core/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
-- `crates/ox-core/src/session/resolver.rs`: `resolve_target`, which maps a `ResumeTarget` to a session ID for startup and `session::handle::roll_into`, importing an export path, and `resolve_prefix` and `resolve_id`, shared with the saved-session operations.
+- `crates/ox-core/src/session/resolver.rs`: `resolve_target`, which maps a `ResumeTarget` to a session ID for startup and `session::handle::roll_into`, importing an export path, and `resolve_prefix`, shared with the saved-session operations.
 - `crates/ox-core/src/session/saved.rs`: `set_archived` behind Ctrl+X, and `delete` behind the confirm-delete modal, both run by the engine.
 - `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`, `ProjectScope`.
 - `crates/ox-core/src/util/text.rs`: `compact_count`, which abbreviates the message count, shared with the status line's token counts.

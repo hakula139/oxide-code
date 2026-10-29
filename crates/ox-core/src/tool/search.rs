@@ -12,20 +12,16 @@ use tokio_util::sync::CancellationToken;
 
 use super::spill::MAX_SPILL_BYTES;
 use super::view::{GrepFileGroup, GrepMatchLine};
-use super::{
-    Prepared, StoredView, ToolCtx, ToolOutput, display_path, extract_input_field, tool_path,
-};
+use super::{StoredView, ToolCtx, ToolOutput, display_path, tool_path};
 use crate::permission::{Access, WalkFilter, Workspace};
 use crate::util::text::{ELLIPSIS, format_size, plural};
 
 // ── Search Root ──
 
-/// Prepares a search tool's call, resolving its `path` argument, the cwd by default, as the root
-/// the gate checks and the walk covers.
-pub(super) fn prepare_search_root(input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
-    let root = search_path(extract_input_field(&input, "path"));
-    let access = Access::for_path(root, &ctx.workspace);
-    Prepared { input, access }
+/// What a search tool's call accesses: its `path` argument, the cwd by default, as the root the
+/// gate checks and the walk covers.
+pub(super) fn root_access(path: Option<&str>, ctx: &ToolCtx) -> Access {
+    Access::for_path(search_path(path), &ctx.workspace)
 }
 
 /// Resolves the search root through [`tool_path`], defaulting to cwd. Shared by the gate and the
