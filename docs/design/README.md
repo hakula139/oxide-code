@@ -21,10 +21,9 @@ Each page covers one topic, and [`docs/research/`](../research/) holds the API r
 
 ## Session
 
-| Document                                 | Description                                                                |
-| ---------------------------------------- | -------------------------------------------------------------------------- |
-| [Persistence](persistence.md)            | SQLite schema, writes, lazy forks, export, prompt context, titles, listing |
-| [File Change Tracking](file-tracking.md) | Read-before-Edit gate, staleness detection, persistence                    |
+| Document                      | Description                                                                |
+| ----------------------------- | -------------------------------------------------------------------------- |
+| [Persistence](persistence.md) | SQLite schema, writes, lazy forks, export, prompt context, titles, listing |
 
 ## Commands
 
@@ -38,14 +37,13 @@ Each page covers one topic, and [`docs/research/`](../research/) holds the API r
 
 ## Tools
 
-| Document                                  | Description                                                          |
-| ----------------------------------------- | -------------------------------------------------------------------- |
-| [Permissions](permissions.md)             | Tiered deny / ask / allow gate, modes, rule grammar                  |
-| [File Mutation](file-mutation.md)         | Edit and write publication in place, metadata preservation           |
-| [Shell Execution](bash.md)                | `bash` process tree, terminal detachment, and environment            |
-| [Background Shells](background-shells.md) | `bash` background runs, `bash_output`, and `bash_stop`               |
-| [Output Truncation](truncation.md)        | Per-tool view-shape caps, a centralized byte budget, and spill files |
-| [Task List](tasks.md)                     | `tasks` tool, task panel, resume and compaction                      |
+| Document                           | Description                                                                                          |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| [Permissions](permissions.md)      | Tiered deny / ask / allow gate, modes, rule grammar                                                  |
+| [File Edits](file-edits.md)        | Read-before-Edit gate, staleness detection, persistence, in-place publication, metadata preservation |
+| [Shell Execution](bash.md)         | `bash` process tree, terminal detachment, environment, and background shells                         |
+| [Output Truncation](truncation.md) | Per-tool view-shape caps, a centralized byte budget, and spill files                                 |
+| [Task List](tasks.md)              | `tasks` tool, task panel, resume and compaction                                                      |
 
 ## Terminal UI
 
