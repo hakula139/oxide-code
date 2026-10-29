@@ -4322,11 +4322,69 @@ mod tests {
                             ("cd src && cd ../secrets && cat key", Decision::Deny),
                             ("cd secrets || cat key", Decision::Deny),
                             ("cd secrets && echo x > key", Decision::Deny),
+                            ("cd secrets && sed -n w\\ key notes", Decision::Deny),
                             ("cd src && cat main.rs", moved),
                             ("cd $DIR && cat key", moved),
                         ] {
                             assert_eq!(
                                 decide_command(&p, case, &workspace),
+                                expected,
+                                "{mode} {case}"
+                            );
+                        }
+                    }
+                });
+            }
+
+            #[test]
+            fn command_weighs_the_files_a_sed_script_reads_writes_and_runs() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                let (cwd, home) = (root.join("repo"), root.join("home"));
+                std::fs::create_dir_all(cwd.join(".git")).unwrap();
+                std::fs::create_dir_all(home.join(".ssh")).unwrap();
+                std::fs::write(cwd.join("README.md"), "").unwrap();
+                std::fs::write(cwd.join(".git/config"), "").unwrap();
+                std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
+                let key = slash_separated(&home.join(".ssh/id_rsa"));
+                temp_env::with_var(HOME_VAR, Some(&home), || {
+                    let workspace = Workspace::new(&cwd);
+                    for mode in [Mode::Manual, Mode::Yolo] {
+                        let p = resolved_policy(
+                            mode,
+                            &[(EDIT, "./locked")],
+                            &[],
+                            &[(EXEC, "sed *")],
+                            &[],
+                            &workspace,
+                        );
+                        let held = if mode == Mode::Yolo {
+                            Decision::Allow
+                        } else {
+                            Decision::Ask
+                        };
+                        for (case, expected) in [
+                            (format!("sed '1r {key}' README.md"), Decision::Deny),
+                            (format!("sed -e p -e '$R {key}' README.md"), Decision::Deny),
+                            (format!("sed --posix '1r {key}' README.md"), Decision::Deny),
+                            (format!("sed --qu -s '1r {key}' README.md"), Decision::Deny),
+                            ("sed 'w locked' README.md".to_owned(), Decision::Deny),
+                            ("sed 's/a/b/w locked' README.md".to_owned(), Decision::Deny),
+                            ("sed -i s/a/b/ locked".to_owned(), Decision::Deny),
+                            ("sed --in-place=.bak 1d locked".to_owned(), Decision::Deny),
+                            ("sed -i s/a/b/ .git/config".to_owned(), held),
+                            ("sed '1e date' README.md".to_owned(), held),
+                            ("sed -f script.sed README.md".to_owned(), held),
+                            ("sed 's/a/b/' README.md".to_owned(), Decision::Allow),
+                            ("sed -i s/a/b/ README.md".to_owned(), Decision::Allow),
+                            ("sed -i s/a/b/ example.txt".to_owned(), Decision::Allow),
+                            (
+                                "sed -n '/x/p;$r notes' README.md".to_owned(),
+                                Decision::Allow,
+                            ),
+                        ] {
+                            assert_eq!(
+                                decide_command(&p, &case, &workspace),
                                 expected,
                                 "{mode} {case}"
                             );
