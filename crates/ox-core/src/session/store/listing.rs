@@ -1,11 +1,11 @@
-//! Session listing: indexed page queries, the latest session, and lookup by ID or ID prefix.
+//! Session listing: indexed page queries, the latest session, and lookup by ID prefix.
 
 use anyhow::Result;
 use rusqlite::{Connection, Row, params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{CONTENT_VERSION, SessionStore, time_column, to_millis};
+use super::{CONTENT_VERSION, SessionStore, is_session_id_byte, time_column, to_millis};
 
 pub const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
 
@@ -200,10 +200,7 @@ impl SessionStore {
         prefix: &str,
         projects: ProjectScope,
     ) -> Result<Vec<SessionInfo>> {
-        if !prefix
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
+        if !prefix.bytes().all(is_session_id_byte) {
             return Ok(Vec::new());
         }
         let mut params = vec![Value::Text(format!("{prefix}*"))];
@@ -222,6 +219,7 @@ impl SessionStore {
     }
 
     /// The session `session_id`, in any project and either archive state.
+    #[cfg(test)]
     pub(crate) fn find(&self, session_id: &str) -> Result<Option<SessionInfo>> {
         let sql = format!("SELECT {INFO_COLUMNS} FROM sessions WHERE id = ?1");
         let params = vec![Value::Text(session_id.to_owned())];

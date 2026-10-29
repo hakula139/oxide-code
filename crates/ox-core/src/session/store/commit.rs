@@ -8,6 +8,7 @@ use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, Transaction
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
+use super::listing::ArchiveState;
 use super::{CHAIN_CTE, CONTENT_VERSION, CompactInfo, SessionStore, UsageRecord, now_millis};
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
@@ -188,8 +189,8 @@ pub(crate) fn commit(
     let mut snapshots = None;
     for record in commit.records {
         match record {
-            Record::Message(row) => insert_message(&tx, &session_id, row)?,
-            Record::Usage(row) => insert_usage(&tx, &session_id, row)?,
+            Record::Message(row) => insert_message(&tx, &session_id, row, Duplicate::Fail)?,
+            Record::Usage(row) => insert_usage(&tx, &session_id, row, Duplicate::Fail)?,
             Record::Title { title, manual } => {
                 // An AI or first-prompt title never replaces a manual one another process set.
                 tx.execute(
@@ -199,10 +200,7 @@ pub(crate) fn commit(
                 )?;
             }
             Record::Archive => {
-                tx.execute(
-                    "UPDATE sessions SET archived_at = ?2 WHERE id = ?1",
-                    (&session_id, now),
-                )?;
+                set_archive_state(&tx, &session_id, ArchiveState::Archived, now)?;
             }
             Record::FileSnapshots(files) => snapshots = Some(files),
         }
@@ -343,17 +341,53 @@ fn fork(
     Ok((id.clone(), Landed::Forked { id, lock }))
 }
 
-/// Inserts `row` into session `session_id`, keeping a row with its ID that the session already
-/// holds, since rows never change.
+/// Moves session `session_id` into archive `state`, archived at `now`, and returns whether it was
+/// in the other state. A session already in `state` keeps its archive time.
+pub(super) fn set_archive_state(
+    conn: &Connection,
+    session_id: &str,
+    state: ArchiveState,
+    now: i64,
+) -> Result<bool> {
+    let archive = state == ArchiveState::Archived;
+    let changed = conn.execute(
+        "UPDATE sessions SET archived_at = ?2 WHERE id = ?1 AND (archived_at IS NULL) = ?3",
+        (session_id, archive.then_some(now), archive),
+    )?;
+    Ok(changed > 0)
+}
+
+/// What an insert does with a row whose key the table already holds: a message's session and ID,
+/// or a request's ID.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Duplicate {
+    /// Fails the commit, since a live commit inserts only fresh IDs.
+    Fail,
+    /// Keeps the stored row, since rows never change and an import repeats rows the store holds.
+    Keep,
+}
+
+impl Duplicate {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Fail => "INSERT",
+            Self::Keep => "INSERT OR IGNORE",
+        }
+    }
+}
+
+/// Inserts `row` into session `session_id`, handling a held ID as `duplicate` says.
 pub(super) fn insert_message(
     tx: &Transaction<'_>,
     session_id: &str,
     row: &MessageRow,
+    duplicate: Duplicate,
 ) -> Result<()> {
     tx.execute(
         &format!(
-            "INSERT OR IGNORE INTO messages (session_id, {MESSAGE_COLUMNS})
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+            "{} INTO messages (session_id, {MESSAGE_COLUMNS})
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            duplicate.verb(),
         ),
         rusqlite::params![
             session_id,
@@ -378,11 +412,18 @@ pub(super) fn insert_message(
     Ok(())
 }
 
-/// Inserts `row` into session `session_id`, keeping a request already stored under its ID, so each
-/// request counts once.
-pub(super) fn insert_usage(tx: &Transaction<'_>, session_id: &str, row: &UsageRow) -> Result<()> {
+/// Inserts `row` into session `session_id`, handling a held ID as `duplicate` says.
+pub(super) fn insert_usage(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    row: &UsageRow,
+    duplicate: Duplicate,
+) -> Result<()> {
     tx.execute(
-        "INSERT OR IGNORE INTO usage (id, session_id, record, created_at) VALUES (?1, ?2, ?3, ?4)",
+        &format!(
+            "{} INTO usage (id, session_id, record, created_at) VALUES (?1, ?2, ?3, ?4)",
+            duplicate.verb(),
+        ),
         (
             row.id.to_string(),
             session_id,
