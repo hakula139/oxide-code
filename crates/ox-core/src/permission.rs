@@ -4272,6 +4272,70 @@ mod tests {
             }
 
             #[test]
+            fn command_weighs_a_relative_path_under_each_directory_it_may_have_entered() {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                let (cwd, home) = (root.join("repo"), root.join("home"));
+                std::fs::create_dir_all(cwd.join("secrets")).unwrap();
+                std::fs::create_dir_all(cwd.join("src")).unwrap();
+                std::fs::create_dir_all(cwd.join("vault")).unwrap();
+                std::fs::create_dir_all(home.join(".ssh")).unwrap();
+                std::fs::write(cwd.join("secrets/key"), "").unwrap();
+                std::fs::write(cwd.join("notes"), "").unwrap();
+                std::fs::write(cwd.join("vault/key"), "").unwrap();
+                std::fs::write(cwd.join("vault/readme"), "").unwrap();
+                std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
+                temp_env::with_var(HOME_VAR, Some(&home), || {
+                    let workspace = Workspace::new(&cwd);
+                    for mode in [Mode::Manual, Mode::Yolo] {
+                        let p = resolved_policy(
+                            mode,
+                            &[
+                                (READ, "./secrets"),
+                                (EDIT, "./secrets"),
+                                (READ, "./vault/key"),
+                            ],
+                            &[],
+                            &[(EXEC, "*")],
+                            &[],
+                            &workspace,
+                        );
+                        let moved = if mode == Mode::Yolo {
+                            Decision::Allow
+                        } else {
+                            Decision::Ask
+                        };
+                        for (case, expected) in [
+                            ("cd ~/.ssh && cat id_rsa", Decision::Deny),
+                            ("cd -P ~/.ssh && cat id_rsa", Decision::Deny),
+                            ("cd -L ~/.ssh && cat id_rsa", Decision::Deny),
+                            ("cd -- ~/.ssh && cat id_rsa", Decision::Deny),
+                            ("cd -Pe -- secrets && cat key", Decision::Deny),
+                            ("pushd secrets; cat key", Decision::Deny),
+                            ("pushd -n secrets; cat key", moved),
+                            ("cd vault && cat k*", Decision::Deny),
+                            ("cd -P vault; head -n 1 k* readme", Decision::Deny),
+                            ("cd ~/.ssh && ls -R", Decision::Deny),
+                            ("cd ~/.ssh; wc -l < id_rsa", Decision::Deny),
+                            ("cd; cat .ssh/id_rsa", Decision::Deny),
+                            ("cd secrets && cat key", Decision::Deny),
+                            ("cd src && cd ../secrets && cat key", Decision::Deny),
+                            ("cd secrets || cat key", Decision::Deny),
+                            ("cd secrets && echo x > key", Decision::Deny),
+                            ("cd src && cat main.rs", moved),
+                            ("cd $DIR && cat key", moved),
+                        ] {
+                            assert_eq!(
+                                decide_command(&p, case, &workspace),
+                                expected,
+                                "{mode} {case}"
+                            );
+                        }
+                    }
+                });
+            }
+
+            #[test]
             fn yolo_holds_a_recursive_read_of_the_cwd_that_a_rule_names() {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();

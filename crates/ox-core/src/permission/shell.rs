@@ -5,6 +5,7 @@
 //! unrecognized: rules may deny it or leave it to ask, but never allow it. `exec` patterns parse
 //! here too, so they read words the way commands do.
 
+use std::iter;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
@@ -371,6 +372,7 @@ impl CommandTarget {
             writes: Vec::new(),
             reads: Vec::new(),
             dir_change: None,
+            entered: EnteredDirs::default(),
             leaves_workspace: false,
             repeats: 0,
             relative_path: false,
@@ -649,6 +651,7 @@ struct Walk<'a> {
     reads: Vec<PathTarget>,
     /// The first directory change, as [`construct`] cuts it for a prompt.
     dir_change: Option<String>,
+    entered: EnteredDirs,
     /// Whether some directory change may leave the workspace. Only a first `cd` or `pushd` that
     /// runs once, to a target [`Walk::enters_workspace`] accepts, stays inside.
     leaves_workspace: bool,
@@ -662,6 +665,18 @@ struct Walk<'a> {
     expands: bool,
     /// The first construct the walk does not recognize, as [`construct`] cuts it for a prompt.
     unrecognized: Option<String>,
+}
+
+/// The directories the `cd` and `pushd` commands of a command may have entered.
+#[derive(Default)]
+struct EnteredDirs {
+    /// Each directory as its literal targets spell it from the working directory. A later relative
+    /// path also names a file under each, since a failed change, a subshell, or `||` may leave any
+    /// of them, or the working directory itself, current.
+    dirs: Vec<PathBuf>,
+    /// Whether a change may have entered a directory the analysis cannot spell, so a later
+    /// relative path may name any file.
+    unknown: bool,
 }
 
 impl Walk<'_> {
@@ -965,7 +980,7 @@ impl Walk<'_> {
             .and_then(|(first, args)| {
                 let name = first.value.as_deref().filter(|_| !first.glob)?;
                 if matches!(name, "cd" | "pushd") {
-                    self.enters_workspace(args).then(Vec::new)
+                    self.enters_workspace(name, args).then(Vec::new)
                 } else {
                     safe_operands(name, args)
                 }
@@ -996,15 +1011,15 @@ impl Walk<'_> {
             match &safe {
                 Some(files) if i == 0 => operands.extend(files.iter().cloned()),
                 _ if READERS.contains(&folded.as_str()) => {
-                    let (files, anything) =
-                        reader_operands(&folded, &all[start + 1..], self.workspace.cwd());
+                    let (files, anything) = self.reader_operands(&folded, &all[start + 1..]);
                     operands.extend(files);
                     reads_anything |= anything || unwrapped.passes_input();
                 }
                 _ => {}
             }
         }
-        let reads = self.resolve_operands(&operands);
+        let (reads, moved_anywhere) = self.resolve_operands(&operands);
+        reads_anything |= moved_anywhere;
 
         let mut words: Vec<ShellWord> = all
             .iter()
@@ -1046,24 +1061,33 @@ impl Walk<'_> {
         }
     }
 
-    /// Resolves the `operands` of one simple command, recording each file it reads for certain as
-    /// the command's read, and returns those it may read: each uncertain operand, and each tree it
-    /// traverses, whose descendants a rule may hold below its root.
-    fn resolve_operands(&mut self, operands: &[Operand]) -> Vec<ReaderPath<PathTarget>> {
-        self.relative_path |= operands
+    /// Resolves the `operands` of one simple command under each directory it may run in,
+    /// recording each file it reads for certain as the command's read, and returns those it may
+    /// read, each uncertain operand and each tree it traverses, whose descendants a rule may hold
+    /// below its root, with whether a relative operand may name any file after a directory change
+    /// the walk cannot spell.
+    fn resolve_operands(&mut self, operands: &[Operand]) -> (Vec<ReaderPath<PathTarget>>, bool) {
+        let relative = operands
             .iter()
             .any(|operand| Path::new(&operand.read.path).is_relative());
+        self.relative_path |= relative;
         let mut possible = Vec::new();
         for operand in operands {
-            let read = operand.read.resolve(&mut self.paths);
-            if operand.certain {
-                self.reads.push(read.path.clone());
-            }
-            if !operand.certain || read.recursive {
-                possible.push(read);
+            for path in self.spellings(&operand.read.path) {
+                let spelled = ReaderPath {
+                    path,
+                    recursive: operand.read.recursive,
+                };
+                let read = spelled.resolve(&mut self.paths);
+                if operand.certain {
+                    self.reads.push(read.path.clone());
+                }
+                if !operand.certain || read.recursive {
+                    possible.push(read);
+                }
             }
         }
-        possible
+        (possible, relative && self.entered.unknown)
     }
 
     /// Weighs the program `name` that `words` run with their arguments: a shell whose literal
@@ -1084,8 +1108,9 @@ impl Walk<'_> {
             self.mark_unrecognized(span_text(words, src));
         }
         if DIRECTORY_CHANGERS.contains(&name) {
-            let inside = self.enters_workspace(args);
+            let inside = self.enters_workspace(name, args);
             self.change_dir(inside, words, src);
+            self.enter_dir(name, args);
         }
     }
 
@@ -1173,21 +1198,80 @@ impl Walk<'_> {
             .get_or_insert_with(|| construct(span_text(words, src)));
     }
 
-    /// Returns whether `args` name one literal directory inside a workspace root without `..`,
-    /// which bash's `cd` applies to the spelled path while the gate resolves symlinks first.
-    fn enters_workspace(&mut self, args: &[Word]) -> bool {
-        let [target] = args else {
-            return false;
+    /// Records where `name` with `args` may move the working directory: a `cd` or `pushd` to one
+    /// literal target, or a bare `cd` to the home directory, joined to each directory the walk
+    /// already knows. Any other change, or one that may run more than once, leaves it unknown.
+    fn enter_dir(&mut self, name: &str, args: &[Word]) {
+        let target = match dir_target(name, args) {
+            DirTarget::Home => home(),
+            DirTarget::Path(path) => Some(path.to_owned()),
+            DirTarget::Stay => return,
+            DirTarget::Unknown => None,
         };
-        target
-            .value
-            .as_deref()
+        let Some(target) = target.filter(|_| self.repeats == 0) else {
+            self.entered.unknown = true;
+            return;
+        };
+        let entered: Vec<_> = iter::once(Path::new(""))
+            .chain(self.entered.dirs.iter().map(PathBuf::as_path))
+            .map(|dir| dir.join(&target))
+            .collect();
+        for dir in entered {
+            if !self.entered.dirs.contains(&dir) {
+                self.entered.dirs.push(dir);
+            }
+        }
+    }
+
+    /// The [`reader_operands`] of reader `name` with `args`, expanding each glob in the working
+    /// directory and in each directory the walk may have entered, where a match is spelled from
+    /// that directory.
+    fn reader_operands(&self, name: &str, args: &[Word]) -> (Vec<Operand>, bool) {
+        let cwd = self.workspace.cwd();
+        let (mut files, mut anything) = reader_operands(name, args, cwd);
+        if args.iter().any(|word| word.glob) {
+            for dir in &self.entered.dirs {
+                let base = cwd.join(dir);
+                let (entered, unknown) = reader_operands(name, args, &base);
+                anything |= unknown;
+                files.extend(entered.into_iter().map(|mut operand| {
+                    operand.read.path =
+                        base.join(&operand.read.path).to_string_lossy().into_owned();
+                    operand
+                }));
+            }
+        }
+        (files, anything)
+    }
+
+    /// `path` as the working directory and each directory the walk may have entered name it.
+    fn spellings(&self, path: &str) -> Vec<String> {
+        let mut spellings = vec![path.to_owned()];
+        if Path::new(path).is_relative() {
+            spellings.extend(
+                self.entered
+                    .dirs
+                    .iter()
+                    .map(|dir| dir.join(path).to_string_lossy().into_owned()),
+            );
+        }
+        spellings
+    }
+
+    /// Returns whether `name` with `args` stays inside a workspace root, either as a `pushd -n`
+    /// that enters nothing or by entering one literal directory in a root spelled without `..`,
+    /// which bash's `cd` applies to the spelled path while the gate resolves links first.
+    fn enters_workspace(&mut self, name: &str, args: &[Word]) -> bool {
+        let path = match dir_target(name, args) {
+            DirTarget::Path(path) => path,
+            DirTarget::Stay => return true,
+            DirTarget::Home | DirTarget::Unknown => return false,
+        };
+        Some(path)
             .filter(|path| {
-                !target.glob
-                    && !path.starts_with(['-', '+'])
-                    && !Path::new(path)
-                        .components()
-                        .any(|c| c == Component::ParentDir)
+                !Path::new(path)
+                    .components()
+                    .any(|c| c == Component::ParentDir)
             })
             .is_some_and(|path| self.paths.resolve(path).zone == Zone::Workspace)
     }
@@ -1364,12 +1448,70 @@ impl Walk<'_> {
             return;
         }
         self.relative_path |= Path::new(&path).is_relative();
-        let access = self.paths.resolve(&path);
-        if reads {
-            self.reads.push(access);
-        } else {
-            self.writes.push(access);
+        for spelled in self.spellings(&path) {
+            let access = self.paths.resolve(&spelled);
+            if reads {
+                self.reads.push(access);
+            } else {
+                self.writes.push(access);
+            }
         }
+    }
+}
+
+/// Where a `cd`, `pushd`, or `popd` with `args` moves the working directory.
+enum DirTarget<'w> {
+    /// The home directory, where a bare `cd` goes.
+    Home,
+    /// One literal directory.
+    Path(&'w str),
+    /// Nowhere, since `pushd -n` changes only the directory stack.
+    Stay,
+    /// Anywhere: `cd -`, `popd`, a stack rotation, or a target that expands.
+    Unknown,
+}
+
+/// The target of directory changer `name` with `args`, after the options bash's `cd` (`-L`, `-P`,
+/// and `-e`) or `pushd` (`-n`) takes and a `--` that ends them. `cd -@` enters a file's extended
+/// attributes, which no path names, so it goes anywhere, and `pushd -n` stays.
+fn dir_target<'w>(name: &str, args: &'w [Word]) -> DirTarget<'w> {
+    let options = match name {
+        "cd" => "LPe",
+        "pushd" => "n",
+        _ => return DirTarget::Unknown,
+    };
+    let mut rest = args;
+    let mut ended = false;
+    while let Some((first, after)) = rest.split_first() {
+        let Some(value) = first.value.as_deref().filter(|_| !first.glob) else {
+            return DirTarget::Unknown;
+        };
+        if value == "--" {
+            ended = true;
+        } else if !value
+            .strip_prefix('-')
+            .is_some_and(|flags| !flags.is_empty() && flags.chars().all(|c| options.contains(c)))
+        {
+            break;
+        } else if name == "pushd" {
+            return DirTarget::Stay;
+        }
+        rest = after;
+        if ended {
+            break;
+        }
+    }
+    match rest {
+        [] if name == "cd" => DirTarget::Home,
+        [target] => match target.value.as_deref() {
+            Some(path)
+                if !target.glob && !path.is_empty() && (ended || !path.starts_with(['-', '+'])) =>
+            {
+                DirTarget::Path(path)
+            }
+            _ => DirTarget::Unknown,
+        },
+        _ => DirTarget::Unknown,
     }
 }
 
@@ -4370,7 +4512,8 @@ mod tests {
                     "cd $DIR && make",
                     "cd && make",
                     "cd - && make",
-                    "cd -P x && make",
+                    "cd -@ x && make",
+                    "cd -P -- -x/.. && make",
                     "cd x* && make",
                     "popd && make",
                     "cd x && cd y && make",
@@ -4416,6 +4559,9 @@ mod tests {
                     &format!("cd x && {}", abs("/usr/bin/make")),
                     "./build.sh",
                     "cd x && make",
+                    "cd -P x && make",
+                    "cd -L -- x && make",
+                    "pushd -n /tmp/evil && make",
                     "cd /repo/x && make",
                     "for i in 1 2; do echo $i; done; cd x && make",
                     "cd /tmp/evil",
