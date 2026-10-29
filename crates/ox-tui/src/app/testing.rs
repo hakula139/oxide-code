@@ -20,7 +20,8 @@ use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
 use super::operation::{Activity, InFlight};
 use super::{App, AppHistory, Host};
-use crate::clipboard::{self, Clipboard, Environment};
+use crate::clipboard::Clipboard;
+use crate::clipboard::testing::REMOTE;
 use crate::git_probes::GitProbes;
 use crate::modal::approval::ApprovalModal;
 use crate::modal::{Modal, ModalKey};
@@ -71,12 +72,7 @@ pub(super) fn test_host() -> Host {
         git_probes: GitProbes::new(PathBuf::from("/repo"), &[], now()),
         // A remote session outside tmux copies only through OSC 52, leaving the system clipboard
         // and tmux alone.
-        clipboard: Clipboard::new(Environment {
-            local: false,
-            tmux: false,
-            screen: false,
-            terminal: clipboard::Terminal::Other,
-        }),
+        clipboard: Clipboard::new(REMOTE),
         open_browser: |_| Ok(()),
     }
 }

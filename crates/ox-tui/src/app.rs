@@ -12,6 +12,7 @@ mod render;
 mod testing;
 
 use std::io;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -22,6 +23,7 @@ use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use ox_core::config::StatusLineSegment;
 use ox_core::permission::Mode;
 use ox_core::protocol::{Event, Interaction, Op};
 use ox_core::session::display::archive_notice;
@@ -29,7 +31,7 @@ use ox_core::session::store::listing::ArchiveState;
 
 use self::operation::InFlight;
 use self::queue::PromptQueue;
-use crate::clipboard::Clipboard;
+use crate::clipboard::{Clipboard, Environment};
 use crate::components::chat::ChatView;
 use crate::components::input::InputArea;
 use crate::components::status::{StatusBar, StatusHyperlink};
@@ -113,6 +115,22 @@ pub(crate) struct Host {
     pub(crate) open_browser: fn(&str) -> io::Result<()>,
 }
 
+impl Host {
+    /// The host of a session in `cwd`, probing the git state that `status_line` reads.
+    pub(crate) fn detect(
+        cwd: &Path,
+        status_line: &[StatusLineSegment],
+        git_branch: Option<String>,
+    ) -> Self {
+        Self {
+            git_branch,
+            git_probes: GitProbes::new(cwd.to_owned(), status_line, now()),
+            clipboard: Clipboard::new(Environment::detect()),
+            open_browser: |url| open::that_detached(url),
+        }
+    }
+}
+
 pub(crate) struct AppHistory {
     pub(crate) interactions: Vec<Interaction>,
     pub(crate) title: Option<String>,
@@ -121,7 +139,6 @@ pub(crate) struct AppHistory {
 }
 
 impl App {
-    /// Builds the app with `git_branch` as the status bar's branch until the first git probe.
     pub(crate) fn new(
         theme: Theme,
         theme_overrides: ThemeOverrides,
@@ -303,7 +320,6 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
     use ox_core::client::{RateLimitWindow, RateLimits};
-    use ox_core::config::StatusLineSegment;
 
     use super::testing::{
         long_chat_block, render_app, rendered_text, start_op, test_app, test_host,
@@ -317,22 +333,34 @@ mod tests {
     use crate::terminal::testing::capture_terminal;
     use crate::testing::{buffer_rows, key_event, mouse_event, mouse_event_at};
 
+    mod host {
+        use super::*;
+
+        mod detect {
+            use super::*;
+
+            #[tokio::test(start_paused = true)]
+            async fn schedules_the_git_probes_the_status_line_reads() {
+                let host =
+                    Host::detect(Path::new("/repo"), &[StatusLineSegment::PullRequest], None);
+
+                assert_eq!(host.git_probes.next_poll(), Some(now()));
+            }
+        }
+    }
+
     mod new {
         use super::*;
 
-        /// [`App::new`] on `session_info` and `history`, with no startup branch.
+        /// [`App::new`] on `session_info` and `history`.
         fn new_app(session_info: LiveSessionInfo, history: AppHistory) -> App {
             let (_event_tx, events) = mpsc::unbounded_channel::<Event>();
             let (ops, _op_rx) = mpsc::channel::<Op>(1);
-            let host = Host {
-                git_branch: None,
-                ..test_host()
-            };
             App::new(
                 Theme::default(),
                 ThemeOverrides::default(),
                 session_info,
-                host,
+                test_host(),
                 events,
                 ops,
                 history,

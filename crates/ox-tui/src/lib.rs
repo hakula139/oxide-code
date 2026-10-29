@@ -35,8 +35,6 @@ use ox_core::util::path::tildify;
 
 use self::action::Action;
 use self::app::{App, AppHistory, Host};
-use self::clipboard::{Clipboard, Environment};
-use self::git_probes::GitProbes;
 use self::session_info::LiveSessionInfo;
 use self::slash::ResumePicker;
 use self::theme::ResolvedTheme;
@@ -81,12 +79,7 @@ pub async fn run<S: Debug>(
         notices: theme_notices,
     } = theme;
     let cwd = engine.cwd();
-    let host = Host {
-        git_branch: startup.git_branch,
-        git_probes: GitProbes::new(cwd.to_owned(), &config.status_line, now()),
-        clipboard: Clipboard::new(Environment::detect()),
-        open_browser: |url| open::that_detached(url),
-    };
+    let host = Host::detect(cwd, &config.status_line, startup.git_branch);
     let session_info = LiveSessionInfo {
         store: engine.store().clone(),
         display_cwd: tildify(cwd),

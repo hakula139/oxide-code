@@ -500,6 +500,22 @@ fn osc52_sequence(text: &str, screen: bool) -> String {
     format!("\x1bP\x1b]52;c;{}\x07\x1b\\", pieces.join("\x1b\\\x1bP"))
 }
 
+// ── Testing ──
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::{Environment, Terminal};
+
+    /// A remote session outside any multiplexer, which copies only through OSC 52 and leaves the
+    /// system clipboard and tmux alone.
+    pub(crate) const REMOTE: Environment = Environment {
+        local: false,
+        tmux: false,
+        screen: false,
+        terminal: Terminal::Other,
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, VecDeque};
@@ -509,14 +525,8 @@ mod tests {
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::{Semaphore, oneshot};
 
+    use super::testing::REMOTE;
     use super::*;
-
-    const REMOTE: Environment = Environment {
-        local: false,
-        tmux: false,
-        screen: false,
-        terminal: Terminal::Other,
-    };
 
     /// A tmux that records each run's arguments and stdin and answers from `replies` in order,
     /// failing any unexpected call.
@@ -610,6 +620,78 @@ mod tests {
                     Terminal::from_vars(Some("ghostty"), None, Some("xterm-ghostty")),
                     Terminal::Other
                 );
+            }
+        }
+    }
+
+    mod environment {
+        use super::*;
+
+        mod detect {
+            use super::*;
+
+            const LOCAL: Environment = Environment {
+                local: true,
+                ..REMOTE
+            };
+
+            #[test]
+            fn reads_the_session_from_the_environment() {
+                for (case, set, expected) in [
+                    ("a plain local session", &[][..], LOCAL),
+                    (
+                        "SSH_CONNECTION",
+                        &[("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")],
+                        REMOTE,
+                    ),
+                    ("SSH_TTY", &[("SSH_TTY", "/dev/pts/0")], REMOTE),
+                    (
+                        "tmux hides an outer screen",
+                        &[("TMUX", "/tmp/tmux-1/default,1,0"), ("STY", "1.pts-0.host")],
+                        Environment {
+                            tmux: true,
+                            ..LOCAL
+                        },
+                    ),
+                    (
+                        "screen outside tmux",
+                        &[("STY", "1.pts-0.host")],
+                        Environment {
+                            screen: true,
+                            ..LOCAL
+                        },
+                    ),
+                    (
+                        "the terminal variables",
+                        &[
+                            ("TERM_PROGRAM", "tmux"),
+                            ("LC_TERMINAL", "iTerm2"),
+                            ("TERM", "screen-256color"),
+                        ],
+                        Environment {
+                            terminal: Terminal::ITerm2,
+                            ..LOCAL
+                        },
+                    ),
+                ] {
+                    let vars = [
+                        "SSH_CONNECTION",
+                        "SSH_TTY",
+                        "TMUX",
+                        "STY",
+                        "TERM_PROGRAM",
+                        "LC_TERMINAL",
+                        "TERM",
+                    ]
+                    .map(|name| {
+                        let value = set.iter().find(|(set, _)| *set == name).map(|(_, v)| *v);
+                        (name, value)
+                    });
+
+                    let detected = temp_env::with_vars(vars, Environment::detect);
+
+                    assert_eq!(detected, expected, "{case}");
+                }
             }
         }
     }

@@ -221,20 +221,13 @@ pub(super) fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_owned();
     }
-    let boundary = head_end(s, max_bytes);
+    let boundary = s
+        .grapheme_indices(true)
+        .map(|(byte, grapheme)| byte + grapheme.len())
+        .take_while(|&end| end <= max_bytes)
+        .last()
+        .unwrap_or(0);
     format!("{}{ELLIPSIS}", &s[..boundary])
-}
-
-/// The byte offset of the last grapheme boundary at or before `budget`.
-fn head_end(text: &str, budget: usize) -> usize {
-    let mut end = 0;
-    for (byte, grapheme) in text.grapheme_indices(true) {
-        if byte + grapheme.len() > budget {
-            break;
-        }
-        end = byte + grapheme.len();
-    }
-    end
 }
 
 #[cfg(test)]
@@ -571,26 +564,6 @@ mod tests {
                 ("inside a combining mark", "e\u{301}x", 2, "..."),
             ] {
                 assert_eq!(truncate_to_bytes(input, max_bytes), expected, "{case}");
-            }
-        }
-    }
-
-    mod head_end {
-        use super::*;
-
-        #[test]
-        fn stops_at_the_last_cluster_boundary_within_the_budget() {
-            for (text, budget, expected) in [
-                ("abc", 10, 3),
-                ("abc", 2, 2),
-                ("a👨‍👩‍👧b", 2, 1),
-                ("a👨‍👩‍👧b", 6, 1),
-                ("a👨‍👩‍👧b", 19, 19),
-                ("e\u{301}x", 2, 0),
-                ("e\u{301}x", 3, 3),
-                ("abc", 0, 0),
-            ] {
-                assert_eq!(head_end(text, budget), expected, "{text:?} {budget}");
             }
         }
     }
