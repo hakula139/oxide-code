@@ -14,7 +14,7 @@ use super::transcript::LiveTranscript;
 use crate::auth::Auth;
 use crate::client::{Request, Response, ResponseEvent, StopDetails, StopReason, Wire};
 use crate::config::compaction::AutoCompactionConfig;
-use crate::message::{ContentBlock, Message, Role};
+use crate::message::{ContentBlock, Message, Role, TextOrigin};
 use crate::model::{ModelSettings, TokenUsage};
 use crate::prompt::PromptParts;
 use crate::protocol::{Event, EventSink};
@@ -131,7 +131,8 @@ pub(super) struct TurnContext<'a> {
 }
 
 /// Drives a prompt through tool rounds and `pause_turn` continuations. Queued prompts enter at
-/// round boundaries, and a queued mode switch applies at the next gated call.
+/// round boundaries. A queued mode switch applies at the next gated call or round boundary,
+/// whichever comes first, and the round's results tell the model of a mode it has not seen.
 ///
 /// A mid-stream abort discards the unfinished reply. A mid-round abort commits the round with
 /// unfinished calls marked interrupted. Both append [`Message::interruption`]. A refusal discards
@@ -154,6 +155,7 @@ pub(super) async fn agent_turn(
         rounds_run,
     } = turn;
     let tool_defs = tools.definitions();
+    let plan_tools = tools.plan_tools();
     let mut report = TurnReport::default();
     let mut ran_tools = false;
     let cap = max_tool_rounds.unwrap_or(u32::MAX);
@@ -205,11 +207,18 @@ pub(super) async fn agent_turn(
             return TurnOutcome::stopped(report, TurnStop::Replied);
         }
 
-        let round =
+        let mut round =
             dispatch::run_tool_round(tools, tool_uses, &parse_errors, sink, mailbox, dispatch_ctx)
                 .await;
         if round.tasks.is_some() {
             report.tasks = round.tasks;
+        }
+        mailbox.apply_mode(dispatch_ctx.policy);
+        if let Some(reminder) = transcript.catch_up_mode(dispatch_ctx.policy.mode(), &plan_tools) {
+            round.results.push(ContentBlock::generated_text(
+                reminder,
+                TextOrigin::SystemReminder,
+            ));
         }
         // Calls that finished before an abort already took effect, so the model must see them.
         commit_round(transcript, sink, blocks, round.results, round.sidecars).await;
@@ -531,6 +540,7 @@ mod tests {
     use crate::session::handle;
     use crate::session::handle::SessionHandle;
     use crate::session::store::testing::test_store;
+    use crate::tool::read::ReadTool;
     use crate::tool::view::{NumberedLine, ToolResultView};
     use crate::tool::{
         DEFAULT_TOOL_ICON, Prepared, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec,
@@ -814,8 +824,9 @@ mod tests {
             }
         }
 
-        /// Runs [`super::agent_turn`] on a live transcript seeded with `messages`, writing the
-        /// transcript's messages back into `messages` on return.
+        /// Runs [`super::agent_turn`] on a live transcript seeded with `messages`, whose model has
+        /// seen the mode `dispatch_ctx` starts in, writing the transcript's messages back into
+        /// `messages` on return.
         async fn run_on_messages(
             turn: TurnContext<'_>,
             session: &SessionHandle,
@@ -824,9 +835,23 @@ mod tests {
             dispatch_ctx: &mut DispatchContext<'_>,
         ) -> TurnOutcome {
             let mut transcript = LiveTranscript::with_messages(session, std::mem::take(messages));
+            transcript.catch_up_mode(dispatch_ctx.policy.mode(), &turn.tools.plan_tools());
             let outcome = super::agent_turn(turn, &mut transcript, mailbox, dispatch_ctx).await;
             *messages = transcript.messages().to_vec();
             outcome
+        }
+
+        /// The permission mode text of the reminder that ends `results`, if one does.
+        fn mode_reminder(results: &Message) -> Option<&str> {
+            let Some(ContentBlock::Text {
+                text,
+                origin: Some(TextOrigin::SystemReminder),
+            }) = results.content.last()
+            else {
+                return None;
+            };
+            let (_, mode) = text.split_once("# Permission mode\n\n")?;
+            mode.strip_suffix("\n</system-reminder>")
         }
 
         /// Dispatch context in `cwd` under `yolo`, so turn tests run the loop without approvals.
@@ -2277,7 +2302,7 @@ mod tests {
 
             let (outcome, messages, sink) = real_client_turn(
                 vec![sse_response(body), sse_response(HELLO_SSE)],
-                &ToolRegistry::new(vec![Box::new(crate::tool::read::ReadTool)]),
+                &ToolRegistry::new(vec![Box::new(ReadTool)]),
             )
             .await;
             outcome.into_result().expect("the read round completes");
@@ -2564,9 +2589,10 @@ mod tests {
             let session = test_session(dir.path());
             let client = FakeClient::new(vec![
                 tool_use_turn("tool_1", "echo", r#"{"v":42}"#),
+                tool_use_turn("tool_2", "echo", r#"{"v":43}"#),
                 text_turn("Done"),
             ]);
-            let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+            let tools = ToolRegistry::new(vec![Box::new(EchoTool), Box::new(ReadTool)]);
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
             let (tx, mut rx) = OpSender::channel(1);
@@ -2594,6 +2620,20 @@ mod tests {
                 content.starts_with("The echo call was denied by `plan` mode,"),
                 "{content}"
             );
+            assert_eq!(
+                mode_reminder(&messages[2]),
+                Some(
+                    "The permission mode is `plan`, so only calls to `read` run. Investigate, then \
+                     present your plan for the user to review."
+                ),
+                "the results name the mode the gate switched to",
+            );
+            assert_eq!(
+                mode_reminder(&messages[4]),
+                None,
+                "a round without a new switch adds no reminder: {:?}",
+                messages[4],
+            );
             assert!(
                 matches!(
                     sink.events().first(),
@@ -2602,6 +2642,49 @@ mod tests {
                 "the switch confirms on receipt: {:?}",
                 sink.events(),
             );
+            drop(tx);
+        }
+
+        #[tokio::test]
+        async fn mode_switch_mid_turn_reaches_the_model_before_a_queued_prompt() {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            let client = FakeClient::new(vec![
+                tool_use_turn("tool_1", "mystery", "{}"),
+                text_turn("Done"),
+            ]);
+            let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+            let sink = CapturingSink::default();
+            let mut messages = vec![Message::user("plan it")];
+            let (tx, mut rx) = OpSender::channel(2);
+            let mut mailbox = Mailbox::new(&mut rx);
+            tx.try_submit(Op::SetMode(crate::permission::Mode::Manual))
+                .unwrap();
+            tx.try_submit(Op::Queue("go ahead".to_owned())).unwrap();
+            let mut dispatch_ctx =
+                dispatch_with(crate::permission::Mode::Plan, &[], &[], Path::new("/repo"));
+
+            run_on_messages(
+                turn_context(&client, &tools, &sink),
+                &session,
+                &mut messages,
+                &mut mailbox,
+                &mut dispatch_ctx,
+            )
+            .await
+            .into_result()
+            .unwrap();
+
+            assert_eq!(
+                dispatch_ctx.policy.mode(),
+                crate::permission::Mode::Manual,
+                "the round boundary applies a switch no gated call took",
+            );
+            assert_eq!(
+                mode_reminder(&messages[2]),
+                Some("The permission mode is `manual`."),
+            );
+            assert_eq!(messages[3], Message::user("go ahead"));
             drop(tx);
         }
 

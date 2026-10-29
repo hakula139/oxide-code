@@ -6,7 +6,7 @@ use indoc::{formatdoc, indoc};
 
 use crate::prompt::instructions::{self, AGENTS_MD, CLAUDE_MD};
 use crate::protocol::Op;
-use crate::util::text::plural;
+use crate::util::text::{list_with_and, plural};
 
 /// Each file `/init` can create, with the tools besides oxide-code that read it.
 pub const FILE_CHOICES: [(&str, &str); 2] = [
@@ -85,11 +85,11 @@ fn existing_instruction_files(root: &Path) -> Vec<PathBuf> {
 
 /// The error for naming a file to create in a project that has the `existing` instruction files.
 fn already_has(existing: &[PathBuf]) -> String {
-    let files = existing
+    let files: Vec<_> = existing
         .iter()
         .map(|path| format!("`{}`", path.display()))
-        .collect::<Vec<_>>()
-        .join(" and ");
+        .collect();
+    let files = list_with_and(&files);
     let them = plural(existing.len(), "it", "them");
     format!("This project already has {files}. Run `/init` without a file name to update {them}.")
 }

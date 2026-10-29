@@ -69,6 +69,19 @@ pub(crate) fn join_sentences(text: &str, next: &str) -> String {
     format!("{text}{separator}{next}")
 }
 
+/// `items` as an English list: `a`, `a and b`, or `a, b, and c`.
+pub(crate) fn list_with_and<S: AsRef<str>>(items: &[S]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.as_ref().to_owned(),
+        [first, second] => format!("{} and {}", first.as_ref(), second.as_ref()),
+        [rest @ .., last] => {
+            let rest: Vec<&str> = rest.iter().map(AsRef::as_ref).collect();
+            format!("{}, and {}", rest.join(", "), last.as_ref())
+        }
+    }
+}
+
 /// Drops `text`'s trailing whitespace and leading blank lines, keeping the first line's indent.
 pub fn trim_blank_edges(text: &str) -> &str {
     let text = text.trim_end();
@@ -275,6 +288,22 @@ mod tests {
                 ("Upstream is down", "Upstream is down. Retry later."),
             ] {
                 assert_eq!(join_sentences(text, "Retry later."), expected);
+            }
+        }
+    }
+
+    mod list_with_and {
+        use super::*;
+
+        #[test]
+        fn joins_two_items_with_and_and_longer_lists_with_a_serial_comma() {
+            for (items, expected) in [
+                (&[][..], ""),
+                (&["a"][..], "a"),
+                (&["a", "b"][..], "a and b"),
+                (&["a", "b", "c"][..], "a, b, and c"),
+            ] {
+                assert_eq!(list_with_and(items), expected, "{items:?}");
             }
         }
     }

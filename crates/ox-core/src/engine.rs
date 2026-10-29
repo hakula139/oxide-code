@@ -166,8 +166,15 @@ impl Engine {
         let read_filter = config.permission.read_filter();
         let tools = Arc::new(ToolRegistry::built_in(&read_filter, &shells));
         let workspace = Arc::new(config.workspace.clone());
-        let (transcript, usage, instruction_warnings) =
-            LiveTranscript::load(handle, transcript, settings.model(), workspace.cwd()).await;
+        let (transcript, usage, instruction_warnings) = LiveTranscript::load(
+            handle,
+            transcript,
+            settings.model(),
+            config.permission.mode(),
+            &tools,
+            workspace.cwd(),
+        )
+        .await;
         let context_estimate = transcript.request_estimate(&tools.definitions());
         Ok(Self {
             client,
@@ -314,9 +321,7 @@ impl Engine {
             }
             Op::Shutdown => OpEnd::Shutdown,
         };
-        if let Some(mode) = mailbox.take_mode() {
-            self.policy.set_mode(mode);
-        }
+        mailbox.apply_mode(&mut self.policy);
         if end == OpEnd::Shutdown {
             return ControlFlow::Break(());
         }
@@ -346,7 +351,7 @@ impl Engine {
             return report_unsent(sink, abort);
         }
 
-        let fresh = self.load_user_context(sink).await;
+        let fresh = self.load_user_context(sink, mailbox).await;
         let outcome = self.transcript.begin_turn(text, fresh, title).await;
         sink.session_write(&outcome.report);
         turn::record_drained_prompts(mailbox.drain_prompts(), &mut self.transcript, sink).await;
@@ -441,11 +446,32 @@ impl Engine {
         sink.emit(Event::TurnRolledBack);
     }
 
-    /// Reads the user context afresh with [`Self::show_instruction_warnings`].
-    async fn load_user_context(&mut self, sink: &dyn EventSink) -> UserContext {
-        let (context, warnings) = UserContext::load(self.cwd(), self.settings.model()).await;
+    /// Reads the user context afresh with [`Self::show_instruction_warnings`], in the mode the
+    /// latest switch `mailbox` holds.
+    async fn load_user_context(
+        &mut self,
+        sink: &dyn EventSink,
+        mailbox: &mut Mailbox<'_>,
+    ) -> UserContext {
+        let (context, warnings) = self.fresh_user_context(mailbox).await;
         self.show_instruction_warnings(sink, warnings);
         context
+    }
+
+    /// Applies the latest switch `mailbox` holds, then reads the user context with
+    /// [`UserContext::load`].
+    async fn fresh_user_context(
+        &mut self,
+        mailbox: &mut Mailbox<'_>,
+    ) -> (UserContext, Vec<String>) {
+        mailbox.apply_mode(&mut self.policy);
+        UserContext::load(
+            self.cwd(),
+            self.settings.model(),
+            self.policy.mode(),
+            &self.tools.plan_tools(),
+        )
+        .await
     }
 
     /// Keeps the instruction file `warnings` of the latest load, showing each one the previous load
@@ -562,9 +588,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::local_testing::{
-        TITLE_MODEL, finished_session, greeting_title, inert_mailbox, login_urls, mount_title,
-        next_matching, service_log, submit, system_prompt, texts, tool_heavy_transcript,
-        tracked_paths, turn_events, write_unreadable_instructions,
+        EchoTool, TITLE_MODEL, finished_session, greeting_title, inert_mailbox, login_urls,
+        mount_title, next_matching, service_log, submit, system_prompt, texts,
+        tool_heavy_transcript, tracked_paths, turn_events, write_unreadable_instructions,
     };
     use super::sessions::format_drift_warning;
     use super::testing::{
@@ -794,6 +820,12 @@ mod tests {
                 assert_eq!(engine.max_tool_rounds, Some(3));
                 assert_eq!(engine.compaction, config.compaction);
                 assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert_eq!(
+                    engine.transcript.prompt().seen.mode,
+                    "The permission mode is `plan`, so only calls to `bash_output`, `bash_stop`, \
+                     `read`, `glob`, `grep`, and `tasks` run. Investigate, then present your plan \
+                     for the user to review.",
+                );
                 assert_eq!(
                     engine.startup_notices,
                     ["Not signed in. Run `/login` to sign in."],
@@ -3385,6 +3417,42 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn renders_a_mode_switch_sent_during_auto_compaction_in_the_fresh_context() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "auto summary").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                engine.compaction = CompactionConfig::with_threshold(50_000);
+                engine.transcript.set_messages(tool_heavy_transcript());
+                engine.usage.set_context_estimate(50_000);
+                let sink = CapturingSink::default();
+                let (ops_tx, mut ops) = OpSender::channel(1);
+                ops_tx.try_submit(Op::SetMode(Mode::Plan)).unwrap();
+
+                let end = engine
+                    .submit_prompt("five", None, &sink, &mut Mailbox::new(&mut ops))
+                    .await;
+
+                assert_eq!(end, OpEnd::Completed);
+                assert_eq!(engine.policy.mode(), Mode::Plan);
+                let requests = request_bodies(&server).await;
+                let turn = requests[1]["messages"].as_array().unwrap();
+                let context = turn[0]["content"][0]["text"].as_str().unwrap();
+                assert!(
+                    context.contains("The permission mode is `plan`"),
+                    "the fresh context renders the new mode: {context}",
+                );
+                assert_eq!(
+                    turn.last().unwrap()["content"].as_array().unwrap().len(),
+                    1,
+                    "the prompt needs no reminder of a mode the context names",
+                );
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn compacts_a_rejected_oversized_prompt_before_the_next_prompt() {
             with_pinned_home(async {
                 let server = MockServer::start().await;
@@ -4185,6 +4253,103 @@ mod tests {
                     "{:?}",
                     sink.events()
                 );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn names_the_new_mode_on_the_next_prompt_only() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let mut mailbox = inert_mailbox();
+
+                engine
+                    .submit_prompt("first", None, &sink, &mut mailbox)
+                    .await;
+                engine.set_mode(&sink, Mode::Plan);
+                engine
+                    .submit_prompt("second", None, &sink, &mut mailbox)
+                    .await;
+                engine.set_mode(&sink, Mode::Plan);
+                engine
+                    .submit_prompt("third", None, &sink, &mut mailbox)
+                    .await;
+
+                let turns = request_bodies(&server).await;
+                let messages = turns[2]["messages"].as_array().unwrap();
+                let second = messages[3]["content"].as_array().unwrap();
+                assert_eq!(second[0]["text"], "second");
+                let reminder = second[1]["text"].as_str().unwrap();
+                assert!(
+                    reminder.contains("The permission mode is `plan`"),
+                    "{reminder}"
+                );
+                assert!(!reminder.contains("# Model"), "{reminder}");
+                let third = messages[5]["content"].as_array().unwrap();
+                assert_eq!(
+                    third.len(),
+                    1,
+                    "an unchanged mode adds no reminder: {third:?}"
+                );
+                assert_eq!(third[0]["text"], "third");
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn names_a_mode_left_after_a_turn_the_model_spent_in_it() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_tool_call_once(&server, "call-1", "echo", "{}").await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![
+                        Box::new(EchoTool),
+                        Box::new(ReadTool),
+                    ]));
+                let sink = CapturingSink::default();
+                let (tx, mut ops) = OpSender::channel(1);
+                tx.try_submit(Op::SetMode(Mode::Plan)).unwrap();
+
+                engine
+                    .submit_prompt("first", None, &sink, &mut Mailbox::new(&mut ops))
+                    .await;
+                engine.set_mode(&sink, Mode::Manual);
+                engine
+                    .submit_prompt("second", None, &sink, &mut inert_mailbox())
+                    .await;
+
+                let turns = request_bodies(&server).await;
+                let messages = turns[2]["messages"].as_array().unwrap();
+                let results = messages[3]["content"].as_array().unwrap();
+                assert_eq!(
+                    results.len(),
+                    1,
+                    "the reminder joins the result: {results:?}"
+                );
+                let result = results[0]["content"].as_str().unwrap();
+                assert!(
+                    result.starts_with("The echo call was denied by `plan` mode"),
+                    "{result}",
+                );
+                assert!(
+                    result.contains("The permission mode is `plan`, so only calls to `read` run."),
+                    "{result}"
+                );
+                let second = messages[5]["content"].as_array().unwrap();
+                assert_eq!(second[0]["text"], "second");
+                let told_manual = second[1]["text"].as_str().unwrap();
+                assert!(
+                    told_manual.contains("The permission mode is `manual`."),
+                    "{told_manual}"
+                );
+                drop(tx);
             })
             .await;
         }

@@ -33,6 +33,7 @@ expression: recovered
     "seen": {
       "date": "2026-01-02",
       "instructions": "",
+      "mode": "",
       "model": ""
     },
     "user_context": ""

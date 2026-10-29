@@ -1,5 +1,7 @@
 //! Serde types for Anthropic Messages API requests, streamed response frames, and error bodies.
 
+use std::borrow::Cow;
+
 use serde::ser::SerializeSeq as _;
 use serde::{Deserialize, Serialize, Serializer};
 
@@ -77,10 +79,26 @@ impl<'a> RequestMessage<'a> {
         }
     }
 
+    /// The request shape of `message`, where text that follows a tool result joins that result's
+    /// content. Mirrors Claude Code's `mergeUserContentBlocks`.
     fn of(message: &'a Message) -> Self {
+        let mut content: Vec<RequestBlock<'a>> = Vec::with_capacity(message.content.len());
+        for block in &message.content {
+            if let (
+                ContentBlock::Text { text, .. },
+                Some(RequestBlock::ToolResult { content, .. }),
+            ) = (block, content.last_mut())
+            {
+                let content = content.to_mut();
+                content.push_str("\n\n");
+                content.push_str(text);
+            } else {
+                content.push(RequestBlock::of(block));
+            }
+        }
         Self {
             role: message.role,
-            content: message.content.iter().map(RequestBlock::of).collect(),
+            content,
         }
     }
 }
@@ -99,6 +117,12 @@ enum RequestBlock<'a> {
     },
     RedactedThinking {
         data: &'a str,
+    },
+    ToolResult {
+        tool_use_id: &'a str,
+        content: Cow<'a, str>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        is_error: bool,
     },
     #[serde(untagged)]
     ServerToolResult {
@@ -127,6 +151,15 @@ impl<'a> RequestBlock<'a> {
                 WireKind::Anthropic => Self::RedactedThinking {
                     data: &replay.payload,
                 },
+            },
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Self::ToolResult {
+                tool_use_id,
+                content: Cow::Borrowed(content),
+                is_error: *is_error,
             },
             ContentBlock::ServerToolResult {
                 tool_use_id,
@@ -558,7 +591,7 @@ mod tests {
                             content: "ok".to_owned(),
                             is_error: false,
                         },
-                        ContentBlock::text("follow-up"),
+                        ContentBlock::tool_result("toolu_2", "done", false),
                     ],
                 },
             ];
@@ -577,8 +610,9 @@ mod tests {
                     {"role": "user", "content": [
                         {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
                         {
-                            "type": "text",
-                            "text": "follow-up",
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_2",
+                            "content": "done",
                             "cache_control": {"type": "ephemeral", "ttl": "1h"},
                         },
                     ]},
@@ -612,6 +646,43 @@ mod tests {
                     "is_error": true,
                     "cache_control": {"type": "ephemeral", "ttl": "1h"},
                 }),
+            );
+        }
+
+        #[test]
+        fn fold_text_after_tool_results_into_the_last_result() {
+            let messages = [Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::tool_result("toolu_1", "ok", false),
+                    ContentBlock::tool_result("toolu_2", "boom", true),
+                    ContentBlock::generated_text("reminder", TextOrigin::SystemReminder),
+                    ContentBlock::text("more"),
+                ],
+            }];
+
+            let v = serde_json::to_value(RequestMessages {
+                user_context: None,
+                messages: &messages,
+                breakpoint: Some(CacheControl::conversation(PromptCacheTtl::OneHour)),
+            })
+            .unwrap();
+
+            assert_eq!(
+                v,
+                json!([{
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_2",
+                            "content": "boom\n\nreminder\n\nmore",
+                            "is_error": true,
+                            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                        },
+                    ],
+                }]),
             );
         }
 
