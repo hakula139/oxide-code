@@ -596,7 +596,7 @@ mod tests {
     use crate::permission::rule::Rule;
     use crate::protocol::local_testing::CapturingSink;
     use crate::protocol::testing::{model_pick, op_id};
-    use crate::protocol::{CompactTrigger, ResumeTarget, SavedTarget, UsageSnapshot};
+    use crate::protocol::{CompactTrigger, SessionRef, UsageSnapshot};
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;
     use crate::session::saved::ArchiveUpdate;
@@ -1214,7 +1214,7 @@ mod tests {
                     matches!(event, Event::OpEnded { .. }).then_some(())
                 })
                 .await;
-                let target = ResumeTarget::Id(session_id.clone());
+                let target = SessionRef::Id(session_id.clone());
                 handle.ops.submit(Op::Resume { target }).await.unwrap();
                 next_matching(&mut handle.events, |event| {
                     matches!(event, Event::SessionResumed { .. }).then_some(())
@@ -1378,7 +1378,7 @@ mod tests {
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let mut handle = engine.spawn();
 
-                let target = ResumeTarget::Prefix(target_id[..8].to_owned());
+                let target = SessionRef::Prefix(target_id[..8].to_owned());
                 handle.ops.submit(Op::Resume { target }).await.unwrap();
                 let resumed = turn_events(&mut handle.events)
                     .await
@@ -1432,7 +1432,7 @@ mod tests {
                 let mut handle = engine.spawn();
 
                 submit(&mut handle, "first").await;
-                let target = ResumeTarget::Prefix(live_id[..8].to_owned());
+                let target = SessionRef::Prefix(live_id[..8].to_owned());
                 handle.ops.submit(Op::Resume { target }).await.unwrap();
                 let failure = next_matching(&mut handle.events, |event| match event {
                     Event::TurnFailed(message) => Some(message),
@@ -1485,7 +1485,7 @@ mod tests {
                 })
                 .await;
                 let fresh = submit(&mut handle, "fresh").await;
-                let target = ResumeTarget::Id(session_id.clone());
+                let target = SessionRef::Id(session_id.clone());
                 handle.ops.submit(Op::Resume { target }).await.unwrap();
                 next_matching(&mut handle.events, |event| {
                     matches!(event, Event::SessionResumed { .. }).then_some(())
@@ -1552,7 +1552,7 @@ mod tests {
                     ArchiveState::Archived,
                 );
 
-                let target = ResumeTarget::Id(archived_id.clone());
+                let target = SessionRef::Id(archived_id.clone());
                 handle.ops.submit(Op::Resume { target }).await.unwrap();
                 let resumed = next_matching(&mut handle.events, |event| match event {
                     Event::SessionResumed { id, prior, .. } => Some((id, prior)),
@@ -1590,7 +1590,7 @@ mod tests {
                 handle
                     .ops
                     .submit(Op::SetArchive {
-                        target: SavedTarget::Id("saved".to_owned()),
+                        target: SessionRef::Id("saved".to_owned()),
                         state: ArchiveState::Archived,
                     })
                     .await
@@ -1598,7 +1598,7 @@ mod tests {
                 handle
                     .ops
                     .submit(Op::Resume {
-                        target: ResumeTarget::Id("saved".to_owned()),
+                        target: SessionRef::Id("saved".to_owned()),
                     })
                     .await
                     .unwrap();
@@ -1621,7 +1621,7 @@ mod tests {
                 assert_eq!(
                     archived,
                     Event::ArchiveUpdated {
-                        target: SavedTarget::Id("saved".to_owned()),
+                        target: SessionRef::Id("saved".to_owned()),
                         state: ArchiveState::Archived,
                         result: Ok(ArchiveUpdate {
                             id: "saved".to_owned(),
@@ -1737,7 +1737,7 @@ mod tests {
                 handle
                     .ops
                     .submit(Op::Resume {
-                        target: ResumeTarget::Prefix("shared".to_owned()),
+                        target: SessionRef::Prefix("shared".to_owned()),
                     })
                     .await
                     .unwrap();
@@ -2447,7 +2447,7 @@ mod tests {
                     seen.len() == 1
                 };
                 let mover = self.moves_head.as_ref().filter(|_| first);
-                let target = ResumeTarget::Id(ctx.session_id.clone());
+                let target = SessionRef::Id(ctx.session_id.clone());
                 Box::pin(async move {
                     if let Some(store) = mover {
                         let mut other = handle::start(store, MODEL, None);
@@ -2527,7 +2527,7 @@ mod tests {
                     .submit_prompt("first", None, &sink, &mut inert_mailbox())
                     .await;
                 let source = stale.session_id();
-                other.resume(&sink, ResumeTarget::Id(source.clone())).await;
+                other.resume(&sink, SessionRef::Id(source.clone())).await;
                 mount_reply_once(&server, "reply").await;
                 other
                     .submit_prompt("elsewhere", None, &sink, &mut inert_mailbox())
@@ -3101,7 +3101,7 @@ mod tests {
                     resumed
                         .resume(
                             &CapturingSink::default(),
-                            ResumeTarget::Id(session_id.clone()),
+                            SessionRef::Id(session_id.clone()),
                         )
                         .await;
                     resumed.generates_titles = true;

@@ -6,7 +6,7 @@ Companion docs: [Slash Commands](slash-commands.md), [Modals](modals.md).
 
 ## Resume Surfaces
 
-`slash/resume` hosts `ResumeCmd` and `ResumePicker`. Bare `/resume` opens the picker, which forwards `Op::Resume` with `ResumeTarget::Id`, the chosen session's ID. The typed form forwards `ResumeTarget::Prefix` through `command::resume`, which the bare REPL runs too, and `ox -r <file>` names a session export to import as `ResumeTarget::Path`. The engine resolves a prefix through `resolve_prefix`, which searches the current project first and widens to every project on a miss, and skips the live session, so a prefix that matches only the live session fails with a message saying so.
+`slash/resume` hosts `ResumeCmd` and `ResumePicker`. Bare `/resume` opens the picker, which forwards `Op::Resume` with `SessionRef::Id`, the chosen session's ID. The typed form forwards `SessionRef::Prefix` through `command::resume`, which the bare REPL runs too. At startup, `ox -r <file>` names a session export, which `resolve_session` imports before it resumes the session, so import never reaches the engine. The engine resolves a prefix through `resolve_prefix`, which searches the current project first and widens to every project on a miss, and skips the live session, so a prefix that matches only the live session fails with a message saying so.
 
 `ox --resume` without a session starts the TUI in a fresh session with no row yet and pushes `ResumePicker::at_startup` before the event loop starts. That picker quits `ox` when dismissed, and Enter resumes through the same swap as `/resume`. A session's row is created only with its first message, so neither path leaves an empty session in the store.
 
@@ -22,7 +22,7 @@ Archiving and deleting from the picker go through the engine. Ctrl+X sends `Op::
 
 ## The Swap
 
-`session::handle::roll_into` mirrors the `roll` behind `/clear`. On the blocking pool, it resolves the target to a session ID through `resolver::resolve_target`, which imports a `ResumeTarget::Path` export, takes the session's liveness lock, and loads and sanitizes its chain, so a resolve or load failure leaves the live session untouched. It then swaps the handle in place and finalizes the old session. Loading an archived target unarchives it. `RollIntoOutcome` carries the target's `LoadedTranscript`, its title, its prior archive state, and the old session's finalize failure.
+`session::handle::roll_into` mirrors the `roll` behind `/clear`. On the blocking pool, it resolves the target to a session ID through `resolver::resolve_ref`, which refuses the live session. `handle::resume` then takes the session's liveness lock and loads and sanitizes its chain, so a resolve or load failure leaves the live session untouched. It then swaps the handle in place and finalizes the old session. Loading an archived target unarchives it. `RollIntoOutcome` carries the target's `LoadedTranscript`, its title, its prior archive state, and the old session's finalize failure.
 
 `Engine::resume` drives `roll_into` and adopts the loaded transcript as startup does: it replays the recorded prompt context, restores the file tracker, and emits `Event::SessionResumed` with the display history from `engine::history::interactions`, already resolved so the TUI renders it without a tool registry. The events that follow report the old session's finalize failure, the restored session cost and task list, unreadable instruction files, tracker drift, and an interrupted reply, and `Event::OpEnded` ends the resume. A failed resolve or load reports `Event::TurnFailed`, ends the resume as failed, and keeps the live session. Later requests and tool calls read the session ID and artifact directory from the live handle, so they follow the swap.
 
@@ -66,7 +66,7 @@ On `SessionResumed`, the TUI rebuilds the chat, clears the modals, and discards 
 - `crates/ox-core/src/engine/sessions.rs`: `Engine::resume`, `format_drift_warning`.
 - `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::roll_into`, which swaps the live transcript for the loaded one.
 - `crates/ox-core/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
-- `crates/ox-core/src/session/resolver.rs`: `resolve_target`, which maps a `ResumeTarget` to a session ID, importing an export path, and `resolve_prefix`.
+- `crates/ox-core/src/session/resolver.rs`: `SessionTarget`, the target `--continue` or `--resume` names; `resolve_session`, which imports an export path; `resolve_ref`, which maps a `SessionRef` to a session ID; and `resolve_prefix`.
 - `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`, `ProjectScope`.
 - `crates/ox-tui/src/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items`, which keeps the cursor when rows drop.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd`, `ResumePicker` and its `at_startup` variant, `PickerAction` and its `ACTIONS` keymap, `Pages`, and `SessionRow` with its `Column` layout.

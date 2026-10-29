@@ -8,7 +8,6 @@
 pub mod notice;
 
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -73,11 +72,11 @@ pub enum Op {
     /// Sets the archive state of the saved session `target` names, which the engine resolves and
     /// reports through [`Event::ArchiveUpdated`].
     SetArchive {
-        target: SavedTarget,
+        target: SessionRef,
         state: ArchiveState,
     },
     /// Looks up the one saved session other than the live one whose ID starts with `prefix`, as
-    /// [`SavedTarget::Prefix`] does, and reports it through [`Event::SavedFound`], so a frontend
+    /// [`SessionRef::Prefix`] does, and reports it through [`Event::SavedFound`], so a frontend
     /// can confirm a [`Self::DeleteSaved`] against what the engine resolved.
     FindSaved { prefix: String },
     /// Deletes saved session `session_id` with its artifacts, which [`Event::SavedDeleted`]
@@ -85,7 +84,7 @@ pub enum Op {
     DeleteSaved { session_id: String },
     /// Finalizes the live session and continues `target`'s saved session in place, which
     /// [`Event::SessionResumed`] reports.
-    Resume { target: ResumeTarget },
+    Resume { target: SessionRef },
     /// Sets the session title by hand, which stops AI title generation for this session.
     Rename { title: String },
     /// Starts a browser sign-in for the oxide-code login, announced with [`Event::LoginStarted`].
@@ -149,25 +148,12 @@ impl fmt::Debug for SignInCode {
     }
 }
 
-/// The session an [`Op::Resume`] or `ox --resume` continues.
+/// A saved session, named by its ID or a unique prefix of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResumeTarget {
-    /// The session that the export at this path holds, imported into the store first.
-    Path(PathBuf),
+pub enum SessionRef {
     /// The saved session with this ID.
     Id(String),
-    /// The one saved session other than the live one whose ID starts with this prefix, searched for
-    /// in the current project first and then in every project.
-    Prefix(String),
-}
-
-/// The saved session an [`Op::SetArchive`] acts on.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SavedTarget {
-    /// The saved session with this ID.
-    Id(String),
-    /// The one saved session other than the live one whose ID starts with this prefix, searched for
-    /// in the current project first and then in every project.
+    /// The one saved session whose ID starts with this prefix.
     Prefix(String),
 }
 
@@ -301,7 +287,7 @@ pub enum Event {
     RenameFailed(String),
     /// An [`Op::SetArchive`] for `target` and `state` completed. Frontends phrase the typed error.
     ArchiveUpdated {
-        target: SavedTarget,
+        target: SessionRef,
         state: ArchiveState,
         result: Result<ArchiveUpdate, SavedError>,
     },

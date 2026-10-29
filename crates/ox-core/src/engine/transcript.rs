@@ -11,7 +11,7 @@ use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::{ContentBlock, Message, TextOrigin};
 use crate::model::ModelSpec;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
-use crate::protocol::ResumeTarget;
+use crate::protocol::SessionRef;
 use crate::session::handle::{
     self, Checkpoint, CompactBoundary, CompactOutcome, LoadedTranscript, RecordOutcome,
     RollIntoOutcome, RollOutcome, SessionHandle, WriteReport,
@@ -297,7 +297,7 @@ impl LiveTranscript {
     pub(super) async fn roll_into(
         &mut self,
         store: &SessionStore,
-        target: ResumeTarget,
+        target: SessionRef,
         model: &str,
     ) -> Result<RollIntoOutcome> {
         self.file_tracker.drain_writes().await;

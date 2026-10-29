@@ -300,9 +300,9 @@ impl Cli {
     }
 
     /// The saved session to continue, or `None` for a new session, which the picker also starts.
-    fn session_target(&self) -> Option<SessionTarget<'_>> {
+    fn session_target(&self) -> Option<SessionTarget> {
         match &self.resume {
-            Some(Some(session)) => Some(SessionTarget::Named(session)),
+            Some(Some(session)) => Some(SessionTarget::named(session)),
             _ => self.r#continue.then_some(SessionTarget::Latest),
         }
     }
@@ -645,6 +645,8 @@ mod tests {
     use std::ffi::OsString;
 
     use indoc::formatdoc;
+
+    use ox_core::protocol::SessionRef;
 
     use super::*;
 
@@ -1101,22 +1103,19 @@ mod tests {
 
             #[test]
             fn is_the_latest_for_continue_and_the_named_session_for_resume() {
-                let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap();
+                let target = |args: &[&str]| Cli::try_parse_from(args).unwrap().session_target();
 
+                assert_eq!(target(&["ox", "-c"]), Some(SessionTarget::Latest));
                 assert_eq!(
-                    parse(&["ox", "-c"]).session_target(),
-                    Some(SessionTarget::Latest),
+                    target(&["ox", "-r", "a1b2"]),
+                    Some(SessionTarget::Ref(SessionRef::Prefix("a1b2".to_owned()))),
                 );
                 assert_eq!(
-                    parse(&["ox", "-r", "a1b2"]).session_target(),
-                    Some(SessionTarget::Named("a1b2")),
-                );
-                assert_eq!(
-                    parse(&["ox", "-r"]).session_target(),
+                    target(&["ox", "-r"]),
                     None,
                     "the picker starts a new session",
                 );
-                assert_eq!(parse(&["ox"]).session_target(), None);
+                assert_eq!(target(&["ox"]), None);
             }
         }
     }

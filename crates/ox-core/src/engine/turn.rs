@@ -527,9 +527,7 @@ mod tests {
     use crate::model::Effort;
     use crate::protocol::local_testing::CapturingSink;
     use crate::protocol::testing::model_pick;
-    use crate::protocol::{
-        ApprovalDecision, Op, OpSender, ResumeTarget, SavedTarget, ToolCall, ToolResult,
-    };
+    use crate::protocol::{ApprovalDecision, Op, OpSender, SessionRef, ToolCall, ToolResult};
     use crate::session::handle;
     use crate::session::handle::SessionHandle;
     use crate::session::store::testing::test_store;
@@ -1452,7 +1450,7 @@ mod tests {
                 Op::Clear,
                 Op::Archive,
                 Op::SetArchive {
-                    target: SavedTarget::Id("other".to_owned()),
+                    target: SessionRef::Id("other".to_owned()),
                     state: crate::session::store::listing::ArchiveState::Archived,
                 },
                 Op::FindSaved {
@@ -1462,7 +1460,7 @@ mod tests {
                     session_id: "other".to_owned(),
                 },
                 Op::Resume {
-                    target: ResumeTarget::Path("/repo/other.jsonl".into()),
+                    target: SessionRef::Id("other".to_owned()),
                 },
                 Op::Rename {
                     title: "Late".to_owned(),

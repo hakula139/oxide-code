@@ -9,7 +9,7 @@ use ox_core::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::{Effort, ModelSpec};
 use ox_core::permission::{Basis, Mode, SessionGrant};
-use ox_core::protocol::{CompactTrigger, Event, Interaction, OpEnd, SavedTarget, notice};
+use ox_core::protocol::{CompactTrigger, Event, Interaction, OpEnd, SessionRef, notice};
 use ox_core::session::display::{archive_notice, id_prefix};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::session::store::listing::{ArchiveState, SessionInfo};
@@ -231,7 +231,7 @@ impl App {
 
     fn report_archive_updated(
         &mut self,
-        target: &SavedTarget,
+        target: &SessionRef,
         state: ArchiveState,
         result: &Result<ArchiveUpdate, SavedError>,
     ) {
@@ -553,7 +553,7 @@ mod tests {
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::{OpReceiver, model_pick, text_result};
-    use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
+    use ox_core::protocol::{ConfigPick, Op, SessionRef, ToolCall, ToolResult, UsageSnapshot};
     use ox_core::session::resolver::ResolveError;
     use ox_core::session::saved::SavedAction;
     use ox_core::session::store::testing::{
@@ -1227,7 +1227,7 @@ mod tests {
             assert_eq!(
                 rx.try_recv().ok(),
                 Some(Op::Resume {
-                    target: ResumeTarget::Prefix("zzzz".to_owned()),
+                    target: SessionRef::Prefix("zzzz".to_owned()),
                 }),
             );
             app.dispatch_action(Action::Submit("third".to_owned()));
@@ -1979,7 +1979,7 @@ mod tests {
         async fn a_resume_ends_after_the_swap() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             let resume = Op::Resume {
-                target: ResumeTarget::Prefix("1a2b".to_owned()),
+                target: SessionRef::Prefix("1a2b".to_owned()),
             };
             app.dispatch_op(resume.clone());
             assert_eq!(rx.try_recv().ok(), Some(resume));
@@ -2394,7 +2394,7 @@ mod tests {
 
         #[test]
         fn leaves_a_saved_session_result_to_a_modal_that_shows_it() {
-            let target = SavedTarget::Id("saved".to_owned());
+            let target = SessionRef::Id("saved".to_owned());
             for (op, event) in [
                 (
                     Op::SetArchive {
@@ -2490,7 +2490,7 @@ mod tests {
                 ("cancelled", true, Ok(update()), false),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
-                let target = SavedTarget::Prefix("saved".to_owned());
+                let target = SessionRef::Prefix("saved".to_owned());
                 app.dispatch_op(Op::SetArchive {
                     target: target.clone(),
                     state: ArchiveState::Archived,
@@ -2672,7 +2672,7 @@ mod tests {
         async fn a_failed_resume_holds_the_queue_past_a_model_change() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_op(Op::Resume {
-                target: ResumeTarget::Id("missing".to_owned()),
+                target: SessionRef::Id("missing".to_owned()),
             });
             rx.try_recv().expect("resume forwarded");
             app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
@@ -2708,10 +2708,10 @@ mod tests {
                 (
                     "/resume",
                     Op::Resume {
-                        target: ResumeTarget::Id("missing".to_owned()),
+                        target: SessionRef::Id("missing".to_owned()),
                     },
                     Op::Resume {
-                        target: ResumeTarget::Id("abcd".to_owned()),
+                        target: SessionRef::Id("abcd".to_owned()),
                     },
                     Event::SessionResumed {
                         id: "abcd".to_owned(),
@@ -2731,7 +2731,7 @@ mod tests {
                 (
                     "/clear after /resume",
                     Op::Resume {
-                        target: ResumeTarget::Id("missing".to_owned()),
+                        target: SessionRef::Id("missing".to_owned()),
                     },
                     Op::Clear,
                     rolled(),
@@ -2768,7 +2768,7 @@ mod tests {
         async fn a_cancel_during_a_failed_resume_leaves_its_prompts_to_the_retry_discard() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_op(Op::Resume {
-                target: ResumeTarget::Id("missing".to_owned()),
+                target: SessionRef::Id("missing".to_owned()),
             });
             rx.try_recv().expect("resume forwarded");
             app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
@@ -2780,7 +2780,7 @@ mod tests {
                 OpEnd::Failed,
             );
             app.dispatch_op(Op::Resume {
-                target: ResumeTarget::Id("abcd".to_owned()),
+                target: SessionRef::Id("abcd".to_owned()),
             });
             rx.try_recv().expect("retry forwarded");
 
@@ -2804,7 +2804,7 @@ mod tests {
             app.handle_esc();
             assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
             app.handle_engine_event(op_ended(&app, OpEnd::Cancelled));
-            let target = SavedTarget::Prefix("saved".to_owned());
+            let target = SessionRef::Prefix("saved".to_owned());
 
             assert_stays_held(
                 &mut app,
@@ -2897,7 +2897,7 @@ mod tests {
 
                 app.handle_crossterm_event(&CrosstermEvent::Key(archive_key));
 
-                let target = SavedTarget::Id("second".to_owned());
+                let target = SessionRef::Id("second".to_owned());
                 assert_eq!(
                     rx.try_recv(),
                     Ok(Op::SetArchive {
@@ -2927,12 +2927,12 @@ mod tests {
 
                 let expected = if next_key == archive_key {
                     Op::SetArchive {
-                        target: SavedTarget::Id("first".to_owned()),
+                        target: SessionRef::Id("first".to_owned()),
                         state: ArchiveState::Archived,
                     }
                 } else {
                     Op::Resume {
-                        target: ResumeTarget::Id("first".to_owned()),
+                        target: SessionRef::Id("first".to_owned()),
                     }
                 };
                 assert_eq!(rx.try_recv(), Ok(expected), "{next_key:?}");

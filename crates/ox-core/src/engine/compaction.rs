@@ -337,7 +337,7 @@ mod tests {
     use crate::permission::Mode;
     use crate::prompt::SessionContext;
     use crate::protocol::local_testing::CapturingSink;
-    use crate::protocol::{Op, OpSender, ResumeTarget, UsageSnapshot};
+    use crate::protocol::{Op, OpSender, SessionRef, UsageSnapshot};
     use crate::session::store::local_testing::fail_writes;
     use crate::session::store::testing::test_store;
     use crate::tool::bash::background::ShellState;
@@ -731,7 +731,7 @@ mod tests {
                 engine
                     .resume(
                         &CapturingSink::default(),
-                        ResumeTarget::Id(session_id.clone()),
+                        SessionRef::Id(session_id.clone()),
                     )
                     .await;
 

@@ -9,7 +9,7 @@ use super::usage::UsageLedger;
 use super::{Engine, turn};
 use crate::git::current_branch;
 use crate::protocol::notice::{previous_session_write_failed, session_write_failed};
-use crate::protocol::{Event, EventSink, OpEnd, ResumeTarget, SavedTarget};
+use crate::protocol::{Event, EventSink, OpEnd, SessionRef};
 use crate::session::display::id_prefix;
 use crate::session::handle::LoadedTranscript;
 use crate::session::saved::{self, SavedError};
@@ -42,7 +42,7 @@ impl Engine {
     pub(super) async fn set_archive(
         &self,
         sink: &dyn EventSink,
-        target: SavedTarget,
+        target: SessionRef,
         state: ArchiveState,
     ) -> OpEnd {
         let result = self
@@ -113,7 +113,7 @@ impl Engine {
     }
 
     /// Finalizes the live session and continues `target`. On failure the live session stays.
-    pub(super) async fn resume(&mut self, sink: &dyn EventSink, target: ResumeTarget) -> OpEnd {
+    pub(super) async fn resume(&mut self, sink: &dyn EventSink, target: SessionRef) -> OpEnd {
         let outcome = match self
             .transcript
             .roll_into(&self.store, target, self.settings.model().id())
@@ -365,7 +365,7 @@ mod tests {
                         Box::pin(async {
                             assert_eq!(
                                 engine
-                                    .resume(&sink, ResumeTarget::Id(target_id.clone()))
+                                    .resume(&sink, SessionRef::Id(target_id.clone()))
                                     .await,
                                 OpEnd::Completed,
                                 "{name}",
@@ -443,7 +443,7 @@ mod tests {
             engine.usage.set_total_estimated_cost_usd(1.23);
             engine.policy.allow_for_session(rule);
             engine
-                .resume(&sink, ResumeTarget::Id(target_id.clone()))
+                .resume(&sink, SessionRef::Id(target_id.clone()))
                 .await;
             assert_eq!(engine.policy.session_allow(), []);
             assert_eq!(engine.transcript.session().session_id(), target_id);
@@ -498,7 +498,7 @@ mod tests {
             let old_id = engine.session_id();
 
             engine
-                .resume(&sink, ResumeTarget::Id(target_id.clone()))
+                .resume(&sink, SessionRef::Id(target_id.clone()))
                 .await;
             engine
                 .submit_prompt("after", None, &sink, &mut inert_mailbox())
@@ -550,7 +550,7 @@ mod tests {
             let after_clear = engine.usage.auto_compaction_failures;
             engine.usage.auto_compaction_failures = AutoCompactFailures::new(3);
             engine
-                .resume(&resume_sink, ResumeTarget::Id(target_id.clone()))
+                .resume(&resume_sink, SessionRef::Id(target_id.clone()))
                 .await;
 
             assert_eq!(after_clear, AutoCompactFailures::default());
@@ -602,7 +602,7 @@ mod tests {
             engine.clear(&CapturingSink::default()).await;
             let cleared = spill_echo_output(&server, &mut engine, "call-2").await;
             engine
-                .resume(&CapturingSink::default(), ResumeTarget::Id(first.clone()))
+                .resume(&CapturingSink::default(), SessionRef::Id(first.clone()))
                 .await;
             let resumed = spill_echo_output(&server, &mut engine, "call-3").await;
 
@@ -630,10 +630,7 @@ mod tests {
             let after_clear = engine.shells.list();
             start_shell(&engine.shells, "sleep 30").await;
             engine
-                .resume(
-                    &CapturingSink::default(),
-                    ResumeTarget::Id(target_id.clone()),
-                )
+                .resume(&CapturingSink::default(), SessionRef::Id(target_id.clone()))
                 .await;
 
             assert_eq!(after_clear, []);
@@ -795,7 +792,7 @@ mod tests {
 
                 let sink = CapturingSink::default();
                 engine
-                    .resume(&sink, ResumeTarget::Id(planned_id.clone()))
+                    .resume(&sink, SessionRef::Id(planned_id.clone()))
                     .await;
                 assert_eq!(engine.transcript.tasks, plan());
                 let events = sink.events();
@@ -873,7 +870,7 @@ mod tests {
                 let saved_id = finished_session(&store).await;
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let live_id = engine.transcript.session().session_id();
-                let target = SavedTarget::Prefix(saved_id[..8].to_owned());
+                let target = SessionRef::Prefix(saved_id[..8].to_owned());
                 let sink = CapturingSink::default();
 
                 engine
@@ -986,10 +983,7 @@ mod tests {
                 let mut engine = engine("http://127.0.0.1:9".to_owned(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine
-                    .resume(
-                        &CapturingSink::default(),
-                        ResumeTarget::Id(saved_id.clone()),
-                    )
+                    .resume(&CapturingSink::default(), SessionRef::Id(saved_id.clone()))
                     .await;
 
                 assert_eq!(
@@ -1035,9 +1029,7 @@ mod tests {
                 std::fs::write(&live, "live").unwrap();
                 seed_full_read(&engine.transcript.file_tracker, &live);
                 let sink = CapturingSink::default();
-                engine
-                    .resume(&sink, ResumeTarget::Id(saved_id.clone()))
-                    .await;
+                engine.resume(&sink, SessionRef::Id(saved_id.clone())).await;
 
                 assert_eq!(tracked_paths(&engine), [kept]);
                 let notice = Event::Notice(format_drift_warning(&[drifted]));
@@ -1066,7 +1058,7 @@ mod tests {
                 engine.clear(&sink).await;
 
                 engine
-                    .resume(&sink, ResumeTarget::Id(recorded_id.clone()))
+                    .resume(&sink, SessionRef::Id(recorded_id.clone()))
                     .await;
                 assert_eq!(engine.transcript.prompt().user_context, SESSION_CONTEXT);
                 assert!(!engine.transcript.prompt_unrecorded());
@@ -1099,7 +1091,7 @@ mod tests {
                     .submit_prompt("write a story", None, &sink, &mut mailbox)
                     .await;
                 engine.clear(&sink).await;
-                engine.resume(&sink, ResumeTarget::Id(interrupted_id.clone())).await;
+                engine.resume(&sink, SessionRef::Id(interrupted_id.clone())).await;
                 engine
                     .submit_prompt("what is 7 times 6?", None, &sink, &mut mailbox)
                     .await;
@@ -1141,10 +1133,7 @@ mod tests {
                     .with_tools(ToolRegistry::new(vec![Box::new(EchoTool)]));
                 engine.set_mode(&CapturingSink::default(), Mode::Yolo);
                 engine
-                    .resume(
-                        &CapturingSink::default(),
-                        ResumeTarget::Id(other_id.clone()),
-                    )
+                    .resume(&CapturingSink::default(), SessionRef::Id(other_id.clone()))
                     .await;
 
                 spill_echo_output(&server, &mut engine, "call-1").await;
@@ -1183,7 +1172,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 engine
-                    .resume(&sink, ResumeTarget::Id(target_id.clone()))
+                    .resume(&sink, SessionRef::Id(target_id.clone()))
                     .await;
 
                 let events = sink.events();
@@ -1229,7 +1218,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 engine
-                    .resume(&sink, ResumeTarget::Path("missing-target.jsonl".into()))
+                    .resume(&sink, SessionRef::Prefix("zzzz".to_owned()))
                     .await;
 
                 assert_eq!(engine.transcript.session().session_id(), original_id);
@@ -1250,10 +1239,8 @@ mod tests {
                 assert_eq!(
                     sink.events(),
                     [Event::TurnFailed(format!(
-                        "Resume failed (still on session {}): \
-                         failed to open missing-target.jsonl: {}",
+                        "Resume failed (still on session {}): no session matching `zzzz`",
                         id_prefix(&original_id),
-                        std::fs::metadata("missing-target.jsonl").unwrap_err(),
                     ))]
                 );
                 engine.shells.stop_all().await;
