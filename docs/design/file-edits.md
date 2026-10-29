@@ -6,13 +6,13 @@ Companion docs: [Permissions](permissions.md).
 
 ## Tracking
 
-The `FileTracker` is shared across a session's tool calls. Read records the content hash and the lines it showed, and each write records the content it left, in a mutex-protected map, keyed by the canonical path so every spelling of one file, symlinks included, shares an entry. Edit and Write refuse a file the tracker holds no state for, and verify the current bytes against the stored hash before they change anything (**Strict Read-before-Edit gate**, **Content hash is the gate**).
+The `FileTracker` is shared across a session's tool calls. Read records the content hash and the lines it showed, and each write records the hash of the content it left, in a mutex-protected map, keyed by the canonical path so every spelling of one file, symlinks included, shares an entry. Edit and Write refuse a file the tracker holds no state for, and verify the current bytes against the stored hash before they change anything (**Strict Read-before-Edit gate**, **Content hash is the gate**).
 
 Each write, including parent-directory creation, and its tracker record run in one tracked task. The engine stops tool admission and waits for those tasks before it reports a cancellation, clears or restores tracker state, changes sessions, or captures the final snapshots. The tracker state persists to the session's row when the session finishes and verifies by content hash on resume (**Persist the tracker on session finish, verify on resume**).
 
 ## Checks Before Writing
 
-The tools open the target the path gate resolved without following a symlink at its final component and without blocking on a swapped-in FIFO, and accept only a regular file within the 10 MiB tracked-file cap. The Read-before-Edit gate supplies the bytes the tool expects to replace, read from disk and matched against the tracked hash.
+The tools open the target that the path gate resolved, refusing a symlink at its final component and never blocking on a swapped-in FIFO, and accept only a regular file within the 10 MiB tracked-file cap. The Read-before-Edit gate supplies the bytes the tool expects to replace, read from disk and matched against the tracked hash.
 
 The `commit` module compares the current content with those bytes before changing anything, and repeats the identity and byte checks immediately before publication. A changed file reports "the file changed while preparing the write. Read it again.", and a replaced inode reports "the file was replaced while preparing the write", so the tool never records success for content another writer already replaced. A writer with access can still change the file between that last check and publication. A file with set-ID permissions on Unix, or with a capability on Linux, is refused, because a write can clear either while the tool would still report success.
 
@@ -26,7 +26,7 @@ When a write or sync fails after the truncation or the creation, the error says 
 
 ## Design Decisions
 
-1. **Strict Read-before-Edit gate.** Edit and Write refuse a file the current session has not read. Soft warnings the model can ignore defeat the purpose.
+1. **Strict Read-before-Edit gate.** Edit and Write refuse a file whose current content the session has neither read nor written. Soft warnings the model can ignore defeat the purpose.
 
 2. **Content hash is the gate.** Mutating tools always rehash the current bytes before writing. The tracker keeps only the hash, since same-size writes can preserve timestamps and only the content proves a file is unchanged.
 
