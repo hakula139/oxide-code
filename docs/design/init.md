@@ -17,11 +17,8 @@ Both prompts share one rubric: include only information an agent would otherwise
 ## Design Decisions
 
 1. **Ask only for the file name.** The model can learn the commands, conventions, and architecture by reading the repository. If neither file exists, the repository cannot determine which name to use: either works, and the choice depends on which other tools the team runs. If a file already exists, updating it in place is the only reasonable choice, so there is nothing to ask. Naming that file runs the same update, while naming the other one is an error, since creating it would add the second file **ask only for the file name** rules out.
-
 2. **No option to create both.** oxide-code loads one file per directory, the first with content among `AGENTS.md`, `CLAUDE.md`, and `.claude/CLAUDE.md`, and does not resolve `@` imports. A second file beside the first would never reach an oxide-code session and would drift out of sync.
-
 3. **The diff is a prompt contract.** In `manual` mode, edits inside the workspace run without approval, so the permission gate could let the model overwrite an existing instruction file without showing anything. The update prompt therefore asks the model to show the diff and stop the turn before editing, and Claude Code's newer `/init` likewise asks for diffs on an existing `CLAUDE.md`. This depends on the model following the prompt. Protecting instruction files would enforce the contract, but would require approval for every edit to them in every session, and headless runs could edit them only with that protection turned off.
-
 4. **The answer comes before the turn.** oxide-code has no tool for the model to ask the user a question, so the file name arrives with the command, typed as its argument or chosen in the TUI's picker. The prompt then includes the answer, and the turn needs no further input.
 
 ## Out of Scope

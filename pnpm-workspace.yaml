@@ -1,5 +1,5 @@
-# Install node_modules before any script or `pnpm exec` when it is missing or stale.
 verifyDepsBeforeRun: install
 
 overrides:
+  markdownlint>re2js: ~2.9.0
   micromark-extension-math>katex: ^0.19.0

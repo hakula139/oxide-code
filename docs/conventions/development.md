@@ -8,8 +8,8 @@ The Nix flake provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `
 
 ```bash
 nix develop                                        # Dev shell with the toolchain, hooks, and Node tools
-nix flake check                                    # Run most hooks and the Home Manager module tests
-nix build                                          # Build ox from source
+nix flake check                                    # Run most hooks, the Home Manager module tests, and the test suite
+nix build                                          # Build ox from source without running the tests
 ```
 
 If you use [direnv](https://direnv.net), run `direnv allow` once. After that, `.envrc` loads the dev shell whenever you enter the repository, sources the gitignored `.envrc.local` when it exists, then loads the gitignored `.env.local`, so local setup and variables reach every command in the shell.
@@ -24,15 +24,17 @@ The Node-based hooks run tools pinned in `node_modules`, which pnpm installs bef
 
 ## Toolchain
 
-- `rust-toolchain.toml` pins the exact Rust release used by the dev shell, CI, and release builds. The flake reads the pin through rust-overlay, while jobs outside Nix install it with `rustup toolchain install`.
+- `rust-toolchain.toml` pins the exact Rust release used by the dev shell, CI's Rust and MSRV jobs, and release builds. The dev shell reads the pin through rust-overlay, while jobs outside Nix install it with `rustup toolchain install`.
+- The Nix package and its `tests` check build with the Rust release of the nixpkgs they come from, so a consumer that follows its own nixpkgs never fetches the pinned toolchain.
 - Renovate bumps the pin in its automerged flake-inputs group. If a new release adds lint failures, fix them in that PR so it can merge.
-- `rust-version` in the root `Cargo.toml` sets the minimum supported Rust version for `cargo install` users. The MSRV job checks it, and [Versioning](../../RELEASING.md#versioning) explains how to bump it.
+- `rust-version` in the root `Cargo.toml` sets the minimum supported Rust version for `cargo install` and Nix users. The MSRV job checks it, the Nix jobs fail when it passes the Rust release of the flake's nixpkgs, and [Versioning](../../RELEASING.md#versioning) explains how to bump it.
 
 ## Nix Style
 
 `nixfmt` formats `flake.nix` and the files in `nix/`, and `statix` and `deadnix` lint them. These rules cover what the tools leave open:
 
 - Keep code within 100 columns, counting the indent, and wrap comments as [Writing](writing.md#comments) describes, since `nixfmt` does not reflow them.
+
 - Mark the file header with `=` banners at column 0, and mark each section with `-` banners indented to match the code around them. Every banner line ends at column 100. A file without banners stays without them:
 
   ```nix
@@ -46,10 +48,15 @@ The Node-based hooks run tools pinned in `node_modules`, which pnpm installs bef
   ```
 
 - Put each argument of a top-level function on its own line, even when the list would fit on one. Take `...` only when the caller passes a broader set, as with flake outputs. A `callPackage` derivation omits it, so an unexpected argument fails.
+
 - Declare each dependency of a `callPackage` file, such as `nix/package.nix`, as its own argument, as nixpkgs does, so `.override` can replace it. Put `lib` first and the other arguments in alphabetical order. In the flake, reach packages through `pkgs`.
+
 - Put `inherit` entries first in a `let` block and in a call's argument set. In a set that returns data, keep each `inherit` where its entry belongs.
+
 - Group related bindings and attributes, and order a `let` block so that each binding follows what it depends on. Within a group, use alphabetical order unless a stronger order applies.
+
 - Follow a multiline binding or attribute with a blank line before its next sibling. Keep single-line siblings together and separate their groups with a blank line. A single-line binding may lead directly into a related multiline one.
+
 - Write multiline text, such as a shell hook, as an indented string with literal line breaks.
 
 ## Config Style
@@ -74,7 +81,7 @@ CI runs on pushes to `main`, pull requests, and manual dispatch, and the release
 | Lint                         | `pnpm format`, `pnpm lint`, `pnpm spellcheck`, and `cargo deny check` in the flake's `lint` shell, which leaves out the pinned toolchain                               |
 | Rust (Linux, macOS, Windows) | `cargo fmt --check` on Linux, then `cargo clippy --all-targets`, `cargo clippy`, `cargo doc --no-deps`, and the test suite under `cargo llvm-cov`, uploaded to Codecov |
 | MSRV                         | `cargo hack check --rust-version` against `rust-version`                                                                                                               |
-| Nix (Linux, macOS)           | `nix flake check`, then the package build, which runs the tests, `ox --version`, and installed license notice checks                                                   |
+| Nix (Linux, macOS)           | `nix flake check`, which also runs the test suite in the build sandbox, then the package build with its `ox --version` and installed license notice checks             |
 
 Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result reads every job of the current run attempt from the Actions API and fails when any job of the CI workflow, including each matrix leg, concludes anything other than success or skipped. That catches a leg cancelled before a runner picks it up, which the `needs` results of a matrix job omit. CI Result runs once the jobs in its `needs` finish and counts any unfinished job as a failure, so list each new job there.
 

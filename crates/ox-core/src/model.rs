@@ -233,23 +233,6 @@ impl PartialEq for ModelSpec {
 
 impl Eq for ModelSpec {}
 
-// ── ResolvedModelId ──
-
-/// A model ID a frontend picked, such as the `/model` resolver's match. The engine accepts any ID,
-/// since [`ModelSpec::resolve`] keeps an unknown one without catalog info.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedModelId(String);
-
-impl ResolvedModelId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    pub(crate) fn into_inner(self) -> String {
-        self.0
-    }
-}
-
 // ── Effort ──
 
 /// Effort level sent as `output_config.effort`.

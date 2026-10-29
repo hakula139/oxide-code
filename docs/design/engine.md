@@ -27,11 +27,8 @@ A turn is a loop of rounds. Each round sends the transcript to the model, stream
 ## Design Decisions
 
 1. **The engine owns every session change, through ops and events.** The TUI, the REPL, and a headless run differ only in input and output, so behavior that changes the session or the transcript lives in the engine, and each frontend renders the same events. A slash command that changes session state forwards an `Op`, while one that only opens a modal stays local.
-
 2. **One terminal event per operation.** A frontend learns that an operation ended from one event, so a lost or reordered progress event cannot leave the input held. The event is the last one the operation emits, and a shutdown is the only way an operation ends without one.
-
 3. **An idle-only op is dropped.** Queueing it would apply a model or session change at a moment the user did not choose, such as after a turn they already interrupted. Dropping it keeps the frontend's own copy authoritative, and the frontend resubmits when it is ready.
-
 4. **Mid-turn controls share the op channel.** `Queue`, `Interrupt`, `Resolve`, `LoginCode`, `SetMode`, and `Shutdown` race the running futures in one `select!`, so a cancel, an approval, or a mode switch does not wait for a stream to finish, and the engine needs no second input path.
 
 ## Out of Scope

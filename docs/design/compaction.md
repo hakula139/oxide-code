@@ -143,26 +143,21 @@ In the bare REPL and headless runs, `driver::stdio::StdioSink` writes `Compactin
 ## Out of Scope
 
 - **Anchored re-compaction (`<previous-summary>` block).** opencode updates a previous summary in place, which pays off only when one session is compacted many times. Each compaction summarizes the transcript since the last boundary, which already starts from the previous summary, and repeated lossy rewrites need usage data before they earn their complexity.
-
 - **Microcompact and prune (in-place tool-result deletion).** Claude Code's microcompact and opencode's prune clear old tool-output bodies before a full summary. They are a separate retention policy with their own UI and persistence, and whole-transcript summaries at turn and round boundaries cover the same need with one mechanism.
-
 - **Partial and range compaction.** Claude Code's message-selector rewind adds a selector UI, a dual-direction summarizer, and a transcript splice for a case `/compact` already covers.
-
 - **Provider-specific remote compaction.** Codex's OpenAI and Azure paths rewrite history server-side. oxide-code talks to the Anthropic Messages API, where the normal stream already works.
-
 - **A pre-flight `count_tokens` request.** Every reference implementation reads the last usage plus an estimate and accepts a few percent of drift, which the extra round trip does not repay.
-
 - **Compaction hooks.** Hooks belong to a general surface tracked in [#157](https://github.com/hakula139/oxide-code/issues/157), with command hooks in [#159](https://github.com/hakula139/oxide-code/issues/159) and the `pre_compact` event in [#168](https://github.com/hakula139/oxide-code/issues/168).
 
 ## Sources
 
 - `crates/ox-core/src/client/anthropic/transport.rs`: `prompt_too_long_message`, which types an HTTP 400 `prompt is too long` as `PromptTooLong`.
 - `crates/ox-core/src/config/compaction.rs`: `CompactionConfig`, which resolves the threshold and its snapping.
-- `crates/ox-core/src/engine.rs`: `Engine::submit_prompt`, which compacts between the segments of a turn, and `Engine::account_usage`.
+- `crates/ox-core/src/engine.rs`: `Engine::submit_prompt`, which compacts between the segments of a turn.
 - `crates/ox-core/src/engine/compaction.rs`: `Engine::compact`, `Engine::run_compaction`, `Engine::replace_with_summary`, `request_summary`, the `SummaryStream` sink, the context-window retries, `AutoCompactFailures`, and `request_tokens`.
 - `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::compact`, which saves the boundary and swaps the transcript to the synthetic continuation.
 - `crates/ox-core/src/engine/turn.rs`: `agent_turn`, `TurnStop::Compact`, `collect_response`, and `TurnReport::context_estimate`.
-- `crates/ox-core/src/engine/usage.rs`: session-cost accounting and `Engine::reset_context_usage`.
+- `crates/ox-core/src/engine/usage.rs`: `UsageLedger`, which accounts the session cost and context usage, and `Engine::account_usage` and `Engine::reset_context_usage`, which feed it.
 - `crates/ox-core/src/protocol.rs`: `Op::Compact`, the `SessionCompacted`, `SummaryToken`, `SummaryDiscarded`, `AutoCompactionStarted`, and `AutoCompactionPaused` events, and `CompactTrigger`.
 - `crates/ox-core/src/protocol/notice.rs`: `compacted`, the boundary header every frontend shows.
 - `crates/ox-core/src/session/actor.rs`: the `SessionCmd::Compact` handler.

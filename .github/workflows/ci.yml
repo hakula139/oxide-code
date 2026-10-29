@@ -149,7 +149,7 @@ jobs:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Run flake check
-        run: nix flake check --print-build-logs
+        run: nix flake check --keep-going --print-build-logs
 
       - name: Build package
         if: ${{ !cancelled() }}
