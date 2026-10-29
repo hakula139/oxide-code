@@ -152,7 +152,8 @@ pub enum DiffLineKind {
 }
 
 /// What an edit changed: its diff, and the line each replacement applied at, which is its first
-/// removed line, or for a pure insertion its first added line.
+/// removed line, or for a pure insertion its first added line. A replacement whose change the diff
+/// places past it applies at the first line it writes, or at its first old line if it writes none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditDiff {
     #[serde(flatten)]

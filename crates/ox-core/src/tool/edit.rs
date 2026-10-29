@@ -369,8 +369,9 @@ fn region_eol(text: &str) -> Option<&'static str> {
 
 /// The line each replacement in `ranges` of `original` applied at, and the new-content lines each
 /// one writes. A replacement applies at the first line of the file diff's `changes` that it
-/// removes, or else the first line it adds. Old-side numbers count lines of `original`, and
-/// new-side numbers count lines of the edited text.
+/// removes, or else the first line it adds. When no change falls in it, it applies at the first
+/// line it writes, or at its first old line if it writes nothing. Old-side numbers count lines of
+/// `original`, and new-side numbers count lines of the edited text.
 fn placements(
     original: &str,
     old_string: &str,
@@ -405,24 +406,26 @@ fn placements(
             })
             .is_some()
         {}
-        locations.extend(
-            changes
-                .peek()
-                .filter(|change| {
-                    if change.old.is_empty() {
-                        change.old.start <= span.end
-                    } else {
-                        change.old.start < span.end
-                    }
-                })
-                .map(|change| {
-                    if change.old.start < span.start {
-                        span.start + 1
-                    } else {
-                        change.location()
-                    }
-                }),
-        );
+        let located = changes
+            .peek()
+            .filter(|change| {
+                if change.old.is_empty() {
+                    change.old.start <= span.end
+                } else {
+                    change.old.start < span.end
+                }
+            })
+            .map(|change| {
+                if change.old.start < span.start {
+                    span.start + 1
+                } else {
+                    change.location()
+                }
+            });
+        // The diff can slide a change past the match when the lines it adds or removes equal the
+        // ones after it.
+        let fallback = if writes_lines { new_line } else { old_line };
+        locations.push(located.unwrap_or(fallback));
         if writes_lines {
             written.push((new_line, new_line + written_breaks));
         }
@@ -1343,6 +1346,27 @@ mod tests {
                     "foo();",
                     "foo();\nbar();",
                     vec![2, 4],
+                ),
+                (
+                    "insertion the diff slides past one replacement",
+                    "fn a() {\n}\n\nfn b() {\n}\nfn c() {\n",
+                    "}",
+                    "}\n",
+                    vec![2, 7],
+                ),
+                (
+                    "insertions the diff slides past each replacement",
+                    "foo();\nfoo();\n",
+                    "foo();",
+                    "foo();\nfoo();",
+                    vec![1, 3],
+                ),
+                (
+                    "deletion the diff slides past",
+                    "a\nb\nb\nc\n",
+                    "a\nb",
+                    "a",
+                    vec![1],
                 ),
             ] {
                 let (locations, _) = placements_in(content, old, new);
