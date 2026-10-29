@@ -6,7 +6,7 @@ mod view;
 
 #[cfg(test)]
 pub(crate) use self::view::testing;
-pub(crate) use self::view::{DiffRow, WorkingTreeDiff};
+pub(crate) use self::view::{GitDiffRow, WorkingTreeDiff};
 
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -287,7 +287,7 @@ mod tests {
 
             assert!(
                 matches!(&output, SlashOutcome::GitDiff(diff)
-                    if diff.rows[0] == DiffRow::File("top.txt".to_owned())
+                    if diff.rows[0] == GitDiffRow::File("top.txt".to_owned())
                         && diff.untracked == ["outside.txt", "sub/here.txt"]),
                 "{output:?}",
             );
@@ -337,7 +337,7 @@ mod tests {
                 .rows
                 .iter()
                 .filter_map(|row| match row {
-                    DiffRow::Added { number, text } => Some((*number, text.as_str())),
+                    GitDiffRow::Added { number, text } => Some((*number, text.as_str())),
                     _ => None,
                 })
                 .collect();
@@ -360,17 +360,17 @@ mod tests {
             assert_eq!(
                 diff.rows,
                 [
-                    DiffRow::File("a.txt".to_owned()),
-                    DiffRow::Hunk("@@ -1 +1,3 @@".to_owned()),
-                    DiffRow::Context {
+                    GitDiffRow::File("a.txt".to_owned()),
+                    GitDiffRow::Hunk("@@ -1 +1,3 @@".to_owned()),
+                    GitDiffRow::Context {
                         number: 1,
                         text: "first".to_owned()
                     },
-                    DiffRow::Added {
+                    GitDiffRow::Added {
                         number: 2,
                         text: "second".to_owned()
                     },
-                    DiffRow::Added {
+                    GitDiffRow::Added {
                         number: 3,
                         text: "third".to_owned()
                     },

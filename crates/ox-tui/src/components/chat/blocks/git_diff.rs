@@ -6,7 +6,7 @@ use ratatui::text::Line;
 
 use super::rows::{NumberedRows, body_row};
 use super::{ChatBlock, RenderCtx};
-use crate::slash::{DiffRow, WorkingTreeDiff};
+use crate::slash::{GitDiffRow, WorkingTreeDiff};
 
 /// Heading over the untracked file list.
 const UNTRACKED_HEADING: &str = "Untracked files:";
@@ -35,26 +35,26 @@ impl ChatBlock for GitDiffBlock {
         let mut out = Vec::new();
         for row in &self.diff.rows {
             match row {
-                DiffRow::File(label) => {
+                GitDiffRow::File(label) => {
                     let style = ctx.theme.text().add_modifier(Modifier::BOLD);
                     body_row(&mut out, ctx, border, label.clone(), style);
                 }
-                DiffRow::Hunk(header) => {
+                GitDiffRow::Hunk(header) => {
                     body_row(&mut out, ctx, border, header.clone(), ctx.theme.dim());
                 }
-                DiffRow::Removed { number, text } => {
+                GitDiffRow::Removed { number, text } => {
                     removed.render(&mut out, *number, text, ctx.theme.text());
                 }
-                DiffRow::Added { number, text } => {
+                GitDiffRow::Added { number, text } => {
                     added.render(&mut out, *number, text, ctx.theme.text());
                 }
-                DiffRow::Context { number, text } => {
+                GitDiffRow::Context { number, text } => {
                     context.render(&mut out, *number, text, ctx.theme.dim());
                 }
-                DiffRow::Marker(text) => {
+                GitDiffRow::Marker(text) => {
                     body_row(&mut out, ctx, border, text.clone(), ctx.theme.dim());
                 }
-                DiffRow::Note(text) => {
+                GitDiffRow::Note(text) => {
                     body_row(&mut out, ctx, border, text.clone(), ctx.theme.text());
                 }
             }
@@ -90,12 +90,12 @@ fn push_separator(out: &mut Vec<Line<'static>>, ctx: &RenderCtx<'_>, border: Sty
 // ── Gutter Sizing ──
 
 /// The largest line number the rows show, which sizes the gutter.
-fn max_line_number(rows: &[DiffRow]) -> usize {
+fn max_line_number(rows: &[GitDiffRow]) -> usize {
     rows.iter()
         .filter_map(|row| match row {
-            DiffRow::Removed { number, .. }
-            | DiffRow::Added { number, .. }
-            | DiffRow::Context { number, .. } => Some(*number),
+            GitDiffRow::Removed { number, .. }
+            | GitDiffRow::Added { number, .. }
+            | GitDiffRow::Context { number, .. } => Some(*number),
             _ => None,
         })
         .max()
@@ -111,7 +111,7 @@ mod tests {
     use crate::slash::testing::{added, context, removed};
     use crate::theme::Theme;
 
-    fn tracked(rows: Vec<DiffRow>) -> WorkingTreeDiff {
+    fn tracked(rows: Vec<GitDiffRow>) -> WorkingTreeDiff {
         WorkingTreeDiff {
             rows,
             ..WorkingTreeDiff::default()
@@ -142,13 +142,13 @@ mod tests {
         fn draws_each_row_kind_in_its_style() {
             let theme = Theme::default();
             let block = GitDiffBlock::new(tracked(vec![
-                DiffRow::File("foo.rs".to_owned()),
-                DiffRow::Note("old mode 100644".to_owned()),
-                DiffRow::Hunk("@@ -1,3 +1,3 @@".to_owned()),
+                GitDiffRow::File("foo.rs".to_owned()),
+                GitDiffRow::Note("old mode 100644".to_owned()),
+                GitDiffRow::Hunk("@@ -1,3 +1,3 @@".to_owned()),
                 removed(1, "old line"),
                 added(1, "new line"),
                 context(2, "context"),
-                DiffRow::Marker(r"\ No newline at end of file".to_owned()),
+                GitDiffRow::Marker(r"\ No newline at end of file".to_owned()),
             ]));
 
             let lines = block.render(&RenderCtx::new(80, &theme));
@@ -201,7 +201,7 @@ mod tests {
         fn lists_untracked_paths_under_a_dim_heading_after_a_blank_row() {
             let theme = Theme::default();
             let block = GitDiffBlock::new(WorkingTreeDiff {
-                rows: vec![DiffRow::File("x".to_owned())],
+                rows: vec![GitDiffRow::File("x".to_owned())],
                 untracked: vec!["new.txt".to_owned(), "also-new.rs".to_owned()],
                 truncation: None,
             });
@@ -272,7 +272,7 @@ mod tests {
 
         #[test]
         fn is_zero_without_numbered_rows() {
-            assert_eq!(max_line_number(&[DiffRow::File("x".to_owned())]), 0);
+            assert_eq!(max_line_number(&[GitDiffRow::File("x".to_owned())]), 0);
         }
     }
 }
