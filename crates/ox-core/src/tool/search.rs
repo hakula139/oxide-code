@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::SystemTime;
 
 use tokio_util::sync::CancellationToken;
@@ -81,11 +81,7 @@ pub(super) fn walk_files<'a>(
     cancel: &'a CancellationToken,
     unreadable: &'a mut Vec<Unreadable>,
 ) -> impl Iterator<Item = ignore::DirEntry> + 'a {
-    ignore::WalkBuilder::new(base)
-        .hidden(false)
-        .filter_entry(|e| e.depth() == 0 || !VCS_DIRS.iter().any(|d| e.file_name() == *d))
-        .same_file_system(true)
-        .max_depth(Some(MAX_WALK_DEPTH))
+    walker(base)
         .build()
         .take_while(|_| !cancel.is_cancelled())
         .filter_map(move |entry| match entry {
@@ -95,7 +91,58 @@ pub(super) fn walk_files<'a>(
                 None
             }
         })
-        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+        .filter(is_file)
+}
+
+/// Walks `base` as [`walk_files`] does, on several threads, until `cancel` fires. Each file goes
+/// through `visit` on the thread that found it, which keeps what it returns. Returns what `visit`
+/// kept and the paths the walk could not read, both in no particular order.
+pub(super) fn walk_files_parallel<T: Send>(
+    base: &Path,
+    cancel: &CancellationToken,
+    visit: impl Fn(ignore::DirEntry) -> Option<T> + Sync,
+) -> (Vec<T>, Vec<Unreadable>) {
+    let (sender, receiver) = mpsc::channel();
+    walker(base).build_parallel().run(|| {
+        let (sender, visit) = (sender.clone(), &visit);
+        Box::new(move |entry| {
+            if cancel.is_cancelled() {
+                return ignore::WalkState::Quit;
+            }
+            let found = match entry {
+                Ok(entry) if is_file(&entry) => visit(entry).map(Ok),
+                Ok(_) => None,
+                Err(e) => Unreadable::from_walk(&e).map(Err),
+            };
+            if let Some(found) = found {
+                _ = sender.send(found);
+            }
+            ignore::WalkState::Continue
+        })
+    });
+    drop(sender);
+    let (mut kept, mut unreadable) = (Vec::new(), Vec::new());
+    for found in receiver {
+        match found {
+            Ok(item) => kept.push(item),
+            Err(path) => unreadable.push(path),
+        }
+    }
+    (kept, unreadable)
+}
+
+fn walker(base: &Path) -> ignore::WalkBuilder {
+    let mut builder = ignore::WalkBuilder::new(base);
+    builder
+        .hidden(false)
+        .filter_entry(|e| e.depth() == 0 || !VCS_DIRS.iter().any(|d| e.file_name() == *d))
+        .same_file_system(true)
+        .max_depth(Some(MAX_WALK_DEPTH));
+    builder
+}
+
+fn is_file(entry: &ignore::DirEntry) -> bool {
+    entry.file_type().is_some_and(|ft| ft.is_file())
 }
 
 /// A path a search could not read, with the error that stopped it.
@@ -107,11 +154,17 @@ pub(super) struct Unreadable {
 }
 
 impl Unreadable {
-    /// What walk error `e` failed to read, or `None` if `e` hides nothing from the walk. An ignore
-    /// file that failed to load only loses its rules, and a path that vanished mid-walk holds
-    /// nothing left to search.
+    /// What walk error `e` failed to read, or `None` for a path that vanished mid-walk, which holds
+    /// nothing left to search. The walk reports an ignore file that failed to load on its directory
+    /// entry, so that error never reaches here.
     fn from_walk(e: &ignore::Error) -> Option<Self> {
-        e.depth()?;
+        // The parallel walk wraps the path in the depth, and the sequential walk the reverse. On
+        // Windows, the parallel walk fails to open a denied directory for its volume check and
+        // reports that without a depth.
+        let e = match e {
+            ignore::Error::WithDepth { err, .. } => err.as_ref(),
+            _ => e,
+        };
         let (path, cause) = match e {
             ignore::Error::WithPath { path, err } => (Some(path.clone()), err.as_ref()),
             _ => (None, e),
@@ -544,6 +597,20 @@ mod tests {
                         },
                         Some((Some("locked"), "denied")),
                     ),
+                    (
+                        at_depth(ignore::Error::WithPath {
+                            path: "locked".into(),
+                            err: Box::new(denied()),
+                        }),
+                        Some((Some("locked"), "denied")),
+                    ),
+                    (
+                        ignore::Error::WithPath {
+                            path: "locked".into(),
+                            err: Box::new(denied()),
+                        },
+                        Some((Some("locked"), "denied")),
+                    ),
                     (at_depth(denied()), Some((None, "denied"))),
                     (
                         ignore::Error::WithPath {
@@ -554,14 +621,6 @@ mod tests {
                         },
                         None,
                     ),
-                    (
-                        ignore::Error::WithPath {
-                            path: ".gitignore".into(),
-                            err: Box::new(denied()),
-                        },
-                        None,
-                    ),
-                    (ignore::Error::Partial(vec![denied(), denied()]), None),
                 ];
 
                 for (e, expected) in cases {

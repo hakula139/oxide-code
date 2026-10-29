@@ -24,19 +24,21 @@ pub(crate) enum FileReadError {
 /// Reads a regular file through a no-follow handle, consuming at most `limit + 1` bytes and
 /// rejecting overflow even if the file grew after its metadata was checked.
 pub(crate) fn read_regular_file(path: &Path, limit: u64) -> Result<Vec<u8>, FileReadError> {
+    read_bounded(open_regular_file(path, limit)?, limit)
+}
+
+/// Opens a regular file through a no-follow handle, refusing one whose opened handle reports more
+/// than `limit` bytes. The file may still grow before it is read.
+pub(crate) fn open_regular_file(path: &Path, limit: u64) -> Result<File, FileReadError> {
     let mut options = OpenOptions::new();
     options.read(true);
     let file = open_no_follow(path, options)?;
-    let metadata = file.metadata()?;
-    read_regular_contents(file, &metadata, limit)
+    validate_regular_file(&file.metadata()?, limit)?;
+    Ok(file)
 }
 
-fn read_regular_contents(
-    reader: impl Read,
-    metadata: &Metadata,
-    limit: u64,
-) -> Result<Vec<u8>, FileReadError> {
-    validate_regular_file(metadata, limit)?;
+/// Reads `reader` to its end, consuming at most `limit + 1` bytes and rejecting overflow.
+fn read_bounded(reader: impl Read, limit: u64) -> Result<Vec<u8>, FileReadError> {
     let mut bytes = Vec::new();
     reader
         .take(limit.saturating_add(1))
@@ -507,7 +509,7 @@ mod tests {
         }
     }
 
-    mod read_regular_contents {
+    mod read_bounded {
         use super::*;
 
         struct Counted<R> {
@@ -541,30 +543,12 @@ mod tests {
                 .write_all(b" plus newly appended bytes")
                 .unwrap();
 
-            let error = read_regular_contents(&mut counted, &metadata, 8).unwrap_err();
+            let error = read_bounded(&mut counted, 8).unwrap_err();
 
             assert_eq!(metadata.len(), 3);
             assert_eq!(counted.consumed, 9);
             assert!(matches!(error, FileReadError::TooLarge { size: 9, max: 8 }));
             assert_eq!(fs::read(&path).unwrap(), b"old plus newly appended bytes");
-        }
-
-        #[test]
-        fn rejects_oversized_metadata_before_consuming_bytes() {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("notes.txt");
-            fs::write(&path, b"too large").unwrap();
-            let file = File::open(&path).unwrap();
-            let metadata = file.metadata().unwrap();
-            let mut counted = Counted {
-                reader: file,
-                consumed: 0,
-            };
-
-            let error = read_regular_contents(&mut counted, &metadata, 8).unwrap_err();
-
-            assert_eq!(counted.consumed, 0);
-            assert!(matches!(error, FileReadError::TooLarge { size: 9, max: 8 }));
         }
 
         #[test]
@@ -580,10 +564,7 @@ mod tests {
                 }
             }
 
-            let file = tempfile::tempfile().unwrap();
-            let metadata = file.metadata().unwrap();
-
-            let error = read_regular_contents(FailedReader, &metadata, 8).unwrap_err();
+            let error = read_bounded(FailedReader, 8).unwrap_err();
 
             assert!(
                 matches!(error, FileReadError::Io(ref error) if error.kind() == io::ErrorKind::PermissionDenied)
