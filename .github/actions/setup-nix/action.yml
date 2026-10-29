@@ -12,12 +12,17 @@ runs:
       uses: cachix/install-nix-action@v31
       with:
         # `sandbox-fallback = false` fails a build that cannot get a sandbox, which Nix would
-        # otherwise run without one.
+        # otherwise run without one. `fallback = true` builds a path whose substitute fails to
+        # download, which Nix would otherwise report as a failed build.
         extra_nix_config: |
+          fallback = true
           sandbox = true
           sandbox-fallback = false
 
     - name: Set up Cachix
+      id: cachix
+      # Also covers the action's post step, which pushes the job's builds.
+      continue-on-error: true
       uses: cachix/cachix-action@v17
       with:
         name: hakula
@@ -25,3 +30,8 @@ runs:
         skipPush: >-
           ${{ !inputs.cachix_auth_token ||
           !(github.ref == 'refs/heads/main' || github.actor == 'hakula139') }}
+
+    - name: Report Cachix failure
+      if: ${{ steps.cachix.outcome == 'failure' }}
+      shell: bash
+      run: echo "::warning title=Cachix unavailable::Cachix setup failed, so this job builds without the hakula cache."
