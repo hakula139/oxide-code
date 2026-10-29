@@ -338,10 +338,7 @@ impl<'r> Dispatcher<'r, '_, '_> {
         if let Some(mode) = self.mailbox.take_mode() {
             self.dispatch_ctx.policy.set_mode(mode);
         }
-        let verdict = self
-            .dispatch_ctx
-            .policy
-            .verdict(class, &prepared.access.as_target());
+        let verdict = self.dispatch_ctx.policy.verdict(class, &prepared.access);
         debug!(
             tool = name,
             id,

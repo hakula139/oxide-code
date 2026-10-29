@@ -13,7 +13,7 @@ use anyhow::{Result, bail, ensure};
 use regex::Regex;
 use tree_sitter::{Node, Parser, Tree};
 
-use super::{Access, PathResolver, Target, Workspace, Zone, fold_name};
+use super::{PathResolver, PathTarget, Workspace, Zone, fold_name};
 use crate::util::path::expand_user;
 
 /// Shells and the commands that start one as another user, whose literal `-c` script the walk
@@ -341,11 +341,11 @@ pub(crate) struct CommandTarget {
     /// `eval` scripts.
     segments: Vec<Segment>,
     /// The files its output redirections write, resolved like an edit's path.
-    writes: Vec<Access>,
+    writes: Vec<PathTarget>,
     /// The files it reads for certain, resolved like a read's path: each input redirection, each
     /// file a wrapper option names, and each [certain](Operand::certain) operand of one of
     /// [`READERS`], including the root of a tree it traverses.
-    reads: Vec<Access>,
+    reads: Vec<PathTarget>,
     /// The first construct the analysis does not recognize, as [`construct`] cuts it for a prompt.
     unrecognized: Option<String>,
 }
@@ -404,11 +404,11 @@ impl CommandTarget {
         &self.segments
     }
 
-    pub(super) fn writes(&self) -> &[Access] {
+    pub(super) fn writes(&self) -> &[PathTarget] {
         &self.writes
     }
 
-    pub(super) fn reads(&self) -> &[Access] {
+    pub(super) fn reads(&self) -> &[PathTarget] {
         &self.reads
     }
 
@@ -436,7 +436,7 @@ pub(super) struct Segment {
     /// like a read's path: each tree it may traverse, whose descendants a rule may match below its
     /// root, and each word whose role or matches the analysis cannot pin. Empty for any other
     /// command.
-    reads: Vec<ReaderPath<Access>>,
+    reads: Vec<ReaderPath<PathTarget>>,
     /// Whether one of [`READERS`] takes a word whose files the analysis cannot list, such as one
     /// that expands a variable, so it may read any file.
     reads_anything: bool,
@@ -460,7 +460,7 @@ impl Segment {
         self.safe
     }
 
-    pub(super) fn reads(&self) -> &[ReaderPath<Access>] {
+    pub(super) fn reads(&self) -> &[ReaderPath<PathTarget>] {
         &self.reads
     }
 
@@ -522,13 +522,9 @@ impl<T> ReaderPath<T> {
 }
 
 impl ReaderPath<String> {
-    fn resolve(&self, paths: &mut PathResolver<'_>) -> ReaderPath<Access> {
+    fn resolve(&self, paths: &mut PathResolver<'_>) -> ReaderPath<PathTarget> {
         let path = paths.resolve(&self.path);
-        let recursive = self.recursive
-            && !path
-                .resolved()
-                .expect("a reader operand resolves to a path")
-                .is_file();
+        let recursive = self.recursive && !path.resolved().is_file();
         ReaderPath { path, recursive }
     }
 }
@@ -649,8 +645,8 @@ struct Walk<'a> {
     /// Whether the environment `bash` starts with sets a variable.
     inherited: &'a dyn Fn(&str) -> bool,
     segments: Vec<Segment>,
-    writes: Vec<Access>,
-    reads: Vec<Access>,
+    writes: Vec<PathTarget>,
+    reads: Vec<PathTarget>,
     /// The first directory change, as [`construct`] cuts it for a prompt.
     dir_change: Option<String>,
     /// Whether some directory change may leave the workspace. Only a first `cd` or `pushd` that
@@ -1053,7 +1049,7 @@ impl Walk<'_> {
     /// Resolves the `operands` of one simple command, recording each file it reads for certain as
     /// the command's read, and returns those it may read: each uncertain operand, and each tree it
     /// traverses, whose descendants a rule may hold below its root.
-    fn resolve_operands(&mut self, operands: &[Operand]) -> Vec<ReaderPath<Access>> {
+    fn resolve_operands(&mut self, operands: &[Operand]) -> Vec<ReaderPath<PathTarget>> {
         self.relative_path |= operands
             .iter()
             .any(|operand| Path::new(&operand.read.path).is_relative());
@@ -1193,15 +1189,7 @@ impl Walk<'_> {
                         .components()
                         .any(|c| c == Component::ParentDir)
             })
-            .is_some_and(|path| {
-                matches!(
-                    self.paths.resolve(path).as_target(),
-                    Target::Path {
-                        zone: Zone::Workspace,
-                        ..
-                    }
-                )
-            })
+            .is_some_and(|path| self.paths.resolve(path).zone == Zone::Workspace)
     }
 
     /// Strips the wrappers that lead `words`. The named words keep every wrapper from the first one
@@ -3601,6 +3589,10 @@ mod tests {
         parse(command).segments[0].is_safe()
     }
 
+    fn resolve(path: &str, workspace: &Workspace) -> PathTarget {
+        PathResolver::new(workspace).resolve(path)
+    }
+
     fn joined(words: &[ShellWord]) -> String {
         words
             .iter()
@@ -4232,10 +4224,10 @@ mod tests {
             fn reads_the_arguments_file_xargs_names() {
                 let parsed = parse("xargs -a .env echo");
 
-                let Access::Path { requested, .. } = &parsed.reads[0] else {
-                    panic!("expected a path read");
-                };
-                assert_eq!(Path::new(requested), Path::new("/repo/.env"));
+                assert_eq!(
+                    Path::new(&parsed.reads[0].requested),
+                    Path::new("/repo/.env")
+                );
             }
 
             #[test]
@@ -4753,17 +4745,10 @@ mod tests {
                 spelled(CommandTarget::parse(command, &Workspace::new(cwd)).reads)
             }
 
-            fn spelled(targets: Vec<Access>) -> Vec<String> {
+            fn spelled(targets: Vec<PathTarget>) -> Vec<String> {
                 targets
                     .into_iter()
-                    .map(|target| match target {
-                        Access::Path {
-                            relative,
-                            requested,
-                            ..
-                        } => relative.unwrap_or(requested),
-                        other => panic!("a redirection target is a path, got {other:?}"),
-                    })
+                    .map(|target| target.relative.unwrap_or(target.requested))
                     .collect()
             }
 
@@ -4779,7 +4764,7 @@ mod tests {
                 assert_eq!(
                     CommandTarget::parse(&format!("echo a > {outside}"), &Workspace::new(cwd))
                         .writes,
-                    [Access::for_path(&outside, &Workspace::new(cwd))]
+                    [resolve(&outside, &Workspace::new(cwd))]
                 );
             }
 
@@ -4915,7 +4900,7 @@ mod tests {
                 "grep -fpats --file=more -e x -- -y src",
                 &Workspace::new(Path::new("/repo")),
             );
-            let at = |name: &str| Access::for_path(name, &Workspace::new(Path::new("/repo")));
+            let at = |name: &str| resolve(name, &Workspace::new(Path::new("/repo")));
             assert!(command.segments[0].is_safe());
             assert_eq!(command.reads, [at("pats"), at("more"), at("-y"), at("src")]);
             assert!(!is_safe("wc --files0-from=list"));
@@ -4955,9 +4940,8 @@ mod tests {
 
         #[test]
         fn admits_builtins_that_only_print_test_files_or_trace() {
-            let at = |name: &str| {
-                ReaderPath::exact(Access::for_path(name, &Workspace::new(Path::new("/repo"))))
-            };
+            let at =
+                |name: &str| ReaderPath::exact(resolve(name, &Workspace::new(Path::new("/repo"))));
             for (command, reads) in [
                 (": done", &[][..]),
                 ("printf '%s\\n' a", &[]),
@@ -5055,10 +5039,7 @@ mod tests {
                 assert!(parsed.segments[0].is_safe(), "{command:?}");
                 assert_eq!(
                     parsed.reads,
-                    [Access::for_path(
-                        "a.rs",
-                        &Workspace::new(Path::new("/repo"))
-                    )],
+                    [resolve("a.rs", &Workspace::new(Path::new("/repo")))],
                     "{command:?}"
                 );
             }
@@ -5215,7 +5196,7 @@ mod tests {
 
             let segment = &command.segments[0];
             assert!(!segment.is_safe());
-            let at = |name: &str| Access::for_path(name, &workspace);
+            let at = |name: &str| resolve(name, &workspace);
             let tree = |name: &str| ReaderPath {
                 path: at(name),
                 recursive: true,

@@ -2346,8 +2346,7 @@ mod tests {
 
             let config = load_with(&dir, &[]).await.unwrap();
 
-            let decide =
-                |class, target: Access| config.permission.decide(class, &target.as_target());
+            let decide = |class, target: Access| config.permission.decide(class, &target);
             let command = |command: &str| Access::for_command(command, &config.workspace);
             assert_eq!(
                 decide(PermissionClass::Exec, command("git push origin")),
@@ -2396,9 +2395,7 @@ mod tests {
 
                 let target = Access::for_path(&key, &config.workspace);
                 assert_eq!(
-                    config
-                        .permission
-                        .decide(PermissionClass::Read, &target.as_target()),
+                    config.permission.decide(PermissionClass::Read, &target),
                     Decision::Deny,
                     "{spelling}"
                 );

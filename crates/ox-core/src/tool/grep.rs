@@ -630,7 +630,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::permission::Access;
+    use crate::permission::{Access, PathTarget};
     use crate::tool::ToolRegistry;
     use crate::tool::local_testing::{self, ctx, deny_reads, search_root, temp_ctx};
     use crate::tool::view::GrepFileGroup;
@@ -686,11 +686,11 @@ mod tests {
                 .prepare(serde_json::json!({"pattern": "x"}), &ctx(dir.path()))
                 .unwrap();
 
-            let Access::Path {
+            let Access::Path(PathTarget {
                 canonical,
                 relative,
                 ..
-            } = prepared.access
+            }) = prepared.access
             else {
                 panic!("expected a path target");
             };
