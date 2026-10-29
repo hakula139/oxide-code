@@ -39,7 +39,7 @@ Each page covers one topic, and [`docs/research/`](../research/) holds the API r
 
 | Document                           | Description                                                                                          |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| [Permissions](permissions.md)      | Tiered deny / ask / allow gate, modes, rule grammar                                                  |
+| [Permissions](permissions.md)      | Tiered deny / ask / allow gate, mode switches, path and command targets, approvals                   |
 | [File Edits](file-edits.md)        | Read-before-Edit gate, staleness detection, persistence, in-place publication, metadata preservation |
 | [Shell Execution](bash.md)         | `bash` process tree, terminal detachment, environment, and background shells                         |
 | [Output Truncation](truncation.md) | Per-tool view-shape caps, a centralized byte budget, and spill files                                 |
