@@ -25,6 +25,7 @@ direnv
 disambiguable
 doas
 dotenv
+elif
 ELOOP
 ENOENT
 ENOTDIR

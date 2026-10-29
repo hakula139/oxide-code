@@ -1,6 +1,6 @@
 # Releasing
 
-Pushing a tag that matches `v[0-9]+.*` starts `.github/workflows/release.yml`, which runs CI, builds and checks every target, and publishes a GitHub Release with the tag's `CHANGELOG.md` section as its notes. A tag with a prerelease suffix, such as `v0.1.0-rc.1`, publishes a prerelease.
+Pushing a tag that matches `v[0-9]+.*` starts `.github/workflows/release.yml`, which waits for a passing CI run on the tagged commit, builds and checks every target, and publishes a GitHub Release with the tag's `CHANGELOG.md` section as its notes. A tag with a prerelease suffix, such as `v0.1.0-rc.1`, publishes a prerelease.
 
 ## Versioning
 
@@ -118,6 +118,8 @@ git fetch origin
 sha=$(gh pr view <release-pr> --json mergeCommit --jq .mergeCommit.oid)
 git tag vX.Y.Z "$sha" && git push origin vX.Y.Z
 ```
+
+The workflow reuses the CI run that the merge started on `main` and waits up to an hour for it to finish. It publishes nothing unless a push or dispatched CI run on that commit passed, so a tag on a commit that never ran CI on `main` needs `gh workflow run ci.yml --ref vX.Y.Z` first, and a failed run needs its failed jobs rerun. Then rerun the Release workflow's failed jobs.
 
 ## Verify Publication
 
