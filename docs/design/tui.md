@@ -83,18 +83,18 @@ A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other
 
 ## Welcome Screen
 
-While the chat has no blocks, no streaming reply, and no compaction summary, and `show_welcome` is on, `App::draw_frame` paints the welcome in the chat region: an identity ribbon with the version, then a body column with the model, effort, and auth source, the working directory, three starter commands, and a tip. `/clear` empties the chat, so the welcome returns, and a resume fills it, so a resumed session never shows the welcome.
+While the chat has no blocks, no streaming reply, no thinking buffer, and no compaction summary, and `show_welcome` is on, `App::draw_frame` paints the welcome in the chat region: an identity ribbon with the version, then a body column with the model, effort, and auth source, the working directory, three starter commands, and a tip. `/clear` empties the chat, so the welcome returns, and a resume fills it, so a resumed session never shows the welcome.
 
-The starters sample the built-in commands a new session can run bare, each with its registry description, and the tip samples `TIP_POOL`, offering the pull request tip only when the status line shows the `pull-request` segment. Both draws seed `fastrand` with the xxh64 hash of the session ID, so a session keeps its picks while each new session draws again.
+The starters sample the built-in commands a new session can run bare, each with its registry description, and the tip samples `TIP_POOL`, offering the pull request tip only when the configured status line includes the `pull-request` segment. Both draws seed `fastrand` with the xxh64 hash of the session ID, so a session keeps its picks while each new session draws again.
 
 The body lines pad to one shared width, since `Paragraph::alignment(Center)` centers each line on its own, so lines of different widths would each start at a different column. The layout steps down by width:
 
-| Cols  | Identity                    | Environment         | Cwd                         | Starters and tip |
-| ----- | --------------------------- | ------------------- | --------------------------- | ---------------- |
-| ≥60   | ribbon `━━━━ oxide-code...` | full line           | tildified, full             | shown            |
-| 40-59 | wordmark `oxide-code v...`  | full line           | tildified, full             | shown            |
-| 25-39 | wordmark                    | model + effort only | tildified, center-truncated | hidden           |
-| <25   | suppressed                  | suppressed          | suppressed                  | suppressed       |
+| Cols  | Identity                    | Environment                       | Cwd                         | Starters and tip |
+| ----- | --------------------------- | --------------------------------- | --------------------------- | ---------------- |
+| ≥60   | ribbon `━━━━ oxide-code...` | model, effort, and auth source    | tildified, end-truncated    | shown            |
+| 40-59 | wordmark `oxide-code v...`  | model and effort                  | tildified, end-truncated    | shown            |
+| 25-39 | wordmark                    | model and effort level, no suffix | tildified, center-truncated | hidden           |
+| <25   | suppressed                  | suppressed                        | suppressed                  | suppressed       |
 
 A chat region shorter than 13 rows hides the starters and the tip at any width.
 
@@ -129,6 +129,7 @@ A chat region shorter than 13 rows hides the starters and the tip at any width.
 
 - `crates/ox-tui/src/action.rs`: `APP_KEYMAP`, the app's global key and its hint.
 - `crates/ox-tui/src/app.rs`: `App`, its `tokio::select!` loop, `TICK_INTERVAL`, the shortest gap between ticks, and `App::next_tick`, which picks when the loop wakes.
+- `crates/ox-tui/src/app/render.rs`: `App::draw_frame`, which paints the welcome while the chat is empty.
 - `crates/ox-tui/src/components/chat.rs`: `ChatView` and the compact and expanded views.
 - `crates/ox-tui/src/components/chat/blocks.rs`: `ChatBlock` and `RenderCtx`, the render contract of a chat block.
 - `crates/ox-tui/src/components/chat/blocks/live_markdown.rs`: `LiveMarkdown`, the text of a section that grows while it streams, with its stable-prefix cache.

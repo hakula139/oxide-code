@@ -12,13 +12,13 @@ Companion docs: [Slash Commands](slash-commands.md), [Modals](modals.md).
 
 ## The Picker
 
-The picker wraps [`SearchableList`](modals.md#shared-primitives), and [Mid-Session Resume](../guide/sessions.md#mid-session-resume) lists its keys. Its named actions come from `ACTIONS`, a keymap that pairs each action with its key and a footer label that can depend on the view, so the footer renders from the table the keys dispatch through.
+The picker wraps [`SearchableList`](modals.md#shared-primitives), and [Resuming a Session](../guide/sessions.md#resuming-a-session) covers what its keys do. Its named actions come from the `ACTIONS` keymap (**One keymap drives keys and hints**).
 
-Rows load in pages of 30 from a `SessionWalk`, each read by one query on a worker thread that hands the page back through `Modal::tick`. A row whose session [forked](persistence.md#lazy-fork) from another shows `(fork of {id8})` after its title. The picker asks for the next page while fewer than one viewport of matching rows sits below the cursor, so typical scrolling never waits on the store, and a query keeps loading until it fills the viewport or the walk ends. Toggling the scope or the archive view restarts the walk with the query kept, and the old view's page is discarded when its worker finishes. A walk that fails, or a worker that dies without a page, takes over the footer with a load error, so a failure cannot pass for an empty list.
+Rows load in pages of 30 from a `SessionWalk`, each read by one query on a worker thread that hands the page back through `Modal::tick`. A row whose session [forked](persistence.md#lazy-fork) from another shows `(fork of {id8})` after its title. A query keeps loading until it fills the viewport or the walk ends (**Load pages in the background as the cursor nears the end**). Toggling the scope or the archive view restarts the walk with the query kept, and the old view's page is discarded when its worker finishes. A walk that fails, or a worker that dies without a page, takes over the footer with a load error, so a failure cannot pass for an empty list.
 
 Each row is one line of columns: the ID prefix, the title, the branch, the project in the all-projects view, the message count, and the relative time. The title takes the width the fixed columns leave, and a narrow row drops the other columns, the ID first, to keep the title at least 24 columns wide, then drops the time below 12, so the title always shows.
 
-Archiving and deleting from the picker go through the engine. Ctrl+X sends `Op::SetArchive` with the row's ID, the op the typed `/archive` and `/unarchive` send with a prefix, and Ctrl+D pushes the confirm-delete modal. While a change is pending the picker ignores the row actions, and when the engine reports it, the picker drops the row with the cursor index kept, so repeated presses work through a run of sessions.
+Archiving and deleting from the picker go through the engine. Ctrl+X sends `Op::SetArchive` with the row's ID, the op the typed `/archive` and `/unarchive` send with a prefix, and Ctrl+D pushes the confirm-delete modal. While an archive toggle is pending, the picker ignores Enter, Ctrl+X, and Ctrl+D, and once the engine reports a success, it drops the row with the cursor index kept (**Ctrl+X moves a session between views in place**). A failure leaves the row and shows an error in the footer.
 
 ## The Swap
 
@@ -28,15 +28,13 @@ Archiving and deleting from the picker go through the engine. Ctrl+X sends `Op::
 
 On `SessionResumed`, the TUI rebuilds the chat, clears the modals, and discards the prompts queued before the resume with a notice. At `SessionReady` it returns to idle and submits the first prompt typed while the resume ran. A failed resume returns to idle with the queue intact and held ([**A cancel leaves the queue to the user**](cancellation.md#design-decisions)).
 
-`SessionStore::walk` returns a `SessionWalk` over the sessions in a `ListScope`, most recently active first, and each page is one query that continues after the last row's `updated_at` and ID, so pages never overlap. `list_paged` takes one page and asks for one session past it to report whether more follow, and `list_matching` looks sessions up by ID prefix. `ox --list` pages the same way, with `--limit 0` for every session.
-
 ## Design Decisions
 
 1. **Bare opens the picker, typed-arg resolves directly.** Same shape as `/model`, `/effort`, `/theme`: bare opens a modal, typed-arg switches directly. Reference CLIs converged on this exploratory-vs-direct split independently (Claude Code's `-r` vs `-c`, Codex's bare `resume` vs `resume <id>`).
 2. **Alias `continue`.** Claude Code's `/resume` also takes `continue` as an alias, so users of either tool can type the word they know.
 3. **Both forms are idle-only.** Bare and typed-arg refuse mid-turn, since the picker eventually submits an `Op::Resume`, and allowing it mid-stream would interleave a session swap with an in-flight response.
 4. **Mid-session re-init uses `roll_into`.** The in-process swap preserves the process and terminal state, avoids an alt-screen exit or relaunch flash, and reuses the `roll` pattern from `/clear`. It clears modals, rolls back any theme preview, and discards the prompts queued before it.
-5. **`RollIntoOutcome` nests the `LoadedTranscript`.** The engine adopts a loaded transcript as one unit, at startup from `ResumedSession` and on `/resume` from `RollIntoOutcome`, so both carry the same struct. The title, the `prior` archive state, and `finalize_failure` sit beside it, since the engine reads each one separately. The tracker snapshots travel inside the transcript, so startup and `/resume` both restore the tracker in the engine, and every frontend gets the drift notice.
+5. **`RollIntoOutcome` nests the `LoadedTranscript`.** The engine adopts a loaded transcript as one unit, at startup from `ResumedSession` and on `/resume` from `RollIntoOutcome`, so both carry the same struct. The title, the `prior` archive state, and the old session's `finalize` report sit beside it, since the engine reads each one separately. The tracker snapshots travel inside the transcript, so startup and `/resume` both restore the tracker in the engine, and every frontend gets the drift notice.
 6. **Surface old-session finalize failures and tracker drift as distinct events.** They have two causes: the previous session failing to finalize (writer), and tracked files drifting since the resumed session (filesystem). The finalize failure is an error that names the previous session, so the user does not read it as a current-writer fault. Drift is a notice, since the Read-before-Edit gate handles it and nothing failed.
 7. **Drop queued prompts on resume, then surface the count.** Queued prompts belong to the source thread, so replaying them in a different transcript would amount to silent corruption. Every session switch drops them, `/clear` and bare `/archive` included, and prints `Discarded N queued prompts from the previous session` so the user knows their typing didn't carry over. The policy is [**A cancel leaves the queue to the user**](cancellation.md#design-decisions).
 8. **`SearchableList` as a sibling primitive to `ListPicker`.** `ListPicker` is small and focused, and adding search and a viewport would double its surface for the simpler pickers. `SearchableList` follows the same trait and delegation pattern beside it.
@@ -64,7 +62,8 @@ On `SessionResumed`, the TUI rebuilds the chat, clears the modals, and discards 
 
 ## Sources
 
-- `crates/ox-core/src/engine/sessions.rs`: `Engine::resume`, `Engine::roll_into`, `format_drift_warning`.
+- `crates/ox-core/src/engine/sessions.rs`: `Engine::resume`, `format_drift_warning`.
+- `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::roll_into`, which swaps the live transcript for the loaded one.
 - `crates/ox-core/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
 - `crates/ox-core/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_target`, which maps a `ResumeTarget` to a session ID, importing an export path, and `resolve_prefix`.

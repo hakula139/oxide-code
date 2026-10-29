@@ -49,4 +49,6 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-tui/src/app/events.rs`: `handle_engine_event`, `end_operation`, `settle_failure`, `discard_queue`, `drain_pending_prompt`, and `set_activity`.
 - `crates/ox-tui/src/app/operation.rs`: `InFlight`, which tracks the idle-only op until its terminal event, and the `Activity` the status bar shows.
 - `crates/ox-tui/src/app/queue.rs`: `PromptQueue` and its `QueuedPrompt` entries, the active prompt, the queued prompts, what a failed turn hands back, and the prompts a session switch leaves behind.
+- `crates/ox-tui/src/app/render.rs`: `App::run_label`, the status bar's operation label and the key that stops it.
 - `crates/ox/src/driver/repl.rs`: `drive`, which turns SIGINT during an operation into `Op::Interrupt` and SIGINT at the prompt into a fresh prompt when stdin is a terminal.
+- `crates/ox/src/driver/stdio.rs`: `render_op`, which renders one operation until its terminal event, and `StdioSink`.

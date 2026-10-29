@@ -15,7 +15,7 @@ Segment render rules:
 - Join only rendered segments, so omitted segments do not leave extra separators.
 - The model segments drop the `Claude` family prefix to save width, while other surfaces keep the full label.
 - The review segment appears only when branch protection requires a review, because GitHub otherwise reports no review decision.
-- Segments that approach a limit escalate their color as **Escalate usage by the percent shown** describes, and the permission mode takes the colors **Show every configured permission mode** gives.
+- Segments that approach a limit escalate their color with the percent they show (**Escalate usage by the percent shown**), and each permission mode has its own color (**Show every configured permission mode**).
 
 ## Usage Data
 
