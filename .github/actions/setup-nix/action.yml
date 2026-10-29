@@ -19,9 +19,9 @@ runs:
           sandbox = true
           sandbox-fallback = false
 
-    # `continue-on-error` also covers the action's post step, which pushes the job's builds.
     - name: Set up Cachix
       id: cachix
+      # Also covers the action's post step, which pushes the job's builds.
       continue-on-error: true
       uses: cachix/cachix-action@v17
       with:
