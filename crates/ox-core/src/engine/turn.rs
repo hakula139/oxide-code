@@ -528,7 +528,9 @@ mod tests {
     use crate::model::Effort;
     use crate::protocol::local_testing::CapturingSink;
     use crate::protocol::testing::model_pick;
-    use crate::protocol::{ApprovalDecision, Op, ResumeTarget, SavedTarget, ToolCall, ToolResult};
+    use crate::protocol::{
+        ApprovalDecision, Op, OpSender, ResumeTarget, SavedTarget, ToolCall, ToolResult,
+    };
     use crate::session::handle;
     use crate::session::handle::SessionHandle;
     use crate::session::store::testing::test_store;
@@ -844,7 +846,7 @@ mod tests {
         /// TUI's approval modal does, while capturing every event.
         struct ReplyingSink {
             events: CapturingSink,
-            op_tx: mpsc::Sender<Op>,
+            op_tx: OpSender,
             decision: ApprovalDecision,
         }
 
@@ -852,7 +854,7 @@ mod tests {
             fn send(&self, event: Event) -> Result<()> {
                 if let Event::ApprovalRequested { id, .. } = &event {
                     self.op_tx
-                        .try_send(Op::Resolve {
+                        .try_submit(Op::Resolve {
                             id: id.clone(),
                             decision: self.decision.clone(),
                         })
@@ -1218,10 +1220,10 @@ mod tests {
             let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("kick off")];
-            let (tx, mut rx) = mpsc::channel::<Op>(4);
+            let (tx, mut rx) = OpSender::channel(4);
             let mut mailbox = Mailbox::new(&mut rx);
             // Hold the sender so `recv()` stays pending after the queued submit.
-            tx.send(Op::Queue("follow up".to_owned())).await.unwrap();
+            tx.submit(Op::Queue("follow up".to_owned())).await.unwrap();
 
             run_on_messages(
                 turn_context(&client, &tools, &sink),
@@ -1273,10 +1275,10 @@ mod tests {
             let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("kick off")];
-            let (tx, mut rx) = mpsc::channel::<Op>(4);
+            let (tx, mut rx) = OpSender::channel(4);
             let mut mailbox = Mailbox::new(&mut rx);
-            tx.send(Op::Queue("first".to_owned())).await.unwrap();
-            tx.send(Op::Queue("second".to_owned())).await.unwrap();
+            tx.submit(Op::Queue("first".to_owned())).await.unwrap();
+            tx.submit(Op::Queue("second".to_owned())).await.unwrap();
 
             run_on_messages(
                 turn_context(&client, &tools, &sink),
@@ -1322,9 +1324,9 @@ mod tests {
             let tools = ToolRegistry::new(vec![]);
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let (tx, mut rx) = OpSender::channel(1);
             let mut mailbox = Mailbox::new(&mut rx);
-            tx.try_send(Op::Interrupt).unwrap();
+            tx.try_submit(Op::Interrupt).unwrap();
 
             let abort = run_on_messages(
                 turn_context(&client, &tools, &sink),
@@ -1350,7 +1352,7 @@ mod tests {
             let tools = ToolRegistry::new(vec![]);
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("write a story")];
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let (tx, mut rx) = OpSender::channel(1);
             let mut mailbox = Mailbox::new(&mut rx);
             let mut dispatch_ctx = yolo_dispatch();
 
@@ -1366,7 +1368,7 @@ mod tests {
                     while sink.events().is_empty() {
                         tokio::task::yield_now().await;
                     }
-                    tx.send(Op::Interrupt).await.unwrap();
+                    tx.submit(Op::Interrupt).await.unwrap();
                 },
             );
 
@@ -1392,9 +1394,9 @@ mod tests {
             let tools = ToolRegistry::new(vec![]);
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let (tx, mut rx) = OpSender::channel(1);
             let mut mailbox = Mailbox::new(&mut rx);
-            tx.try_send(Op::Shutdown).unwrap();
+            tx.try_submit(Op::Shutdown).unwrap();
 
             let abort = run_on_messages(
                 turn_context(&client, &tools, &sink),
@@ -1420,7 +1422,7 @@ mod tests {
             let tools = ToolRegistry::new(vec![]);
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("hi")];
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let (tx, mut rx) = OpSender::channel(1);
             let mut mailbox = Mailbox::new(&mut rx);
             drop(tx);
 
@@ -1473,9 +1475,9 @@ mod tests {
                 let tools = ToolRegistry::new(vec![]);
                 let sink = CapturingSink::default();
                 let mut messages = vec![Message::user("hi")];
-                let (tx, mut rx) = mpsc::channel::<Op>(1);
+                let (tx, mut rx) = OpSender::channel(1);
                 let mut mailbox = Mailbox::new(&mut rx);
-                tx.try_send(op.clone()).unwrap();
+                tx.try_submit(op.clone()).unwrap();
 
                 let outcome = run_on_messages(
                     turn_context(&client, &tools, &sink),
@@ -1522,7 +1524,7 @@ mod tests {
             ]);
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("kick off")];
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let (tx, mut rx) = OpSender::channel(1);
             let mut mailbox = Mailbox::new(&mut rx);
             let mut dispatch_ctx = yolo_dispatch();
 
@@ -1536,7 +1538,7 @@ mod tests {
                 ),
                 async {
                     started.notified().await;
-                    tx.send(Op::Interrupt).await.unwrap();
+                    tx.submit(Op::Interrupt).await.unwrap();
                 },
             );
 
@@ -1611,7 +1613,7 @@ mod tests {
             })]);
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("kick off")];
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let (tx, mut rx) = OpSender::channel(1);
             let mut mailbox = Mailbox::new(&mut rx);
             let mut dispatch_ctx = yolo_dispatch();
 
@@ -1625,7 +1627,7 @@ mod tests {
                 ),
                 async {
                     started.notified().await;
-                    tx.send(Op::Interrupt).await.unwrap();
+                    tx.submit(Op::Interrupt).await.unwrap();
                 },
             );
 
@@ -2570,9 +2572,9 @@ mod tests {
             let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
             let sink = CapturingSink::default();
             let mut messages = vec![Message::user("run echo")];
-            let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let (tx, mut rx) = OpSender::channel(1);
             let mut mailbox = Mailbox::new(&mut rx);
-            tx.try_send(Op::SetMode(crate::permission::Mode::Plan))
+            tx.try_submit(Op::SetMode(crate::permission::Mode::Plan))
                 .unwrap();
             let mut dispatch_ctx = yolo_dispatch();
 
@@ -2632,7 +2634,7 @@ mod tests {
                     text_turn("Done"),
                 ]);
                 let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-                let (op_tx, mut ops) = mpsc::channel(4);
+                let (op_tx, mut ops) = OpSender::channel(4);
                 let mut mailbox = Mailbox::new(&mut ops);
                 let sink = ReplyingSink {
                     events: CapturingSink::default(),
@@ -2710,7 +2712,7 @@ mod tests {
             let tools = ToolRegistry::new(vec![Box::new(crate::tool::write::WriteTool)]);
             let mut dispatch_ctx = dispatch_with(crate::permission::Mode::Manual, &[], &[], &cwd);
             let mut messages = vec![Message::user("take notes")];
-            let (op_tx, mut ops) = mpsc::channel(4);
+            let (op_tx, mut ops) = OpSender::channel(4);
             let mut mailbox = Mailbox::new(&mut ops);
             let sink = ReplyingSink {
                 events: CapturingSink::default(),

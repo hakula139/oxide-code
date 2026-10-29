@@ -12,7 +12,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::abort::{Mailbox, TurnAbort};
 use super::dispatch::DispatchContext;
 use super::testing::MODEL;
-use super::{Engine, EngineHandle, TurnEnd};
+use super::{Engine, EngineHandle};
 use crate::client::anthropic::local_testing::completion_body;
 use crate::file_tracker::testing::tracker;
 use crate::message::{ContentBlock, Message, Replay, Role};
@@ -55,13 +55,12 @@ pub(super) async fn next_matching<T>(
     }
 }
 
-/// Events up to and including the terminal event of the prompt in flight.
+/// Events up to and including the next [`Event::OpEnded`], which ends the op in flight.
 pub(super) async fn turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
-    let prompt = Op::prompt("");
     let mut seen = Vec::new();
     loop {
         let event = events.recv().await.expect("the engine stopped early");
-        let ended = TurnEnd::of(&prompt, &event).is_some();
+        let ended = matches!(event, Event::OpEnded { .. });
         seen.push(event);
         if ended {
             return seen;
@@ -89,7 +88,7 @@ pub(super) fn greeting_title() -> ResponseTemplate {
 }
 
 pub(super) async fn submit(handle: &mut EngineHandle, text: &str) -> Vec<Event> {
-    handle.ops.send(Op::prompt(text)).await.unwrap();
+    handle.ops.submit(Op::prompt(text)).await.unwrap();
     turn_events(&mut handle.events).await
 }
 

@@ -39,7 +39,7 @@ use crate::model::ModelSettings;
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::UserContext;
 use crate::protocol::notice::{self, ConfigSettings};
-use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, TurnEnd};
+use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, OpEnd, OpSender, Submission};
 use crate::session::handle::{LoadedTranscript, SessionHandle};
 use crate::session::store::SessionStore;
 use crate::session::title_generator;
@@ -57,7 +57,7 @@ const OP_CHANNEL_CAP: usize = 32;
 pub struct EngineHandle {
     /// Frontend submissions, subject to [`Op`]'s idle-state requirements. Enqueueing an op does
     /// not acknowledge its execution.
-    pub ops: mpsc::Sender<Op>,
+    pub ops: OpSender,
     pub events: mpsc::UnboundedReceiver<Event>,
     pub task: EngineTask,
 }
@@ -232,7 +232,7 @@ impl Engine {
     /// Starts the engine task, which first emits the config's startup notices, then what
     /// [`Self::emit_session_start`] shows.
     pub fn spawn(mut self) -> EngineHandle {
-        let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
+        let (ops, op_rx) = OpSender::channel(OP_CHANNEL_CAP);
         // Unbounded, so the engine never waits on or drops events for a frontend that falls behind.
         let (sink, events) = mpsc::unbounded_channel();
         self.shells.attach(Arc::new(sink.clone()));
@@ -248,10 +248,10 @@ impl Engine {
     async fn run(
         mut self,
         sink: mpsc::UnboundedSender<Event>,
-        mut ops: mpsc::Receiver<Op>,
+        mut ops: mpsc::Receiver<Submission>,
     ) -> Option<String> {
         loop {
-            let op = tokio::select! {
+            let submission = tokio::select! {
                 biased;
                 billed = self.usage.title_usage_landed() => {
                     if billed {
@@ -259,12 +259,12 @@ impl Engine {
                     }
                     continue;
                 }
-                op = ops.recv() => match op {
-                    Some(op) => op,
+                submission = ops.recv() => match submission {
+                    Some(submission) => submission,
                     None => break,
                 },
             };
-            if self.serve(op, &sink, &mut ops).await.is_break() {
+            if self.serve(submission, &sink, &mut ops).await.is_break() {
                 break;
             }
         }
@@ -272,22 +272,27 @@ impl Engine {
         self.finalize().await
     }
 
-    /// Serves one op, racing a long operation against the ops that arrive while it runs, and
-    /// applies the last mode switch among them once it ends. Breaks on a shutdown.
-    async fn serve<S>(&mut self, op: Op, sink: &S, ops: &mut mpsc::Receiver<Op>) -> ControlFlow<()>
+    /// Serves one op, racing a long operation against the ops that arrive while it runs, applies
+    /// the last mode switch among them, and ends it with [`Event::OpEnded`]. Breaks on a shutdown.
+    async fn serve<S>(
+        &mut self,
+        Submission { id, op }: Submission,
+        sink: &S,
+        ops: &mut mpsc::Receiver<Submission>,
+    ) -> ControlFlow<()>
     where
         S: EventSink + Clone + 'static,
     {
         let mut mailbox = Mailbox::new(ops);
-        let mut end = None;
-        match op {
+        let end = match op {
             Op::Prompt { text, title } => {
-                end = Some(self.submit_prompt(&text, title, sink, &mut mailbox).await);
+                self.submit_prompt(&text, title, sink, &mut mailbox).await
             }
-            Op::Compact { instructions } => {
-                end = Some(self.compact(sink, &mut mailbox, instructions).await);
+            Op::Compact { instructions } => self.compact(sink, &mut mailbox, instructions).await,
+            Op::Clear => {
+                self.clear(sink).await;
+                OpEnd::Completed
             }
-            Op::Clear => self.clear(sink).await,
             Op::Archive => self.archive(sink).await,
             Op::SetArchive { target, state } => self.set_archive(sink, target, state).await,
             Op::FindSaved { prefix } => self.find_saved(sink, prefix).await,
@@ -295,23 +300,28 @@ impl Engine {
             Op::Resume { target } => self.resume(sink, target).await,
             Op::Rename { title } => self.rename(sink, title).await,
             Op::SetModel(pick) => self.set_model(sink, pick),
-            Op::SetMode(mode) => self.set_mode(sink, mode),
-            Op::Login => end = Some(self.login(sink, &mut mailbox).await),
+            Op::SetMode(mode) => {
+                self.set_mode(sink, mode);
+                OpEnd::Completed
+            }
+            Op::Login => self.login(sink, &mut mailbox).await,
             Op::Logout => self.logout(sink).await,
             // A `Queue` here arrived after its turn ended, and the frontend still submits it. An
             // interrupt, approval, or sign-in code only matters mid-operation, where the
             // operation's `Mailbox` consumes it.
-            Op::Queue(_) | Op::Interrupt | Op::Resolve { .. } | Op::LoginCode(_) => {}
-            Op::Shutdown => return ControlFlow::Break(()),
-        }
+            Op::Queue(_) | Op::Interrupt | Op::Resolve { .. } | Op::LoginCode(_) => {
+                OpEnd::Completed
+            }
+            Op::Shutdown => OpEnd::Shutdown,
+        };
         if let Some(mode) = mailbox.take_mode() {
             self.policy.set_mode(mode);
         }
-        if end == Some(TurnEnd::Shutdown) {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
+        if end == OpEnd::Shutdown {
+            return ControlFlow::Break(());
         }
+        sink.emit(Event::OpEnded { id, end });
+        ControlFlow::Continue(())
     }
 
     /// Runs `text` through auto-compaction and one agent turn, rolling back a refused turn, and
@@ -324,7 +334,7 @@ impl Engine {
         title: Option<String>,
         sink: &S,
         mailbox: &mut Mailbox<'_>,
-    ) -> TurnEnd
+    ) -> OpEnd
     where
         S: EventSink + Clone + 'static,
     {
@@ -378,10 +388,7 @@ impl Engine {
         };
         self.transcript.end_turn();
         match result {
-            Ok(_) => {
-                sink.emit(Event::TurnComplete);
-                TurnEnd::Completed
-            }
+            Ok(_) => OpEnd::Completed,
             Err(abort) => report_abort(sink, abort),
         }
     }
@@ -452,8 +459,9 @@ impl Engine {
         }
     }
 
-    /// Applies a model and / or effort pick. The model goes first because it re-resolves effort.
-    fn set_model(&mut self, sink: &dyn EventSink, pick: ConfigPick) {
+    /// Applies a model and / or effort pick. The model goes first because it re-resolves effort. An
+    /// effort-only pick the model has no level for changes nothing, so it fails.
+    fn set_model(&mut self, sink: &dyn EventSink, pick: ConfigPick) -> OpEnd {
         let before = ConfigSettings {
             model: self.settings.model().clone(),
             effort: self.settings.effort(),
@@ -482,6 +490,7 @@ impl Engine {
             effort,
             auto_compaction,
         } = after;
+        let end = OpEnd::settled(!matches!(pick, ConfigPick::Effort(_)) || effort.is_some());
         sink.emit(Event::ConfigChanged {
             model,
             effort,
@@ -489,6 +498,7 @@ impl Engine {
             auto_compaction,
             notice,
         });
+        end
     }
 
     /// Switches the permission mode for later calls.
@@ -510,30 +520,25 @@ impl Engine {
 
 // ── Reporting ──
 
-/// Shows `abort` on `sink` as the operation's one terminal event. `Shutdown` stays silent.
-/// [`Event`] lists each op's terminal events.
-fn report_abort(sink: &dyn EventSink, abort: TurnAbort) -> TurnEnd {
+/// The end `abort` gives the operation, reporting a failure's cause on `sink` first.
+fn report_abort(sink: &dyn EventSink, abort: TurnAbort) -> OpEnd {
     match abort {
-        TurnAbort::Cancelled => {
-            sink.emit(Event::Cancelled);
-            TurnEnd::Cancelled
-        }
-        TurnAbort::Shutdown => TurnEnd::Shutdown,
+        TurnAbort::Cancelled => OpEnd::Cancelled,
+        TurnAbort::Shutdown => OpEnd::Shutdown,
         TurnAbort::Refused(notice) => {
             sink.emit(Event::TurnFailed(notice));
-            TurnEnd::Failed
+            OpEnd::Failed
         }
         TurnAbort::Failed(e) => {
             sink.emit(Event::TurnFailed(format!("{e:#}")));
-            TurnEnd::Failed
+            OpEnd::Failed
         }
     }
 }
 
 /// Reports an abort that stopped the operation before it recorded its prompt, handing the prompt
-/// back for any outcome but shutdown. The frontend returns it to the user, and the abort's terminal
-/// event follows.
-fn report_unsent(sink: &dyn EventSink, abort: TurnAbort) -> TurnEnd {
+/// back for any outcome but shutdown, and the frontend returns it to the user before the op ends.
+fn report_unsent(sink: &dyn EventSink, abort: TurnAbort) -> OpEnd {
     if !matches!(abort, TurnAbort::Shutdown) {
         sink.emit(Event::PromptUnsent);
     }
@@ -590,7 +595,7 @@ mod tests {
     use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::protocol::local_testing::CapturingSink;
-    use crate::protocol::testing::model_pick;
+    use crate::protocol::testing::{model_pick, op_id};
     use crate::protocol::{CompactTrigger, ResumeTarget, SavedTarget, UsageSnapshot};
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;
@@ -966,14 +971,13 @@ mod tests {
 
         /// Events until the turn ends and its title and combined usage arrive, in any order.
         async fn titled_turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
-            let prompt = Op::prompt("");
             let expected =
                 request_cost(MODEL, REPLY_USAGE) + request_cost(TITLE_MODEL, COMPLETION_USAGE);
             let (mut ended, mut titled, mut billed) = (false, false, false);
             let mut seen = Vec::new();
             while !(ended && titled && billed) {
                 let event = events.recv().await.expect("the engine stopped early");
-                ended |= TurnEnd::of(&prompt, &event).is_some();
+                ended |= matches!(event, Event::OpEnded { .. });
                 titled |= matches!(event, Event::SessionTitleUpdated { .. });
                 billed |= matches!(
                     &event,
@@ -1016,8 +1020,8 @@ mod tests {
                         [
                             Event::StreamToken(token),
                             Event::UsageUpdated(_),
-                            Event::TurnComplete,
-                        ] if token == "reply"
+                            Event::OpEnded { id, end: OpEnd::Completed },
+                        ] if token == "reply" && *id == op_id(0)
                     ),
                     "{events:?}"
                 );
@@ -1043,7 +1047,7 @@ mod tests {
                 let live_id = engine.session_id();
                 let mut handle = engine.spawn();
 
-                handle.ops.send(Op::prompt("hello")).await.unwrap();
+                handle.ops.submit(Op::prompt("hello")).await.unwrap();
                 let first = titled_turn_events(&mut handle.events).await;
                 let second = submit(&mut handle, "again").await;
                 handle.shutdown().await.unwrap();
@@ -1064,8 +1068,8 @@ mod tests {
                                 estimated_cost_usd: Some(cost),
                                 ..
                             }),
-                            Event::TurnComplete,
-                        ] if (cost - expected).abs() < 1e-12
+                            Event::OpEnded { id, end: OpEnd::Completed },
+                        ] if (cost - expected).abs() < 1e-12 && *id == op_id(1)
                     ),
                     "two turns and the title: {second:?}"
                 );
@@ -1088,13 +1092,19 @@ mod tests {
                 let session_id = engine.session_id();
                 let (billed, usage) = oneshot::channel();
                 engine.usage.track_title_usage(usage);
-                let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
+                let (ops, op_rx) = OpSender::channel(OP_CHANNEL_CAP);
                 let (sink, events) = mpsc::unbounded_channel();
                 let task = EngineTask(tokio::spawn(engine.run(sink.clone(), op_rx)));
                 let mut handle = EngineHandle { ops, events, task };
 
                 let first = submit(&mut handle, "hello").await;
-                assert!(matches!(first.last(), Some(Event::TurnComplete)));
+                assert!(matches!(
+                    first.last(),
+                    Some(Event::OpEnded {
+                        end: OpEnd::Completed,
+                        ..
+                    })
+                ));
                 let title = title_generator::spawn(
                     client,
                     api_key(),
@@ -1168,7 +1178,10 @@ mod tests {
                             context_window: Some(1_000_000),
                             estimated_cost_usd: Some(request_cost(MODEL, REPLY_USAGE)),
                         }),
-                        Event::TurnComplete,
+                        Event::OpEnded {
+                            id: op_id(0),
+                            end: OpEnd::Completed
+                        },
                     ]
                 );
             })
@@ -1191,15 +1204,15 @@ mod tests {
                 let session_id = engine.session_id();
                 let mut handle = engine.spawn();
 
-                handle.ops.send(Op::prompt("hello")).await.unwrap();
+                handle.ops.submit(Op::prompt("hello")).await.unwrap();
                 titled_turn_events(&mut handle.events).await;
-                handle.ops.send(Op::Clear).await.unwrap();
+                handle.ops.submit(Op::Clear).await.unwrap();
                 next_matching(&mut handle.events, |event| {
-                    matches!(event, Event::SessionReady).then_some(())
+                    matches!(event, Event::OpEnded { .. }).then_some(())
                 })
                 .await;
                 let target = ResumeTarget::Id(session_id.clone());
-                handle.ops.send(Op::Resume { target }).await.unwrap();
+                handle.ops.submit(Op::Resume { target }).await.unwrap();
                 next_matching(&mut handle.events, |event| {
                     matches!(event, Event::SessionResumed { .. }).then_some(())
                 })
@@ -1252,11 +1265,19 @@ mod tests {
                     Op::prompt("first"),
                     Op::Queue("queued".to_owned()),
                 ] {
-                    handle.ops.send(op).await.unwrap();
+                    handle.ops.submit(op).await.unwrap();
                 }
+                let idle_queue = turn_events(&mut handle.events).await;
                 let events = turn_events(&mut handle.events).await;
                 handle.shutdown().await.unwrap();
 
+                assert_eq!(
+                    idle_queue,
+                    [Event::OpEnded {
+                        id: op_id(0),
+                        end: OpEnd::Completed
+                    }]
+                );
                 let drained: Vec<_> = events
                     .iter()
                     .filter_map(|event| match event {
@@ -1304,21 +1325,24 @@ mod tests {
                 submit(&mut handle, "two").await;
                 handle
                     .ops
-                    .send(Op::Compact {
+                    .submit(Op::Compact {
                         instructions: Some("focus".to_owned()),
                     })
                     .await
                     .unwrap();
-                let compacted = next_matching(&mut handle.events, |event| match event {
-                    Event::SessionCompacted {
-                        pre_count,
-                        instructions,
-                        trigger,
-                        ..
-                    } => Some((pre_count, instructions, trigger)),
-                    _ => None,
-                })
-                .await;
+                let compacted = turn_events(&mut handle.events)
+                    .await
+                    .into_iter()
+                    .find_map(|event| match event {
+                        Event::SessionCompacted {
+                            pre_count,
+                            instructions,
+                            trigger,
+                            ..
+                        } => Some((pre_count, instructions, trigger)),
+                        _ => None,
+                    })
+                    .expect("the compaction reports its result");
                 submit(&mut handle, "after").await;
                 handle.shutdown().await.unwrap();
 
@@ -1352,12 +1376,15 @@ mod tests {
                 let mut handle = engine.spawn();
 
                 let target = ResumeTarget::Prefix(target_id[..8].to_owned());
-                handle.ops.send(Op::Resume { target }).await.unwrap();
-                let resumed = next_matching(&mut handle.events, |event| match event {
-                    Event::SessionResumed { id, history, .. } => Some((id, history)),
-                    _ => None,
-                })
-                .await;
+                handle.ops.submit(Op::Resume { target }).await.unwrap();
+                let resumed = turn_events(&mut handle.events)
+                    .await
+                    .into_iter()
+                    .find_map(|event| match event {
+                        Event::SessionResumed { id, history, .. } => Some((id, history)),
+                        _ => None,
+                    })
+                    .expect("the resume reports the session");
                 submit(&mut handle, "again").await;
                 handle.shutdown().await.unwrap();
 
@@ -1403,7 +1430,7 @@ mod tests {
 
                 submit(&mut handle, "first").await;
                 let target = ResumeTarget::Prefix(live_id[..8].to_owned());
-                handle.ops.send(Op::Resume { target }).await.unwrap();
+                handle.ops.submit(Op::Resume { target }).await.unwrap();
                 let failure = next_matching(&mut handle.events, |event| match event {
                     Event::TurnFailed(message) => Some(message),
                     _ => None,
@@ -1441,22 +1468,22 @@ mod tests {
                 submit(&mut handle, "two").await;
                 handle
                     .ops
-                    .send(Op::Compact { instructions: None })
+                    .submit(Op::Compact { instructions: None })
                     .await
                     .unwrap();
                 next_matching(&mut handle.events, |event| {
-                    matches!(event, Event::SessionReady).then_some(())
+                    matches!(event, Event::OpEnded { .. }).then_some(())
                 })
                 .await;
                 submit(&mut handle, "after").await;
-                handle.ops.send(Op::Clear).await.unwrap();
+                handle.ops.submit(Op::Clear).await.unwrap();
                 next_matching(&mut handle.events, |event| {
-                    matches!(event, Event::SessionReady).then_some(())
+                    matches!(event, Event::OpEnded { .. }).then_some(())
                 })
                 .await;
                 let fresh = submit(&mut handle, "fresh").await;
                 let target = ResumeTarget::Id(session_id.clone());
-                handle.ops.send(Op::Resume { target }).await.unwrap();
+                handle.ops.submit(Op::Resume { target }).await.unwrap();
                 next_matching(&mut handle.events, |event| {
                     matches!(event, Event::SessionResumed { .. }).then_some(())
                 })
@@ -1473,7 +1500,10 @@ mod tests {
                                 estimated_cost_usd: Some(cost),
                                 ..
                             }),
-                            Event::TurnComplete,
+                            Event::OpEnded {
+                                end: OpEnd::Completed,
+                                ..
+                            },
                         ] if (cost - 0.006).abs() < 1e-12
                     ),
                     "a cleared session starts its own cost: {fresh:?}"
@@ -1505,7 +1535,7 @@ mod tests {
                 let mut handle = engine.spawn();
 
                 submit(&mut handle, "first").await;
-                handle.ops.send(Op::Archive).await.unwrap();
+                handle.ops.submit(Op::Archive).await.unwrap();
                 let (fresh_id, old_session) =
                     next_matching(&mut handle.events, |event| match event {
                         Event::SessionRolled { id, old_session } => Some((id, old_session)),
@@ -1520,7 +1550,7 @@ mod tests {
                 );
 
                 let target = ResumeTarget::Id(archived_id.clone());
-                handle.ops.send(Op::Resume { target }).await.unwrap();
+                handle.ops.submit(Op::Resume { target }).await.unwrap();
                 let resumed = next_matching(&mut handle.events, |event| match event {
                     Event::SessionResumed { id, prior, .. } => Some((id, prior)),
                     _ => None,
@@ -1556,7 +1586,7 @@ mod tests {
 
                 handle
                     .ops
-                    .send(Op::SetArchive {
+                    .submit(Op::SetArchive {
                         target: SavedTarget::Id("saved".to_owned()),
                         state: ArchiveState::Archived,
                     })
@@ -1564,7 +1594,7 @@ mod tests {
                     .unwrap();
                 handle
                     .ops
-                    .send(Op::Resume {
+                    .submit(Op::Resume {
                         target: ResumeTarget::Id("saved".to_owned()),
                     })
                     .await
@@ -1630,7 +1660,7 @@ mod tests {
 
                 handle
                     .ops
-                    .send(Op::FindSaved {
+                    .submit(Op::FindSaved {
                         prefix: "saved".to_owned(),
                     })
                     .await
@@ -1652,7 +1682,7 @@ mod tests {
 
                 handle
                     .ops
-                    .send(Op::DeleteSaved {
+                    .submit(Op::DeleteSaved {
                         session_id: "saved-session".to_owned(),
                     })
                     .await
@@ -1703,7 +1733,7 @@ mod tests {
 
                 handle
                     .ops
-                    .send(Op::Resume {
+                    .submit(Op::Resume {
                         target: ResumeTarget::Prefix("shared".to_owned()),
                     })
                     .await
@@ -1742,7 +1772,7 @@ mod tests {
                     Op::SetMode(Mode::Plan),
                     Op::Shutdown,
                 ] {
-                    ops.send(op).await.unwrap();
+                    ops.submit(op).await.unwrap();
                 }
                 let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
                     .await
@@ -1759,12 +1789,17 @@ mod tests {
                         seen.as_slice(),
                         [
                             Event::SessionTitleUpdated { id, title },
+                            Event::OpEnded { id: renamed, end: OpEnd::Completed },
                             Event::ConfigChanged {
                                 requested: ConfigPick::Effort(Effort::Low),
                                 ..
                             },
+                            Event::OpEnded { id: configured, end: OpEnd::Completed },
                             Event::ModeChanged(Mode::Plan),
-                        ] if *id == live_id && title == "Fix login"
+                            Event::OpEnded { id: switched, end: OpEnd::Completed },
+                        ] if *id == live_id
+                            && title == "Fix login"
+                            && [*renamed, *configured, *switched] == [op_id(0), op_id(1), op_id(2)]
                     ),
                     "{seen:?}"
                 );
@@ -1780,7 +1815,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let handle = engine(server.uri(), &store, dir.path()).await.spawn();
 
-                handle.ops.send(Op::Shutdown).await.unwrap();
+                handle.ops.submit(Op::Shutdown).await.unwrap();
                 assert_eq!(handle.task.join().await.unwrap(), None);
 
                 assert_eq!(listed_ids(&store, ArchiveState::Active), [] as [String; 0]);
@@ -1827,16 +1862,34 @@ mod tests {
 
                 let mut cancelled = Vec::new();
                 for (count, prompt) in [(1, "write a story"), (2, "write a poem")] {
-                    handle.ops.send(Op::prompt(prompt)).await.unwrap();
+                    handle.ops.submit(Op::prompt(prompt)).await.unwrap();
                     until_requested(&server, count).await;
-                    handle.ops.send(Op::Interrupt).await.unwrap();
+                    handle.ops.submit(Op::Interrupt).await.unwrap();
                     cancelled.extend(turn_events(&mut handle.events).await);
                 }
                 let next = submit(&mut handle, "what is 7 times 6?").await;
                 handle.shutdown().await.unwrap();
 
-                assert_eq!(cancelled, [Event::Cancelled, Event::Cancelled]);
-                assert!(matches!(next.last(), Some(Event::TurnComplete)));
+                assert_eq!(
+                    cancelled,
+                    [
+                        Event::OpEnded {
+                            id: op_id(0),
+                            end: OpEnd::Cancelled
+                        },
+                        Event::OpEnded {
+                            id: op_id(2),
+                            end: OpEnd::Cancelled
+                        },
+                    ]
+                );
+                assert_eq!(
+                    next.last(),
+                    Some(&Event::OpEnded {
+                        id: op_id(4),
+                        end: OpEnd::Completed
+                    })
+                );
                 let requests = request_bodies(&server).await;
                 assert_eq!(
                     texts(&requests[2])[1..],
@@ -1877,9 +1930,9 @@ mod tests {
                 engine.usage.set_context_estimate(50_000);
                 let mut handle = engine.spawn();
 
-                handle.ops.send(Op::prompt("five")).await.unwrap();
+                handle.ops.submit(Op::prompt("five")).await.unwrap();
                 until_requested(&server, 1).await;
-                handle.ops.send(Op::Interrupt).await.unwrap();
+                handle.ops.submit(Op::Interrupt).await.unwrap();
                 let events = turn_events(&mut handle.events).await;
                 handle.shutdown().await.unwrap();
 
@@ -1889,7 +1942,10 @@ mod tests {
                         [
                             Event::AutoCompactionStarted,
                             Event::PromptUnsent,
-                            Event::Cancelled
+                            Event::OpEnded {
+                                end: OpEnd::Cancelled,
+                                ..
+                            }
                         ]
                     ),
                     "{events:?}"
@@ -1909,7 +1965,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn shutdown_mid_request_stops_without_a_terminal_event() {
+        async fn shutdown_mid_request_stops_without_ending_the_op() {
             with_pinned_home(async {
                 for (label, op) in [
                     ("prompt", Op::prompt("mid stream")),
@@ -1927,9 +1983,9 @@ mod tests {
                         task,
                     } = engine.spawn();
 
-                    ops.send(op).await.unwrap();
+                    ops.submit(op).await.unwrap();
                     until_requested(&server, 1).await;
-                    ops.send(Op::Shutdown).await.unwrap();
+                    ops.submit(Op::Shutdown).await.unwrap();
                     let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
                         .await
                         .unwrap_or_else(|_| {
@@ -1958,7 +2014,7 @@ mod tests {
                 seed_full_read(&engine.transcript.file_tracker, &read_path);
                 let handle = engine.spawn();
 
-                handle.ops.send(Op::prompt("mid stream")).await.unwrap();
+                handle.ops.submit(Op::prompt("mid stream")).await.unwrap();
                 until_requested(&server, 1).await;
                 tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
                     .await
@@ -1994,15 +2050,15 @@ mod tests {
                         task,
                     } = engine.spawn();
 
-                    ops.send(Op::Login).await.unwrap();
+                    ops.submit(Op::Login).await.unwrap();
                     let (url, _) = login_urls(&mut events).await;
-                    ops.send(Op::Interrupt).await.unwrap();
+                    ops.submit(Op::Interrupt).await.unwrap();
                     let cancelled = events.recv().await;
-                    ops.send(Op::Logout).await.unwrap();
+                    ops.submit(Op::Logout).await.unwrap();
                     let signed_out = events.recv().await;
-                    ops.send(Op::Login).await.unwrap();
+                    ops.submit(Op::Login).await.unwrap();
                     login_urls(&mut events).await;
-                    ops.send(Op::Shutdown).await.unwrap();
+                    ops.submit(Op::Shutdown).await.unwrap();
                     let failure = tokio::time::timeout(Duration::from_secs(5), task.join())
                         .await
                         .expect("Shutdown stops the engine mid sign-in")
@@ -2012,7 +2068,13 @@ mod tests {
                         url.starts_with("https://claude.ai/oauth/authorize?"),
                         "{url}"
                     );
-                    assert!(matches!(cancelled, Some(Event::Cancelled)), "{cancelled:?}");
+                    assert_eq!(
+                        cancelled,
+                        Some(Event::OpEnded {
+                            id: op_id(0),
+                            end: OpEnd::Cancelled
+                        })
+                    );
                     assert!(
                         matches!(
                             signed_out,
@@ -2035,6 +2097,80 @@ mod tests {
     mod serve {
         use super::*;
 
+        fn submission(n: u64, op: Op) -> Submission {
+            Submission { id: op_id(n), op }
+        }
+
+        #[tokio::test]
+        async fn ends_each_op_it_takes_while_idle_under_its_id() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let (_tx, mut ops) = OpSender::channel(1);
+
+                for (n, op, end) in [
+                    (0, Op::SetMode(Mode::Plan), OpEnd::Completed),
+                    (1, Op::Queue("late".to_owned()), OpEnd::Completed),
+                    (
+                        2,
+                        Op::SetModel(model_pick("custom-model", None)),
+                        OpEnd::Completed,
+                    ),
+                    (
+                        3,
+                        Op::SetModel(ConfigPick::Effort(Effort::High)),
+                        OpEnd::Failed,
+                    ),
+                    (
+                        4,
+                        Op::Rename {
+                            title: "Renamed".to_owned(),
+                        },
+                        OpEnd::Completed,
+                    ),
+                    (
+                        5,
+                        Op::FindSaved {
+                            prefix: "missing".to_owned(),
+                        },
+                        OpEnd::Failed,
+                    ),
+                ] {
+                    let label = format!("{op:?}");
+                    let flow = engine.serve(submission(n, op), &sink, &mut ops).await;
+
+                    assert_eq!(flow, ControlFlow::Continue(()), "{label}");
+                    assert_eq!(
+                        sink.events().last(),
+                        Some(&Event::OpEnded { id: op_id(n), end }),
+                        "{label}"
+                    );
+                }
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn stops_on_a_shutdown_without_ending_it() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let (_tx, mut ops) = OpSender::channel(1);
+
+                let flow = engine
+                    .serve(submission(0, Op::Shutdown), &sink, &mut ops)
+                    .await;
+
+                assert_eq!(flow, ControlFlow::Break(()));
+                assert_eq!(sink.events(), []);
+            })
+            .await;
+        }
+
         #[tokio::test]
         async fn keeps_a_mode_switch_that_arrives_mid_turn() {
             with_pinned_home(async {
@@ -2043,14 +2179,33 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let sink = CapturingSink::default();
-                let (tx, mut ops) = mpsc::channel(1);
-                tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+                let (tx, mut ops) = OpSender::channel(1);
+                tx.try_submit(Op::SetMode(Mode::Plan)).unwrap();
 
-                let flow = engine.serve(Op::prompt("hello"), &sink, &mut ops).await;
+                let flow = engine
+                    .serve(submission(1, Op::prompt("hello")), &sink, &mut ops)
+                    .await;
 
                 assert_eq!(flow, ControlFlow::Continue(()));
                 assert_eq!(engine.policy.mode(), Mode::Plan);
-                assert_eq!(sink.events().first(), Some(&Event::ModeChanged(Mode::Plan)));
+                let events = sink.events();
+                assert_eq!(events.first(), Some(&Event::ModeChanged(Mode::Plan)));
+                assert_eq!(
+                    events.last(),
+                    Some(&Event::OpEnded {
+                        id: op_id(1),
+                        end: OpEnd::Completed
+                    }),
+                    "{events:?}"
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(event, Event::OpEnded { .. }))
+                        .count(),
+                    1,
+                    "the switch has no OpEnded of its own"
+                );
                 drop(tx);
             })
             .await;
@@ -2064,17 +2219,27 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.transcript.set_messages(tool_heavy_transcript());
                 let sink = CapturingSink::default();
-                let (tx, mut ops) = mpsc::channel(2);
-                tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
-                tx.try_send(Op::Interrupt).unwrap();
+                let (tx, mut ops) = OpSender::channel(2);
+                tx.try_submit(Op::SetMode(Mode::Plan)).unwrap();
+                tx.try_submit(Op::Interrupt).unwrap();
 
                 let flow = engine
-                    .serve(Op::Compact { instructions: None }, &sink, &mut ops)
+                    .serve(
+                        submission(0, Op::Compact { instructions: None }),
+                        &sink,
+                        &mut ops,
+                    )
                     .await;
 
                 assert_eq!(flow, ControlFlow::Continue(()));
                 assert_eq!(engine.policy.mode(), Mode::Plan);
-                assert_eq!(sink.events().last(), Some(&Event::Cancelled));
+                assert_eq!(
+                    sink.events().last(),
+                    Some(&Event::OpEnded {
+                        id: op_id(0),
+                        end: OpEnd::Cancelled
+                    })
+                );
             })
             .await;
         }
@@ -2149,7 +2314,7 @@ mod tests {
             }
         }
 
-        async fn assert_workspace_writes_drained(name: &str, op: Op, expected: TurnEnd) {
+        async fn assert_workspace_writes_drained(name: &str, op: Op, expected: OpEnd) {
             let server = MockServer::start().await;
             mount_tool_call_once(
                 &server,
@@ -2173,7 +2338,7 @@ mod tests {
                 release: Arc::clone(&release),
             })]));
             let sink = CapturingSink::default();
-            let (tx, mut ops) = mpsc::channel(1);
+            let (tx, mut ops) = OpSender::channel(1);
             let mut mailbox = Mailbox::new(&mut ops);
             let ended = {
                 let mut turn =
@@ -2183,7 +2348,7 @@ mod tests {
                     end = turn.as_mut() => panic!("turn ended before its write started: {end:?}"),
                 };
 
-                tx.try_send(op).unwrap();
+                tx.try_submit(op).unwrap();
                 assert!(futures::poll!(turn.as_mut()).is_pending(), "{name}");
                 assert_writes_draining(&tracker);
                 assert!(cancel.is_cancelled(), "{name}");
@@ -2193,7 +2358,7 @@ mod tests {
                     !sink
                         .events()
                         .iter()
-                        .any(|event| { matches!(event, Event::ToolCallEnd(_) | Event::Cancelled) }),
+                        .any(|event| matches!(event, Event::ToolCallEnd(_))),
                     "{name}"
                 );
                 release.notify_one();
@@ -2202,15 +2367,7 @@ mod tests {
             assert_eq!(ended, expected, "{name}");
 
             assert_workspace_write(&path, &tracker, b"committed");
-            assert_eq!(
-                sink.events()
-                    .iter()
-                    .filter(|event| matches!(event, Event::Cancelled))
-                    .count(),
-                usize::from(expected == TurnEnd::Cancelled),
-                "{name}",
-            );
-            if expected == TurnEnd::Cancelled {
+            if expected == OpEnd::Cancelled {
                 server.reset().await;
                 mount_tool_call_once(
                     &server,
@@ -2229,7 +2386,7 @@ mod tests {
                 assert!(!token.is_cancelled(), "{name}");
                 assert_workspace_write(&path, &tracker, b"committed");
                 release.notify_one();
-                assert_eq!(next.await, TurnEnd::Completed, "{name}");
+                assert_eq!(next.await, OpEnd::Completed, "{name}");
                 assert_resumed_write(&sink);
                 assert_workspace_write(&path, &tracker, b"later");
             }
@@ -2245,8 +2402,8 @@ mod tests {
         async fn interrupt_and_shutdown_wait_for_workspace_writes_before_ending() {
             with_pinned_home(async {
                 for (name, op, expected) in [
-                    ("interrupt", Op::Interrupt, TurnEnd::Cancelled),
-                    ("shutdown", Op::Shutdown, TurnEnd::Shutdown),
+                    ("interrupt", Op::Interrupt, OpEnd::Cancelled),
+                    ("shutdown", Op::Shutdown, OpEnd::Shutdown),
                 ] {
                     Box::pin(assert_workspace_writes_drained(name, op, expected)).await;
                 }
@@ -2462,7 +2619,7 @@ mod tests {
                         .submit_prompt("probe", None, &sink, &mut inert_mailbox())
                         .await;
 
-                    assert_eq!(end, TurnEnd::Completed, "{name}");
+                    assert_eq!(end, OpEnd::Completed, "{name}");
                     let fork = engine.session_id();
                     assert_ne!(fork, source, "{name}");
                     let sent: Vec<String> = server
@@ -2596,13 +2753,12 @@ mod tests {
                 Event::ToolCallStart(_) => "tool_call_start",
                 Event::ToolCallEnd(_) => "tool_call_end",
                 Event::PromptDrained(_) => "prompt_drained",
-                Event::TurnComplete => "turn_complete",
+                Event::OpEnded { .. } => "op_ended",
                 Event::TurnRolledBack => "turn_rolled_back",
                 Event::PromptUnsent => "prompt_unsent",
                 Event::TurnFailed(_) => "turn_failed",
                 Event::UsageUpdated(_) => "usage_updated",
                 Event::RateLimitsUpdated(_) => "rate_limits_updated",
-                Event::Cancelled => "cancelled",
                 Event::AutoCompactionStarted => "auto_compaction_started",
                 Event::AutoCompactionPaused { .. } => "auto_compaction_paused",
                 Event::AutoCompactionResumed => "auto_compaction_resumed",
@@ -2617,7 +2773,6 @@ mod tests {
                 Event::SessionResumed { .. } => "session_resumed",
                 Event::SessionForked { .. } => "session_forked",
                 Event::SessionCompacted { .. } => "session_compacted",
-                Event::SessionReady => "session_ready",
                 Event::ConfigChanged { .. } => "config_changed",
                 Event::ModeChanged(_) => "mode_changed",
                 Event::LoginStarted { .. } => "login_started",
@@ -2652,12 +2807,12 @@ mod tests {
                 let end = engine
                     .submit_prompt("first", None, &sink, &mut mailbox)
                     .await;
-                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(end, OpEnd::Completed);
                 "2000-01-01".clone_into(&mut engine.transcript.prompt_mut().seen.date);
                 let end = engine
                     .submit_prompt("second", None, &sink, &mut mailbox)
                     .await;
-                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(end, OpEnd::Completed);
 
                 let turns = request_bodies(&server).await;
                 assert_eq!(
@@ -2808,7 +2963,7 @@ mod tests {
                         failure.await;
                         end
                     };
-                    assert_eq!(end, TurnEnd::Completed, "{case}");
+                    assert_eq!(end, OpEnd::Completed, "{case}");
                     engine.emit_usage_update(&sink);
                     engine.finalize().await;
 
@@ -2858,7 +3013,7 @@ mod tests {
                     .submit_prompt("plan it", None, &sink, &mut mailbox)
                     .await;
 
-                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(end, OpEnd::Completed);
                 assert_eq!(engine.transcript.tasks, plan());
                 let events = sink.events();
                 let updated = events
@@ -2900,7 +3055,7 @@ mod tests {
                     .submit_prompt("plan it", None, &CapturingSink::default(), &mut mailbox)
                     .await;
 
-                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(end, OpEnd::Completed);
                 assert_eq!(server.received_requests().await.unwrap().len(), 3);
                 assert_eq!(engine.transcript.tasks, plan());
             })
@@ -2926,7 +3081,7 @@ mod tests {
                                 &mut inert_mailbox()
                             )
                             .await,
-                        TurnEnd::Failed
+                        OpEnd::Failed
                     );
                     if manual {
                         let renamed = original
@@ -2953,7 +3108,7 @@ mod tests {
                     let end = resumed
                         .submit_prompt("accepted", None, &sink, &mut inert_mailbox())
                         .await;
-                    assert_eq!(end, TurnEnd::Completed);
+                    assert_eq!(end, OpEnd::Completed);
                     if manual {
                         assert!(!resumed.usage.tracks_title_usage());
                     } else {
@@ -3004,7 +3159,7 @@ mod tests {
                     .submit_prompt("plan it", None, &CapturingSink::default(), &mut mailbox)
                     .await;
 
-                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(end, OpEnd::Failed);
                 assert_eq!(engine.transcript.tasks, plan());
             })
             .await;
@@ -3044,7 +3199,7 @@ mod tests {
                 let first = engine
                     .submit_prompt("first", None, &sink, &mut mailbox)
                     .await;
-                assert_eq!(first, TurnEnd::Completed);
+                assert_eq!(first, OpEnd::Completed);
                 "2000-01-01".clone_into(&mut engine.transcript.prompt_mut().seen.date);
                 let before_refusal = sink.events().len();
 
@@ -3058,7 +3213,7 @@ mod tests {
                     .submit_prompt("rephrased", None, &sink, &mut mailbox)
                     .await;
 
-                assert_eq!(refused, TurnEnd::Failed);
+                assert_eq!(refused, OpEnd::Failed);
                 let [
                     ..,
                     restored,
@@ -3084,7 +3239,7 @@ mod tests {
                 );
                 assert_eq!(tracked, [notes]);
                 assert_eq!(tasks, plan());
-                assert_eq!(rephrased, TurnEnd::Completed);
+                assert_eq!(rephrased, OpEnd::Completed);
                 let turns = request_bodies(&server).await;
                 let messages = turns.last().unwrap()["messages"].as_array().unwrap();
                 let [.., done, prompt] = &messages[..] else {
@@ -3135,8 +3290,8 @@ mod tests {
                     .submit_prompt("rephrased", None, &sink, &mut mailbox)
                     .await;
 
-                assert_eq!(refused, TurnEnd::Failed);
-                assert_eq!(rephrased, TurnEnd::Completed);
+                assert_eq!(refused, OpEnd::Failed);
+                assert_eq!(rephrased, OpEnd::Completed);
                 let turns = request_bodies(&server).await;
                 assert_eq!(texts(&turns[1]), [SESSION_CONTEXT, "rephrased"]);
             })
@@ -3163,7 +3318,7 @@ mod tests {
                     .submit_prompt("five", None, &sink, &mut mailbox)
                     .await;
 
-                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(end, OpEnd::Completed);
                 assert_eq!(
                     engine.usage.auto_compaction_failures,
                     AutoCompactFailures::default(),
@@ -3218,10 +3373,10 @@ mod tests {
                 };
                 assert_eq!(usage.context_tokens, None);
                 assert!((usage.estimated_cost_usd.unwrap() - (1.23 + 0.006)).abs() < 1e-12);
-                let completed = events
+                let replied = events
                     .iter()
-                    .position(|event| matches!(event, Event::TurnComplete));
-                assert!(compacted < completed.unwrap());
+                    .position(|event| matches!(event, Event::StreamToken(_)));
+                assert!(compacted < replied.unwrap());
             })
             .await;
         }
@@ -3256,7 +3411,7 @@ mod tests {
                 let first = engine
                     .submit_prompt("hello", None, &sink, &mut mailbox)
                     .await;
-                assert_eq!(first, TurnEnd::Completed);
+                assert_eq!(first, OpEnd::Completed);
                 assert_eq!(
                     engine.usage.context_estimate(),
                     1_000 + estimate::transcript_tokens(&engine.transcript.messages()[1..])
@@ -3264,11 +3419,11 @@ mod tests {
                 let rejected = engine
                     .submit_prompt(&oversized, None, &sink, &mut mailbox)
                     .await;
-                assert_eq!(rejected, TurnEnd::Failed);
+                assert_eq!(rejected, OpEnd::Failed);
                 let continued = engine
                     .submit_prompt("continue the investigation", None, &sink, &mut mailbox)
                     .await;
-                assert_eq!(continued, TurnEnd::Completed);
+                assert_eq!(continued, OpEnd::Completed);
 
                 let events = sink.events();
                 assert!(
@@ -3327,7 +3482,7 @@ mod tests {
                     .submit_prompt("five", None, &sink, &mut mailbox)
                     .await;
 
-                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(end, OpEnd::Failed);
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
                 assert_eq!(
                     engine.usage.auto_compaction_failures,
@@ -3376,15 +3531,15 @@ mod tests {
                 engine.transcript.set_messages(tool_heavy_transcript());
                 engine.usage.set_context_estimate(50_000);
                 let sink = CapturingSink::default();
-                let (ops_tx, mut ops) = mpsc::channel(1);
+                let (ops_tx, mut ops) = OpSender::channel(1);
                 let mut mailbox = Mailbox::new(&mut ops);
-                ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
+                ops_tx.try_submit(Op::SetMode(Mode::Plan)).unwrap();
 
                 let end = engine
                     .submit_prompt("five", None, &sink, &mut mailbox)
                     .await;
 
-                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(end, OpEnd::Failed);
                 assert_eq!(mailbox.take_mode(), Some(Mode::Plan));
             })
             .await;
@@ -3405,7 +3560,7 @@ mod tests {
                     .submit_prompt("hello", None, &sink, &mut mailbox)
                     .await;
 
-                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(end, OpEnd::Failed);
                 assert_eq!(engine.transcript.messages(), [] as [Message; 0]);
                 assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
                 let events = sink.events();
@@ -3436,7 +3591,7 @@ mod tests {
                     .submit_prompt("plan it", None, &sink, &mut inert_mailbox())
                     .await;
 
-                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(end, OpEnd::Completed);
                 let transcript = [mid_turn_summary(), Message::assistant("done")];
                 assert_eq!(engine.transcript.messages(), transcript);
                 let data = store.load_session_data(&engine.session_id()).unwrap();
@@ -3477,7 +3632,6 @@ mod tests {
                         "usage_updated",
                         "stream_token",
                         "usage_updated",
-                        "turn_complete",
                     ]
                 );
             })
@@ -3498,7 +3652,7 @@ mod tests {
                     .submit_prompt("plan it", None, &sink, &mut inert_mailbox())
                     .await;
 
-                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(end, OpEnd::Failed);
                 assert_eq!(request_bodies(&server).await.len(), 2);
                 assert_eq!(
                     engine.usage.auto_compaction_failures,
@@ -3548,12 +3702,12 @@ mod tests {
                 mount_delayed_reply_once(&server, "mid-turn summary", summary_delay).await;
                 mount_refusal_once(&server, 1_000).await;
                 let sink = CapturingSink::default();
-                let (ops_tx, mut ops) = mpsc::channel(1);
+                let (ops_tx, mut ops) = OpSender::channel(1);
                 let mut mailbox = Mailbox::new(&mut ops);
                 let queue = async {
                     until_requested(&server, 2).await;
                     let prompt = Op::Queue("also check the docs".to_owned());
-                    ops_tx.send(prompt).await.unwrap();
+                    ops_tx.submit(prompt).await.unwrap();
                 };
 
                 let (end, ()) = tokio::join!(
@@ -3561,7 +3715,7 @@ mod tests {
                     queue
                 );
 
-                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(end, OpEnd::Failed);
                 let requests = request_bodies(&server).await;
                 assert_eq!(
                     texts(&requests[2]).last(),
@@ -3621,7 +3775,7 @@ mod tests {
                     .submit_prompt("plan it", None, &sink, &mut inert_mailbox())
                     .await;
 
-                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(end, OpEnd::Completed);
                 assert_eq!(request_bodies(&server).await.len(), 2);
                 assert_eq!(
                     engine.transcript.messages().last(),
@@ -3640,8 +3794,8 @@ mod tests {
         async fn interrupt_or_shutdown_during_a_mid_turn_compaction_ends_on_the_marker() {
             with_pinned_home(async {
                 for (op, expected) in [
-                    (Op::Interrupt, TurnEnd::Cancelled),
-                    (Op::Shutdown, TurnEnd::Shutdown),
+                    (Op::Interrupt, OpEnd::Cancelled),
+                    (Op::Shutdown, OpEnd::Shutdown),
                 ] {
                     let server = MockServer::start().await;
                     let dir = tempfile::tempdir().unwrap();
@@ -3649,11 +3803,11 @@ mod tests {
                     let mut engine = mid_turn_engine(&server, &store, dir.path()).await;
                     mount_stalled_reply_once(&server).await;
                     let sink = CapturingSink::default();
-                    let (ops_tx, mut ops) = mpsc::channel(1);
+                    let (ops_tx, mut ops) = OpSender::channel(1);
                     let mut mailbox = Mailbox::new(&mut ops);
                     let stop = async {
                         until_requested(&server, 2).await;
-                        ops_tx.send(op).await.unwrap();
+                        ops_tx.submit(op).await.unwrap();
                     };
 
                     let (end, ()) = tokio::join!(
@@ -3696,7 +3850,7 @@ mod tests {
                     .submit_prompt("plan it", None, &sink, &mut inert_mailbox())
                     .await;
 
-                assert_eq!(end, TurnEnd::Completed, "{:?}", sink.events().last());
+                assert_eq!(end, OpEnd::Completed, "{:?}", sink.events().last());
                 assert_eq!(request_bodies(&server).await.len(), 5);
                 let summary = synthesize_post_compact_message(
                     "second summary",
@@ -3721,11 +3875,11 @@ mod tests {
                 let mut engine = mid_turn_engine(&server, &store, dir.path()).await;
                 mount_delayed_reply_once(&server, "   ", Duration::from_millis(200)).await;
                 let sink = CapturingSink::default();
-                let (ops_tx, mut ops) = mpsc::channel(1);
+                let (ops_tx, mut ops) = OpSender::channel(1);
                 let mut mailbox = Mailbox::new(&mut ops);
                 let switch = async {
                     until_requested(&server, 2).await;
-                    ops_tx.send(Op::SetMode(Mode::Plan)).await.unwrap();
+                    ops_tx.submit(Op::SetMode(Mode::Plan)).await.unwrap();
                 };
 
                 let (end, ()) = tokio::join!(
@@ -3733,7 +3887,7 @@ mod tests {
                     switch
                 );
 
-                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(end, OpEnd::Failed);
                 assert_eq!(mailbox.take_mode(), Some(Mode::Plan));
             })
             .await;
@@ -4083,24 +4237,21 @@ mod tests {
         use super::*;
 
         #[test]
-        fn shows_cancel_and_failure_but_keeps_shutdown_silent() {
+        fn reports_only_a_failures_cause() {
             let sink = CapturingSink::default();
 
-            assert_eq!(
-                report_abort(&sink, TurnAbort::Cancelled),
-                TurnEnd::Cancelled
-            );
-            assert_eq!(report_abort(&sink, TurnAbort::Shutdown), TurnEnd::Shutdown);
+            assert_eq!(report_abort(&sink, TurnAbort::Cancelled), OpEnd::Cancelled);
+            assert_eq!(report_abort(&sink, TurnAbort::Shutdown), OpEnd::Shutdown);
             assert_eq!(
                 report_abort(&sink, TurnAbort::Failed(anyhow!("boom"))),
-                TurnEnd::Failed
+                OpEnd::Failed
             );
 
             let events = sink.events();
             assert!(
                 matches!(
                     events.as_slice(),
-                    [Event::Cancelled, Event::TurnFailed(msg)] if msg == "boom"
+                    [Event::TurnFailed(msg)] if msg == "boom"
                 ),
                 "{events:?}",
             );
@@ -4111,17 +4262,14 @@ mod tests {
         use super::*;
 
         #[test]
-        fn hands_the_prompt_back_before_the_terminal_event_but_not_on_shutdown() {
+        fn hands_the_prompt_back_unless_the_engine_shuts_down() {
             let sink = CapturingSink::default();
 
-            assert_eq!(
-                report_unsent(&sink, TurnAbort::Cancelled),
-                TurnEnd::Cancelled
-            );
-            assert_eq!(report_unsent(&sink, TurnAbort::Shutdown), TurnEnd::Shutdown);
+            assert_eq!(report_unsent(&sink, TurnAbort::Cancelled), OpEnd::Cancelled);
+            assert_eq!(report_unsent(&sink, TurnAbort::Shutdown), OpEnd::Shutdown);
             assert_eq!(
                 report_unsent(&sink, TurnAbort::Failed(anyhow!("boom"))),
-                TurnEnd::Failed
+                OpEnd::Failed
             );
 
             let events = sink.events();
@@ -4130,7 +4278,6 @@ mod tests {
                     events.as_slice(),
                     [
                         Event::PromptUnsent,
-                        Event::Cancelled,
                         Event::PromptUnsent,
                         Event::TurnFailed(msg)
                     ] if msg == "boom"

@@ -17,7 +17,7 @@ use crate::client::anthropic::testing::{
 };
 use crate::config::testing::test_config;
 use crate::permission::Workspace;
-use crate::protocol::Event;
+use crate::protocol::{Event, OpEnd, OpSender, Submission};
 use crate::session::handle::{self, LoadedTranscript};
 use crate::session::store::SessionStore;
 use crate::tool::ToolRegistry;
@@ -53,12 +53,15 @@ pub async fn engine(base_url: String, store: &SessionStore, cwd: &Path) -> Engin
 /// An [`EngineHandle`] that ends each prompt at once and reports `failure` from shutdown, standing
 /// in for an engine whose session cannot be saved.
 pub fn unsaved_session_handle(failure: &str) -> EngineHandle {
-    let (ops, mut pending) = mpsc::channel(1);
+    let (ops, mut pending) = OpSender::channel(1);
     let (events, received) = mpsc::unbounded_channel();
     let failure = failure.to_owned();
     let task = tokio::spawn(async move {
-        while pending.recv().await.is_some() {
-            _ = events.send(Event::TurnComplete);
+        while let Some(Submission { id, .. }) = pending.recv().await {
+            _ = events.send(Event::OpEnded {
+                id,
+                end: OpEnd::Completed,
+            });
         }
         Some(failure)
     });
@@ -88,7 +91,7 @@ impl Engine {
 
 /// Handle to an engine whose task panicked with `engine bug`, closing both channels.
 pub fn panicked_engine() -> EngineHandle {
-    let (ops, _) = mpsc::channel(1);
+    let (ops, _) = OpSender::channel(1);
     let (_, events) = mpsc::unbounded_channel();
     EngineHandle {
         ops,

@@ -7,12 +7,11 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::Position;
-use tokio::sync::mpsc::OwnedPermit;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::debug;
 
 use ox_core::command::{self, Parsed};
-use ox_core::protocol::{Op, SignInCode};
+use ox_core::protocol::{Op, OpId, OpPermit, SignInCode};
 
 use super::operation::InFlight;
 use super::queue::{QueuedPrompt, SwitchTo};
@@ -265,7 +264,7 @@ impl App {
 
     /// Reserves delivery before applying the op's local state change, and drops an idle-only op
     /// with a chat error while another operation runs, since the engine would drop it silently. An
-    /// idle-only op stays in flight until its terminal event. Prompts reach the engine only through
+    /// idle-only op stays in flight until the engine ends it. Prompts reach the engine only through
     /// the prompt queue, by [`Self::start_turn`] and [`Self::forward_queued_prompts`].
     pub(super) fn dispatch_op(&mut self, op: Op) {
         if op == Op::Shutdown {
@@ -301,17 +300,18 @@ impl App {
             | Op::Logout
             | Op::Shutdown => {}
         }
-        self.begin(&op);
+        self.begin(&op, permit.id());
         let closed = self.modals.notify(EngineUpdate::Admitted(&op));
-        permit.send(op);
+        permit.submit(op);
         for action in closed.into_iter().flatten() {
             self.apply_modal_action(action);
         }
     }
 
-    /// Puts `op` in flight when it runs until a terminal event, which also closes an exit window.
-    fn begin(&mut self, op: &Op) {
-        if let Some(in_flight) = InFlight::new(op) {
+    /// Puts `op`, submitted as `id`, in flight when it runs until the engine ends it, which also
+    /// closes an exit window.
+    fn begin(&mut self, op: &Op, id: OpId) {
+        if let Some(in_flight) = InFlight::new(op, id) {
             self.in_flight = Some(in_flight);
             self.exit_armed = None;
         }
@@ -319,11 +319,11 @@ impl App {
 
     /// Reserves capacity for `op`. A full channel surfaces as a chat error block, and a closed
     /// channel quits. The permit keeps that capacity while local state changes.
-    fn reserve_op(&mut self, op: Op) -> Option<(OwnedPermit<Op>, Op)> {
-        let error = match self.ops.clone().try_reserve_owned() {
+    fn reserve_op(&mut self, op: Op) -> Option<(OpPermit, Op)> {
+        let error = match self.ops.try_reserve() {
             Ok(permit) => return Some((permit, op)),
-            Err(TrySendError::Full(_)) => TrySendError::Full(op),
-            Err(TrySendError::Closed(_)) => TrySendError::Closed(op),
+            Err(TrySendError::Full(())) => TrySendError::Full(op),
+            Err(TrySendError::Closed(())) => TrySendError::Closed(op),
         };
         self.surface_send_error(&error);
         None
@@ -475,8 +475,8 @@ impl App {
             self.chat.push_user_message(display);
         }
         self.queue.set_active(prompt);
-        self.begin(&op);
-        permit.send(op);
+        self.begin(&op, permit.id());
+        permit.submit(op);
         self.forward_queued_prompts();
     }
 
@@ -492,8 +492,8 @@ impl App {
             return;
         }
         while let Some(prompt) = self.queue.next_to_forward() {
-            match self.ops.try_send(Op::Queue(prompt)) {
-                Ok(()) => self.queue.mark_forwarded(),
+            match self.ops.try_submit(Op::Queue(prompt)) {
+                Ok(_) => self.queue.mark_forwarded(),
                 Err(TrySendError::Full(_)) => break,
                 Err(e) => {
                     self.surface_send_error(&e);
@@ -574,9 +574,9 @@ mod tests {
     use ox_core::model::Effort;
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
-    use ox_core::protocol::testing::{model_pick, text_result};
+    use ox_core::protocol::testing::{OpReceiver, model_pick, text_result};
     use ox_core::protocol::{
-        ApprovalDecision, CompactTrigger, ConfigPick, Event, ResumeTarget, SavedTarget,
+        ApprovalDecision, CompactTrigger, ConfigPick, Event, OpEnd, ResumeTarget, SavedTarget,
     };
     use ox_core::session::saved::{ArchiveUpdate, SavedAction, SavedError};
     use ox_core::session::store::listing::ArchiveState;
@@ -587,8 +587,8 @@ mod tests {
     use crate::app::operation::Activity;
     use crate::app::testing::{
         FakeModal, KeyLogModal, OP_CHANNEL_CAPACITY, activity, apply_next_app_event, cell_of,
-        copy_report, long_chat_block, push_answerable_approval, render_app, rendered_text,
-        start_op, test_app,
+        copy_report, end_op_with, long_chat_block, op_ended, push_answerable_approval, render_app,
+        rendered_text, start_op, test_app,
     };
     use crate::components::status::StatusHyperlink;
     use crate::modal::UpdateReply;
@@ -606,7 +606,7 @@ mod tests {
                 let op = Op::Rename {
                     title: format!("queued-{index}"),
                 };
-                app.ops.try_send(op.clone()).unwrap();
+                app.ops.try_submit(op.clone()).unwrap();
                 op
             })
             .collect()
@@ -1605,7 +1605,7 @@ mod tests {
 
                 app.handle_engine_event(Event::PromptDrained("next prompt".to_owned()));
                 app.handle_engine_event(Event::PromptDrained("retry prompt".to_owned()));
-                app.handle_engine_event(Event::TurnComplete);
+                app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
                 assert_eq!(activity(&app), None, "{command}");
                 assert_eq!(app.queue.active(), None, "{command}");
@@ -2158,7 +2158,7 @@ mod tests {
                 assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{command}");
 
                 app.handle_engine_event(swapped);
-                app.handle_engine_event(Event::SessionReady);
+                app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
                 assert_eq!(activity(&app), Some(&Activity::Streaming), "{command}");
                 assert_eq!(
@@ -2251,18 +2251,27 @@ mod tests {
             let started = r#"Admitted(SetArchive { target: Prefix("saved"), state: Archived })"#;
             assert_eq!(*observed.lock().unwrap(), [started]);
 
-            app.handle_engine_event(Event::ArchiveUpdated {
-                target: target.clone(),
-                state: ArchiveState::Archived,
-                result: Ok(ArchiveUpdate {
-                    id: "saved".to_owned(),
-                    changed: true,
-                }),
-            });
+            let ended = op_ended(&app, OpEnd::Completed);
+            let ended_update = format!("Event({ended:?})");
+            end_op_with(
+                &mut app,
+                Event::ArchiveUpdated {
+                    target: target.clone(),
+                    state: ArchiveState::Archived,
+                    result: Ok(ArchiveUpdate {
+                        id: "saved".to_owned(),
+                        changed: true,
+                    }),
+                },
+                OpEnd::Completed,
+            );
 
             assert_eq!(activity(&app), None);
             let completed = r#"Event(ArchiveUpdated { target: Prefix("saved"), state: Archived, result: Ok(ArchiveUpdate { id: "saved", changed: true }) })"#;
-            assert_eq!(*observed.lock().unwrap(), [started, completed]);
+            assert_eq!(
+                *observed.lock().unwrap(),
+                [started, completed, &ended_update]
+            );
             assert_eq!(
                 app.chat.last_system_text(),
                 Some(
@@ -2274,22 +2283,29 @@ mod tests {
             app.dispatch_op(op.clone());
             assert_eq!(rx.try_recv(), Ok(op));
             app.modals.clear();
-            app.handle_engine_event(Event::ArchiveUpdated {
-                target,
-                state: ArchiveState::Archived,
-                result: Err(SavedError::Failed {
-                    action: SavedAction::Archive,
-                    id: "saved".to_owned(),
-                    cause: "disk full".to_owned(),
-                }),
-            });
+            end_op_with(
+                &mut app,
+                Event::ArchiveUpdated {
+                    target,
+                    state: ArchiveState::Archived,
+                    result: Err(SavedError::Failed {
+                        action: SavedAction::Archive,
+                        id: "saved".to_owned(),
+                        cause: "disk full".to_owned(),
+                    }),
+                },
+                OpEnd::Failed,
+            );
 
             assert_eq!(activity(&app), None);
             assert_eq!(
                 app.chat.last_error_text(),
                 Some("/archive: Failed to archive session saved: disk full")
             );
-            assert_eq!(*observed.lock().unwrap(), [started, completed, started]);
+            assert_eq!(
+                *observed.lock().unwrap(),
+                [started, completed, &ended_update, started]
+            );
         }
 
         #[test]
@@ -2668,11 +2684,7 @@ mod tests {
         use super::*;
 
         /// An app signing in, with the `Login` op already taken off `rx`.
-        fn signing_in() -> (
-            App,
-            tokio::sync::mpsc::Receiver<Op>,
-            tokio::sync::mpsc::UnboundedSender<Event>,
-        ) {
+        fn signing_in() -> (App, OpReceiver, tokio::sync::mpsc::UnboundedSender<Event>) {
             let (mut app, mut rx, event_tx) = test_app(None);
             app.dispatch_op(Op::Login);
             rx.try_recv().expect("login forwarded");
@@ -2785,7 +2797,7 @@ mod tests {
             app.dispatch_action(Action::Submit("active".to_owned()));
             app.dispatch_action(Action::Submit("held".to_owned()));
             app.handle_esc();
-            app.handle_engine_event(Event::Cancelled);
+            app.handle_engine_event(op_ended(&app, OpEnd::Cancelled));
             let mut forwarded = || std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
             assert_eq!(
                 forwarded(),
@@ -2831,7 +2843,7 @@ mod tests {
                 "the queue keeps the typed escape so Esc restores it",
             );
 
-            app.handle_engine_event(Event::Cancelled);
+            app.handle_engine_event(op_ended(&app, OpEnd::Cancelled));
             app.dispatch_action(Action::Submit("new".to_owned()));
 
             assert_eq!(
@@ -2849,7 +2861,7 @@ mod tests {
         fn keeps_a_prompt_the_full_channel_turned_away_queued() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
-            while app.ops.try_send(Op::Interrupt).is_ok() {}
+            while app.ops.try_submit(Op::Interrupt).is_ok() {}
             let entries_before = app.chat.entry_count();
 
             app.dispatch_action(Action::Submit("a".to_owned()));
@@ -2863,7 +2875,7 @@ mod tests {
         fn resends_a_prompt_the_full_channel_turned_away() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
-            while app.ops.try_send(Op::Interrupt).is_ok() {}
+            while app.ops.try_submit(Op::Interrupt).is_ok() {}
             app.dispatch_action(Action::Submit("a".to_owned()));
             while rx.try_recv().is_ok() {}
 
@@ -2875,7 +2887,7 @@ mod tests {
                 }
                 sent.push(op);
             }
-            app.handle_engine_event(Event::TurnComplete);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
             sent.extend(std::iter::from_fn(|| rx.try_recv().ok()));
 
             assert_eq!(sent, [Op::Queue("a".to_owned()), Op::Queue("b".to_owned())]);

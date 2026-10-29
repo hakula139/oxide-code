@@ -15,7 +15,7 @@ Each page covers one topic, and [`docs/research/`](../research/) holds the API r
 
 | Document                    | Description                                                           |
 | --------------------------- | --------------------------------------------------------------------- |
-| [Engine](engine.md)         | `Op` / `Event` contract, terminal events, turn pipeline               |
+| [Engine](engine.md)         | `Op` / `Event` contract, operation ends, turn pipeline                |
 | [System Prompt](prompt.md)  | Static sections, environment, user context, tool descriptions         |
 | [Compaction](compaction.md) | Manual and automatic compaction, threshold, summarizer, failure reset |
 

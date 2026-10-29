@@ -15,7 +15,7 @@ use tracing::debug;
 
 use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::{
-    ApprovalDecision, Event, Op, ToolCall, ToolResult, TurnEnd, UsageSnapshot, notice,
+    ApprovalDecision, Event, Op, OpEnd, OpSender, ToolCall, ToolResult, UsageSnapshot, notice,
 };
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use ox_core::session::store::listing::ArchiveState;
@@ -30,9 +30,9 @@ use super::Shutdown;
 
 /// How [`run_op`] returned.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum OpEnd {
+pub(super) enum RunEnd {
     /// The op ended this way.
-    Ended(TurnEnd),
+    Ended(OpEnd),
     /// The engine stopped before the op ended.
     EngineStopped,
     /// A signal stopped the run.
@@ -51,15 +51,16 @@ pub(super) enum OpEnd {
 /// since the loop starts a new one for every event.
 pub(super) async fn run_op<O: Write, E: Write, A: Approver>(
     events: &mut mpsc::UnboundedReceiver<Event>,
-    ops: &mpsc::Sender<Op>,
+    ops: &OpSender,
     output: &mut Output<O, E>,
     signal: &mut impl AsyncFnMut() -> Shutdown,
     op: Op,
     mut approver: Option<&mut A>,
-) -> OpEnd {
+) -> RunEnd {
     let attended = approver.is_some();
-    // A send fails only once the engine has stopped, which the next `recv` reports.
-    _ = ops.send(op.clone()).await;
+    let Ok(op_id) = ops.submit(op).await else {
+        return RunEnd::EngineStopped;
+    };
     let mut held = VecDeque::new();
     let mut interrupted = false;
     loop {
@@ -77,7 +78,7 @@ pub(super) async fn run_op<O: Write, E: Write, A: Approver>(
                 }
                 event = events.recv() => match event {
                     Some(event) => event,
-                    None => return OpEnd::EngineStopped,
+                    None => return RunEnd::EngineStopped,
                 },
             }
         };
@@ -88,14 +89,14 @@ pub(super) async fn run_op<O: Write, E: Write, A: Approver>(
             grant,
         } = event
         else {
-            let end = TurnEnd::of(&op, &event);
+            let end = event.end_of(op_id);
             output.render(event);
             if let Some(end) = end {
-                return OpEnd::Ended(end);
+                return RunEnd::Ended(end);
             }
             if output.stdout_lost() && !interrupted {
                 interrupted = true;
-                _ = ops.send(Op::Interrupt).await;
+                _ = ops.submit(Op::Interrupt).await;
             }
             continue;
         };
@@ -111,9 +112,9 @@ pub(super) async fn run_op<O: Write, E: Write, A: Approver>(
                 decision = &mut decision => break Some(decision),
                 event = events.recv() => {
                     let Some(event) = event else {
-                        return OpEnd::EngineStopped;
+                        return RunEnd::EngineStopped;
                     };
-                    let ends = TurnEnd::of(&op, &event).is_some();
+                    let ends = event.end_of(op_id).is_some();
                     held.push_back(event);
                     if ends {
                         break None;
@@ -132,7 +133,7 @@ pub(super) async fn run_op<O: Write, E: Write, A: Approver>(
                 output.record(Err(error));
                 ApprovalDecision::Abort
             });
-            _ = ops.send(Op::Resolve { id, decision }).await;
+            _ = ops.submit(Op::Resolve { id, decision }).await;
         }
     }
 }
@@ -141,16 +142,16 @@ pub(super) async fn run_op<O: Write, E: Write, A: Approver>(
 /// in an attended run has interrupted the op, which keeps rendering until the op ends.
 async fn on_signal<O: Write, E: Write>(
     output: &mut Output<O, E>,
-    ops: &mpsc::Sender<Op>,
+    ops: &OpSender,
     attended: bool,
     shutdown: Shutdown,
-) -> Option<OpEnd> {
+) -> Option<RunEnd> {
     output.break_line();
     if attended && shutdown == Shutdown::Interrupt {
-        _ = ops.send(Op::Interrupt).await;
+        _ = ops.submit(Op::Interrupt).await;
         return None;
     }
-    Some(OpEnd::Signal(shutdown))
+    Some(RunEnd::Signal(shutdown))
 }
 
 /// How a stdio frontend answers an approval request.
@@ -287,7 +288,7 @@ impl<O: Write, E: Write> Output<O, E> {
 
     /// Prints the result that ends a JSON run, or ends the reply line a text run left open.
     /// `session_id` names the session the run started in.
-    pub(super) fn print_result(&mut self, stop_reason: TurnEnd, session_id: &str) {
+    pub(super) fn print_result(&mut self, stop_reason: OpEnd, session_id: &str) {
         let result = if self.format == OutputFormat::Text {
             self.text.end_line(&mut self.stdout).map_err(Into::into)
         } else {
@@ -302,7 +303,7 @@ impl<O: Write, E: Write> Output<O, E> {
                 stop_reason,
                 error: error.as_deref(),
                 session_write_error: session_write_error.as_deref(),
-                message: (stop_reason == TurnEnd::Completed).then_some(message.as_str()),
+                message: (stop_reason == OpEnd::Completed).then_some(message.as_str()),
                 usage: usage.as_ref(),
                 session_id: forked_to.as_deref().unwrap_or(session_id),
             });
@@ -486,7 +487,7 @@ impl TextState {
             }
             Event::ConfigChanged { notice, .. } => writeln!(stderr, "{notice}")?,
             Event::ModeChanged(mode) => writeln!(stderr, "{}", notice::mode_changed(mode))?,
-            // TUI-only events and the `SessionReady` marker have no stdio surface to update.
+            // TUI-only events have no stdio surface to update.
             Event::PromptDrained(_)
             | Event::TurnRolledBack
             | Event::PromptUnsent
@@ -505,10 +506,12 @@ impl TextState {
             | Event::SavedFound(_)
             | Event::SavedDeleted { .. }
             | Event::SessionRulesUpdated(_)
-            | Event::BackgroundShellsUpdated(_)
-            | Event::SessionReady => {}
-            Event::TurnComplete => self.end_line(stdout)?,
-            Event::Cancelled => self.end_reply_then(stdout, stderr, INTERRUPTED_MARKER)?,
+            | Event::BackgroundShellsUpdated(_) => {}
+            Event::OpEnded {
+                end: OpEnd::Cancelled,
+                ..
+            } => self.end_reply_then(stdout, stderr, INTERRUPTED_MARKER)?,
+            Event::OpEnded { .. } => self.end_line(stdout)?,
             Event::Retrying(msg) | Event::Notice(msg) => {
                 writeln!(stderr, "{}", escape_controls(&msg))?;
             }
@@ -645,7 +648,7 @@ mod tests {
     use ox_core::model::{Effort, ModelSpec};
     use ox_core::permission::Mode;
     use ox_core::permission::testing::exec_grant;
-    use ox_core::protocol::testing::{ls_call, text_result};
+    use ox_core::protocol::testing::{OpReceiver, ls_call, op_channel, op_id, text_result};
     use ox_core::protocol::{CompactTrigger, ConfigPick, SavedTarget};
     use ox_core::session::saved::{SavedAction, SavedError};
     use ox_core::session::store::testing::test_store;
@@ -659,6 +662,11 @@ mod tests {
     use crate::driver::testing::{
         ClosedPipe, FailingWriter, Failure, Screen, no_signal, output, result_data,
     };
+
+    /// The end of the first op a fresh [`OpSender`] submits.
+    fn op_ended(end: OpEnd) -> Event {
+        Event::OpEnded { id: op_id(0), end }
+    }
 
     mod run_op {
         use super::*;
@@ -727,8 +735,16 @@ mod tests {
             (tx, rx)
         }
 
+        /// The end of an op submitted after the one under test.
+        fn later_op_ended() -> Event {
+            Event::OpEnded {
+                id: op_id(9),
+                end: OpEnd::Completed,
+            }
+        }
+
         /// Every op sent on `ops` so far.
-        fn sent(ops: &mut mpsc::Receiver<Op>) -> Vec<Op> {
+        fn sent(ops: &mut OpReceiver) -> Vec<Op> {
             std::iter::from_fn(|| ops.try_recv().ok()).collect()
         }
 
@@ -737,9 +753,9 @@ mod tests {
             let (_tx, mut events) = queued([
                 approval(Some(exec_grant("ls"))),
                 Event::Notice("Done.".to_owned()),
-                Event::TurnComplete,
+                op_ended(OpEnd::Completed),
             ]);
-            let (ops_tx, mut ops) = mpsc::channel(4);
+            let (ops_tx, mut ops) = op_channel(4);
             let (mut output, _, stderr) = output(OutputFormat::Text);
             let mut approver = fixed(ApprovalDecision::Deny);
 
@@ -753,7 +769,7 @@ mod tests {
             )
             .await;
 
-            assert_eq!(end, OpEnd::Ended(TurnEnd::Completed));
+            assert_eq!(end, RunEnd::Ended(OpEnd::Completed));
             assert_eq!(
                 approver.offered,
                 [("Bash".to_owned(), Some("ls".to_owned()))],
@@ -776,9 +792,9 @@ mod tests {
             let (_tx, mut events) = queued([
                 approval(None),
                 Event::ModeChanged(Mode::Plan),
-                Event::Cancelled,
+                op_ended(OpEnd::Cancelled),
             ]);
-            let (ops_tx, mut ops) = mpsc::channel(4);
+            let (ops_tx, mut ops) = op_channel(4);
             let (mut output, _, stderr) = output(OutputFormat::Text);
 
             let end = run_op(
@@ -791,7 +807,7 @@ mod tests {
             )
             .await;
 
-            assert_eq!(end, OpEnd::Ended(TurnEnd::Cancelled));
+            assert_eq!(end, RunEnd::Ended(OpEnd::Cancelled));
             assert_eq!(
                 stderr.text(),
                 format!("Switched to plan mode\n{INTERRUPTED_MARKER}\n"),
@@ -824,9 +840,9 @@ mod tests {
             let (_tx, mut events) = queued([
                 approval(None),
                 Event::ModeChanged(Mode::Plan),
-                Event::TurnComplete,
+                op_ended(OpEnd::Completed),
             ]);
-            let (ops, _ops_rx) = mpsc::channel(4);
+            let (ops, _ops_rx) = op_channel(4);
             let (mut output, _, stderr) = output(OutputFormat::Text);
             let mut approver = Watching {
                 screen: stderr.clone(),
@@ -843,19 +859,19 @@ mod tests {
             )
             .await;
 
-            assert_eq!(end, OpEnd::Ended(TurnEnd::Completed));
+            assert_eq!(end, RunEnd::Ended(OpEnd::Completed));
             assert_eq!(approver.rendered.as_deref(), Some(""));
             assert_eq!(stderr.text(), "Switched to plan mode\n");
         }
 
         #[tokio::test]
-        async fn stops_at_the_terminal_event_even_when_rendering_fails() {
+        async fn stops_at_its_ops_end_even_when_rendering_fails() {
             let (_tx, mut events) = queued([
                 Event::StreamToken("reply".to_owned()),
-                Event::Cancelled,
-                Event::TurnComplete,
+                op_ended(OpEnd::Cancelled),
+                later_op_ended(),
             ]);
-            let (ops, _ops_rx) = mpsc::channel(4);
+            let (ops, _ops_rx) = op_channel(4);
             let failure = Failure::Write("reply");
             let mut output = Output::new(
                 OutputFormat::Text,
@@ -875,13 +891,13 @@ mod tests {
             )
             .await;
 
-            assert_eq!(end, OpEnd::Ended(TurnEnd::Cancelled));
-            assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
+            assert_eq!(end, RunEnd::Ended(OpEnd::Cancelled));
+            assert_eq!(events.try_recv().ok(), Some(later_op_ended()));
             assert_eq!(output.finish().unwrap_err().to_string(), failure.message());
         }
 
         #[tokio::test]
-        async fn aborts_an_approval_with_failed_output_and_drains_its_terminal_event() {
+        async fn aborts_an_approval_with_failed_output_and_drains_its_ops_end() {
             struct LostPrompt;
 
             impl Approver for LostPrompt {
@@ -898,10 +914,10 @@ mod tests {
             let (_tx, mut events) = queued([
                 approval(Some(exec_grant("ls"))),
                 Event::StreamToken("later output".to_owned()),
-                Event::Cancelled,
-                Event::TurnComplete,
+                op_ended(OpEnd::Cancelled),
+                later_op_ended(),
             ]);
-            let (ops_tx, mut ops) = mpsc::channel(4);
+            let (ops_tx, mut ops) = op_channel(4);
             let (mut output, stdout, stderr) = output(OutputFormat::Text);
 
             let end = run_op(
@@ -914,7 +930,7 @@ mod tests {
             )
             .await;
 
-            assert_eq!(end, OpEnd::Ended(TurnEnd::Cancelled));
+            assert_eq!(end, RunEnd::Ended(OpEnd::Cancelled));
             assert_eq!(
                 sent(&mut ops),
                 [
@@ -927,7 +943,7 @@ mod tests {
             );
             assert_eq!(stdout.text(), "later output\n");
             assert_eq!(stderr.text(), format!("{INTERRUPTED_MARKER}\n"));
-            assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
+            assert_eq!(events.try_recv().ok(), Some(later_op_ended()));
             assert_eq!(
                 output.finish().unwrap_err().to_string(),
                 "lost approval prompt"
@@ -935,18 +951,22 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn waits_for_the_terminal_event_of_its_own_op() {
+        async fn waits_for_the_end_of_its_own_op() {
             let (tx, mut events) = queued([
                 Event::SessionRolled {
                     id: "next-session".to_owned(),
                     old_session: ArchiveState::Active,
                 },
+                Event::OpEnded {
+                    id: op_id(9),
+                    end: OpEnd::Failed,
+                },
                 Event::Error("Previous session write failed: disk full".to_owned()),
-                Event::SessionReady,
-                Event::TurnComplete,
+                op_ended(OpEnd::Completed),
+                later_op_ended(),
             ]);
             drop(tx);
-            let (ops, _ops_rx) = mpsc::channel(4);
+            let (ops, _ops_rx) = op_channel(4);
             let (mut output, _, stderr) = output(OutputFormat::Text);
             let mut approver = fixed(ApprovalDecision::Deny);
 
@@ -960,7 +980,7 @@ mod tests {
             )
             .await;
 
-            assert_eq!(end, OpEnd::Ended(TurnEnd::Completed));
+            assert_eq!(end, RunEnd::Ended(OpEnd::Completed));
             assert_eq!(
                 stderr.text(),
                 indoc! {"
@@ -968,7 +988,7 @@ mod tests {
                     Error: Previous session write failed: disk full
                 "},
             );
-            assert_eq!(events.try_recv().ok(), Some(Event::TurnComplete));
+            assert_eq!(events.try_recv().ok(), Some(later_op_ended()));
         }
 
         #[tokio::test]
@@ -993,7 +1013,7 @@ mod tests {
                 )
                 .await;
 
-                assert_eq!(end, OpEnd::Ended(TurnEnd::Completed));
+                assert_eq!(end, RunEnd::Ended(OpEnd::Completed));
                 let stderr = stderr.text();
                 let lines: Vec<&str> = stderr.lines().collect();
                 let [rolled, warning] = lines[..] else {
@@ -1022,7 +1042,7 @@ mod tests {
                 };
                 let (tx, mut events) = queued([pending]);
                 drop(tx);
-                let (ops, _ops_rx) = mpsc::channel(4);
+                let (ops, _ops_rx) = op_channel(4);
                 let (mut output, stdout, _) = output(OutputFormat::Text);
 
                 let end = run_op(
@@ -1035,7 +1055,7 @@ mod tests {
                 )
                 .await;
 
-                assert_eq!(end, OpEnd::EngineStopped, "held: {held}");
+                assert_eq!(end, RunEnd::EngineStopped, "held: {held}");
                 let expected = if held { "" } else { "partial" };
                 assert_eq!(stdout.text(), expected, "held: {held}");
             }
@@ -1070,9 +1090,9 @@ mod tests {
                     Event::StreamToken("first".to_owned()),
                     Event::Notice("Reading.".to_owned()),
                     Event::StreamToken("second".to_owned()),
-                    Event::TurnComplete,
+                    op_ended(OpEnd::Completed),
                 ]);
-                let (ops_tx, mut ops) = mpsc::channel(4);
+                let (ops_tx, mut ops) = op_channel(4);
                 let mut output = Output::new(OutputFormat::StreamJson, false, stdout, stderr);
 
                 let end = run_op(
@@ -1085,7 +1105,7 @@ mod tests {
                 )
                 .await;
 
-                assert_eq!(end, OpEnd::Ended(TurnEnd::Completed), "{case}");
+                assert_eq!(end, RunEnd::Ended(OpEnd::Completed), "{case}");
                 let expected = if interrupts {
                     vec![prompt(), Op::Interrupt]
                 } else {
@@ -1099,21 +1119,21 @@ mod tests {
         #[tokio::test]
         async fn sigint_interrupts_an_attended_op_and_other_signals_stop_the_run() {
             for (attended, signal, ends) in [
-                (true, Shutdown::Interrupt, OpEnd::Ended(TurnEnd::Cancelled)),
+                (true, Shutdown::Interrupt, RunEnd::Ended(OpEnd::Cancelled)),
                 (
                     false,
                     Shutdown::Interrupt,
-                    OpEnd::Signal(Shutdown::Interrupt),
+                    RunEnd::Signal(Shutdown::Interrupt),
                 ),
                 #[cfg(unix)]
                 (
                     true,
                     Shutdown::Terminate,
-                    OpEnd::Signal(Shutdown::Terminate),
+                    RunEnd::Signal(Shutdown::Terminate),
                 ),
             ] {
                 let (tx, mut events) = queued([Event::StreamToken("partial".to_owned())]);
-                let (ops_tx, mut ops) = mpsc::channel(4);
+                let (ops_tx, mut ops) = op_channel(4);
                 let (mut output, stdout, stderr) = output(OutputFormat::Text);
                 let mut fired = false;
                 let mut once = async || {
@@ -1122,7 +1142,7 @@ mod tests {
                     }
                     tokio::task::yield_now().await;
                     fired = true;
-                    tx.send(Event::Cancelled).unwrap();
+                    tx.send(op_ended(OpEnd::Cancelled)).unwrap();
                     signal
                 };
                 let mut approver = fixed(ApprovalDecision::Deny);
@@ -1138,7 +1158,7 @@ mod tests {
                 .await;
 
                 assert_eq!(end, ends, "{attended}, {signal:?}");
-                let interrupts = matches!(end, OpEnd::Ended(_));
+                let interrupts = matches!(end, RunEnd::Ended(_));
                 let expected = if interrupts {
                     vec![prompt(), Op::Interrupt]
                 } else {
@@ -1158,7 +1178,7 @@ mod tests {
         #[tokio::test]
         async fn sigint_during_an_approval_drops_the_question() {
             let (tx, mut events) = queued([approval(None)]);
-            let (ops_tx, mut ops) = mpsc::channel(4);
+            let (ops_tx, mut ops) = op_channel(4);
             let (mut output, _, stderr) = output(OutputFormat::Text);
             let mut fired = false;
             let mut once = async || {
@@ -1167,7 +1187,7 @@ mod tests {
                 }
                 tokio::task::yield_now().await;
                 fired = true;
-                tx.send(Event::Cancelled).unwrap();
+                tx.send(op_ended(OpEnd::Cancelled)).unwrap();
                 Shutdown::Interrupt
             };
 
@@ -1181,7 +1201,7 @@ mod tests {
             )
             .await;
 
-            assert_eq!(end, OpEnd::Ended(TurnEnd::Cancelled));
+            assert_eq!(end, RunEnd::Ended(OpEnd::Cancelled));
             assert_eq!(sent(&mut ops), [prompt(), Op::Interrupt]);
             assert_eq!(stderr.text(), format!("\n{INTERRUPTED_MARKER}\n"));
         }
@@ -1190,7 +1210,7 @@ mod tests {
         #[tokio::test]
         async fn sigterm_during_an_approval_stops_the_run() {
             let (_tx, mut events) = queued([approval(None)]);
-            let (ops_tx, mut ops) = mpsc::channel(4);
+            let (ops_tx, mut ops) = op_channel(4);
             let (mut output, _, stderr) = output(OutputFormat::Text);
             let mut signal = async || {
                 tokio::task::yield_now().await;
@@ -1207,7 +1227,7 @@ mod tests {
             )
             .await;
 
-            assert_eq!(end, OpEnd::Signal(Shutdown::Terminate));
+            assert_eq!(end, RunEnd::Signal(Shutdown::Terminate));
             assert_eq!(sent(&mut ops), [prompt()]);
             assert_eq!(stderr.text(), "\n");
         }
@@ -1244,11 +1264,11 @@ mod tests {
                             Event::StreamToken("lost".to_owned()),
                             Event::StreamToken("reply".to_owned()),
                             Event::Error("boom".to_owned()),
-                            Event::TurnComplete,
+                            op_ended(OpEnd::Completed),
                         ] {
                             output.render(event);
                         }
-                        output.print_result(TurnEnd::Completed, "session-1");
+                        output.print_result(OpEnd::Completed, "session-1");
 
                         assert_eq!(
                             output.finish().unwrap_err().to_string(),
@@ -1309,7 +1329,7 @@ mod tests {
                 output.render(Event::StreamToken("reply".to_owned()));
 
                 output.session_write_error("disk full");
-                output.print_result(TurnEnd::Completed, "session-1");
+                output.print_result(OpEnd::Completed, "session-1");
 
                 output.finish().unwrap();
                 assert_eq!(stderr.text(), "Error: Session write failed: disk full\n");
@@ -1329,7 +1349,7 @@ mod tests {
                 output.render(Event::StreamToken("partial".to_owned()));
 
                 output.break_line();
-                output.print_result(TurnEnd::Shutdown, "session-1");
+                output.print_result(OpEnd::Shutdown, "session-1");
 
                 output.finish().unwrap();
                 assert_eq!(
@@ -1388,12 +1408,12 @@ mod tests {
                     Event::StreamToken("Found ".to_owned()),
                     Event::StreamToken("it.".to_owned()),
                     Event::UsageUpdated(usage(2_000)),
-                    Event::TurnComplete,
+                    op_ended(OpEnd::Completed),
                 ] {
                     output.render(event);
                 }
 
-                output.print_result(TurnEnd::Completed, "session-1");
+                output.print_result(OpEnd::Completed, "session-1");
 
                 output.finish().unwrap();
                 let stdout = stdout.text();
@@ -1423,7 +1443,7 @@ mod tests {
                     from: "session-1".to_owned(),
                 });
 
-                output.print_result(TurnEnd::Completed, "session-1");
+                output.print_result(OpEnd::Completed, "session-1");
 
                 output.finish().unwrap();
                 let stdout = stdout.text();
@@ -1440,8 +1460,8 @@ mod tests {
                 let (mut output, stdout, stderr) = output(OutputFormat::Text);
                 output.render(Event::StreamToken("partial reply".to_owned()));
 
-                output.print_result(TurnEnd::Shutdown, "session-1");
-                output.print_result(TurnEnd::Shutdown, "session-1");
+                output.print_result(OpEnd::Shutdown, "session-1");
+                output.print_result(OpEnd::Shutdown, "session-1");
 
                 output.finish().unwrap();
                 assert_eq!(
@@ -1868,33 +1888,35 @@ mod tests {
             }
 
             #[test]
-            fn turn_complete_ends_the_open_reply_line_once() {
+            fn a_completed_end_closes_the_open_reply_line_once() {
                 let mut state = TextState::new(true);
                 render_one(&mut state, Event::ThinkingToken("plan".to_owned()));
 
-                let ended = render_one(&mut state, Event::TurnComplete);
-                let again = render_one(&mut state, Event::TurnComplete);
+                let ended = render_one(&mut state, op_ended(OpEnd::Completed));
+                let again = render_one(&mut state, op_ended(OpEnd::Completed));
 
                 assert_eq!(ended, ("\n".to_owned(), String::new()));
                 assert_eq!(again, (String::new(), String::new()));
             }
 
             #[test]
-            fn turn_complete_leaves_a_closed_reply_line_alone() {
+            fn a_completed_end_leaves_a_closed_reply_line_alone() {
                 let mut state = TextState::new(false);
                 render_one(&mut state, Event::StreamToken("Done.\n".to_owned()));
                 render_one(&mut state, Event::StreamToken(String::new()));
 
                 assert_eq!(
-                    render_one(&mut state, Event::TurnComplete),
+                    render_one(&mut state, op_ended(OpEnd::Completed)),
                     (String::new(), String::new()),
                 );
             }
 
             #[test]
             fn cancelled_ends_the_reply_line_before_the_marker() {
-                let screen =
-                    render_on_screen([Event::StreamToken("partial".to_owned()), Event::Cancelled]);
+                let screen = render_on_screen([
+                    Event::StreamToken("partial".to_owned()),
+                    op_ended(OpEnd::Cancelled),
+                ]);
 
                 assert_eq!(screen, format!("partial\n{INTERRUPTED_MARKER}\n"));
             }
@@ -1981,7 +2003,11 @@ mod tests {
                     .break_line(&mut screen.clone(), &mut screen.clone())
                     .expect("break_line returns Ok");
                 state
-                    .render(Event::Cancelled, &mut screen.clone(), &mut screen.clone())
+                    .render(
+                        op_ended(OpEnd::Cancelled),
+                        &mut screen.clone(),
+                        &mut screen.clone(),
+                    )
                     .expect("render returns Ok");
 
                 assert_eq!(screen.text(), format!("partial\n{INTERRUPTED_MARKER}\n"));

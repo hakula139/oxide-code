@@ -303,8 +303,8 @@ mod tests {
     use ox_core::config::StatusLineSegment;
     use ox_core::permission::testing::exec_grant;
     use ox_core::permission::{Basis, Mode};
-    use ox_core::protocol::testing::{ls_call, text_result};
-    use ox_core::protocol::{ApprovalDecision, CompactTrigger, Event, Op};
+    use ox_core::protocol::testing::{OpReceiver, ls_call, text_result};
+    use ox_core::protocol::{ApprovalDecision, CompactTrigger, Event, Op, OpEnd};
     use ox_core::tool::tasks::testing::plan;
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
@@ -312,8 +312,8 @@ mod tests {
     use crate::action::Action;
     use crate::app::CopyNotice;
     use crate::app::testing::{
-        FakeModal, cell_of, five_hour_limit, long_chat_block, push_answerable_approval, render_app,
-        rendered_text, start_op, test_app,
+        FakeModal, cell_of, end_op_with, five_hour_limit, long_chat_block, op_ended,
+        push_answerable_approval, render_app, rendered_text, start_op, test_app,
     };
     use crate::clipboard::CopyError;
     use crate::components::status::StatusBar;
@@ -542,7 +542,7 @@ mod tests {
         "};
 
         /// An app running `/compact` on a short exchange, its summary streamed to the last bullet.
-        fn app_streaming_a_summary() -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
+        fn app_streaming_a_summary() -> (App, OpReceiver, mpsc::UnboundedSender<Event>) {
             let (mut app, rx, event_tx) = test_app(None);
             app.chat.push_user_message("Fix the login bug.".to_owned());
             app.chat.append_stream_token("Fixed the token refresh.");
@@ -894,7 +894,7 @@ mod tests {
                 instructions: None,
                 trigger: CompactTrigger::Manual,
             });
-            app.handle_engine_event(Event::SessionReady);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             insta::assert_snapshot!(render_app(&mut app, 60, 16));
         }
@@ -904,7 +904,7 @@ mod tests {
             let (mut app, _rx, _event_tx) = app_streaming_a_summary();
 
             app.handle_engine_event(Event::SummaryDiscarded);
-            app.handle_engine_event(Event::Cancelled);
+            app.handle_engine_event(op_ended(&app, OpEnd::Cancelled));
 
             insta::assert_snapshot!(render_app(&mut app, 60, 16));
         }
@@ -914,10 +914,11 @@ mod tests {
             let (mut app, _rx, _event_tx) = app_streaming_a_summary();
 
             app.handle_engine_event(Event::SummaryDiscarded);
-            app.handle_engine_event(Event::TurnFailed(
+            let failed = Event::TurnFailed(
                 "Compaction failed: the summary hit the max_tokens output limit before it finished"
                     .to_owned(),
-            ));
+            );
+            end_op_with(&mut app, failed, OpEnd::Failed);
 
             let text = rendered_text(&mut app, 60, 16);
             assert!(

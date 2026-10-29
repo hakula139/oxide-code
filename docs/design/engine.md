@@ -10,13 +10,15 @@ An `Op` is one of three kinds:
 - **A session operation.** `Compact`, `Clear`, `Archive`, `Resume`, and `Rename` change the session, `SetArchive`, `FindSaved`, and `DeleteSaved` look up or change a saved one, and `SetModel` and `SetMode` change the settings the next turn uses.
 - **Sign-in and shutdown.** `Login`, `LoginCode`, and `Logout` manage the oxide-code login, and `Shutdown` ends the process.
 
-`Op::is_idle_only` names the ops that require an idle engine. A frontend waits for the preceding operation's terminal event before sending one, and the engine drops an idle-only op that arrives during another operation without a terminal event, since the frontend still owns it. The other ops act on the operation in flight, so they arrive on the same channel and race the running stream and tool futures in one biased `select!`.
+A frontend submits each op through its `OpSender`, which hands back the `OpId` the op took. Clones of a sender share one numbering, so each ID is unique among the engine's submissions, and the event that ends the op carries it.
+
+`Op::is_idle_only` names the ops that require an idle engine. A frontend waits for the preceding operation to end before sending one, and the engine drops an idle-only op that arrives during another operation without ending it, since the frontend still owns it. The other ops act on the operation in flight, so they arrive on the same channel and race the running stream and tool futures in one biased `select!`.
 
 ## Events
 
 Events report progress, then end an operation. `Event` carries streamed text and thinking, tool calls and their results, usage, rate limits, session and configuration changes, retrying notices, and warnings.
 
-Each attended operation ends with exactly one terminal event, unless a shutdown stops it first. A turn ends with `TurnComplete`, `TurnFailed`, or `Cancelled`, or with `TurnRolledBack` before a `TurnFailed` when the model refused, or with `PromptUnsent` before a `TurnFailed` or `Cancelled` when sign-in or automatic compaction stopped it before the prompt was recorded. `Event`'s rustdoc in `crates/ox-core/src/protocol.rs` names the terminal event of every other op, its failure case included. `TurnEnd::of` maps an op and an event to how the op ended, counting a `ConfigChanged` that rejects an `/effort` pick as a failure. The REPL and headless drivers render until the op they sent ends, and the TUI holds input from the start of an operation until its terminal event, then runs the teardown that submits the queued prompt. [**One operation in flight, ended by its terminal event**](cancellation.md#design-decisions) states when the TUI holds the queue instead.
+Each op the engine takes while idle ends with one `OpEnded { id, end }`, the last event the op emits while it runs, unless a shutdown stops the engine first. Background work the op started, such as the AI title or a background shell, may report afterward. `end` is an `OpEnd`, which is `Completed`, `Cancelled`, or `Failed`. A failure reports its cause first, through `TurnFailed`, `RenameFailed`, a failed result such as `ArchiveUpdated`, or the `ConfigChanged` notice for an `/effort` pick the model has no level for. A turn the model refused reports `TurnRolledBack` before its `TurnFailed`, and a turn that sign-in or automatic compaction stopped before the prompt was recorded reports `PromptUnsent`. An op the engine takes during another operation, such as `Queue`, `Interrupt`, or `Resolve`, acts on that operation and has no end of its own, and neither has an idle-only op the engine drops. The REPL and headless drivers render until the `OpEnded` that carries the ID their submission returned, and the TUI holds input from the start of an operation until its `OpEnded`, then runs the teardown that submits the queued prompt. [**One operation in flight, ended by its own `OpEnded`**](cancellation.md#design-decisions) states when the TUI holds the queue instead. The headless output keeps its documented event names and reports a completed turn's end as `turn_complete`.
 
 `Error` reports a failure that leaves the operation running, such as a failed session write. `Notice` warns about a condition the session works around, such as a drifted file, and `Retrying` is a dim notice for a request the client sends again.
 
@@ -27,7 +29,7 @@ A turn is a loop of rounds. Each round sends the transcript to the model, stream
 ## Design Decisions
 
 1. **The engine owns every session change, through ops and events.** The TUI, the REPL, and a headless run differ only in input and output, so behavior that changes the session or the transcript lives in the engine, and each frontend renders the same events. A slash command that changes session state forwards an `Op`, while one that only opens a modal stays local.
-2. **One terminal event per operation.** A frontend learns that an operation ended from one event, so a lost or reordered progress event cannot leave the input held. The event is the last one the operation emits, and a shutdown is the only way an operation ends without one.
+2. **One end event per operation, under the op's ID.** A frontend learns that an operation ended from one event, so a lost or reordered progress event cannot leave the input held. The event is the last one the operation emits while it runs, and a shutdown is the only way an operation ends without one. The ID ties the end to its submission, so a frontend never takes the end of an op it did not wait on, such as a mode switch sent while idle, for the end of its own, and no table of which event ends which op has to track the engine.
 3. **An idle-only op is dropped.** Queueing it would apply a model or session change at a moment the user did not choose, such as after a turn they already interrupted. Dropping it keeps the frontend's own copy authoritative, and the frontend resubmits when it is ready.
 4. **Mid-turn controls share the op channel.** `Queue`, `Interrupt`, `Resolve`, `LoginCode`, `SetMode`, and `Shutdown` race the running futures in one `select!`, so a cancel, an approval, or a mode switch does not wait for a stream to finish, and the engine needs no second input path.
 
@@ -40,7 +42,7 @@ A turn is a loop of rounds. Each round sends the transcript to the model, stream
 - `crates/ox-core/src/engine.rs`: `Engine`, `EngineHandle`, and the op loop.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round` and `Dispatcher`.
 - `crates/ox-core/src/engine/turn.rs`: `agent_turn`, the round loop, and `interrupt_turn`.
-- `crates/ox-core/src/protocol.rs`: `Op`, `Event`, the per-op terminal-event docs, and `TurnEnd::of`.
+- `crates/ox-core/src/protocol.rs`: `Op`, `OpSender`, `OpId`, `Event`, and `OpEnd`.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op`, which sends each frontend action as an op.
 - `crates/ox-tui/src/app/events.rs`: the TUI's event handling and operation teardown.
 - `crates/ox/src/driver/stdio.rs`: `run_op`, which sends an op and renders until it ends.

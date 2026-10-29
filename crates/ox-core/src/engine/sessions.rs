@@ -9,7 +9,7 @@ use super::usage::UsageLedger;
 use super::{Engine, turn};
 use crate::git::current_branch;
 use crate::protocol::notice::{previous_session_write_failed, session_write_failed};
-use crate::protocol::{Event, EventSink, ResumeTarget, SavedTarget};
+use crate::protocol::{Event, EventSink, OpEnd, ResumeTarget, SavedTarget};
 use crate::session::display::id_prefix;
 use crate::session::handle::LoadedTranscript;
 use crate::session::saved::{self, SavedError};
@@ -24,18 +24,19 @@ impl Engine {
     }
 
     /// Archives the live session, then rolls like [`Self::clear`].
-    pub(super) async fn archive(&mut self, sink: &dyn EventSink) {
+    pub(super) async fn archive(&mut self, sink: &dyn EventSink) -> OpEnd {
         if self.transcript.messages().is_empty() {
             sink.emit(Event::TurnFailed(
                 "Nothing to archive: this session has no messages yet".to_owned(),
             ));
-            return;
+            return OpEnd::Failed;
         }
         if let Some(failure) = self.transcript.archive().await.failure {
             sink.emit(Event::TurnFailed(format!("Archive failed: {failure}")));
-            return;
+            return OpEnd::Failed;
         }
         self.roll_session(sink, ArchiveState::Archived).await;
+        OpEnd::Completed
     }
 
     pub(super) async fn set_archive(
@@ -43,38 +44,44 @@ impl Engine {
         sink: &dyn EventSink,
         target: SavedTarget,
         state: ArchiveState,
-    ) {
+    ) -> OpEnd {
         let result = self
             .on_saved({
                 let target = target.clone();
                 move |store, live_id| saved::set_archived(store, &target, state, live_id)
             })
             .await;
+        let end = OpEnd::settled(result.is_ok());
         sink.emit(Event::ArchiveUpdated {
             target,
             state,
             result,
         });
+        end
     }
 
-    pub(super) async fn find_saved(&self, sink: &dyn EventSink, prefix: String) {
+    pub(super) async fn find_saved(&self, sink: &dyn EventSink, prefix: String) -> OpEnd {
         let result = self
             .on_saved(move |store, live_id| saved::find(store, &prefix, live_id).map(Box::new))
             .await;
+        let end = OpEnd::settled(result.is_ok());
         sink.emit(Event::SavedFound(result));
+        end
     }
 
-    pub(super) async fn delete_saved(&self, sink: &dyn EventSink, session_id: String) {
+    pub(super) async fn delete_saved(&self, sink: &dyn EventSink, session_id: String) -> OpEnd {
         let result = self
             .on_saved({
                 let session_id = session_id.clone();
                 move |store, live_id| saved::delete(store, &session_id, live_id)
             })
             .await;
+        let end = OpEnd::settled(result.is_ok());
         sink.emit(Event::SavedDeleted {
             id: session_id,
             result,
         });
+        end
     }
 
     /// Runs `op` on the blocking pool with the store and the live session's ID, since a
@@ -103,11 +110,10 @@ impl Engine {
         });
         report_finalize_failure(sink, outcome.finalize.failure);
         self.emit_session_start(sink);
-        sink.emit(Event::SessionReady);
     }
 
     /// Finalizes the live session and continues `target`. On failure the live session stays.
-    pub(super) async fn resume(&mut self, sink: &dyn EventSink, target: ResumeTarget) {
+    pub(super) async fn resume(&mut self, sink: &dyn EventSink, target: ResumeTarget) -> OpEnd {
         let outcome = match self
             .transcript
             .roll_into(&self.store, target, self.settings.model().id())
@@ -119,7 +125,7 @@ impl Engine {
                     "Resume failed (still on session {}): {e:#}",
                     id_prefix(&self.transcript.session().session_id()),
                 )));
-                return;
+                return OpEnd::Failed;
             }
         };
         self.adopt_session(sink, outcome.transcript).await;
@@ -131,7 +137,7 @@ impl Engine {
         });
         report_finalize_failure(sink, outcome.finalize.failure);
         self.emit_session_start(sink);
-        sink.emit(Event::SessionReady);
+        OpEnd::Completed
     }
 
     async fn adopt_session(&mut self, sink: &dyn EventSink, transcript: LoadedTranscript) {
@@ -149,7 +155,7 @@ impl Engine {
         );
     }
 
-    pub(super) async fn rename(&self, sink: &dyn EventSink, title: String) {
+    pub(super) async fn rename(&self, sink: &dyn EventSink, title: String) -> OpEnd {
         if let Some(failure) = self
             .transcript
             .set_manual_title(title.clone())
@@ -157,12 +163,13 @@ impl Engine {
             .failure
         {
             sink.emit(Event::RenameFailed(session_write_failed(&failure)));
-            return;
+            return OpEnd::Failed;
         }
         sink.emit(Event::SessionTitleUpdated {
             id: self.transcript.session().session_id(),
             title,
         });
+        OpEnd::Completed
     }
 
     /// Shows what a session carries as the engine starts on it: its usage and task list, the
@@ -258,7 +265,7 @@ mod tests {
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass};
     use crate::protocol::local_testing::CapturingSink;
-    use crate::protocol::{Interaction, Op};
+    use crate::protocol::{Interaction, Op, OpSender};
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;
     use crate::session::saved::ArchiveUpdate;
@@ -354,7 +361,15 @@ mod tests {
 
                 {
                     let mut operation: std::pin::Pin<Box<dyn Future<Output = ()>>> = if resume {
-                        Box::pin(engine.resume(&sink, ResumeTarget::Id(target_id.clone())))
+                        Box::pin(async {
+                            assert_eq!(
+                                engine
+                                    .resume(&sink, ResumeTarget::Id(target_id.clone()))
+                                    .await,
+                                OpEnd::Completed,
+                                "{name}",
+                            );
+                        })
                     } else {
                         Box::pin(engine.clear(&sink))
                     };
@@ -388,12 +403,6 @@ mod tests {
                         path,
                         purpose: GatePurpose::Write
                     }),
-                    "{name}",
-                );
-                assert!(
-                    sink.events()
-                        .iter()
-                        .any(|event| matches!(event, Event::SessionReady)),
                     "{name}",
                 );
                 assert_eq!(engine.finalize().await, None, "{name}");
@@ -558,7 +567,6 @@ mod tests {
                             old_session: ArchiveState::Active,
                             ..
                         },
-                        Event::SessionReady,
                     ]
                 ),
                 "{cleared:?}",
@@ -570,7 +578,6 @@ mod tests {
                     [
                         Event::AutoCompactionResumed,
                         Event::SessionResumed { id, .. },
-                        Event::SessionReady,
                     ] if *id == target_id
                 ),
                 "{resumed:?}",
@@ -748,7 +755,6 @@ mod tests {
                             },
                             Event::Error(failure),
                             Event::Notice(notice),
-                            Event::SessionReady,
                         ] if failure == "Previous session write failed: \
                                          session writer task has stopped. \
                                          Conversation history may be incomplete."
@@ -1078,9 +1084,9 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 let interrupted_id = engine.session_id();
                 let sink = CapturingSink::default();
-                let (ops_tx, mut ops) = mpsc::channel(1);
+                let (ops_tx, mut ops) = OpSender::channel(1);
                 let mut mailbox = Mailbox::new(&mut ops);
-                ops_tx.send(Op::Interrupt).await.unwrap();
+                ops_tx.submit(Op::Interrupt).await.unwrap();
                 engine
                     .submit_prompt("write a story", None, &sink, &mut mailbox)
                     .await;
@@ -1174,7 +1180,6 @@ mod tests {
                         [
                             Event::SessionResumed { id, .. },
                             Event::Error(msg),
-                            Event::SessionReady,
                         ] if *id == target_id
                                 && msg == "Previous session write failed: \
                                            session writer task has stopped. \

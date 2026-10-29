@@ -8,7 +8,7 @@
 use serde::Serialize;
 
 use ox_core::client::RateLimits;
-use ox_core::protocol::{CompactTrigger, Event, ToolCall, ToolResult, TurnEnd, UsageSnapshot};
+use ox_core::protocol::{CompactTrigger, Event, OpEnd, ToolCall, ToolResult, UsageSnapshot};
 use ox_core::tool::bash::background::BackgroundShell;
 use ox_core::tool::tasks::Task;
 
@@ -48,7 +48,7 @@ pub(super) enum HeadlessEvent<'a> {
 /// How a headless run ended.
 #[derive(Serialize)]
 pub(super) struct RunResult<'a> {
-    pub(super) stop_reason: TurnEnd,
+    pub(super) stop_reason: OpEnd,
     /// Why the turn failed.
     pub(super) error: Option<&'a str>,
     /// Why the session could not be saved, which leaves its run missing from the transcript.
@@ -90,12 +90,16 @@ pub(super) fn wire(event: &Event) -> Option<HeadlessEvent<'_>> {
         },
         Event::Notice(text) => HeadlessEvent::Notice(text),
         Event::Error(text) => HeadlessEvent::Error(text),
-        Event::TurnComplete => HeadlessEvent::TurnComplete,
+        // Headless renders only its prompt's events, so a completed end is the turn's.
+        Event::OpEnded {
+            end: OpEnd::Completed,
+            ..
+        } => HeadlessEvent::TurnComplete,
         Event::PromptUnsent => HeadlessEvent::PromptUnsent,
         Event::TurnRolledBack => HeadlessEvent::TurnRolledBack,
         Event::TurnFailed(text) => HeadlessEvent::TurnFailed(text),
-        Event::PromptDrained(_)
-        | Event::Cancelled
+        Event::OpEnded { .. }
+        | Event::PromptDrained(_)
         | Event::AutoCompactionPaused { .. }
         | Event::AutoCompactionResumed
         | Event::SessionTitleUpdated { .. }
@@ -106,7 +110,6 @@ pub(super) fn wire(event: &Event) -> Option<HeadlessEvent<'_>> {
         | Event::SessionRolled { .. }
         | Event::SessionResumed { .. }
         | Event::SessionForked { .. }
-        | Event::SessionReady
         | Event::ConfigChanged { .. }
         | Event::ModeChanged(_)
         | Event::LoginStarted { .. }
@@ -122,7 +125,7 @@ pub(super) fn wire(event: &Event) -> Option<HeadlessEvent<'_>> {
 mod tests {
     use ox_core::client::RateLimitWindow;
     use ox_core::permission::Mode;
-    use ox_core::protocol::testing::ls_call;
+    use ox_core::protocol::testing::{ls_call, op_id};
     use ox_core::tool::bash::background::testing::shells_in_each_state;
     use ox_core::tool::tasks::testing::plan;
     use ox_core::tool::view::{
@@ -215,7 +218,10 @@ mod tests {
             },
             Event::Notice("Skipped instruction file /repo/CLAUDE.md.".to_owned()),
             Event::Error("Session write failed: disk full".to_owned()),
-            Event::TurnComplete,
+            Event::OpEnded {
+                id: op_id(0),
+                end: OpEnd::Completed,
+            },
             Event::PromptUnsent,
             Event::TurnRolledBack,
             Event::TurnFailed("Anthropic API error (HTTP 400 Bad Request)".to_owned()),
@@ -232,7 +238,7 @@ mod tests {
             estimated_cost_usd: Some(0.018),
         };
         let result = HeadlessEvent::Result(RunResult {
-            stop_reason: TurnEnd::Completed,
+            stop_reason: OpEnd::Completed,
             error: None,
             session_write_error: Some("disk full"),
             message: Some("Done."),
@@ -254,12 +260,18 @@ mod tests {
     #[test]
     fn keeps_undocumented_events_off_stdout() {
         for event in [
-            Event::Cancelled,
+            Event::OpEnded {
+                id: op_id(0),
+                end: OpEnd::Cancelled,
+            },
+            Event::OpEnded {
+                id: op_id(0),
+                end: OpEnd::Failed,
+            },
             Event::AutoCompactionPaused { failures: 3 },
             Event::AutoCompactionResumed,
             Event::PromptDrained("next".to_owned()),
             Event::ModeChanged(Mode::Plan),
-            Event::SessionReady,
         ] {
             assert!(wire(&event).is_none(), "{event:?}");
         }
