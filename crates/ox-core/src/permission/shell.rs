@@ -537,8 +537,8 @@ impl ReaderPath<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Operand {
     read: ReaderPath<String>,
-    /// Whether the word is a literal file argument in every supported argument order and build,
-    /// so the command reads it for certain unless it traverses a tree there.
+    /// Whether every supported argument order and build opens the word as a file or as the root
+    /// of a tree it traverses, so the command reads it for certain.
     certain: bool,
 }
 
@@ -2763,13 +2763,15 @@ fn long_option(arg: &str) -> Option<&str> {
 
 /// The paths reader `name` may read, expanding whole words before assigning their argument roles.
 /// A multi-match expansion that can change roles leaves the reads unknown and keeps every possible
-/// named operand, none of them certain. Glob match ordering is not assumed, since bash's locale can
-/// change it.
+/// named operand. Only the words before it, and the literal words after it that are certain with
+/// each glob read as one word, as an expanding word is, stay certain. Glob match ordering is not
+/// assumed, since bash's locale can change it.
 fn reader_operands(name: &str, args: &[Word], cwd: &Path) -> (Vec<Operand>, bool) {
     let written: Vec<_> = args.iter().map(|word| word.value.as_deref()).collect();
     let written = reader_args(name, &written);
     let mut anything = written.unknown;
     let mut values = Vec::new();
+    let mut origins = Vec::new();
     let mut groups = Vec::new();
     for (index, word) in args.iter().enumerate() {
         if let Some(pattern) = word.value.as_deref().filter(|_| word.glob) {
@@ -2778,6 +2780,7 @@ fn reader_operands(name: &str, args: &[Word], cwd: &Path) -> (Vec<Operand>, bool
                     if matches.len() > 1 {
                         groups.push((values.len()..values.len() + matches.len(), index));
                     }
+                    origins.extend(matches.iter().map(|_| None));
                     values.extend(matches.into_iter().map(Some));
                     continue;
                 }
@@ -2785,17 +2788,22 @@ fn reader_operands(name: &str, args: &[Word], cwd: &Path) -> (Vec<Operand>, bool
                 Some(_) => {}
             }
         }
+        origins.push((!word.glob).then_some(index));
         values.push(word.value.clone());
     }
     let values: Vec<_> = values.iter().map(Option::as_deref).collect();
-    let (files, unknown) = expanded_reader_paths(name, &written, &values, &groups);
+    let (files, unknown) = expanded_reader_paths(name, &written, &values, &origins, &groups);
     (files, anything || unknown)
 }
 
+/// The reads of `values`, the expanded words of a reader whose `written` words a glob expanded
+/// into, where `origins` names the written word of each value that is not a glob match and each
+/// of `groups` spans the matches of a multi-match glob with the index of its written word.
 fn expanded_reader_paths(
     name: &str,
     written: &ReaderArgs,
     values: &[Option<&str>],
+    origins: &[Option<usize>],
     groups: &[(Range<usize>, usize)],
 ) -> (Vec<Operand>, bool) {
     let grammar = reader_grammar(name);
@@ -2815,14 +2823,17 @@ fn expanded_reader_paths(
         })
         .map(|(range, _)| range.start);
     let anything = written.unknown || expanded.unknown || ambiguous.is_some();
+    let late_literals: Vec<usize> = ambiguous.map_or_else(Vec::new, |start| {
+        origins[start..].iter().flatten().copied().collect()
+    });
     let mut files: Vec<Operand> = expanded
         .reads(ambiguous)
-        .chain(
-            written
-                .files
-                .iter()
-                .map(|(_, path)| Operand::possible(path.clone())),
-        )
+        .chain(written.files.iter().map(|(index, path)| Operand {
+            read: path.clone(),
+            certain: index.is_some_and(|index| {
+                late_literals.contains(&index) && written.read_everywhere.contains(&index)
+            }),
+        }))
         .collect();
     if let Some(start) = ambiguous {
         let recursive = files.iter().any(|operand| operand.read.recursive)
@@ -2871,7 +2882,7 @@ fn expanded_reader_paths(
 }
 
 /// What one of [`READERS`] reads, from its arguments.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct ReaderArgs {
     /// Each path with the index of its word, or no index for an implicit cwd: each operand but a
     /// leading pattern or script, and each value of an option that names a file.
@@ -2882,6 +2893,8 @@ struct ReaderArgs {
     operands: Vec<usize>,
     /// Words that every supported argument order and build opens as a file.
     read_everywhere: Vec<usize>,
+    /// Whether every supported argument order and build searches the implicit cwd.
+    cwd_everywhere: bool,
     /// Words that supply an option's value in any supported argument order or build.
     option_values: Vec<usize>,
     /// Whether it may read a file the arguments do not name: a word expands, or an option names a
@@ -2891,13 +2904,18 @@ struct ReaderArgs {
 
 impl ReaderArgs {
     /// Each path in `files`, certain when its word is in `read_everywhere` and comes before the
-    /// first match of an `ambiguous` glob, whose matches may shift the roles of later words.
+    /// first match of an `ambiguous` glob, whose matches may shift the roles of later words, or
+    /// when it is an implicit cwd every order and build searches and no glob is ambiguous.
     fn reads(&self, ambiguous: Option<usize>) -> impl Iterator<Item = Operand> + '_ {
         self.files.iter().map(move |(index, read)| Operand {
             read: read.clone(),
-            certain: index.is_some_and(|index| {
-                self.read_everywhere.contains(&index) && ambiguous.is_none_or(|start| index < start)
-            }),
+            certain: match index {
+                Some(index) => {
+                    self.read_everywhere.contains(index)
+                        && ambiguous.is_none_or(|start| *index < start)
+                }
+                None => self.cwd_everywhere && ambiguous.is_none(),
+            },
         })
     }
 
@@ -2922,6 +2940,7 @@ fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
         fixed_values: (0..values.len()).collect(),
         operands: (0..values.len()).collect(),
         read_everywhere: (0..values.len()).collect(),
+        cwd_everywhere: true,
         option_values: Vec::new(),
         unknown: values.iter().any(Option::is_none)
             || name == "find" && values.contains(&Some("-files0-from")),
@@ -2939,6 +2958,7 @@ fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
             args.operands.retain(|index| read.operands.contains(index));
             args.read_everywhere
                 .retain(|index| read.read_everywhere.contains(index));
+            args.cwd_everywhere &= read.cwd_everywhere;
             args.files.extend(read.files);
             args.option_values.extend(read.option_values);
             args.unknown |= read.unknown;
@@ -3002,14 +3022,7 @@ impl ReaderGrammar {
     /// does not list counts its `=` value as a file, and since it may be one that gives the
     /// pattern, the leading operand then counts as a file too.
     fn read(&self, dialect: Dialect, permute: bool, values: &[Option<&str>]) -> ReaderArgs {
-        let mut args = ReaderArgs {
-            files: Vec::new(),
-            fixed_values: Vec::new(),
-            operands: Vec::new(),
-            read_everywhere: Vec::new(),
-            option_values: Vec::new(),
-            unknown: false,
-        };
+        let mut args = ReaderArgs::default();
         let mut operands = Vec::new();
         let mut pattern_given = false;
         let mut recursive = self.operands == OperandKind::Find;
@@ -3100,6 +3113,7 @@ impl ReaderGrammar {
             .iter()
             .filter_map(|(index, _)| index.filter(|index| *index < tree_end))
             .collect();
+        args.cwd_everywhere = args.files.iter().any(|(index, _)| index.is_none());
         args.fixed_values.clone_from(&args.option_values);
         args
     }
@@ -5162,8 +5176,21 @@ mod tests {
                 let expanded: Vec<_> = expanded.split_whitespace().map(Some).collect();
                 let args = reader_args(reader, &written);
 
-                let (paths, unknown) =
-                    expanded_reader_paths(reader, &args, &expanded, &[(start..end, source)]);
+                let origins: Vec<_> = (0..expanded.len())
+                    .map(|index| match index {
+                        _ if index < start => Some(index),
+                        _ if index < end => None,
+                        _ => Some(index + source + 1 - end),
+                    })
+                    .collect();
+
+                let (paths, unknown) = expanded_reader_paths(
+                    reader,
+                    &args,
+                    &expanded,
+                    &origins,
+                    &[(start..end, source)],
+                );
 
                 assert!(unknown, "{reader} {expanded:?}");
                 assert!(

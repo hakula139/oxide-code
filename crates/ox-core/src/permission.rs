@@ -4279,7 +4279,11 @@ mod tests {
                         ("grep -r key ~", Decision::Allow),
                         ("grep -r key secrets", Decision::Ask),
                         ("cat ~/.ssh/id_rsa *", Decision::Deny),
-                        ("cat * ~/.ssh/id_rsa", Decision::Allow),
+                        ("cat * ~/.ssh/id_rsa", Decision::Deny),
+                        ("head * ~/.ssh/id_rsa", Decision::Deny),
+                        ("grep key * ~/.ssh/id_rsa", Decision::Deny),
+                        ("grep * ~/.ssh/id_rsa", Decision::Deny),
+                        ("grep -e key * ~/.ssh/id_rsa", Decision::Deny),
                         ("find ~ -path ~/.ssh/id_rsa", Decision::Allow),
                         ("test -f ~/.ssh/id_rsa", Decision::Allow),
                         ("cat $F", Decision::Allow),
@@ -4288,6 +4292,29 @@ mod tests {
                         assert_eq!(decide_command(&yolo, case, &workspace), expected, "{case}");
                     }
                 });
+            }
+
+            #[test]
+            fn yolo_holds_a_recursive_read_of_the_cwd_that_a_rule_names() {
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let workspace = Workspace::new(cwd);
+                let yolo = resolved_policy(
+                    Mode::Yolo,
+                    &[],
+                    &[(READ, &slash_separated(cwd))],
+                    &[],
+                    &[],
+                    &workspace,
+                );
+
+                for case in ["grep -r key", "grep -r key .", "ls -R", "ls -R ."] {
+                    assert_eq!(
+                        decide_command(&yolo, case, &workspace),
+                        Decision::Ask,
+                        "{case}"
+                    );
+                }
             }
 
             #[test]
