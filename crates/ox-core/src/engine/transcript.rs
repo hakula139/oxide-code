@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::compaction::request_tokens;
+use super::estimate::request_tokens;
 use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::{ContentBlock, Message, TextOrigin};
 use crate::model::ModelSpec;

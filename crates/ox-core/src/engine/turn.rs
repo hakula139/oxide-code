@@ -7,8 +7,9 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 
 use super::abort::{AbortResult, Mailbox, TurnAbort};
-use super::compaction::{auto_compaction_due, request_tokens, transcript_tokens};
+use super::compaction::auto_compaction_due;
 use super::dispatch::{self, DispatchContext};
+use super::estimate::{request_tokens, transcript_tokens};
 use super::transcript::LiveTranscript;
 use crate::auth::Auth;
 use crate::client::{Request, Response, ResponseEvent, StopDetails, StopReason, Wire};
