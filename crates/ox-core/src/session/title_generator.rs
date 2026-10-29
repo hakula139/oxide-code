@@ -144,13 +144,10 @@ async fn generate_and_record(
         return Ok(());
     }
 
-    sink.emit(
-        Event::SessionTitleUpdated {
-            id: session.session_id(),
-            title,
-        },
-        "session-title-updated",
-    );
+    sink.emit(Event::SessionTitleUpdated {
+        id: session.session_id(),
+        title,
+    });
     Ok(())
 }
 

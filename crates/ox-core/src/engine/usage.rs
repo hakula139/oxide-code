@@ -74,14 +74,11 @@ impl UsageLedger {
         if self.displayed_usage.is_none() && estimated_cost_usd.is_none() {
             return;
         }
-        sink.emit(
-            Event::UsageUpdated(UsageSnapshot {
-                context_tokens: self.displayed_usage.map(TokenUsage::context_tokens),
-                context_window,
-                estimated_cost_usd,
-            }),
-            "usage-updated",
-        );
+        sink.emit(Event::UsageUpdated(UsageSnapshot {
+            context_tokens: self.displayed_usage.map(TokenUsage::context_tokens),
+            context_window,
+            estimated_cost_usd,
+        }));
     }
 
     /// Holds `usage`, the receiver for the title request just started, until its usage joins the

@@ -90,10 +90,7 @@ impl AutoCompactFailures {
         self.0 += 1;
         let paused = self.is_paused();
         if paused {
-            sink.emit(
-                Event::AutoCompactionPaused { failures: self.0 },
-                "auto-compaction-paused",
-            );
+            sink.emit(Event::AutoCompactionPaused { failures: self.0 });
         }
         let next = match (point, paused) {
             (AutoPoint::MidTurn, false) => "The turn stopped before its next request. \
@@ -124,7 +121,7 @@ impl AutoCompactFailures {
     /// Clears the count and reports [`Event::AutoCompactionResumed`] if auto-compaction was paused.
     pub(super) fn reset(&mut self, sink: &dyn EventSink) {
         if std::mem::take(self).is_paused() {
-            sink.emit(Event::AutoCompactionResumed, "auto-compaction-resumed");
+            sink.emit(Event::AutoCompactionResumed);
         }
     }
 }
@@ -220,7 +217,7 @@ impl Engine {
         inbox: &mut Inbox,
         point: AutoPoint,
     ) -> AbortResult<()> {
-        sink.emit(Event::AutoCompactionStarted, "auto-compaction-started");
+        sink.emit(Event::AutoCompactionStarted);
         let cause = match self
             .run_compaction(auth, sink, ops, inbox, None, point.into())
             .await
@@ -251,7 +248,7 @@ impl Engine {
             Ok(auth) => auth,
             Err(abort) => {
                 self.adopt_mode(&mut inbox);
-                return report_abort(sink, abort, "compact-failed");
+                return report_abort(sink, abort);
             }
         };
         let compacted = self
@@ -267,7 +264,7 @@ impl Engine {
         self.adopt_mode(&mut inbox);
         let abort = match compacted {
             Ok(()) => {
-                sink.emit(Event::SessionReady, "session-ready");
+                sink.emit(Event::SessionReady);
                 return TurnEnd::Completed;
             }
             Err(CompactFailure::Aborted(abort)) => abort,
@@ -276,7 +273,7 @@ impl Engine {
                 "Compaction was not saved, so the transcript is unchanged"
             )),
         };
-        report_abort(sink, abort, "compact-failed")
+        report_abort(sink, abort)
     }
 
     /// Summarizes the transcript and swaps the summary in as it saves the boundary, starting the
@@ -363,20 +360,17 @@ impl Engine {
         let instructions = boundary.record.instructions.clone();
         let outcome = self.transcript.compact(boundary, synthetic).await;
         if outcome.checkpoint.is_none() {
-            sink.emit(Event::SummaryDiscarded, "summary-discarded");
+            sink.emit(Event::SummaryDiscarded);
             sink.session_write(&outcome.report);
             return false;
         }
 
-        sink.emit(
-            Event::SessionCompacted {
-                summary,
-                pre_count: outcome.pre_count,
-                instructions,
-                trigger,
-            },
-            "session-compacted",
-        );
+        sink.emit(Event::SessionCompacted {
+            summary,
+            pre_count: outcome.pre_count,
+            instructions,
+            trigger,
+        });
         // Reports the write after the compaction event, which clears the TUI's chat.
         sink.session_write(&outcome.report);
         true
@@ -518,7 +512,7 @@ impl<'a> SummaryStream<'a> {
     /// Tells the frontend to drop the summary text streamed so far, if any.
     fn discard(&self) {
         if self.streamed.swap(false, Ordering::Relaxed) {
-            self.sink.emit(Event::SummaryDiscarded, "summary-discarded");
+            self.sink.emit(Event::SummaryDiscarded);
         }
     }
 
