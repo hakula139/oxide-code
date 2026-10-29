@@ -36,11 +36,8 @@ The attribution block follows the same split. A first-party request carries the 
 ## Design Decisions
 
 1. **Send the conversation's captured beta sequence.** Reproducing Claude Code's sequence, including betas for features this client leaves unused, keeps a gateway that fingerprints the client from rejecting the request. A test pins the release the sequence was captured from, so a version bump fails until it is recaptured.
-
 2. **Two breakpoints with one TTL.** The static prefix and the conversation tail are the two levels that change independently. Capping tool output when the tool returns keeps the prefix stable, so the breakpoint pays cache-read rates for most of the input.
-
 3. **Gate only the body-side scope on the base URL.** The header alone is a server-side no-op, so sending it everywhere costs nothing, while the scope field is what a gateway can reject.
-
 4. **Classify before retrying.** A malformed request cannot succeed on a later attempt, and retrying it hides the error behind a minute of backoff. The classification reads the status and the server's own hint, so reworded message text changes nothing.
 
 ## Out of Scope

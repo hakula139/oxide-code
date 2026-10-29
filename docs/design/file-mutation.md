@@ -29,17 +29,11 @@ A file with more than one hard link, a parent that refuses a new entry, a differ
 ## Design Decisions
 
 1. **Choose the strategy per file.** One strategy either refuses files whose metadata a staged copy cannot reproduce, or gives up crash atomicity for every write. Comparing what the copy can reproduce keeps the common case atomic and writes the files that a rename would strip instead of rejecting them. Claude Code follows the same shape, renaming a staged copy after `chmod` and falling back to an in-place write, while Codex and pi write in place ([Claude Code](https://github.com/hakula139/claude-code), [Codex](https://github.com/openai/codex), [pi](https://github.com/badlogic/pi-mono)).
-
 2. **Reproduce metadata by comparing snapshots.** Capturing the staged file and comparing it with the original asks the filesystem what it actually attached to the new file, so inherited ACLs, SELinux labels, and filesystems without extended-attribute support need no capability probe or special case.
-
 3. **Only Linux renames.** A staged file already carries the owner of the process that creates it and the group and extended attributes its parent gives it, so `fchmod` completes the set with the original's mode. macOS and Windows need native ACL, flag, stream, and compression work to reach the same guarantee, and their in-place writes keep all of it already.
-
 4. **Write through the held handle, not a reopened path.** The handle was opened without following a symlink and checked against the tracked bytes, so rewriting through it cannot land on a different file, and every hard link keeps seeing one inode.
-
 5. **In-place publication trades crash atomicity for preservation.** A crash, a full disk, or a kill mid-write can leave partial content, while the atomic path publishes either the complete bytes or none of them. Ordinary existing files on Linux keep the atomic path, while a file whose metadata the copy cannot inherit is written in place and gives up crash atomicity for that write.
-
 6. **New files trade crash atomicity for portability.** An exclusive open needs no rename or hard link, so it works on volumes such as exFAT, which support neither a no-replace rename nor hard links and on which a staged copy could not be published at all. A crash, a full disk, or a kill mid-write can leave a partial new file, and a reader or file watcher can see the file while it is written, but no earlier content exists to lose.
-
 7. **Hard links, set-ID files, and capability files.** A file with several links can sit inside the workspace while another link sits outside every root, so the workspace gate never auto-allows it, but an explicit rule or approval writes it in place and every link sees the new content. Set-ID files and files carrying a capability stay refused because a write can clear either and the tool cannot report what the file system did with them.
 
 ## Sources
