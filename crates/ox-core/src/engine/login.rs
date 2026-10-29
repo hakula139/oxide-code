@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use tracing::warn;
 
 use super::abort::{AbortResult, Mailbox, TurnAbort};
-use super::{Engine, TurnEnd, report_abort};
+use super::{Engine, OpEnd, report_abort};
 use crate::auth::oauth;
 use crate::auth::oauth::login::{Grant, PendingLogin};
 use crate::auth::{self, Auth, AuthSource};
@@ -88,11 +88,7 @@ impl Engine {
     }
 
     /// Signs in through the browser and stores the new oxide-code login.
-    pub(super) async fn login(
-        &mut self,
-        sink: &dyn EventSink,
-        mailbox: &mut Mailbox<'_>,
-    ) -> TurnEnd {
+    pub(super) async fn login(&mut self, sink: &dyn EventSink, mailbox: &mut Mailbox<'_>) -> OpEnd {
         let pending = match PendingLogin::start().await {
             Ok(pending) => pending,
             Err(e) => return report_abort(sink, sign_in_failed(&e)),
@@ -113,7 +109,7 @@ impl Engine {
         match signed_in {
             Ok(Ok(auth)) => {
                 self.adopt_login(sink, auth);
-                TurnEnd::Completed
+                OpEnd::Completed
             }
             Ok(Err(e)) => report_abort(sink, sign_in_failed(&e)),
             Err(abort) => report_abort(sink, abort),
@@ -134,12 +130,12 @@ impl Engine {
 
     /// Removes the oxide-code login. A session using it, or one signed out, falls back to the
     /// Claude Code login, and stays signed out without a usable one.
-    pub(super) async fn logout(&mut self, sink: &dyn EventSink) {
+    pub(super) async fn logout(&mut self, sink: &dyn EventSink) -> OpEnd {
         let removed = match oauth::delete_login().await {
             Ok(removed) => removed,
             Err(e) => {
                 sink.emit(Event::TurnFailed(format!("Sign-out failed: {e:#}")));
-                return;
+                return OpEnd::Failed;
             }
         };
         let mut fallback_error = None;
@@ -163,6 +159,7 @@ impl Engine {
             auth: self.sign_in.source(),
             fallback_error,
         });
+        OpEnd::Completed
     }
 }
 
@@ -208,7 +205,6 @@ mod tests {
 
     use indoc::formatdoc;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tokio::sync::mpsc;
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -218,7 +214,9 @@ mod tests {
     use crate::engine::local_testing::{inert_mailbox, login_urls, submit, tool_heavy_transcript};
     use crate::engine::testing::{engine, mount_reply, with_pinned_home};
     use crate::permission::Mode;
+    use crate::protocol::OpSender;
     use crate::protocol::local_testing::CapturingSink;
+    use crate::protocol::testing::op_id;
     use crate::session::store::testing::test_store;
 
     /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.
@@ -313,7 +311,7 @@ mod tests {
 
                     let end = engine.submit_prompt("hi", None, &sink, &mut mailbox).await;
 
-                    assert_eq!(end, TurnEnd::Completed);
+                    assert_eq!(end, OpEnd::Completed);
                     assert!(
                         matches!(
                             &engine.sign_in,
@@ -330,10 +328,6 @@ mod tests {
                                 auth: AuthSource::OxLogin
                             })
                         ),
-                        "{events:?}"
-                    );
-                    assert!(
-                        matches!(events.last(), Some(Event::TurnComplete)),
                         "{events:?}"
                     );
                     assert_eq!(sent_authorization(&server).await, "Bearer ox-token");
@@ -362,7 +356,7 @@ mod tests {
                     let end = engine.compact(&sink, &mut mailbox, None).await;
 
                     let events = sink.events();
-                    assert_eq!(end, TurnEnd::Completed, "{events:?}");
+                    assert_eq!(end, OpEnd::Completed, "{events:?}");
                     assert!(
                         matches!(
                             events.first(),
@@ -404,7 +398,7 @@ mod tests {
 
                     let end = engine.submit_prompt("hi", None, &sink, &mut mailbox).await;
 
-                    assert_eq!(end, TurnEnd::Failed);
+                    assert_eq!(end, OpEnd::Failed);
                     assert!(
                         matches!(engine.sign_in, SignIn::SignedOut { retry: true }),
                         "{:?}",
@@ -440,24 +434,21 @@ mod tests {
                     .await;
                     engine.sign_in = SignIn::SignedOut { retry: true };
                     let sink = CapturingSink::default();
-                    let (tx, mut ops) = mpsc::channel(1);
+                    let (tx, mut ops) = OpSender::channel(1);
                     let mut mailbox = Mailbox::new(&mut ops);
-                    tx.try_send(Op::Interrupt).unwrap();
+                    tx.try_submit(Op::Interrupt).unwrap();
 
                     let end = engine.submit_prompt("hi", None, &sink, &mut mailbox).await;
                     engine.client.finish_reloads().await;
 
-                    assert_eq!(end, TurnEnd::Cancelled);
+                    assert_eq!(end, OpEnd::Cancelled);
                     assert!(
                         matches!(engine.sign_in, SignIn::SignedOut { retry: true }),
                         "{:?}",
                         engine.sign_in,
                     );
                     assert!(
-                        matches!(
-                            sink.events().as_slice(),
-                            [Event::PromptUnsent, Event::Cancelled]
-                        ),
+                        matches!(sink.events().as_slice(), [Event::PromptUnsent]),
                         "{:?}",
                         sink.events(),
                     );
@@ -485,7 +476,7 @@ mod tests {
 
                     let end = engine.submit_prompt("hi", None, &sink, &mut mailbox).await;
 
-                    assert_eq!(end, TurnEnd::Failed);
+                    assert_eq!(end, OpEnd::Failed);
                     assert!(
                         matches!(engine.sign_in, SignIn::SignedOut { retry: false }),
                         "{:?}",
@@ -525,7 +516,7 @@ mod tests {
 
                     let end = engine.submit_prompt("hi", None, &sink, &mut mailbox).await;
 
-                    assert_eq!(end, TurnEnd::Failed);
+                    assert_eq!(end, OpEnd::Failed);
                     assert!(
                         matches!(engine.sign_in, SignIn::SignedOut { retry: false }),
                         "{:?}",
@@ -610,10 +601,11 @@ mod tests {
                         engine.oauth_token_url = format!("{}/token", server.uri());
                         let mut handle = engine.spawn();
 
-                        handle.ops.send(Op::Login).await.unwrap();
+                        handle.ops.submit(Op::Login).await.unwrap();
                         let (url, _) = login_urls(&mut handle.events).await;
                         let reply = return_from_browser(&url, "code=auth-code").await;
                         let signed_in = handle.events.recv().await;
+                        let login_end = handle.events.recv().await;
                         let turn = submit(&mut handle, "hi").await;
                         handle.shutdown().await.unwrap();
 
@@ -627,7 +619,20 @@ mod tests {
                             ),
                             "{signed_in:?}"
                         );
-                        assert!(matches!(turn.last(), Some(Event::TurnComplete)), "{turn:?}");
+                        assert_eq!(
+                            login_end,
+                            Some(Event::OpEnded {
+                                id: op_id(0),
+                                end: OpEnd::Completed
+                            })
+                        );
+                        assert_eq!(
+                            turn.last(),
+                            Some(&Event::OpEnded {
+                                id: op_id(1),
+                                end: OpEnd::Completed
+                            })
+                        );
                         let requests = server.received_requests().await.unwrap();
                         let prompt = requests
                             .iter()
@@ -670,15 +675,15 @@ mod tests {
                     engine.oauth_token_url = format!("{}/token", server.uri());
                     let mut handle = engine.spawn();
 
-                    handle.ops.send(Op::Login).await.unwrap();
+                    handle.ops.submit(Op::Login).await.unwrap();
                     let (url, manual_url) = login_urls(&mut handle.events).await;
                     let state = query_param(&manual_url, "state");
                     let code = |code: &str| Op::LoginCode(SignInCode(code.to_owned()));
-                    handle.ops.send(Op::Clear).await.unwrap();
-                    handle.ops.send(code("pasted-code#other-state")).await.unwrap();
+                    handle.ops.submit(Op::Clear).await.unwrap();
+                    handle.ops.submit(code("pasted-code#other-state")).await.unwrap();
                     let rejected = handle.events.recv().await;
                     let pasted = code(&format!("pasted-code#{state}"));
-                    handle.ops.send(pasted).await.unwrap();
+                    handle.ops.submit(pasted).await.unwrap();
                     let signed_in = handle.events.recv().await;
                     handle.shutdown().await.unwrap();
 
@@ -720,7 +725,7 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let mut handle = engine.spawn();
 
-                handle.ops.send(Op::Login).await.unwrap();
+                handle.ops.submit(Op::Login).await.unwrap();
                 let (url, _) = login_urls(&mut handle.events).await;
                 let reply = return_from_browser(&url, "error=access_denied").await;
                 let failed = handle.events.recv().await;
@@ -747,14 +752,14 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let sink = CapturingSink::default();
-                let (ops_tx, mut ops) = mpsc::channel(2);
+                let (ops_tx, mut ops) = OpSender::channel(2);
                 let mut mailbox = Mailbox::new(&mut ops);
-                ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
-                ops_tx.try_send(Op::Interrupt).unwrap();
+                ops_tx.try_submit(Op::SetMode(Mode::Plan)).unwrap();
+                ops_tx.try_submit(Op::Interrupt).unwrap();
 
                 let end = engine.login(&sink, &mut mailbox).await;
 
-                assert_eq!(end, TurnEnd::Cancelled);
+                assert_eq!(end, OpEnd::Cancelled);
                 assert_eq!(mailbox.take_mode(), Some(Mode::Plan));
             })
             .await;

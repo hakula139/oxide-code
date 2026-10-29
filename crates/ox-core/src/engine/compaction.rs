@@ -11,7 +11,7 @@ use super::abort::{AbortResult, Mailbox, TurnAbort};
 use super::estimate::transcript_tokens;
 use super::post_compact::synthesize_post_compact_message;
 use super::turn::{conversation_request, record_interruption};
-use super::{Engine, TurnEnd, report_abort};
+use super::{Engine, OpEnd, report_abort};
 use crate::auth::Auth;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::message::Message;
@@ -207,7 +207,7 @@ impl Engine {
         sink: &dyn EventSink,
         mailbox: &mut Mailbox<'_>,
         instructions: Option<String>,
-    ) -> TurnEnd {
+    ) -> OpEnd {
         let auth = match self.ensure_signed_in(sink, mailbox).await {
             Ok(auth) => auth,
             Err(abort) => return report_abort(sink, abort),
@@ -216,10 +216,7 @@ impl Engine {
             .run_compaction(&auth, sink, mailbox, instructions, CompactTrigger::Manual)
             .await;
         let abort = match compacted {
-            Ok(()) => {
-                sink.emit(Event::SessionReady);
-                return TurnEnd::Completed;
-            }
+            Ok(()) => return OpEnd::Completed,
             Err(CompactFailure::Aborted(abort)) => abort,
             Err(CompactFailure::Summary(e)) => TurnAbort::Failed(e.context("Compaction failed")),
             Err(CompactFailure::WriterGone) => TurnAbort::Failed(anyhow!(
@@ -352,7 +349,6 @@ mod tests {
     use indoc::formatdoc;
     use serde_json::json;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tokio::sync::mpsc;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer};
 
@@ -371,7 +367,7 @@ mod tests {
     use crate::permission::Mode;
     use crate::prompt::SessionContext;
     use crate::protocol::local_testing::CapturingSink;
-    use crate::protocol::{Op, ResumeTarget, UsageSnapshot};
+    use crate::protocol::{Op, OpSender, ResumeTarget, UsageSnapshot};
     use crate::session::store::local_testing::fail_writes;
     use crate::session::store::testing::test_store;
     use crate::tool::bash::background::ShellState;
@@ -648,10 +644,10 @@ mod tests {
                     auto_engine(&server, dir.path(), usage, tool_heavy_transcript()).await;
                 engine.transcript.tasks = plan();
                 let sink = CapturingSink::default();
-                let (ops_tx, mut ops) = mpsc::channel(1);
+                let (ops_tx, mut ops) = OpSender::channel(1);
                 let mut mailbox = Mailbox::new(&mut ops);
                 ops_tx
-                    .try_send(Op::Queue("queued after summary".to_owned()))
+                    .try_submit(Op::Queue("queued after summary".to_owned()))
                     .unwrap();
 
                 let compacted = engine.auto_compact(&api_key(), &sink, &mut mailbox).await;
@@ -735,7 +731,7 @@ mod tests {
                     .compact(&sink, &mut mailbox, Some("focus".to_owned()))
                     .await;
 
-                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(end, OpEnd::Completed);
                 assert_eq!(
                     engine.transcript.messages(),
                     [synthesize_post_compact_message(
@@ -779,12 +775,9 @@ mod tests {
                     },
                     Event::AutoCompactionResumed,
                     Event::UsageUpdated(usage),
-                    Event::SessionReady,
                 ] = events.as_slice()
                 else {
-                    panic!(
-                        "expected the summary, compaction, resume, cost, then the end: {events:?}"
-                    );
+                    panic!("expected the summary, compaction, resume, then cost: {events:?}");
                 };
                 assert_eq!(streamed, "manual summary");
                 assert_eq!(focus, "focus");
@@ -811,7 +804,7 @@ mod tests {
                     .compact(&CapturingSink::default(), &mut mailbox, None)
                     .await;
 
-                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(end, OpEnd::Completed);
                 assert_eq!(
                     engine.transcript.messages(),
                     [synthesize_post_compact_message(
@@ -853,7 +846,7 @@ mod tests {
                     .compact(&CapturingSink::default(), &mut mailbox, None)
                     .await;
 
-                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(end, OpEnd::Completed);
                 assert_eq!(
                     engine.transcript.messages(),
                     [synthesize_post_compact_message(
@@ -877,27 +870,27 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.usage.set_total_estimated_cost_usd(1.23);
                 let sink = CapturingSink::default();
-                let (ops_tx, mut ops) = mpsc::channel(1);
+                let (ops_tx, mut ops) = OpSender::channel(1);
                 let mut mailbox = Mailbox::new(&mut ops);
 
                 engine
                     .transcript
                     .set_messages(vec![Message::user("too short")]);
                 let end = engine.compact(&sink, &mut mailbox, None).await;
-                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(end, OpEnd::Failed);
                 assert_eq!(engine.transcript.messages(), [Message::user("too short")]);
 
                 engine.transcript.set_messages(tool_heavy_transcript());
-                ops_tx.send(Op::Interrupt).await.unwrap();
+                ops_tx.submit(Op::Interrupt).await.unwrap();
                 let end = engine.compact(&sink, &mut mailbox, None).await;
-                assert_eq!(end, TurnEnd::Cancelled);
+                assert_eq!(end, OpEnd::Cancelled);
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
 
                 engine.transcript.set_session(dead_test_session());
                 let end = engine.compact(&sink, &mut mailbox, None).await;
                 assert_eq!(
                     end,
-                    TurnEnd::Failed,
+                    OpEnd::Failed,
                     "a compaction whose writer is gone fails"
                 );
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
@@ -908,7 +901,6 @@ mod tests {
                         events.as_slice(),
                         [
                             Event::TurnFailed(short),
-                            Event::Cancelled,
                             Event::SummaryToken(_),
                             Event::SummaryDiscarded,
                             Event::Error(boundary_write),
@@ -958,7 +950,7 @@ mod tests {
 
                 let end = engine.compact(&sink, &mut inert_mailbox(), None).await;
 
-                assert_eq!(end, TurnEnd::Completed);
+                assert_eq!(end, OpEnd::Completed);
                 let events = sink.events();
                 assert!(
                     matches!(
@@ -971,7 +963,6 @@ mod tests {
                                 estimated_cost_usd: Some(cost),
                                 ..
                             }),
-                            Event::SessionReady,
                         ] if (cost - 1.23).abs() < 1e-12
                     ),
                     "the cleared context shows beside the unchanged cost: {events:?}",
@@ -994,7 +985,7 @@ mod tests {
 
                 let end = engine.compact(&sink, &mut mailbox, None).await;
 
-                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(end, OpEnd::Failed);
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
                 assert_eq!(request_bodies(&server).await, [] as [serde_json::Value; 0]);
                 let events = sink.events();
@@ -1017,14 +1008,14 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.transcript.set_messages(tool_heavy_transcript());
                 let sink = CapturingSink::default();
-                let (ops_tx, mut ops) = mpsc::channel(2);
+                let (ops_tx, mut ops) = OpSender::channel(2);
                 let mut mailbox = Mailbox::new(&mut ops);
-                ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
-                ops_tx.try_send(Op::Interrupt).unwrap();
+                ops_tx.try_submit(Op::SetMode(Mode::Plan)).unwrap();
+                ops_tx.try_submit(Op::Interrupt).unwrap();
 
                 let end = engine.compact(&sink, &mut mailbox, None).await;
 
-                assert_eq!(end, TurnEnd::Cancelled);
+                assert_eq!(end, OpEnd::Cancelled);
                 assert_eq!(mailbox.take_mode(), Some(Mode::Plan));
             })
             .await;
@@ -1038,13 +1029,13 @@ mod tests {
                 let mut engine = engine(base_url, &test_store(dir.path()), dir.path()).await;
                 engine.transcript.set_messages(tool_heavy_transcript());
                 let sink = CapturingSink::default();
-                let (ops_tx, mut ops) = mpsc::channel(1);
+                let (ops_tx, mut ops) = OpSender::channel(1);
                 let mut mailbox = Mailbox::new(&mut ops);
                 let interrupt_once_streaming = async {
                     while sink.events().is_empty() {
                         tokio::task::yield_now().await;
                     }
-                    ops_tx.send(Op::Interrupt).await.unwrap();
+                    ops_tx.submit(Op::Interrupt).await.unwrap();
                 };
 
                 let (end, ()) = tokio::join!(
@@ -1052,7 +1043,7 @@ mod tests {
                     interrupt_once_streaming,
                 );
 
-                assert_eq!(end, TurnEnd::Cancelled);
+                assert_eq!(end, OpEnd::Cancelled);
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
                 let events = sink.events();
                 assert!(
@@ -1062,7 +1053,6 @@ mod tests {
                             Event::SummaryToken(partial),
                             Event::SummaryDiscarded,
                             Event::UsageUpdated(_),
-                            Event::Cancelled,
                         ] if partial == "partial"
                     ),
                     "{events:?}",
@@ -1092,7 +1082,7 @@ mod tests {
 
                 let end = engine.compact(&sink, &mut mailbox, None).await;
 
-                assert_eq!(end, TurnEnd::Failed);
+                assert_eq!(end, OpEnd::Failed);
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
                 assert_eq!(
                     engine.usage.displayed_usage(),

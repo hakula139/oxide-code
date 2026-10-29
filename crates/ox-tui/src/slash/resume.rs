@@ -843,6 +843,8 @@ mod tests {
     use time::macros::datetime;
     use tokio::sync::mpsc;
 
+    use ox_core::protocol::OpEnd;
+    use ox_core::protocol::testing::op_id;
     use ox_core::session::display::UNTITLED_MARKER;
     use ox_core::session::saved::{self, SavedAction};
     use ox_core::session::store::testing::{
@@ -2375,7 +2377,10 @@ mod tests {
                 target: SavedTarget::Prefix("2222".to_owned()),
                 state: ArchiveState::Archived,
             }));
-            let reply = picker.on_engine(EngineUpdate::Event(&Event::TurnComplete));
+            let reply = picker.on_engine(EngineUpdate::Event(&Event::OpEnded {
+                id: op_id(0),
+                end: OpEnd::Completed,
+            }));
 
             assert!(picker.archive.is_none(), "a prefix names no listed row");
             assert!(matches!(reply, UpdateReply::Unclaimed));

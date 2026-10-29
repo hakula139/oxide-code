@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::permission::Mode;
-use crate::protocol::{Event, EventSink, Op};
+use crate::protocol::{Event, EventSink, Op, Submission};
 
 /// Why a turn ended without a clean assistant reply. The engine keeps serving after `Cancelled` but
 /// stops on `Shutdown`.
@@ -25,13 +25,13 @@ pub(super) type AbortResult<T> = std::result::Result<T, TurnAbort>;
 /// prompts queued for its next round boundary, and the latest mode switch, which applies before
 /// the next gated tool call or once the operation ends.
 pub(super) struct Mailbox<'a> {
-    ops: &'a mut mpsc::Receiver<Op>,
+    ops: &'a mut mpsc::Receiver<Submission>,
     prompts: Vec<String>,
     mode: Option<Mode>,
 }
 
 impl<'a> Mailbox<'a> {
-    pub(super) const fn new(ops: &'a mut mpsc::Receiver<Op>) -> Self {
+    pub(super) const fn new(ops: &'a mut mpsc::Receiver<Submission>) -> Self {
         Self {
             ops,
             prompts: Vec::new(),
@@ -68,7 +68,8 @@ impl<'a> Mailbox<'a> {
             tokio::select! {
                 // Queued ops, an interrupt above all, must win over a `fut` that is already ready.
                 biased;
-                op = self.ops.recv() => {
+                submission = self.ops.recv() => {
+                    let op = submission.map(|submission| submission.op);
                     if let Some(output) = self.absorb(op, sink)?.and_then(&mut on_op) {
                         return Ok(output);
                     }
@@ -113,8 +114,9 @@ impl<'a> Mailbox<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::SignInCode;
     use crate::protocol::local_testing::CapturingSink;
+    use crate::protocol::testing::op_id;
+    use crate::protocol::{OpSender, SignInCode};
 
     mod mailbox {
         use super::*;
@@ -124,10 +126,10 @@ mod tests {
 
             #[tokio::test]
             async fn keeps_queued_prompts_and_the_latest_mode_switch() {
-                let (tx, mut rx) = mpsc::channel(3);
-                tx.try_send(Op::Queue("next".to_owned())).unwrap();
-                tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
-                tx.try_send(Op::SetMode(Mode::Yolo)).unwrap();
+                let (tx, mut rx) = OpSender::channel(3);
+                tx.try_submit(Op::Queue("next".to_owned())).unwrap();
+                tx.try_submit(Op::SetMode(Mode::Plan)).unwrap();
+                tx.try_submit(Op::SetMode(Mode::Yolo)).unwrap();
                 let mut mailbox = Mailbox::new(&mut rx);
                 let sink = CapturingSink::default();
 
@@ -153,9 +155,11 @@ mod tests {
                 let mut outcomes = Vec::new();
 
                 for op in [Some(Op::Interrupt), Some(Op::Shutdown), None] {
-                    let (tx, mut rx) = mpsc::channel(1);
+                    let (tx, mut rx) = OpSender::channel(1);
                     match op {
-                        Some(op) => tx.try_send(op).unwrap(),
+                        Some(op) => {
+                            tx.try_submit(op).unwrap();
+                        }
                         None => drop(tx),
                     }
                     let outcome = Mailbox::new(&mut rx)
@@ -183,11 +187,11 @@ mod tests {
 
             #[tokio::test]
             async fn ends_with_the_first_op_the_handler_takes() {
-                let (tx, mut rx) = mpsc::channel(3);
-                tx.try_send(Op::Clear).unwrap();
-                tx.try_send(Op::LoginCode(SignInCode("code#state".to_owned())))
+                let (tx, mut rx) = OpSender::channel(3);
+                tx.try_submit(Op::Clear).unwrap();
+                tx.try_submit(Op::LoginCode(SignInCode("code#state".to_owned())))
                     .unwrap();
-                tx.try_send(Op::Logout).unwrap();
+                tx.try_submit(Op::Logout).unwrap();
                 let sink = CapturingSink::default();
                 let mut passed = Vec::new();
 
@@ -206,7 +210,13 @@ mod tests {
                     "{output:?}"
                 );
                 assert_eq!(passed, [Op::Clear]);
-                assert_eq!(rx.try_recv().ok(), Some(Op::Logout));
+                assert_eq!(
+                    rx.try_recv().ok(),
+                    Some(Submission {
+                        id: op_id(2),
+                        op: Op::Logout
+                    })
+                );
                 assert_eq!(sink.events(), []);
             }
         }

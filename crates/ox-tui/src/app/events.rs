@@ -9,7 +9,7 @@ use ox_core::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::{Effort, ModelSpec};
 use ox_core::permission::{Basis, Mode, SessionGrant};
-use ox_core::protocol::{CompactTrigger, Event, Interaction, SavedTarget, TurnEnd, notice};
+use ox_core::protocol::{CompactTrigger, Event, Interaction, OpEnd, SavedTarget, notice};
 use ox_core::session::display::{archive_notice, id_prefix};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::session::store::listing::{ArchiveState, SessionInfo};
@@ -29,7 +29,7 @@ use crate::{NOTICE_DURATION, now};
 
 impl App {
     /// Passes `event` to the open modals and shows it, leaving a saved-session result to a modal
-    /// that shows it, then ends the in-flight operation if `event` is its terminal event.
+    /// that shows it, then ends the in-flight operation if `event` is its [`Event::OpEnded`].
     pub(super) fn handle_engine_event(&mut self, event: Event) {
         let end = self.in_flight.as_ref().and_then(|op| op.end(&event));
         let shown = self.notify_modals(EngineUpdate::Event(&event));
@@ -69,8 +69,8 @@ impl App {
             }
             Event::ToolCallEnd(result) => self.chat.push_tool_result(result),
             Event::PromptDrained(text) => self.apply_prompt_drained(text),
-            // Terminal events that only end the operation, which `end_operation` settles.
-            Event::TurnComplete | Event::Cancelled | Event::SessionReady => {}
+            // `end_operation` settles the in-flight op, and the TUI tracks no other.
+            Event::OpEnded { .. } => {}
             Event::TurnRolledBack => self.queue.mark_rolled_back(),
             Event::PromptUnsent => self.queue.mark_unsent(),
             Event::UsageUpdated(usage) => self.session_info.usage = Some(usage),
@@ -151,12 +151,12 @@ impl App {
     /// failure that holds the queue holds it until the user submits a prompt or starts a session
     /// switch, and a cancel also leaves the prompts a failed switch kept for its retry to the user.
     /// An operation's end defers the head while a modal that may send the next operation is open.
-    fn end_operation(&mut self, ended: &InFlight, end: TurnEnd) {
+    fn end_operation(&mut self, ended: &InFlight, end: OpEnd) {
         self.chat.commit_streaming();
         let goes_on = match end {
-            TurnEnd::Completed => true,
-            TurnEnd::Failed => self.settle_failure(),
-            TurnEnd::Cancelled | TurnEnd::Shutdown => {
+            OpEnd::Completed => true,
+            OpEnd::Failed => self.settle_failure(),
+            OpEnd::Cancelled | OpEnd::Shutdown => {
                 if self.queue.unsent() {
                     self.settle_failure();
                 } else {
@@ -544,7 +544,7 @@ mod tests {
     use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
     use indoc::indoc;
     use tokio::sync::mpsc::error::TryRecvError;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::oneshot;
 
     use ox_core::config::StatusLineSegment;
     use ox_core::config::compaction::testing::WINDOW_1M_THRESHOLD;
@@ -552,7 +552,7 @@ mod tests {
     use ox_core::permission::PermissionClass;
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
-    use ox_core::protocol::testing::{model_pick, text_result};
+    use ox_core::protocol::testing::{OpReceiver, model_pick, text_result};
     use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
     use ox_core::session::resolver::ResolveError;
     use ox_core::session::saved::SavedAction;
@@ -568,8 +568,8 @@ mod tests {
     use super::*;
     use crate::action::Action;
     use crate::app::testing::{
-        FakeModal, activity, apply_next_app_event, five_hour_limit, render_app, rendered_text,
-        start_op, test_app, test_app_with,
+        FakeModal, activity, apply_next_app_event, end_op_with, five_hour_limit, op_ended,
+        render_app, rendered_text, start_op, test_app, test_app_with,
     };
     use crate::clipboard::CopyError;
     use crate::git_probes::pull_request::testing::pull_request;
@@ -837,26 +837,26 @@ mod tests {
         }
 
         #[test]
-        fn turn_complete_becomes_idle() {
+        fn a_completed_turn_becomes_idle() {
             let (mut app, _rx, _event_tx) = test_app(None);
-            // Drive into streaming first so TurnComplete has state to tear down.
+            // Drive into streaming first so the turn's end has state to tear down.
             app.dispatch_action(Action::Submit("hi".to_owned()));
             assert_eq!(activity(&app), Some(&Activity::Streaming));
 
-            app.handle_engine_event(Event::TurnComplete);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             assert_eq!(activity(&app), None);
         }
 
         #[tokio::test]
-        async fn turn_complete_starts_a_turn_with_the_queue_head_and_hands_it_the_rest() {
+        async fn a_completed_turn_starts_a_turn_with_the_queue_head_and_hands_it_the_rest() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             rx.try_recv().expect("active submit forwarded");
             app.queue.push("a".to_owned());
             app.queue.push("b".to_owned());
 
-            app.handle_engine_event(Event::TurnComplete);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             let forwarded: Vec<Op> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             assert_eq!(forwarded, [Op::prompt("a"), Op::Queue("b".to_owned())],);
@@ -865,7 +865,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn turn_complete_after_a_cancel_request_leaves_the_queue_to_the_user() {
+        async fn a_completed_turn_after_a_cancel_request_leaves_the_queue_to_the_user() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             rx.try_recv().expect("active submit forwarded");
@@ -874,7 +874,7 @@ mod tests {
             app.handle_esc();
             assert_eq!(rx.try_recv().ok(), Some(Op::Interrupt));
 
-            app.handle_engine_event(Event::TurnComplete);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             assert_eq!(
                 rx.try_recv(),
@@ -897,9 +897,11 @@ mod tests {
             rx.try_recv().expect("queued prompt forwarded");
 
             app.handle_engine_event(Event::TurnRolledBack);
-            app.handle_engine_event(Event::TurnFailed(
-                "The model declined this request.".to_owned(),
-            ));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("The model declined this request.".to_owned()),
+                OpEnd::Failed,
+            );
 
             assert_eq!(activity(&app), None);
             assert_eq!(app.input.lines(), ["//refused".to_owned()]);
@@ -926,9 +928,11 @@ mod tests {
             rx.try_recv().expect("prompt forwarded");
 
             app.handle_engine_event(Event::TurnRolledBack);
-            app.handle_engine_event(Event::TurnFailed(
-                "The model declined this request.".to_owned(),
-            ));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("The model declined this request.".to_owned()),
+                OpEnd::Failed,
+            );
 
             assert_eq!(activity(&app), None);
             assert_eq!(app.input.lines(), ["/init AGENTS.md".to_owned()]);
@@ -946,9 +950,13 @@ mod tests {
             app.handle_engine_event(Event::AutoCompactionStarted);
 
             app.handle_engine_event(Event::PromptUnsent);
-            app.handle_engine_event(Event::TurnFailed(
-                "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
-            ));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed(
+                    "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
+                ),
+                OpEnd::Failed,
+            );
 
             assert_eq!(
                 app.chat.last_error_text(),
@@ -977,9 +985,13 @@ mod tests {
             app.dispatch_action(Action::Submit("queued".to_owned()));
 
             app.handle_engine_event(Event::PromptUnsent);
-            app.handle_engine_event(Event::TurnFailed(
-                "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
-            ));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed(
+                    "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
+                ),
+                OpEnd::Failed,
+            );
 
             assert_eq!(activity(&app), None);
             assert!(app.input.is_empty());
@@ -1005,9 +1017,13 @@ mod tests {
             app.handle_engine_event(Event::AutoCompactionStarted);
             app.dispatch_action(Action::Submit("queued".to_owned()));
             app.handle_engine_event(Event::PromptUnsent);
-            app.handle_engine_event(Event::TurnFailed(
-                "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
-            ));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed(
+                    "Auto-compaction failed: summarizer down. The prompt was not sent.".to_owned(),
+                ),
+                OpEnd::Failed,
+            );
             assert_eq!(*app.queue.pending(), ["/init AGENTS.md", "queued"]);
 
             app.dispatch_action(Action::Submit("go".to_owned()));
@@ -1026,9 +1042,11 @@ mod tests {
             rx.try_recv().expect("queued submit forwarded");
 
             app.handle_engine_event(Event::PromptUnsent);
-            app.handle_engine_event(Event::TurnFailed(
-                "Not signed in. Run `/login` to sign in.".to_owned(),
-            ));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("Not signed in. Run `/login` to sign in.".to_owned()),
+                OpEnd::Failed,
+            );
 
             assert_eq!(
                 app.chat.last_error_text(),
@@ -1053,7 +1071,11 @@ mod tests {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("boom".to_owned()));
 
-            app.handle_engine_event(Event::TurnFailed("API blew up".to_owned()));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("API blew up".to_owned()),
+                OpEnd::Failed,
+            );
 
             assert_eq!(app.chat.last_error_text(), Some("API blew up"));
             assert_eq!(activity(&app), None);
@@ -1067,7 +1089,11 @@ mod tests {
             app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
             let during = rx.try_recv();
 
-            app.handle_engine_event(Event::TurnFailed("Archive failed: disk full".to_owned()));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("Archive failed: disk full".to_owned()),
+                OpEnd::Failed,
+            );
 
             assert_eq!(during, Err(TryRecvError::Empty));
             assert_eq!(
@@ -1088,7 +1114,11 @@ mod tests {
             app.queue.push("second".to_owned());
             let chat_before = app.chat.entry_count();
 
-            app.handle_engine_event(Event::TurnFailed("API failed".to_owned()));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("API failed".to_owned()),
+                OpEnd::Failed,
+            );
 
             assert_eq!(
                 app.chat.entry_count(),
@@ -1117,7 +1147,11 @@ mod tests {
             });
             app.queue.push("queued".to_owned());
 
-            app.handle_engine_event(Event::TurnFailed("API failed".to_owned()));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("API failed".to_owned()),
+                OpEnd::Failed,
+            );
 
             assert_eq!(rx.try_recv().unwrap(), Op::prompt("queued"));
             assert!(app.input.is_empty(), "the sent prompt is not handed back");
@@ -1132,11 +1166,15 @@ mod tests {
             app.handle_engine_event(Event::AutoCompactionStarted);
             app.dispatch_action(Action::Submit("queued".to_owned()));
 
-            app.handle_engine_event(Event::TurnFailed(
-                "Auto-compaction failed: summarizer down. \
-                 The turn stopped before its next request."
-                    .to_owned(),
-            ));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed(
+                    "Auto-compaction failed: summarizer down. \
+                     The turn stopped before its next request."
+                        .to_owned(),
+                ),
+                OpEnd::Failed,
+            );
 
             assert_eq!(activity(&app), None);
             assert!(app.input.is_empty(), "the sent prompt is not handed back");
@@ -1155,9 +1193,11 @@ mod tests {
             assert_eq!(rx.try_recv().ok(), Some(Op::Compact { instructions: None }));
             app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
 
-            app.handle_engine_event(Event::TurnFailed(
-                "Compaction failed: summarizer down".to_owned(),
-            ));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("Compaction failed: summarizer down".to_owned()),
+                OpEnd::Failed,
+            );
 
             assert_eq!(
                 rx.try_recv(),
@@ -1182,7 +1222,7 @@ mod tests {
             rx.try_recv().expect("second submit forwarded");
             app.handle_esc();
             assert_eq!(rx.try_recv().ok(), Some(Op::Interrupt));
-            app.handle_engine_event(Event::Cancelled);
+            app.handle_engine_event(op_ended(&app, OpEnd::Cancelled));
             app.dispatch_action(Action::Submit("/resume zzzz".to_owned()));
             assert_eq!(
                 rx.try_recv().ok(),
@@ -1192,9 +1232,13 @@ mod tests {
             );
             app.dispatch_action(Action::Submit("third".to_owned()));
 
-            app.handle_engine_event(Event::TurnFailed(
-                "Resume failed (still on session x): no session matching `zzzz`".to_owned(),
-            ));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed(
+                    "Resume failed (still on session x): no session matching `zzzz`".to_owned(),
+                ),
+                OpEnd::Failed,
+            );
 
             assert_eq!(
                 rx.try_recv(),
@@ -1227,9 +1271,11 @@ mod tests {
                 ],
             );
 
-            app.handle_engine_event(Event::TurnFailed(
-                "agent stopped after 3 tool rounds".to_owned(),
-            ));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("agent stopped after 3 tool rounds".to_owned()),
+                OpEnd::Failed,
+            );
 
             assert_eq!(
                 forwarded(),
@@ -1240,11 +1286,11 @@ mod tests {
                 ],
             );
 
-            app.handle_engine_event(Event::TurnComplete);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             assert_eq!(forwarded(), [Op::prompt("b"), Op::Queue("c".to_owned())],);
 
-            app.handle_engine_event(Event::TurnComplete);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             assert_eq!(forwarded(), [Op::prompt("c")]);
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
@@ -1262,14 +1308,14 @@ mod tests {
         }
 
         #[test]
-        fn cancelled_commits_partial_stream_with_marker_and_becomes_idle() {
+        fn a_cancelled_turn_commits_partial_stream_with_marker_and_becomes_idle() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("hi".to_owned()));
             app.handle_engine_event(Event::StreamToken("partial answer".to_owned()));
             let entries_before = app.chat.entry_count();
             assert_eq!(activity(&app), Some(&Activity::Streaming));
 
-            app.handle_engine_event(Event::Cancelled);
+            app.handle_engine_event(op_ended(&app, OpEnd::Cancelled));
 
             assert_eq!(activity(&app), None);
             assert_eq!(
@@ -1285,7 +1331,7 @@ mod tests {
         #[test]
         fn cancelling_status_is_sticky_against_late_buffered_events() {
             // Events buffered before an interrupt must not clear the cancellation status before
-            // `Cancelled` arrives.
+            // the turn's `OpEnded` arrives.
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("hi".to_owned()));
             app.dispatch_action(Action::Op(Op::Interrupt));
@@ -1301,14 +1347,14 @@ mod tests {
         }
 
         #[test]
-        fn cancelled_with_no_stream_still_pushes_marker() {
+        fn a_cancelled_turn_with_no_stream_still_pushes_marker() {
             // A cancel during a tool call (or before any stream tokens) makes commit_streaming a
             // no-op, but the marker still lands so the user sees where the cancel hit.
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("hi".to_owned()));
             let entries_before = app.chat.entry_count();
 
-            app.handle_engine_event(Event::Cancelled);
+            app.handle_engine_event(op_ended(&app, OpEnd::Cancelled));
 
             assert_eq!(app.chat.entry_count(), entries_before + 1);
             let text = rendered_text(&mut app, 60, 8);
@@ -1316,7 +1362,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn cancelled_with_an_unsent_prompt_hands_it_back_without_a_marker() {
+        async fn a_cancelled_turn_with_an_unsent_prompt_hands_it_back_without_a_marker() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             rx.try_recv().expect("active submit forwarded");
@@ -1324,7 +1370,7 @@ mod tests {
             rx.try_recv().expect("queued submit forwarded");
             app.handle_engine_event(Event::PromptUnsent);
 
-            app.handle_engine_event(Event::Cancelled);
+            app.handle_engine_event(op_ended(&app, OpEnd::Cancelled));
 
             assert_eq!(activity(&app), None);
             assert_eq!(*app.queue.pending(), ["active", "queued"]);
@@ -1337,7 +1383,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn cancelled_goes_idle_and_esc_recalls_the_queued_prompt() {
+        async fn a_cancelled_turn_goes_idle_and_esc_recalls_the_queued_prompt() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("first".to_owned()));
             rx.try_recv().expect("first submit forwarded");
@@ -1347,7 +1393,7 @@ mod tests {
             app.handle_esc();
             assert_eq!(rx.try_recv().ok(), Some(Op::Interrupt));
 
-            app.handle_engine_event(Event::Cancelled);
+            app.handle_engine_event(op_ended(&app, OpEnd::Cancelled));
 
             assert_eq!(
                 rx.try_recv(),
@@ -1839,9 +1885,11 @@ mod tests {
             app.handle_engine_event(Event::PromptDrained("after".to_owned()));
 
             app.handle_engine_event(Event::TurnRolledBack);
-            app.handle_engine_event(Event::TurnFailed(
-                "The model declined this request.".to_owned(),
-            ));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("The model declined this request.".to_owned()),
+                OpEnd::Failed,
+            );
 
             assert!(app.input.is_empty(), "the summary holds the active prompt");
             assert_eq!(*app.queue.pending(), ["after"]);
@@ -1873,7 +1921,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn session_ready_after_a_compaction_starts_the_queue_head_below_its_notices() {
+        async fn a_compactions_end_starts_the_queue_head_below_its_notices() {
             // Compaction keeps the session, so a queued prompt becomes the first post-compact turn.
             // `/resume` swaps sessions and drops it.
             let (mut app, mut rx, _event_tx) = test_app(None);
@@ -1891,7 +1939,7 @@ mod tests {
                 "Skipped instruction file CLAUDE.md".to_owned(),
             ));
             let before_ready = rx.try_recv();
-            app.handle_engine_event(Event::SessionReady);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             assert_eq!(before_ready, Err(TryRecvError::Empty));
             assert_eq!(
@@ -1906,7 +1954,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn session_ready_after_a_cancelled_compaction_keeps_the_queue_waiting() {
+        async fn a_compaction_that_outran_its_cancel_keeps_the_queue_waiting() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.queue.push("queued before compact".to_owned());
             app.dispatch_op(Op::Compact { instructions: None });
@@ -1920,7 +1968,7 @@ mod tests {
                 instructions: None,
                 trigger: CompactTrigger::Manual,
             });
-            app.handle_engine_event(Event::SessionReady);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
             assert_eq!(*app.queue.pending(), ["queued before compact"]);
@@ -1928,7 +1976,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn session_ready_ends_a_resume_after_the_swap() {
+        async fn a_resume_ends_after_the_swap() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             let resume = Op::Resume {
                 target: ResumeTarget::Prefix("1a2b".to_owned()),
@@ -1943,14 +1991,14 @@ mod tests {
                 history: Vec::new(),
             });
             let at_swap = activity(&app).cloned();
-            app.handle_engine_event(Event::SessionReady);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             assert_eq!(at_swap, Some(Activity::Resuming));
             assert_eq!(activity(&app), None);
         }
 
         #[tokio::test]
-        async fn session_ready_ends_an_archive_and_starts_the_prompt_queued_during_it() {
+        async fn an_archives_end_starts_the_prompt_queued_during_it() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_op(Op::Archive);
             assert_eq!(rx.recv().await, Some(Op::Archive));
@@ -1962,7 +2010,7 @@ mod tests {
                 old_session: ArchiveState::Archived,
             });
             let at_roll = activity(&app).cloned();
-            app.handle_engine_event(Event::SessionReady);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             assert_eq!(during, Err(TryRecvError::Empty));
             assert_eq!(at_roll, Some(Activity::Archiving));
@@ -2095,7 +2143,7 @@ mod tests {
                 app.session_info.config.auth = None;
                 start_op(&mut app, &Op::Login);
 
-                app.handle_engine_event(Event::SignedIn { auth });
+                end_op_with(&mut app, Event::SignedIn { auth }, OpEnd::Completed);
 
                 assert_eq!(app.session_info.config.auth, Some(auth));
                 assert_eq!(app.chat.last_system_text(), Some(expected));
@@ -2110,9 +2158,13 @@ mod tests {
             rx.try_recv().expect("login forwarded");
             app.queue.push("held".to_owned());
 
-            app.handle_engine_event(Event::SignedIn {
-                auth: AuthSource::OxLogin,
-            });
+            end_op_with(
+                &mut app,
+                Event::SignedIn {
+                    auth: AuthSource::OxLogin,
+                },
+                OpEnd::Completed,
+            );
 
             assert_eq!(rx.try_recv().ok(), Some(Op::prompt("held")));
             assert_eq!(activity(&app), Some(&Activity::Streaming));
@@ -2127,9 +2179,13 @@ mod tests {
             app.handle_esc();
             assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
 
-            app.handle_engine_event(Event::SignedIn {
-                auth: AuthSource::OxLogin,
-            });
+            end_op_with(
+                &mut app,
+                Event::SignedIn {
+                    auth: AuthSource::OxLogin,
+                },
+                OpEnd::Completed,
+            );
 
             assert_eq!(activity(&app), None);
             assert_eq!(*app.queue.pending(), ["held"]);
@@ -2213,11 +2269,15 @@ mod tests {
             app.dispatch_action(Action::Submit("next".to_owned()));
             let during = (activity(&app).cloned(), rx.try_recv());
 
-            app.handle_engine_event(Event::SignedOut {
-                removed: true,
-                auth: Some(AuthSource::ApiKeyEnv),
-                fallback_error: None,
-            });
+            end_op_with(
+                &mut app,
+                Event::SignedOut {
+                    removed: true,
+                    auth: Some(AuthSource::ApiKeyEnv),
+                    fallback_error: None,
+                },
+                OpEnd::Completed,
+            );
 
             assert_eq!(
                 during,
@@ -2366,7 +2426,7 @@ mod tests {
                 app.push_modal(Box::new(modal));
                 start_op(&mut app, &op);
 
-                app.handle_engine_event(event);
+                end_op_with(&mut app, event, OpEnd::Completed);
 
                 assert_eq!(activity(&app), None, "{op:?}");
                 assert!(app.modals.is_active(), "{op:?}");
@@ -2378,19 +2438,19 @@ mod tests {
     mod end_operation {
         use super::*;
 
-        /// Runs `op` to its `end` on an app whose queue holds "typed meanwhile", then checks that
-        /// nothing started.
+        /// Runs `op` through `result` to a completed end, then checks that nothing started and the
+        /// queue still holds "typed meanwhile".
         fn assert_stays_held(
             app: &mut App,
-            rx: &mut mpsc::Receiver<Op>,
+            rx: &mut OpReceiver,
             op: &Op,
-            end: Event,
+            result: Event,
             label: &str,
         ) {
             app.dispatch_op(op.clone());
             assert_eq!(rx.try_recv().as_ref(), Ok(op), "{label}");
 
-            app.handle_engine_event(end);
+            end_op_with(app, result, OpEnd::Completed);
 
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{label}");
             assert_eq!(*app.queue.pending(), ["typed meanwhile"], "{label}");
@@ -2404,7 +2464,7 @@ mod tests {
             app.handle_engine_event(bash_call_start("orphan", "ls"));
             assert_eq!(app.chat.pending_call_count(), 1);
 
-            app.handle_engine_event(Event::TurnComplete);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             assert_eq!(
                 app.chat.pending_call_count(),
@@ -2442,11 +2502,20 @@ mod tests {
                     assert_eq!(rx.try_recv(), Ok(Op::Interrupt), "{label}");
                 }
 
-                app.handle_engine_event(Event::ArchiveUpdated {
-                    target,
-                    state: ArchiveState::Archived,
-                    result,
-                });
+                let end = if result.is_ok() {
+                    OpEnd::Completed
+                } else {
+                    OpEnd::Failed
+                };
+                end_op_with(
+                    &mut app,
+                    Event::ArchiveUpdated {
+                        target,
+                        state: ArchiveState::Archived,
+                        result,
+                    },
+                    end,
+                );
 
                 let started = rx.try_recv().ok();
                 assert_eq!(
@@ -2475,7 +2544,11 @@ mod tests {
                 app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
                 rx.try_recv().expect("lookup forwarded");
                 app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
-                app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+                end_op_with(
+                    &mut app,
+                    Event::SavedFound(Ok(Box::new(listed_session("saved")))),
+                    OpEnd::Completed,
+                );
                 assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "{case}");
                 let delete = Op::DeleteSaved {
                     session_id: "saved".to_owned(),
@@ -2483,10 +2556,19 @@ mod tests {
                 app.dispatch_op(delete.clone());
                 assert_eq!(rx.try_recv(), Ok(delete), "{case}");
 
-                app.handle_engine_event(Event::SavedDeleted {
-                    id: "saved".to_owned(),
-                    result,
-                });
+                let end = if result.is_ok() {
+                    OpEnd::Completed
+                } else {
+                    OpEnd::Failed
+                };
+                end_op_with(
+                    &mut app,
+                    Event::SavedDeleted {
+                        id: "saved".to_owned(),
+                        result,
+                    },
+                    end,
+                );
 
                 assert_eq!(app.modals.is_active(), stays_open, "{case}");
                 assert_eq!(
@@ -2509,7 +2591,11 @@ mod tests {
             app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
             rx.try_recv().expect("lookup forwarded");
             app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
-            app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+            end_op_with(
+                &mut app,
+                Event::SavedFound(Ok(Box::new(listed_session("saved")))),
+                OpEnd::Completed,
+            );
             let deferred = rx.try_recv();
 
             app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
@@ -2526,7 +2612,11 @@ mod tests {
             rx.try_recv().expect("lookup forwarded");
             app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
             app.dispatch_action(Action::Submit("/help".to_owned()));
-            app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+            end_op_with(
+                &mut app,
+                Event::SavedFound(Ok(Box::new(listed_session("saved")))),
+                OpEnd::Completed,
+            );
             let deferred = rx.try_recv();
 
             app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
@@ -2547,7 +2637,7 @@ mod tests {
             app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
             app.push_modal(Box::new(FakeModal::new("help")));
 
-            app.handle_engine_event(Event::SessionReady);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
         }
@@ -2558,7 +2648,11 @@ mod tests {
             app.dispatch_op(Op::Compact { instructions: None });
             rx.try_recv().expect("compaction forwarded");
             app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
-            app.handle_engine_event(Event::TurnFailed("Compaction failed".to_owned()));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("Compaction failed".to_owned()),
+                OpEnd::Failed,
+            );
 
             assert_stays_held(
                 &mut app,
@@ -2582,8 +2676,12 @@ mod tests {
             });
             rx.try_recv().expect("resume forwarded");
             app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
-            app.handle_engine_event(Event::TurnFailed("No session matches".to_owned()));
-            let end = Event::ConfigChanged {
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("No session matches".to_owned()),
+                OpEnd::Failed,
+            );
+            let changed = Event::ConfigChanged {
                 model: app.session_info.config.model.clone(),
                 effort: Some(Effort::Low),
                 requested: ConfigPick::Effort(Effort::Low),
@@ -2595,7 +2693,7 @@ mod tests {
                 &mut app,
                 &mut rx,
                 &Op::SetModel(ConfigPick::Effort(Effort::Low)),
-                end,
+                changed,
                 "model",
             );
         }
@@ -2646,12 +2744,16 @@ mod tests {
                 app.dispatch_op(failed);
                 rx.try_recv().expect("switch forwarded");
                 app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
-                app.handle_engine_event(Event::TurnFailed("Switch failed".to_owned()));
+                end_op_with(
+                    &mut app,
+                    Event::TurnFailed("Switch failed".to_owned()),
+                    OpEnd::Failed,
+                );
                 app.dispatch_op(retry);
                 rx.try_recv().expect("retry forwarded");
 
                 app.handle_engine_event(landed);
-                app.handle_engine_event(Event::SessionReady);
+                app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
                 assert_eq!(
                     rx.try_recv().ok(),
@@ -2672,7 +2774,11 @@ mod tests {
             app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
             app.handle_esc();
             assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
-            app.handle_engine_event(Event::TurnFailed("No session matches".to_owned()));
+            end_op_with(
+                &mut app,
+                Event::TurnFailed("No session matches".to_owned()),
+                OpEnd::Failed,
+            );
             app.dispatch_op(Op::Resume {
                 target: ResumeTarget::Id("abcd".to_owned()),
             });
@@ -2684,7 +2790,7 @@ mod tests {
                 prior: ArchiveState::Active,
                 history: Vec::new(),
             });
-            app.handle_engine_event(Event::SessionReady);
+            app.handle_engine_event(op_ended(&app, OpEnd::Completed));
 
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
             assert_eq!(*app.queue.pending(), [] as [&str; 0]);
@@ -2697,7 +2803,7 @@ mod tests {
             app.queue.push("typed meanwhile".to_owned());
             app.handle_esc();
             assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
-            app.handle_engine_event(Event::Cancelled);
+            app.handle_engine_event(op_ended(&app, OpEnd::Cancelled));
             let target = SavedTarget::Prefix("saved".to_owned());
 
             assert_stays_held(
@@ -2721,12 +2827,18 @@ mod tests {
 
         #[tokio::test]
         async fn a_rename_keeps_a_prompt_local_until_it_ends() {
-            for end in [
-                Event::SessionTitleUpdated {
-                    id: "test-session".to_owned(),
-                    title: "Renamed".to_owned(),
-                },
-                Event::RenameFailed("Session write failed: disk full".to_owned()),
+            for (result, end) in [
+                (
+                    Event::SessionTitleUpdated {
+                        id: "test-session".to_owned(),
+                        title: "Renamed".to_owned(),
+                    },
+                    OpEnd::Completed,
+                ),
+                (
+                    Event::RenameFailed("Session write failed: disk full".to_owned()),
+                    OpEnd::Failed,
+                ),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
                 app.dispatch_action(Action::Submit("/rename Renamed".to_owned()));
@@ -2740,7 +2852,7 @@ mod tests {
                 app.dispatch_action(Action::Submit("typed meanwhile".to_owned()));
                 let during = rx.try_recv();
 
-                app.handle_engine_event(end.clone());
+                end_op_with(&mut app, result, end);
 
                 assert_eq!(during, Err(TryRecvError::Empty), "{end:?}");
                 assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")), "{end:?}");
@@ -2774,7 +2886,7 @@ mod tests {
                 start_op(&mut app, &Op::prompt("running"));
                 app.handle_esc();
                 assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
-                app.handle_engine_event(Event::Cancelled);
+                app.handle_engine_event(op_ended(&app, OpEnd::Cancelled));
                 app.session_info.store = store;
                 app.dispatch_action(Action::Submit("/resume".to_owned()));
                 let page = app
@@ -2794,14 +2906,18 @@ mod tests {
                     })
                 );
 
-                app.handle_engine_event(Event::ArchiveUpdated {
-                    target,
-                    state: ArchiveState::Archived,
-                    result: Ok(ArchiveUpdate {
-                        id: "second".to_owned(),
-                        changed: true,
-                    }),
-                });
+                end_op_with(
+                    &mut app,
+                    Event::ArchiveUpdated {
+                        target,
+                        state: ArchiveState::Archived,
+                        result: Ok(ArchiveUpdate {
+                            id: "second".to_owned(),
+                            changed: true,
+                        }),
+                    },
+                    OpEnd::Completed,
+                );
 
                 assert_eq!(activity(&app), None, "{next_key:?}");
                 assert_eq!(*app.queue.pending(), ["held prompt"], "{next_key:?}");
@@ -2840,7 +2956,11 @@ mod tests {
                 },
             );
 
-            app.handle_engine_event(Event::SavedFound(Ok(Box::new(listed_session("saved")))));
+            end_op_with(
+                &mut app,
+                Event::SavedFound(Ok(Box::new(listed_session("saved")))),
+                OpEnd::Completed,
+            );
 
             assert_eq!(activity(&app), None);
             assert!(app.modals.is_active(), "the confirm modal opens");
@@ -2852,11 +2972,13 @@ mod tests {
                     prefix: "1a2b".to_owned(),
                 },
             );
-            app.handle_engine_event(Event::SavedFound(Err(SavedError::Resolve(
-                ResolveError::Live {
+            end_op_with(
+                &mut app,
+                Event::SavedFound(Err(SavedError::Resolve(ResolveError::Live {
                     prefix: "test-".to_owned(),
-                },
-            ))));
+                }))),
+                OpEnd::Failed,
+            );
 
             assert_eq!(activity(&app), None);
             assert!(!app.modals.is_active());
@@ -2900,10 +3022,19 @@ mod tests {
                 app.handle_engine_event(Event::SavedFound(Ok(Box::new(info))));
                 start_op(&mut app, &delete_saved("saved"));
 
-                app.handle_engine_event(Event::SavedDeleted {
-                    id: "saved".to_owned(),
-                    result: result.clone(),
-                });
+                let end = if closes {
+                    OpEnd::Completed
+                } else {
+                    OpEnd::Failed
+                };
+                end_op_with(
+                    &mut app,
+                    Event::SavedDeleted {
+                        id: "saved".to_owned(),
+                        result: result.clone(),
+                    },
+                    end,
+                );
 
                 assert_eq!(activity(&app), None, "{result:?}");
                 assert_eq!(app.modals.is_active(), !closes, "{result:?}");
@@ -2918,10 +3049,14 @@ mod tests {
             let id = stamped_id(0xab);
             start_op(&mut app, &delete_saved(&id));
 
-            app.handle_engine_event(Event::SavedDeleted {
-                id: id.clone(),
-                result: Ok(()),
-            });
+            end_op_with(
+                &mut app,
+                Event::SavedDeleted {
+                    id: id.clone(),
+                    result: Ok(()),
+                },
+                OpEnd::Completed,
+            );
 
             assert_eq!(activity(&app), None);
             assert_eq!(
@@ -2930,12 +3065,16 @@ mod tests {
             );
 
             start_op(&mut app, &delete_saved(&id));
-            app.handle_engine_event(Event::SavedDeleted {
-                id,
-                result: Err(SavedError::Live {
-                    id: "abababab".to_owned(),
-                }),
-            });
+            end_op_with(
+                &mut app,
+                Event::SavedDeleted {
+                    id,
+                    result: Err(SavedError::Live {
+                        id: "abababab".to_owned(),
+                    }),
+                },
+                OpEnd::Failed,
+            );
 
             assert_eq!(activity(&app), None);
             assert_eq!(

@@ -14,7 +14,8 @@ use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
 use ox_core::client::{RateLimitWindow, RateLimits};
-use ox_core::protocol::{Event, Op};
+use ox_core::protocol::testing::{OpReceiver, op_channel, op_id};
+use ox_core::protocol::{Event, Op, OpEnd};
 use ox_core::session::store::listing::ArchiveState;
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
@@ -32,13 +33,11 @@ use crate::session_info::testing::unknown_model_session_info;
 use crate::testing::buffer_rows;
 use crate::theme::{Theme, ThemeOverrides};
 
-/// How many unread ops [`test_app`]'s channel holds before `try_send` reports it full.
+/// How many unread ops [`test_app`]'s channel holds before `try_submit` reports it full.
 pub(super) const OP_CHANNEL_CAPACITY: usize = 8;
 
 /// Idle `App` plus the `ops` consumer and an `event_tx` kept alive so `events` stays open.
-pub(super) fn test_app(
-    title: Option<&str>,
-) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
+pub(super) fn test_app(title: Option<&str>) -> (App, OpReceiver, mpsc::UnboundedSender<Event>) {
     test_app_with(unknown_model_session_info(), title)
 }
 
@@ -46,7 +45,7 @@ pub(super) fn test_app(
 pub(super) fn test_app_with(
     session_info: LiveSessionInfo,
     title: Option<&str>,
-) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
+) -> (App, OpReceiver, mpsc::UnboundedSender<Event>) {
     test_app_from(
         session_info,
         AppHistory {
@@ -61,9 +60,9 @@ pub(super) fn test_app_with(
 pub(super) fn test_app_from(
     mut session_info: LiveSessionInfo,
     history: AppHistory,
-) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
+) -> (App, OpReceiver, mpsc::UnboundedSender<Event>) {
     let (event_tx, events) = mpsc::unbounded_channel::<Event>();
-    let (ops, op_rx) = mpsc::channel::<Op>(OP_CHANNEL_CAPACITY);
+    let (ops, op_rx) = op_channel(OP_CHANNEL_CAPACITY);
     let (app_events, background) = mpsc::unbounded_channel();
     let host = test_host(&app_events);
     session_info.app_events = app_events;
@@ -107,10 +106,23 @@ pub(super) async fn copy_report(app: &mut App) -> CopyReport {
     next_report(&app.clipboard, &mut app.background).await
 }
 
-/// Puts `op` in flight with no other local effect of [`App::dispatch_op`], such as the queue marks
-/// a compaction or session switch sets.
+/// Puts `op` in flight, under an ID the app's channel never issues, with no other local effect of
+/// [`App::dispatch_op`], such as the queue marks a compaction or session switch sets.
 pub(super) fn start_op(app: &mut App, op: &Op) {
-    app.in_flight = InFlight::new(op);
+    app.in_flight = InFlight::new(op, op_id(u64::MAX));
+}
+
+/// The [`Event::OpEnded`] that ends the in-flight operation as `end`.
+pub(super) fn op_ended(app: &App, end: OpEnd) -> Event {
+    let id = app.in_flight.as_ref().expect("an op is in flight").id();
+    Event::OpEnded { id, end }
+}
+
+/// Shows `result`, then ends the in-flight operation as `end`, the order the engine reports them.
+pub(super) fn end_op_with(app: &mut App, result: Event, end: OpEnd) {
+    let ended = op_ended(app, end);
+    app.handle_engine_event(result);
+    app.handle_engine_event(ended);
 }
 
 /// What the in-flight operation does, or `None` while idle.
