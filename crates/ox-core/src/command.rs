@@ -10,7 +10,7 @@ use std::path::Path;
 
 use indoc::formatdoc;
 
-use crate::model::{Effort, MODELS, ModelInfo, ResolvedModelId};
+use crate::model::{Effort, MODELS, ModelInfo};
 use crate::permission::Mode;
 use crate::protocol::{ConfigPick, Op, ResumeTarget};
 use crate::session::display::fit_title;
@@ -81,12 +81,17 @@ pub fn names() -> impl Iterator<Item = &'static str> {
 /// Resolves aliases and parses `parsed` into an op at `project_root`. Errors use the typed command
 /// name, and prompts use the command line as their title. `None` without a typed form.
 pub fn typed_op(parsed: &Parsed, project_root: &Path) -> Option<Result<Op, String>> {
-    let command = find(&parsed.name)?;
-    let mut op = (command.parse)(&parsed.args, project_root);
+    let mut op = typed_form(&parsed.name, &parsed.args, project_root)?;
     if let Ok(Op::Prompt { title, .. }) = &mut op {
         *title = Some(parsed.line());
     }
     Some(op.map_err(|msg| parsed.named_error(&msg)))
+}
+
+/// Parses `args` for the command `name` runs at `project_root`, leaving prompts untitled and errors
+/// unprefixed for a caller that names the command itself. `None` without a typed form.
+pub fn typed_form(name: &str, args: &str, project_root: &Path) -> Option<Result<Op, String>> {
+    find(name).map(|command| (command.parse)(args, project_root))
 }
 
 /// The command `name` runs, canonically or as one of its aliases.
@@ -113,7 +118,7 @@ pub fn label(name: &str) -> String {
 }
 
 /// `/compact [<instructions>]`, where trailing text focuses the summary.
-pub fn compact(args: &str) -> Op {
+fn compact(args: &str) -> Op {
     let instructions = args.trim();
     Op::Compact {
         instructions: (!instructions.is_empty()).then(|| instructions.to_owned()),
@@ -121,7 +126,7 @@ pub fn compact(args: &str) -> Op {
 }
 
 /// `/effort <level>`, case-insensitive.
-pub fn effort(arg: &str) -> Result<Op, String> {
+fn effort(arg: &str) -> Result<Op, String> {
     let usage = format!("/effort <{}>", variant::names_joined::<Effort>("|"));
     let arg = required(arg, "level", &usage)?;
     let pick = arg.to_ascii_lowercase().parse().map_err(|_| {
@@ -134,7 +139,7 @@ pub fn effort(arg: &str) -> Result<Op, String> {
 }
 
 /// `/mode <mode>`, case-insensitive.
-pub fn mode(arg: &str) -> Result<Op, String> {
+fn mode(arg: &str) -> Result<Op, String> {
     let usage = format!("/mode <{}>", variant::names_joined::<Mode>("|"));
     let arg = required(arg, "mode", &usage)?;
     let mode = arg.to_ascii_lowercase().parse::<Mode>().map_err(|_| {
@@ -149,7 +154,7 @@ pub fn mode(arg: &str) -> Result<Op, String> {
 /// `/model <id>`. Matches an exact catalog ID, then a unique substring of one, so family names such
 /// as `opus` work as aliases. Any other ID is accepted verbatim, for a gateway that serves models
 /// outside the catalog, and the swap warns that the model is not a supported one.
-pub fn model(arg: &str) -> Result<Op, String> {
+fn model(arg: &str) -> Result<Op, String> {
     let raw = required(arg, "model ID", "/model <id>")?;
     let arg = raw.to_ascii_lowercase();
     let hits: Vec<&ModelInfo> = match MODELS.iter().find(|info| info.id == arg) {
@@ -177,7 +182,7 @@ pub fn model(arg: &str) -> Result<Op, String> {
         [] => raw,
     };
     Ok(Op::SetModel(ConfigPick::Model {
-        id: ResolvedModelId::new(id),
+        id: id.to_owned(),
         effort: None,
     }))
 }
@@ -191,7 +196,7 @@ pub fn rename(title: &str) -> Result<Op, String> {
 }
 
 /// `/resume <id-prefix>`. The engine resolves the prefix against the saved sessions.
-pub fn resume(prefix: &str) -> Result<Op, String> {
+fn resume(prefix: &str) -> Result<Op, String> {
     let prefix = required(prefix, "session ID", "/resume <id-prefix>")?;
     Ok(Op::Resume {
         target: ResumeTarget::Prefix(prefix.to_owned()),
@@ -225,33 +230,16 @@ fn format_models<'a>(models: impl IntoIterator<Item = &'a ModelInfo>) -> String 
         .join("\n")
 }
 
-// ── Testing ──
-
-#[cfg(any(test, feature = "testing"))]
-pub mod testing {
-    use super::COMMANDS;
-
-    /// The canonical names of the commands that have aliases.
-    pub fn aliased_names() -> impl Iterator<Item = &'static str> {
-        COMMANDS
-            .iter()
-            .filter(|command| !command.aliases.is_empty())
-            .map(|command| command.name)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::protocol::testing::model_pick;
     use crate::session::display::MAX_TITLE_WIDTH;
 
     fn set_model(id: &str) -> Op {
-        Op::SetModel(ConfigPick::Model {
-            id: ResolvedModelId::new(id),
-            effort: None,
-        })
+        Op::SetModel(model_pick(id, None))
     }
 
     fn set_effort(level: Effort) -> Op {

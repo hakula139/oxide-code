@@ -2,7 +2,7 @@
 
 `/resume` (alias `/continue`) opens a searchable session picker when bare, or jumps directly when given a session ID. The picker loads sessions a page at a time as the cursor nears the end of the loaded rows. At startup, `ox --resume` without a session opens the same picker.
 
-Companion docs: [Slash Commands](slash-commands.md), [Modals](modals.md). Underlying research: [research/slash/resume.md](../research/slash/resume.md).
+Companion docs: [Slash Commands](slash-commands.md), [Modals](modals.md).
 
 ## Resume Surfaces
 
@@ -18,7 +18,7 @@ The picker wraps [`SearchableList`](modals.md) and adds these controls and displ
 - Enter on a focused row submits, while Enter with no selection keeps the picker open so the user can Tab the scope or Esc out.
 - Esc dismisses through the keymap, since the picker captures it, and Ctrl+C cancels via the universal stack gate.
 - The footer leads with the Enter and Esc hints, then names the scope, then lists the other actions whose labels apply. Keeping the scope beside Esc leaves it visible on a medium-width footer. Labels follow the view, so the Ctrl+X action reads as archiving or unarchiving. The row actions' hints hide while no row is highlighted, and the Ctrl+U hint shows only while a query is typed.
-- Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). When the engine reports the delete through `Modal::saved_deleted`, the picker drops that row and the row that followed takes the highlight, while a cancelled or failed delete leaves the rows and the cursor in place.
+- Ctrl+D on the cursor row pushes [`ConfirmDeleteSessionModal`](modals.md). When the engine reports the delete through `Modal::on_engine`, the picker drops that row and the row that followed takes the highlight, while a cancelled or failed delete leaves the rows and the cursor in place.
 - Ctrl+X archives the cursor row, or unarchives it in the archived view, by sending `Op::SetArchive` with the row's ID, the op the typed `/archive` and `/unarchive` forms send with a prefix. Until `ArchiveUpdated` arrives, the picker ignores Enter, Ctrl+X, and Ctrl+D, while navigation and view changes stay available. When it reports success, the picker drops the row with the cursor index and scroll position kept, so the cursor lands on the row that followed while the visible rows hold still, and the footer names the moved session until the next key or for 3 seconds, the same `NOTICE_DURATION` as the copy notice. A refusal or failed write shows in the footer as an error and leaves the row in place.
 
 `ox --resume` without a session starts the TUI in a fresh session with no row yet, then opens the picker on the first frame. `main.rs` builds it with `ResumePicker::at_startup`, and `ox_tui::run` pushes `Startup::picker` onto the modal stack before the event loop starts. The startup picker carries `Dismissal::Quit`, so Esc / Ctrl+C call `on_cancel`, which resolves to `Op::Shutdown`, and the footer labels that key as quitting. Pressing Enter resumes through the same `roll_into` path as `/resume`. A session's row is created only with the first message, so neither path leaves an empty session in the store.
@@ -34,48 +34,29 @@ On `SessionResumed`, `apply_session_resumed` rebuilds the chat, clears the modal
 ## Design Decisions
 
 1. **Bare opens the picker, typed-arg resolves directly.** Same shape as `/model`, `/effort`, `/theme`: bare opens a modal, typed-arg switches directly. Reference CLIs converged on this exploratory-vs-direct split independently (Claude Code's `-r` vs `-c`, Codex's bare `resume` vs `resume <id>`).
-
 2. **Alias `continue`.** Claude Code's `/resume` also takes `continue` as an alias, so users of either tool can type the word they know.
-
-3. **`classify` is always `Mutating`.** Both bare and typed-arg refuse mid-turn, since the picker eventually submits an `Op::Resume`, and allowing it mid-stream would interleave a session swap with an in-flight response, which the read-only fast path exists to rule out.
-
+3. **Both forms are idle-only.** Bare and typed-arg refuse mid-turn, since the picker eventually submits an `Op::Resume`, and allowing it mid-stream would interleave a session swap with an in-flight response.
 4. **Mid-session re-init uses `roll_into`.** The in-process swap preserves the process and terminal state, avoids an alt-screen exit or relaunch flash, and reuses the `roll` pattern from `/clear`. It clears modals, rolls back any theme preview, and discards the prompts queued before it.
-
 5. **`RollIntoOutcome` nests the `LoadedTranscript`.** The engine adopts a loaded transcript as one unit, at startup from `ResumedSession` and on `/resume` from `RollIntoOutcome`, so both carry the same struct. The title, the `prior` archive state, and `finalize_failure` sit beside it, since the engine reads each one separately. The tracker snapshots travel inside the transcript, so startup and `/resume` both restore the tracker in the engine, and every frontend gets the drift notice.
-
 6. **Surface old-session finalize failures and tracker drift as distinct events.** They have two causes: the previous session failing to finalize (writer), and tracked files drifting since the resumed session (filesystem). The finalize failure is an error that names the previous session, so the user does not read it as a current-writer fault. Drift is a notice, since the Read-before-Edit gate handles it and nothing failed.
-
 7. **Drop queued prompts on resume, then surface the count.** Queued prompts belong to the source thread, so replaying them in a different transcript would amount to silent corruption. Every session switch drops them, `/clear` and bare `/archive` included, and prints `Discarded N queued prompts from the previous session` so the user knows their typing didn't carry over. The policy is [**A cancel leaves the queue to the user**](cancellation.md#design-decisions).
-
 8. **`SearchableList` as a sibling primitive to `ListPicker`.** `ListPicker` is small and focused, and adding search and a viewport would double its surface for the simpler pickers. `SearchableList` follows the same trait and delegation pattern beside it.
-
 9. **Two-method `SearchableItem`: `haystack` plus `render`.** A substring filter and a layout callback are the only things the primitive needs from items.
-
 10. **Substring search only.** Codex and opencode both use plain substring search.
-
 11. **Project scoping defaults to the current project, with Tab widening.** Matches the `ox -c` resolver semantics: CLI `--all` widens up front, in-picker `Tab` toggles, and the typed query persists across the rebuild.
-
-12. **Load pages in the background as the cursor nears the end.** Loading the next page while a viewport of matching rows remains below the cursor keeps paging out of sight and lets a query reach every session in scope. Parsing reads each transcript in full, and a page can parse far more files than it keeps when most sessions sit in the other archive view, so the reads run on a worker thread. On 1,000 sessions of 650 kB each, a 30-session page took about 10 ms with a warm cache, while a scan that found no match in the requested view took about 250 ms. Listing and sorting the files stays on the UI thread and took a few milliseconds there.
-
-13. **Listing API centralizes pagination in `list_paged(limit, scope)`.** The page, the archive filter, and whether more sessions follow come from one walk that stops one session past the page, so a listing's cost scales with the page. Listings report no exact total, since counting the sessions in one archive state would parse every file in scope. `ox -c` stops at the first unarchived session through `latest`, and a prefix lookup parses only matching files.
-
+12. **Load pages in the background as the cursor nears the end.** Loading the next page while a viewport of matching rows remains below the cursor keeps paging out of sight and lets a query reach every session in scope. Each page is one query, which runs on a worker thread so a slow disk never stalls the render loop.
+13. **Keyset pages through `SessionWalk`.** The picker walks a `SessionWalk`, and `ox --list` reads one page of it through `list_paged`. Each page is ordered by `(updated_at, id)` and starts after the last row of the page before, so pages never overlap, while a session another process writes between two pages may show twice or not at all. Each query asks for one row past the page to learn whether more sessions follow, so listings report no exact total. In the current project, the `sessions_by_project` index on `(project_root, updated_at)` serves the order, so a page reads the project's rows in order and stops once it fills. Across all projects no index serves it, so each page scans and sorts the whole table. `ox -c` reads one row through `latest`, and a prefix lookup searches the current project through `sessions_by_project` before it widens to every project.
 14. **`--list --limit 0` opts back into unbounded listing.** Scripts piping output need the full set, so `0` is the explicit unbounded value and no magic large default is needed.
-
 15. **Bare suppresses echo, typed-arg echoes.** Mirrors the universal rule: the modal is the response, so the typed `> /resume` line stays out of history. Typed `> /resume <id>` echoes, so the line shows while the swap runs and heads the error when the swap fails. A successful resume then replaces the chat with the target's history.
-
 16. **Always show the picker, even with one or zero matches.** Auto-resuming on a single match would surprise users who typed `/resume` just to peek the list, and an empty list with a clear message is better than silently doing nothing.
-
 17. **Ctrl+A switches to the archived view.** Archived sessions stay out of the default rows but remain one key away, and resuming one from that view unarchives it, matching `ox -r <prefix>`. The view composes with Tab, so archived sessions can be listed across every project.
-
 18. **`ox --resume` without a session reuses the in-TUI picker, and dismissing it quits.** Opening the picker over a fresh session lets startup share `/resume`'s modal and its in-process swap, avoiding a separate pre-TUI selection screen. Claude Code's `--resume` and Codex's `resume` subcommand both open a picker at startup. Codex starts a fresh session when you press Esc, but plain `ox` already does that, so Esc quits. Esc always keeps its universal modal meaning, even when you've typed a query, and Ctrl+U clears the query. The picker holds focus until it closes, so resume or compaction can't clear the stack and trigger its quitting `on_cancel` while it's open.
-
 19. **One keymap drives keys and hints.** Each named action carries its key and a footer label that can depend on the view, so `handle_key` dispatches through the table that renders the footer, and adding a key adds its hint. The picker captures Esc so dismissal is one of those actions. The scope status stays out of the table. [#278](https://github.com/hakula139/oxide-code/issues/278) tracks rebinding these actions, and [#281](https://github.com/hakula139/oxide-code/issues/281) tracks fitting their hints to narrow footers.
-
 20. **Ctrl+X moves a session between views in place.** Clearing out a long list takes one key per session, with no ID prefix to read off and type. Ctrl+X is free among the picker's keys. The filter's `LineEditor` maps it to cutting a selection, which the editor never draws, so the picker shadows it just as it shadows the editor's Ctrl+A (line start), Ctrl+D (delete forward), and Ctrl+U (kill to line start). The highlight moves to the next row, so repeated presses work through a run of sessions.
 
 ## Out of Scope
 
-- **Date grouping in the picker.** `Today` / `Yesterday` / ISO date groups would not improve on a flat mtime list, whose relative times already encode recency.
+- **Date grouping in the picker.** `Today` / `Yesterday` / ISO date groups would not improve on a list ordered by last activity, whose relative times already encode recency.
 - **Numeric `1`–`9` mnemonics.** Cursor plus Enter is enough, and mnemonics conflict with type-to-search.
 - **Worktree or branch tree expansion.** Claude Code's `▼` / `▶` tree and a side preview pane would both double layout complexity for marginal gain.
 - **In-picker rename of other sessions.** `/rename` covers the live session's title.

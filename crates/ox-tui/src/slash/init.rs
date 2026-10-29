@@ -13,7 +13,7 @@ use ox_core::command::init::{self, FILE_CHOICES};
 
 use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
-use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
+use super::registry::{ArgCompletion, SlashCommand, SlashOutcome};
 use crate::action::Action;
 use crate::modal::chrome::CONFIRM_HINTS;
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
@@ -33,8 +33,8 @@ impl SlashCommand for InitCmd {
         "Create or update AGENTS.md / CLAUDE.md"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        SlashKind::Mutating
+    fn idle_only(&self) -> bool {
+        true
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -162,16 +162,6 @@ mod tests {
         match picker.handle_key(&KeyEvent::from(code)) {
             ModalKey::Submitted(ModalAction::Dispatch(action)) => Some(action),
             _ => None,
-        }
-    }
-
-    mod classify {
-        use super::*;
-
-        #[test]
-        fn is_mutating() {
-            assert_eq!(InitCmd.classify(""), SlashKind::Mutating);
-            assert_eq!(InitCmd.classify("AGENTS.md"), SlashKind::Mutating);
         }
     }
 

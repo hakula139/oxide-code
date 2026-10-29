@@ -54,11 +54,6 @@ pub(super) struct SharedState {
     live: Mutex<Live>,
     flush_failure_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
-    /// Whether a `/rename` titled the session, in this process or before a resume.
-    /// [`SessionHandle::set_manual_title`] sets it before it sends the title, so no AI or
-    /// first-prompt title follows. The title generator checks it before appending, and the actor
-    /// checks again on arrival, since a `/rename` can land in between.
-    manual_title_set: AtomicBool,
     /// The write failure that stopped persistence, threaded into actor-gone messages so the user
     /// sees the cause.
     last_flush_failure: Mutex<Option<String>>,
@@ -71,7 +66,7 @@ struct Live {
 }
 
 impl SharedState {
-    pub(super) fn new(session_id: &str, artifact_dir: PathBuf, manual_title_set: bool) -> Self {
+    pub(super) fn new(session_id: &str, artifact_dir: PathBuf) -> Self {
         Self {
             live: Mutex::new(Live {
                 id: Arc::from(session_id),
@@ -79,7 +74,6 @@ impl SharedState {
             }),
             flush_failure_surfaced: AtomicBool::new(false),
             actor_gone_surfaced: AtomicBool::new(false),
-            manual_title_set: AtomicBool::new(manual_title_set),
             last_flush_failure: Mutex::new(None),
         }
     }
@@ -104,14 +98,6 @@ impl SharedState {
         surface_once(&self.actor_gone_surfaced)
     }
 
-    pub(super) fn mark_manual_title_set(&self) {
-        self.manual_title_set.store(true, Ordering::Release);
-    }
-
-    pub(super) fn manual_title_set(&self) -> bool {
-        self.manual_title_set.load(Ordering::Acquire)
-    }
-
     pub(super) fn last_flush_failure(&self) -> Option<String> {
         lock_or_recover(&self.last_flush_failure, "last_flush_failure").clone()
     }
@@ -127,7 +113,7 @@ pub(crate) struct Checkpoint {
     /// The message the next one chains from, `None` before the first.
     pub(super) tip: Option<Uuid>,
     pub(super) message_count: u32,
-    /// Whether a user prompt before this point titled the session.
+    /// Whether a prior prompt or compaction root used the first-prompt title opportunity.
     pub(super) first_user_prompt_seen: bool,
 }
 
@@ -176,6 +162,15 @@ pub(crate) struct CompactOutcome {
     /// effect in memory whether or not its commit lands.
     pub(crate) checkpoint: Option<Checkpoint>,
     pub(crate) report: WriteReport,
+}
+
+/// Ack from [`SessionHandle::append_ai_title`]. `applied` is whether the title is the session's
+/// once its batch commits, `false` when a manual title in memory or in the store held or the
+/// writer is gone.
+#[derive(Debug)]
+pub(super) struct AiTitleOutcome {
+    pub(super) applied: bool,
+    pub(super) report: WriteReport,
 }
 
 impl SessionHandle {
@@ -260,24 +255,24 @@ impl SessionHandle {
         self.dispatch(SessionCmd::Usage { records, ack }, rx).await
     }
 
-    /// Records an AI-generated session title, which supersedes the first-prompt title.
-    pub(super) async fn append_ai_title(&self, title: String) -> WriteReport {
+    /// Records an AI-generated session title, which supersedes the first-prompt title but never a
+    /// manual one.
+    pub(super) async fn append_ai_title(&self, title: String) -> AiTitleOutcome {
         let (ack, rx) = oneshot::channel();
-        self.dispatch(SessionCmd::AppendAiTitle { title, ack }, rx)
+        self.request(SessionCmd::AppendAiTitle { title, ack }, rx)
             .await
+            .unwrap_or_else(|| AiTitleOutcome {
+                applied: false,
+                report: self.actor_gone_report(),
+            })
     }
 
     /// Persists a user-supplied title, suppressing AI titles for the rest of the session.
     pub(crate) async fn set_manual_title(&self, title: String) -> WriteReport {
         self.stop_title_task().await;
-        self.shared.mark_manual_title_set();
         let (ack, rx) = oneshot::channel();
         self.dispatch(SessionCmd::SetManualTitle { title, ack }, rx)
             .await
-    }
-
-    pub(crate) fn manual_title_set(&self) -> bool {
-        self.shared.manual_title_set()
     }
 
     /// Writes the synthetic post-compact root carrying the compaction boundary, which resets the
@@ -451,7 +446,7 @@ pub(crate) fn start(
     model: &str,
     git_branch: Option<String>,
 ) -> SessionHandle {
-    spawn_actor(SessionState::fresh(store.clone(), model, git_branch), false)
+    spawn_actor(SessionState::fresh(store.clone(), model, git_branch))
 }
 
 /// The new session ID and the old session's last write report.
@@ -554,7 +549,7 @@ pub(super) fn resume(
         .unwrap_or_default();
     let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);
     let state = SessionState::resumed(store.clone(), &data, message_count, model, lock);
-    let handle = spawn_actor(state, data.title_manual);
+    let handle = spawn_actor(state);
     Ok(ResumedSession {
         handle,
         transcript: LoadedTranscript {
@@ -571,13 +566,8 @@ pub(super) fn resume(
     })
 }
 
-/// Spawns the actor for `state`, with the manual-title latch `manual_title_set` its title carries.
-fn spawn_actor(state: SessionState, manual_title_set: bool) -> SessionHandle {
-    let shared = Arc::new(SharedState::new(
-        state.session_id(),
-        state.artifact_dir(),
-        manual_title_set,
-    ));
+fn spawn_actor(state: SessionState) -> SessionHandle {
+    let shared = Arc::new(SharedState::new(state.session_id(), state.artifact_dir()));
     let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let join = tokio::spawn(actor::run(state, cmd_rx, Arc::clone(&shared)));
     SessionHandle {
@@ -822,7 +812,7 @@ mod tests {
                 .await;
 
             for (name, report) in [
-                ("AppendAiTitle", title),
+                ("AppendAiTitle", title.report),
                 ("SetManualTitle", manual),
                 ("Finish", finish),
                 ("Usage", usage),
@@ -858,6 +848,88 @@ mod tests {
                 listed_title(&store, &sid).as_deref(),
                 Some("Fix auth flow for mobile")
             );
+        }
+
+        #[tokio::test]
+        async fn keeps_the_manual_title_a_fork_copied() {
+            let (_dir, store) = isolated_store();
+            let stale = start(&store, "m", None);
+            let source = stale.session_id();
+            stale.record_message(Message::user("first prompt")).await;
+            let other = resume_id(&store, &source).unwrap().handle;
+            other.record_message(Message::user("elsewhere")).await;
+            other.set_manual_title("Renamed".to_owned()).await;
+            other.shutdown().await;
+            let forked = stale.record_message(Message::assistant("reply")).await;
+            let fork = forked.report.fork.expect("the stale handle forks").to;
+
+            let ai = stale.append_ai_title("AI title".to_owned()).await;
+            stale.shutdown().await;
+
+            assert!(!ai.applied);
+            let data = store.load_session_data(&fork).unwrap();
+            assert_eq!(data.title.as_deref(), Some("Renamed"));
+            assert!(data.title_manual);
+        }
+
+        #[tokio::test]
+        async fn keeps_the_manual_title_a_fork_in_its_batch_copied() {
+            let (_dir, store) = isolated_store();
+            let stale = start(&store, "m", None);
+            let source = stale.session_id();
+            stale.record_message(Message::user("first prompt")).await;
+            let other = resume_id(&store, &source).unwrap().handle;
+            other.record_message(Message::user("elsewhere")).await;
+            other.set_manual_title("Renamed".to_owned()).await;
+            other.shutdown().await;
+
+            let (forked, ai) = tokio::join!(
+                stale.record_message(Message::assistant("reply")),
+                stale.append_ai_title("AI title".to_owned()),
+            );
+            stale.shutdown().await;
+
+            assert!(!ai.applied);
+            let fork = forked.report.fork.expect("the stale handle forks").to;
+            let data = store.load_session_data(&fork).unwrap();
+            assert_eq!(data.title.as_deref(), Some("Renamed"));
+            assert!(data.title_manual);
+        }
+
+        #[tokio::test]
+        async fn keeps_the_manual_title_another_process_set() {
+            let (_dir, store) = isolated_store();
+            let stale = start(&store, "m", None);
+            let sid = stale.session_id();
+            stale.record_message(Message::user("first prompt")).await;
+            let other = resume_id(&store, &sid).unwrap().handle;
+            other.set_manual_title("Renamed".to_owned()).await;
+            other.shutdown().await;
+
+            let ai = stale.append_ai_title("AI title".to_owned()).await;
+            stale.shutdown().await;
+
+            assert!(!ai.applied);
+            let data = store.load_session_data(&sid).unwrap();
+            assert_eq!(data.title.as_deref(), Some("Renamed"));
+            assert!(data.title_manual);
+        }
+
+        #[tokio::test]
+        async fn keeps_the_manual_title_a_resume_loaded() {
+            let (_dir, store) = isolated_store();
+            let original = start(&store, "m", None);
+            let sid = original.session_id();
+            original.record_message(Message::user("seed")).await;
+            original.set_manual_title("Manual".to_owned()).await;
+            original.shutdown().await;
+            let resumed = resume_id(&store, &sid).unwrap().handle;
+
+            let ai = resumed.append_ai_title("AI title".to_owned()).await;
+            resumed.shutdown().await;
+
+            assert!(!ai.applied);
+            assert_eq!(listed_title(&store, &sid).as_deref(), Some("Manual"));
         }
     }
 
@@ -922,7 +994,9 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                assert_eq!(accepted_rx.await.unwrap(), WriteReport::default());
+                let accepted = accepted_rx.await.unwrap();
+                assert!(accepted.applied);
+                assert_eq!(accepted.report, WriteReport::default());
             }
             let renamed = session.clone();
             let rename =
@@ -935,7 +1009,10 @@ mod tests {
             actor.send(manual).await.unwrap();
             assert_eq!(rename.await.unwrap(), WriteReport::default());
             if accept_before_rename {
-                _ = ack.send(WriteReport::default());
+                _ = ack.send(AiTitleOutcome {
+                    applied: true,
+                    report: WriteReport::default(),
+                });
             } else {
                 actor
                     .send(SessionCmd::AppendAiTitle { title, ack })
@@ -959,23 +1036,15 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn writes_user_provided_title_and_latches_shared_flag() {
+        async fn writes_user_provided_title() {
             let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let sid = handle.session_id();
-            assert!(
-                !handle.manual_title_set(),
-                "fresh handle must start unlatched"
-            );
             handle.record_message(Message::user("seed")).await;
 
             let report = handle.set_manual_title("User wins".to_owned()).await;
 
             assert_eq!(report, WriteReport::default());
-            assert!(
-                handle.manual_title_set(),
-                "the shared flag must latch immediately on dispatch",
-            );
             handle.shutdown().await;
             assert_eq!(listed_title(&store, &sid).as_deref(), Some("User wins"));
         }
@@ -992,21 +1061,6 @@ mod tests {
 
             assert_eq!(first.ai_title_seed, None);
             assert_eq!(listed_title(&store, &sid).as_deref(), Some("Named early"));
-        }
-
-        #[tokio::test]
-        async fn latches_again_when_the_session_resumes() {
-            let (_dir, store) = isolated_store();
-            let original = start(&store, "m", None);
-            let sid = original.session_id();
-            original.record_message(Message::user("seed")).await;
-            original.set_manual_title("Manual".to_owned()).await;
-            original.shutdown().await;
-
-            let resumed = resume_id(&store, &sid).unwrap();
-
-            assert!(resumed.handle.manual_title_set());
-            resumed.handle.shutdown().await;
         }
 
         #[tokio::test]
@@ -1084,19 +1138,6 @@ mod tests {
                 [usage
                     .await
                     .expect("a cost the store keeps must also reach the engine")]
-            );
-        }
-
-        #[tokio::test]
-        async fn actor_gone_surfaces_failure_but_still_latches_flag() {
-            let handle = testing::dead("dead");
-
-            let report = handle.set_manual_title("User wins".to_owned()).await;
-
-            assert!(report.failure.is_some(), "actor-gone must surface failure");
-            assert!(
-                handle.manual_title_set(),
-                "flag latches regardless of dispatch"
             );
         }
     }
@@ -2126,7 +2167,7 @@ mod tests {
                 "usage": transcript.usage,
                 "tasks": transcript.tasks,
                 "file_snapshots": transcript.file_snapshots,
-                "manual_title_set": resumed.handle.manual_title_set(),
+                "title_manual": store.load_session_data(&session_id).unwrap().title_manual,
             });
 
             let before = store.load_session_data(&session_id).unwrap().messages;
