@@ -48,7 +48,7 @@ impl Inbox {
             }
             Some(Op::SetMode(mode)) => {
                 self.mode = Some(mode);
-                sink.emit(Event::ModeChanged(mode), "mode-changed");
+                sink.emit(Event::ModeChanged(mode));
                 Ok(None)
             }
             Some(op) => Ok(Some(op)),

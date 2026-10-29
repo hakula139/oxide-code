@@ -233,7 +233,7 @@ impl Engine {
         let (sink, events) = mpsc::unbounded_channel();
         self.shells.attach(Arc::new(sink.clone()));
         for notice in std::mem::take(&mut self.startup_notices) {
-            sink.emit(Event::Notice(notice), "startup-notice");
+            sink.emit(Event::Notice(notice));
         }
         self.emit_session_start(&sink);
         let task = EngineTask(tokio::spawn(self.run(sink, op_rx)));
@@ -312,13 +312,13 @@ impl Engine {
             Ok(auth) => auth,
             Err(abort) => {
                 self.adopt_mode(&mut inbox);
-                return report_unsent(sink, abort, "turn-failed");
+                return report_unsent(sink, abort);
             }
         };
         let compacted = self.auto_compact(&auth, sink, ops, &mut inbox).await;
         self.adopt_mode(&mut inbox);
         if let Err(abort) = compacted {
-            return report_unsent(sink, abort, "auto-compact-failed");
+            return report_unsent(sink, abort);
         }
 
         let fresh = self.load_user_context(sink).await;
@@ -367,10 +367,10 @@ impl Engine {
         self.transcript.end_turn();
         match result {
             Ok(_) => {
-                sink.emit(Event::TurnComplete, "turn-complete");
+                sink.emit(Event::TurnComplete);
                 TurnEnd::Completed
             }
-            Err(abort) => report_abort(sink, abort, "turn-failed"),
+            Err(abort) => report_abort(sink, abort),
         }
     }
 
@@ -421,10 +421,10 @@ impl Engine {
         sink.session_write(&written);
         if report.tasks.is_some() {
             let tasks = self.transcript.tasks.clone();
-            sink.emit(Event::TasksUpdated(tasks), "tasks-rolled-back");
+            sink.emit(Event::TasksUpdated(tasks));
         }
         self.emit_usage_update(sink);
-        sink.emit(Event::TurnRolledBack, "turn-rolled-back");
+        sink.emit(Event::TurnRolledBack);
     }
 
     /// Reads the user context afresh with [`Self::show_instruction_warnings`].
@@ -440,7 +440,7 @@ impl Engine {
         let previous = std::mem::replace(&mut self.instruction_warnings, warnings);
         for warning in &self.instruction_warnings {
             if !previous.contains(warning) {
-                sink.emit(Event::Notice(warning.clone()), "instruction-warning");
+                sink.emit(Event::Notice(warning.clone()));
             }
         }
     }
@@ -475,22 +475,19 @@ impl Engine {
             effort,
             auto_compaction,
         } = after;
-        sink.emit(
-            Event::ConfigChanged {
-                model,
-                effort,
-                requested: pick,
-                auto_compaction,
-                notice,
-            },
-            "config-changed",
-        );
+        sink.emit(Event::ConfigChanged {
+            model,
+            effort,
+            requested: pick,
+            auto_compaction,
+            notice,
+        });
     }
 
     /// Switches the permission mode for later calls.
     fn set_mode(&mut self, sink: &dyn EventSink, mode: Mode) {
         self.policy.set_mode(mode);
-        sink.emit(Event::ModeChanged(mode), "mode-changed");
+        sink.emit(Event::ModeChanged(mode));
     }
 
     /// Applies the mode switch an operation left in `inbox`.
@@ -513,21 +510,21 @@ impl Engine {
 
 // ── Reporting ──
 
-/// Shows `abort` on `sink` as the operation's one terminal event, logging `label` if a failure
-/// event is dropped. `Shutdown` stays silent. [`Event`] lists each op's terminal events.
-fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> TurnEnd {
+/// Shows `abort` on `sink` as the operation's one terminal event. `Shutdown` stays silent.
+/// [`Event`] lists each op's terminal events.
+fn report_abort(sink: &dyn EventSink, abort: TurnAbort) -> TurnEnd {
     match abort {
         TurnAbort::Cancelled => {
-            sink.emit(Event::Cancelled, "cancelled");
+            sink.emit(Event::Cancelled);
             TurnEnd::Cancelled
         }
         TurnAbort::Shutdown => TurnEnd::Shutdown,
         TurnAbort::Refused(notice) => {
-            sink.emit(Event::TurnFailed(notice), label);
+            sink.emit(Event::TurnFailed(notice));
             TurnEnd::Failed
         }
         TurnAbort::Failed(e) => {
-            sink.emit(Event::TurnFailed(format!("{e:#}")), label);
+            sink.emit(Event::TurnFailed(format!("{e:#}")));
             TurnEnd::Failed
         }
     }
@@ -536,11 +533,11 @@ fn report_abort(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> 
 /// Reports an abort that stopped the operation before it recorded its prompt, handing the prompt
 /// back for any outcome but shutdown. The frontend returns it to the user, and the abort's terminal
 /// event follows.
-fn report_unsent(sink: &dyn EventSink, abort: TurnAbort, label: &'static str) -> TurnEnd {
+fn report_unsent(sink: &dyn EventSink, abort: TurnAbort) -> TurnEnd {
     if !matches!(abort, TurnAbort::Shutdown) {
-        sink.emit(Event::PromptUnsent, "prompt-unsent");
+        sink.emit(Event::PromptUnsent);
     }
-    report_abort(sink, abort, label)
+    report_abort(sink, abort)
 }
 
 #[cfg(test)]
@@ -4025,15 +4022,12 @@ mod tests {
             let sink = CapturingSink::default();
 
             assert_eq!(
-                report_abort(&sink, TurnAbort::Cancelled, "label"),
+                report_abort(&sink, TurnAbort::Cancelled),
                 TurnEnd::Cancelled
             );
+            assert_eq!(report_abort(&sink, TurnAbort::Shutdown), TurnEnd::Shutdown);
             assert_eq!(
-                report_abort(&sink, TurnAbort::Shutdown, "label"),
-                TurnEnd::Shutdown
-            );
-            assert_eq!(
-                report_abort(&sink, TurnAbort::Failed(anyhow!("boom")), "label"),
+                report_abort(&sink, TurnAbort::Failed(anyhow!("boom"))),
                 TurnEnd::Failed
             );
 
@@ -4056,15 +4050,12 @@ mod tests {
             let sink = CapturingSink::default();
 
             assert_eq!(
-                report_unsent(&sink, TurnAbort::Cancelled, "label"),
+                report_unsent(&sink, TurnAbort::Cancelled),
                 TurnEnd::Cancelled
             );
+            assert_eq!(report_unsent(&sink, TurnAbort::Shutdown), TurnEnd::Shutdown);
             assert_eq!(
-                report_unsent(&sink, TurnAbort::Shutdown, "label"),
-                TurnEnd::Shutdown
-            );
-            assert_eq!(
-                report_unsent(&sink, TurnAbort::Failed(anyhow!("boom")), "label"),
+                report_unsent(&sink, TurnAbort::Failed(anyhow!("boom"))),
                 TurnEnd::Failed
             );
 

@@ -218,10 +218,7 @@ impl Registry {
     /// order the list changed.
     fn publish(&self) {
         if let Some(sink) = &self.sink {
-            sink.emit(
-                Event::BackgroundShellsUpdated(self.list()),
-                "background-shells-updated",
-            );
+            sink.emit(Event::BackgroundShellsUpdated(self.list()));
         }
     }
 
