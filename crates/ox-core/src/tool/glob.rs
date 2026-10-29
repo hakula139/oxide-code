@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use super::search::{NO_FILES_FOUND, SearchOutput, SearchRoot, SearchRow, SearchRows};
+use super::search::{NO_FILES_FOUND, SearchOutput, SearchRoot};
 use super::view::ToolResultView;
 use super::{
     Prepared, StoredView, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field,
@@ -152,20 +152,20 @@ fn glob_files(
             !held
         });
     let (entries, total) = super::search::newest_first(entries, MAX_RESULTS);
-    let mut rows = SearchRows::new(MAX_RESULTS);
-    for entry in entries {
-        rows.push(SearchRow::Path(super::display_path(entry.path(), cwd)));
-    }
+    let files: Vec<String> = entries
+        .iter()
+        .map(|entry| super::display_path(entry.path(), cwd))
+        .collect();
     withheld += super::search::withhold_unreadable(&mut unreadable, &read_filter);
 
     let truncated = total > MAX_RESULTS;
 
-    let (mut content, title) = if rows.kept.is_empty() {
+    let (mut content, title) = if files.is_empty() {
         (NO_FILES_FOUND.to_owned(), NO_FILES_FOUND.to_owned())
     } else {
-        let count = rows.kept.len();
+        let count = files.len();
         let word = plural(count, "file", "files");
-        (rows.render(), format!("Found {count} {word}"))
+        (files.join("\n"), format!("Found {count} {word}"))
     };
     if truncated {
         _ = write!(
@@ -178,7 +178,7 @@ fn glob_files(
     let view = if unreadable.is_empty() && withheld == 0 {
         StoredView::View(ToolResultView::GlobFiles {
             pattern: pattern.to_owned(),
-            files: rows.kept.iter().map(ToString::to_string).collect(),
+            files,
             total,
         })
     } else {

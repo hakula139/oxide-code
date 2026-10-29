@@ -1193,6 +1193,25 @@ mod tests {
         }
     }
 
+    mod synthesize_chunk {
+        use super::*;
+
+        #[test]
+        fn starts_numbering_at_one() {
+            let chunk = synthesize_chunk("a\nb", "x\ny");
+            assert_eq!(chunk.old[0].number, 1);
+            assert_eq!(chunk.new[0].number, 1);
+        }
+
+        #[test]
+        fn applies_trim() {
+            let chunk = synthesize_chunk("fn foo()", "fn foo()\n    body");
+            assert_eq!(chunk.old, []);
+            assert_eq!(chunk.new.len(), 1);
+            assert_eq!(chunk.new[0].text, "    body");
+        }
+    }
+
     mod build_diff {
         use super::*;
 
@@ -1471,25 +1490,6 @@ mod tests {
             for (case, eol, expected) in [("CRLF", "\r\n", "a\r\nb\r\n"), ("LF", "\n", "a\nb\n")] {
                 assert_eq!(apply_eol("a\nb\n".to_owned(), eol), expected, "{case}");
             }
-        }
-    }
-
-    mod synthesize_chunk {
-        use super::*;
-
-        #[test]
-        fn starts_numbering_at_one() {
-            let chunk = synthesize_chunk("a\nb", "x\ny");
-            assert_eq!(chunk.old[0].number, 1);
-            assert_eq!(chunk.new[0].number, 1);
-        }
-
-        #[test]
-        fn applies_trim() {
-            let chunk = synthesize_chunk("fn foo()", "fn foo()\n    body");
-            assert_eq!(chunk.old, []);
-            assert_eq!(chunk.new.len(), 1);
-            assert_eq!(chunk.new[0].text, "    body");
         }
     }
 }

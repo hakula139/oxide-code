@@ -158,7 +158,7 @@ struct Call<'r> {
 }
 
 impl Call<'_> {
-    /// Runs the call under the time cap and returns its output.
+    /// Runs the call and caps its output.
     async fn run(self) -> ToolOutput {
         run_capped(self.tool, self.prepared, &self.ctx).await
     }

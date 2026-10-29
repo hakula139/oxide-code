@@ -1,5 +1,6 @@
 //! Regex content search tool.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ use super::{
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
 use crate::util::fs::{FileReadError, read_regular_file};
-use crate::util::text::{format_size, plural};
+use crate::util::text::{ELLIPSIS, format_size, plural};
 
 const NO_MATCHES_FOUND: &str = "No matches found";
 const RESULTS_LIMIT_PREFIX: &str = "(Results limited to ";
@@ -454,7 +455,7 @@ fn search_no_context(text: &str, re: &regex::Regex, display_path: &str, rows: &m
             return;
         }
         if re.is_match(line) {
-            let truncated = super::truncate_line(line, MAX_LINE_CHARS);
+            let truncated = truncate_line(line, MAX_LINE_CHARS);
             rows.push(SearchRow::Match {
                 path: display_path.to_owned(),
                 line: GrepMatchLine {
@@ -511,7 +512,7 @@ fn search_with_context(
                 return;
             }
             let is_match = match_indices.binary_search(&i).is_ok();
-            let truncated = super::truncate_line(line, MAX_LINE_CHARS);
+            let truncated = truncate_line(line, MAX_LINE_CHARS);
             rows.push(SearchRow::Match {
                 path: display_path.to_owned(),
                 line: GrepMatchLine {
@@ -522,6 +523,22 @@ fn search_with_context(
             });
         }
     }
+}
+
+/// Caps a line at `max_chars` characters, appending `... [N chars]` with the original length so the
+/// model can decide whether to read more. Borrows when the line already fits.
+fn truncate_line(line: &str, max_chars: usize) -> Cow<'_, str> {
+    if line.len() <= max_chars {
+        return Cow::Borrowed(line);
+    }
+    let Some((boundary, _)) = line.char_indices().nth(max_chars) else {
+        return Cow::Borrowed(line);
+    };
+    let total_chars = max_chars + line[boundary..].chars().count();
+    Cow::Owned(format!(
+        "{}{ELLIPSIS} [{total_chars} chars]",
+        &line[..boundary]
+    ))
 }
 
 // ── Files-with-Matches Mode ──
@@ -1889,6 +1906,51 @@ mod tests {
 
             assert_eq!(rows.render(), "f.txt:1:a");
             assert!(rows.full());
+        }
+    }
+
+    mod truncate_line {
+        use super::*;
+
+        #[test]
+        fn borrows_a_line_within_the_cap() {
+            assert!(matches!(
+                truncate_line("hello", MAX_LINE_CHARS),
+                Cow::Borrowed("hello")
+            ));
+        }
+
+        #[test]
+        fn long_text_ends_with_ellipsis() {
+            let long_line = "x".repeat(MAX_LINE_CHARS + 100);
+            let result = truncate_line(&long_line, MAX_LINE_CHARS);
+            let suffix = format!("... [{} chars]", MAX_LINE_CHARS + 100);
+            assert_eq!(result.len(), MAX_LINE_CHARS + suffix.len());
+            assert_eq!(&result[..MAX_LINE_CHARS], "x".repeat(MAX_LINE_CHARS));
+            assert_eq!(&result[MAX_LINE_CHARS..], suffix);
+        }
+
+        #[test]
+        fn multibyte_text_preserves_character_boundaries() {
+            let mut line = "a".repeat(MAX_LINE_CHARS - 2);
+            line.push('🦀');
+            line.push_str(&"b".repeat(100));
+            let result = truncate_line(&line, MAX_LINE_CHARS);
+
+            let (prefix, suffix) = result.split_once("... [").unwrap();
+            let expected_prefix = "a".repeat(MAX_LINE_CHARS - 2) + "🦀" + "b";
+            assert_eq!(prefix, expected_prefix);
+            assert_eq!(prefix.chars().count(), MAX_LINE_CHARS);
+            assert_eq!(suffix, format!("{} chars]", MAX_LINE_CHARS + 99));
+        }
+
+        #[test]
+        fn counts_characters_against_the_cap_not_bytes() {
+            let line = "é".repeat(MAX_LINE_CHARS);
+            let result = truncate_line(&line, MAX_LINE_CHARS);
+
+            assert!(matches!(result, Cow::Borrowed(_)));
+            assert_eq!(result.as_ref(), line);
         }
     }
 
