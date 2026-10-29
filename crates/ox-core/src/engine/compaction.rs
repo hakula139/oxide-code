@@ -20,7 +20,7 @@ use crate::message::{ContentBlock, Message, Role, TextOrigin};
 use crate::model::TokenUsage;
 use crate::prompt::{PromptParts, UserContext};
 use crate::protocol::{CompactTrigger, Event, EventSink, Op};
-use crate::session::handle::{Checkpoint, CompactBoundary};
+use crate::session::handle::CompactBoundary;
 use crate::session::post_compact::synthesize_post_compact_message;
 use crate::session::store::CompactRecord;
 use crate::tool::ToolDefinition;
@@ -190,20 +190,18 @@ impl Engine {
 
         self.run_auto_compaction(auth, sink, ops, inbox, AutoPoint::BeforePrompt)
             .await
-            .map(drop)
     }
 
     /// Compacts the transcript at a round boundary of a turn whose context crossed the threshold,
-    /// so the turn goes on from the summary, and returns the summary's checkpoint. A cancel ends
-    /// the turn on [`Message::interruption`] as at any other round boundary, and a failure counts
-    /// toward the pause and fails the turn.
+    /// so the turn goes on from the summary. A cancel ends the turn on [`Message::interruption`] as
+    /// at any other round boundary, and a failure counts toward the pause and fails the turn.
     pub(super) async fn compact_mid_turn(
         &mut self,
         auth: &Auth,
         sink: &dyn EventSink,
         ops: &mut mpsc::Receiver<Op>,
         inbox: &mut Inbox,
-    ) -> AbortResult<Checkpoint> {
+    ) -> AbortResult<()> {
         let compacted = self
             .run_auto_compaction(auth, sink, ops, inbox, AutoPoint::MidTurn)
             .await;
@@ -221,13 +219,13 @@ impl Engine {
         ops: &mut mpsc::Receiver<Op>,
         inbox: &mut Inbox,
         point: AutoPoint,
-    ) -> AbortResult<Checkpoint> {
+    ) -> AbortResult<()> {
         sink.emit(Event::AutoCompactionStarted, "auto-compaction-started");
         let cause = match self
             .run_compaction(auth, sink, ops, inbox, None, point.into())
             .await
         {
-            Ok(checkpoint) => return Ok(checkpoint),
+            Ok(()) => return Ok(()),
             Err(CompactFailure::Aborted(abort)) => return Err(abort),
             Err(CompactFailure::Summary(e)) => {
                 warn!(?point, error = %format_args!("{e:#}"), "auto-compaction failed");
@@ -268,7 +266,7 @@ impl Engine {
             .await;
         self.adopt_mode(&mut inbox);
         let abort = match compacted {
-            Ok(_) => {
+            Ok(()) => {
                 sink.emit(Event::SessionReady, "session-ready");
                 return TurnEnd::Completed;
             }
@@ -282,8 +280,8 @@ impl Engine {
     }
 
     /// Summarizes the transcript and swaps the summary in as it saves the boundary, starting the
-    /// new transcript from a fresh user context, and returns the summary's checkpoint. Bills each
-    /// summary request and shows the usage once any request reported it or the transcript changed.
+    /// new transcript from a fresh user context. Bills each summary request and shows the usage
+    /// once any request reported it or the transcript changed.
     async fn run_compaction(
         &mut self,
         auth: &Auth,
@@ -292,7 +290,7 @@ impl Engine {
         inbox: &mut Inbox,
         instructions: Option<String>,
         trigger: CompactTrigger,
-    ) -> Result<Checkpoint, CompactFailure> {
+    ) -> Result<(), CompactFailure> {
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
         let session_id = self.session_id();
@@ -320,11 +318,12 @@ impl Engine {
                     },
                     context: self.transcript.prompt().refreshed(fresh),
                 };
-                let compacted = self.replace_with_summary(sink, boundary, trigger).await;
-                if compacted.is_some() {
+                if self.replace_with_summary(sink, boundary, trigger).await {
                     self.show_instruction_warnings(sink, warnings);
+                    Ok(())
+                } else {
+                    Err(CompactFailure::WriterGone)
                 }
-                compacted.ok_or(CompactFailure::WriterGone)
             }
             Ok(Err(e)) => Err(CompactFailure::Summary(e)),
             Err(abort) => Err(CompactFailure::Aborted(abort)),
@@ -344,15 +343,16 @@ impl Engine {
     /// Saves the compaction boundary and swaps the transcript to the summary message, which lists
     /// the open background shells and, after a mid-turn `trigger`, asks the model to resume the
     /// turn. It then clears the file tracker, reports the compaction under `trigger`, and returns
-    /// the summary's checkpoint. A failed write stops persistence, while the summary still replaces
-    /// the transcript in memory and the failure is reported after the compaction event. Only a
-    /// session writer that is gone discards the summary and leaves the transcript unchanged.
+    /// whether the summary replaced the transcript. A failed write stops persistence, while the
+    /// summary still replaces the transcript in memory and the failure is reported after the
+    /// compaction event. Only a session writer that is gone discards the summary and leaves the
+    /// transcript unchanged.
     async fn replace_with_summary(
         &mut self,
         sink: &dyn EventSink,
         boundary: CompactBoundary,
         trigger: CompactTrigger,
-    ) -> Option<Checkpoint> {
+    ) -> bool {
         let synthetic = synthesize_post_compact_message(
             &boundary.record.summary,
             &boundary.record.tasks,
@@ -362,11 +362,11 @@ impl Engine {
         let summary = boundary.record.summary.clone();
         let instructions = boundary.record.instructions.clone();
         let outcome = self.transcript.compact(boundary, synthetic).await;
-        let Some(checkpoint) = outcome.checkpoint else {
+        if outcome.checkpoint.is_none() {
             sink.emit(Event::SummaryDiscarded, "summary-discarded");
             sink.session_write(&outcome.report);
-            return None;
-        };
+            return false;
+        }
 
         sink.emit(
             Event::SessionCompacted {
@@ -379,7 +379,7 @@ impl Engine {
         );
         // Reports the write after the compaction event, which clears the TUI's chat.
         sink.session_write(&outcome.report);
-        Some(checkpoint)
+        true
     }
 }
 
@@ -1561,7 +1561,7 @@ mod tests {
                         compact.await
                     };
 
-                    assert!(compacted.is_some(), "{trigger:?}");
+                    assert!(compacted, "{trigger:?}");
                     assert_eq!(std::fs::read(&read).unwrap(), b"committed", "{trigger:?}");
                     assert_eq!(
                         engine.transcript.file_tracker.snapshot_all(),
@@ -1614,7 +1614,7 @@ mod tests {
                     .replace_with_summary(&sink, boundary(Vec::new()), CompactTrigger::Auto)
                     .await;
 
-                assert!(compacted.is_none());
+                assert!(!compacted);
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
                 assert_eq!(engine.transcript.file_tracker.snapshot_all(), tracked);
                 let events = sink.events();
@@ -1653,7 +1653,7 @@ mod tests {
                     .replace_with_summary(&sink, boundary(Vec::new()), CompactTrigger::Auto)
                     .await;
 
-                assert!(compacted.is_some());
+                assert!(compacted);
                 assert_eq!(
                     engine.transcript.messages(),
                     [synthesize_post_compact_message(
@@ -1702,7 +1702,7 @@ mod tests {
                     .replace_with_summary(&sink, large, CompactTrigger::Auto)
                     .await;
 
-                assert!(compacted.is_some());
+                assert!(compacted);
                 assert_eq!(
                     engine.transcript.messages(),
                     [synthesize_post_compact_message(
