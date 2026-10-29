@@ -85,6 +85,8 @@ CI runs on pushes to `main`, pull requests, and manual dispatch, and the release
 
 Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result reads every job of the current run attempt from the Actions API and fails when any job of the CI workflow, including each matrix leg, concludes anything other than success or skipped. That catches a leg cancelled before a runner picks it up, which the `needs` results of a matrix job omit. CI Result runs once the jobs in its `needs` finish and counts any unfinished job as a failure, so list each new job there.
 
+The Lint and Nix jobs pull from the `hakula` Cachix cache, and runs on `main` or by the maintainer push their builds to it. The cache only saves build time, so a failed Cachix setup, download, or push does not fail a job: a failed setup logs a warning and the job builds without the cache, a failed download makes Nix build that path from source, and a failed push at the end of the job shows Cachix's error annotation on a green job. Every other failed step still fails its job and CI Result. A download that stalls without failing still runs the job into its timeout, which [#715](https://github.com/hakula139/oxide-code/issues/715) tracks.
+
 A push to a pull request cancels the CI it supersedes, while every push to `main` gets its own run, which a later push never cancels.
 
 Each job sets `timeout-minutes` to several times its usual duration, so a hung test stops its job at that limit, where it would otherwise hold the runner for GitHub's six-hour default. GitHub reports such a job as cancelled, with an annotation saying it exceeded the maximum execution time, and CI Result counts it as a failure. Give each new job a limit the same way. libtest names any test still running after 60 seconds, so the log of a timed-out job shows which test hung.
@@ -95,4 +97,4 @@ No job runs a plain `cargo build`, so run it locally for a quick compile check. 
 
 Fix the cause of a failing hook, lint, test, or CI job. Skipped tests, `--skip` or `--exclude` flags, ignore and allowlist entries, `continue-on-error`, `|| true`, retries, and special cases for one path or commit only hide the failure. A test that cannot run in some environment, such as the Nix build sandbox, must be restructured until it can, as [Hermetic Tests](testing.md#hermetic-tests) describes.
 
-Keep an ignore or allowlist entry only when it is the design, such as a license the project accepts, an advisory with no fix, or a generated file that a formatter must skip, and give the reason in the PR that adds it.
+Keep an ignore or allowlist entry only when it is the design, such as a license the project accepts, an advisory with no fix, or a generated file that a formatter must skip. Keep a `continue-on-error` only on a step whose failure cannot change what a build or check finds, such as the Cachix setup. Give the reason in the PR that adds either.

@@ -1,6 +1,6 @@
 # Cancellation and Queued Input
 
-How the TUI cancels work on Esc or Ctrl+C, exits on a second Ctrl+C from idle, and queues the prompts typed while a turn runs. [Engine](engine.md) covers the operation and event contract these controls drive.
+The TUI cancels work on Esc or Ctrl+C, exits on a second Ctrl+C or Ctrl+D from idle, and queues the prompts typed while a turn runs. [Engine](engine.md) covers the operation and event contract these controls drive.
 
 ## Controls
 
@@ -10,7 +10,7 @@ The TUI exposes these controls and behaviors:
 - **Queue input.** Enter while busy appends to the app's `PromptQueue`, rendered as a dim preview above the input, and forwards the prompt as `Op::Queue`.
 - **Drain input.** The engine splices each forwarded prompt in at its next round boundary, as [Turn Pipeline](engine.md#turn-pipeline) describes, and confirms it with `Event::PromptDrained`. A turn that ends first drops the prompts it still holds, and once it completes or fails the TUI submits the queue head as the next turn. A prompt whose automatic compaction failed was never sent, so the TUI hands it back (**The TUI owns the queue**). A failed compaction partway through a turn ends the turn and leaves the queue waiting, as [Inside a Turn](compaction.md#inside-a-turn) describes. A refused turn that the engine rolled back (`TurnRolledBack`) hands back its prompt and the queued prompts it took in the same way, or after a mid-turn compaction only the queued prompts it took in since.
 - **Interrupt work.** Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, the bash tool kills the command's process tree, and a dim italic `(interrupted)` marker lands in chat. The transcript then ends on a `[Request interrupted by user]` user message, so the model knows the user abandoned that prompt.
-- **Show status.** The status bar puts the key that stops the work beside the spinner: `Streaming · Esc to interrupt`, `Running {tool} · Esc to interrupt`, `Compacting · Esc to interrupt`, `Signing in · Esc to cancel`, `Signing out`, `Clearing`, `Resuming`, `Archiving`, `Searching`, `Deleting`, `Renaming`, `Updating model`, and `Cancelling`. An armed exit names the keys that confirm it: `Press Ctrl+C or Ctrl+D again to exit` with an empty input, and `Press Ctrl+C again to exit` while the input holds a draft, where Ctrl+D deletes forward.
+- **Show status.** The status bar names the operation in flight beside the spinner, with the key that stops it where one does, as in `Streaming · Esc to interrupt`, and shows `Cancelling` until a cancel's terminal event. An armed exit names the keys that confirm it, leaving out Ctrl+D while the input holds a draft, where Ctrl+D deletes forward.
 
 The bare REPL maps SIGINT the way a shell does when stdin is a terminal. During an operation, it sends `Op::Interrupt`, and once cancellation ends the operation, `render_op` drops any approval question still awaiting an answer. At the prompt, SIGINT discards the line and prompts again, so only the end of input exits. With piped stdin, SIGINT ends the run, as SIGTERM and SIGHUP always do.
 
@@ -32,32 +32,23 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 
 6. **One operation in flight, ended by its terminal event.** `App::in_flight` holds the idle-only op the engine runs, from its dispatch to the terminal event `TurnEnd::of` matches for it, the contract the stdio driver ends each op through ([**One terminal event per operation**](engine.md#design-decisions)). The App is busy exactly while an op is in flight, so it never sends an idle-only op, `/rename` and `/model` included, before the previous op's terminal event. `App::end_operation` alone decides what follows an op. A cancel holds the queue, and so does a failure that `PromptQueue::fail_turn` settles by handing back an unsent or rolled-back prompt or by holding the queue after a failed compaction or session switch. A held queue waits for the user's next submit or session switch, so a later operation's end never starts prompts typed for a transcript or session the user did not get. Otherwise the queue head starts. An op's end defers the head while a modal that may send an idle-only op stays open, as the `/resume` picker does after an archive toggle and the `/delete` confirm after its lookup, since a started prompt would make that op fail as busy. `Modal::sends_idle_only_ops` names those modals, so the rule holds whatever opened the modal, and the head starts once the user closes the last of them. A read-only modal, such as `/help`, defers nothing. No modal that sends idle-only ops can be open when a turn ends, since the idle-only commands that open one are refused while busy. The status bar's label derives from the in-flight op and the latest stream, tool, or automatic compaction event, and a pending cancel keeps `Cancelling` until the terminal event. An armed exit is a separate deadline, `App::exit_armed`, which only an idle input arms and the next op clears. The App itself routes Esc, Ctrl+C, and Ctrl+D, whose meaning depends on the run state, and tells the input only whether to draw its busy rules, so no decision reads state back from a view.
 
-7. **Cancellation rides the existing `Event` channel.** `Event::Cancelled` covers both the TUI and `StdioSink`. No new event channel.
+7. **Cancellation is a terminal event.** `Event::Cancelled` ends an op as any other terminal event does, so the TUI and `StdioSink` settle a cancel through the event stream they already read, with no channel of its own.
 
 ## Sources
 
-- `crates/ox-core/src/engine.rs`: `Engine::run`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt`, `report_abort`, and `report_unsent`, which every frontend's operation ends through.
-- `crates/ox-core/src/engine/abort.rs`: `TurnAbort` enum, `await_unless_aborted`.
+- `crates/ox-core/src/engine.rs`: `Engine::serve`, which ignores an `Op::Queue` that arrives between turns, plus `Engine::submit_prompt`, `report_abort`, and `report_unsent`, which every frontend's operation ends through.
+- `crates/ox-core/src/engine/abort.rs`: `TurnAbort` enum, `Mailbox`, which races each wait against interrupts and holds the queued prompts.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round` / `ToolRound`, `Dispatcher::run_ready`, which cancels the running calls on an abort.
 - `crates/ox-core/src/engine/turn.rs`: `agent_turn` round loop, `interrupt_turn`, `record_drained_prompts`.
-- `crates/ox-core/src/file_tracker.rs`: `FileTracker::write_and_record`.
 - `crates/ox-core/src/message.rs`: `Message::interruption`, the marker a user abort records.
 - `crates/ox-core/src/protocol.rs`: the `Event` docs that list each op's terminal events, `TurnEnd::of`, `Event::{Cancelled, PromptDrained, TurnFailed}`, `Interaction::Interrupted`, `Op::{Interrupt, Queue, Shutdown}`.
-- `crates/ox-core/src/session/history.rs`: `walk_transcript`, which shows a resumed interruption marker as `Interaction::Interrupted`.
 - `crates/ox-core/src/tool.rs`: `Tool::run` drop contract, `ToolCtx::cancel`.
 - `crates/ox-core/src/tool/bash.rs`: `ShellTree`, which kills the shell's process group (Unix) or Job Object (Windows) when a call times out or drops before finishing.
-- `crates/ox-core/src/tool/file.rs`: `write_file`.
-- `crates/ox-core/src/tool/search.rs`: `walk_files`.
 - `crates/ox-tui/src/app.rs`: `App::in_flight` and `App::exit_armed`.
 - `crates/ox-tui/src/app/dispatch.rs`: `dispatch_op` / `start_turn` / `forward_queued_prompts`, `handle_esc`, `handle_ctrl_c`, the delete-forward and empty-input exit split in `handle_ctrl_d`, and `expire_armed_exit`.
 - `crates/ox-tui/src/app/events.rs`: `handle_engine_event`, `end_operation`, `settle_failure`, `discard_queue`, `drain_pending_prompt`, and `set_activity`.
 - `crates/ox-tui/src/app/operation.rs`: `InFlight`, which tracks the idle-only op until its terminal event, and the `Activity` the status bar shows.
 - `crates/ox-tui/src/app/queue.rs`: `PromptQueue` and its `QueuedPrompt` entries, the active prompt, the queued prompts, what a failed turn hands back, and the prompts a session switch leaves behind.
-- `crates/ox-tui/src/app/render.rs`: `run_label`, the run state with its busy hint or exit hint.
-- `crates/ox-tui/src/components/chat.rs`: `ChatView::clear_pending_calls`, which evicts orphan tool calls at turn boundaries, and `ChatView::load_history`, which shows a resumed interruption as the `(interrupted)` line.
-- `crates/ox-tui/src/components/chat/blocks/interrupted.rs`: `InterruptedMarker` block.
-- `crates/ox-tui/src/components/input.rs`: `set_text` and `is_empty`, which the idle Esc recall and the Ctrl+D gate use.
-- `crates/ox-tui/src/components/status.rs`: `RunLabel` and the spinner.
-- `crates/ox-tui/src/glyphs.rs`: `INTERRUPTED_MARKER`.
+- `crates/ox-tui/src/app/render.rs`: `App::run_label`, the status bar's operation label and the key that stops it.
 - `crates/ox/src/driver/repl.rs`: `drive`, which turns SIGINT during an operation into `Op::Interrupt` and SIGINT at the prompt into a fresh prompt when stdin is a terminal.
-- `crates/ox/src/driver/stdio.rs`: `StdioSink::render`, and `render_op`, which renders until the op it sent ends.
+- `crates/ox/src/driver/stdio.rs`: `render_op`, which renders one operation until its terminal event, and `StdioSink`.

@@ -19,9 +19,10 @@ use ox_core::session::store::listing::ArchiveState;
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
 use super::operation::{Activity, InFlight};
-use super::{App, AppHistory, Host};
-use crate::clipboard::Clipboard;
-use crate::clipboard::testing::REMOTE;
+use super::{App, AppHistory, Channels, Host};
+use crate::app_event::AppEventSender;
+use crate::clipboard::testing::{REMOTE, next_report};
+use crate::clipboard::{Clipboard, CopyReport};
 use crate::git_probes::GitProbes;
 use crate::modal::approval::ApprovalModal;
 use crate::modal::{Modal, ModalKey};
@@ -46,35 +47,64 @@ pub(super) fn test_app_with(
     session_info: LiveSessionInfo,
     title: Option<&str>,
 ) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
-    let (event_tx, events) = mpsc::unbounded_channel::<Event>();
-    let (ops, op_rx) = mpsc::channel::<Op>(OP_CHANNEL_CAPACITY);
-    let app = App::new(
-        Theme::default(),
-        ThemeOverrides::default(),
+    test_app_from(
         session_info,
-        test_host(),
-        events,
-        ops,
         AppHistory {
             interactions: Vec::new(),
             title: title.map(ToOwned::to_owned),
             prior: ArchiveState::Active,
         },
+    )
+}
+
+/// [`test_app_with`] opening on `history`.
+pub(super) fn test_app_from(
+    mut session_info: LiveSessionInfo,
+    history: AppHistory,
+) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
+    let (event_tx, events) = mpsc::unbounded_channel::<Event>();
+    let (ops, op_rx) = mpsc::channel::<Op>(OP_CHANNEL_CAPACITY);
+    let (app_events, background) = mpsc::unbounded_channel();
+    let host = test_host(&app_events);
+    session_info.app_events = app_events;
+    let app = App::new(
+        Theme::default(),
+        ThemeOverrides::default(),
+        session_info,
+        host,
+        Channels {
+            events,
+            ops,
+            background,
+        },
+        history,
     );
     (app, op_rx, event_tx)
 }
 
-/// A [`Host`] on `main` that never spawns a process or touches the system clipboard.
-pub(super) fn test_host() -> Host {
+/// A [`Host`] on `main` that never spawns a process or touches the system clipboard, reporting its
+/// copies to `app_events`.
+fn test_host(app_events: &AppEventSender) -> Host {
     Host {
         git_branch: Some("main".to_owned()),
         // With no segments to serve, the probes never spawn `git` or `gh`.
-        git_probes: GitProbes::new(PathBuf::from("/repo"), &[], now()),
+        git_probes: GitProbes::new(PathBuf::from("/repo"), &[], app_events.clone(), now()),
         // A remote session outside tmux copies only through OSC 52, leaving the system clipboard
         // and tmux alone.
-        clipboard: Clipboard::new(REMOTE),
+        clipboard: Clipboard::new(REMOTE, app_events.clone()),
         open_browser: |_| Ok(()),
     }
+}
+
+/// Applies the next result that background work reports, as the event loop does.
+pub(super) async fn apply_next_app_event(app: &mut App) {
+    let event = app.background.recv().await.expect("the App holds a sender");
+    app.apply_app_event(event);
+}
+
+/// The report of the latest copy, as the event loop takes it.
+pub(super) async fn copy_report(app: &mut App) -> CopyReport {
+    next_report(&app.clipboard, &mut app.background).await
 }
 
 /// Puts `op` in flight with no other local effect of [`App::dispatch_op`], such as the queue marks

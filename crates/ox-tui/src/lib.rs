@@ -2,6 +2,7 @@
 
 mod action;
 mod app;
+mod app_event;
 mod clipboard;
 mod components;
 mod cursor;
@@ -26,15 +27,16 @@ use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use ox_core::config::ConfigSnapshot;
 use ox_core::engine::{Engine, EngineHandle};
-use ox_core::session::store::listing::ArchiveState;
+use ox_core::session::store::listing::{ArchiveState, ProjectScope};
 use ox_core::util::path::tildify;
 
 use self::action::Action;
-use self::app::{App, AppHistory, Host};
+use self::app::{App, AppHistory, Channels, Host};
 use self::session_info::LiveSessionInfo;
 use self::slash::ResumePicker;
 use self::theme::ResolvedTheme;
@@ -50,8 +52,8 @@ const NOTICE_DURATION: Duration = Duration::from_secs(3);
 pub struct Startup {
     /// The branch checked out at startup, which the status bar shows until its first git probe.
     pub git_branch: Option<String>,
-    /// The session picker that `--resume` without a session opens over the first frame.
-    pub picker: Option<ResumePicker>,
+    /// Where the session picker that `--resume` without a session opens over the first frame looks.
+    pub picker: Option<ProjectScope>,
     /// The `ox <prompt>` text, submitted as if typed once the TUI opens.
     pub prompt: Option<String>,
     /// The resumed session's title, or `None` when the session starts fresh.
@@ -79,9 +81,11 @@ pub async fn run<S: Debug>(
         notices: theme_notices,
     } = theme;
     let cwd = engine.cwd();
-    let host = Host::detect(cwd, &config.status_line, startup.git_branch);
+    let (app_events, background) = mpsc::unbounded_channel();
+    let host = Host::detect(cwd, &config.status_line, startup.git_branch, &app_events);
     let session_info = LiveSessionInfo {
         store: engine.store().clone(),
+        app_events,
         display_cwd: tildify(cwd),
         project_root: engine.project_root().to_owned(),
         version: env!("CARGO_PKG_VERSION"),
@@ -96,6 +100,9 @@ pub async fn run<S: Debug>(
         theme_overrides: overrides.slots(),
     };
     let interactions = engine.take_history();
+    let picker = startup
+        .picker
+        .map(|projects| ResumePicker::at_startup(&session_info, projects));
 
     let mut tui = terminal::init()?;
     let EngineHandle { ops, events, task } = engine.spawn();
@@ -104,8 +111,11 @@ pub async fn run<S: Debug>(
         overrides,
         session_info,
         host,
-        events,
-        ops,
+        Channels {
+            events,
+            ops,
+            background,
+        },
         AppHistory {
             interactions,
             title: startup.title,
@@ -115,7 +125,7 @@ pub async fn run<S: Debug>(
     for notice in theme_notices {
         app.push_system_message(notice);
     }
-    if let Some(picker) = startup.picker {
+    if let Some(picker) = picker {
         app.push_modal(Box::new(picker));
     }
     if let Some(prompt) = startup.prompt {
