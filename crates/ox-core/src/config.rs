@@ -782,7 +782,11 @@ mod tests {
             max_tool_rounds: Some(100),
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
             compaction: CompactionConfig::with_threshold(42),
-            permission: Policy::new(Mode::Plan, Vec::new(), Vec::new(), Vec::new()),
+            permission: {
+                let mut policy = Policy::default();
+                policy.set_mode(Mode::Plan);
+                policy
+            },
             show_thinking: true,
             show_welcome: false,
             status_line: vec![

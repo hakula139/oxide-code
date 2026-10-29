@@ -303,8 +303,10 @@ mod tests {
             let dir = canonical_tempdir();
             fs::write(dir.path().join("public.rs"), "").unwrap();
             fs::write(dir.path().join("secret.rs"), "").unwrap();
-            let registry =
-                ToolRegistry::new(vec![Box::new(GlobTool::new(deny_reads(&["secret.rs"])))]);
+            let registry = ToolRegistry::new(vec![Box::new(GlobTool::new(deny_reads(
+                &["secret.rs"],
+                dir.path(),
+            )))]);
             let input = serde_json::json!({"pattern": "*.rs"});
 
             let output = registry
@@ -609,7 +611,7 @@ mod tests {
             fs::write(dir.path().join("config.toml"), "").unwrap();
             fs::create_dir(dir.path().join("secrets")).unwrap();
             fs::write(dir.path().join("secrets/key.toml"), "").unwrap();
-            let read_filter = deny_reads(&["secrets/**"]);
+            let read_filter = deny_reads(&["secrets/**"], dir.path());
 
             let result = glob_in("*.toml", None, dir.path(), &read_filter).unwrap();
             assert_eq!(
@@ -666,7 +668,13 @@ mod tests {
             fs::create_dir(&secrets).unwrap();
             let _denied = deny_read_access(&secrets);
 
-            let result = glob_in("*.rs", None, dir.path(), &deny_reads(&["secrets"])).unwrap();
+            let result = glob_in(
+                "*.rs",
+                None,
+                dir.path(),
+                &deny_reads(&["secrets"], dir.path()),
+            )
+            .unwrap();
 
             assert_eq!(
                 result.content,
@@ -723,7 +731,7 @@ mod tests {
             fs::write(outside.join(".env"), "").unwrap();
             fs::write(outside.join("app.toml"), "").unwrap();
             std::os::unix::fs::symlink(&outside, cwd.join("config")).unwrap();
-            let read_filter = deny_reads(&[".env"]);
+            let read_filter = deny_reads(&[".env"], &cwd);
 
             let result = glob_in("*", Some("config"), &cwd, &read_filter).unwrap();
             let app = outside.join("app.toml").display().to_string();

@@ -496,12 +496,14 @@ pub(crate) mod local_testing {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
+    use strum::VariantArray as _;
     use tokio_util::sync::CancellationToken;
 
     use super::search::{SearchRoot, search_arg};
     use super::spill::run_capped;
     use super::{Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
     use crate::file_tracker::FileTracker;
+    use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass, Policy, ReadFilter, Workspace};
 
@@ -547,13 +549,24 @@ pub(crate) mod local_testing {
         tool.run(prepared, ctx).await
     }
 
-    /// The read filter of a policy that denies reading whatever one of `patterns` matches.
-    pub(super) fn deny_reads(patterns: &[&str]) -> ReadFilter {
+    /// The read filter of a policy in `cwd` that denies reading whatever one of `patterns`
+    /// matches, and nothing else.
+    pub(super) fn deny_reads(patterns: &[&str], cwd: &Path) -> ReadFilter {
         let deny = patterns
             .iter()
             .map(|pattern| Rule::parse(PermissionClass::Read, pattern).unwrap())
             .collect();
-        Policy::new(Mode::Manual, deny, Vec::new(), Vec::new()).read_filter()
+        let workspace = Workspace::new(cwd);
+        Policy::resolve(
+            Mode::Manual,
+            deny,
+            Vec::new(),
+            Vec::new(),
+            Shipped::VARIANTS,
+            &workspace,
+        )
+        .unwrap()
+        .read_filter()
     }
 
     /// The root a search call in `cwd` that names `path` walks, resolved the way the search tools'
@@ -628,11 +641,13 @@ mod tests {
     use std::fs;
 
     use serde_json::Value;
+    use strum::VariantArray as _;
 
     use super::local_testing::{ctx, deny_reads, temp_ctx};
     use super::testing::bash_registry;
     use super::view::NumberedLine;
     use super::*;
+    use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PathTarget, PermissionClass, Policy, Zone};
     use crate::util::fs::testing::{symlink_dir, symlink_file};
@@ -718,7 +733,15 @@ mod tests {
                 (PermissionClass::Exec, "cat .env"),
             ]
             .map(|(class, pattern)| Rule::parse(class, pattern).unwrap());
-            let policy = Policy::new(Mode::Manual, deny.to_vec(), Vec::new(), Vec::new());
+            let policy = Policy::resolve(
+                Mode::Manual,
+                deny.to_vec(),
+                Vec::new(),
+                Vec::new(),
+                Shipped::VARIANTS,
+                &Workspace::new(dir.path()),
+            )
+            .unwrap();
             let cases = [
                 ("read", serde_json::json!({"file_path": ".env"})),
                 ("grep", serde_json::json!({"pattern": ".", "path": ".env"})),
@@ -1176,7 +1199,10 @@ mod tests {
                 let dir = canonical_tempdir();
                 fs::write(dir.path().join("notes.txt"), "token").unwrap();
                 fs::write(dir.path().join("secret.txt"), "token").unwrap();
-                let tools = ToolRegistry::built_in(&deny_reads(&["secret.txt"]), &Arc::default());
+                let tools = ToolRegistry::built_in(
+                    &deny_reads(&["secret.txt"], dir.path()),
+                    &Arc::default(),
+                );
                 let ctx = ctx(dir.path());
 
                 for (tool, pattern, rows) in [

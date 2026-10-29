@@ -549,6 +549,7 @@ mod tests {
 
     use anyhow::anyhow;
     use indoc::indoc;
+    use strum::VariantArray as _;
     use tokio::sync::Notify;
     use tokio::sync::oneshot;
     use tokio_util::sync::CancellationToken;
@@ -586,6 +587,7 @@ mod tests {
     use crate::model;
     use crate::model::{Effort, ModelSpec, PromptCacheTtl, TokenUsage};
     use crate::permission::PermissionClass;
+    use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::protocol::testing::{CapturingSink, model_pick};
     use crate::protocol::{CompactTrigger, ResumeTarget, SavedTarget, UsageSnapshot};
@@ -805,8 +807,16 @@ mod tests {
                 let store = test_store(dir.path());
                 let mut config = test_config("http://127.0.0.1:9", api_key(), MODEL);
                 let deny = vec![Rule::parse(PermissionClass::Read, "secret.txt").unwrap()];
-                config.permission = Policy::new(Mode::Manual, deny, Vec::new(), Vec::new());
                 config.workspace = Workspace::new(dir.path());
+                config.permission = Policy::resolve(
+                    Mode::Manual,
+                    deny,
+                    Vec::new(),
+                    Vec::new(),
+                    Shipped::VARIANTS,
+                    &config.workspace,
+                )
+                .unwrap();
                 let ctx = ctx(dir.path());
 
                 let engine = Engine::new(
