@@ -98,14 +98,12 @@ inputs.oxide-code = {
   url = "github:hakula139/oxide-code";
   inputs = {
     nixpkgs.follows = "nixpkgs";
-    flake-utils.follows = "flake-utils";
     git-hooks-nix.follows = "git-hooks-nix";
     home-manager.follows = "home-manager";
+    rust-overlay.follows = "rust-overlay";
   };
 };
 ```
-
-Leave `rust-overlay` unfollowed, since the flake's lock carries a revision that knows the Rust release `rust-toolchain.toml` pins, which an older lock of yours may lack.
 
 Then import the module in your Home Manager configuration:
 
@@ -130,6 +128,12 @@ programs.oxide-code = {
 File paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. A tag in the input URL pins the module together with the binary. The module owns `config.toml`, so keep local overrides in `ox/config.d/`, where they take precedence.
 
 The default `package` is built from the flake directly, so an override applied to `pkgs.oxide-code` does not reach it. To wrap or patch the package, apply `inputs.oxide-code.overlays.default` to your package set and set `programs.oxide-code.package` to your wrapper around `pkgs.oxide-code`.
+
+The default `package` and the overlay build `ox` with the Rust release of the package set they are applied to, which must meet the Rust version that [From Source via Cargo](#from-source-via-cargo) requires. If your nixpkgs ships an older Rust, drop `nixpkgs.follows` from the input and install the flake's own build, which uses the nixpkgs the flake pins:
+
+```nix
+programs.oxide-code.package = inputs.oxide-code.packages.${pkgs.stdenv.hostPlatform.system}.default;
+```
 
 With `checkConfig` on, the build runs the configured package's [`ox config check`](configuration.md#checking-the-config) on the generated `config.toml`, so a typo or an invalid value fails `home-manager switch` with `ox`'s own error. The check runs as a Nix build user with an empty scratch home directory and no credentials, inside the build sandbox where Nix enables one (macOS does not by default), so a wrapper `package` must start without your home directory or secrets.
 
@@ -179,7 +183,7 @@ This prints the version string. If you see `command not found`, the binary is no
 To also remove session data and config:
 
 ```bash
-rm -rf ${XDG_DATA_HOME:-$HOME/.local/share}/ox        # Sessions, device ID, and the oxide-code login
-rm -rf ${XDG_STATE_HOME:-$HOME/.local/state}/ox       # Log files
-rm -rf ${XDG_CONFIG_HOME:-$HOME/.config}/ox           # User config (if you wrote one)
+rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/ox"      # Sessions, device ID, and the oxide-code login
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/ox"     # Log files
+rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/ox"         # User config (if you wrote one)
 ```
