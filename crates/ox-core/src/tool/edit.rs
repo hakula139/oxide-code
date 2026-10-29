@@ -419,8 +419,7 @@ fn placements(
                 if change.old.start < span.start {
                     span.start + 1
                 } else if change.old.is_empty() {
-                    // Several replacements can share one insertion, which starts in an earlier
-                    // replacement's lines.
+                    // An insertion several replacements share can start before this one's lines.
                     change.location().max(new_line)
                 } else {
                     change.location()
