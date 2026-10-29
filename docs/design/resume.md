@@ -24,7 +24,7 @@ Archiving and deleting from the picker go through the engine. Ctrl+X sends `Op::
 
 `session::handle::roll_into` mirrors the `roll` behind `/clear`. On the blocking pool, it resolves the target to a session ID through `resolver::resolve_target`, which imports a `ResumeTarget::Path` export, takes the session's liveness lock, and loads and sanitizes its chain, so a resolve or load failure leaves the live session untouched. It then swaps the handle in place and finalizes the old session. Loading an archived target unarchives it. `RollIntoOutcome` carries the target's `LoadedTranscript`, its title, its prior archive state, and the old session's finalize failure.
 
-`Engine::resume` drives `roll_into` and adopts the loaded transcript as startup does: it replays the recorded prompt context, restores the file tracker, and emits `Event::SessionResumed` with the display history from `session::history::interactions`, already resolved so the TUI renders it without a tool registry. The events that follow report the old session's finalize failure, the restored session cost and task list, unreadable instruction files, tracker drift, and an interrupted reply, and `Event::SessionReady` ends the resume. A failed resolve or load ends it with `Event::TurnFailed` and keeps the live session. Later requests and tool calls read the session ID and artifact directory from the live handle, so they follow the swap.
+`Engine::resume` drives `roll_into` and adopts the loaded transcript as startup does: it replays the recorded prompt context, restores the file tracker, and emits `Event::SessionResumed` with the display history from `engine::history::interactions`, already resolved so the TUI renders it without a tool registry. The events that follow report the old session's finalize failure, the restored session cost and task list, unreadable instruction files, tracker drift, and an interrupted reply, and `Event::SessionReady` ends the resume. A failed resolve or load ends it with `Event::TurnFailed` and keeps the live session. Later requests and tool calls read the session ID and artifact directory from the live handle, so they follow the swap.
 
 On `SessionResumed`, the TUI rebuilds the chat, clears the modals, and discards the prompts queued before the resume with a notice. At `SessionReady` it returns to idle and submits the first prompt typed while the resume ran. A failed resume returns to idle with the queue intact and held ([**A cancel leaves the queue to the user**](cancellation.md#design-decisions)).
 
@@ -62,10 +62,10 @@ On `SessionResumed`, the TUI rebuilds the chat, clears the modals, and discards 
 
 ## Sources
 
+- `crates/ox-core/src/engine/history.rs`: `interactions`, the display projection `SessionResumed` carries.
 - `crates/ox-core/src/engine/sessions.rs`: `Engine::resume`, `format_drift_warning`.
 - `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::roll_into`, which swaps the live transcript for the loaded one.
 - `crates/ox-core/src/session/handle.rs`: `roll_into`, `RollIntoOutcome`, `LoadedTranscript`.
-- `crates/ox-core/src/session/history.rs`: `interactions`, the display projection `SessionResumed` carries.
 - `crates/ox-core/src/session/resolver.rs`: `resolve_target`, which maps a `ResumeTarget` to a session ID, importing an export path, and `resolve_prefix`.
 - `crates/ox-core/src/session/store/listing.rs`: `walk`, `SessionWalk`, `list_paged`, `latest`, `list_matching`, `ListPage`, `ListScope`, `ProjectScope`.
 - `crates/ox-tui/src/modal/searchable_list.rs`: `SearchableList<T>`, `SearchableItem`, `append_items` and `set_has_more` for paged loading, and `retain_items`, which keeps the cursor when rows drop.

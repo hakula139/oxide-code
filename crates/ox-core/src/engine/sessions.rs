@@ -237,7 +237,8 @@ mod tests {
     use crate::client::anthropic::testing::{sse_body, sse_response};
     use crate::config::compaction::CompactionConfig;
     use crate::engine::abort::Mailbox;
-    use crate::engine::compaction::{AutoCompactFailures, auto_compaction_due, request_tokens};
+    use crate::engine::compaction::{AutoCompactFailures, auto_compaction_due};
+    use crate::engine::estimate::request_tokens;
     use crate::engine::local_testing::{
         EchoTool, dead_test_session, finished_session, greeting_title, inert_mailbox, mount_title,
         next_matching, system_prompt, texts, tracked_paths, write_unreadable_instructions,

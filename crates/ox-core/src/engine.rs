@@ -4,9 +4,12 @@
 mod abort;
 mod compaction;
 mod dispatch;
+mod estimate;
+mod history;
 #[cfg(test)]
 mod local_testing;
 mod login;
+mod post_compact;
 mod sessions;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -39,7 +42,7 @@ use crate::protocol::notice::{self, ConfigSettings};
 use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, TurnEnd};
 use crate::session::handle::{LoadedTranscript, SessionHandle};
 use crate::session::store::SessionStore;
-use crate::session::{history, title_generator};
+use crate::session::title_generator;
 use crate::tool::ToolRegistry;
 use crate::tool::bash::background::BackgroundShells;
 use crate::util::tls::Trust;
@@ -573,6 +576,7 @@ mod tests {
     use crate::config::credentials::AuthState;
     use crate::config::testing::test_config;
     use crate::engine::compaction::AutoCompactFailures;
+    use crate::engine::post_compact::synthesize_post_compact_message;
     use crate::file_tracker::testing::{
         assert_writes_draining, blocked_write, poll_until_draining, record_tracked_file,
         seed_full_read,
@@ -587,7 +591,6 @@ mod tests {
     use crate::protocol::{CompactTrigger, ResumeTarget, SavedTarget, UsageSnapshot};
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;
-    use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::saved::ArchiveUpdate;
     use crate::session::store::UsageRecord;
     use crate::session::store::listing::ArchiveState;
@@ -3177,7 +3180,7 @@ mod tests {
                 assert_eq!(engine.transcript.messages().len(), 3);
                 assert_eq!(
                     engine.usage.context_estimate(),
-                    1_000 + compaction::transcript_tokens(&engine.transcript.messages()[2..]),
+                    1_000 + estimate::transcript_tokens(&engine.transcript.messages()[2..]),
                     "the turn's input plus its reply",
                 );
                 assert!(
@@ -3245,7 +3248,7 @@ mod tests {
                 assert_eq!(first, TurnEnd::Completed);
                 assert_eq!(
                     engine.usage.context_estimate(),
-                    1_000 + compaction::transcript_tokens(&engine.transcript.messages()[1..])
+                    1_000 + estimate::transcript_tokens(&engine.transcript.messages()[1..])
                 );
                 let rejected = engine
                     .submit_prompt(&oversized, None, &sink, &mut mailbox)

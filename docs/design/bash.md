@@ -86,9 +86,9 @@ Whenever a shell starts, exits, or stops, the engine emits `Event::BackgroundShe
 - `crates/ox-core/src/config/credentials.rs`: `secret_env_vars`, derived from `EXPLICIT` and `CUSTOM_HEADERS_VAR`, and `withhold_secrets`, which removes them from a child's environment.
 - `crates/ox-core/src/engine.rs`: `Engine::shells`, which `Engine::new` shares with the three tools, attached to the event channel in `spawn` and ended in `finalize`.
 - `crates/ox-core/src/engine/compaction.rs`: `Engine::replace_with_summary`, which lists the open shells in the summary message.
+- `crates/ox-core/src/engine/post_compact.rs`: `shell_reminder`, the block listing open shells after the summary.
 - `crates/ox-core/src/engine/sessions.rs`: `adopt_session`, which ends the old session's shells.
 - `crates/ox-core/src/protocol.rs`: `Event::BackgroundShellsUpdated`.
-- `crates/ox-core/src/session/post_compact.rs`: `shell_reminder`, the block listing open shells after the summary.
 - `crates/ox-core/src/tool.rs`: `ToolRegistry::built_in`, which hands one `BackgroundShells` to the three tools.
 - `crates/ox-core/src/tool/bash.rs`: `ShellTree`, `SESSION_ID_VAR`, `EDITOR_VARS`, `CDPATH_VAR`, `run_in_background`, `PipeCapture`, `render_output`, `bash`, which finds Git Bash on Windows, and `Bash::ready`, which waits for the MSYS runtime before a shell starts.
 - `crates/ox-core/src/tool/bash/background.rs`: `BackgroundShells`, `supervise`, `BashOutputTool`, `BashStopTool`, and `BackgroundShells::start`, which spawns a background shell through the same `ShellTree`.

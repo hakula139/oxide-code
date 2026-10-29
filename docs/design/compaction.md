@@ -149,12 +149,15 @@ In the bare REPL and headless runs, `driver::stdio::StdioSink` writes `Compactin
 
 - `crates/ox-core/src/config/compaction.rs`: `CompactionConfig`, which resolves the threshold and its snapping.
 - `crates/ox-core/src/engine.rs`: `Engine::submit_prompt`, which compacts between the segments of a turn.
-- `crates/ox-core/src/engine/compaction.rs`: `Engine::compact`, `Engine::run_compaction`, `Engine::replace_with_summary`, `request_summary`, the `SummaryStream` sink, the context-window retries, `AutoCompactFailures`, and `request_tokens`.
+- `crates/ox-core/src/engine/compaction.rs`: `Engine::compact`, `Engine::run_compaction`, `Engine::replace_with_summary`, and `AutoCompactFailures`.
+- `crates/ox-core/src/engine/compaction/summary.rs`: `request_summary`, the `SummaryStream` sink, and the context-window retries.
+- `crates/ox-core/src/engine/estimate.rs`: `request_tokens`.
+- `crates/ox-core/src/engine/history.rs`: `TranscriptWalker::push_message`, which skips the generated summary block when the compaction boundary already displays it.
+- `crates/ox-core/src/engine/post_compact.rs`: `SUMMARY_PREFIX` and `synthesize_post_compact_message`.
 - `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::compact`, which saves the boundary and swaps the transcript to the synthetic continuation.
 - `crates/ox-core/src/engine/turn.rs`: `agent_turn`, `TurnStop::Compact`, `collect_response`, and `TurnReport::context_estimate`.
 - `crates/ox-core/src/engine/usage.rs`: `UsageLedger`, which accounts the session cost and context usage, and `Engine::account_usage` and `Engine::reset_context_usage`, which feed it.
 - `crates/ox-core/src/protocol.rs`: `Op::Compact`, the `SessionCompacted`, `SummaryToken`, `SummaryDiscarded`, `AutoCompactionStarted`, and `AutoCompactionPaused` events, and `CompactTrigger`.
-- `crates/ox-core/src/session/post_compact.rs`: `SUMMARY_PREFIX` and `synthesize_post_compact_message`.
 - `crates/ox-core/src/session/state.rs`: `SessionState::compact`, which queues the synthetic root.
 - `crates/ox-core/src/session/store.rs`: `CompactInfo`, the record a compaction root stores.
 - `crates/ox-core/src/session/store/load.rs`: the chain walk that stops at the root.

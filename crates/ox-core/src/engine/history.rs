@@ -6,17 +6,17 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::store::CompactInfo;
 use crate::message::{ContentBlock, Message, Role, TextOrigin, progress_note};
 use crate::model::lacks_progress_updates;
 use crate::protocol::{Interaction, ToolCall, ToolResult};
+use crate::session::store::CompactInfo;
 use crate::tool::view::ToolResultView;
 use crate::tool::{ToolMetadata, ToolRegistry};
 
 /// Projects a resumed transcript for display, opening with its compaction boundary when `compact`
 /// is set. `tool_metadata` holds the per-call metadata the session persisted, keyed by tool-use ID,
 /// and path arguments show relative to `cwd`.
-pub(crate) fn interactions(
+pub(super) fn interactions(
     messages: &[Message],
     compact: Option<&CompactInfo>,
     tool_metadata: &HashMap<String, ToolMetadata>,
@@ -203,9 +203,9 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::engine::post_compact::synthesize_post_compact_message;
     use crate::message::{INTERRUPTION_MARKER, Replay};
     use crate::protocol::{CompactTrigger, testing};
-    use crate::session::post_compact::synthesize_post_compact_message;
     use crate::session::store::CompactRecord;
     use crate::tool::DEFAULT_TOOL_ICON;
     use crate::tool::StoredView;
@@ -414,6 +414,20 @@ mod tests {
                     Interaction::AssistantText(reminder.to_owned()),
                 ]
             );
+        }
+
+        #[test]
+        fn keeps_control_text_the_user_typed() {
+            for text in [
+                "<system-reminder>Explain this tag.</system-reminder>",
+                INTERRUPTION_MARKER,
+            ] {
+                let messages = [Message::user(text)];
+
+                let out = walk(&messages);
+
+                assert_eq!(out, [Interaction::UserText(text.to_owned())], "{text}");
+            }
         }
 
         #[test]

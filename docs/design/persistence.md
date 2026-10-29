@@ -193,14 +193,14 @@ Listings render rows as follows:
 
 ## Sources
 
+- `crates/ox-core/src/engine/history.rs`: the resumed transcript, whose tool results take their views from `ToolRegistry::result_view`.
+- `crates/ox-core/src/engine/post_compact.rs`: the synthetic post-compact root.
 - `crates/ox-core/src/engine/turn.rs`: `agent_turn`, which records each tool round with one `RecordRound` command.
 - `crates/ox-core/src/engine/usage.rs`: `UsageLedger::for_session`, which sums the session cost from the resumed usage rows.
 - `crates/ox-core/src/message.rs`: the message and content-block types that the message rows store.
 - `crates/ox-core/src/session/actor.rs`: the actor that owns the session state and commits each wakeup's commands on a blocking task.
 - `crates/ox-core/src/session/display.rs`: the session ID and title formatting that listings use, including the fork label.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle`, `WriteReport`, and `Fork`, and the session-format tests.
-- `crates/ox-core/src/session/history.rs`: the resumed transcript, whose tool results take their views from `ToolRegistry::result_view`.
-- `crates/ox-core/src/session/post_compact.rs`: the synthetic post-compact root.
 - `crates/ox-core/src/session/resolver.rs`: the `--continue` and `--resume` targets, `ox export`, and session-ID prefix resolution.
 - `crates/ox-core/src/session/sanitize.rs`: resume-time transcript repair.
 - `crates/ox-core/src/session/saved.rs`: archiving and deleting saved sessions.
