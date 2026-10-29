@@ -304,6 +304,32 @@ mod tests {
         }
 
         #[test]
+        fn resolves_a_prefix_in_the_current_project_over_another_projects_match() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = seeded_store(dir.path());
+            let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+            seed_test_session(
+                &other,
+                "saved-elsewhere",
+                Some("Elsewhere"),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let target = SessionRef::Prefix("saved".to_owned());
+
+            let update = set_archived(&store, &target, ArchiveState::Archived, LIVE_ID);
+
+            assert_eq!(
+                update,
+                Ok(ArchiveUpdate {
+                    id: SAVED_ID.to_owned(),
+                    changed: true,
+                }),
+            );
+            assert_eq!(archive_times(&other, "saved-elsewhere").0, None);
+        }
+
+        #[test]
         fn refuses_the_live_session_and_names_an_unmatched_target() {
             let dir = tempfile::tempdir().unwrap();
             let store = seeded_store(dir.path());

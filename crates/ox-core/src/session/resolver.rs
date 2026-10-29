@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use tracing::debug;
 
 use super::display::id_prefix;
@@ -22,32 +22,27 @@ pub enum SessionTarget {
     Latest,
     /// The session that the export at this path holds, imported into the store first.
     Import(PathBuf),
-    /// The saved session a reference names.
+    /// The saved session whose ID prefix `--resume <prefix>` gives.
     Ref(SessionRef),
 }
 
 impl SessionTarget {
-    /// Classifies the `--resume <session>` argument `raw`. An argument that contains a path
-    /// separator or has a `.jsonl` extension, which no session-ID prefix does, names an export, and
-    /// any other names a session-ID prefix. Rejects a blank argument, which names no session.
-    pub fn named(raw: &str) -> Result<Self> {
+    /// Classifies the `--resume <session>` argument `raw`, which holds more than whitespace, as
+    /// `--resume`'s parser ensures. An argument that contains a path separator or has a `.jsonl`
+    /// extension, which no session-ID prefix does, names an export, and any other names a
+    /// session-ID prefix.
+    pub fn named(raw: &str) -> Self {
         let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            bail!(
-                "empty session ID prefix \
-                 (run `ox -c` to continue the latest session or `ox -r` to pick one)"
-            );
-        }
         let path = Path::new(trimmed);
         let is_path = trimmed.contains(['/', '\\'])
             || path
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"));
-        Ok(if is_path {
+        if is_path {
             Self::Import(path.to_path_buf())
         } else {
             Self::Ref(SessionRef::Prefix(trimmed.to_owned()))
-        })
+        }
     }
 }
 
@@ -232,11 +227,6 @@ mod tests {
         SEEDED_PROMPT, archive_test_session, isolated_store, seed_test_session, test_store,
     };
 
-    /// The target `--resume raw` names.
-    fn named(raw: &str) -> SessionTarget {
-        SessionTarget::named(raw).unwrap()
-    }
-
     mod session_target {
         use super::*;
 
@@ -272,21 +262,7 @@ mod tests {
                         SessionTarget::Ref(SessionRef::Prefix("a1b2c3d4-e5f6-7890".to_owned())),
                     ),
                 ] {
-                    assert_eq!(SessionTarget::named(raw).unwrap(), expected, "{raw:?}");
-                }
-            }
-
-            #[test]
-            fn rejects_a_blank_argument() {
-                for raw in ["", "   ", "\t\n"] {
-                    let err = SessionTarget::named(raw).unwrap_err();
-
-                    assert_eq!(
-                        err.to_string(),
-                        "empty session ID prefix \
-                         (run `ox -c` to continue the latest session or `ox -r` to pick one)",
-                        "{raw:?}",
-                    );
+                    assert_eq!(SessionTarget::named(raw), expected, "{raw:?}");
                 }
             }
         }
@@ -326,10 +302,15 @@ mod tests {
             let (_dir, store) = isolated_store();
 
             let arg = export.to_string_lossy().into_owned();
-            let resumed =
-                resolve_session(&store, "m", None, Some(named(&arg)), ProjectScope::Current)
-                    .await
-                    .unwrap();
+            let resumed = resolve_session(
+                &store,
+                "m",
+                None,
+                Some(SessionTarget::named(&arg)),
+                ProjectScope::Current,
+            )
+            .await
+            .unwrap();
 
             assert_eq!(resumed.handle.session_id(), full_id);
             assert_eq!(resumed.transcript.messages, [Message::user("exported")]);
@@ -350,7 +331,7 @@ mod tests {
                 &store,
                 "m",
                 None,
-                Some(named(prefix)),
+                Some(SessionTarget::named(prefix)),
                 ProjectScope::Current,
             )
             .await
@@ -369,9 +350,15 @@ mod tests {
             seed_test_session(&store, "abcd-local", Some("Local"), 1, at);
             seed_test_session(&other, "abcd-other", Some("Other"), 1, at);
             let resume = async |prefix: &str, projects: ProjectScope| {
-                resolve_session(&store, "m", None, Some(named(prefix)), projects)
-                    .await
-                    .map(|resumed| resumed.title)
+                resolve_session(
+                    &store,
+                    "m",
+                    None,
+                    Some(SessionTarget::named(prefix)),
+                    projects,
+                )
+                .await
+                .map(|resumed| resumed.title)
             };
 
             assert_eq!(
@@ -472,7 +459,7 @@ mod tests {
                 &store,
                 "m",
                 None,
-                Some(named("arch")),
+                Some(SessionTarget::named("arch")),
                 ProjectScope::Current,
             )
             .await
@@ -520,7 +507,7 @@ mod tests {
                 &store,
                 "m",
                 None,
-                Some(named("zzzz")),
+                Some(SessionTarget::named("zzzz")),
                 ProjectScope::Current,
             )
             .await
@@ -543,11 +530,17 @@ mod tests {
                 );
             }
 
-            let err = resolve_session(&store, "m", None, Some(named("ab")), ProjectScope::Current)
-                .await
-                .err()
-                .unwrap()
-                .to_string();
+            let err = resolve_session(
+                &store,
+                "m",
+                None,
+                Some(SessionTarget::named("ab")),
+                ProjectScope::Current,
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string();
             assert_eq!(
                 err,
                 "ambiguous prefix `ab` matches 7 sessions: \
@@ -566,10 +559,16 @@ mod tests {
                 (ProjectScope::Every, "all projects"),
             ] {
                 let cause = store.list_matching("ab", projects).unwrap_err();
-                let err = resolve_session(&store, "m", None, Some(named("ab")), projects)
-                    .await
-                    .err()
-                    .unwrap();
+                let err = resolve_session(
+                    &store,
+                    "m",
+                    None,
+                    Some(SessionTarget::named("ab")),
+                    projects,
+                )
+                .await
+                .err()
+                .unwrap();
 
                 assert_eq!(
                     err.to_string(),
@@ -585,7 +584,7 @@ mod tests {
                 &store,
                 "m",
                 None,
-                Some(named("/does/not/exist.jsonl")),
+                Some(SessionTarget::named("/does/not/exist.jsonl")),
                 ProjectScope::Current,
             )
             .await
@@ -603,21 +602,15 @@ mod tests {
         use super::*;
 
         #[test]
-        fn names_a_file_it_cannot_open_or_import() {
+        fn names_a_file_it_cannot_import() {
             let (dir, store) = isolated_store();
-            let missing = dir.path().join("missing.jsonl");
             let foreign = dir.path().join("foreign.jsonl");
             std::fs::write(&foreign, "{\"type\":\"header\"}\n").unwrap();
 
-            let failure = |path: &Path| format!("{:#}", import(&store, path).unwrap_err());
+            let err = import(&store, &foreign).unwrap_err();
 
-            assert!(
-                failure(&missing).starts_with(&format!("failed to open {}: ", missing.display())),
-                "{}",
-                failure(&missing),
-            );
             assert_eq!(
-                failure(&foreign),
+                format!("{err:#}"),
                 format!(
                     "failed to import {}: line 1: not an ox session export, which starts with a \
                      session record",

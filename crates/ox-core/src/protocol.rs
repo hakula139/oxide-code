@@ -148,13 +148,12 @@ impl fmt::Debug for SignInCode {
     }
 }
 
-/// A saved session other than the live one, which an [`Op::Resume`] or [`Op::SetArchive`] acts on.
+/// A saved session, named by its ID or a unique prefix of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionRef {
     /// The saved session with this ID.
     Id(String),
-    /// The one saved session whose ID starts with this prefix, searched for in the current project
-    /// first and then in every project.
+    /// The one saved session whose ID starts with this prefix.
     Prefix(String),
 }
 

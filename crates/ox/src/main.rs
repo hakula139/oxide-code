@@ -300,11 +300,10 @@ impl Cli {
     }
 
     /// The saved session to continue, or `None` for a new session, which the picker also starts.
-    /// Fails on a blank `--resume` argument.
-    fn session_target(&self) -> Result<Option<SessionTarget>> {
+    fn session_target(&self) -> Option<SessionTarget> {
         match &self.resume {
-            Some(Some(session)) => SessionTarget::named(session).map(Some),
-            _ => Ok(self.r#continue.then_some(SessionTarget::Latest)),
+            Some(Some(session)) => Some(SessionTarget::named(session)),
+            _ => self.r#continue.then_some(SessionTarget::Latest),
         }
     }
 }
@@ -532,7 +531,7 @@ async fn run_session(
         &store,
         config.model.id(),
         git_branch.clone(),
-        cli.session_target()?,
+        cli.session_target(),
         cli.projects(),
     )
     .await?;
@@ -646,6 +645,7 @@ mod tests {
     use std::ffi::OsString;
 
     use indoc::formatdoc;
+
     use ox_core::protocol::SessionRef;
 
     use super::*;
@@ -1103,8 +1103,7 @@ mod tests {
 
             #[test]
             fn is_the_latest_for_continue_and_the_named_session_for_resume() {
-                let target =
-                    |args: &[&str]| Cli::try_parse_from(args).unwrap().session_target().unwrap();
+                let target = |args: &[&str]| Cli::try_parse_from(args).unwrap().session_target();
 
                 assert_eq!(target(&["ox", "-c"]), Some(SessionTarget::Latest));
                 assert_eq!(
