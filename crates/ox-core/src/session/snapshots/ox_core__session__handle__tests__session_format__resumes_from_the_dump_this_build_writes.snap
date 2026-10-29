@@ -270,20 +270,34 @@ expression: recovered
       "result_view": {
         "view": {
           "data": {
-            "chunk": {
-              "new": [
-                {
-                  "number": 1,
-                  "text": "fn run() {}"
-                }
-              ],
-              "old": [
-                {
-                  "number": 1,
-                  "text": "fn main() {}"
-                }
-              ]
-            },
+            "hunks": [
+              {
+                "lines": [
+                  {
+                    "changed": [
+                      {
+                        "end": 7,
+                        "start": 3
+                      }
+                    ],
+                    "kind": "removed",
+                    "number": 1,
+                    "text": "fn main() {}"
+                  },
+                  {
+                    "changed": [
+                      {
+                        "end": 6,
+                        "start": 3
+                      }
+                    ],
+                    "kind": "added",
+                    "number": 1,
+                    "text": "fn run() {}"
+                  }
+                ]
+              }
+            ],
             "locations": [
               1
             ]

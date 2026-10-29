@@ -56,9 +56,12 @@ impl Tool for WriteTool {
         Box::pin(async move {
             let input: Input = prepared.parsed();
             let current = current_text(&prepared.path()).await;
+            let diff = super::run_blocking(move || Ok(super::diff::diff(&current, &input.content)))
+                .await
+                .unwrap_or_default();
             ApprovalPreview {
                 title: prepared.path_title(name, cwd),
-                body: ApprovalBody::Diff(super::edit::synthesize_chunk(&current, &input.content)),
+                body: ApprovalBody::Diff(diff),
             }
         })
     }
@@ -249,21 +252,29 @@ mod tests {
     use crate::file_tracker::testing::{assert_writes_draining, seed_full_read};
     use crate::tool::local_testing::{self, ctx, temp_ctx};
     use crate::tool::read::ReadTool;
-    use crate::tool::view::{DiffChunk, NumberedLine};
+    use crate::tool::testing::diff_line;
+    use crate::tool::view::{Diff, DiffHunk, DiffLineKind};
     use crate::util::fs::testing::{deny_subdir_creation, make_read_only, symlink_file};
     use crate::util::path::local_testing::canonical_tempdir;
+
+    /// A one-line diff that replaces `old`, or adds a line when it is `None`.
+    fn replaced_line(old: Option<&str>, new: &str) -> ApprovalBody {
+        let removed = old.map(|old| diff_line(DiffLineKind::Removed, 1, old));
+        let lines = removed
+            .into_iter()
+            .chain([diff_line(DiffLineKind::Added, 1, new)])
+            .collect();
+        ApprovalBody::Diff(Diff {
+            hunks: vec![DiffHunk { lines }],
+            omitted_lines: 0,
+        })
+    }
 
     mod approval_preview {
         use super::*;
 
         fn added_line(text: &str) -> ApprovalBody {
-            ApprovalBody::Diff(DiffChunk {
-                old: Vec::new(),
-                new: vec![NumberedLine {
-                    number: 1,
-                    text: text.to_owned(),
-                }],
-            })
+            replaced_line(None, text)
         }
 
         fn prepare(input: serde_json::Value, cwd: &Path) -> Prepared {
@@ -296,7 +307,7 @@ mod tests {
             let prepared = prepare(
                 serde_json::json!({
                     "file_path": path,
-                    "content": "keep\nnew line\n",
+                    "content": "keep\nfresh text\n",
                 }),
                 dir.path(),
             );
@@ -307,15 +318,15 @@ mod tests {
 
             assert_eq!(
                 preview.body,
-                ApprovalBody::Diff(DiffChunk {
-                    old: vec![NumberedLine {
-                        number: 2,
-                        text: "old line".to_owned(),
+                ApprovalBody::Diff(Diff {
+                    hunks: vec![DiffHunk {
+                        lines: vec![
+                            diff_line(DiffLineKind::Context, 1, "keep"),
+                            diff_line(DiffLineKind::Removed, 2, "old line"),
+                            diff_line(DiffLineKind::Added, 2, "fresh text"),
+                        ],
                     }],
-                    new: vec![NumberedLine {
-                        number: 2,
-                        text: "new line".to_owned(),
-                    }],
+                    omitted_lines: 0,
                 }),
             );
         }
@@ -340,19 +351,7 @@ mod tests {
                 .await;
 
             assert_eq!(preview.title, "Write(target.txt)");
-            assert_eq!(
-                preview.body,
-                ApprovalBody::Diff(DiffChunk {
-                    old: vec![NumberedLine {
-                        number: 1,
-                        text: "token".to_owned(),
-                    }],
-                    new: vec![NumberedLine {
-                        number: 1,
-                        text: "new".to_owned(),
-                    }],
-                }),
-            );
+            assert_eq!(preview.body, replaced_line(Some("token"), "new"));
         }
     }
 
@@ -554,19 +553,7 @@ mod tests {
             let prepared = WriteTool.prepare(input.clone(), &ctx).unwrap();
             let preview = WriteTool.approval_preview("write", &prepared, &cwd).await;
 
-            assert_eq!(
-                preview.body,
-                ApprovalBody::Diff(DiffChunk {
-                    old: vec![NumberedLine {
-                        number: 1,
-                        text: "old".to_owned(),
-                    }],
-                    new: vec![NumberedLine {
-                        number: 1,
-                        text: "new".to_owned(),
-                    }],
-                }),
-            );
+            assert_eq!(preview.body, replaced_line(Some("old"), "new"));
 
             let output = local_testing::run(&WriteTool, input, &ctx).await;
 

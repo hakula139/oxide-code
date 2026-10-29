@@ -429,6 +429,7 @@ fn file_snapshots_column(session: &SessionLine) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::store::CONTENT_VERSION;
     use crate::session::store::commit::Record;
     use crate::session::store::listing::ArchiveState;
     use crate::session::store::local_testing::{message_row, save};
@@ -702,7 +703,7 @@ mod tests {
             };
             let escaping_id = edited("id", "../escape".into());
             let escaping_source = edited("forked_from", "\u{1b}[2J".into());
-            let newer = edited("format", 2.into());
+            let newer = edited("format", (CONTENT_VERSION + 1).into());
 
             for (name, input, expected) in [
                 (
@@ -729,7 +730,7 @@ mod tests {
                 (
                     "newer format",
                     vec![&newer, m1],
-                    "line 1: session format version 2 is newer than supported (1). \
+                    "line 1: session format version 3 is newer than supported (2). \
                      Upgrade oxide-code to import it."
                         .to_owned(),
                 ),

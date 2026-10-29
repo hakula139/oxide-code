@@ -26,7 +26,7 @@ mod status;
 mod theme;
 
 pub(crate) use self::delete::confirm_modal as delete_confirm_modal;
-pub(crate) use self::diff::{DiffRow, WorkingTreeDiff};
+pub(crate) use self::diff::{GitDiffRow, WorkingTreeDiff};
 pub(crate) use self::matcher::MatchedCommand;
 pub(crate) use self::registry::{ArgCompletion, SlashOutcome};
 pub(crate) use self::resume::{PageEnd, ResumePicker};

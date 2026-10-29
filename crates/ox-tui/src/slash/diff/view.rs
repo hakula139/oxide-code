@@ -15,7 +15,7 @@ pub(super) const MAX_BYTES: usize = 64 * 1024;
 /// Uncommitted changes in a repository, parsed from `git diff` and `git ls-files` output.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct WorkingTreeDiff {
-    pub(crate) rows: Vec<DiffRow>,
+    pub(crate) rows: Vec<GitDiffRow>,
     /// Untracked paths, relative to the repository root.
     pub(crate) untracked: Vec<String>,
     /// What the byte budget left out, when the output ran past it.
@@ -24,7 +24,7 @@ pub(crate) struct WorkingTreeDiff {
 
 /// One drawn row of a tracked diff.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum DiffRow {
+pub(crate) enum GitDiffRow {
     /// A file's path, or `old → new` when its extended header records a rename.
     File(String),
     /// An `@@ -a,b +c,d @@` hunk header, kept as git wrote it.
@@ -150,11 +150,11 @@ impl Budget {
 
 // ── Diff Parsing ──
 
-/// Turns diff lines into [`DiffRow`]s, tracking the open file and hunk.
+/// Turns diff lines into [`GitDiffRow`]s, tracking the open file and hunk.
 #[derive(Default)]
 struct Parser {
-    rows: Vec<DiffRow>,
-    /// Index of the open file's [`DiffRow::File`] row, which a rename header relabels.
+    rows: Vec<GitDiffRow>,
+    /// Index of the open file's [`GitDiffRow::File`] row, which a rename header relabels.
     file: Option<usize>,
     rename_from: Option<String>,
     hunk: HunkCursor,
@@ -166,30 +166,30 @@ impl Parser {
             self.end_file();
             self.file = Some(self.rows.len());
             let label = parse_diff_git_path(line).unwrap_or_else(|| line.to_owned());
-            self.rows.push(DiffRow::File(label));
+            self.rows.push(GitDiffRow::File(label));
         } else if let Some((old, new)) = parse_hunk_header(line) {
             self.hunk = HunkCursor { old, new };
-            self.rows.push(DiffRow::Hunk(line.to_owned()));
+            self.rows.push(GitDiffRow::Hunk(line.to_owned()));
         } else if !self.hunk.is_open() {
             self.push_outside_hunk(line);
         } else {
             let row = if let Some(text) = line.strip_prefix('-') {
-                DiffRow::Removed {
+                GitDiffRow::Removed {
                     number: self.hunk.old.advance(),
                     text: text.to_owned(),
                 }
             } else if let Some(text) = line.strip_prefix('+') {
-                DiffRow::Added {
+                GitDiffRow::Added {
                     number: self.hunk.new.advance(),
                     text: text.to_owned(),
                 }
             } else if let Some(text) = context_text(line) {
-                DiffRow::Context {
+                GitDiffRow::Context {
                     number: self.hunk.advance_context(),
                     text: text.to_owned(),
                 }
             } else {
-                DiffRow::Marker(line.to_owned())
+                GitDiffRow::Marker(line.to_owned())
             };
             self.rows.push(row);
         }
@@ -204,13 +204,13 @@ impl Parser {
             && let Some(from) = self.rename_from.take()
             && let Some(file) = self.file
         {
-            self.rows[file] = DiffRow::File(format!("{from} → {}", header_path(to)));
+            self.rows[file] = GitDiffRow::File(format!("{from} → {}", header_path(to)));
         } else if !is_file_header(line) {
             let line = line.to_owned();
             let row = if line.is_empty() || line.starts_with('\\') {
-                DiffRow::Marker(line)
+                GitDiffRow::Marker(line)
             } else {
-                DiffRow::Note(line)
+                GitDiffRow::Note(line)
             };
             self.rows.push(row);
         }
@@ -374,21 +374,21 @@ fn context_text(line: &str) -> Option<&str> {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use super::DiffRow;
+    use super::GitDiffRow;
 
-    pub(crate) fn removed(number: usize, text: &str) -> DiffRow {
+    pub(crate) fn removed(number: usize, text: &str) -> GitDiffRow {
         let text = text.to_owned();
-        DiffRow::Removed { number, text }
+        GitDiffRow::Removed { number, text }
     }
 
-    pub(crate) fn added(number: usize, text: &str) -> DiffRow {
+    pub(crate) fn added(number: usize, text: &str) -> GitDiffRow {
         let text = text.to_owned();
-        DiffRow::Added { number, text }
+        GitDiffRow::Added { number, text }
     }
 
-    pub(crate) fn context(number: usize, text: &str) -> DiffRow {
+    pub(crate) fn context(number: usize, text: &str) -> GitDiffRow {
         let text = text.to_owned();
-        DiffRow::Context { number, text }
+        GitDiffRow::Context { number, text }
     }
 }
 
@@ -407,15 +407,15 @@ mod tests {
         mod new {
             use super::*;
 
-            fn file(label: &str) -> DiffRow {
-                DiffRow::File(label.to_owned())
+            fn file(label: &str) -> GitDiffRow {
+                GitDiffRow::File(label.to_owned())
             }
 
-            fn hunk(header: &str) -> DiffRow {
-                DiffRow::Hunk(header.to_owned())
+            fn hunk(header: &str) -> GitDiffRow {
+                GitDiffRow::Hunk(header.to_owned())
             }
 
-            fn rows_of(diff: &str) -> Vec<DiffRow> {
+            fn rows_of(diff: &str) -> Vec<GitDiffRow> {
                 WorkingTreeDiff::new(&[diff], "", HINT, false).rows
             }
 
@@ -538,7 +538,7 @@ mod tests {
                         removed(1, "a"),
                         removed(2, "b"),
                         added(1, "c"),
-                        DiffRow::Marker(r"\ No newline at end of file".to_owned()),
+                        GitDiffRow::Marker(r"\ No newline at end of file".to_owned()),
                         file("two.rs"),
                         hunk("@@ -1 +1 @@"),
                         removed(1, "x"),
@@ -595,7 +595,7 @@ mod tests {
                     rows[2..],
                     [
                         added(1, "real add"),
-                        DiffRow::Marker("corrupt-no-marker".to_owned()),
+                        GitDiffRow::Marker("corrupt-no-marker".to_owned()),
                         added(2, "second add"),
                     ]
                 );
@@ -616,8 +616,8 @@ mod tests {
                     rows,
                     [
                         file(r"old.sh → new\tname.sh"),
-                        DiffRow::Note("old mode 100644".to_owned()),
-                        DiffRow::Note("new mode 100755".to_owned()),
+                        GitDiffRow::Note("old mode 100644".to_owned()),
+                        GitDiffRow::Note("new mode 100755".to_owned()),
                     ]
                 );
             }

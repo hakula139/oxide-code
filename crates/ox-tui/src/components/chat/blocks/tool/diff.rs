@@ -1,15 +1,17 @@
-//! Edit-tool diff body: a unified `-` / `+` layout of an [`EditDiff`]'s hunk.
+//! Edit-tool diff body: the hunks of an [`EditDiff`] in a unified layout, with context rows and the
+//! changed words of each paired line marked.
 
 use ratatui::style::Style;
 
-use ox_core::tool::view::{DiffChunk, EditDiff, NumberedLine};
+use ox_core::tool::view::{Diff, DiffLineKind, DiffRow, EditDiff};
 use ox_core::util::text::plural;
 
 use super::overflow_footer;
 use crate::components::chat::blocks::rows::{NumberedRows, body_row};
 use crate::components::chat::blocks::{BlockRows, RenderCtx};
+use crate::glyphs::{HUNK_GAP, diff_cap_row};
 
-/// Body rows a diff shows in the compact view, split between its sides.
+/// Diff line rows the compact view shows.
 const MAX_DIFF_BODY_LINES: usize = 20;
 /// Line numbers the locations footer lists in the compact view.
 const MAX_LOCATIONS_DISPLAYED: usize = 8;
@@ -21,7 +23,7 @@ pub(super) fn render(
     border_style: Style,
     diff: &EditDiff,
 ) {
-    if diff.chunk.old.is_empty() && diff.chunk.new.is_empty() {
+    if diff.diff.hunks.is_empty() {
         body_row(
             &mut out.lines,
             ctx,
@@ -32,54 +34,97 @@ pub(super) fn render(
         return;
     }
 
-    render_chunk_body(out, ctx, border_style, &diff.chunk);
+    render_hunks(out, ctx, border_style, &diff.diff);
 
     if diff.locations.len() > 1 {
         render_locations_footer(out, ctx, border_style, &diff.locations);
     }
 }
 
-fn render_chunk_body(
-    out: &mut BlockRows,
-    ctx: &RenderCtx<'_>,
-    border_style: Style,
-    chunk: &DiffChunk,
-) {
-    let max_number = max_line_number(chunk);
+/// Draws context rows as `/diff` does, and removed and added rows over their tints.
+fn render_hunks(out: &mut BlockRows, ctx: &RenderCtx<'_>, border_style: Style, diff: &Diff) {
+    let max_number = diff.max_number();
+    let context = NumberedRows::new(ctx, border_style, max_number);
     let removed = NumberedRows::removed(ctx, border_style, max_number);
     let added = NumberedRows::added(ctx, border_style, max_number);
-    let text_style = ctx.theme.text();
-    let budget = ctx.cap(MAX_DIFF_BODY_LINES);
 
-    for entry in entries(&chunk.old, &chunk.new, budget) {
-        match entry {
-            Entry::Line {
-                side: Side::Del,
-                line,
-            } => removed.render(&mut out.lines, line.number, &line.text, text_style),
-            Entry::Line {
-                side: Side::Add,
-                line,
-            } => added.render(&mut out.lines, line.number, &line.text, text_style),
-            Entry::Ellipsis { hidden } => {
-                overflow_footer(out, ctx, border_style, hidden, "line", "lines", false);
+    for row in rows(diff, ctx.cap(MAX_DIFF_BODY_LINES)) {
+        match row {
+            Row::Diff(DiffRow::Line(line)) => {
+                let (rows, text_style) = match line.kind {
+                    DiffLineKind::Context => (&context, ctx.theme.dim()),
+                    DiffLineKind::Removed => (&removed, ctx.theme.text()),
+                    DiffLineKind::Added => (&added, ctx.theme.text()),
+                };
+                rows.render_segments(&mut out.lines, line.number, line.segments(), text_style);
+            }
+            Row::Diff(DiffRow::Gap) => {
+                let gap = format!("{HUNK_GAP:>width$}", width = max_number.to_string().len());
+                body_row(&mut out.lines, ctx, border_style, gap, ctx.theme.dim());
+            }
+            Row::Diff(DiffRow::Omitted(lines)) => {
+                let text = diff_cap_row(lines);
+                body_row(&mut out.lines, ctx, border_style, text, ctx.theme.dim());
+            }
+            Row::Elided(lines) => {
+                overflow_footer(out, ctx, border_style, lines, "line", "lines", false);
+            }
+            Row::FoldedHunks(hunks) => {
+                overflow_footer(out, ctx, border_style, hunks, "hunk", "hunks", false);
             }
         }
     }
 }
 
-fn max_line_number(chunk: &DiffChunk) -> usize {
-    chunk
-        .old
-        .iter()
-        .chain(&chunk.new)
-        .map(|line| line.number)
-        .max()
-        .unwrap_or(0)
+/// One row of a diff body as [`rows`] lays it out.
+enum Row<'a> {
+    Diff(DiffRow<'a>),
+    /// The middle lines of an over-budget hunk.
+    Elided(usize),
+    /// The hunks left out once the budget filled.
+    FoldedHunks(usize),
 }
 
-/// Lists the lines each chunk applied at. A compact list that leaves some out ends with the expand
-/// hint and expands the block when clicked.
+/// The rows of [`Diff::rows`] that fit `budget` line rows, which must be at least 2. Hunks keep
+/// their rows while they fit, and the rest fold into one [`Row::FoldedHunks`]. A first hunk longer
+/// than the budget keeps a half at each end around a [`Row::Elided`]. The cap row always shows,
+/// since expanding cannot reveal the lines it counts.
+fn rows(diff: &Diff, budget: usize) -> Vec<Row<'_>> {
+    let mut lens = diff.hunks.iter().map(|hunk| hunk.lines.len());
+    let first = lens.next().unwrap_or(0);
+    let shown = if first > budget {
+        1
+    } else {
+        1 + lens
+            .scan(budget - first, |left, len| {
+                (len <= *left).then(|| *left -= len)
+            })
+            .count()
+    };
+
+    let mut rows = Vec::new();
+    let mut hunk = 0;
+    for row in diff.rows() {
+        if row == DiffRow::Gap {
+            hunk += 1;
+            if hunk == shown {
+                rows.push(Row::FoldedHunks(diff.hunks.len() - shown));
+            }
+        }
+        if hunk < shown || matches!(row, DiffRow::Omitted(_)) {
+            rows.push(Row::Diff(row));
+        }
+    }
+    if first > budget {
+        let head = budget.div_ceil(2);
+        let tail = first - (budget - head);
+        rows.splice(head..tail, [Row::Elided(tail - head)]);
+    }
+    rows
+}
+
+/// Lists the lines each replacement applied at. A compact list that leaves some out ends with the
+/// expand hint and expands the block when clicked.
 fn render_locations_footer(
     out: &mut BlockRows,
     ctx: &RenderCtx<'_>,
@@ -107,89 +152,24 @@ fn render_locations_footer(
     out.push_expander(|lines| body_row(lines, ctx, border_style, text, style));
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Side {
-    Del,
-    Add,
-}
-
-enum Entry<'a> {
-    Line { side: Side, line: &'a NumberedLine },
-    Ellipsis { hidden: usize },
-}
-
-/// Lays out both sides within `budget` rows, which must be at least 2 so each side keeps a row.
-fn entries<'a>(
-    old_lines: &'a [NumberedLine],
-    new_lines: &'a [NumberedLine],
-    budget: usize,
-) -> Vec<Entry<'a>> {
-    let (old_budget, new_budget) = split_budget(old_lines.len(), new_lines.len(), budget);
-    let mut out = Vec::with_capacity(old_lines.len() + new_lines.len() + 2);
-    emit_side(&mut out, Side::Del, old_lines, old_budget);
-    emit_side(&mut out, Side::Add, new_lines, new_budget);
-    out
-}
-
-/// Splits the budget between the sides, and the smaller side's surplus goes to the larger one.
-fn split_budget(old_len: usize, new_len: usize, budget: usize) -> (usize, usize) {
-    if old_len + new_len <= budget {
-        return (old_len, new_len);
-    }
-    let half = budget.div_ceil(2);
-    if old_len <= half {
-        return (old_len, budget - old_len);
-    }
-    if new_len <= budget - half {
-        return (budget - new_len, new_len);
-    }
-    (half, budget - half)
-}
-
-fn emit_side<'a>(out: &mut Vec<Entry<'a>>, side: Side, lines: &'a [NumberedLine], budget: usize) {
-    if lines.is_empty() {
-        return;
-    }
-    if lines.len() <= budget {
-        for line in lines {
-            out.push(Entry::Line { side, line });
-        }
-        return;
-    }
-    let head = budget - 1;
-    let tail = 1;
-    for line in &lines[..head] {
-        out.push(Entry::Line { side, line });
-    }
-    out.push(Entry::Ellipsis {
-        hidden: lines.len() - budget,
-    });
-    for line in &lines[lines.len() - tail..] {
-        out.push(Entry::Line { side, line });
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+
+    use ox_core::tool::testing::diff_line;
+    use ox_core::tool::view::{DiffHunk, DiffLine};
     use ratatui::text::Line;
 
     use super::*;
     use crate::theme::Theme;
 
-    fn line_numbered(side: &[&str]) -> Vec<NumberedLine> {
-        side.iter()
-            .enumerate()
-            .map(|(i, t)| NumberedLine {
-                number: i + 1,
-                text: (*t).to_owned(),
-            })
-            .collect()
-    }
-
-    fn chunk_of(old: &[&str], new: &[&str]) -> DiffChunk {
-        DiffChunk {
-            old: line_numbered(old),
-            new: line_numbered(new),
+    fn edit_diff(hunks: Vec<Vec<DiffLine>>, locations: Vec<usize>) -> EditDiff {
+        EditDiff {
+            diff: Diff {
+                hunks: hunks.into_iter().map(|lines| DiffHunk { lines }).collect(),
+                omitted_lines: 0,
+            },
+            locations,
         }
     }
 
@@ -200,8 +180,19 @@ mod tests {
         }
     }
 
+    fn render_compact(theme: &Theme, diff: &EditDiff) -> BlockRows {
+        let mut out = BlockRows::default();
+        render(
+            &mut out,
+            &RenderCtx::new(80, theme),
+            theme.tool_border(),
+            diff,
+        );
+        out
+    }
+
     /// Each row's text without the pad that carries a diff row's bg to the chat width.
-    fn rows(out: &[Line<'static>]) -> Vec<String> {
+    fn text_rows(out: &[Line<'static>]) -> Vec<String> {
         out.iter()
             .map(|line| line.to_string().trim_end().to_owned())
             .collect()
@@ -211,68 +202,57 @@ mod tests {
         use super::*;
 
         #[test]
-        fn marks_a_hunk_without_lines_as_no_change() {
+        fn marks_a_diff_without_hunks_as_no_change() {
             let theme = Theme::default();
-            let diff = EditDiff {
-                chunk: chunk_of(&[], &[]),
-                locations: vec![],
-            };
-            let mut out = BlockRows::default();
 
-            render(
-                &mut out,
-                &RenderCtx::new(80, &theme),
-                theme.tool_border(),
-                &diff,
-            );
+            let out = render_compact(&theme, &edit_diff(Vec::new(), Vec::new()));
 
-            assert_eq!(rows(&out.lines), ["▎   (no change)"]);
+            assert_eq!(text_rows(&out.lines), ["▎   (no change)"]);
         }
 
         #[test]
-        fn single_location_emits_body_without_locations_footer() {
+        fn draws_context_around_the_change_without_a_locations_footer_for_one_location() {
             let theme = Theme::default();
-            let diff = EditDiff {
-                chunk: chunk_of(&["foo"], &["bar"]),
-                locations: vec![1],
-            };
-            let mut out = BlockRows::default();
-
-            render(
-                &mut out,
-                &RenderCtx::new(80, &theme),
-                theme.tool_border(),
-                &diff,
+            let diff = edit_diff(
+                vec![vec![
+                    diff_line(DiffLineKind::Context, 9, "fn main() {"),
+                    diff_line(DiffLineKind::Removed, 10, "    foo();"),
+                    diff_line(DiffLineKind::Added, 10, "    bar();"),
+                    diff_line(DiffLineKind::Context, 11, "}"),
+                ]],
+                vec![10],
             );
 
-            assert_eq!(rows(&out.lines), ["▎   1 - foo", "▎   1 + bar"]);
-        }
-
-        #[test]
-        fn several_locations_emit_one_body_plus_locations_footer() {
-            let theme = Theme::default();
-            let line = |text: &str| NumberedLine {
-                number: 12,
-                text: text.to_owned(),
-            };
-            let diff = EditDiff {
-                chunk: DiffChunk {
-                    old: vec![line("foo")],
-                    new: vec![line("bar")],
-                },
-                locations: vec![12, 47],
-            };
-            let mut out = BlockRows::default();
-
-            render(
-                &mut out,
-                &RenderCtx::new(80, &theme),
-                theme.tool_border(),
-                &diff,
-            );
+            let out = render_compact(&theme, &diff);
 
             assert_eq!(
-                rows(&out.lines),
+                text_rows(&out.lines),
+                [
+                    "▎    9 │ fn main() {",
+                    "▎   10 -     foo();",
+                    "▎   10 +     bar();",
+                    "▎   11 │ }",
+                ]
+            );
+            assert_eq!(out.lines[0].spans[3].style, theme.dim());
+            assert_eq!(out.lines[0].spans[3].style.bg, None);
+        }
+
+        #[test]
+        fn ends_with_the_locations_of_several_replacements() {
+            let theme = Theme::default();
+            let diff = edit_diff(
+                vec![vec![
+                    diff_line(DiffLineKind::Removed, 12, "foo"),
+                    diff_line(DiffLineKind::Added, 12, "bar"),
+                ]],
+                vec![12, 47],
+            );
+
+            let out = render_compact(&theme, &diff);
+
+            assert_eq!(
+                text_rows(&out.lines),
                 [
                     "▎   12 - foo",
                     "▎   12 + bar",
@@ -282,43 +262,163 @@ mod tests {
         }
     }
 
-    mod render_chunk_body {
+    mod render_hunks {
         use super::*;
 
+        fn render_rows(ctx: &RenderCtx<'_>, diff: &EditDiff) -> BlockRows {
+            let mut out = BlockRows::default();
+            render_hunks(&mut out, ctx, ctx.theme.tool_border(), &diff.diff);
+            out
+        }
+
         #[test]
-        fn caps_a_long_side_with_a_clickable_footer_until_expanded() {
+        fn marks_the_changed_words_over_the_word_bg() {
             let theme = Theme::default();
-            let added: Vec<String> = (1..=MAX_DIFF_BODY_LINES + 2)
-                .map(|n| format!("line {n}"))
-                .collect();
-            let added: Vec<&str> = added.iter().map(String::as_str).collect();
-            let chunk = chunk_of(&[], &added);
-            let row = |n: usize| format!("▎   {n:>2} + line {n}");
-            let mut compact = BlockRows::default();
-            let mut expanded = BlockRows::default();
-
-            render_chunk_body(
-                &mut compact,
-                &RenderCtx::new(80, &theme),
-                theme.tool_border(),
-                &chunk,
-            );
-            render_chunk_body(
-                &mut expanded,
-                &expanded_ctx(&theme),
-                theme.tool_border(),
-                &chunk,
+            let changed = |kind, text: &str, range: Range<usize>| DiffLine {
+                changed: vec![range],
+                ..diff_line(kind, 1, text)
+            };
+            let diff = edit_diff(
+                vec![vec![
+                    changed(DiffLineKind::Removed, "let a = 1;", 8..9),
+                    changed(DiffLineKind::Added, "let a = 2;", 8..9),
+                ]],
+                vec![1],
             );
 
-            let head = MAX_DIFF_BODY_LINES - 1;
-            let mut expected: Vec<String> = (1..=head).map(row).collect();
-            expected.push("▎   ... +2 lines".to_owned());
-            expected.push(row(MAX_DIFF_BODY_LINES + 2));
-            assert_eq!(rows(&compact.lines), expected);
-            assert_eq!(compact.expander_rows(), [head]);
+            let out = render_rows(&RenderCtx::new(80, &theme), &diff);
+
+            for (row, word, row_bg, word_bg) in [
+                (&out.lines[0], "1", theme.diff_del(), theme.diff_del_word()),
+                (&out.lines[1], "2", theme.diff_add(), theme.diff_add_word()),
+            ] {
+                let text: Vec<_> = row.spans[3..6]
+                    .iter()
+                    .map(|span| (span.content.as_ref(), span.style.bg))
+                    .collect();
+                assert_eq!(
+                    text,
+                    [
+                        ("let a = ", row_bg.bg),
+                        (word, word_bg.bg),
+                        (";", row_bg.bg),
+                    ],
+                );
+            }
+        }
+
+        #[test]
+        fn separates_hunks_with_a_gap_and_folds_the_hunks_past_the_budget() {
+            let theme = Theme::default();
+            let hunk = |number: usize| {
+                vec![
+                    diff_line(DiffLineKind::Removed, number, "old"),
+                    diff_line(DiffLineKind::Added, number, "new"),
+                ]
+            };
+            let diff = edit_diff(
+                (1..=MAX_DIFF_BODY_LINES / 2 + 2)
+                    .map(|n| hunk(n * 10))
+                    .collect(),
+                Vec::new(),
+            );
+
+            let compact = render_rows(&RenderCtx::new(80, &theme), &diff);
+            let expanded = render_rows(&expanded_ctx(&theme), &diff);
+
+            let compact_rows = text_rows(&compact.lines);
             assert_eq!(
-                rows(&expanded.lines),
-                (1..=MAX_DIFF_BODY_LINES + 2).map(row).collect::<Vec<_>>(),
+                compact_rows[..5],
+                [
+                    "▎    10 - old",
+                    "▎    10 + new",
+                    "▎     ⋮",
+                    "▎    20 - old",
+                    "▎    20 + new",
+                ],
+            );
+            assert_eq!(compact_rows.last().unwrap(), "▎   ... +2 hunks");
+            assert_eq!(compact.expander_rows(), [compact_rows.len() - 1]);
+            assert_eq!(text_rows(&expanded.lines).last().unwrap(), "▎   120 + new");
+            assert_eq!(expanded.expander_rows(), Vec::<usize>::new());
+        }
+
+        #[test]
+        fn elides_an_overlong_first_hunk_and_folds_the_rest_until_expanded() {
+            let theme = Theme::default();
+            let numbers = 1..=MAX_DIFF_BODY_LINES + 2;
+            let added = numbers
+                .clone()
+                .map(|n| diff_line(DiffLineKind::Added, n, &format!("line {n}")))
+                .collect();
+            let diff = edit_diff(
+                vec![added, vec![diff_line(DiffLineKind::Added, 40, "line 40")]],
+                vec![1, 40],
+            );
+            let row = |n: usize| format!("▎   {n:>2} + line {n}");
+
+            let compact = render_rows(&RenderCtx::new(80, &theme), &diff);
+            let expanded = render_rows(&expanded_ctx(&theme), &diff);
+
+            let half = MAX_DIFF_BODY_LINES / 2;
+            let mut expected: Vec<String> = (1..=half).map(row).collect();
+            expected.push("▎   ... +2 lines".to_owned());
+            expected.extend((half + 3..=MAX_DIFF_BODY_LINES + 2).map(row));
+            expected.push("▎   ... +1 hunk".to_owned());
+            assert_eq!(text_rows(&compact.lines), expected);
+            assert_eq!(compact.expander_rows(), [half, MAX_DIFF_BODY_LINES + 1]);
+            let mut expected: Vec<String> = numbers.map(row).collect();
+            expected.extend(["▎    ⋮".to_owned(), row(40)]);
+            assert_eq!(text_rows(&expanded.lines), expected);
+            assert_eq!(expanded.expander_rows(), Vec::<usize>::new());
+        }
+
+        #[test]
+        fn ends_a_capped_diff_with_a_plain_count_of_the_lines_it_left_out() {
+            let theme = Theme::default();
+            let hunk = |number: usize| vec![diff_line(DiffLineKind::Added, number, "new")];
+            let diff = EditDiff {
+                diff: Diff {
+                    omitted_lines: 5,
+                    ..edit_diff(
+                        (1..=MAX_DIFF_BODY_LINES + 2)
+                            .map(|n| hunk(n * 10))
+                            .collect(),
+                        Vec::new(),
+                    )
+                    .diff
+                },
+                locations: Vec::new(),
+            };
+            let hint = Some("Ctrl+O to expand");
+
+            let compact = render_rows(
+                &RenderCtx {
+                    expand_hint: hint,
+                    ..RenderCtx::new(80, &theme)
+                },
+                &diff,
+            );
+            let expanded = render_rows(
+                &RenderCtx {
+                    expand_hint: hint,
+                    ..expanded_ctx(&theme)
+                },
+                &diff,
+            );
+
+            let compact_rows = text_rows(&compact.lines);
+            assert_eq!(
+                compact_rows[compact_rows.len() - 2..],
+                [
+                    "▎   ... +2 hunks · Ctrl+O to expand",
+                    "▎   ... +5 lines past the diff limit",
+                ],
+            );
+            assert_eq!(compact.expander_rows(), [compact_rows.len() - 2]);
+            assert_eq!(
+                text_rows(&expanded.lines).last().unwrap(),
+                "▎   ... +5 lines past the diff limit"
             );
             assert_eq!(expanded.expander_rows(), Vec::<usize>::new());
         }
@@ -340,7 +440,7 @@ mod tests {
             render_locations_footer(&mut out, &ctx, theme.tool_border(), &locations);
 
             assert_eq!(
-                rows(&out.lines),
+                text_rows(&out.lines),
                 ["▎   applied at lines 1, 2, 3, 4, 5, 6, 7, 8 and 2 more · Ctrl+O to expand"]
             );
             assert_eq!(out.expander_rows(), [0]);
@@ -360,7 +460,7 @@ mod tests {
             );
 
             assert_eq!(
-                rows(&out.lines),
+                text_rows(&out.lines),
                 ["▎   applied at lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"]
             );
             assert_eq!(out.expander_rows(), Vec::<usize>::new());
@@ -378,7 +478,7 @@ mod tests {
                 &[42],
             );
 
-            assert_eq!(rows(&out.lines), ["▎   applied at line 42"]);
+            assert_eq!(text_rows(&out.lines), ["▎   applied at line 42"]);
         }
 
         #[test]
@@ -405,114 +505,9 @@ mod tests {
             render_locations_footer(&mut out, &ctx, theme.tool_border(), &[12, 47, 200]);
 
             assert_eq!(
-                rows(&out.lines),
+                text_rows(&out.lines),
                 ["▎   applied at lines 12,", "▎   47, 200"]
             );
-        }
-    }
-
-    mod entries {
-        use super::*;
-
-        fn render_entries(entries: &[Entry<'_>]) -> Vec<String> {
-            entries
-                .iter()
-                .map(|e| match e {
-                    Entry::Line { side, line } => {
-                        let sign = match side {
-                            Side::Del => '-',
-                            Side::Add => '+',
-                        };
-                        format!("{sign} {}", line.text)
-                    }
-                    Entry::Ellipsis { hidden } => format!("... +{hidden}"),
-                })
-                .collect()
-        }
-
-        #[test]
-        fn under_budget_shows_all_lines() {
-            let old = line_numbered(&["foo", "bar"]);
-            let new = line_numbered(&["baz"]);
-            let entries = entries(&old, &new, 10);
-            assert_eq!(render_entries(&entries), vec!["- foo", "- bar", "+ baz"]);
-        }
-
-        #[test]
-        fn over_budget_splits_budget_between_sides() {
-            let old = line_numbered(&["a", "b"]);
-            let new = line_numbered(&["c", "d", "e", "f", "g"]);
-            let entries = entries(&old, &new, 5);
-            assert_eq!(
-                render_entries(&entries),
-                vec!["- a", "- b", "+ c", "+ d", "... +2", "+ g"],
-                "old fits in its budget, while new uses head + ellipsis + tail",
-            );
-        }
-
-        #[test]
-        fn pure_deletion_over_budget_truncates_old_side() {
-            let old = line_numbered(&["a", "b", "c", "d", "e", "f", "g"]);
-            let new: Vec<NumberedLine> = Vec::new();
-            let entries = entries(&old, &new, 5);
-            assert_eq!(
-                render_entries(&entries),
-                vec!["- a", "- b", "- c", "- d", "... +2", "- g"],
-                "old gets the full budget when new is empty",
-            );
-        }
-
-        #[test]
-        fn at_budget_boundary_shows_every_line() {
-            let old = line_numbered(&["a", "b", "c"]);
-            let new = line_numbered(&["x", "y"]);
-            let entries = entries(&old, &new, 5);
-            assert_eq!(
-                render_entries(&entries),
-                vec!["- a", "- b", "- c", "+ x", "+ y"],
-            );
-        }
-
-        #[test]
-        fn both_sides_overflow_split_evenly() {
-            let old = line_numbered(&["a0", "a1", "a2", "a3", "a4"]);
-            let new = line_numbered(&["b0", "b1", "b2", "b3", "b4"]);
-            let entries = entries(&old, &new, 5);
-            assert_eq!(
-                render_entries(&entries),
-                vec!["- a0", "- a1", "... +2", "- a4", "+ b0", "... +3", "+ b4"],
-            );
-        }
-
-        #[test]
-        fn budget_two_emits_single_ellipsis_then_tail_per_side() {
-            let old = line_numbered(&["a", "b", "c"]);
-            let new = line_numbered(&["x", "y", "z"]);
-            let entries = entries(&old, &new, 2);
-            assert_eq!(
-                render_entries(&entries),
-                vec!["... +2", "- c", "... +2", "+ z"],
-            );
-        }
-    }
-
-    mod split_budget {
-        use super::*;
-
-        #[test]
-        fn under_budget_preserves_input_lengths() {
-            assert_eq!(split_budget(2, 3, 10), (2, 3));
-        }
-
-        #[test]
-        fn smaller_side_surplus_flows_to_larger() {
-            assert_eq!(split_budget(1, 20, 5), (1, 4));
-            assert_eq!(split_budget(20, 1, 5), (4, 1));
-        }
-
-        #[test]
-        fn both_overflow_splits_with_odd_line_to_old() {
-            assert_eq!(split_budget(10, 10, 5), (3, 2));
         }
     }
 }

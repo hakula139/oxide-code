@@ -36,6 +36,8 @@ syntax_theme = "InspiredGitHub"
 # Diff backgrounds (light pastels for the light variant)
 diff_add = { bg = "#c8e4ce" }
 diff_del = { bg = "#f0c8d0" }
+diff_add_word = { bg = "#add6ad" }
+diff_del_word = { bg = "#eaa3b2" }
 
 # Markdown headings
 heading_h1 = { fg = "#4c4f69", bold = true, underlined = true }

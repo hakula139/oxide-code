@@ -11,7 +11,7 @@ use ratatui::widgets::Paragraph;
 
 use ox_core::permission::SessionGrant;
 use ox_core::protocol::{ApprovalDecision, Op};
-use ox_core::tool::view::{ApprovalBody, ApprovalPreview, DiffChunk};
+use ox_core::tool::view::{ApprovalBody, ApprovalPreview, Diff, DiffLine, DiffLineKind, DiffRow};
 use ox_core::util::text::is_hidden;
 
 use super::acceptance::Acceptance;
@@ -19,10 +19,11 @@ use super::chrome::{HINT_SEPARATOR, KEY_UP_DOWN, wrap_hints};
 use super::line_editor::LineEditor;
 use super::{Modal, ModalAction, ModalKey};
 use crate::action::Action;
+use crate::glyphs::{DIFF_SIGN_WIDTH, HUNK_GAP, diff_cap_row, diff_sign};
 use crate::keymap::{KeyChord, hint};
 use crate::saturating_u16;
 use crate::theme::Theme;
-use crate::wrap::{expand_tabs, wrap_line};
+use crate::wrap::{expand_tabs, expand_tabs_in_spans, wrap_line};
 
 // ── Constants ──
 
@@ -228,7 +229,14 @@ impl ApprovalModal {
         let body = self
             .body
             .iter()
-            .flat_map(|line| wrap_line(line.to_line(&palette), budget, CONTINUATION_INDENT, None))
+            .flat_map(|line| {
+                wrap_line(
+                    line.to_line(&palette),
+                    budget,
+                    line.continuation_indent(),
+                    None,
+                )
+            })
             .collect();
         Wrapped {
             width,
@@ -479,31 +487,57 @@ impl Modal for ApprovalModal {
 
 // ── Body ──
 
-/// A preview row before wrapping. Diff text has its tabs expanded.
-struct BodyLine {
-    kind: BodyKind,
-    text: String,
-}
-
-#[derive(Clone, Copy)]
-enum BodyKind {
-    Command,
-    Removed,
-    Added,
+/// A preview row before wrapping.
+enum BodyLine {
+    Command(String),
+    /// A diff line behind its number, right-aligned to the widest number in the diff.
+    Diff {
+        number: String,
+        line: DiffLine,
+    },
+    /// A marker row: the break between two hunks, as wide as the number column, or the count of
+    /// lines the diff left out.
+    Marker(String),
 }
 
 impl BodyLine {
     fn to_line(&self, palette: &Palette) -> Line<'static> {
-        let (sign, style) = match self.kind {
-            BodyKind::Command => {
-                return Line::from(reveal(&self.text, palette.text, palette.marker, true));
+        let (number, line) = match self {
+            Self::Command(text) => {
+                return Line::from(reveal(text, palette.text, palette.marker, true));
             }
-            BodyKind::Removed => ("- ", palette.removed),
-            BodyKind::Added => ("+ ", palette.added),
+            Self::Marker(text) => return Line::from(Span::styled(text.clone(), palette.marker)),
+            Self::Diff { number, line } => (number, line),
         };
-        let mut spans = vec![Span::styled(sign, style)];
-        spans.extend(reveal(&self.text, style, palette.marker, false));
+        let (style, word) = match line.kind {
+            DiffLineKind::Context => (palette.context, palette.context),
+            DiffLineKind::Removed => (palette.removed, palette.removed_word),
+            DiffLineKind::Added => (palette.added, palette.added_word),
+        };
+        let mut spans = vec![
+            Span::styled(number.clone(), palette.number),
+            Span::styled(diff_sign(line.kind), style),
+        ];
+        let segments = line.segments().into_iter().map(|(text, changed)| {
+            Span::styled(text.to_owned(), if changed { word } else { style })
+        });
+        for segment in expand_tabs_in_spans(segments.collect()) {
+            spans.extend(reveal(
+                &segment.content,
+                segment.style,
+                palette.marker,
+                false,
+            ));
+        }
         Line::from(spans)
+    }
+
+    /// Where a wrapped row continues: under a diff line's text, or indented under a command.
+    fn continuation_indent(&self) -> usize {
+        match self {
+            Self::Diff { number, .. } => number.len() + DIFF_SIGN_WIDTH,
+            Self::Command(_) | Self::Marker(_) => CONTINUATION_INDENT,
+        }
     }
 }
 
@@ -514,8 +548,12 @@ struct Palette {
     title: Style,
     reason: Style,
     text: Style,
+    number: Style,
+    context: Style,
     removed: Style,
+    removed_word: Style,
     added: Style,
+    added_word: Style,
     marker: Style,
 }
 
@@ -525,37 +563,40 @@ impl Palette {
             title: theme.accent().add_modifier(Modifier::BOLD),
             reason: theme.muted(),
             text: theme.text(),
+            number: theme.muted(),
+            context: theme.dim(),
             removed: theme.error(),
+            removed_word: theme.error().patch(theme.diff_del_word()),
             added: theme.success(),
+            added_word: theme.success().patch(theme.diff_add_word()),
             marker: theme.dim(),
         }
     }
 }
 
-/// Flattens an [`ApprovalBody`] into preview rows: a command's lines verbatim, or a diff's hunk as
-/// `-` / `+` rows.
+/// Flattens an [`ApprovalBody`] into preview rows: a command's lines verbatim, or a diff's hunks as
+/// numbered rows with a gap row between hunks.
 fn flatten_body(body: &ApprovalBody) -> Vec<BodyLine> {
     match body {
         // Not `lines`, which would drop a `\r` before each `\n` that the preview must reveal.
         ApprovalBody::Command(command) => command
             .split_terminator('\n')
-            .map(|line| BodyLine {
-                kind: BodyKind::Command,
-                text: line.to_owned(),
-            })
+            .map(|line| BodyLine::Command(line.to_owned()))
             .collect(),
-        ApprovalBody::Diff(chunk) => diff_rows(chunk),
+        ApprovalBody::Diff(diff) => diff_rows(diff),
     }
 }
 
-fn diff_rows(chunk: &DiffChunk) -> Vec<BodyLine> {
-    let removed = chunk.old.iter().map(|line| (BodyKind::Removed, line));
-    let added = chunk.new.iter().map(|line| (BodyKind::Added, line));
-    removed
-        .chain(added)
-        .map(|(kind, line)| BodyLine {
-            kind,
-            text: expand_tabs(&line.text),
+fn diff_rows(diff: &Diff) -> Vec<BodyLine> {
+    let width = diff.max_number().to_string().len();
+    diff.rows()
+        .map(|row| match row {
+            DiffRow::Line(line) => BodyLine::Diff {
+                number: format!("{:>width$}", line.number),
+                line: line.clone(),
+            },
+            DiffRow::Gap => BodyLine::Marker(format!("{HUNK_GAP:>width$}")),
+            DiffRow::Omitted(lines) => BodyLine::Marker(diff_cap_row(lines)),
         })
         .collect()
 }
@@ -619,6 +660,7 @@ fn flush(spans: &mut Vec<Span<'static>>, plain: &mut String, style: Style) {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
     use std::time::Duration;
 
     use crossterm::event::KeyModifiers;
@@ -629,7 +671,8 @@ mod tests {
     use ox_core::permission::PermissionClass;
     use ox_core::permission::rule::Rule;
     use ox_core::permission::testing::exec_grant;
-    use ox_core::tool::view::NumberedLine;
+    use ox_core::tool::testing::diff_line;
+    use ox_core::tool::view::DiffHunk;
 
     use super::*;
     use crate::modal::ModalStack;
@@ -724,20 +767,25 @@ mod tests {
         }
 
         #[test]
-        fn paints_diff_body_with_signs() {
+        fn paints_numbered_hunks_with_a_gap_between_them() {
             let mut modal = ApprovalModal::new(
                 "call-1".to_owned(),
                 ApprovalPreview {
                     title: "Write(src/main.rs)".to_owned(),
-                    body: ApprovalBody::Diff(DiffChunk {
-                        old: vec![NumberedLine {
-                            number: 1,
-                            text: "old line".to_owned(),
-                        }],
-                        new: vec![NumberedLine {
-                            number: 1,
-                            text: "new line".to_owned(),
-                        }],
+                    body: ApprovalBody::Diff(Diff {
+                        hunks: vec![
+                            DiffHunk {
+                                lines: vec![
+                                    diff_line(DiffLineKind::Context, 8, "keep"),
+                                    diff_line(DiffLineKind::Removed, 9, "old line"),
+                                    diff_line(DiffLineKind::Added, 9, "new line"),
+                                ],
+                            },
+                            DiffHunk {
+                                lines: vec![diff_line(DiffLineKind::Added, 20, "tail")],
+                            },
+                        ],
+                        omitted_lines: 0,
                     }),
                 },
                 None,
@@ -746,8 +794,39 @@ mod tests {
 
             let dump = rendered(&mut modal, 40, 40);
 
-            assert!(dump.contains("- old line"), "removed row appears: {dump}");
-            assert!(dump.contains("+ new line"), "added row appears: {dump}");
+            let body = indoc! {"
+                 8 │ keep
+                 9 - old line
+                 9 + new line
+                 ⋮
+                20 + tail
+            "};
+            assert!(dump.contains(body), "numbered hunks appear: {dump}");
+        }
+
+        #[test]
+        fn wraps_a_diff_line_under_its_text() {
+            let mut modal = ApprovalModal::new(
+                "call-1".to_owned(),
+                ApprovalPreview {
+                    title: "Edit(a.rs)".to_owned(),
+                    body: ApprovalBody::Diff(Diff {
+                        hunks: vec![DiffHunk {
+                            lines: vec![diff_line(DiffLineKind::Added, 7, "alpha beta gamma")],
+                        }],
+                        omitted_lines: 0,
+                    }),
+                },
+                None,
+                None,
+            );
+
+            let dump = rendered(&mut modal, 14, 20);
+
+            assert!(
+                dump.contains("7 + alpha beta\n    gamma\n"),
+                "continuations align under the text: {dump}"
+            );
         }
 
         #[test]
@@ -1509,21 +1588,65 @@ mod tests {
         fn keeps_a_carriage_return_before_a_line_break_in_its_row() {
             let rows = flatten_body(&ApprovalBody::Command("echo a\r\nls\n".to_owned()));
 
-            let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+            let texts: Vec<&str> = rows
+                .iter()
+                .map(|row| match row {
+                    BodyLine::Command(text) => text.as_str(),
+                    _ => panic!("a command flattens to command rows"),
+                })
+                .collect();
             assert_eq!(texts, ["echo a\r", "ls"]);
         }
 
         #[test]
-        fn expands_diff_tabs() {
-            let rows = flatten_body(&ApprovalBody::Diff(DiffChunk {
-                old: Vec::new(),
-                new: vec![NumberedLine {
-                    number: 1,
-                    text: "\tfoo()".to_owned(),
-                }],
+        fn expands_diff_tabs_and_marks_the_changed_words() {
+            let theme = Theme::default();
+            let palette = Palette::new(&theme);
+            let line = DiffLine {
+                changed: vec![Range { start: 1, end: 4 }],
+                ..diff_line(DiffLineKind::Added, 9, "\tfoo()")
+            };
+            let rows = flatten_body(&ApprovalBody::Diff(Diff {
+                hunks: vec![DiffHunk { lines: vec![line] }],
+                omitted_lines: 0,
             }));
 
-            assert_eq!(rows[0].text, "    foo()");
+            let spans: Vec<_> = rows[0]
+                .to_line(&palette)
+                .spans
+                .into_iter()
+                .map(|span| (span.content.into_owned(), span.style))
+                .collect();
+
+            let (added, word) = (palette.added, palette.added_word);
+            assert_eq!(
+                spans,
+                [
+                    ("9".to_owned(), palette.number),
+                    (" + ".to_owned(), added),
+                    ("    ".to_owned(), added),
+                    ("foo".to_owned(), word),
+                    ("()".to_owned(), added),
+                ],
+            );
+        }
+
+        #[test]
+        fn ends_a_capped_diff_with_the_count_it_left_out() {
+            let theme = Theme::default();
+            let palette = Palette::new(&theme);
+            let rows = flatten_body(&ApprovalBody::Diff(Diff {
+                hunks: vec![DiffHunk {
+                    lines: vec![diff_line(DiffLineKind::Added, 9, "foo()")],
+                }],
+                omitted_lines: 1,
+            }));
+
+            let last = rows.last().unwrap().to_line(&palette);
+
+            assert_eq!(rows.len(), 2);
+            assert_eq!(last.to_string(), "... +1 line past the diff limit");
+            assert_eq!(last.spans[0].style, palette.marker);
         }
     }
 

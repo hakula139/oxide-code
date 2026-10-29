@@ -2,6 +2,7 @@
 //! built-in tools.
 
 pub mod bash;
+mod diff;
 pub(crate) mod edit;
 mod file;
 pub(crate) mod glob;
@@ -304,8 +305,8 @@ pub trait Tool: Send + Sync {
 
     /// Builds the approval modal's preview of `prepared`, by default the tool name over its label
     /// from [`Self::summarize_call`], or over where its path resolved for a tool with a
-    /// [`Self::path_field`]. Async because the write preview reads the file it would replace
-    /// through the resolved path.
+    /// [`Self::path_field`]. Async because the edit and write previews read the file they would
+    /// change through the resolved path.
     fn approval_preview<'a>(
         &'a self,
         name: &'a str,
@@ -609,9 +610,9 @@ pub mod testing {
     use std::sync::Arc;
 
     use super::bash::BashTool;
-    use super::edit::{anchor_line, synthesize_chunk};
+    use super::diff::{Change, diff_with_changes};
     use super::{ApprovalBody, ApprovalPreview, Tool, ToolRegistry};
-    use crate::tool::view::EditDiff;
+    use crate::tool::view::{DiffLine, DiffLineKind, EditDiff};
 
     /// The approval preview of a foreground `bash` call that runs `command`.
     pub fn bash_preview(command: &str) -> ApprovalPreview {
@@ -627,11 +628,23 @@ pub mod testing {
         ToolRegistry::new(tools)
     }
 
-    /// An edit diff replacing `old` with `new` at line 1, as the TUI tests render it.
+    /// An edit diff replacing the whole text `old` with `new`, as the frontend tests render it.
     pub fn edit_diff(old: &str, new: &str) -> EditDiff {
-        let chunk = synthesize_chunk(old, new);
-        let locations = anchor_line(&chunk, 1, 1).into_iter().collect();
-        EditDiff { chunk, locations }
+        let (diff, changes) = diff_with_changes(old, new);
+        EditDiff {
+            diff,
+            locations: changes.first().map(Change::location).into_iter().collect(),
+        }
+    }
+
+    /// A diff row of `kind` with no changed spans.
+    pub fn diff_line(kind: DiffLineKind, number: usize, text: &str) -> DiffLine {
+        DiffLine {
+            kind,
+            number,
+            text: text.to_owned(),
+            changed: Vec::new(),
+        }
     }
 }
 

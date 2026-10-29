@@ -950,6 +950,8 @@ mod tests {
                 Some(Color::Rgb(0x38, 0x2c, 0x34)),
                 "delta minus",
             );
+            assert_eq!(t.diff_add_word.bg, Some(Color::Rgb(0x43, 0x5c, 0x4c)));
+            assert_eq!(t.diff_del_word.bg, Some(Color::Rgb(0x5d, 0x3f, 0x4b)));
         }
 
         /// `text` is the one slot every palette gives a different shade.

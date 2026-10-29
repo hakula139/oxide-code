@@ -8,6 +8,9 @@
 //! - Tool status indicators (`✓` / `✗`) carry no trailing space. The renderer handles the gap.
 
 use ox_core::tool::tasks::TaskStatus;
+use ox_core::tool::view::DiffLineKind;
+
+use crate::components::overflow_count;
 
 // ── User Prompt ──
 
@@ -149,6 +152,31 @@ pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
 /// Line marking where a cancelled turn's reply stopped, in the chat and on stderr under `--no-tui`.
 pub const INTERRUPTED_MARKER: &str = "(interrupted)";
 
+// ── Diffs ──
+
+/// The row between two diff hunks, right-aligned in the number column.
+pub const HUNK_GAP: &str = "⋮";
+
+/// The separator between a diff row's number and its text, which signs a changed row.
+pub const fn diff_sign(kind: DiffLineKind) -> &'static str {
+    match kind {
+        DiffLineKind::Context => " │ ",
+        DiffLineKind::Removed => " - ",
+        DiffLineKind::Added => " + ",
+    }
+}
+
+/// Display width of each [`diff_sign`] in terminal columns.
+pub(crate) const DIFF_SIGN_WIDTH: usize = 3;
+
+/// The row closing a diff its row cap cut, counting the lines it left out.
+pub fn diff_cap_row(lines: usize) -> String {
+    format!(
+        "{} past the diff limit",
+        overflow_count(lines, "line", "lines")
+    )
+}
+
 // ── Status Spinner ──
 
 /// 8-dot Braille spinner frames whose one empty dot moves clockwise, indexed modulo their count.
@@ -278,6 +306,21 @@ mod tests {
         #[test]
         fn matches_display_width() {
             assert_eq!(CURSOR_MARKER.width(), usize::from(CURSOR_MARKER_WIDTH));
+        }
+    }
+
+    mod diff_sign_width {
+        use super::*;
+
+        #[test]
+        fn matches_display_width_of_every_sign() {
+            for kind in [
+                DiffLineKind::Context,
+                DiffLineKind::Removed,
+                DiffLineKind::Added,
+            ] {
+                assert_eq!(diff_sign(kind).width(), DIFF_SIGN_WIDTH, "{kind:?}");
+            }
         }
     }
 

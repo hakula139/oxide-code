@@ -18,8 +18,9 @@ use ox_core::permission::rule::Rule;
 use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::notice::ENGINE_STOPPED;
 use ox_core::protocol::{ApprovalDecision, Event, Op, OpEnd};
-use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
+use ox_core::tool::view::{ApprovalBody, ApprovalPreview, DiffRow};
 use ox_core::util::text::escape_hidden;
+use ox_tui::glyphs::{HUNK_GAP, diff_cap_row, diff_sign};
 
 use super::stdio::{Approver, Output, OutputFormat, RunEnd, run_op};
 use super::{Exit, Shutdown, Signals, decode_input};
@@ -339,12 +340,18 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
                 writeln!(out, "  {}", escape_hidden(line))?;
             }
         }
-        ApprovalBody::Diff(chunk) => {
-            for line in &chunk.old {
-                writeln!(out, "  - {}", escape_hidden(&line.text))?;
-            }
-            for line in &chunk.new {
-                writeln!(out, "  + {}", escape_hidden(&line.text))?;
+        ApprovalBody::Diff(diff) => {
+            let width = diff.max_number().to_string().len();
+            for row in diff.rows() {
+                match row {
+                    DiffRow::Line(line) => {
+                        let sign = diff_sign(line.kind);
+                        let text = escape_hidden(&line.text);
+                        writeln!(out, "  {:>width$}{sign}{text}", line.number)?;
+                    }
+                    DiffRow::Gap => writeln!(out, "  {HUNK_GAP:>width$}")?,
+                    DiffRow::Omitted(lines) => writeln!(out, "  {}", diff_cap_row(lines))?,
+                }
             }
         }
     }
@@ -465,8 +472,8 @@ mod tests {
     use ox_core::permission::testing::exec_grant;
     use ox_core::permission::{Mode, PermissionClass, Tier};
     use ox_core::session::store::testing::{saved_message_count, saved_messages, test_store};
-    use ox_core::tool::testing::{bash_preview, bash_registry};
-    use ox_core::tool::view::{DiffChunk, NumberedLine};
+    use ox_core::tool::testing::{bash_preview, bash_registry, diff_line};
+    use ox_core::tool::view::{Diff, DiffHunk, DiffLineKind};
     use ox_tui::glyphs::INTERRUPTED_MARKER;
 
     use super::*;
@@ -1590,15 +1597,24 @@ mod tests {
                 &mut out,
                 &ApprovalPreview {
                     title: "Edit(src/a.rs)".to_owned(),
-                    body: ApprovalBody::Diff(DiffChunk {
-                        old: vec![NumberedLine {
-                            number: 3,
-                            text: "let a = 1;".to_owned(),
-                        }],
-                        new: vec![NumberedLine {
-                            number: 3,
-                            text: "let a = 2;\u{1b}[2K\u{200b}".to_owned(),
-                        }],
+                    body: ApprovalBody::Diff(Diff {
+                        hunks: vec![
+                            DiffHunk {
+                                lines: vec![
+                                    diff_line(DiffLineKind::Context, 2, "fn f() {"),
+                                    diff_line(DiffLineKind::Removed, 3, "let a = 1;"),
+                                    diff_line(
+                                        DiffLineKind::Added,
+                                        3,
+                                        "let a = 2;\u{1b}[2K\u{200b}",
+                                    ),
+                                ],
+                            },
+                            DiffHunk {
+                                lines: vec![diff_line(DiffLineKind::Added, 12, "g();")],
+                            },
+                        ],
+                        omitted_lines: 7,
                     }),
                 },
                 &basis,
@@ -1609,8 +1625,12 @@ mod tests {
                 String::from_utf8(out).unwrap(),
                 indoc! {r"
                     Edit(src/a.rs) needs approval:
-                      - let a = 1;
-                      + let a = 2;\u{1b}[2K\u{200b}
+                       2 │ fn f() {
+                       3 - let a = 1;
+                       3 + let a = 2;\u{1b}[2K\u{200b}
+                       ⋮
+                      12 + g();
+                      ... +7 lines past the diff limit
                     Asks because of the `ask.edit` pattern `src/\u{200b}*.rs`
                 "},
             );

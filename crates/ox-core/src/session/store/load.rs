@@ -396,7 +396,7 @@ mod tests {
 
             assert_eq!(
                 err.to_string(),
-                "session format version 2 is newer than supported (1). Upgrade oxide-code to open it."
+                "session format version 3 is newer than supported (2). Upgrade oxide-code to open it."
             );
         }
 
