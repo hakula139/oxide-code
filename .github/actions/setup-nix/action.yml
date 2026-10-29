@@ -12,8 +12,10 @@ runs:
       uses: cachix/install-nix-action@v31
       with:
         # `sandbox-fallback = false` fails a build that cannot get a sandbox, which Nix would
-        # otherwise run without one.
+        # otherwise run without one. `fallback = true` builds a path whose substitute fails to
+        # download, which Nix would otherwise report as a failed build.
         extra_nix_config: |
+          fallback = true
           sandbox = true
           sandbox-fallback = false
 

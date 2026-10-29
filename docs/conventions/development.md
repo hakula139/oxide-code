@@ -79,7 +79,7 @@ CI runs on pushes to `main`, pull requests, and manual dispatch, and the release
 
 Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result reads every job of the current run attempt from the Actions API and fails when any job of the CI workflow, including each matrix leg, concludes anything other than success or skipped. That catches a leg cancelled before a runner picks it up, which the `needs` results of a matrix job omit. CI Result runs once the jobs in its `needs` finish and counts any unfinished job as a failure, so list each new job there.
 
-The Lint and Nix jobs pull from the `hakula` Cachix cache, and runs on `main` or by the maintainer push their builds to it. The cache only saves build time, so a Cachix failure never fails a job: a failed setup logs a warning and the job builds without the cache, while a failed push at the end of the job shows Cachix's error annotation on a green job. Every other failed step still fails its job and CI Result.
+The Lint and Nix jobs pull from the `hakula` Cachix cache, and runs on `main` or by the maintainer push their builds to it. The cache only saves build time, so a Cachix failure never fails a job: a failed setup logs a warning and the job builds without the cache, a failed download makes Nix build that path from source, and a failed push at the end of the job shows Cachix's error annotation on a green job. Every other failed step still fails its job and CI Result.
 
 A push to a pull request cancels the CI it supersedes, while every push to `main` gets its own run, which a later push never cancels.
 
