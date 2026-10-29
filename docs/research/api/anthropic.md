@@ -283,6 +283,22 @@ The `anthropic-version` header is `2023-06-01` across all Claude Code endpoints.
 
 oxide-code sends the dateless IDs `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`, which Anthropic's [models overview](https://platform.claude.com/docs/en/about-claude/models/overview) lists as pinned snapshots. All four have a 1M-token context window without the `context-1m-2025-08-07` beta. The `[1m]` suffix (e.g., `claude-opus-5-5[1m]`) is a client-side convention that Claude Code strips before sending to the API via `normalizeModelStringForAPI()`. oxide-code treats such an ID as unknown and suggests the ID without the suffix.
 
+## Pricing
+
+Anthropic's [pricing page](https://platform.claude.com/docs/en/about-claude/pricing) lists first-party Claude API prices in USD per million tokens, with separate rates for 5-minute cache writes, 1-hour cache writes, cache reads, and output tokens. As of 2026-10-17, the rows for oxide-code's model table are:
+
+| Model                     | Input | 5m cache write | 1h cache write | Cache read | Output |
+| ------------------------- | ----- | -------------- | -------------- | ---------- | ------ |
+| Fable 5.1                 | $10   | $12.50         | $20            | $0.25      | $50    |
+| Opus 5.5                  | $4    | $5             | $8             | $0.20      | $20    |
+| Sonnet 5.5                | $2    | $2.50          | $4             | $0.10      | $10    |
+| Haiku 5.5 (≤ 100K prompt) | $0.10 | $0.125         | $0.20          | $0.01      | $0.50  |
+| Haiku 5.5 (> 100K prompt) | $0.50 | $0.625         | $1             | $0.05      | $2.50  |
+
+Haiku 5.5 picks its tier per request from the prompt size (input + cache creation + cache read), so session cost has to be summed request by request.
+
+Cost display should stay best-effort because account discounts, marketplace billing, data residency, fast mode, and server-side tool pricing can change the final bill.
+
 ## SDK vs Raw HTTP
 
 Claude Code uses the Anthropic TypeScript SDK with `authToken` (not `apiKey`) for OAuth. The SDK:

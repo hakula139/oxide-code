@@ -2,7 +2,7 @@
 
 `/resume` (alias `/continue`) opens a searchable session picker when bare, or jumps directly when given a session ID. The picker loads sessions a page at a time as the cursor nears the end of the loaded rows. At startup, `ox --resume` without a session opens the same picker.
 
-Companion docs: [Slash Commands](slash-commands.md), [Modals](modals.md). Underlying research: [research/slash/resume.md](../research/slash/resume.md).
+Companion docs: [Slash Commands](slash-commands.md), [Modals](modals.md).
 
 ## Resume Surfaces
 
