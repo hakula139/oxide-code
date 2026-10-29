@@ -418,6 +418,10 @@ fn placements(
             .map(|change| {
                 if change.old.start < span.start {
                     span.start + 1
+                } else if change.old.is_empty() {
+                    // Several replacements can share one insertion, which starts in an earlier
+                    // replacement's lines.
+                    change.location().max(new_line)
                 } else {
                     change.location()
                 }
@@ -1362,12 +1366,20 @@ mod tests {
                     vec![1, 3],
                 ),
                 (
+                    "one insertion shared by several replacements",
+                    "foo();\nfoo();\nfoo();\n",
+                    "foo();",
+                    "foo();\nfoo();",
+                    vec![1, 3, 5],
+                ),
+                (
                     "deletion the diff slides past",
                     "a\nb\nb\nc\n",
                     "a\nb",
                     "a",
                     vec![1],
                 ),
+                ("joined breaks", "\na\n", "\n", "", vec![1, 2]),
             ] {
                 let (locations, _) = placements_in(content, old, new);
 
