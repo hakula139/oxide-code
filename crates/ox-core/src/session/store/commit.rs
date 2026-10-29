@@ -30,13 +30,10 @@ pub(crate) struct Commit<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct SessionRow {
     pub(crate) id: String,
-    pub(crate) forked_from: Option<String>,
     pub(crate) cwd: String,
     pub(crate) project_root: String,
     pub(crate) git_branch: Option<String>,
     pub(crate) model: String,
-    /// Unix milliseconds.
-    pub(crate) created_at: i64,
     pub(crate) title: Option<String>,
     pub(crate) title_manual: bool,
 }
@@ -137,6 +134,14 @@ fn json_column<T: DeserializeOwned>(row: &Row<'_>, idx: usize) -> Result<Option<
     Ok(Some(serde_json::from_str(&text)?))
 }
 
+/// What a committed batch did.
+pub(crate) struct Committed {
+    pub(crate) landed: Landed,
+    /// The session's title as the batch left it, read back after a batch that forked or wrote a
+    /// title, since the store may hold a manual title this process has not seen.
+    pub(crate) title: Option<StoredTitle>,
+}
+
 /// Where a committed batch landed.
 pub(crate) enum Landed {
     /// The batch landed on the row it found, or wrote nothing.
@@ -144,14 +149,16 @@ pub(crate) enum Landed {
     /// The batch inserted the fresh session's row, whose liveness lock the commit took.
     Created(FileLock),
     /// Another process moved the head since this one last saw it, so the batch landed on session
-    /// `id`, copied from this process's view with the source's title and manual flag, whose
-    /// liveness lock the commit took.
-    Forked {
-        id: String,
-        lock: FileLock,
-        title: Option<String>,
-        title_manual: bool,
-    },
+    /// `id`, a copy of this process's view that took the source's title. The commit took the
+    /// fork's liveness lock.
+    Forked { id: String, lock: FileLock },
+}
+
+/// A session's stored title and whether `/rename` set it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct StoredTitle {
+    pub(crate) title: Option<String>,
+    pub(crate) manual: bool,
 }
 
 /// Runs `commit` as one transaction. A fresh commit must hold a message, which the row it inserts
@@ -160,13 +167,13 @@ pub(crate) fn commit(
     conn: &mut Connection,
     store: &SessionStore,
     commit: &Commit<'_>,
-) -> Result<Landed> {
+) -> Result<Committed> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let now = now_millis();
     let (session_id, landed) = match commit.saved {
         Saved::Fresh => {
             let lock = store.hold(&commit.session.id)?;
-            insert_session(&tx, commit.session, now)?;
+            insert_session(&tx, commit.session, None, now)?;
             (commit.session.id.clone(), Landed::Created(lock))
         }
         Saved::At { base } => {
@@ -184,8 +191,10 @@ pub(crate) fn commit(
             Record::Message(row) => insert_message(&tx, &session_id, row)?,
             Record::Usage(row) => insert_usage(&tx, &session_id, row)?,
             Record::Title { title, manual } => {
+                // An AI or first-prompt title never replaces a manual one another process set.
                 tx.execute(
-                    "UPDATE sessions SET title = ?2, title_manual = ?3 WHERE id = ?1",
+                    "UPDATE sessions SET title = ?2, title_manual = ?3
+                     WHERE id = ?1 AND (?3 OR NOT title_manual)",
                     (&session_id, title, manual),
                 )?;
             }
@@ -211,6 +220,13 @@ pub(crate) fn commit(
             ),
         )?;
     }
+    let wrote_title = commit
+        .records
+        .iter()
+        .any(|record| matches!(record, Record::Title { .. }));
+    let title = (wrote_title || matches!(landed, Landed::Forked { .. }))
+        .then(|| stored_title(&tx, &session_id))
+        .transpose()?;
     if let Some(files) = snapshots {
         let tip = match (commit.head, commit.saved) {
             (Some(head), _) => head.id,
@@ -227,7 +243,7 @@ pub(crate) fn commit(
         )?;
     }
     tx.commit()?;
-    Ok(landed)
+    Ok(Committed { landed, title })
 }
 
 /// The head of session `session_id`.
@@ -252,7 +268,26 @@ pub(super) fn find_head(tx: &Transaction<'_>, session_id: &str) -> Result<Option
         .transpose()
 }
 
-fn insert_session(tx: &Transaction<'_>, session: &SessionRow, now: i64) -> Result<()> {
+fn stored_title(tx: &Transaction<'_>, session_id: &str) -> Result<StoredTitle> {
+    Ok(tx.query_row(
+        "SELECT title, title_manual FROM sessions WHERE id = ?1",
+        [session_id],
+        |row| {
+            Ok(StoredTitle {
+                title: row.get(0)?,
+                manual: row.get(1)?,
+            })
+        },
+    )?)
+}
+
+/// Inserts `session`'s row, created at `now` as a fork of `forked_from` or a fresh session.
+fn insert_session(
+    tx: &Transaction<'_>,
+    session: &SessionRow,
+    forked_from: Option<&str>,
+    now: i64,
+) -> Result<()> {
     tx.execute(
         "INSERT INTO sessions (
              id, forked_from, project_root, cwd, git_branch, model, format, created_at,
@@ -260,13 +295,13 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionRow, now: i64) -> Resul
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0)",
         rusqlite::params![
             session.id,
-            session.forked_from,
+            forked_from,
             session.project_root,
             session.cwd,
             session.git_branch,
             session.model,
             CONTENT_VERSION,
-            session.created_at,
+            now,
             now,
             session.title,
             session.title_manual,
@@ -286,20 +321,14 @@ fn fork(
 ) -> Result<(String, Landed)> {
     let id = Uuid::new_v4().to_string();
     let lock = store.hold(&id)?;
-    let (title, title_manual) = tx.query_row(
-        "SELECT title, title_manual FROM sessions WHERE id = ?1",
-        [&session.id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+    let source = stored_title(tx, &session.id)?;
     let row = SessionRow {
         id: id.clone(),
-        forked_from: Some(session.id.clone()),
-        created_at: now,
-        title,
-        title_manual,
+        title: source.title,
+        title_manual: source.manual,
         ..session.clone()
     };
-    insert_session(tx, &row, now)?;
+    insert_session(tx, &row, Some(&session.id), now)?;
     if let Some(base) = base {
         tx.execute(
             &format!(
@@ -311,13 +340,7 @@ fn fork(
             (&session.id, base.to_string(), &id),
         )?;
     }
-    let landed = Landed::Forked {
-        id: id.clone(),
-        lock,
-        title: row.title,
-        title_manual: row.title_manual,
-    };
-    Ok((id, landed))
+    Ok((id.clone(), Landed::Forked { id, lock }))
 }
 
 /// Inserts `row` into session `session_id`, keeping a row with its ID that the session already

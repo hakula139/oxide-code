@@ -22,10 +22,7 @@ use crate::tool::ToolMetadata;
 #[derive(Debug)]
 pub(crate) struct SessionData {
     pub(crate) session_id: String,
-    pub(crate) forked_from: Option<String>,
     pub(crate) git_branch: Option<String>,
-    /// Unix milliseconds.
-    pub(crate) created_at: i64,
     pub(crate) messages: Vec<Message>,
     /// The message the next one chains from, `None` for an empty branch.
     pub(crate) head: Option<Uuid>,
@@ -35,7 +32,7 @@ pub(crate) struct SessionData {
     pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<String>,
     pub(crate) title_manual: bool,
-    /// Whether the branch already used the first-prompt title opportunity.
+    /// Whether a prompt or compaction root on the branch used the first-prompt title opportunity.
     pub(crate) first_user_prompt_seen: bool,
     pub(crate) archive_state: ArchiveState,
     pub(crate) tool_metadata: HashMap<String, ToolMetadata>,
@@ -50,8 +47,7 @@ pub(crate) fn load(conn: &mut Connection, session_id: &str) -> Result<SessionDat
     let tx = conn.transaction()?;
     let Some(row) = tx
         .query_row(
-            "SELECT format, head_id, title, title_manual, archived_at, file_snapshots, forked_from,
-                 git_branch, created_at
+            "SELECT format, head_id, title, title_manual, archived_at, file_snapshots, git_branch
              FROM sessions WHERE id = ?1",
             [session_id],
             SessionRow::read,
@@ -86,12 +82,10 @@ pub(crate) fn load(conn: &mut Connection, session_id: &str) -> Result<SessionDat
         .context("invalid file snapshots")?
         .unwrap_or_default();
 
-    let first_user_prompt_seen = chain.has_prompt || chain.compact.is_some() || row.title_manual;
+    let first_user_prompt_seen = chain.has_prompt || chain.compact.is_some();
     Ok(SessionData {
         session_id: session_id.to_owned(),
-        forked_from: row.forked_from,
         git_branch: row.git_branch,
-        created_at: row.created_at,
         messages: chain.messages,
         head,
         context: chain.context,
@@ -122,9 +116,7 @@ struct SessionRow {
     title_manual: bool,
     archived_at: Option<i64>,
     file_snapshots: Option<String>,
-    forked_from: Option<String>,
     git_branch: Option<String>,
-    created_at: i64,
 }
 
 impl SessionRow {
@@ -136,9 +128,7 @@ impl SessionRow {
             title_manual: row.get(3)?,
             archived_at: row.get(4)?,
             file_snapshots: row.get(5)?,
-            forked_from: row.get(6)?,
-            git_branch: row.get(7)?,
-            created_at: row.get(8)?,
+            git_branch: row.get(6)?,
         })
     }
 }
@@ -336,7 +326,7 @@ mod tests {
                     vec![message_row(1, None, Message::user("rewound"))],
                     true,
                     None,
-                    true,
+                    false,
                 ),
                 (
                     "prompt rewound off the branch",

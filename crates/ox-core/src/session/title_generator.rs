@@ -94,7 +94,7 @@ where
 
 // ── Generation ──
 
-/// Asks Haiku for a title, then appends it and notifies `sink` unless a `/rename` won the race.
+/// Asks Haiku for a title, then appends it and notifies `sink` unless a manual title holds.
 /// Sends the request's usage on `billed` and records it in `session` before parsing the reply,
 /// since the API bills a reply that holds no title. The send goes first, so a `/rename` that aborts
 /// the task during the write still leaves the cost counted.
@@ -138,11 +138,11 @@ async fn generate_and_record(
 
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
-    if session.manual_title_set() {
+    let outcome = session.append_ai_title(title.clone()).await;
+    sink.session_write(&outcome.report);
+    if !outcome.applied {
         return Ok(());
     }
-    let report = session.append_ai_title(title.clone()).await;
-    sink.session_write(&report);
 
     sink.emit(
         Event::SessionTitleUpdated {
@@ -269,6 +269,7 @@ mod tests {
     use crate::message::Message;
     use crate::protocol::testing::CapturingSink;
     use crate::session::handle::testing::dead;
+    use crate::session::store::local_testing::fail_writes;
     use crate::session::store::testing::test_store;
 
     fn title_client(base_url: String) -> Client {
@@ -277,6 +278,13 @@ mod tests {
 
     /// The cache TTL of the session every title request in these tests runs for.
     const CACHE_TTL: PromptCacheTtl = PromptCacheTtl::FiveMin;
+
+    /// A Haiku reply holding `text` with no usage, so the title is the request's only write.
+    fn body_without_usage(text: &str) -> String {
+        let mut body: serde_json::Value = serde_json::from_str(&completion_body(text)).unwrap();
+        body.as_object_mut().unwrap().remove("usage");
+        body.to_string()
+    }
 
     /// The usage record of one title request.
     fn title_record() -> UsageRecord {
@@ -654,12 +662,13 @@ mod tests {
                 .and(wm_path("/v1/messages"))
                 .respond_with(
                     ResponseTemplate::new(200)
-                        .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
+                        .set_body_string(body_without_usage(r#"{"title":"Fix auth"}"#)),
                 )
                 .mount(&server)
                 .await;
-
-            let session = dead("dead-session");
+            let dir = tempfile::tempdir().unwrap();
+            let session = prepared_session(dir.path()).await;
+            fail_writes(&test_store(dir.path()));
             let client = title_client(server.uri());
             let sink = CapturingSink::default();
 
@@ -679,15 +688,51 @@ mod tests {
                 sink.events(),
                 [
                     Event::Error(
-                        "Session write failed: session writer task has stopped. \
-                         Conversation history may be incomplete."
+                        "Session write failed: disk full: Error code 1811: constraint failed"
                             .to_owned(),
                     ),
                     Event::SessionTitleUpdated {
-                        id: "dead-session".to_owned(),
+                        id: session.session_id(),
                         title: "Fix auth".to_owned(),
                     },
                 ],
+            );
+        }
+
+        #[tokio::test]
+        async fn skips_the_title_event_when_the_writer_is_gone() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(wm_path("/v1/messages"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(body_without_usage(r#"{"title":"Fix auth"}"#)),
+                )
+                .mount(&server)
+                .await;
+            let session = dead("dead-session");
+            let client = title_client(server.uri());
+            let sink = CapturingSink::default();
+
+            generate_and_record(
+                &client,
+                &api_key(),
+                CACHE_TTL,
+                &session,
+                &sink,
+                "first prompt",
+                oneshot::channel().0,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                sink.events(),
+                [Event::Error(
+                    "Session write failed: session writer task has stopped. \
+                     Conversation history may be incomplete."
+                        .to_owned(),
+                )],
             );
         }
 
