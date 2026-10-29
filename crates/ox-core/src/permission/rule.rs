@@ -18,8 +18,7 @@ use regex_syntax::hir::literal::Extractor;
 
 use super::shell::{PatternWord, Segment, ShellWord, bare_program, pattern_words};
 use super::{
-    Access, DirectoryAliases, PathTarget, PermissionClass, fold_name, folded_components,
-    relative_to_folded, resolve, walk_spelling,
+    Access, DirectoryAliases, PathTarget, PermissionClass, fold_name, relative_to_folded, resolve,
 };
 use crate::util::path::{lexical_normalize, slash_separated};
 use crate::util::text::is_hidden;
@@ -54,17 +53,14 @@ struct PathGlob {
     /// Whether the glob matches absolute paths, or paths below each anchor directory.
     absolute: bool,
     literal: PathBuf,
-    bases: Vec<PathBuf>,
-    /// Equivalent bases expressed in one walk's spelling, with each component folded.
-    walk_bases: Option<Vec<Vec<String>>>,
     exact: GlobSet,
     folded: GlobSet,
 }
 
 /// The tier a match is evaluated for, selecting how commands, symlinked paths, and name spellings
 /// match. Naming it at every match keeps the allow / deny asymmetry legible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MatchDiscipline {
+#[derive(Debug, Clone, Copy)]
+pub(super) enum MatchDiscipline<'a> {
     /// Every simple command of a command the analysis recognizes must match its named words, each
     /// literal one exactly, and a path matches only where it resolves, with names exactly as the
     /// pattern writes them. Neither a chained command, a symlink, nor a variant spelling widens.
@@ -72,9 +68,19 @@ pub(super) enum MatchDiscipline {
     /// Any simple command may match, by its named words, its program words, or its program's bare
     /// name. The pattern's later words may sit among other words, each word compares folded as
     /// names do, and a word that expands matches any pattern word. A path matches as resolved or as
-    /// spelled, with names folded too. A danger behind a safe head, an option, an expansion, a
-    /// symlink, or a variant spelling is caught.
-    Deny,
+    /// spelled, with names folded too, or below where the rule's literal prefix lands. A danger
+    /// behind a safe head, an option, an expansion, a symlink, or a variant spelling is caught.
+    Deny(Prefixes<'a>),
+}
+
+/// Where a deny or ask path rule's literal prefix lands, so a path that reaches it through another
+/// spelling of the prefix still matches. Empty for any other rule.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Prefixes<'a> {
+    /// The [`Rule::prefix_bases`] of the rule, each also tried where it resolves at match time.
+    Located(&'a [PathBuf]),
+    /// The same locations in one walk's spelling, split into [`fold_name`]-folded components.
+    Walk(&'a [Vec<String>]),
 }
 
 impl Rule {
@@ -149,7 +155,7 @@ impl Rule {
         }
         match (&self.pattern, target) {
             (_, Access::Path(path)) => self.path_matches(path, discipline),
-            (_, Access::Command(command)) if discipline == MatchDiscipline::Allow => {
+            (_, Access::Command(command)) if matches!(discipline, MatchDiscipline::Allow) => {
                 command.unrecognized().is_none()
                     && !command.segments().is_empty()
                     && command
@@ -195,25 +201,25 @@ impl Rule {
         }
     }
 
-    /// Returns whether a deny or ask `read` rule may match `path` or a recursive descendant.
-    pub(super) fn holds_read(&self, path: &PathTarget, recursive: bool) -> bool {
-        if self.matches_path(PermissionClass::Read, path, MatchDiscipline::Deny) {
+    /// Returns whether a deny or ask `read` rule may match `path` or a recursive descendant, given
+    /// the rule's [`Self::prefix_bases`].
+    pub(super) fn holds_read(&self, path: &PathTarget, recursive: bool, bases: &[PathBuf]) -> bool {
+        let discipline = MatchDiscipline::Deny(Prefixes::Located(bases));
+        if self.matches_path(PermissionClass::Read, path, discipline) {
             return true;
         }
-        if self.class != PermissionClass::Read || !recursive {
-            return false;
-        }
-        match &self.pattern {
-            Pattern::Path(glob) => glob.may_match_below([&path.canonical, &path.requested]),
-            _ => false,
-        }
+        self.class == PermissionClass::Read
+            && recursive
+            && matches!(self.pattern, Pattern::Path(_))
+            && may_match_below(bases, [&path.canonical, &path.requested])
     }
 
-    /// This rule with its literal path prefix rooted at each absolute anchor and where those roots
-    /// resolve when the policy loads.
-    pub(super) fn with_resolved_prefixes(mut self, anchors: &[PathBuf]) -> Self {
-        let Pattern::Path(glob) = &mut self.pattern else {
-            return self;
+    /// Where this rule's literal path prefix lands, rooted at each absolute anchor unless the
+    /// pattern is absolute, plus where each such location resolves now. Empty for any rule but a
+    /// path glob.
+    pub(super) fn prefix_bases(&self, anchors: &[PathBuf]) -> Vec<PathBuf> {
+        let Pattern::Path(glob) = &self.pattern else {
+            return Vec::new();
         };
         let mut bases: Vec<PathBuf> = if glob.absolute {
             vec![glob.literal.clone()]
@@ -230,26 +236,7 @@ impl Rule {
         bases.extend(resolved);
         bases.sort();
         bases.dedup();
-        glob.bases = bases;
-        self
-    }
-
-    /// This rule in a walk's directory spelling, with alias resolution completed before matching
-    /// its entries. Walks do not follow symlinks, so each entry shares that spelling.
-    pub(super) fn for_walk(mut self, base: &Path) -> Self {
-        let Pattern::Path(glob) = &mut self.pattern else {
-            return self;
-        };
-        glob.walk_bases = Some(
-            glob.bases
-                .iter()
-                .map(|prefix| {
-                    let resolved = resolve(prefix).unwrap_or_else(|_| prefix.clone());
-                    folded_components(&walk_spelling(&resolved, base))
-                })
-                .collect(),
-        );
-        self
+        bases
     }
 }
 
@@ -430,13 +417,7 @@ impl PathGlob {
             exact: set([parsed, path_glob(&below)?])?,
             folded: set([path_glob(&fold_path(glob))?, path_glob(&fold_path(&below))?])?,
             absolute,
-            bases: if absolute {
-                vec![literal.clone()]
-            } else {
-                Vec::new()
-            },
             literal,
-            walk_bases: None,
         })
     }
 
@@ -449,7 +430,11 @@ impl PathGlob {
             deny_rooted,
             ..
         } = path;
-        let deny = discipline == MatchDiscipline::Deny;
+        let prefixes = match discipline {
+            MatchDiscipline::Allow => None,
+            MatchDiscipline::Deny(prefixes) => Some(prefixes),
+        };
+        let deny = prefixes.is_some();
         let hit = |path: &str| {
             self.exact.is_match(path) || (deny && self.folded.is_match(fold_path(path)))
         };
@@ -459,10 +444,17 @@ impl PathGlob {
             rooted.iter().any(|path| hit(path))
                 || (deny && deny_rooted.iter().any(|path| hit(path)))
         };
-        written || (deny && self.prefix_matches([canonical, requested], hit))
+        written
+            || prefixes
+                .is_some_and(|prefixes| self.prefix_matches(prefixes, [canonical, requested], hit))
     }
 
-    fn prefix_matches(&self, paths: [&str; 2], hit: impl Fn(&str) -> bool) -> bool {
+    fn prefix_matches(
+        &self,
+        prefixes: Prefixes,
+        paths: [&str; 2],
+        hit: impl Fn(&str) -> bool,
+    ) -> bool {
         let projected_match = |relative: &str| {
             let mut projected = self.literal.clone();
             if !relative.is_empty() {
@@ -471,40 +463,43 @@ impl PathGlob {
             !paths.iter().any(|path| projected == Path::new(path))
                 && hit(&slash_separated(&projected))
         };
-        if let Some(bases) = &self.walk_bases {
-            return bases.iter().any(|base| {
+        match prefixes {
+            Prefixes::Walk(bases) => bases.iter().any(|base| {
                 paths.iter().any(|path| {
                     relative_to_folded(Path::new(path), base)
                         .is_some_and(|relative| projected_match(&relative))
                 })
-            });
+            }),
+            Prefixes::Located(bases) => {
+                let mut aliases = DirectoryAliases::default();
+                prefix_locations(bases).any(|base| {
+                    paths.iter().any(|path| {
+                        aliases
+                            .relative_to(Path::new(path), &base)
+                            .is_some_and(|relative| projected_match(&relative))
+                    })
+                })
+            }
         }
-        let mut aliases = DirectoryAliases::default();
-        self.prefix_locations().any(|base| {
-            paths.iter().any(|path| {
-                aliases
-                    .relative_to(Path::new(path), &base)
-                    .is_some_and(|relative| projected_match(&relative))
-            })
-        })
     }
+}
 
-    fn may_match_below(&self, paths: [&str; 2]) -> bool {
-        let mut aliases = DirectoryAliases::default();
-        self.prefix_locations().any(|base| {
-            paths.iter().any(|path| {
-                let path = Path::new(path);
-                aliases.relative_to(&base, path).is_some()
-                    || aliases.relative_to(path, &base).is_some()
-            })
+/// Returns whether either of `paths` and a location of `bases` sit one within the other.
+fn may_match_below(bases: &[PathBuf], paths: [&str; 2]) -> bool {
+    let mut aliases = DirectoryAliases::default();
+    prefix_locations(bases).any(|base| {
+        paths.iter().any(|path| {
+            let path = Path::new(path);
+            aliases.relative_to(&base, path).is_some() || aliases.relative_to(path, &base).is_some()
         })
-    }
+    })
+}
 
-    fn prefix_locations(&self) -> impl Iterator<Item = PathBuf> + '_ {
-        self.bases.iter().flat_map(|base| {
-            std::iter::once(base.clone()).chain(resolve(base).ok().filter(|path| path != base))
-        })
-    }
+/// Each of `bases`, followed by where it resolves now when that differs.
+fn prefix_locations(bases: &[PathBuf]) -> impl Iterator<Item = PathBuf> + '_ {
+    bases.iter().flat_map(|base| {
+        std::iter::once(base.clone()).chain(resolve(base).ok().filter(|path| path != base))
+    })
 }
 
 /// `literal_separator` keeps `*` from crossing `/`, so `*.json` names one level of files.
@@ -619,8 +614,25 @@ mod tests {
         }
     }
 
-    fn matches_path(rule: &Rule, path: &PathTarget, discipline: MatchDiscipline) -> bool {
-        rule.matches_path(rule.class(), path, discipline)
+    /// Deny discipline for a rule that holds no path pattern, and so has no prefix bases.
+    const DENY: MatchDiscipline<'static> = MatchDiscipline::Deny(Prefixes::Located(&[]));
+
+    fn allows_path(rule: &Rule, path: &PathTarget) -> bool {
+        rule.matches_path(rule.class(), path, MatchDiscipline::Allow)
+    }
+
+    /// Whether `rule` holds `path` back with the prefix bases it has in a workspace at `anchor`.
+    fn denies_path_from(rule: &Rule, path: &PathTarget, anchor: &Path) -> bool {
+        let bases = rule.prefix_bases(&[anchor.to_path_buf()]);
+        rule.matches_path(
+            rule.class(),
+            path,
+            MatchDiscipline::Deny(Prefixes::Located(&bases)),
+        )
+    }
+
+    fn denies_path(rule: &Rule, path: &PathTarget) -> bool {
+        denies_path_from(rule, path, Path::new(&abs("/repo")))
     }
 
     mod parse {
@@ -636,7 +648,7 @@ mod tests {
                     "{target:?}"
                 );
             }
-            assert!(!any.matches(PermissionClass::Edit, &Access::None, MatchDiscipline::Deny));
+            assert!(!any.matches(PermissionClass::Edit, &Access::None, DENY));
         }
 
         #[test]
@@ -802,11 +814,7 @@ mod tests {
             .unwrap();
             assert_eq!(rule.pattern(), "./src/a[[]1[]].rs");
             let other = ["src/a1.rs".to_owned()];
-            assert!(!matches_path(
-                &rule,
-                &path(&abs("/repo/src/a1.rs"), &other),
-                MatchDiscipline::Allow
-            ));
+            assert!(!allows_path(&rule, &path(&abs("/repo/src/a1.rs"), &other)));
 
             let top = ["a.rs".to_owned()];
             let rule = Rule::for_call(
@@ -876,7 +884,7 @@ mod tests {
         use super::*;
 
         fn holds(rule: &Rule, command: &str) -> bool {
-            rule.matches(PermissionClass::Exec, &cmd(command), MatchDiscipline::Deny)
+            rule.matches(PermissionClass::Exec, &cmd(command), DENY)
         }
 
         #[test]
@@ -1048,17 +1056,13 @@ mod tests {
                 let rooted = [relative.to_owned()];
                 let canonical = format!("/repo/{relative}");
                 assert_eq!(
-                    matches_path(&rule, &path(&canonical, &rooted), MatchDiscipline::Allow),
+                    allows_path(&rule, &path(&canonical, &rooted)),
                     expected,
                     "{relative}"
                 );
             }
             assert!(
-                !matches_path(
-                    &rule,
-                    &path("/elsewhere/target", &[]),
-                    MatchDiscipline::Deny
-                ),
+                !denies_path(&rule, &path("/elsewhere/target", &[])),
                 "a name pattern applies only below an anchor directory"
             );
         }
@@ -1074,7 +1078,7 @@ mod tests {
                 ] {
                     let rooted = [relative.to_owned()];
                     assert_eq!(
-                        matches_path(&rule, &path("/repo/x", &rooted), MatchDiscipline::Allow),
+                        allows_path(&rule, &path("/repo/x", &rooted)),
                         expected,
                         "{raw} vs {relative}"
                     );
@@ -1082,53 +1086,35 @@ mod tests {
             }
             let top = edit("./a.rs");
             let nested = ["sub/a.rs".to_owned()];
-            assert!(!matches_path(
-                &top,
-                &path("/repo/sub/a.rs", &nested),
-                MatchDiscipline::Allow
-            ));
+            assert!(!allows_path(&top, &path("/repo/sub/a.rs", &nested)));
         }
 
         #[test]
         fn path_absolute_and_home_patterns_match_the_resolved_path() {
             let etc = edit(&abs("/etc/**"));
-            assert!(matches_path(
-                &etc,
-                &path(&abs("/etc/passwd"), &[]),
-                MatchDiscipline::Allow
-            ));
+            assert!(allows_path(&etc, &path(&abs("/etc/passwd"), &[])));
             let inside = ["etc/x".to_owned()];
-            assert!(!matches_path(
-                &etc,
-                &path(&abs("/repo/etc/x"), &inside),
-                MatchDiscipline::Allow
-            ));
+            assert!(!allows_path(&etc, &path(&abs("/repo/etc/x"), &inside)));
 
             let nginx = edit(&format!("{}/", abs("/etc/nginx")));
             for target in [abs("/etc/nginx"), abs("/etc/nginx/nginx.conf")] {
                 assert!(
-                    matches_path(&nginx, &path(&target, &[]), MatchDiscipline::Allow),
+                    allows_path(&nginx, &path(&target, &[])),
                     "a trailing `/` is ignored: {target}"
                 );
             }
 
             temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
                 let notes = edit("~/notes/");
-                assert!(matches_path(
+                assert!(allows_path(&notes, &path(&abs("/home/u/notes"), &[])));
+                assert!(allows_path(
                     &notes,
-                    &path(&abs("/home/u/notes"), &[]),
-                    MatchDiscipline::Allow
-                ));
-                assert!(matches_path(
-                    &notes,
-                    &path(&abs("/home/u/notes/today.md"), &[]),
-                    MatchDiscipline::Allow
+                    &path(&abs("/home/u/notes/today.md"), &[])
                 ));
                 let literal = ["~/notes/today.md".to_owned()];
-                assert!(!matches_path(
+                assert!(!allows_path(
                     &notes,
-                    &path("/repo/~/notes/today.md", &literal),
-                    MatchDiscipline::Allow
+                    &path("/repo/~/notes/today.md", &literal)
                 ));
             });
         }
@@ -1144,10 +1130,7 @@ mod tests {
             ] {
                 temp_env::with_var(HOME_VAR, Some(&spelling), || {
                     let notes = edit("~/notes/*.md");
-                    assert!(
-                        matches_path(&notes, &path(&target, &[]), MatchDiscipline::Allow),
-                        "{spelling}"
-                    );
+                    assert!(allows_path(&notes, &path(&target, &[])), "{spelling}");
                 });
             }
         }
@@ -1167,26 +1150,14 @@ mod tests {
             };
             let absolute = edit(&abs("/repo/.env"));
             for rule in [edit(".env"), absolute] {
-                assert!(
-                    matches_path(&rule, &env, MatchDiscipline::Deny),
-                    "{}",
-                    rule.pattern()
-                );
-                assert!(
-                    !matches_path(&rule, &env, MatchDiscipline::Allow),
-                    "{}",
-                    rule.pattern()
-                );
+                assert!(denies_path(&rule, &env), "{}", rule.pattern());
+                assert!(!allows_path(&rule, &env), "{}", rule.pattern());
             }
 
             let upper = [".ENV.".to_owned()];
             let folded = path("/repo/.ENV.", &upper);
-            assert!(matches_path(&edit(".env"), &folded, MatchDiscipline::Deny));
-            assert!(!matches_path(
-                &edit(".env"),
-                &folded,
-                MatchDiscipline::Allow
-            ));
+            assert!(denies_path(&edit(".env"), &folded));
+            assert!(!allows_path(&edit(".env"), &folded));
         }
 
         #[cfg(windows)]
@@ -1194,15 +1165,11 @@ mod tests {
         fn path_reads_backslash_separators_and_needs_a_drive() {
             let rule = edit(r"src\*.rs");
             let rooted = [r"src\a.rs".to_owned()];
-            assert!(matches_path(
-                &rule,
-                &path(r"C:\repo\src\a.rs", &rooted),
-                MatchDiscipline::Allow
-            ));
+            assert!(allows_path(&rule, &path(r"C:\repo\src\a.rs", &rooted)));
             let dotted = edit(r"C:\repo\secrets");
             let target = path(r"C:\repo\secrets.\key", &[]);
-            assert!(matches_path(&dotted, &target, MatchDiscipline::Deny));
-            assert!(!matches_path(&dotted, &target, MatchDiscipline::Allow));
+            assert!(denies_path(&dotted, &target));
+            assert!(!allows_path(&dotted, &target));
             for raw in ["/secrets/**", r"\tmp\**"] {
                 let err = format!("{:#}", Rule::parse(PermissionClass::Read, raw).unwrap_err());
                 assert!(err.contains("needs a drive"), "{raw}: {err}");
@@ -1237,11 +1204,7 @@ mod tests {
                 ("gitlab/get_me", false),
             ] {
                 assert_eq!(
-                    tool.matches(
-                        PermissionClass::Mcp,
-                        &Access::Name(name.to_owned()),
-                        MatchDiscipline::Deny
-                    ),
+                    tool.matches(PermissionClass::Mcp, &Access::Name(name.to_owned()), DENY),
                     expected,
                     "{name}"
                 );
@@ -1269,12 +1232,12 @@ mod tests {
                 ("./vault[[]1[]]/key", "vault1", true, false),
                 ("secret", "src", true, true),
             ] {
-                let rule = rule(PermissionClass::Read, pattern)
-                    .with_resolved_prefixes(&[root.to_path_buf()]);
+                let rule = rule(PermissionClass::Read, pattern);
+                let bases = rule.prefix_bases(&[root.to_path_buf()]);
                 let canonical = slash_separated(&root.join(name));
                 let rooted = [name.to_owned()];
 
-                let held = rule.holds_read(&path(&canonical, &rooted), recursive);
+                let held = rule.holds_read(&path(&canonical, &rooted), recursive, &bases);
 
                 assert_eq!(
                     held, expected,
@@ -1289,12 +1252,12 @@ mod tests {
             let any = rule(PermissionClass::Read, "*");
             let edit = rule(PermissionClass::Edit, "*");
 
-            assert!(any.holds_read(&vault, false));
-            assert!(!edit.holds_read(&vault, true));
+            assert!(any.holds_read(&vault, false, &[]));
+            assert!(!edit.holds_read(&vault, true, &[]));
         }
     }
 
-    mod with_resolved_prefixes {
+    mod prefix_bases {
         use super::*;
 
         #[test]
@@ -1326,25 +1289,21 @@ mod tests {
                     "real/y.rs",
                 ),
             ] {
-                let rule = Rule::parse(PermissionClass::Read, &raw)
-                    .unwrap()
-                    .with_resolved_prefixes(std::slice::from_ref(anchor));
-                assert_eq!(rule.pattern(), raw, "the copy keeps the pattern as written");
+                let rule = Rule::parse(PermissionClass::Read, &raw).unwrap();
                 let matches = |relative: &str| {
                     let canonical = format!("{root_glob}/{relative}");
-                    matches_path(&rule, &path(&canonical, &[]), MatchDiscipline::Deny)
+                    denies_path_from(&rule, &path(&canonical, &[]), anchor)
                 };
                 assert!(matches(inside), "{raw}");
                 assert!(!matches(outside), "{raw}");
             }
 
-            let unchanged = Rule::parse(PermissionClass::Read, &format!("{root_glob}/real/**"))
-                .unwrap()
-                .with_resolved_prefixes(std::slice::from_ref(&root));
-            assert!(matches_path(
+            let unchanged =
+                Rule::parse(PermissionClass::Read, &format!("{root_glob}/real/**")).unwrap();
+            assert!(denies_path_from(
                 &unchanged,
                 &path(&format!("{root_glob}/real/key"), &[]),
-                MatchDiscipline::Deny
+                &root
             ));
         }
 
@@ -1371,18 +1330,16 @@ mod tests {
                     r"\\server\two\real\key",
                 ),
             ] {
-                let mut rule = edit(pattern);
-                let Pattern::Path(glob) = &mut rule.pattern else {
-                    unreachable!()
-                };
-                glob.walk_bases = Some(vec![folded_components(Path::new(base))]);
+                let rule = edit(pattern);
+                let bases = [crate::permission::folded_components(Path::new(base))];
+                let walk = MatchDiscipline::Deny(Prefixes::Walk(&bases));
 
                 assert!(
-                    matches_path(&rule, &path(same, &[]), MatchDiscipline::Deny),
+                    rule.matches_path(rule.class(), &path(same, &[]), walk),
                     "{same}"
                 );
                 assert!(
-                    !matches_path(&rule, &path(different, &[]), MatchDiscipline::Deny),
+                    !rule.matches_path(rule.class(), &path(different, &[]), walk),
                     "{different}"
                 );
             }

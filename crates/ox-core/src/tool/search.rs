@@ -607,7 +607,7 @@ mod tests {
         fn drops_and_counts_only_the_paths_the_filter_withholds() {
             let dir = canonical_tempdir();
             let root = local_testing::search_root(dir.path(), None).unwrap();
-            let read_filter = deny_reads(&["secrets"]);
+            let read_filter = deny_reads(&["secrets"], dir.path());
             let read_filter = read_filter.walk(&root.base, &root.spelled, &root.workspace);
             let at = |path: Option<&str>| Unreadable {
                 path: path.map(|path| dir.path().join(path)),
