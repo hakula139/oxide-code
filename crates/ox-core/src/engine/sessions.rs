@@ -814,6 +814,32 @@ mod tests {
             })
             .await;
         }
+
+        #[tokio::test]
+        async fn starts_the_new_session_in_the_mode_in_force() {
+            with_pinned_home(async {
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine("http://127.0.0.1:9".to_owned(), &store, dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+                let sink = CapturingSink::default();
+                engine.set_mode(&sink, Mode::Plan);
+
+                engine.clear(&sink).await;
+
+                let prompt = engine.transcript.prompt();
+                let mode = "The permission mode is `plan`, so only calls to `tasks` run. \
+                            Investigate, then present your plan for the user to review.";
+                assert_eq!(prompt.seen.mode, mode);
+                assert!(
+                    prompt.user_context.contains(mode),
+                    "{}",
+                    prompt.user_context
+                );
+            })
+            .await;
+        }
     }
 
     mod archive {
@@ -1076,6 +1102,43 @@ mod tests {
                 assert_eq!(system_prompt(&turns[1]), system_prompt(&turns[0]));
                 assert_eq!(turns[1]["messages"][0], turns[0]["messages"][0]);
                 assert_eq!(turns[1]["messages"][1]["content"][0]["text"], "first");
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn restores_a_mode_the_round_results_told_the_model() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                let input = serde_json::json!({ "tasks": plan() }).to_string();
+                mount_tool_call_once(&server, "call-1", "tasks", &input).await;
+                mount_reply(&server, "done").await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![Box::new(TasksTool)]));
+                let recorded_id = engine.session_id();
+                let sink = CapturingSink::default();
+                let (tx, mut ops) = OpSender::channel(1);
+                tx.try_submit(Op::SetMode(Mode::Plan)).unwrap();
+                engine
+                    .submit_prompt("plan it", None, &sink, &mut Mailbox::new(&mut ops))
+                    .await;
+                let told = engine.transcript.prompt().seen.clone();
+                engine.clear(&sink).await;
+
+                engine
+                    .resume(&sink, SessionRef::Id(recorded_id.clone()))
+                    .await;
+
+                assert!(
+                    told.mode.starts_with("The permission mode is `plan`"),
+                    "{}",
+                    told.mode,
+                );
+                assert_eq!(engine.transcript.prompt().seen, told);
+                drop(tx);
             })
             .await;
         }

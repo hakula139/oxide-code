@@ -34,7 +34,7 @@ use self::tasks::{Task, TasksTool};
 use self::view::{ApprovalBody, ApprovalPreview, ToolResultView};
 use self::write::WriteTool;
 use crate::file_tracker::FileTracker;
-use crate::permission::{Access, PathTarget, PermissionClass, ReadFilter, Workspace};
+use crate::permission::{Access, Mode, PathTarget, PermissionClass, ReadFilter, Workspace};
 use crate::util::path::{expand_user, slash_separated};
 use crate::util::text::capitalize_first;
 
@@ -392,14 +392,23 @@ impl ToolRegistry {
             .map(|(spec, tool)| (spec, tool.as_ref()))
     }
 
-    /// The specs the tools registered with, in registration order.
-    pub(crate) fn specs(&self) -> impl Iterator<Item = &ToolSpec> {
-        self.tools.iter().map(|(spec, _)| spec)
-    }
-
     /// The definitions a request sends, in registration order.
     pub(crate) fn definitions(&self) -> Vec<&ToolDefinition> {
-        self.specs().map(|spec| &spec.definition).collect()
+        self.tools
+            .iter()
+            .map(|(spec, _)| &spec.definition)
+            .collect()
+    }
+
+    /// The names of the tools whose class `plan` mode does not deny, in registration order. Only
+    /// `read`-class calls then run outright, so a tool of a class the mode leaves to the rules,
+    /// such as `mcp`, would be listed though its calls ask.
+    pub(crate) fn plan_tools(&self) -> Vec<&str> {
+        self.tools
+            .iter()
+            .filter(|(spec, _)| !Mode::Plan.denies(spec.class))
+            .map(|(spec, _)| spec.definition.name.as_str())
+            .collect()
     }
 
     pub(crate) fn icon(&self, name: &str) -> &'static str {
@@ -1263,6 +1272,31 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(listed, registered);
+            }
+        }
+
+        mod plan_tools {
+            use super::*;
+
+            #[test]
+            fn names_the_registered_tools_plan_does_not_deny_in_order() {
+                let custom = ToolRegistry::new(vec![
+                    Box::new(WriteTool),
+                    Box::new(TasksTool),
+                    Box::new(ReadTool),
+                ]);
+                let cases = [
+                    (
+                        "built-in",
+                        built_in(),
+                        &["bash_output", "bash_stop", "read", "glob", "grep", "tasks"][..],
+                    ),
+                    ("custom", custom, &["tasks", "read"]),
+                ];
+
+                for (label, registry, expected) in cases {
+                    assert_eq!(registry.plan_tools(), expected, "{label}");
+                }
             }
         }
 

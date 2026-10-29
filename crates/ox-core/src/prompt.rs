@@ -16,7 +16,6 @@ use self::sections::{
 use crate::git::repo_root;
 use crate::model::ModelSpec;
 use crate::permission::Mode;
-use crate::tool::ToolRegistry;
 use crate::util::text::list_with_and;
 
 /// Output of [`build_prompt`] or [`restore_prompt`], held for a whole session so every request
@@ -42,6 +41,15 @@ impl PromptParts {
         let reminder = render_reminder(&self.seen, &fresh);
         self.seen = fresh;
         Some(reminder)
+    }
+
+    /// [`Self::catch_up`] for a `mode` switch alone, leaving the rest of what the model has seen.
+    pub(crate) fn catch_up_mode(&mut self, mode: Mode, plan_tools: &[&str]) -> Option<String> {
+        let fresh = UserContext {
+            mode: mode_rules(mode, plan_tools),
+            ..self.seen.clone()
+        };
+        self.catch_up(fresh)
     }
 
     /// Re-renders `user_context` from `fresh` for a transcript no earlier request started with.
@@ -96,20 +104,20 @@ pub(crate) struct UserContext {
 
 impl UserContext {
     /// Reads the instruction files that apply in `cwd`, plus today's date, `model`'s identity, and
-    /// what `mode` lets calls of `tools` do. Also returns a warning for each instruction file that
-    /// exists but cannot or may not be read.
+    /// what `mode` lets tool calls do, where `plan` runs calls to `plan_tools` only. Also returns a
+    /// warning for each instruction file that exists but cannot or may not be read.
     pub(crate) async fn load(
         cwd: &Path,
         model: &ModelSpec,
         mode: Mode,
-        tools: &ToolRegistry,
+        plan_tools: &[&str],
     ) -> (Self, Vec<String>) {
         let (instructions, warnings) = instructions::load(cwd).await;
         let context = Self {
             instructions,
             date: environment::current_date(),
             model: environment::model_identity(model),
-            mode: mode_rules(mode, tools),
+            mode: mode_rules(mode, plan_tools),
         };
         (context, warnings)
     }
@@ -129,11 +137,11 @@ pub(crate) struct SessionContext {
 pub(crate) async fn build_prompt(
     model: &ModelSpec,
     mode: Mode,
-    tools: &ToolRegistry,
+    plan_tools: &[&str],
     cwd: &Path,
 ) -> (PromptParts, Vec<String>) {
     let git_root = repo_root(cwd).await;
-    assemble(model, mode, tools, cwd, git_root.as_deref()).await
+    assemble(model, mode, plan_tools, cwd, git_root.as_deref()).await
 }
 
 /// Rebuilds the prompt `stored` describes, so a resumed session sends the prefix it sent before. A
@@ -160,12 +168,12 @@ pub(crate) async fn restore_prompt(stored: SessionContext, cwd: &Path) -> Prompt
 async fn assemble(
     model: &ModelSpec,
     mode: Mode,
-    tools: &ToolRegistry,
+    plan_tools: &[&str],
     cwd: &Path,
     git_root: Option<&Path>,
 ) -> (PromptParts, Vec<String>) {
     let environment = Environment::detect(cwd, git_root);
-    let (context, warnings) = UserContext::load(cwd, model, mode, tools).await;
+    let (context, warnings) = UserContext::load(cwd, model, mode, plan_tools).await;
 
     let parts = PromptParts {
         system: system_prompt(&environment),
@@ -264,30 +272,24 @@ fn render_mode(mode: &str) -> String {
     }
 }
 
-/// What `mode` lets tool calls do, naming the `tools` that `plan` leaves for investigating.
-fn mode_rules(mode: Mode, tools: &ToolRegistry) -> String {
+/// Names `mode`, which the System section describes, and for `plan` the `plan_tools` it runs.
+fn mode_rules(mode: Mode, plan_tools: &[&str]) -> String {
     match mode {
-        Mode::Manual => "The permission mode is `manual`. Reads, read-only commands, and edits \
-                         inside the working directory run, and any other call waits for the \
-                         user's approval, or is denied when nobody can approve it."
-            .to_owned(),
-        Mode::Plan => {
-            let running: Vec<_> = tools
-                .specs()
-                .filter(|spec| !mode.denies(spec.class))
-                .map(|spec| format!("`{}`", spec.definition.name))
-                .collect();
-            format!(
-                "The permission mode is `plan`, so every edit and command is denied, and only calls \
-                 to {} run. Investigate with them, then present your plan for the user to review.",
-                list_with_and(&running),
-            )
-        }
-        Mode::Yolo => {
-            "The permission mode is `yolo`, so calls run unless a permission rule holds them."
-                .to_owned()
-        }
+        Mode::Plan => format!(
+            "The permission mode is `plan`, so {}. Investigate, then present your plan for the \
+             user to review.",
+            plan_runs(plan_tools),
+        ),
+        Mode::Manual | Mode::Yolo => format!("The permission mode is `{mode}`."),
     }
+}
+
+/// The calls `plan` mode runs, given the names
+/// [`ToolRegistry::plan_tools`](crate::tool::ToolRegistry::plan_tools) returns, as the clause
+/// that the mode section and `plan`'s denials share.
+pub(crate) fn plan_runs(plan_tools: &[&str]) -> String {
+    let spans: Vec<_> = plan_tools.iter().map(|name| format!("`{name}`")).collect();
+    format!("only calls to {} run", list_with_and(&spans))
 }
 
 /// `body` wrapped in the model-facing `<system-reminder>` envelope.
@@ -301,8 +303,6 @@ pub(crate) fn system_reminder(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use indoc::indoc;
     use time::macros::format_description;
     use time::{Date, OffsetDateTime};
@@ -310,19 +310,13 @@ mod tests {
     use super::*;
     use crate::git::local_testing::init_fixture_repo;
     use crate::git::testing::with_isolated_git_env_async;
-    use crate::permission::ReadFilter;
     use crate::util::path::testing::pinned_home;
 
     const IDENTITY: &str = "You are powered by the model test-model.";
+    const PLAN_TOOLS: &[&str] = &["read", "grep", "tasks"];
 
-    /// The built-in tools, with no read rules and background shells of their own.
-    fn built_in() -> ToolRegistry {
-        ToolRegistry::built_in(&ReadFilter::default(), &Arc::default())
-    }
-
-    /// What `mode` lets calls of the built-in tools do.
     fn rules(mode: Mode) -> String {
-        mode_rules(mode, &built_in())
+        mode_rules(mode, PLAN_TOOLS)
     }
 
     fn context(instructions: &str, date: &str) -> UserContext {
@@ -388,7 +382,7 @@ mod tests {
 
                     # Permission mode
 
-                    The permission mode is `plan`, so every edit and command is denied, and only calls to `bash_output`, `bash_stop`, `read`, `glob`, `grep`, and `tasks` run. Investigate with them, then present your plan for the user to review.
+                    The permission mode is `plan`, so only calls to `read`, `grep`, and `tasks` run. Investigate, then present your plan for the user to review.
                     </system-reminder>"
                 },
             );
@@ -399,6 +393,41 @@ mod tests {
             assert!(
                 parts.user_context.is_empty(),
                 "catching up must leave the first message alone"
+            );
+        }
+    }
+
+    mod catch_up_mode {
+        use super::*;
+
+        #[test]
+        fn reminds_of_a_new_mode_alone_and_keeps_the_rest_seen() {
+            let mut parts = PromptParts {
+                seen: context("Rules.", "2026-04-12"),
+                ..PromptParts::default()
+            };
+
+            assert_eq!(parts.catch_up_mode(Mode::Manual, PLAN_TOOLS), None);
+            let reminder = parts.catch_up_mode(Mode::Yolo, PLAN_TOOLS).unwrap();
+
+            assert_eq!(
+                reminder,
+                indoc! {"
+                    <system-reminder>
+                    The context from the start of this conversation has changed. Use these values from now on:
+
+                    # Permission mode
+
+                    The permission mode is `yolo`.
+                    </system-reminder>"
+                },
+            );
+            assert_eq!(
+                parts.seen,
+                UserContext {
+                    mode: rules(Mode::Yolo),
+                    ..context("Rules.", "2026-04-12")
+                },
             );
         }
     }
@@ -434,7 +463,7 @@ mod tests {
 
             let (parts, warnings) = with_isolated_git_env_async(temp_env::async_with_vars(
                 pinned_home(home.path()),
-                build_prompt(&model, Mode::Plan, &built_in(), cwd.path()),
+                build_prompt(&model, Mode::Plan, PLAN_TOOLS, cwd.path()),
             ))
             .await;
 
@@ -577,7 +606,7 @@ mod tests {
                 assemble(
                     &model,
                     Mode::Manual,
-                    &built_in(),
+                    PLAN_TOOLS,
                     tmp.path(),
                     Some(tmp.path()),
                 ),
@@ -650,7 +679,7 @@ mod tests {
 
             let (parts, warnings) = temp_env::async_with_vars(
                 pinned_home(home.path()),
-                assemble(&model, Mode::Manual, &built_in(), &sub, Some(root)),
+                assemble(&model, Mode::Manual, PLAN_TOOLS, &sub, Some(root)),
             )
             .await;
             assert_eq!(warnings, [] as [String; 0]);
@@ -730,7 +759,7 @@ mod tests {
 
                     # Permission mode
 
-                    The permission mode is `manual`. Reads, read-only commands, and edits inside the working directory run, and any other call waits for the user's approval, or is denied when nobody can approve it.
+                    The permission mode is `manual`.
 
                     IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
                     </system-reminder>"
@@ -756,48 +785,11 @@ mod tests {
 
                     # Permission mode
 
-                    The permission mode is `manual`. Reads, read-only commands, and edits inside the working directory run, and any other call waits for the user's approval, or is denied when nobody can approve it.
+                    The permission mode is `manual`.
 
                     IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
                     </system-reminder>"
                 },
-            );
-        }
-    }
-
-    mod mode_rules {
-        use strum::VariantArray as _;
-
-        use super::*;
-        use crate::tool::read::ReadTool;
-        use crate::tool::tasks::TasksTool;
-        use crate::tool::write::WriteTool;
-
-        #[test]
-        fn names_each_mode_it_describes() {
-            for &mode in Mode::VARIANTS {
-                let rules = rules(mode);
-
-                assert!(
-                    rules.starts_with(&format!("The permission mode is `{mode}`")),
-                    "{mode}: {rules}"
-                );
-            }
-        }
-
-        #[test]
-        fn plan_names_the_registered_tools_it_leaves_running() {
-            let tools = ToolRegistry::new(vec![
-                Box::new(WriteTool),
-                Box::new(TasksTool),
-                Box::new(ReadTool),
-            ]);
-
-            let rules = mode_rules(Mode::Plan, &tools);
-
-            assert!(
-                rules.contains("only calls to `tasks` and `read` run."),
-                "{rules}"
             );
         }
     }
@@ -828,7 +820,7 @@ mod tests {
 
                     # Permission mode
 
-                    The permission mode is `manual`. Reads, read-only commands, and edits inside the working directory run, and any other call waits for the user's approval, or is denied when nobody can approve it.
+                    The permission mode is `manual`.
                     </system-reminder>"
                 },
             );
@@ -852,6 +844,39 @@ mod tests {
         }
     }
 
+    mod mode_rules {
+        use super::*;
+
+        #[test]
+        fn names_the_mode_and_the_tools_plan_runs() {
+            let cases = [
+                (Mode::Manual, "The permission mode is `manual`."),
+                (
+                    Mode::Plan,
+                    "The permission mode is `plan`, so only calls to `read`, `grep`, and `tasks` \
+                     run. Investigate, then present your plan for the user to review.",
+                ),
+                (Mode::Yolo, "The permission mode is `yolo`."),
+            ];
+
+            for (mode, expected) in cases {
+                assert_eq!(mode_rules(mode, PLAN_TOOLS), expected, "{mode}");
+            }
+        }
+    }
+
+    mod plan_runs {
+        use super::*;
+
+        #[test]
+        fn names_each_tool_as_a_code_span() {
+            assert_eq!(
+                plan_runs(&["tasks", "read"]),
+                "only calls to `tasks` and `read` run"
+            );
+        }
+    }
+
     mod sections {
         use super::*;
 
@@ -871,7 +896,7 @@ mod tests {
                     "SYSTEM_SECTION",
                     SYSTEM_SECTION,
                     &[
-                        "In `plan`, every `edit`, `write`, and `bash` call is denied",
+                        "In `plan`, every edit and command is denied",
                         "reads each command of a chain",
                         "needs approval in `manual`, so prefer plain commands",
                     ],

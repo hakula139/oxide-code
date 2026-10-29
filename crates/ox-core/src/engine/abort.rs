@@ -5,7 +5,7 @@
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::permission::Mode;
+use crate::permission::{Mode, Policy};
 use crate::protocol::{Event, EventSink, Op, Submission};
 
 /// Why a turn ended without a clean assistant reply. The engine keeps serving after `Cancelled` but
@@ -22,8 +22,9 @@ pub(super) enum TurnAbort {
 pub(super) type AbortResult<T> = std::result::Result<T, TurnAbort>;
 
 /// The ops one operation in flight races its futures against, and what it keeps from them: the
-/// prompts queued for its next round boundary, and the latest mode switch, which applies before
-/// the next gated tool call or once the operation ends.
+/// prompts queued for its next round boundary, and the latest mode switch, which applies at the
+/// first of the next gated tool call, round boundary, or user context render, or once the
+/// operation ends.
 pub(super) struct Mailbox<'a> {
     ops: &'a mut mpsc::Receiver<Submission>,
     prompts: Vec<String>,
@@ -79,7 +80,15 @@ impl<'a> Mailbox<'a> {
         }
     }
 
-    /// The latest mode switch the operation received, which the caller applies.
+    /// Applies the latest mode switch the operation received to `policy`.
+    pub(super) const fn apply_mode(&mut self, policy: &mut Policy) {
+        if let Some(mode) = self.mode.take() {
+            policy.set_mode(mode);
+        }
+    }
+
+    /// The latest mode switch the operation received.
+    #[cfg(test)]
     pub(super) const fn take_mode(&mut self) -> Option<Mode> {
         self.mode.take()
     }
@@ -90,7 +99,7 @@ impl<'a> Mailbox<'a> {
     }
 
     /// Handles an op received while an operation runs, where `None` means the channel closed. Keeps
-    /// a queued prompt, and keeps a mode switch for the next gated call while confirming it on
+    /// a queued prompt, and keeps a mode switch for [`Self::apply_mode`] while confirming it on
     /// `sink` at once, since no gated call runs between the two. An interrupt or shutdown returns
     /// its abort, and any other op comes back for the caller.
     fn absorb(&mut self, op: Option<Op>, sink: &dyn EventSink) -> AbortResult<Option<Op>> {

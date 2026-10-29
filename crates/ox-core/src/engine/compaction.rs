@@ -15,7 +15,6 @@ use super::{Engine, OpEnd, report_abort};
 use crate::auth::Auth;
 use crate::config::compaction::AutoCompactionConfig;
 use crate::message::Message;
-use crate::prompt::UserContext;
 use crate::protocol::{CompactTrigger, Event, EventSink};
 use crate::session::handle::CompactBoundary;
 use crate::session::store::CompactRecord;
@@ -242,13 +241,7 @@ impl Engine {
             .await;
         let compacted = match summary {
             Ok(Ok(summary)) => {
-                let (fresh, warnings) = UserContext::load(
-                    self.cwd(),
-                    self.settings.model(),
-                    self.policy.mode(),
-                    &self.tools,
-                )
-                .await;
+                let (fresh, warnings) = self.fresh_user_context(mailbox).await;
                 let boundary = CompactBoundary {
                     record: CompactRecord {
                         summary,

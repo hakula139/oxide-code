@@ -15,6 +15,7 @@ use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, ConfigFix, Decision, Mode, Policy, SessionGrant, Workspace};
+use crate::prompt::plan_runs;
 use crate::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::handle::SessionHandle;
 use crate::tool::spill::run_capped;
@@ -335,9 +336,7 @@ impl<'r> Dispatcher<'r, '_, '_> {
     ) -> AbortResult<Option<ToolOutput>> {
         let name = spec.definition.name.as_str();
         let class = spec.class;
-        if let Some(mode) = self.mailbox.take_mode() {
-            self.dispatch_ctx.policy.set_mode(mode);
-        }
+        self.mailbox.apply_mode(self.dispatch_ctx.policy);
         let verdict = self.dispatch_ctx.policy.verdict(class, &prepared.access);
         debug!(
             tool = name,
@@ -349,7 +348,7 @@ impl<'r> Dispatcher<'r, '_, '_> {
         match verdict.decision {
             Decision::Allow => Ok(None),
             Decision::Deny => Ok(Some(match verdict.basis {
-                Basis::Mode(Mode::Plan) => plan_denied_output(name),
+                Basis::Mode(Mode::Plan) => plan_denied_output(name, self.tools),
                 basis => denied_output(name, format_args!("by {basis}")),
             })),
             Decision::Unapproved => {
@@ -437,13 +436,15 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
     ))
 }
 
-/// The synthetic error result for a call `plan` mode denies. It steers the model toward the plan
-/// the mode exists for, since asking the user to adjust permissions would defeat the mode.
-fn plan_denied_output(name: &str) -> ToolOutput {
+/// The synthetic error result for a call `plan` mode denies, naming the `tools` that still run. It
+/// steers the model toward the plan the mode exists for, since asking the user to adjust
+/// permissions would defeat the mode.
+fn plan_denied_output(name: &str, tools: &ToolRegistry) -> ToolOutput {
     ToolOutput::error(format!(
-        "The {name} call was denied by `plan` mode, which allows only reads. \
+        "The {name} call was denied by `plan` mode, where {}. \
          Do not retry it. \
-         Finish investigating with `read`, `glob`, and `grep`, then present your plan."
+         Finish investigating, then present your plan.",
+        plan_runs(&tools.plan_tools()),
     ))
 }
 
@@ -541,6 +542,7 @@ mod tests {
     use crate::protocol::local_testing::{CapturingSink, FailingSink};
     use crate::tool::ToolDefinition;
     use crate::tool::edit::EditTool;
+    use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_registry;
@@ -982,7 +984,7 @@ mod tests {
 
             #[tokio::test]
             async fn plan_mode_denial_steers_toward_the_plan() {
-                let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+                let tools = ToolRegistry::new(vec![Box::new(EchoTool), Box::new(ReadTool)]);
                 let sink = CapturingSink::default();
                 let mut dispatch_ctx = dispatch_with(Mode::Plan, &[], &[], Path::new("/repo"));
 
@@ -1002,9 +1004,9 @@ mod tests {
                 assert!(denial.is_error);
                 assert_eq!(
                     denial.content,
-                    "The echo call was denied by `plan` mode, which allows only reads. \
+                    "The echo call was denied by `plan` mode, where only calls to `read` run. \
                      Do not retry it. \
-                     Finish investigating with `read`, `glob`, and `grep`, then present your plan."
+                     Finish investigating, then present your plan."
                 );
                 assert_eq!(
                     approval_ids(&sink),

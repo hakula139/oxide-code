@@ -195,11 +195,13 @@ impl SessionHandle {
     }
 
     /// Records one tool round in one commit: the assistant message and the tool results answering
-    /// it, which carry their metadata. Default metadata is skipped.
+    /// it, which carry their metadata and the prompt state they are the first to carry. Default
+    /// metadata is skipped.
     pub(crate) async fn record_round(
         &self,
         assistant: Message,
         tool_results: Message,
+        context: Option<SessionContext>,
         metadata: Vec<(String, ToolMetadata)>,
     ) -> WriteReport {
         let metadata = metadata
@@ -208,7 +210,7 @@ impl SessionHandle {
             .collect();
         self.write(move |state| {
             _ = state.queue_message(assistant, None, BTreeMap::new(), None);
-            _ = state.queue_message(tool_results, None, metadata, None);
+            _ = state.queue_message(tool_results, context, metadata, None);
         })
         .await
         .1
@@ -675,6 +677,7 @@ mod tests {
                 .record_round(
                     Message::assistant("round"),
                     Message::user("result"),
+                    None,
                     vec![
                         ("t1".to_owned(), edited.clone()),
                         ("t2".to_owned(), ToolMetadata::default()),
@@ -1636,6 +1639,7 @@ mod tests {
                         role: Role::User,
                         content: vec![ContentBlock::tool_result("t1", "Edited f.rs.", false)],
                     },
+                    None,
                     vec![("t1".to_owned(), edit_metadata())],
                 )
                 .await;
@@ -1682,6 +1686,7 @@ mod tests {
                             ),
                         ],
                     },
+                    None,
                     vec![
                         (
                             "t2".to_owned(),
