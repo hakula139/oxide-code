@@ -166,8 +166,15 @@ impl Engine {
         let read_filter = config.permission.read_filter();
         let tools = Arc::new(ToolRegistry::built_in(&read_filter, &shells));
         let workspace = Arc::new(config.workspace.clone());
-        let (transcript, usage, instruction_warnings) =
-            LiveTranscript::load(handle, transcript, settings.model(), workspace.cwd()).await;
+        let (transcript, usage, instruction_warnings) = LiveTranscript::load(
+            handle,
+            transcript,
+            settings.model(),
+            config.permission.mode(),
+            &tools,
+            workspace.cwd(),
+        )
+        .await;
         let context_estimate = transcript.request_estimate(&tools.definitions());
         Ok(Self {
             client,
@@ -443,7 +450,13 @@ impl Engine {
 
     /// Reads the user context afresh with [`Self::show_instruction_warnings`].
     async fn load_user_context(&mut self, sink: &dyn EventSink) -> UserContext {
-        let (context, warnings) = UserContext::load(self.cwd(), self.settings.model()).await;
+        let (context, warnings) = UserContext::load(
+            self.cwd(),
+            self.settings.model(),
+            self.policy.mode(),
+            &self.tools,
+        )
+        .await;
         self.show_instruction_warnings(sink, warnings);
         context
     }
@@ -4185,6 +4198,49 @@ mod tests {
                     "{:?}",
                     sink.events()
                 );
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn names_the_new_mode_on_the_next_prompt_only() {
+            with_pinned_home(async {
+                let server = MockServer::start().await;
+                mount_reply(&server, "reply").await;
+                let dir = tempfile::tempdir().unwrap();
+                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let sink = CapturingSink::default();
+                let mut mailbox = inert_mailbox();
+
+                engine
+                    .submit_prompt("first", None, &sink, &mut mailbox)
+                    .await;
+                engine.set_mode(&sink, Mode::Plan);
+                engine
+                    .submit_prompt("second", None, &sink, &mut mailbox)
+                    .await;
+                engine.set_mode(&sink, Mode::Plan);
+                engine
+                    .submit_prompt("third", None, &sink, &mut mailbox)
+                    .await;
+
+                let turns = request_bodies(&server).await;
+                let messages = turns[2]["messages"].as_array().unwrap();
+                let second = messages[3]["content"].as_array().unwrap();
+                assert_eq!(second[0]["text"], "second");
+                let reminder = second[1]["text"].as_str().unwrap();
+                assert!(
+                    reminder.contains("The permission mode is `plan`"),
+                    "{reminder}"
+                );
+                assert!(!reminder.contains("# Model"), "{reminder}");
+                let third = messages[5]["content"].as_array().unwrap();
+                assert_eq!(
+                    third.len(),
+                    1,
+                    "an unchanged mode adds no reminder: {third:?}"
+                );
+                assert_eq!(third[0]["text"], "third");
             })
             .await;
         }

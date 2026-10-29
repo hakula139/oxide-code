@@ -13,6 +13,7 @@ use super::schema::FileConfig;
 use crate::permission::project::{ProjectFileError, resolve_project_file};
 use crate::permission::{Tier, extra_root};
 use crate::util::path::{XdgBase, app_dir, tildify};
+use crate::util::text::list_with_and;
 use crate::util::toml::{error_location, redacted_message};
 
 const CONFIG_FILE: &str = "config.toml";
@@ -305,11 +306,6 @@ fn reject_project_keys(table: &Table, path: &Path) -> Result<()> {
         list_with_and(PROJECT_CLIENT_KEYS),
         user_config_hint(),
     )
-}
-
-fn list_with_and(items: &[&str]) -> String {
-    let (last, rest) = items.split_last().expect("the list is not empty");
-    format!("{}, and {last}", rest.join(", "))
 }
 
 /// The dotted names of the keys in the `section` table of `table`, the root when empty, that are

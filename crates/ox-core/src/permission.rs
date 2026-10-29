@@ -76,6 +76,15 @@ impl Mode {
             Self::Yolo => "Run tool calls unless a deny rule or your ask rules hold them",
         }
     }
+
+    /// Whether the mode denies every call in `class`, whatever the allow and ask rules say.
+    pub(crate) fn denies(self, class: PermissionClass) -> bool {
+        self == Self::Plan
+            && matches!(
+                class,
+                PermissionClass::Edit | PermissionClass::Exec | PermissionClass::Net
+            )
+    }
 }
 
 // ── Permission Class ──
@@ -1096,13 +1105,8 @@ impl Policy {
             return verdict(Decision::Deny, rule.basis(Tier::Deny));
         }
 
-        if self.mode == Mode::Plan
-            && matches!(
-                class,
-                PermissionClass::Edit | PermissionClass::Exec | PermissionClass::Net
-            )
-        {
-            return verdict(Decision::Deny, Basis::Mode(Mode::Plan));
+        if self.mode.denies(class) {
+            return verdict(Decision::Deny, Basis::Mode(self.mode));
         }
 
         if self.mode == Mode::Yolo {

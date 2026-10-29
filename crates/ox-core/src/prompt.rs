@@ -15,6 +15,9 @@ use self::sections::{
 };
 use crate::git::repo_root;
 use crate::model::ModelSpec;
+use crate::permission::Mode;
+use crate::tool::ToolRegistry;
+use crate::util::text::list_with_and;
 
 /// Output of [`build_prompt`] or [`restore_prompt`], held for a whole session so every request
 /// shares a byte-identical prefix.
@@ -22,8 +25,8 @@ use crate::model::ModelSpec;
 pub(crate) struct PromptParts {
     environment: Environment,
     pub(crate) system: SystemPrompt,
-    /// The instruction files, date, and model identity reminder, sent as the first user message so
-    /// a `/model` swap leaves the system prompt byte-identical.
+    /// The instruction files, date, model identity, and permission mode reminder, sent as the first
+    /// user message so a `/model` swap leaves the system prompt byte-identical.
     pub(crate) user_context: String,
     /// What the model has seen of the user context, in `user_context` or a later reminder.
     pub(crate) seen: UserContext,
@@ -85,17 +88,28 @@ pub(crate) struct UserContext {
     pub(crate) date: String,
     /// Rendered model name, exact ID, and knowledge cutoff.
     pub(crate) model: String,
+    /// Rendered permission mode and what it lets tool calls do. Empty in a context a session
+    /// recorded before the user context named the mode.
+    #[serde(default)]
+    pub(crate) mode: String,
 }
 
 impl UserContext {
-    /// Reads the instruction files that apply in `cwd`, plus today's date and `model`'s identity.
-    /// Also returns a warning for each instruction file that exists but cannot or may not be read.
-    pub(crate) async fn load(cwd: &Path, model: &ModelSpec) -> (Self, Vec<String>) {
+    /// Reads the instruction files that apply in `cwd`, plus today's date, `model`'s identity, and
+    /// what `mode` lets calls of `tools` do. Also returns a warning for each instruction file that
+    /// exists but cannot or may not be read.
+    pub(crate) async fn load(
+        cwd: &Path,
+        model: &ModelSpec,
+        mode: Mode,
+        tools: &ToolRegistry,
+    ) -> (Self, Vec<String>) {
         let (instructions, warnings) = instructions::load(cwd).await;
         let context = Self {
             instructions,
             date: environment::current_date(),
             model: environment::model_identity(model),
+            mode: mode_rules(mode, tools),
         };
         (context, warnings)
     }
@@ -112,9 +126,14 @@ pub(crate) struct SessionContext {
 
 /// Detects the environment and loads instruction files for a new session. Also returns the warnings
 /// [`UserContext::load`] does.
-pub(crate) async fn build_prompt(model: &ModelSpec, cwd: &Path) -> (PromptParts, Vec<String>) {
+pub(crate) async fn build_prompt(
+    model: &ModelSpec,
+    mode: Mode,
+    tools: &ToolRegistry,
+    cwd: &Path,
+) -> (PromptParts, Vec<String>) {
     let git_root = repo_root(cwd).await;
-    assemble(model, cwd, git_root.as_deref()).await
+    assemble(model, mode, tools, cwd, git_root.as_deref()).await
 }
 
 /// Rebuilds the prompt `stored` describes, so a resumed session sends the prefix it sent before. A
@@ -140,11 +159,13 @@ pub(crate) async fn restore_prompt(stored: SessionContext, cwd: &Path) -> Prompt
 
 async fn assemble(
     model: &ModelSpec,
+    mode: Mode,
+    tools: &ToolRegistry,
     cwd: &Path,
     git_root: Option<&Path>,
 ) -> (PromptParts, Vec<String>) {
     let environment = Environment::detect(cwd, git_root);
-    let (context, warnings) = UserContext::load(cwd, model).await;
+    let (context, warnings) = UserContext::load(cwd, model, mode, tools).await;
 
     let parts = PromptParts {
         system: system_prompt(&environment),
@@ -178,6 +199,7 @@ fn render_user_context(context: &UserContext) -> String {
     }
     sections.push(render_date(&context.date));
     sections.push(render_model(&context.model));
+    sections.push(render_mode(&context.mode));
 
     let sections = sections.join("\n\n");
     system_reminder(&formatdoc! {"
@@ -206,6 +228,9 @@ fn render_reminder(seen: &UserContext, fresh: &UserContext) -> String {
     if fresh.model != seen.model {
         sections.push(render_model(&fresh.model));
     }
+    if fresh.mode != seen.mode {
+        sections.push(render_mode(&fresh.mode));
+    }
 
     let sections = sections.join("\n\n");
     system_reminder(&formatdoc! {"
@@ -231,6 +256,40 @@ fn render_model(model: &str) -> String {
     }
 }
 
+fn render_mode(mode: &str) -> String {
+    formatdoc! {"
+        # Permission mode
+
+        {mode}"
+    }
+}
+
+/// What `mode` lets tool calls do, naming the `tools` that `plan` leaves for investigating.
+fn mode_rules(mode: Mode, tools: &ToolRegistry) -> String {
+    match mode {
+        Mode::Manual => "The permission mode is `manual`. Reads, read-only commands, and edits \
+                         inside the working directory run, and any other call waits for the \
+                         user's approval, or is denied when nobody can approve it."
+            .to_owned(),
+        Mode::Plan => {
+            let running: Vec<_> = tools
+                .specs()
+                .filter(|spec| !mode.denies(spec.class))
+                .map(|spec| format!("`{}`", spec.definition.name))
+                .collect();
+            format!(
+                "The permission mode is `plan`, so every edit and command is denied, and only calls \
+                 to {} run. Investigate with them, then present your plan for the user to review.",
+                list_with_and(&running),
+            )
+        }
+        Mode::Yolo => {
+            "The permission mode is `yolo`, so calls run unless a permission rule holds them."
+                .to_owned()
+        }
+    }
+}
+
 /// `body` wrapped in the model-facing `<system-reminder>` envelope.
 pub(crate) fn system_reminder(body: &str) -> String {
     formatdoc! {"
@@ -242,6 +301,8 @@ pub(crate) fn system_reminder(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use indoc::indoc;
     use time::macros::format_description;
     use time::{Date, OffsetDateTime};
@@ -249,15 +310,27 @@ mod tests {
     use super::*;
     use crate::git::local_testing::init_fixture_repo;
     use crate::git::testing::with_isolated_git_env_async;
+    use crate::permission::ReadFilter;
     use crate::util::path::testing::pinned_home;
 
     const IDENTITY: &str = "You are powered by the model test-model.";
+
+    /// The built-in tools, with no read rules and background shells of their own.
+    fn built_in() -> ToolRegistry {
+        ToolRegistry::built_in(&ReadFilter::default(), &Arc::default())
+    }
+
+    /// What `mode` lets calls of the built-in tools do.
+    fn rules(mode: Mode) -> String {
+        mode_rules(mode, &built_in())
+    }
 
     fn context(instructions: &str, date: &str) -> UserContext {
         UserContext {
             instructions: instructions.to_owned(),
             date: date.to_owned(),
             model: IDENTITY.to_owned(),
+            mode: rules(Mode::Manual),
         }
     }
 
@@ -294,13 +367,31 @@ mod tests {
                 model: "You are powered by the model other-model.".to_owned(),
                 ..context("New rules.", "2026-04-13")
             };
-            let reminder = parts.catch_up(swapped).unwrap();
+            let reminder = parts.catch_up(swapped.clone()).unwrap();
             assert!(reminder.contains(indoc! {"
                 # Model
 
                 You are powered by the model other-model."
             }));
             assert!(!reminder.contains("# User instructions"), "{reminder}");
+
+            let planning = UserContext {
+                mode: rules(Mode::Plan),
+                ..swapped
+            };
+            let reminder = parts.catch_up(planning).unwrap();
+            assert_eq!(
+                reminder,
+                indoc! {"
+                    <system-reminder>
+                    The context from the start of this conversation has changed. Use these values from now on:
+
+                    # Permission mode
+
+                    The permission mode is `plan`, so every edit and command is denied, and only calls to `bash_output`, `bash_stop`, `read`, `glob`, `grep`, and `tasks` run. Investigate with them, then present your plan for the user to review.
+                    </system-reminder>"
+                },
+            );
 
             let reminder = parts.catch_up(context("", "2026-04-13")).unwrap();
             assert!(reminder.contains("The instruction files were removed"));
@@ -337,13 +428,13 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn names_the_model_in_user_context_only() {
+        async fn names_the_model_and_the_mode_in_user_context_only() {
             let (home, cwd) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let model = ModelSpec::resolve("claude-opus-5-5");
 
             let (parts, warnings) = with_isolated_git_env_async(temp_env::async_with_vars(
                 pinned_home(home.path()),
-                build_prompt(&model, cwd.path()),
+                build_prompt(&model, Mode::Plan, &built_in(), cwd.path()),
             ))
             .await;
 
@@ -370,8 +461,21 @@ mod tests {
                 parts.user_context,
             );
             assert_eq!(parts.seen.model, identity);
-            assert!(!parts.system.stable.contains("claude-opus-5-5"));
-            assert!(!parts.system.dynamic.contains("claude-opus-5-5"));
+            let mode = rules(Mode::Plan);
+            assert!(
+                parts.user_context.contains(&formatdoc! {"
+                    # Permission mode
+
+                    {mode}"
+                }),
+                "{}",
+                parts.user_context,
+            );
+            assert_eq!(parts.seen.mode, mode);
+            for text in ["claude-opus-5-5", &mode] {
+                assert!(!parts.system.stable.contains(text), "{text}");
+                assert!(!parts.system.dynamic.contains(text), "{text}");
+            }
         }
     }
 
@@ -407,7 +511,37 @@ mod tests {
             let dynamic = &parts.system.dynamic;
             assert!(dynamic.contains("- Platform: plan9"), "{dynamic}");
             assert_eq!(parts.user_context, "recorded context");
-            assert_eq!(parts.seen, context("Recorded rules.", "2026-04-12"));
+            assert_eq!(
+                parts.seen,
+                UserContext {
+                    mode: String::new(),
+                    ..context("Recorded rules.", "2026-04-12")
+                },
+            );
+        }
+
+        #[tokio::test]
+        async fn names_the_mode_next_turn_when_the_recording_predates_it() {
+            let tmp = tempfile::tempdir().expect("failed to create tempdir");
+            let mut parts = restore_prompt(recorded_context(tmp.path()), tmp.path()).await;
+
+            let reminder = parts
+                .catch_up(context("Recorded rules.", "2026-04-12"))
+                .unwrap();
+
+            let mode = rules(Mode::Manual);
+            assert_eq!(
+                reminder,
+                formatdoc! {"
+                    <system-reminder>
+                    The context from the start of this conversation has changed. Use these values from now on:
+
+                    # Permission mode
+
+                    {mode}
+                    </system-reminder>"
+                },
+            );
         }
 
         #[tokio::test]
@@ -440,7 +574,13 @@ mod tests {
 
             let (parts, warnings) = temp_env::async_with_vars(
                 pinned_home(home.path()),
-                assemble(&model, tmp.path(), Some(tmp.path())),
+                assemble(
+                    &model,
+                    Mode::Manual,
+                    &built_in(),
+                    tmp.path(),
+                    Some(tmp.path()),
+                ),
             )
             .await;
             assert_eq!(warnings, [] as [String; 0]);
@@ -510,7 +650,7 @@ mod tests {
 
             let (parts, warnings) = temp_env::async_with_vars(
                 pinned_home(home.path()),
-                assemble(&model, &sub, Some(root)),
+                assemble(&model, Mode::Manual, &built_in(), &sub, Some(root)),
             )
             .await;
             assert_eq!(warnings, [] as [String; 0]);
@@ -588,6 +728,10 @@ mod tests {
 
                     You are powered by the model test-model.
 
+                    # Permission mode
+
+                    The permission mode is `manual`. Reads, read-only commands, and edits inside the working directory run, and any other call waits for the user's approval, or is denied when nobody can approve it.
+
                     IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
                     </system-reminder>"
                 },
@@ -610,9 +754,50 @@ mod tests {
 
                     You are powered by the model test-model.
 
+                    # Permission mode
+
+                    The permission mode is `manual`. Reads, read-only commands, and edits inside the working directory run, and any other call waits for the user's approval, or is denied when nobody can approve it.
+
                     IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
                     </system-reminder>"
                 },
+            );
+        }
+    }
+
+    mod mode_rules {
+        use strum::VariantArray as _;
+
+        use super::*;
+        use crate::tool::read::ReadTool;
+        use crate::tool::tasks::TasksTool;
+        use crate::tool::write::WriteTool;
+
+        #[test]
+        fn names_each_mode_it_describes() {
+            for &mode in Mode::VARIANTS {
+                let rules = rules(mode);
+
+                assert!(
+                    rules.starts_with(&format!("The permission mode is `{mode}`")),
+                    "{mode}: {rules}"
+                );
+            }
+        }
+
+        #[test]
+        fn plan_names_the_registered_tools_it_leaves_running() {
+            let tools = ToolRegistry::new(vec![
+                Box::new(WriteTool),
+                Box::new(TasksTool),
+                Box::new(ReadTool),
+            ]);
+
+            let rules = mode_rules(Mode::Plan, &tools);
+
+            assert!(
+                rules.contains("only calls to `tasks` and `read` run."),
+                "{rules}"
             );
         }
     }
@@ -640,6 +825,10 @@ mod tests {
                     # Model
 
                     You are powered by the model test-model.
+
+                    # Permission mode
+
+                    The permission mode is `manual`. Reads, read-only commands, and edits inside the working directory run, and any other call waits for the user's approval, or is denied when nobody can approve it.
                     </system-reminder>"
                 },
             );

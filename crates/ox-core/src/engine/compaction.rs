@@ -242,7 +242,13 @@ impl Engine {
             .await;
         let compacted = match summary {
             Ok(Ok(summary)) => {
-                let (fresh, warnings) = UserContext::load(self.cwd(), self.settings.model()).await;
+                let (fresh, warnings) = UserContext::load(
+                    self.cwd(),
+                    self.settings.model(),
+                    self.policy.mode(),
+                    &self.tools,
+                )
+                .await;
                 let boundary = CompactBoundary {
                     record: CompactRecord {
                         summary,

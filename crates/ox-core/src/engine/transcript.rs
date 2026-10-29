@@ -10,6 +10,7 @@ use super::estimate::request_tokens;
 use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::{ContentBlock, Message, TextOrigin};
 use crate::model::ModelSpec;
+use crate::permission::Mode;
 use crate::prompt::{self, PromptParts, SessionContext, UserContext};
 use crate::protocol::SessionRef;
 use crate::session::handle::{
@@ -17,6 +18,7 @@ use crate::session::handle::{
     RollIntoOutcome, RollOutcome, SessionHandle, WriteReport,
 };
 use crate::session::store::{CompactInfo, SessionStore, UsageRecord};
+use crate::tool::ToolRegistry;
 use crate::tool::tasks::Task;
 use crate::tool::{ToolDefinition, ToolMetadata};
 
@@ -63,12 +65,15 @@ struct TranscriptStart {
 
 impl LiveTranscript {
     /// Builds the live transcript of `transcript` on `session`, restoring the file tracker and
-    /// building the prompt. Also returns the loaded session's usage, which seeds its cost, and the
-    /// warnings about instruction files a fresh prompt could not read.
+    /// building the prompt, which a fresh session starts in `mode` with `tools`. Also returns the
+    /// loaded session's usage, which seeds its cost, and the warnings about instruction files a
+    /// fresh prompt could not read.
     pub(super) async fn load(
         session: SessionHandle,
         transcript: LoadedTranscript,
         model: &ModelSpec,
+        mode: Mode,
+        tools: &ToolRegistry,
         cwd: &Path,
     ) -> (Self, Vec<UsageRecord>, Vec<String>) {
         let LoadedTranscript {
@@ -82,7 +87,7 @@ impl LiveTranscript {
         } = transcript;
         let (file_tracker, drifted) = FileTracker::restored(file_snapshots).await;
         let prompt_unrecorded = context.is_none();
-        let (prompt, warnings) = session_prompt(context, model, cwd).await;
+        let (prompt, warnings) = session_prompt(context, model, mode, tools, cwd).await;
         let live = Self {
             session,
             messages,
@@ -104,10 +109,12 @@ impl LiveTranscript {
         &mut self,
         transcript: LoadedTranscript,
         model: &ModelSpec,
+        mode: Mode,
+        tools: &ToolRegistry,
         cwd: &Path,
     ) -> (Vec<UsageRecord>, Vec<String>) {
         let (live, usage, warnings) =
-            Self::load(self.session.clone(), transcript, model, cwd).await;
+            Self::load(self.session.clone(), transcript, model, mode, tools, cwd).await;
         *self = live;
         (usage, warnings)
     }
@@ -358,15 +365,18 @@ impl LiveTranscript {
     }
 }
 
-/// Replays the prompt a session recorded, or builds a fresh one for a session without one. Also
-/// returns the warnings about instruction files a fresh build could not read.
+/// Replays the prompt a session recorded, or builds a fresh one in `mode` with `tools` for a
+/// session without one. Also returns the warnings about instruction files a fresh build could not
+/// read.
 async fn session_prompt(
     context: Option<SessionContext>,
     model: &ModelSpec,
+    mode: Mode,
+    tools: &ToolRegistry,
     cwd: &Path,
 ) -> (PromptParts, Vec<String>) {
     match context {
         Some(context) => (prompt::restore_prompt(context, cwd).await, Vec::new()),
-        None => prompt::build_prompt(model, cwd).await,
+        None => prompt::build_prompt(model, mode, tools, cwd).await,
     }
 }

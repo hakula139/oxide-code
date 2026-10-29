@@ -1,6 +1,6 @@
 # System Prompt
 
-The `prompt` module builds what the model reads about its role and its session: static sections shared by every session, an environment section for the session's machine and directory, and a user context that carries the instruction files, the date, and the model's identity.
+The `prompt` module builds what the model reads about its role and its session: static sections shared by every session, an environment section for the session's machine and directory, and a user context that carries the instruction files, the date, the model's identity, and the permission mode.
 
 ## Request Layout
 
@@ -24,9 +24,9 @@ A session records the environment with its prompt context, as [Persistence](pers
 
 ## User Context
 
-The leading user message carries the user context: the instruction files that [Instruction Files](../guide/instructions.md) describes, the local date, and the model's name, exact ID, and knowledge cutoff. `PromptParts::seen` records what the model has seen of these values.
+The leading user message carries the user context: the instruction files that [Instruction Files](../guide/instructions.md) describes, the local date, the model's name, exact ID, and knowledge cutoff, and the permission mode with what it lets calls do. In `plan`, the mode section names the tools that still run and asks the model to investigate and then present its plan. `PromptParts::seen` records what the model has seen of these values.
 
-Before each prompt, the engine loads the user context again and compares it with what the model has seen. When an instruction file, the date, or the model changed, it appends a `<system-reminder>` with only the changed values to the prompt's user message, and transcript displays hide the reminder. A removed instruction file produces a reminder that the earlier instructions no longer apply. Compaction renders a fresh user context for the summarized transcript and counts it as seen, since no earlier request started with that transcript.
+Before each prompt, the engine loads the user context again and compares it with what the model has seen. When an instruction file, the date, the model, or the mode changed, it appends a `<system-reminder>` with only the changed values to the prompt's user message, and transcript displays hide the reminder. A removed instruction file produces a reminder that the earlier instructions no longer apply. A mode switch through `/mode`, Tab, or Shift+Tab reaches the model with the next prompt, and a resumed session whose recorded context predates the mode, or that resumes in another mode, names the current one on its first prompt. Compaction renders a fresh user context for the summarized transcript and counts it as seen, since no earlier request started with that transcript.
 
 ## Tool Descriptions
 
@@ -38,7 +38,7 @@ Each tool's description states the facts that would otherwise cost the model a f
 
 2. **Follow Claude Code's sections and rewrite every sentence `ox` contradicts.** Claude models are tuned against Claude Code's prompt, so reusing its structure and wording where the harnesses behave alike keeps behavior predictable. Copying the prompt whole describes Claude Code's harness instead, such as a persistent working directory between `bash` calls and clickable `owner/repo#123` references, so each sentence is checked against what `ox` does. Rules the copied prompt states twice are merged into one sentence.
 
-3. **Describe the permission modes statically and steer `plan` in its denial.** The modes and the chain rule are the same in every session, so they belong in the cached static prefix. What to do after a `plan` denial matters only once a call is denied, so the denial's result says it, where it is the latest instruction the model reads and costs nothing on other requests. Telling the model which mode is active belongs in the user context, which [#727](https://github.com/hakula139/oxide-code/issues/727) tracks.
+3. **Describe the permission modes statically, and name the active one in the user context.** The modes and the chain rule are the same in every session, so they belong in the cached static prefix. The active mode changes within a session, so it travels in the user context, where a switch costs one reminder and leaves the cached prefix intact, and the model plans in `plan` without first spending a denied call. The `plan` denial still tells the model to present its plan, since a denied call is the latest instruction it reads.
 
 4. **Name the shell that runs commands.** Claude Code reports `$SHELL` because its Bash tool runs commands through the user's shell. `ox` runs every command with `bash -c`, so reporting only `$SHELL` invites zsh or fish syntax that bash rejects.
 
@@ -46,15 +46,11 @@ Each tool's description states the facts that would otherwise cost the model a f
 
 6. **Keep tool descriptions to facts that prevent a failed call.** Every request sends every description, so a fact the result already reports would cost tokens on each request to save one round in a rare case.
 
-## Out of Scope
-
-- **Current permission mode.** The user context does not yet name the active mode, so the model learns of `plan` from its first denied call. Adding it waits on the engine's rework of how an op adopts a mode switch, tracked in [#727](https://github.com/hakula139/oxide-code/issues/727).
-
 ## Sources
 
 - `crates/ox-core/src/client/anthropic.rs`: `SYSTEM_PROMPT_PREFIX` and `build_system_blocks`.
 - `crates/ox-core/src/engine/dispatch.rs`: `denied_output` and `plan_denied_output`, the results of denied calls.
-- `crates/ox-core/src/prompt.rs`: `PromptParts`, `UserContext`, `build_prompt`, `restore_prompt`, and the user context and reminder rendering.
+- `crates/ox-core/src/prompt.rs`: `PromptParts`, `UserContext`, `build_prompt`, `restore_prompt`, `mode_rules`, and the user context and reminder rendering.
 - `crates/ox-core/src/prompt/environment.rs`: `Environment`, `model_identity`, and the date.
 - `crates/ox-core/src/prompt/instructions.rs`: instruction file discovery and rendering.
 - `crates/ox-core/src/prompt/sections.rs`: the static sections.

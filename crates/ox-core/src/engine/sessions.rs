@@ -144,7 +144,13 @@ impl Engine {
         self.shells.stop_all().await;
         let (usage, warnings) = self
             .transcript
-            .adopt(transcript, self.settings.model(), self.workspace.cwd())
+            .adopt(
+                transcript,
+                self.settings.model(),
+                self.policy.mode(),
+                &self.tools,
+                self.workspace.cwd(),
+            )
             .await;
         self.instruction_warnings = warnings;
         self.policy.clear_session_allow();

@@ -392,12 +392,14 @@ impl ToolRegistry {
             .map(|(spec, tool)| (spec, tool.as_ref()))
     }
 
+    /// The specs the tools registered with, in registration order.
+    pub(crate) fn specs(&self) -> impl Iterator<Item = &ToolSpec> {
+        self.tools.iter().map(|(spec, _)| spec)
+    }
+
     /// The definitions a request sends, in registration order.
     pub(crate) fn definitions(&self) -> Vec<&ToolDefinition> {
-        self.tools
-            .iter()
-            .map(|(spec, _)| &spec.definition)
-            .collect()
+        self.specs().map(|spec| &spec.definition).collect()
     }
 
     pub(crate) fn icon(&self, name: &str) -> &'static str {
