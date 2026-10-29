@@ -980,7 +980,7 @@ impl Walk<'_> {
             .and_then(|(first, args)| {
                 let name = first.value.as_deref().filter(|_| !first.glob)?;
                 if matches!(name, "cd" | "pushd") {
-                    self.enters_workspace(args).then(Vec::new)
+                    self.enters_workspace(name, args).then(Vec::new)
                 } else {
                     safe_operands(name, args)
                 }
@@ -1011,8 +1011,7 @@ impl Walk<'_> {
             match &safe {
                 Some(files) if i == 0 => operands.extend(files.iter().cloned()),
                 _ if READERS.contains(&folded.as_str()) => {
-                    let (files, anything) =
-                        reader_operands(&folded, &all[start + 1..], self.workspace.cwd());
+                    let (files, anything) = self.reader_operands(&folded, &all[start + 1..]);
                     operands.extend(files);
                     reads_anything |= anything || unwrapped.passes_input();
                 }
@@ -1109,7 +1108,7 @@ impl Walk<'_> {
             self.mark_unrecognized(span_text(words, src));
         }
         if DIRECTORY_CHANGERS.contains(&name) {
-            let inside = self.enters_workspace(args);
+            let inside = self.enters_workspace(name, args);
             self.change_dir(inside, words, src);
             self.enter_dir(name, args);
         }
@@ -1203,13 +1202,10 @@ impl Walk<'_> {
     /// literal target, or a bare `cd` to the home directory, joined to each directory the walk
     /// already knows. Any other change, or one that may run more than once, leaves it unknown.
     fn enter_dir(&mut self, name: &str, args: &[Word]) {
-        let target = match args {
-            [] if name == "cd" => home(),
-            [target] if name != "popd" && !target.glob => target
-                .value
-                .clone()
-                .filter(|path| !path.is_empty() && !path.starts_with(['-', '+'])),
-            _ => None,
+        let target = match dir_target(name, args) {
+            DirTarget::Home => home(),
+            DirTarget::Path(path) => Some(path.to_owned()),
+            DirTarget::Unknown => None,
         };
         let Some(target) = target.filter(|_| self.repeats == 0) else {
             self.entered.unknown = true;
@@ -1226,6 +1222,27 @@ impl Walk<'_> {
         }
     }
 
+    /// The [`reader_operands`] of reader `name` with `args`, expanding each glob in the working
+    /// directory and in each directory the walk may have entered, where a match is spelled from
+    /// that directory.
+    fn reader_operands(&self, name: &str, args: &[Word]) -> (Vec<Operand>, bool) {
+        let cwd = self.workspace.cwd();
+        let (mut files, mut anything) = reader_operands(name, args, cwd);
+        if args.iter().any(|word| word.glob) {
+            for dir in &self.entered.dirs {
+                let base = cwd.join(dir);
+                let (entered, unknown) = reader_operands(name, args, &base);
+                anything |= unknown;
+                files.extend(entered.into_iter().map(|mut operand| {
+                    operand.read.path =
+                        base.join(&operand.read.path).to_string_lossy().into_owned();
+                    operand
+                }));
+            }
+        }
+        (files, anything)
+    }
+
     /// `path` as the working directory and each directory the walk may have entered name it.
     fn spellings(&self, path: &str) -> Vec<String> {
         let mut spellings = vec![path.to_owned()];
@@ -1240,21 +1257,17 @@ impl Walk<'_> {
         spellings
     }
 
-    /// Returns whether `args` name one literal directory inside a workspace root without `..`,
-    /// which bash's `cd` applies to the spelled path while the gate resolves symlinks first.
-    fn enters_workspace(&mut self, args: &[Word]) -> bool {
-        let [target] = args else {
+    /// Returns whether `name` with `args` enters one literal directory in a workspace root, with
+    /// no `..`, which bash's `cd` applies to the spelled path while the gate resolves links first.
+    fn enters_workspace(&mut self, name: &str, args: &[Word]) -> bool {
+        let DirTarget::Path(path) = dir_target(name, args) else {
             return false;
         };
-        target
-            .value
-            .as_deref()
+        Some(path)
             .filter(|path| {
-                !target.glob
-                    && !path.starts_with(['-', '+'])
-                    && !Path::new(path)
-                        .components()
-                        .any(|c| c == Component::ParentDir)
+                !Path::new(path)
+                    .components()
+                    .any(|c| c == Component::ParentDir)
             })
             .is_some_and(|path| self.paths.resolve(path).zone == Zone::Workspace)
     }
@@ -1439,6 +1452,58 @@ impl Walk<'_> {
                 self.writes.push(access);
             }
         }
+    }
+}
+
+/// Where a `cd`, `pushd`, or `popd` with `args` moves the working directory.
+enum DirTarget<'w> {
+    /// The home directory, where a bare `cd` goes.
+    Home,
+    /// One literal directory.
+    Path(&'w str),
+    /// Anywhere: `cd -`, `popd`, a stack rotation, or a target that expands.
+    Unknown,
+}
+
+/// The target of directory changer `name` with `args`, after the options bash's `cd` (`-L`, `-P`,
+/// and `-e`) or `pushd` (`-n`) takes and a `--` that ends them. `cd -@` enters a file's extended
+/// attributes, which no path names, so it goes anywhere.
+fn dir_target<'w>(name: &str, args: &'w [Word]) -> DirTarget<'w> {
+    let options = match name {
+        "cd" => "LPe",
+        "pushd" => "n",
+        _ => return DirTarget::Unknown,
+    };
+    let mut rest = args;
+    let mut ended = false;
+    while let Some((first, after)) = rest.split_first() {
+        let Some(value) = first.value.as_deref().filter(|_| !first.glob) else {
+            return DirTarget::Unknown;
+        };
+        if value == "--" {
+            ended = true;
+        } else if !value
+            .strip_prefix('-')
+            .is_some_and(|flags| !flags.is_empty() && flags.chars().all(|c| options.contains(c)))
+        {
+            break;
+        }
+        rest = after;
+        if ended {
+            break;
+        }
+    }
+    match rest {
+        [] if name == "cd" => DirTarget::Home,
+        [target] => match target.value.as_deref() {
+            Some(path)
+                if !target.glob && !path.is_empty() && (ended || !path.starts_with(['-', '+'])) =>
+            {
+                DirTarget::Path(path)
+            }
+            _ => DirTarget::Unknown,
+        },
+        _ => DirTarget::Unknown,
     }
 }
 
@@ -4439,7 +4504,8 @@ mod tests {
                     "cd $DIR && make",
                     "cd && make",
                     "cd - && make",
-                    "cd -P x && make",
+                    "cd -@ x && make",
+                    "cd -P -- -x/.. && make",
                     "cd x* && make",
                     "popd && make",
                     "cd x && cd y && make",
@@ -4485,6 +4551,8 @@ mod tests {
                     &format!("cd x && {}", abs("/usr/bin/make")),
                     "./build.sh",
                     "cd x && make",
+                    "cd -P x && make",
+                    "cd -L -- x && make",
                     "cd /repo/x && make",
                     "for i in 1 2; do echo $i; done; cd x && make",
                     "cd /tmp/evil",
