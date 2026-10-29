@@ -39,13 +39,51 @@ env:
 jobs:
   ci:
     name: CI
-    # ci.yml already checks pull requests, so calling it here would duplicate those checks.
-    if: github.event_name != 'pull_request' && !inputs.notes
+    # ci.yml already checks pull requests, and a tag reuses its commit's CI run.
+    if: github.event_name != 'pull_request' && github.ref_type != 'tag' && !inputs.notes
     permissions:
       actions: read
       contents: read
     uses: ./.github/workflows/ci.yml
     secrets: inherit
+
+  tagged-ci:
+    name: Check Tagged Commit CI
+    if: github.ref_type == 'tag' && !inputs.notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for CI on the tagged commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Pull request runs test a merge commit, so only push and dispatched runs count.
+          while true; do
+            verdict=$(
+              gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA" \
+                --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")]
+                  | if any(.[]; .conclusion == "success") then
+                      "passed \(map(select(.conclusion == "success"))[0].html_url)"
+                    elif any(.[]; .status != "completed") then "running"
+                    else "failed" end'
+            )
+            case "$verdict" in
+              passed*)
+                echo "CI passed on $GITHUB_SHA: ${verdict#passed }"
+                exit 0
+                ;;
+              running)
+                sleep 30
+                ;;
+              *)
+                echo "::error::No push or dispatched CI run passed on $GITHUB_SHA." \
+                  "Rerun its failed jobs, or run ci.yml on $GITHUB_REF_NAME, then rerun this job."
+                exit 1
+                ;;
+            esac
+          done
 
   build:
     name: Build (${{ matrix.target }})
@@ -169,7 +207,7 @@ jobs:
   publish:
     name: Publish GitHub Release
     if: github.ref_type == 'tag'
-    needs: [ci, build]
+    needs: [tagged-ci, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
