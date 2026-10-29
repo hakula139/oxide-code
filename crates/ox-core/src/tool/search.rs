@@ -158,8 +158,8 @@ impl Unreadable {
     /// file that failed to load only loses its rules, and a path that vanished mid-walk holds
     /// nothing left to search.
     fn from_walk(e: &ignore::Error) -> Option<Self> {
-        // A depthless error is an ignore file that failed to load, here or in an ancestor, except
-        // the I/O error of the parallel walk's volume check on a denied directory on Windows.
+        // A depthless error is an ignore file that failed to load, here or in an ancestor, unless
+        // it is an I/O error, as from the parallel walk's volume check on a denied Windows folder.
         if e.depth().is_none() && e.io_error().is_none() {
             return None;
         }
@@ -297,7 +297,7 @@ impl SearchRows {
     }
 
     pub(super) fn push(&mut self, row: SearchRow) {
-        if row == SearchRow::Separator {
+        if matches!(row, SearchRow::Separator) {
             self.separator_pending = !self.kept.is_empty();
             return;
         }

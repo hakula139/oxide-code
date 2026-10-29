@@ -271,13 +271,14 @@ fn grep_files(params: &GrepParams<'_>) -> Result<SearchOutput, String> {
 }
 
 /// Compiles `pattern` into a matcher whose matches each lie within one line, where `^` and `$`
-/// match at line boundaries, `$` also before a `\r\n`. A pattern holding a line break fails, while
-/// a lone `\r` stays searchable. Size limits keep a hostile pattern from exhausting memory.
+/// match at line boundaries, `$` also before a `\r\n`. `.`, `^`, and `$` take a lone `\r` as a line
+/// end, while a literal `\r` still matches within a line. A pattern holding a line break or able
+/// to match invalid UTF-8 fails. Size limits keep a hostile pattern from exhausting memory.
 fn matcher(pattern: &str, case_insensitive: bool) -> Result<RegexMatcher, String> {
     // The builder parses the pattern wrapped in `(?:...)`, which would accept an unbalanced
     // `a)|(b` and quote the wrapped pattern in errors, so the pattern is checked alone first.
     regex_syntax::ParserBuilder::new()
-        .utf8(false)
+        .utf8(true)
         .case_insensitive(case_insensitive)
         .build()
         .parse(pattern)
@@ -427,7 +428,7 @@ enum Line<'b> {
 
 impl<'a> Search<'a> {
     /// A search reporting `context` lines before and after each match. A file that grows past
-    /// `size_limit` bytes before it is read counts as unreadable.
+    /// `size_limit` bytes after the walk measured it counts as unreadable.
     fn new(
         matcher: RegexMatcher,
         context: usize,
@@ -493,12 +494,9 @@ impl<'a> Search<'a> {
             on_line,
             cancel: self.cancel,
         };
-        if let Err(e) = self
-            .searcher
+        self.searcher
             .search_slice(&self.matcher, strip_bom(&text).as_bytes(), sink)
-        {
-            self.unreadable.push(Unreadable::from_read(path, &e));
-        }
+            .expect("the matcher shares the searcher's `\\n` terminator, and the sink never fails");
     }
 }
 
@@ -537,12 +535,12 @@ impl<F: FnMut(Line<'_>) -> bool> Sink for LineSink<'_, F> {
     }
 }
 
-/// A reported line's text without its line ending, with invalid UTF-8 replaced.
-fn line_text(bytes: &[u8]) -> Cow<'_, str> {
+/// A reported line's text without its line ending.
+fn line_text(bytes: &[u8]) -> &str {
     let line = bytes
         .strip_suffix(b"\n")
         .map_or(bytes, |line| line.strip_suffix(b"\r").unwrap_or(line));
-    String::from_utf8_lossy(line)
+    str::from_utf8(line).expect("the searched text is UTF-8 split at `\\n`")
 }
 
 // ── Content Mode ──
@@ -574,7 +572,7 @@ fn format_content(
                 path: display_path.clone(),
                 line: GrepMatchLine {
                     number: usize::try_from(number).unwrap_or(usize::MAX),
-                    text: truncate_line(&text, MAX_LINE_CHARS).into_owned(),
+                    text: truncate_line(text, MAX_LINE_CHARS).into_owned(),
                     is_match,
                 },
             });
@@ -1469,7 +1467,7 @@ mod tests {
 
         #[test]
         fn invalid_regex_reports_error() {
-            for pattern in ["[invalid", "a)|(b"] {
+            for pattern in ["[invalid", "a)|(b", r"(?-u:\xFF)"] {
                 let err = grep_files(&params(pattern, Path::new("/"))).unwrap_err();
 
                 let cause = regex::Regex::new(pattern).unwrap_err();
@@ -1898,26 +1896,37 @@ mod tests {
             }
 
             #[test]
-            fn matches_a_carriage_return_within_a_line() {
+            fn treats_a_lone_carriage_return_as_a_line_end_but_matches_it_literally() {
                 let dir = canonical_tempdir();
                 let path = dir.path().join("a.txt");
                 fs::write(&path, "a\rb\r\nab\n").unwrap();
 
-                let (lines, unreadable) = search_lines(r"a\rb", 0, &path);
+                for (pattern, expected) in [
+                    (r"a\rb", &["1:a\rb"][..]),
+                    ("a.b", &[][..]),
+                    ("a$", &["1:a\rb"][..]),
+                ] {
+                    let (lines, unreadable) = search_lines(pattern, 0, &path);
 
-                assert_eq!(lines, ["1:a\rb"]);
-                assert_eq!(unreadable, []);
+                    assert_eq!(lines, expected, "{pattern}");
+                    assert_eq!(unreadable, [], "{pattern}");
+                }
             }
 
             #[test]
             fn skips_a_file_read_refuses_as_binary_and_searches_later_nul_lines() {
                 let filler = "x\n".repeat(4096);
+                let utf16: Vec<u8> = "\u{feff}hit\n"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect();
                 for (case, contents, expected) in [
-                    ("NUL beside the match", "hit\n\0".to_owned(), &[][..]),
-                    ("NUL after a short first line", "hi\n\0".to_owned(), &[][..]),
+                    ("NUL beside the match", b"hit\n\0".to_vec(), &[][..]),
+                    ("NUL after a short first line", b"hi\n\0".to_vec(), &[][..]),
+                    ("UTF-16 with a BOM", utf16, &[][..]),
                     (
                         "NUL past the first 8 KiB",
-                        format!("hit\n{filler}\0\nhit\n"),
+                        format!("hit\n{filler}\0\nhit\n").into_bytes(),
                         &["1:hit", "4099:hit"][..],
                     ),
                 ] {
@@ -1930,22 +1939,6 @@ mod tests {
                     assert_eq!(lines, expected, "{case}");
                     assert_eq!(unreadable, [], "{case}");
                 }
-            }
-
-            #[test]
-            fn skips_a_utf16_file_as_binary() {
-                let dir = canonical_tempdir();
-                let path = dir.path().join("a.txt");
-                let text: Vec<u8> = "\u{feff}miss\nhit\n"
-                    .encode_utf16()
-                    .flat_map(u16::to_le_bytes)
-                    .collect();
-                fs::write(&path, text).unwrap();
-
-                let (lines, unreadable) = search_lines("hit", 0, &path);
-
-                assert_eq!(lines, [] as [String; 0]);
-                assert_eq!(unreadable, []);
             }
 
             #[test]
@@ -1972,6 +1965,28 @@ mod tests {
 
                 assert_eq!(lines, ["1:hit"]);
                 assert_eq!(unreadable, []);
+            }
+
+            #[test]
+            fn stops_mid_file_once_cancelled() {
+                let dir = canonical_tempdir();
+                let path = dir.path().join("a.txt");
+                fs::write(&path, "hit\nhit\n").unwrap();
+                let cancel = CancellationToken::new();
+                let matcher = matcher("hit", false).unwrap();
+                let mut search = Search::new(matcher, 0, MAX_WALK_FILE_SIZE, &cancel, Vec::new());
+                let mut numbers = Vec::new();
+
+                search.file(&path, |line| {
+                    if let Line::Text { number, .. } = line {
+                        numbers.push(number);
+                    }
+                    cancel.cancel();
+                    true
+                });
+
+                assert_eq!(numbers, [1]);
+                assert_eq!(search.unreadable, []);
             }
 
             #[test]
@@ -2030,7 +2045,7 @@ mod tests {
                     io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32).to_string();
                 #[cfg(windows)]
                 let cause = "the final path component is a symlink".to_owned();
-                assert_eq!(lines, Vec::<String>::new());
+                assert_eq!(lines, [] as [String; 0]);
                 assert_eq!(
                     unreadable,
                     [Unreadable {
