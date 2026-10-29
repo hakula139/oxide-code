@@ -2589,6 +2589,7 @@ mod tests {
             let session = test_session(dir.path());
             let client = FakeClient::new(vec![
                 tool_use_turn("tool_1", "echo", r#"{"v":42}"#),
+                tool_use_turn("tool_2", "echo", r#"{"v":43}"#),
                 text_turn("Done"),
             ]);
             let tools = ToolRegistry::new(vec![Box::new(EchoTool), Box::new(ReadTool)]);
@@ -2626,6 +2627,12 @@ mod tests {
                      present your plan for the user to review."
                 ),
                 "the results name the mode the gate switched to",
+            );
+            assert_eq!(
+                mode_reminder(&messages[4]),
+                None,
+                "a round without a new switch adds no reminder: {:?}",
+                messages[4],
             );
             assert!(
                 matches!(

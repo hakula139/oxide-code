@@ -4328,18 +4328,19 @@ mod tests {
                 let turns = request_bodies(&server).await;
                 let messages = turns[2]["messages"].as_array().unwrap();
                 let results = messages[3]["content"].as_array().unwrap();
-                assert!(
-                    results[0]["content"]
-                        .as_str()
-                        .unwrap()
-                        .starts_with("The echo call was denied by `plan` mode"),
-                    "{results:?}",
+                assert_eq!(
+                    results.len(),
+                    1,
+                    "the reminder joins the result: {results:?}"
                 );
-                let told_plan = results[1]["text"].as_str().unwrap();
+                let result = results[0]["content"].as_str().unwrap();
                 assert!(
-                    told_plan
-                        .contains("The permission mode is `plan`, so only calls to `read` run."),
-                    "{told_plan}"
+                    result.starts_with("The echo call was denied by `plan` mode"),
+                    "{result}",
+                );
+                assert!(
+                    result.contains("The permission mode is `plan`, so only calls to `read` run."),
+                    "{result}"
                 );
                 let second = messages[5]["content"].as_array().unwrap();
                 assert_eq!(second[0]["text"], "second");
