@@ -141,6 +141,8 @@ impl Host {
 pub(crate) struct Channels {
     /// What the engine reports.
     pub(crate) events: mpsc::UnboundedReceiver<Event>,
+    /// The engine's op queue, which the App never waits on, so an op that finds it full is dropped
+    /// with a notice.
     pub(crate) ops: mpsc::Sender<Op>,
     /// What background work reports through the senders that the session info and the host hold.
     pub(crate) background: mpsc::UnboundedReceiver<AppEvent>,
@@ -340,7 +342,7 @@ mod tests {
     use ox_core::client::{RateLimitWindow, RateLimits};
 
     use super::testing::{
-        long_chat_block, render_app, rendered_text, start_op, test_app, test_host,
+        long_chat_block, render_app, rendered_text, start_op, test_app, test_app_from,
     };
     use super::*;
     use crate::components::status::SPINNER_FRAME_INTERVAL;
@@ -376,26 +378,6 @@ mod tests {
     mod new {
         use super::*;
 
-        /// [`App::new`] on `session_info` and `history`.
-        fn new_app(session_info: LiveSessionInfo, history: AppHistory) -> App {
-            let (_event_tx, events) = mpsc::unbounded_channel::<Event>();
-            let (ops, _op_rx) = mpsc::channel::<Op>(1);
-            let (_app_events, background) = mpsc::unbounded_channel();
-            let host = test_host(&session_info.app_events);
-            App::new(
-                Theme::default(),
-                ThemeOverrides::default(),
-                session_info,
-                host,
-                Channels {
-                    events,
-                    ops,
-                    background,
-                },
-                history,
-            )
-        }
-
         #[test]
         fn plumbs_resumed_title_and_branch() {
             let (app, _rx, _event_tx) = test_app(Some("Resumed title"));
@@ -430,7 +412,7 @@ mod tests {
                 prior: ArchiveState::Archived,
             };
 
-            let mut app = new_app(unknown_model_session_info(), history);
+            let (mut app, _rx, _event_tx) = test_app_from(unknown_model_session_info(), history);
 
             assert_eq!(app.chat.entry_count(), 2);
             let text = rendered_text(&mut app, 80, 12);

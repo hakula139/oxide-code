@@ -315,8 +315,8 @@ impl App {
     }
 
     /// Rebinds to session `id` titled `title`, clearing the previous session's chat, rules,
-    /// background shells, tasks, slash-command tasks, usage, and in-flight prompt. Returns the
-    /// previous session's ID.
+    /// background shells, tasks, usage, and in-flight prompt. Counts the switch, so output from a
+    /// background slash command typed before it is dropped. Returns the previous session's ID.
     fn rebind_session(&mut self, id: String, title: Option<String>) -> String {
         let old_id = std::mem::replace(&mut self.session_info.session_id, id);
         self.session_info.session_allow.clear();
@@ -482,7 +482,7 @@ impl App {
                 }
             }
             AppEvent::Slash(end) => self.apply_slash_end(end),
-            AppEvent::SessionsPage(page) => self.dirty |= self.modals.deliver_sessions_page(page),
+            AppEvent::Page(page) => self.dirty |= self.modals.deliver_sessions_page(page),
         }
     }
 
@@ -502,7 +502,7 @@ impl App {
     }
 
     /// Notes how a copy went, queueing its OSC 52 write for the next frame.
-    pub(super) fn apply_copy_report(&mut self, report: CopyReport) {
+    fn apply_copy_report(&mut self, report: CopyReport) {
         let (text, failed) = report.notice();
         if let Ok(Delivery::Osc52 { sequence, .. }) = report.outcome {
             self.pending_clipboard = Some(sequence);
@@ -543,8 +543,8 @@ mod tests {
 
     use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
     use indoc::indoc;
-    use tokio::sync::mpsc;
     use tokio::sync::mpsc::error::TryRecvError;
+    use tokio::sync::{mpsc, oneshot};
 
     use ox_core::config::StatusLineSegment;
     use ox_core::config::compaction::testing::WINDOW_1M_THRESHOLD;
@@ -556,7 +556,6 @@ mod tests {
     use ox_core::protocol::{ConfigPick, Op, ResumeTarget, ToolCall, ToolResult, UsageSnapshot};
     use ox_core::session::resolver::ResolveError;
     use ox_core::session::saved::SavedAction;
-    use ox_core::session::store::listing::ProjectScope;
     use ox_core::session::store::testing::{
         isolated_store, listed_session, seed_test_session, stamped_id,
     };
@@ -569,8 +568,8 @@ mod tests {
     use super::*;
     use crate::action::Action;
     use crate::app::testing::{
-        FakeModal, activity, five_hour_limit, render_app, rendered_text, start_op, test_app,
-        test_app_with,
+        FakeModal, activity, apply_next_app_event, five_hour_limit, render_app, rendered_text,
+        start_op, test_app, test_app_with,
     };
     use crate::clipboard::CopyError;
     use crate::git_probes::pull_request::testing::pull_request;
@@ -578,7 +577,7 @@ mod tests {
     use crate::modal::UpdateReply;
     use crate::modal::testing::ScriptedModal;
     use crate::session_info::testing::unknown_model_session_info;
-    use crate::slash::{ResumePicker, SlashOutcome, WorkingTreeDiff};
+    use crate::slash::{SlashOutcome, WorkingTreeDiff};
     use crate::theme::builtin;
 
     fn bash_call_start(id: &str, command: &str) -> Event {
@@ -1456,41 +1455,45 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn session_rolled_drops_the_old_session_slash_output() {
-            for finished_before_the_switch in [true, false] {
-                let (mut app, _rx, _event_tx) = test_app(None);
-                let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        async fn session_rolled_shows_slash_output_only_in_the_session_it_was_typed_in() {
+            /// A background slash command that prints `text` once its sender fires.
+            fn gated(text: &'static str) -> (SlashOutcome, oneshot::Sender<()>) {
+                let (release, wait) = oneshot::channel::<()>();
                 let task = SlashOutcome::Background(Box::pin(async move {
                     wait.await.unwrap();
-                    Ok(SlashOutcome::SystemMessage(
-                        "old session's output".to_owned(),
-                    ))
+                    Ok(SlashOutcome::SystemMessage(text.to_owned()))
                 }));
-                let handed_back = app.apply_slash_outcome(Ok(task), "/diff");
-                assert_eq!(handed_back, None);
-                let rolled = Event::SessionRolled {
-                    id: "rolled-session".to_owned(),
-                    old_session: ArchiveState::Active,
-                };
-
-                let output = if finished_before_the_switch {
-                    release.send(()).unwrap();
-                    let output = app.background.recv().await.unwrap();
-                    app.handle_engine_event(rolled);
-                    output
-                } else {
-                    app.handle_engine_event(rolled);
-                    release.send(()).unwrap();
-                    app.background.recv().await.unwrap()
-                };
-                app.apply_app_event(output);
-
-                assert_eq!(
-                    app.chat.entry_count(),
-                    0,
-                    "finished before the switch: {finished_before_the_switch}",
-                );
+                (task, release)
             }
+            let rolled = || Event::SessionRolled {
+                id: "rolled-session".to_owned(),
+                old_session: ArchiveState::Active,
+            };
+
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let (task, release) = gated("finished before the switch");
+            assert_eq!(app.apply_slash_outcome(Ok(task), "/diff"), None);
+            release.send(()).unwrap();
+            let output = app.background.recv().await.unwrap();
+            app.handle_engine_event(rolled());
+            app.apply_app_event(output);
+            assert_eq!(app.chat.entry_count(), 0, "a result queued at the switch");
+
+            let (mut app, _rx, _event_tx) = test_app(None);
+            let (task, release) = gated("finished after the switch");
+            assert_eq!(app.apply_slash_outcome(Ok(task), "/diff"), None);
+            app.handle_engine_event(rolled());
+            release.send(()).unwrap();
+            apply_next_app_event(&mut app).await;
+            assert_eq!(app.chat.entry_count(), 0, "a result that finished later");
+
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.handle_engine_event(rolled());
+            let (task, release) = gated("typed after the switch");
+            assert_eq!(app.apply_slash_outcome(Ok(task), "/diff"), None);
+            release.send(()).unwrap();
+            apply_next_app_event(&mut app).await;
+            assert_eq!(app.chat.last_system_text(), Some("typed after the switch"));
         }
 
         #[test]
@@ -2773,8 +2776,7 @@ mod tests {
                 assert_eq!(rx.try_recv(), Ok(Op::Interrupt));
                 app.handle_engine_event(Event::Cancelled);
                 app.session_info.store = store;
-                let picker = ResumePicker::at_startup(&app.session_info, ProjectScope::Current);
-                app.push_modal(Box::new(picker));
+                app.dispatch_action(Action::Submit("/resume".to_owned()));
                 let page = app
                     .background
                     .blocking_recv()
@@ -3073,6 +3075,31 @@ mod tests {
             app.apply_app_event(slash_end(&app, Err("/diff: boom".to_owned())));
 
             assert_eq!(app.chat.last_error_text(), Some("/diff: boom"));
+        }
+
+        #[test]
+        fn repaints_the_picker_a_page_reaches() {
+            let (_dir, store) = isolated_store();
+            seed_test_session(
+                &store,
+                "listed",
+                Some("listed session"),
+                1,
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.session_info.store = store;
+            app.dispatch_action(Action::Submit("/resume".to_owned()));
+            let page = app
+                .background
+                .blocking_recv()
+                .expect("the App holds a sender");
+            app.dirty = false;
+
+            app.apply_app_event(page);
+
+            assert!(app.dirty);
+            assert!(rendered_text(&mut app, 80, 24).contains("listed session"));
         }
     }
 

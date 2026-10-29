@@ -364,14 +364,14 @@ enum Pages {
 
 /// A page a picker's worker read, which hands the walk back with it. Only the picker whose request
 /// is still in flight takes it, so a page from a reloaded or closed listing goes nowhere.
-pub(crate) struct SessionsPage {
+pub(crate) struct PageEnd {
     request: u64,
     walk: SessionWalk,
     /// `None` when the worker panicked.
     page: Option<anyhow::Result<Vec<SessionInfo>>>,
 }
 
-/// What a [`SessionsPage`] brought.
+/// What a [`PageEnd`] brought.
 enum Loaded {
     Page(Vec<SessionInfo>),
     /// The store failed to read the page, which ends the listing.
@@ -403,12 +403,12 @@ impl Pages {
                 let events = events.clone();
                 thread::spawn(move || {
                     let page = panic::catch_unwind(AssertUnwindSafe(|| walk.next_page(PAGE_SIZE)));
-                    let page = SessionsPage {
+                    let page = PageEnd {
                         request,
                         walk,
                         page: page.ok(),
                     };
-                    _ = events.send(AppEvent::SessionsPage(page));
+                    _ = events.send(AppEvent::Page(page));
                 });
                 *self = Self::Loading(request);
             }
@@ -416,15 +416,18 @@ impl Pages {
         }
     }
 
-    /// Whether `page` answers the request in flight.
-    fn awaits(&self, page: &SessionsPage) -> bool {
-        matches!(self, Self::Loading(request) if *request == page.request)
-    }
-
-    /// What the awaited `page` brought, putting its walk back at rest.
-    fn finish(&mut self, page: SessionsPage) -> Loaded {
-        let SessionsPage { walk, page, .. } = page;
-        match page {
+    /// What `page` brought when it answers the request in flight, putting its walk back at rest.
+    /// Hands back a page for any other request untouched.
+    #[expect(
+        clippy::result_large_err,
+        reason = "a page moves once per load, the same move `Modal::on_sessions_page` makes"
+    )]
+    fn take(&mut self, page: PageEnd) -> Result<Loaded, PageEnd> {
+        if !matches!(self, Self::Loading(request) if *request == page.request) {
+            return Err(page);
+        }
+        let PageEnd { walk, page, .. } = page;
+        Ok(match page {
             Some(Ok(page)) => {
                 *self = Self::rest(walk);
                 Loaded::Page(page)
@@ -437,7 +440,7 @@ impl Pages {
                 *self = Self::Done;
                 Loaded::Stopped
             }
-        }
+        })
     }
 }
 
@@ -794,13 +797,11 @@ impl Modal for ResumePicker {
         UpdateReply::Unclaimed
     }
 
-    fn on_sessions_page(&mut self, page: SessionsPage) -> Option<SessionsPage> {
-        if !self.pages.awaits(&page) {
-            return Some(page);
-        }
-        let loaded = self.pages.finish(page);
-        self.page_loaded(loaded);
-        None
+    fn on_sessions_page(&mut self, page: PageEnd) -> Option<PageEnd> {
+        self.pages
+            .take(page)
+            .map(|loaded| self.page_loaded(loaded))
+            .err()
     }
 
     fn tick(&mut self, now: Instant) -> bool {
@@ -980,17 +981,20 @@ mod tests {
         }
 
         /// The next page a worker sent, waiting for it.
-        fn next_page(&mut self) -> SessionsPage {
+        fn next_page(&mut self) -> PageEnd {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                match self.inbox.try_recv() {
-                    Ok(AppEvent::SessionsPage(page)) => return page,
-                    Ok(_) => panic!("expected a sessions page"),
-                    Err(_) => {
-                        assert!(Instant::now() < deadline, "the page never arrived");
-                        std::thread::yield_now();
+                if let Ok(event) = self.inbox.try_recv() {
+                    assert!(
+                        matches!(event, AppEvent::Page(_)),
+                        "expected a sessions page"
+                    );
+                    if let AppEvent::Page(page) = event {
+                        return page;
                     }
                 }
+                assert!(Instant::now() < deadline, "the page never arrived");
+                std::thread::yield_now();
             }
         }
 
@@ -2379,40 +2383,6 @@ mod tests {
         }
     }
 
-    mod tick {
-        use super::*;
-
-        #[tokio::test(start_paused = true)]
-        async fn restores_the_hints_once_the_archive_notice_expires() {
-            let (_dir, store) = isolated_store();
-            seed_test_session(
-                &store,
-                &stamped_id(0x11),
-                Some("only"),
-                1,
-                datetime!(2026-04-18 09:00:00 UTC),
-            );
-            let mut picker = opened(store, "live-session-id");
-            archive(&mut picker);
-            let notice = "Archived session 11111111: only";
-            assert_eq!(footer_row(&mut picker, 120), notice);
-
-            let just_before = NOTICE_DURATION
-                .checked_sub(Duration::from_millis(1))
-                .unwrap();
-            tokio::time::advance(just_before).await;
-            assert!(!picker.tick(now()), "the notice is still due");
-            assert_eq!(footer_row(&mut picker, 120), notice);
-
-            tokio::time::advance(Duration::from_millis(1)).await;
-            assert!(picker.tick(now()), "the expiry asks for a repaint");
-            assert_eq!(
-                footer_row(&mut picker, 120),
-                picker.footer_hints().join(HINT_SEPARATOR),
-            );
-        }
-    }
-
     mod on_sessions_page {
         use super::*;
 
@@ -2423,10 +2393,10 @@ mod tests {
         fn awaiting(
             picker: &mut ResumePicker,
             page: Option<anyhow::Result<Vec<SessionInfo>>>,
-        ) -> SessionsPage {
+        ) -> PageEnd {
             picker.pages = Pages::Loading(AWAITED);
             picker.list.set_has_more(true);
-            SessionsPage {
+            PageEnd {
                 request: AWAITED,
                 walk: picker.store.walk(ListScope::default()),
                 page,
@@ -2549,6 +2519,40 @@ mod tests {
                 format!("{MODAL_ERROR_PREFIX}{LOADER_STOPPED}"),
             );
             assert!(!picker.pages.has_more());
+        }
+    }
+
+    mod tick {
+        use super::*;
+
+        #[tokio::test(start_paused = true)]
+        async fn restores_the_hints_once_the_archive_notice_expires() {
+            let (_dir, store) = isolated_store();
+            seed_test_session(
+                &store,
+                &stamped_id(0x11),
+                Some("only"),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let mut picker = opened(store, "live-session-id");
+            archive(&mut picker);
+            let notice = "Archived session 11111111: only";
+            assert_eq!(footer_row(&mut picker, 120), notice);
+
+            let just_before = NOTICE_DURATION
+                .checked_sub(Duration::from_millis(1))
+                .unwrap();
+            tokio::time::advance(just_before).await;
+            assert!(!picker.tick(now()), "the notice is still due");
+            assert_eq!(footer_row(&mut picker, 120), notice);
+
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert!(picker.tick(now()), "the expiry asks for a repaint");
+            assert_eq!(
+                footer_row(&mut picker, 120),
+                picker.footer_hints().join(HINT_SEPARATOR),
+            );
         }
     }
 

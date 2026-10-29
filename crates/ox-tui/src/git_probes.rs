@@ -244,13 +244,6 @@ mod tests {
         )
     }
 
-    fn probe_end(event: Option<AppEvent>) -> ProbeEnd {
-        let Some(AppEvent::Probe(end)) = event else {
-            panic!("expected a probe end");
-        };
-        end
-    }
-
     mod new {
         use super::*;
 
@@ -355,7 +348,10 @@ mod tests {
                     probe,
                     update: Some(update),
                 };
-                assert_eq!(probe_end(event), expected, "not a repo");
+                assert!(
+                    matches!(event, Some(AppEvent::Probe(end)) if end == expected),
+                    "not a repo",
+                );
             }
         }
     }
@@ -483,7 +479,7 @@ mod tests {
             spawn_probe(&tx, Probe::Branch, async { panic!("probe failed") });
             drop(tx);
 
-            assert_eq!(probe_end(rx.recv().await), STOPPED);
+            assert!(matches!(rx.recv().await, Some(AppEvent::Probe(end)) if end == STOPPED));
         }
 
         #[tokio::test(start_paused = true)]
@@ -498,7 +494,7 @@ mod tests {
             drop(tx);
             tokio::time::advance(PROBE_TIMEOUT).await;
 
-            assert_eq!(probe_end(rx.recv().await), STOPPED);
+            assert!(matches!(rx.recv().await, Some(AppEvent::Probe(end)) if end == STOPPED));
             assert_eq!(
                 dropped_rx.try_recv(),
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed),

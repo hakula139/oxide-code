@@ -499,7 +499,10 @@ fn osc52_sequence(text: &str, screen: bool) -> String {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use super::{Environment, Terminal};
+    use tokio::sync::mpsc;
+
+    use super::{Clipboard, CopyReport, Environment, Terminal};
+    use crate::app_event::AppEvent;
 
     /// A remote session outside any multiplexer, which copies only through OSC 52 and leaves the
     /// system clipboard and tmux alone.
@@ -509,6 +512,25 @@ pub(crate) mod testing {
         screen: false,
         terminal: Terminal::Other,
     };
+
+    /// The report of `clipboard`'s latest copy, as the App's event loop takes it from `events`.
+    pub(crate) async fn next_report(
+        clipboard: &Clipboard,
+        events: &mut mpsc::UnboundedReceiver<AppEvent>,
+    ) -> CopyReport {
+        loop {
+            let event = events.recv().await;
+            assert!(
+                matches!(event, Some(AppEvent::Copy(_))),
+                "expected a copy end"
+            );
+            if let Some(AppEvent::Copy(end)) = event
+                && let Some(report) = clipboard.finish(end)
+            {
+                return report;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -520,7 +542,7 @@ mod tests {
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::{Semaphore, mpsc, oneshot};
 
-    use super::testing::REMOTE;
+    use super::testing::{REMOTE, next_report};
     use super::*;
 
     /// A tmux that records each run's arguments and stdin and answers from `replies` in order,
@@ -581,21 +603,6 @@ mod tests {
     fn test_clipboard(environment: Environment) -> (Clipboard, mpsc::UnboundedReceiver<AppEvent>) {
         let (events, reports) = mpsc::unbounded_channel();
         (Clipboard::new(environment, events), reports)
-    }
-
-    /// The report of the latest copy, as the App's event loop takes it from `reports`.
-    async fn next_report(
-        clipboard: &Clipboard,
-        reports: &mut mpsc::UnboundedReceiver<AppEvent>,
-    ) -> CopyReport {
-        loop {
-            let Some(AppEvent::Copy(end)) = reports.recv().await else {
-                panic!("expected a copy end");
-            };
-            if let Some(report) = clipboard.finish(end) {
-                return report;
-            }
-        }
     }
 
     fn load_buffer(args: &[&str], stdin: &str) -> (Vec<String>, String) {

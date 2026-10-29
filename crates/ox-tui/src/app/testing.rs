@@ -20,8 +20,8 @@ use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 
 use super::operation::{Activity, InFlight};
 use super::{App, AppHistory, Channels, Host};
-use crate::app_event::{AppEvent, AppEventSender};
-use crate::clipboard::testing::REMOTE;
+use crate::app_event::AppEventSender;
+use crate::clipboard::testing::{REMOTE, next_report};
 use crate::clipboard::{Clipboard, CopyReport};
 use crate::git_probes::GitProbes;
 use crate::modal::approval::ApprovalModal;
@@ -44,8 +44,23 @@ pub(super) fn test_app(
 
 /// [`test_app`] started on `session_info`.
 pub(super) fn test_app_with(
-    mut session_info: LiveSessionInfo,
+    session_info: LiveSessionInfo,
     title: Option<&str>,
+) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
+    test_app_from(
+        session_info,
+        AppHistory {
+            interactions: Vec::new(),
+            title: title.map(ToOwned::to_owned),
+            prior: ArchiveState::Active,
+        },
+    )
+}
+
+/// [`test_app_with`] opening on `history`.
+pub(super) fn test_app_from(
+    mut session_info: LiveSessionInfo,
+    history: AppHistory,
 ) -> (App, mpsc::Receiver<Op>, mpsc::UnboundedSender<Event>) {
     let (event_tx, events) = mpsc::unbounded_channel::<Event>();
     let (ops, op_rx) = mpsc::channel::<Op>(OP_CHANNEL_CAPACITY);
@@ -62,18 +77,14 @@ pub(super) fn test_app_with(
             ops,
             background,
         },
-        AppHistory {
-            interactions: Vec::new(),
-            title: title.map(ToOwned::to_owned),
-            prior: ArchiveState::Active,
-        },
+        history,
     );
     (app, op_rx, event_tx)
 }
 
 /// A [`Host`] on `main` that never spawns a process or touches the system clipboard, reporting its
 /// copies to `app_events`.
-pub(super) fn test_host(app_events: &AppEventSender) -> Host {
+fn test_host(app_events: &AppEventSender) -> Host {
     Host {
         git_branch: Some("main".to_owned()),
         // With no segments to serve, the probes never spawn `git` or `gh`.
@@ -93,14 +104,7 @@ pub(super) async fn apply_next_app_event(app: &mut App) {
 
 /// The report of the latest copy, as the event loop takes it.
 pub(super) async fn copy_report(app: &mut App) -> CopyReport {
-    loop {
-        let Some(AppEvent::Copy(end)) = app.background.recv().await else {
-            panic!("expected a copy end");
-        };
-        if let Some(report) = app.clipboard.finish(end) {
-            return report;
-        }
-    }
+    next_report(&app.clipboard, &mut app.background).await
 }
 
 /// Puts `op` in flight with no other local effect of [`App::dispatch_op`], such as the queue marks

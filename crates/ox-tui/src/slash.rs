@@ -29,7 +29,7 @@ pub(crate) use self::delete::confirm_modal as delete_confirm_modal;
 pub(crate) use self::diff::{DiffRow, WorkingTreeDiff};
 pub(crate) use self::matcher::MatchedCommand;
 pub(crate) use self::registry::{ArgCompletion, SlashOutcome};
-pub(crate) use self::resume::{ResumePicker, SessionsPage};
+pub(crate) use self::resume::{PageEnd, ResumePicker};
 pub(crate) use self::sessions::{
     CLEAR_THEN_DELETE_HINT, archive_message, delete_lookup_error, saved_error_message,
 };

@@ -22,7 +22,7 @@ use ox_core::protocol::{Event, Op};
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
 use crate::keymap::{CTRL_C, KeyChord, is_unmodified};
-use crate::slash::SessionsPage;
+use crate::slash::PageEnd;
 use crate::theme::Theme;
 
 const TOP_BORDER_HEIGHT: u16 = 1;
@@ -54,7 +54,7 @@ pub(crate) trait Modal: Send {
 
     /// Receives a page of sessions that a `/resume` picker's worker read, wherever the modal sits
     /// on the stack. Returns the page when it answers another modal's request. Default returns it.
-    fn on_sessions_page(&mut self, page: SessionsPage) -> Option<SessionsPage> {
+    fn on_sessions_page(&mut self, page: PageEnd) -> Option<PageEnd> {
         Some(page)
     }
 
@@ -200,11 +200,12 @@ impl ModalStack {
         claimed.then_some(actions)
     }
 
-    /// Hands `page` to the modal whose request it answers. Returns whether one took it, so the
+    /// Offers `page` to each modal from the top until one takes it. Returns whether one did, so the
     /// caller repaints.
-    pub(crate) fn deliver_sessions_page(&mut self, page: SessionsPage) -> bool {
+    pub(crate) fn deliver_sessions_page(&mut self, page: PageEnd) -> bool {
         self.stack
             .iter_mut()
+            .rev()
             .try_fold(page, |page, modal| modal.on_sessions_page(page))
             .is_none()
     }
