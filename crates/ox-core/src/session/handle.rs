@@ -151,7 +151,8 @@ impl SessionHandle {
         Arc::clone(&lock_or_recover(&self.inner.live, "live").artifact_dir)
     }
 
-    /// Ties the AI title request to this session, so `finalize` aborts it.
+    /// Ties the AI title request to this session, so a rename, a rewind to before the first
+    /// prompt, or `finalize` aborts it.
     pub(super) fn set_title_task(&self, task: JoinHandle<()>) {
         *lock_or_recover(&self.inner.title_task, "title_task") = Some(task);
     }
@@ -268,8 +269,8 @@ impl SessionHandle {
     pub(crate) async fn archive(&self) -> WriteReport {
         let ((), committed) = self.commit(SessionState::queue_archive, |(), _| ()).await;
         let failure = committed.err();
-        if let Some(failure) = &failure {
-            _ = self.surface(failure.clone());
+        if failure.is_some() {
+            self.mark_failure_surfaced();
         }
         WriteReport {
             failure,
@@ -315,10 +316,9 @@ impl SessionHandle {
 
     /// Applies `apply`, commits, and settles under the state's lock on a blocking thread, so a
     /// busy store never stalls the runtime, then returns what `settle` makes of `apply`'s value
-    /// and the committed state, with the commit's failure. A fork points every clone at the new
+    /// and the committed state, with the commit's result. A fork points every clone at the new
     /// session. A panic while the lock is held stops persistence, which the next write that saves
-    /// anything reports. A cancelled caller leaves the write to run to the end, which still logs
-    /// its failure.
+    /// anything reports. A cancelled caller leaves the write to run to the end and log any failure.
     async fn commit<T: Send + 'static, U: Send + 'static>(
         &self,
         apply: impl FnOnce(&mut SessionState) -> T + Send + 'static,
@@ -349,15 +349,15 @@ impl SessionHandle {
                 fork,
             },
             Err(failure) => WriteReport {
-                failure: self.surface(failure),
+                failure: self.mark_failure_surfaced().then_some(failure),
                 fork: None,
             },
         }
     }
 
-    /// Marks a commit failure as reported, returning `failure` only if none was before.
-    fn surface(&self, failure: String) -> Option<String> {
-        (!self.inner.failure_surfaced.swap(true, Ordering::AcqRel)).then_some(failure)
+    /// Marks a commit failure as reported, returning whether it is the first one.
+    fn mark_failure_surfaced(&self) -> bool {
+        !self.inner.failure_surfaced.swap(true, Ordering::AcqRel)
     }
 }
 
@@ -1070,6 +1070,28 @@ mod tests {
             );
             assert_eq!(second.report, WriteReport::default());
             assert_eq!(saved_message_count(&store, &sid), 1);
+        }
+
+        #[tokio::test]
+        async fn panicking_after_a_failed_commit_keeps_its_cause() {
+            let (_dir, store) = isolated_store();
+            let handle = start(&store, "m", None);
+            fail_writes(&store);
+            let failed = handle.record_message(Message::user("lost")).await;
+            let clone = handle.clone();
+
+            let panicked = tokio::spawn(async move {
+                clone
+                    .write(|_| -> u8 { panic!("deliberate write panic") })
+                    .await
+            })
+            .await;
+            let archived = handle.archive().await;
+
+            let disk_full = "disk full: Error code 1811: constraint failed";
+            assert_eq!(failed.report.failure.as_deref(), Some(disk_full));
+            assert!(panicked.unwrap_err().is_panic());
+            assert_eq!(archived.failure, Some(format!("{STOPPED}: {disk_full}")));
         }
     }
 

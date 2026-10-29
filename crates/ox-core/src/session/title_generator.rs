@@ -58,8 +58,9 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 
 /// Spawns a task that asks Haiku for a title, appends it to `session`, and emits
 /// `SessionTitleUpdated` through `sink`. The returned receiver gets the usage the response reports,
-/// even for a reply that holds no title. Finalizing `session` aborts the task. A generation failure
-/// only warns, while a write failure shows as a session write error.
+/// even for a reply that holds no title. A rename, a rewind to before the first prompt, or
+/// finalizing `session` aborts the task. A generation failure only warns, while a write failure
+/// shows as a session write error.
 pub(crate) fn spawn<S>(
     client: Client,
     auth: Auth,
@@ -373,7 +374,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn delivers_the_usage_whose_write_a_rename_aborts() {
+        async fn delivers_and_saves_the_usage_when_a_rename_aborts_mid_write() {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(wm_path("/v1/messages"))

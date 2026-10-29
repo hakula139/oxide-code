@@ -21,7 +21,7 @@ use crate::prompt::SessionContext;
 use crate::tool::ToolMetadata;
 use crate::util::fs::FileLock;
 
-/// What every commit after a failed write reports ahead of the first failure, since nothing is
+/// What every commit after a failed write reports before naming that failure, since nothing is
 /// written once one fails.
 pub(super) const STOPPED: &str = "session persistence stopped after an earlier write failed";
 
@@ -269,9 +269,10 @@ impl SessionState {
         }
     }
 
-    /// Stops persistence for good with `cause`, as a failed commit does.
+    /// Stops persistence for good, as a failed commit does. Every later failure names `cause`
+    /// unless an earlier failure already stopped it.
     pub(super) fn stop(&mut self, cause: String) {
-        self.stopped = Some(cause);
+        self.stopped.get_or_insert(cause);
     }
 
     /// Commits the records queued since the last commit, returning the fork it made. A fresh
