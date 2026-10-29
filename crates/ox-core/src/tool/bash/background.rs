@@ -684,7 +684,7 @@ mod tests {
 
     use super::testing::shell;
     use super::*;
-    use crate::protocol::testing::CapturingSink;
+    use crate::protocol::local_testing::CapturingSink;
     use crate::tool::bash::BashTool;
     use crate::tool::bash::testing::{record_pid, until_gone, until_recorded};
     use crate::tool::local_testing::{self, ctx, spill_path, temp_ctx};

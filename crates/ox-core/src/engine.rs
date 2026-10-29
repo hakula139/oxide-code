@@ -589,7 +589,8 @@ mod tests {
     use crate::permission::PermissionClass;
     use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
-    use crate::protocol::testing::{CapturingSink, model_pick};
+    use crate::protocol::local_testing::CapturingSink;
+    use crate::protocol::testing::model_pick;
     use crate::protocol::{CompactTrigger, ResumeTarget, SavedTarget, UsageSnapshot};
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;

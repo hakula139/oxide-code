@@ -264,7 +264,7 @@ mod tests {
     use crate::client::anthropic::testing::api_key;
     use crate::config::testing::test_config;
     use crate::message::Message;
-    use crate::protocol::testing::CapturingSink;
+    use crate::protocol::local_testing::CapturingSink;
     use crate::session::handle::testing::dead;
     use crate::session::store::local_testing::fail_writes;
     use crate::session::store::testing::test_store;

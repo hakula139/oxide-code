@@ -218,7 +218,7 @@ mod tests {
     use crate::engine::local_testing::{inert_mailbox, login_urls, submit, tool_heavy_transcript};
     use crate::engine::testing::{engine, mount_reply, with_pinned_home};
     use crate::permission::Mode;
-    use crate::protocol::testing::CapturingSink;
+    use crate::protocol::local_testing::CapturingSink;
     use crate::session::store::testing::test_store;
 
     /// Stores an oxide-code login under `data`, standing in for `$XDG_DATA_HOME`.

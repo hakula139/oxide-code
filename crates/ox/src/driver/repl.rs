@@ -16,7 +16,7 @@ use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
 use ox_core::util::text::escape_hidden;
 
 use super::stdio::{Approver, OpEnd, Output, OutputFormat, run_op};
-use super::{Exit, Shutdown, decode_input, shutdown_signal};
+use super::{Exit, Shutdown, Signals, decode_input};
 
 /// The command `/help`, which the REPL answers itself.
 const HELP: &str = "help";
@@ -42,6 +42,7 @@ pub(crate) async fn run(
         io::stderr(),
     );
     let prompter = Prompter::new(BufReader::new(tokio::io::stdin()), io::stderr());
+    let mut signals = Signals::new();
     drive(
         handle,
         &project_root,
@@ -49,7 +50,7 @@ pub(crate) async fn run(
         first,
         prompter,
         attended,
-        &mut shutdown_signal,
+        &mut async || signals.recv().await,
     )
     .await
 }
@@ -369,21 +370,10 @@ mod tests {
     use ox_tui::glyphs::INTERRUPTED_MARKER;
 
     use super::*;
-    use crate::driver::testing::{ClosedPipe, FailingWriter, Failure, Screen};
+    use crate::driver::testing::{ClosedPipe, FailingWriter, Failure, Screen, no_signal, output};
 
     mod drive {
         use super::*;
-
-        async fn no_signal() -> Shutdown {
-            std::future::pending().await
-        }
-
-        /// A text output with the screens its stdout and stderr show.
-        fn output() -> (Output<Screen, Screen>, Screen, Screen) {
-            let (stdout, stderr) = (Screen::default(), Screen::default());
-            let output = Output::new(OutputFormat::Text, false, stdout.clone(), stderr.clone());
-            (output, stdout, stderr)
-        }
 
         #[tokio::test]
         async fn skips_blank_lines_and_exits_cleanly_at_eof() {
@@ -392,7 +382,7 @@ mod tests {
                 mount_reply(&server, "reply").await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let (mut output, stdout, _) = output();
+                let (mut output, stdout, _) = output(OutputFormat::Text);
                 let input: &[u8] = b"\n   \nhello\n";
 
                 let exit = Box::pin(drive(
@@ -420,7 +410,7 @@ mod tests {
         #[tokio::test]
         async fn exits_with_failure_when_the_session_cannot_be_saved() {
             let failure = "session writer task has stopped";
-            let (mut output, _, stderr) = output();
+            let (mut output, _, stderr) = output(OutputFormat::Text);
             let input: &[u8] = b"hello\n";
             let handle = unsaved_session_handle(failure);
 
@@ -456,7 +446,7 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &mut output().0,
+                    &mut output(OutputFormat::Text).0,
                     first,
                     Prompter::new(input, io::sink()),
                     true,
@@ -489,7 +479,7 @@ mod tests {
                     let store = test_store(dir.path());
                     let engine = engine(server.uri(), &store, dir.path()).await;
                     let session_id = engine.session_id();
-                    let (mut output, stdout, _) = output();
+                    let (mut output, stdout, _) = output(OutputFormat::Text);
                     let mut out = FailingWriter::new(failure);
                     let input: &[u8] = b"hello\n/exit\n";
 
@@ -538,7 +528,7 @@ mod tests {
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
                 let session_id = engine.session_id();
-                let (mut output, stdout, stderr) = output();
+                let (mut output, stdout, stderr) = output(OutputFormat::Text);
                 let input: &[u8] = indoc! {b"
                     first
                     /resume zzzz
@@ -641,7 +631,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let first_id = engine.session_id();
-                let (mut output, _, stderr) = output();
+                let (mut output, _, stderr) = output(OutputFormat::Text);
                 let log = (1..=150)
                     .map(|n| format!("request {n} served in 12 ms."))
                     .collect::<Vec<_>>()
@@ -713,7 +703,7 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &mut output().0,
+                    &mut output(OutputFormat::Text).0,
                     None,
                     Prompter::new(input, io::sink()),
                     true,
@@ -742,7 +732,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let engine = engine(server.uri(), &store, dir.path()).await;
-                let (mut output, _, stderr) = output();
+                let (mut output, _, stderr) = output(OutputFormat::Text);
                 let input: &[u8] = indoc! {b"
                     /init
                     /init CLAUDE.md
@@ -799,7 +789,7 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &mut output().0,
+                    &mut output(OutputFormat::Text).0,
                     None,
                     Prompter::new(input, io::sink()),
                     true,
@@ -820,7 +810,7 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let (mut output, _, stderr) = output();
+                let (mut output, _, stderr) = output(OutputFormat::Text);
                 let input: &[u8] = indoc! {b"
                     /effort turbo
                     /model
@@ -869,7 +859,7 @@ mod tests {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                let (mut output, stdout, stderr) = output();
+                let (mut output, stdout, stderr) = output(OutputFormat::Text);
 
                 let exit = Box::pin(drive(
                     engine.spawn(),
@@ -915,7 +905,7 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &mut output().0,
+                    &mut output(OutputFormat::Text).0,
                     None,
                     Prompter::new(input.as_bytes(), io::sink()),
                     true,
@@ -954,7 +944,7 @@ mod tests {
                         .await
                         .with_tools(bash_registry(Vec::new()));
                     let session_id = engine.session_id();
-                    let (mut output, _, stderr) = output();
+                    let (mut output, _, stderr) = output(OutputFormat::Text);
                     let mut out = FailingWriter::new(failure);
                     let input: &[u8] = b"/exit\n";
 
@@ -1079,7 +1069,7 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &mut output().0,
+                    &mut output(OutputFormat::Text).0,
                     None,
                     Prompter::new(BufReader::new(reader), io::sink()),
                     true,
@@ -1113,7 +1103,7 @@ mod tests {
                 let exit = Box::pin(drive(
                     engine.spawn(),
                     dir.path(),
-                    &mut output().0,
+                    &mut output(OutputFormat::Text).0,
                     None,
                     Prompter::new(input, io::sink()),
                     false,
@@ -1135,7 +1125,7 @@ mod tests {
             let result = Box::pin(drive(
                 panicked_engine(),
                 Path::new("/repo"),
-                &mut output().0,
+                &mut output(OutputFormat::Text).0,
                 None,
                 Prompter::new(input, FailingWriter::new(Failure::Write("> "))),
                 true,

@@ -14,7 +14,7 @@ use ox_core::protocol::notice::ENGINE_STOPPED;
 use ox_core::protocol::{Event, Op, TurnEnd};
 
 use super::stdio::{OpEnd, Output, OutputFormat, Unattended, run_op};
-use super::{Exit, decode_input, shutdown_signal};
+use super::{Exit, Shutdown, Signals, decode_input};
 
 /// How long [`read_prompt`] waits on an open stdin before saying what it waits for.
 const STDIN_NOTICE_DELAY: Duration = Duration::from_secs(3);
@@ -30,7 +30,15 @@ pub(crate) async fn run(
 ) -> Result<Exit, EnginePanic> {
     let session_id = engine.session_id();
     let mut output = Output::new(format, show_thinking, io::stdout(), io::stderr());
-    drive(engine.spawn(), &mut output, &session_id, prompt).await
+    let mut signals = Signals::new();
+    drive(
+        engine.spawn(),
+        &mut output,
+        &session_id,
+        prompt,
+        &mut async || signals.recv().await,
+    )
+    .await
 }
 
 /// The prompt a `--print` run answers: `prompt` with stdin attached when stdin is not a terminal,
@@ -89,18 +97,20 @@ fn compose_prompt(prompt: Option<&str>, stdin: Option<&str>) -> Option<String> {
     }
 }
 
+/// Runs `prompt` through `handle` as [`run`] describes. Each `signal` call awaits the next signal.
 async fn drive<O: Write, E: Write>(
     mut handle: EngineHandle,
     output: &mut Output<O, E>,
     session_id: &str,
     prompt: &str,
+    signal: &mut impl AsyncFnMut() -> Shutdown,
 ) -> Result<Exit, EnginePanic> {
     let prompt = Op::prompt(command::unescape_literal(prompt));
     let (end, mut exit) = match run_op(
         &mut handle.events,
         &handle.ops,
         output,
-        &mut shutdown_signal,
+        signal,
         prompt,
         None::<&mut Unattended>,
     )
@@ -140,8 +150,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use ox_core::engine::testing::{
-        engine, mount_reply, mount_tool_call_once, panic_message, panicked_engine, request_bodies,
-        unsaved_session_handle, with_pinned_home,
+        engine, mount_reply, mount_stalled_reply_once, mount_tool_call_once, panic_message,
+        panicked_engine, request_bodies, unsaved_session_handle, until_requested, with_pinned_home,
     };
     use ox_core::permission::PermissionClass;
     use ox_core::session::store::testing::test_store;
@@ -149,24 +159,7 @@ mod tests {
     use ox_core::tool::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
 
     use super::*;
-    use crate::driver::testing::{ClosedPipe, Screen};
-
-    const SESSION_ID: &str = "session-1";
-
-    /// An output in `format` with the screens its stdout and stderr show.
-    fn output(format: OutputFormat) -> (Output<Screen, Screen>, Screen, Screen) {
-        let (stdout, stderr) = (Screen::default(), Screen::default());
-        let output = Output::new(format, false, stdout.clone(), stderr.clone());
-        (output, stdout, stderr)
-    }
-
-    /// The `data` of the result line that ends `stdout`.
-    fn result_data(stdout: &str) -> serde_json::Value {
-        let line = stdout.lines().last().expect("a result line");
-        let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(record["type"], "result");
-        record["data"].take()
-    }
+    use crate::driver::testing::{ClosedPipe, Screen, no_signal, output, result_data};
 
     mod read_input {
         use super::*;
@@ -254,6 +247,8 @@ mod tests {
     mod drive {
         use super::*;
 
+        const SESSION_ID: &str = "session-1";
+
         /// A read-class tool, which the default policy runs without asking, with a fixed result.
         struct LookTool;
 
@@ -302,6 +297,7 @@ mod tests {
                         &mut output,
                         SESSION_ID,
                         "Look around.",
+                        &mut no_signal,
                     ))
                     .await
                     .unwrap();
@@ -326,9 +322,15 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let (mut output, stdout, stderr) = output(OutputFormat::Json);
 
-                let exit = Box::pin(drive(engine.spawn(), &mut output, SESSION_ID, "//hello"))
-                    .await
-                    .unwrap();
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    &mut output,
+                    SESSION_ID,
+                    "//hello",
+                    &mut no_signal,
+                ))
+                .await
+                .unwrap();
 
                 assert_eq!(exit, Exit::Success);
                 let result = result_data(&stdout.text());
@@ -355,9 +357,15 @@ mod tests {
                 let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let (mut output, stdout, stderr) = output(OutputFormat::Json);
 
-                let exit = Box::pin(drive(engine.spawn(), &mut output, SESSION_ID, "hello"))
-                    .await
-                    .unwrap();
+                let exit = Box::pin(drive(
+                    engine.spawn(),
+                    &mut output,
+                    SESSION_ID,
+                    "hello",
+                    &mut no_signal,
+                ))
+                .await
+                .unwrap();
 
                 assert_eq!(exit, Exit::Failure);
                 let result = result_data(&stdout.text());
@@ -376,12 +384,67 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn reports_the_signal_that_stops_the_run_in_each_format() {
+            with_pinned_home(async {
+                for format in [
+                    OutputFormat::Text,
+                    OutputFormat::Json,
+                    OutputFormat::StreamJson,
+                ] {
+                    let server = MockServer::start().await;
+                    mount_stalled_reply_once(&server).await;
+                    let dir = tempfile::tempdir().unwrap();
+                    let engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                    let (mut output, stdout, stderr) = output(format);
+                    let mut signal = async || {
+                        until_requested(&server, 1).await;
+                        Shutdown::Interrupt
+                    };
+
+                    let exit = Box::pin(drive(
+                        engine.spawn(),
+                        &mut output,
+                        SESSION_ID,
+                        "hello",
+                        &mut signal,
+                    ))
+                    .await
+                    .unwrap();
+
+                    assert_eq!(exit, Exit::Signal(Shutdown::Interrupt), "{format:?}");
+                    let stdout = stdout.text();
+                    if format == OutputFormat::Text {
+                        assert_eq!(stdout, "", "{format:?}");
+                    } else {
+                        assert!(
+                            stdout.lines().all(|line| !line.is_empty()),
+                            "{format:?}: {stdout:?}"
+                        );
+                        assert_eq!(
+                            result_data(&stdout)["stop_reason"],
+                            "shutdown",
+                            "{format:?}"
+                        );
+                    }
+                    assert_eq!(stderr.text(), "\n", "{format:?}");
+                }
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn prints_the_failed_result_before_handing_back_an_engine_panic() {
             let (mut output, stdout, stderr) = output(OutputFormat::StreamJson);
 
-            let panic = Box::pin(drive(panicked_engine(), &mut output, SESSION_ID, "hello"))
-                .await
-                .unwrap_err();
+            let panic = Box::pin(drive(
+                panicked_engine(),
+                &mut output,
+                SESSION_ID,
+                "hello",
+                &mut no_signal,
+            ))
+            .await
+            .unwrap_err();
 
             assert_eq!(panic_message(panic), "engine bug");
             assert_eq!(
@@ -405,9 +468,15 @@ mod tests {
                     let stderr = Screen::default();
                     let mut output = Output::new(format, false, ClosedPipe, stderr.clone());
 
-                    let exit = Box::pin(drive(engine.spawn(), &mut output, SESSION_ID, "hello"))
-                        .await
-                        .unwrap();
+                    let exit = Box::pin(drive(
+                        engine.spawn(),
+                        &mut output,
+                        SESSION_ID,
+                        "hello",
+                        &mut no_signal,
+                    ))
+                    .await
+                    .unwrap();
 
                     assert_eq!(exit, Exit::Failure, "{format:?}");
                     let stderr = stderr.text();
@@ -439,6 +508,7 @@ mod tests {
                     &mut output,
                     SESSION_ID,
                     "Look around.",
+                    &mut no_signal,
                 ))
                 .await
                 .unwrap();
@@ -459,9 +529,15 @@ mod tests {
             let (mut output, stdout, stderr) = output(OutputFormat::Json);
             let handle = unsaved_session_handle(failure);
 
-            let exit = Box::pin(drive(handle, &mut output, SESSION_ID, "hello"))
-                .await
-                .unwrap();
+            let exit = Box::pin(drive(
+                handle,
+                &mut output,
+                SESSION_ID,
+                "hello",
+                &mut no_signal,
+            ))
+            .await
+            .unwrap();
 
             assert_eq!(exit, Exit::Failure);
             let result = result_data(&stdout.text());

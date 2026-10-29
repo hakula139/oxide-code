@@ -542,7 +542,7 @@ pub enum Interaction {
 /// Transport from the engine to a frontend. `send` runs for every streamed token, so it must be
 /// cheap, and it must not panic once the frontend is gone. Discard its error with `_ =` only for
 /// streamed text, where losing a token is harmless.
-pub trait EventSink: Send + Sync {
+pub(crate) trait EventSink: Send + Sync {
     fn send(&self, event: Event) -> Result<()>;
 
     /// Sends `event` and logs its variant at `error!` if the channel rejects it. Use it for an
@@ -580,23 +580,20 @@ impl EventSink for mpsc::UnboundedSender<Event> {
 
 // ── Testing ──
 
-#[cfg(any(test, feature = "testing"))]
-pub mod testing {
+#[cfg(test)]
+pub(crate) mod local_testing {
     use std::sync::{Arc, Mutex};
 
     use anyhow::{Result, bail};
-    use serde_json::json;
 
-    use super::{ConfigPick, Event, EventSink, ToolCall, ToolResult};
-    use crate::model::Effort;
-    use crate::tool::view::ToolResultView;
+    use super::{Event, EventSink};
 
     /// An [`EventSink`] that keeps every event it receives. Clones share one log.
     #[derive(Clone, Default)]
-    pub struct CapturingSink(Arc<Mutex<Vec<Event>>>);
+    pub(crate) struct CapturingSink(Arc<Mutex<Vec<Event>>>);
 
     impl CapturingSink {
-        pub fn events(&self) -> Vec<Event> {
+        pub(crate) fn events(&self) -> Vec<Event> {
             self.0
                 .lock()
                 .expect("the event log is not poisoned")
@@ -615,13 +612,22 @@ pub mod testing {
     }
 
     /// An [`EventSink`] whose `send` always fails, as it does once the frontend is gone.
-    pub struct FailingSink;
+    pub(crate) struct FailingSink;
 
     impl EventSink for FailingSink {
         fn send(&self, _event: Event) -> Result<()> {
             bail!("sink closed")
         }
     }
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
+    use serde_json::json;
+
+    use super::{ConfigPick, ToolCall, ToolResult};
+    use crate::model::Effort;
+    use crate::tool::view::ToolResultView;
 
     /// A pick of the model `id`, with `effort` when one was picked alongside.
     pub fn model_pick(id: &str, effort: Option<Effort>) -> ConfigPick {

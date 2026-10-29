@@ -405,16 +405,14 @@ fn try_main() -> Result<ExitCode> {
         .enable_all()
         .build()
         .context("failed to start the async runtime")?;
-    let exit = runtime.block_on(async_main(offset_error)).map_err(|e| {
-        match e.downcast::<EnginePanic>() {
-            Ok(panic) => panic.resume(),
-            Err(e) => e,
-        }
+    let exit = runtime.block_on(async_main(offset_error));
+    // tokio's stdin reader can stay blocked in `read`, such as one an abandoned approval started,
+    // and a regular drop waits for it. The drivers finish the session before they return.
+    runtime.shutdown_background();
+    let exit = exit.map_err(|e| match e.downcast::<EnginePanic>() {
+        Ok(panic) => panic.resume(),
+        Err(e) => e,
     })?;
-    if matches!(exit, Exit::Signal(_)) {
-        // tokio's stdin reader can stay blocked in `read`, and a regular drop waits for it.
-        runtime.shutdown_background();
-    }
     Ok(exit.finish())
 }
 
@@ -508,13 +506,14 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         title,
         prior,
     };
+    let mut signals = driver::Signals::new();
     // Boxed, since on Windows this future passes clippy's 16 KiB `large_futures` threshold.
     let signal = Box::pin(ox_tui::run(
         engine,
         theme,
         config.snapshot(),
         startup,
-        driver::shutdown_signal(),
+        signals.recv(),
     ))
     .await?;
     Ok(signal.map_or(Exit::Success, Exit::Signal))

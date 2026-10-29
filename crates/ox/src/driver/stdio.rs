@@ -47,7 +47,8 @@ pub(super) enum OpEnd {
 ///
 /// SIGINT in a run with an `approver` interrupts `op`, as it does in a shell, while any other
 /// signal stops the run. Once stdout's reader goes away, `op` is interrupted, since nothing reads
-/// the rest.
+/// the rest. Each `signal` call must be cancel safe, as [`Signals::recv`](super::Signals::recv) is,
+/// since the loop starts a new one for every event.
 pub(super) async fn run_op<O: Write, E: Write, A: Approver>(
     events: &mut mpsc::UnboundedReceiver<Event>,
     ops: &mpsc::Sender<Op>,
@@ -62,77 +63,94 @@ pub(super) async fn run_op<O: Write, E: Write, A: Approver>(
     let mut held = VecDeque::new();
     let mut interrupted = false;
     loop {
-        // The signal future lives until it resolves, so a signal between two events is not lost.
-        let mut caught = pin!(signal());
-        let shutdown = 'events: loop {
-            let event = if let Some(event) = held.pop_front() {
-                event
-            } else {
-                tokio::select! {
-                    biased;
+        let event = if let Some(event) = held.pop_front() {
+            event
+        } else {
+            tokio::select! {
+                biased;
 
-                    shutdown = &mut caught => break shutdown,
-                    event = events.recv() => match event {
-                        Some(event) => event,
-                        None => return OpEnd::EngineStopped,
-                    },
-                }
-            };
-            let Event::ApprovalRequested {
-                id,
-                preview,
-                basis,
-                grant,
-            } = event
-            else {
-                let end = TurnEnd::of(&op, &event);
-                output.render(event);
-                if let Some(end) = end {
-                    return OpEnd::Ended(end);
-                }
-                if output.stdout_lost() && !interrupted {
-                    interrupted = true;
-                    _ = ops.send(Op::Interrupt).await;
-                }
-                continue;
-            };
-
-            let approver = approver
-                .as_deref_mut()
-                .expect("an engine requests approval only in an attended run");
-            let mut decision = pin!(approver.decide(&preview, &basis, grant.as_deref()));
-            let decision = loop {
-                tokio::select! {
-                    biased;
-
-                    decision = &mut decision => break Some(decision),
-                    event = events.recv() => {
-                        let Some(event) = event else {
-                            return OpEnd::EngineStopped;
-                        };
-                        let ends = TurnEnd::of(&op, &event).is_some();
-                        held.push_back(event);
-                        if ends {
-                            break None;
-                        }
+                shutdown = signal() => {
+                    if let Some(end) = on_signal(output, ops, attended, shutdown).await {
+                        return end;
                     }
-                    shutdown = &mut caught => break 'events shutdown,
+                    continue;
                 }
-            };
-            if let Some(decision) = decision {
-                let decision = decision.unwrap_or_else(|error| {
-                    output.record(Err(error));
-                    ApprovalDecision::Abort
-                });
-                _ = ops.send(Op::Resolve { id, decision }).await;
+                event = events.recv() => match event {
+                    Some(event) => event,
+                    None => return OpEnd::EngineStopped,
+                },
             }
         };
-        output.break_line();
-        if !(attended && shutdown == Shutdown::Interrupt) {
-            return OpEnd::Signal(shutdown);
+        let Event::ApprovalRequested {
+            id,
+            preview,
+            basis,
+            grant,
+        } = event
+        else {
+            let end = TurnEnd::of(&op, &event);
+            output.render(event);
+            if let Some(end) = end {
+                return OpEnd::Ended(end);
+            }
+            if output.stdout_lost() && !interrupted {
+                interrupted = true;
+                _ = ops.send(Op::Interrupt).await;
+            }
+            continue;
+        };
+
+        let approver = approver
+            .as_deref_mut()
+            .expect("an engine requests approval only in an attended run");
+        let mut decision = pin!(approver.decide(&preview, &basis, grant.as_deref()));
+        let decision = loop {
+            tokio::select! {
+                biased;
+
+                decision = &mut decision => break Some(decision),
+                event = events.recv() => {
+                    let Some(event) = event else {
+                        return OpEnd::EngineStopped;
+                    };
+                    let ends = TurnEnd::of(&op, &event).is_some();
+                    held.push_back(event);
+                    if ends {
+                        break None;
+                    }
+                }
+                shutdown = signal() => {
+                    if let Some(end) = on_signal(output, ops, attended, shutdown).await {
+                        return end;
+                    }
+                    break None;
+                }
+            }
+        };
+        if let Some(decision) = decision {
+            let decision = decision.unwrap_or_else(|error| {
+                output.record(Err(error));
+                ApprovalDecision::Abort
+            });
+            _ = ops.send(Op::Resolve { id, decision }).await;
         }
-        _ = ops.send(Op::Interrupt).await;
     }
+}
+
+/// Moves past the `^C` that `shutdown` echoed, then returns how the run ends, or `None` once SIGINT
+/// in an attended run has interrupted the op, which keeps rendering until the op ends.
+async fn on_signal<O: Write, E: Write>(
+    output: &mut Output<O, E>,
+    ops: &mpsc::Sender<Op>,
+    attended: bool,
+    shutdown: Shutdown,
+) -> Option<OpEnd> {
+    output.break_line();
+    if attended && shutdown == Shutdown::Interrupt {
+        _ = ops.send(Op::Interrupt).await;
+        return None;
+    }
+    Some(OpEnd::Signal(shutdown))
 }
 
 /// How a stdio frontend answers an approval request.
@@ -187,7 +205,7 @@ pub(super) struct Output<O, E> {
     stderr: E,
     format: OutputFormat,
     text: TextState,
-    /// What the result of a JSON run reports, which a text run leaves empty.
+    /// What the result of a JSON run reports.
     summary: RunSummary,
     failure: Option<anyhow::Error>,
 }
@@ -195,10 +213,10 @@ pub(super) struct Output<O, E> {
 /// What the result line of a JSON run reports besides how it ended.
 #[derive(Default)]
 struct RunSummary {
-    /// Reply text since the last tool call, which the result reports as the final message.
-    message: String,
     error: Option<String>,
     session_write_error: Option<String>,
+    /// Reply text since the last tool call, which the result reports as the final message.
+    message: String,
     usage: Option<UsageSnapshot>,
     /// The session a fork moved the run to, which the result reports in place of the one it
     /// started in.
@@ -259,6 +277,10 @@ impl<O: Write, E: Write> Output<O, E> {
 
     /// Moves to a new line after a signal, past the `^C` a terminal echoes.
     pub(super) fn break_line(&mut self) {
+        if self.format != OutputFormat::Text {
+            // The JSON formats render replies into a sink, so their open line is not on stdout.
+            self.text.line_open = false;
+        }
         let result = self.text.break_line(&mut self.stdout, &mut self.stderr);
         self.record(result.map_err(Into::into));
     }
@@ -270,9 +292,9 @@ impl<O: Write, E: Write> Output<O, E> {
             self.text.end_line(&mut self.stdout).map_err(Into::into)
         } else {
             let RunSummary {
-                message,
                 error,
                 session_write_error,
+                message,
                 usage,
                 forked_to,
             } = &self.summary;
@@ -634,22 +656,9 @@ mod tests {
     use ox_core::util::log::testing::LogCapture;
 
     use super::*;
-    use crate::driver::testing::{ClosedPipe, FailingWriter, Failure, Screen};
-
-    /// An output in `format` with the screens its stdout and stderr show.
-    fn output(format: OutputFormat) -> (Output<Screen, Screen>, Screen, Screen) {
-        let (stdout, stderr) = (Screen::default(), Screen::default());
-        let output = Output::new(format, false, stdout.clone(), stderr.clone());
-        (output, stdout, stderr)
-    }
-
-    /// The `data` of the result line that ends `stdout`.
-    fn result_data(stdout: &str) -> serde_json::Value {
-        let line = stdout.lines().last().expect("a result line");
-        let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(record["type"], "result");
-        record["data"].take()
-    }
+    use crate::driver::testing::{
+        ClosedPipe, FailingWriter, Failure, Screen, no_signal, output, result_data,
+    };
 
     mod run_op {
         use super::*;
@@ -721,10 +730,6 @@ mod tests {
         /// Every op sent on `ops` so far.
         fn sent(ops: &mut mpsc::Receiver<Op>) -> Vec<Op> {
             std::iter::from_fn(|| ops.try_recv().ok()).collect()
-        }
-
-        async fn no_signal() -> Shutdown {
-            std::future::pending().await
         }
 
         #[tokio::test]
@@ -1123,8 +1128,8 @@ mod tests {
                     if fired {
                         return std::future::pending().await;
                     }
-                    fired = true;
                     tokio::task::yield_now().await;
+                    fired = true;
                     tx.send(Event::Cancelled).unwrap();
                     signal
                 };
@@ -1168,8 +1173,8 @@ mod tests {
                 if fired {
                     return std::future::pending().await;
                 }
-                fired = true;
                 tokio::task::yield_now().await;
+                fired = true;
                 tx.send(Event::Cancelled).unwrap();
                 Shutdown::Interrupt
             };
@@ -1188,6 +1193,32 @@ mod tests {
             assert_eq!(sent(&mut ops), [prompt(), Op::Interrupt]);
             assert_eq!(stderr.text(), format!("\n{INTERRUPTED_MARKER}\n"));
         }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn sigterm_during_an_approval_stops_the_run() {
+            let (_tx, mut events) = queued([approval(None)]);
+            let (ops_tx, mut ops) = mpsc::channel(4);
+            let (mut output, _, stderr) = output(OutputFormat::Text);
+            let mut signal = async || {
+                tokio::task::yield_now().await;
+                Shutdown::Terminate
+            };
+
+            let end = run_op(
+                &mut events,
+                &ops_tx,
+                &mut output,
+                &mut signal,
+                prompt(),
+                Some(&mut Undecided),
+            )
+            .await;
+
+            assert_eq!(end, OpEnd::Signal(Shutdown::Terminate));
+            assert_eq!(sent(&mut ops), [prompt()]);
+            assert_eq!(stderr.text(), "\n");
+        }
     }
 
     mod output {
@@ -1203,32 +1234,6 @@ mod tests {
 
             assert_eq!(output.finish().unwrap_err().to_string(), "first failure");
             output.finish().unwrap();
-        }
-
-        mod record {
-            use super::*;
-
-            #[test]
-            fn logs_the_full_failure_chain() {
-                let logs = LogCapture::default();
-                let (mut output, _, _) = output(OutputFormat::Text);
-                let failure = anyhow::anyhow!("pipe closed").context("failed to render event");
-
-                tracing::dispatcher::with_default(&logs.dispatch(), || {
-                    output.record(Err(failure));
-                });
-
-                assert_eq!(
-                    logs.events(),
-                    [BTreeMap::from([
-                        (
-                            "error".to_owned(),
-                            "failed to render event: pipe closed".to_owned()
-                        ),
-                        ("message".to_owned(), "stdio output failed".to_owned()),
-                    ])]
-                );
-            }
         }
 
         mod render {
@@ -1323,6 +1328,55 @@ mod tests {
             }
         }
 
+        mod break_line {
+            use super::*;
+
+            #[test]
+            fn ends_an_open_reply_line_once() {
+                let (mut output, stdout, stderr) = output(OutputFormat::Text);
+                output.render(Event::StreamToken("partial".to_owned()));
+
+                output.break_line();
+                output.print_result(TurnEnd::Shutdown, "session-1");
+
+                output.finish().unwrap();
+                assert_eq!(
+                    (stdout.text(), stderr.text()),
+                    ("partial\n".to_owned(), String::new()),
+                );
+            }
+
+            #[test]
+            fn keeps_the_line_break_off_stdout_in_the_json_formats() {
+                for format in [OutputFormat::Json, OutputFormat::StreamJson] {
+                    let (mut output, stdout, stderr) = output(format);
+                    output.render(Event::StreamToken("partial".to_owned()));
+                    let streamed = stdout.text();
+
+                    output.break_line();
+
+                    output.finish().unwrap();
+                    assert_eq!(stdout.text(), streamed, "{format:?}");
+                    assert_eq!(stderr.text(), "\n", "{format:?}");
+                }
+            }
+
+            #[test]
+            fn retains_a_failed_line_break() {
+                let failure = Failure::Write("\n");
+                let mut output = Output::new(
+                    OutputFormat::Text,
+                    false,
+                    io::sink(),
+                    FailingWriter::new(failure),
+                );
+
+                output.break_line();
+
+                assert_eq!(output.finish().unwrap_err().to_string(), failure.message());
+            }
+        }
+
         mod print_result {
             use super::*;
 
@@ -1405,37 +1459,29 @@ mod tests {
             }
         }
 
-        mod break_line {
+        mod record {
             use super::*;
 
             #[test]
-            fn ends_an_open_reply_line_once() {
-                let (mut output, stdout, stderr) = output(OutputFormat::Text);
-                output.render(Event::StreamToken("partial".to_owned()));
+            fn logs_the_full_failure_chain() {
+                let logs = LogCapture::default();
+                let (mut output, _, _) = output(OutputFormat::Text);
+                let failure = anyhow::anyhow!("pipe closed").context("failed to render event");
 
-                output.break_line();
-                output.print_result(TurnEnd::Shutdown, "session-1");
+                tracing::dispatcher::with_default(&logs.dispatch(), || {
+                    output.record(Err(failure));
+                });
 
-                output.finish().unwrap();
                 assert_eq!(
-                    (stdout.text(), stderr.text()),
-                    ("partial\n".to_owned(), String::new()),
+                    logs.events(),
+                    [BTreeMap::from([
+                        (
+                            "error".to_owned(),
+                            "failed to render event: pipe closed".to_owned()
+                        ),
+                        ("message".to_owned(), "stdio output failed".to_owned()),
+                    ])]
                 );
-            }
-
-            #[test]
-            fn retains_a_failed_line_break() {
-                let failure = Failure::Write("\n");
-                let mut output = Output::new(
-                    OutputFormat::Text,
-                    false,
-                    io::sink(),
-                    FailingWriter::new(failure),
-                );
-
-                output.break_line();
-
-                assert_eq!(output.finish().unwrap_err().to_string(), failure.message());
             }
         }
 
@@ -1462,14 +1508,15 @@ mod tests {
         mod render {
             use super::*;
 
-            fn test_sink(show_thinking: bool) -> TextState {
+            fn text_state(show_thinking: bool) -> TextState {
                 TextState::new(show_thinking)
             }
 
-            fn render_one(sink: &mut TextState, event: Event) -> (String, String) {
+            fn render_one(state: &mut TextState, event: Event) -> (String, String) {
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
-                sink.render(event, &mut stdout, &mut stderr)
+                state
+                    .render(event, &mut stdout, &mut stderr)
                     .expect("render returns Ok");
                 (
                     String::from_utf8(stdout).expect("stdout is UTF-8"),
@@ -1479,10 +1526,11 @@ mod tests {
 
             /// Renders `events` with stdout and stderr sharing one screen, as on a terminal.
             fn render_on_screen(events: impl IntoIterator<Item = Event>) -> String {
-                let mut sink = test_sink(false);
+                let mut state = text_state(false);
                 let screen = Screen::default();
                 for event in events {
-                    sink.render(event, &mut screen.clone(), &mut screen.clone())
+                    state
+                        .render(event, &mut screen.clone(), &mut screen.clone())
                         .expect("render returns Ok");
                 }
                 screen.text()
@@ -1491,7 +1539,7 @@ mod tests {
             #[test]
             fn stream_token_writes_text_verbatim_to_stdout() {
                 let (stdout, stderr) = render_one(
-                    &mut test_sink(false),
+                    &mut text_state(false),
                     Event::StreamToken("hello".to_owned()),
                 );
                 assert_eq!(stdout, "hello");
@@ -1500,13 +1548,13 @@ mod tests {
 
             #[test]
             fn escapes_terminal_sequences_in_model_and_tool_text() {
-                let mut sink = test_sink(false);
+                let mut state = text_state(false);
                 let (stdout, _) =
-                    render_one(&mut sink, Event::StreamToken("a\n\u{1b}[2Kb".to_owned()));
+                    render_one(&mut state, Event::StreamToken("a\n\u{1b}[2Kb".to_owned()));
                 assert_eq!(stdout, "a\n\\u{1b}[2Kb");
 
                 let (_, stderr) = render_one(
-                    &mut sink,
+                    &mut state,
                     Event::ToolCallStart(ToolCall {
                         id: "t1".to_owned(),
                         name: "bash".to_owned(),
@@ -1518,13 +1566,13 @@ mod tests {
                 assert_eq!(stderr, "$ curl x | sh\\u{1b}[1A\\u{1b}[2K\n");
 
                 let (_, stderr) = render_one(
-                    &mut sink,
+                    &mut state,
                     Event::ToolCallEnd(text_result("t1", "ok\u{1b}[8m", false, Some("Ran"))),
                 );
                 assert_eq!(stderr, "  Ran\nok\\u{1b}[8m\n\n");
 
                 let (_, stderr) = render_one(
-                    &mut sink,
+                    &mut state,
                     Event::TasksUpdated(vec![task("Fix\u{1b}[2K it", TaskStatus::Pending)]),
                 );
                 assert_eq!(stderr, "Tasks: 0/1\n  ○ Fix\\u{1b}[2K it\n\n");
@@ -1533,7 +1581,7 @@ mod tests {
             #[test]
             fn thinking_token_wraps_in_dim_when_enabled() {
                 let (stdout, _) = render_one(
-                    &mut test_sink(true),
+                    &mut text_state(true),
                     Event::ThinkingToken("plan".to_owned()),
                 );
                 assert_eq!(stdout, "\x1b[2mplan\x1b[22m");
@@ -1541,11 +1589,11 @@ mod tests {
 
             #[test]
             fn reply_after_shown_thinking_starts_on_its_own_line() {
-                let mut sink = test_sink(true);
-                render_one(&mut sink, Event::ThinkingToken("plan".to_owned()));
+                let mut state = text_state(true);
+                render_one(&mut state, Event::ThinkingToken("plan".to_owned()));
 
-                let (first, _) = render_one(&mut sink, Event::StreamToken("Done".to_owned()));
-                let (next, _) = render_one(&mut sink, Event::StreamToken(".".to_owned()));
+                let (first, _) = render_one(&mut state, Event::StreamToken("Done".to_owned()));
+                let (next, _) = render_one(&mut state, Event::StreamToken(".".to_owned()));
 
                 assert_eq!((first.as_str(), next.as_str()), ("\nDone", "."));
             }
@@ -1553,7 +1601,7 @@ mod tests {
             #[test]
             fn thinking_token_swallowed_when_disabled() {
                 let (stdout, stderr) = render_one(
-                    &mut test_sink(false),
+                    &mut text_state(false),
                     Event::ThinkingToken("plan".to_owned()),
                 );
                 assert_eq!(stdout, "");
@@ -1563,13 +1611,13 @@ mod tests {
             #[test]
             fn progress_update_writes_to_stderr_only_when_thinking_hidden() {
                 let event = || Event::ProgressUpdate("Found the loader.\n".to_owned());
-                let (stdout, stderr) = render_one(&mut test_sink(false), event());
+                let (stdout, stderr) = render_one(&mut text_state(false), event());
                 assert_eq!(stdout, "");
                 assert_eq!(stderr, "Found the loader.\n");
 
                 // The same text already streamed as dim thinking on stdout.
                 assert_eq!(
-                    render_one(&mut test_sink(true), event()),
+                    render_one(&mut text_state(true), event()),
                     (String::new(), String::new()),
                 );
             }
@@ -1577,7 +1625,7 @@ mod tests {
             #[test]
             fn tool_call_start_writes_icon_label_to_stderr() {
                 let (stdout, stderr) =
-                    render_one(&mut test_sink(false), Event::ToolCallStart(ls_call()));
+                    render_one(&mut text_state(false), Event::ToolCallStart(ls_call()));
                 assert_eq!(stdout, "");
                 assert_eq!(stderr, "$ ls\n");
             }
@@ -1595,7 +1643,7 @@ mod tests {
             #[test]
             fn tool_call_end_with_title_writes_title_then_content() {
                 let (_, stderr) = render_one(
-                    &mut test_sink(false),
+                    &mut text_state(false),
                     Event::ToolCallEnd(text_result("t1", "file1\nfile2\n", false, Some("Listed"))),
                 );
                 assert_eq!(
@@ -1611,7 +1659,7 @@ mod tests {
 
             #[test]
             fn tool_call_end_after_another_call_started_repeats_its_header() {
-                let mut sink = test_sink(false);
+                let mut state = text_state(false);
                 let start = |id: &str| {
                     Event::ToolCallStart(ToolCall {
                         id: id.to_owned(),
@@ -1630,7 +1678,7 @@ mod tests {
                     start("c"),
                     Event::ToolCallEnd(text_result("c", "c hits", false, None)),
                 ]
-                .map(|event| render_one(&mut sink, event).1);
+                .map(|event| render_one(&mut state, event).1);
 
                 assert_eq!(
                     rendered,
@@ -1648,7 +1696,7 @@ mod tests {
             #[test]
             fn tool_call_end_without_title_skips_header_and_whitespace_content() {
                 let (_, stderr) = render_one(
-                    &mut test_sink(false),
+                    &mut text_state(false),
                     Event::ToolCallEnd(text_result("t2", "   \n", true, None)),
                 );
                 assert_eq!(stderr, "\n");
@@ -1656,9 +1704,9 @@ mod tests {
 
             #[test]
             fn tasks_updated_marks_each_task_under_its_progress_and_skips_a_cleared_list() {
-                let mut sink = test_sink(false);
+                let mut state = text_state(false);
 
-                let (stdout, stderr) = render_one(&mut sink, Event::TasksUpdated(plan()));
+                let (stdout, stderr) = render_one(&mut state, Event::TasksUpdated(plan()));
                 assert_eq!(stdout, "");
                 assert_eq!(
                     stderr,
@@ -1672,14 +1720,14 @@ mod tests {
                     .concat(),
                 );
 
-                let (stdout, stderr) = render_one(&mut sink, Event::TasksUpdated(Vec::new()));
+                let (stdout, stderr) = render_one(&mut state, Event::TasksUpdated(Vec::new()));
                 assert_eq!((stdout.as_str(), stderr.as_str()), ("", ""));
             }
 
             #[test]
             fn auto_compaction_started_explains_the_pause() {
                 let (stdout, stderr) =
-                    render_one(&mut test_sink(false), Event::AutoCompactionStarted);
+                    render_one(&mut text_state(false), Event::AutoCompactionStarted);
 
                 assert_eq!(stdout, "");
                 assert_eq!(stderr, "Compacting the conversation to free up context\n");
@@ -1688,7 +1736,7 @@ mod tests {
             #[test]
             fn session_compacted_writes_the_boundary_with_its_focus_escaped() {
                 let (stdout, stderr) = render_one(
-                    &mut test_sink(false),
+                    &mut text_state(false),
                     Event::SessionCompacted {
                         summary: "summary".to_owned(),
                         pre_count: 4,
@@ -1759,7 +1807,7 @@ mod tests {
                 ];
 
                 for (event, expected) in cases {
-                    let (stdout, stderr) = render_one(&mut test_sink(false), event);
+                    let (stdout, stderr) = render_one(&mut text_state(false), event);
 
                     assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
                     assert_eq!(stderr, expected);
@@ -1776,7 +1824,7 @@ mod tests {
                     notice: "Effort set to low".to_owned(),
                 };
 
-                let (stdout, stderr) = render_one(&mut test_sink(false), event);
+                let (stdout, stderr) = render_one(&mut text_state(false), event);
 
                 assert_eq!(stdout, "");
                 assert_eq!(stderr, "Effort set to low\n");
@@ -1785,7 +1833,7 @@ mod tests {
             #[test]
             fn mode_changed_names_the_mode_in_use() {
                 let (stdout, stderr) =
-                    render_one(&mut test_sink(false), Event::ModeChanged(Mode::Plan));
+                    render_one(&mut text_state(false), Event::ModeChanged(Mode::Plan));
 
                 assert_eq!(stdout, "");
                 assert_eq!(stderr, "Switched to plan mode\n");
@@ -1825,7 +1873,7 @@ mod tests {
                     },
                     Event::BackgroundShellsUpdated(shells_in_each_state()),
                 ] {
-                    let (stdout, stderr) = render_one(&mut test_sink(false), event);
+                    let (stdout, stderr) = render_one(&mut text_state(false), event);
                     assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
                     assert!(stderr.is_empty(), "stderr must stay empty: {stderr:?}");
                 }
@@ -1833,11 +1881,11 @@ mod tests {
 
             #[test]
             fn turn_complete_ends_the_open_reply_line_once() {
-                let mut sink = test_sink(true);
-                render_one(&mut sink, Event::ThinkingToken("plan".to_owned()));
+                let mut state = text_state(true);
+                render_one(&mut state, Event::ThinkingToken("plan".to_owned()));
 
-                let ended = render_one(&mut sink, Event::TurnComplete);
-                let again = render_one(&mut sink, Event::TurnComplete);
+                let ended = render_one(&mut state, Event::TurnComplete);
+                let again = render_one(&mut state, Event::TurnComplete);
 
                 assert_eq!(ended, ("\n".to_owned(), String::new()));
                 assert_eq!(again, (String::new(), String::new()));
@@ -1845,12 +1893,12 @@ mod tests {
 
             #[test]
             fn turn_complete_leaves_a_closed_reply_line_alone() {
-                let mut sink = test_sink(false);
-                render_one(&mut sink, Event::StreamToken("Done.\n".to_owned()));
-                render_one(&mut sink, Event::StreamToken(String::new()));
+                let mut state = text_state(false);
+                render_one(&mut state, Event::StreamToken("Done.\n".to_owned()));
+                render_one(&mut state, Event::StreamToken(String::new()));
 
                 assert_eq!(
-                    render_one(&mut sink, Event::TurnComplete),
+                    render_one(&mut state, Event::TurnComplete),
                     (String::new(), String::new()),
                 );
             }
@@ -1869,9 +1917,9 @@ mod tests {
                 let notice = "Skipped instruction file /repo/CLAUDE.md: Permission denied";
 
                 let (retry_stdout, retry_stderr) =
-                    render_one(&mut test_sink(false), Event::Retrying(retry.to_owned()));
+                    render_one(&mut text_state(false), Event::Retrying(retry.to_owned()));
                 let (notice_stdout, notice_stderr) =
-                    render_one(&mut test_sink(false), Event::Notice(notice.to_owned()));
+                    render_one(&mut text_state(false), Event::Notice(notice.to_owned()));
 
                 assert_eq!(retry_stdout, "");
                 assert_eq!(retry_stderr, format!("{retry}\n"));
@@ -1891,11 +1939,11 @@ mod tests {
 
             #[test]
             fn turn_failed_still_writes_stderr_when_stdout_is_closed() {
-                let mut sink = test_sink(false);
-                render_one(&mut sink, Event::StreamToken("partial reply".to_owned()));
+                let mut state = text_state(false);
+                render_one(&mut state, Event::StreamToken("partial reply".to_owned()));
                 let mut stderr = Vec::new();
 
-                let rendered = sink.render(
+                let rendered = state.render(
                     Event::TurnFailed("boom".to_owned()),
                     &mut ClosedPipe,
                     &mut stderr,
@@ -1914,10 +1962,10 @@ mod tests {
             #[test]
             fn errors_prefix_with_error_label() {
                 let (_, stderr) =
-                    render_one(&mut test_sink(false), Event::Error("boom".to_owned()));
+                    render_one(&mut text_state(false), Event::Error("boom".to_owned()));
                 assert_eq!(stderr, "Error: boom\n");
                 let (_, stderr) = render_one(
-                    &mut test_sink(false),
+                    &mut text_state(false),
                     Event::RenameFailed("lost".to_owned()),
                 );
                 assert_eq!(stderr, "Error: lost\n");
@@ -1929,18 +1977,21 @@ mod tests {
 
             #[test]
             fn ends_the_open_reply_line_past_the_echoed_signal() {
-                let mut sink = TextState::new(false);
+                let mut state = TextState::new(false);
                 let screen = Screen::default();
-                sink.render(
-                    Event::StreamToken("partial".to_owned()),
-                    &mut screen.clone(),
-                    &mut screen.clone(),
-                )
-                .expect("render returns Ok");
+                state
+                    .render(
+                        Event::StreamToken("partial".to_owned()),
+                        &mut screen.clone(),
+                        &mut screen.clone(),
+                    )
+                    .expect("render returns Ok");
 
-                sink.break_line(&mut screen.clone(), &mut screen.clone())
+                state
+                    .break_line(&mut screen.clone(), &mut screen.clone())
                     .expect("break_line returns Ok");
-                sink.render(Event::Cancelled, &mut screen.clone(), &mut screen.clone())
+                state
+                    .render(Event::Cancelled, &mut screen.clone(), &mut screen.clone())
                     .expect("render returns Ok");
 
                 assert_eq!(screen.text(), format!("partial\n{INTERRUPTED_MARKER}\n"));

@@ -52,4 +52,4 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-tui/src/app/queue.rs`: `PromptQueue` and its `QueuedPrompt` entries, the active prompt, the queued prompts, what a failed turn hands back, and the prompts a session switch leaves behind.
 - `crates/ox-tui/src/app/render.rs`: `App::run_label`, the status bar's operation label and the key that stops it.
 - `crates/ox/src/driver/repl.rs`: `drive`, which turns SIGINT at the prompt into a fresh prompt when stdin is a terminal.
-- `crates/ox/src/driver/stdio.rs`: `run_op`, which renders one operation until its terminal event and turns SIGINT during an attended operation into `Op::Interrupt`.
+- `crates/ox/src/driver/stdio.rs`: `run_op`, which renders one operation until its terminal event and turns SIGINT during an attended operation into `Op::Interrupt`, and `TextState::render`, which prints the `(interrupted)` marker.
