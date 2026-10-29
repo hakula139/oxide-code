@@ -526,7 +526,8 @@ mod tests {
     use crate::engine::testing::MODEL;
     use crate::message::{Replay, Role};
     use crate::model::Effort;
-    use crate::protocol::testing::{CapturingSink, model_pick};
+    use crate::protocol::local_testing::CapturingSink;
+    use crate::protocol::testing::model_pick;
     use crate::protocol::{ApprovalDecision, Op, ResumeTarget, SavedTarget, ToolCall, ToolResult};
     use crate::session::handle;
     use crate::session::handle::SessionHandle;

@@ -8,6 +8,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
@@ -37,12 +38,15 @@ use ox_tui::slash::is_built_in;
 use ox_tui::terminal;
 use ox_tui::theme::{ResolvedTheme, resolve_theme};
 
-use self::driver::Exit;
-use self::driver::headless::OutputFormat;
+use self::driver::{Exit, OutputFormat};
 
 /// The arguments that start or resume a conversation, none of which `--list`, `--archived`, or
 /// `--limit` can accompany.
 const SESSION_ARGS: &[&str] = &["continue", "print", "prompt", "resume"];
+
+/// How long an exit waits for the runtime's blocking work, which covers arboard's 100 ms X11
+/// clipboard handover.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Parser)]
 #[command(
@@ -463,16 +467,15 @@ fn try_main() -> Result<ExitCode> {
         .enable_all()
         .build()
         .context("failed to start the async runtime")?;
-    let exit = runtime.block_on(async_main(offset_error)).map_err(|e| {
-        match e.downcast::<EnginePanic>() {
-            Ok(panic) => panic.resume(),
-            Err(e) => e,
-        }
+    let result = runtime.block_on(async_main(offset_error));
+    // A signal exit never returns, so blocking work such as the clipboard handover must finish
+    // first. Signals go unheard until ox exits, and a DNS lookup on the blocking pool could hold
+    // a plain drop for the resolver's timeout, so every exit bounds the wait.
+    runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
+    let exit = result.map_err(|e| match e.downcast::<EnginePanic>() {
+        Ok(panic) => panic.resume(),
+        Err(e) => e,
     })?;
-    if matches!(exit, Exit::Signal(_)) {
-        // tokio's stdin reader can stay blocked in `read`, and a regular drop waits for it.
-        runtime.shutdown_background();
-    }
     Ok(exit.finish())
 }
 
@@ -569,13 +572,14 @@ async fn run_session(
         title,
         prior,
     };
+    let mut signals = driver::Signals::new();
     // Boxed, since on Windows this future passes clippy's 16 KiB `large_futures` threshold.
     let signal = Box::pin(ox_tui::run(
         engine,
         *theme,
         config.snapshot(),
         startup,
-        driver::shutdown_signal(),
+        signals.recv(),
     ))
     .await?;
     Ok(signal.map_or(Exit::Success, Exit::Signal))

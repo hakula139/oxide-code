@@ -359,7 +359,7 @@ mod tests {
     use crate::engine::turn::conversation_request;
     use crate::message::Replay;
     use crate::model::ModelSettings;
-    use crate::protocol::testing::CapturingSink;
+    use crate::protocol::local_testing::CapturingSink;
     use crate::tool::ToolDefinition;
 
     fn to_json(messages: &[Message]) -> Vec<serde_json::Value> {

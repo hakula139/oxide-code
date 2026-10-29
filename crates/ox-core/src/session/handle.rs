@@ -1080,7 +1080,7 @@ mod tests {
 
             use crate::client::anthropic::local_testing::{completion_body, test_client};
             use crate::client::anthropic::testing::api_key;
-            use crate::protocol::testing::CapturingSink;
+            use crate::protocol::local_testing::CapturingSink;
             use crate::session::title_generator;
 
             let server = MockServer::start().await;
