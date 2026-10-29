@@ -471,7 +471,7 @@ pub struct ResumePicker {
     list: SearchableList<SessionRow>,
     scope: ListScope,
     dismissal: Dismissal,
-    /// Filtered out of every page so the user can't self-resume onto the open append-writer.
+    /// Filtered out of every page, since resume, archive, and delete all refuse the live session.
     live_session_id: String,
     pages: Pages,
     /// When the last reload started, in local time, which every page's rows count from.
