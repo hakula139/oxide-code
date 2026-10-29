@@ -154,27 +154,25 @@ pub(super) struct Unreadable {
 }
 
 impl Unreadable {
-    /// What walk error `e` failed to read, or `None` for a path that vanished mid-walk, which holds
-    /// nothing left to search. The walk reports an ignore file that failed to load on its directory
-    /// entry, so that error never reaches here.
+    /// What walk error `e` failed to read, or `None` if `e` hides nothing from the walk. An ignore
+    /// file that failed to load only loses its rules, and a path that vanished mid-walk holds
+    /// nothing left to search.
     fn from_walk(e: &ignore::Error) -> Option<Self> {
-        // The parallel walk wraps the path in the depth, and the sequential walk the reverse. On
-        // Windows, the parallel walk fails to open a denied directory for its volume check and
-        // reports that without a depth.
-        let e = match e {
-            ignore::Error::WithDepth { err, .. } => err.as_ref(),
-            _ => e,
-        };
-        let (path, cause) = match e {
-            ignore::Error::WithPath { path, err } => (Some(path.clone()), err.as_ref()),
-            _ => (None, e),
-        };
+        // A depthless error is an ignore file that failed to load, here or in an ancestor, except
+        // the I/O error of the parallel walk's volume check on a denied directory on Windows.
+        if e.depth().is_none() && e.io_error().is_none() {
+            return None;
+        }
+        let (path, cause) = located(e);
         let error = match cause.io_error() {
             Some(io) if io.kind() == std::io::ErrorKind::NotFound => return None,
             Some(io) => innermost_error(io),
             None => cause.to_string(),
         };
-        Some(Self { path, error })
+        Some(Self {
+            path: path.map(Path::to_path_buf),
+            error,
+        })
     }
 
     /// The file at `path`, whose read failed with `e`.
@@ -183,6 +181,16 @@ impl Unreadable {
             path: Some(path.to_owned()),
             error: innermost_error(e),
         }
+    }
+}
+
+/// The path walk error `e` names and the error under it. Either walk may wrap the path in depths,
+/// or a depth in the path, so this skips each depth until it reaches a path.
+fn located(e: &ignore::Error) -> (Option<&Path>, &ignore::Error) {
+    match e {
+        ignore::Error::WithDepth { err, .. } => located(err),
+        ignore::Error::WithPath { path, err } => (Some(path), err),
+        _ => (None, e),
     }
 }
 
@@ -210,7 +218,7 @@ pub(super) fn withhold_unreadable(
     found - unreadable.len()
 }
 
-/// The newest `limit` entries and the full count, in walk order among equal modification times.
+/// The newest `limit` entries and the full count, by path among equal modification times.
 pub(super) fn newest_first(
     entries: impl Iterator<Item = ignore::DirEntry>,
     limit: usize,
@@ -218,7 +226,7 @@ pub(super) fn newest_first(
     let mut newest = BTreeMap::new();
     let mut total = 0;
     for entry in entries {
-        let key = (Reverse(entry_mtime(&entry)), total);
+        let key = (Reverse(entry_mtime(&entry)), entry.path().to_path_buf());
         total += 1;
         newest.insert(key, entry);
         if newest.len() > limit {
@@ -264,11 +272,13 @@ impl fmt::Display for SearchRow {
 
 /// Retains an output prefix under a row cap and the spill budget. The first omitted row records
 /// truncation, while callers that need full totals can continue counting without retaining rows.
+/// A [`SearchRow::Separator`] waits for the row after it, so the output never ends in one.
 pub(super) struct SearchRows {
     pub(super) kept: Vec<SearchRow>,
     bytes: u64,
     head_limit: usize,
     row_limit_reached: bool,
+    separator_pending: bool,
 }
 
 impl SearchRows {
@@ -278,6 +288,7 @@ impl SearchRows {
             bytes: 0,
             head_limit,
             row_limit_reached: false,
+            separator_pending: false,
         }
     }
 
@@ -286,12 +297,24 @@ impl SearchRows {
     }
 
     pub(super) fn push(&mut self, row: SearchRow) {
-        if self.kept.len() == self.head_limit {
+        if row == SearchRow::Separator {
+            self.separator_pending = !self.kept.is_empty();
+            return;
+        }
+        let needed = 1 + usize::from(self.separator_pending);
+        if self.kept.len() + needed > self.head_limit {
             self.row_limit_reached = true;
         } else if !self.full() {
-            self.bytes += row.to_string().len() as u64 + 1;
-            self.kept.push(row);
+            if std::mem::take(&mut self.separator_pending) {
+                self.keep(SearchRow::Separator);
+            }
+            self.keep(row);
         }
+    }
+
+    fn keep(&mut self, row: SearchRow) {
+        self.bytes += row.to_string().len() as u64 + 1;
+        self.kept.push(row);
     }
 
     pub(super) fn limit_description(&self, noun: &str) -> Option<String> {
@@ -424,7 +447,7 @@ mod tests {
     use indoc::{formatdoc, indoc};
 
     use super::*;
-    use crate::tool::local_testing::{self, create_modified_at, deny_reads};
+    use crate::tool::local_testing::{self, deny_reads, write_modified_at};
     use crate::util::fs::testing::deny_read_access;
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::testing::HOME_VAR;
@@ -576,6 +599,24 @@ mod tests {
         }
     }
 
+    mod walk_files_parallel {
+        use super::*;
+
+        #[test]
+        fn visits_nothing_once_cancelled() {
+            let dir = canonical_tempdir();
+            fs::write(dir.path().join("a.txt"), "").unwrap();
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+
+            let (kept, unreadable) =
+                walk_files_parallel(dir.path(), &cancel, |entry| Some(entry.into_path()));
+
+            assert_eq!(kept, [] as [PathBuf; 0]);
+            assert_eq!(unreadable, []);
+        }
+    }
+
     mod unreadable {
         use super::*;
 
@@ -589,7 +630,21 @@ mod tests {
                     depth: 1,
                     err: Box::new(err),
                 };
+                let bad_glob = || ignore::Error::WithLineNumber {
+                    line: 1,
+                    err: Box::new(ignore::Error::Glob {
+                        glob: Some("{a".to_owned()),
+                        err: "unclosed alternate group".to_owned(),
+                    }),
+                };
                 let cases = [
+                    (
+                        at_depth(ignore::Error::WithPath {
+                            path: "locked".into(),
+                            err: Box::new(at_depth(denied())),
+                        }),
+                        Some((Some("locked"), "denied")),
+                    ),
                     (
                         ignore::Error::WithPath {
                             path: "locked".into(),
@@ -621,6 +676,14 @@ mod tests {
                         },
                         None,
                     ),
+                    (
+                        ignore::Error::WithPath {
+                            path: ".gitignore".into(),
+                            err: Box::new(bad_glob()),
+                        },
+                        None,
+                    ),
+                    (ignore::Error::Partial(vec![bad_glob(), bad_glob()]), None),
                 ];
 
                 for (e, expected) in cases {
@@ -663,8 +726,9 @@ mod tests {
         fn keeps_later_newest_entries_while_counting_the_whole_walk() {
             let dir = canonical_tempdir();
             for index in 0..300 {
-                create_modified_at(
+                write_modified_at(
                     &dir.path().join(format!("{index:03}.rs")),
+                    "",
                     1_000_000 + index,
                 );
             }
@@ -690,14 +754,14 @@ mod tests {
         }
 
         #[test]
-        fn orders_by_mtime_and_keeps_input_order_among_ties() {
+        fn orders_by_mtime_then_by_path_whatever_the_input_order() {
             let dir = canonical_tempdir();
             for (name, secs) in [
                 ("a.txt", 1_000_000),
                 ("b.txt", 1_000_060),
                 ("c.txt", 1_000_000),
             ] {
-                create_modified_at(&dir.path().join(name), secs);
+                write_modified_at(&dir.path().join(name), "", secs);
             }
             let mut unreadable = Vec::new();
             let mut entries: Vec<_> =
@@ -705,8 +769,8 @@ mod tests {
             entries.sort_by_key(|entry| Reverse(entry.file_name().to_owned()));
 
             for (limit, expected) in [
-                (usize::MAX, vec!["b.txt", "c.txt", "a.txt"]),
-                (2, vec!["b.txt", "c.txt"]),
+                (usize::MAX, vec!["b.txt", "a.txt", "c.txt"]),
+                (2, vec!["b.txt", "a.txt"]),
                 (1, vec!["b.txt"]),
                 (0, vec![]),
             ] {
@@ -775,6 +839,19 @@ mod tests {
                     rows.limit_description("files").as_deref(),
                     Some("10 MiB of output")
                 );
+            }
+
+            #[test]
+            fn keeps_a_separator_only_between_two_rows() {
+                let mut rows = SearchRows::new(usize::MAX);
+
+                for row in ["a", "b"] {
+                    rows.push(SearchRow::Separator);
+                    rows.push(SearchRow::Path(row.to_owned()));
+                }
+                rows.push(SearchRow::Separator);
+
+                assert_eq!(rows.render(), "a\n--\nb");
             }
         }
 

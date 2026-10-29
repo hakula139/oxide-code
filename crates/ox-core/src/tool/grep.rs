@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::fmt::Write as _;
 use std::fs::Metadata;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use strum::VariantArray;
 use tokio_util::sync::CancellationToken;
 
+use super::file::{is_binary, strip_bom};
 use super::search::{
     NO_FILES_FOUND, SearchOutput, SearchRoot, SearchRow, SearchRows, Unreadable, search_arg,
 };
@@ -27,7 +28,7 @@ use super::{
 };
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::permission::{PermissionClass, ReadFilter, WalkFilter};
-use crate::util::fs::{FileReadError, open_regular_file};
+use crate::util::fs::{FileReadError, read_regular_file};
 use crate::util::text::{ELLIPSIS, format_size, plural};
 
 const NO_MATCHES_FOUND: &str = "No matches found";
@@ -58,7 +59,8 @@ impl Tool for GrepTool {
                 name: "grep".to_owned(),
                 description: "Search file contents with a Rust `regex` pattern, \
                               which supports no lookaround or backreferences. \
-                              Each line is matched on its own, so a pattern cannot span lines. \
+                              Each line is matched on its own, so a pattern cannot span lines \
+                              or contain a line break. \
                               A directory search includes hidden files and skips VCS directories \
                               and files that `.gitignore` excludes."
                     .to_owned(),
@@ -269,8 +271,8 @@ fn grep_files(params: &GrepParams<'_>) -> Result<SearchOutput, String> {
 }
 
 /// Compiles `pattern` into a matcher whose matches each lie within one line, where `^` and `$`
-/// match at line boundaries, `$` also before a `\r\n`. The size limits keep an adversarial pattern
-/// from exhausting memory.
+/// match at line boundaries, `$` also before a `\r\n`. A pattern holding a line break fails, while
+/// a lone `\r` stays searchable. Size limits keep a hostile pattern from exhausting memory.
 fn matcher(pattern: &str, case_insensitive: bool) -> Result<RegexMatcher, String> {
     // The builder parses the pattern wrapped in `(?:...)`, which would accept an unbalanced
     // `a)|(b` and quote the wrapped pattern in errors, so the pattern is checked alone first.
@@ -285,8 +287,10 @@ fn matcher(pattern: &str, case_insensitive: bool) -> Result<RegexMatcher, String
         .size_limit(REGEX_SIZE_LIMIT)
         .dfa_size_limit(REGEX_SIZE_LIMIT)
         .multi_line(true)
-        .line_terminator(Some(b'\n'))
+        // `crlf` also sets a CRLF line terminator, which would stop `\r` from matching, so the
+        // terminator follows it.
         .crlf(true)
+        .line_terminator(Some(b'\n'))
         .build(pattern)
         .map_err(|e| format!("Invalid regex: {e}"))
 }
@@ -408,15 +412,14 @@ struct Search<'a> {
     unreadable: Vec<Unreadable>,
 }
 
-/// A line a search reports, with its 1-based number and its bytes, line ending included.
+/// A line a search reports.
 enum Line<'b> {
-    Match {
+    /// A matching line, or a context line around one, with its 1-based number and its bytes, line
+    /// ending included.
+    Text {
         number: u64,
         bytes: &'b [u8],
-    },
-    Context {
-        number: u64,
-        bytes: &'b [u8],
+        is_match: bool,
     },
     /// The gap between two runs of matches and their context.
     Break,
@@ -424,7 +427,7 @@ enum Line<'b> {
 
 impl<'a> Search<'a> {
     /// A search reporting `context` lines before and after each match. A file that grows past
-    /// `size_limit` bytes while it is read counts as unreadable.
+    /// `size_limit` bytes before it is read counts as unreadable.
     fn new(
         matcher: RegexMatcher,
         context: usize,
@@ -432,12 +435,14 @@ impl<'a> Search<'a> {
         cancel: &'a CancellationToken,
         unreadable: Vec<Unreadable>,
     ) -> Self {
+        // Binary detection and decoding happen before the search, under the rules `read` follows.
         let searcher = SearcherBuilder::new()
-            .line_terminator(LineTerminator::crlf())
+            .line_terminator(LineTerminator::byte(b'\n'))
             .line_number(true)
             .before_context(context)
             .after_context(context)
-            .binary_detection(BinaryDetection::quit(b'\0'))
+            .binary_detection(BinaryDetection::none())
+            .bom_sniffing(false)
             .build();
         Self {
             searcher,
@@ -452,62 +457,49 @@ impl<'a> Search<'a> {
         self.cancel.is_cancelled()
     }
 
-    /// Searches the file at `path`, passing each line it reports to `on_line` until that returns
-    /// `false` or the call is interrupted. A NUL byte marks binary data, which ends the search, so
-    /// a binary file reports nothing. A file whose open or read fails goes to `unreadable`, unless
-    /// it vanished after the walk found it.
+    /// Searches the file at `path` as `read` would show it, passing each line it reports to
+    /// `on_line` until that returns `false` or the call is interrupted. A file `read` refuses as
+    /// binary reports nothing. The text drops a leading UTF-8 BOM and replaces invalid UTF-8 with
+    /// U+FFFD, which `.` matches. A file whose read fails goes to `unreadable`, unless it vanished
+    /// after the walk found it.
     ///
-    /// The open refuses a symlink and never blocks on a fifo, and the opened file must be a regular
+    /// The read refuses a symlink and never blocks on a fifo, and the opened file must be a regular
     /// file within the size limit, so an entry swapped after the walk checked it is not read
     /// through.
     fn file(&mut self, path: &Path, on_line: impl FnMut(Line<'_>) -> bool) {
-        let result = open_regular_file(path, self.size_limit)
-            .map_err(|error| match error {
-                FileReadError::Io(error) => error,
-                FileReadError::Directory | FileReadError::NonRegular => {
-                    io::Error::other("not a regular file")
-                }
-                FileReadError::TooLarge { .. } => grew_past(self.size_limit),
-            })
-            .and_then(|file| {
-                let reader = SizeCapped {
-                    reader: file.take(self.size_limit.saturating_add(1)),
-                    limit: self.size_limit,
+        let bytes = match read_regular_file(path, self.size_limit) {
+            Ok(bytes) => bytes,
+            Err(FileReadError::Io(e)) if e.kind() == io::ErrorKind::NotFound => return,
+            Err(error) => {
+                let error = match error {
+                    FileReadError::Io(error) => error,
+                    FileReadError::Directory | FileReadError::NonRegular => {
+                        io::Error::other("not a regular file")
+                    }
+                    FileReadError::TooLarge { .. } => {
+                        let limit = format_size(self.size_limit);
+                        io::Error::other(format!("grew past the {limit} size limit"))
+                    }
                 };
-                let sink = LineSink {
-                    on_line,
-                    cancel: self.cancel,
-                };
-                self.searcher.search_reader(&self.matcher, reader, sink)
-            });
-        if let Err(e) = result
-            && e.kind() != io::ErrorKind::NotFound
+                self.unreadable.push(Unreadable::from_read(path, &error));
+                return;
+            }
+        };
+        if is_binary(&bytes) {
+            return;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let sink = LineSink {
+            on_line,
+            cancel: self.cancel,
+        };
+        if let Err(e) = self
+            .searcher
+            .search_slice(&self.matcher, strip_bom(&text).as_bytes(), sink)
         {
             self.unreadable.push(Unreadable::from_read(path, &e));
         }
     }
-}
-
-/// Reads a file its open found within `limit` bytes, failing once it yields a byte past them.
-struct SizeCapped<R> {
-    /// The file, limited to one byte past `limit`.
-    reader: io::Take<R>,
-    limit: u64,
-}
-
-impl<R: Read> Read for SizeCapped<R> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let count = self.reader.read(buffer)?;
-        if count > 0 && self.reader.limit() == 0 {
-            return Err(grew_past(self.limit));
-        }
-        Ok(count)
-    }
-}
-
-fn grew_past(limit: u64) -> io::Error {
-    let limit = format_size(limit);
-    io::Error::other(format!("grew past the {limit} size limit"))
 }
 
 struct LineSink<'c, F> {
@@ -525,25 +517,23 @@ impl<F: FnMut(Line<'_>) -> bool> Sink for LineSink<'_, F> {
     type Error = io::Error;
 
     fn matched(&mut self, _: &Searcher, mat: &SinkMatch<'_>) -> io::Result<bool> {
-        Ok(self.report(Line::Match {
+        Ok(self.report(Line::Text {
             number: mat.line_number().unwrap_or_default(),
             bytes: mat.bytes(),
+            is_match: true,
         }))
     }
 
     fn context(&mut self, _: &Searcher, context: &SinkContext<'_>) -> io::Result<bool> {
-        Ok(self.report(Line::Context {
+        Ok(self.report(Line::Text {
             number: context.line_number().unwrap_or_default(),
             bytes: context.bytes(),
+            is_match: false,
         }))
     }
 
     fn context_break(&mut self, _: &Searcher) -> io::Result<bool> {
         Ok(self.report(Line::Break))
-    }
-
-    fn binary_data(&mut self, _: &Searcher, _: u64) -> io::Result<bool> {
-        Ok(false)
     }
 }
 
@@ -570,13 +560,14 @@ fn format_content(
         }
         let display_path = super::display_path(path, cwd);
         search.file(path, |line| {
-            let (number, bytes, is_match) = match line {
-                Line::Match { number, bytes } => (number, bytes, true),
-                Line::Context { number, bytes } => (number, bytes, false),
-                Line::Break => {
-                    rows.push(SearchRow::Separator);
-                    return !rows.full();
-                }
+            let Line::Text {
+                number,
+                bytes,
+                is_match,
+            } = line
+            else {
+                rows.push(SearchRow::Separator);
+                return !rows.full();
             };
             let text = line_text(bytes);
             rows.push(SearchRow::Match {
@@ -653,7 +644,7 @@ fn format_files_with_matches(
         }
         let mut matched = false;
         search.file(path, |line| {
-            matched = matches!(line, Line::Match { .. });
+            matched = matches!(line, Line::Text { is_match: true, .. });
             !matched
         });
         if matched {
@@ -700,7 +691,7 @@ fn format_count(
         }
         let mut count = 0;
         search.file(path, |line| {
-            count += usize::from(matches!(line, Line::Match { .. }));
+            count += usize::from(matches!(line, Line::Text { is_match: true, .. }));
             true
         });
         if count > 0 {
@@ -742,7 +733,9 @@ mod tests {
     use super::*;
     use crate::permission::{Access, PathTarget};
     use crate::tool::ToolRegistry;
-    use crate::tool::local_testing::{self, ctx, deny_reads, search_root, temp_ctx};
+    use crate::tool::local_testing::{
+        self, ctx, deny_reads, search_root, temp_ctx, write_modified_at,
+    };
     use crate::tool::view::GrepFileGroup;
     use crate::util::fs::testing::{deny_read_access, symlink_file};
     use crate::util::path::local_testing::canonical_tempdir;
@@ -1485,6 +1478,18 @@ mod tests {
         }
 
         #[test]
+        fn rejects_a_pattern_holding_a_line_break() {
+            for pattern in ["a\nb", r"a\nb"] {
+                let err = grep_files(&params(pattern, Path::new("/"))).unwrap_err();
+
+                assert_eq!(
+                    err, r#"Invalid regex: the literal "\n" is not allowed in a regex"#,
+                    "{pattern:?}"
+                );
+            }
+        }
+
+        #[test]
         fn rejects_an_invalid_include_pattern() {
             let dir = canonical_tempdir();
             let mut p = params("test", dir.path());
@@ -1608,30 +1613,67 @@ mod tests {
         }
 
         #[test]
-        fn head_limit_across_multiple_files() {
+        fn head_limit_keeps_the_newest_files_rows() {
             let dir = canonical_tempdir();
-            for name in ["a.txt", "b.txt"] {
-                fs::write(dir.path().join(name), "match\nmatch\nmatch\n").unwrap();
+            for (name, secs) in [("a.txt", 2_000_000), ("b.txt", 1_000_000)] {
+                write_modified_at(&dir.path().join(name), "match\nmatch\n", secs);
             }
 
             let mut p = params("match", dir.path());
             p.head_limit = Some(3);
             let result = grep_files(&p).unwrap().content;
 
-            // The second write may or may not move the mtime, so either file can sort first.
-            let (rows, footer) = result.split_once("\n\n").unwrap();
-            let (file, _) = rows.split_once(':').unwrap();
-
-            assert!(["a.txt", "b.txt"].contains(&file), "{result}");
             assert_eq!(
-                rows,
-                formatdoc! {"
-                    {file}:1:match
-                    {file}:2:match
-                    {file}:3:match"
+                result,
+                indoc! {"
+                    a.txt:1:match
+                    a.txt:2:match
+                    b.txt:1:match
+
+                    (Results limited to 3 lines)"
                 },
             );
-            assert_eq!(footer, "(Results limited to 3 lines)");
+        }
+
+        #[test]
+        fn lists_files_newest_first_and_ties_and_notes_by_path() {
+            let dir = canonical_tempdir();
+            for (name, secs) in [
+                ("b.rs", 1_000_000),
+                ("new.rs", 2_000_000),
+                ("a.rs", 1_000_000),
+            ] {
+                write_modified_at(&dir.path().join(name), "hit\n", secs);
+            }
+            for name in ["large_b.txt", "large_a.txt"] {
+                let file = File::create(dir.path().join(name)).unwrap();
+                file.set_len(MAX_WALK_FILE_SIZE + 1).unwrap();
+            }
+            let locked = ["locked_b", "locked_a"].map(|name| dir.path().join(name));
+            for path in &locked {
+                fs::create_dir(path).unwrap();
+            }
+            let _denied = locked.each_ref().map(|path| deny_read_access(path));
+
+            let result = grep_files(&params("hit", dir.path())).unwrap().content;
+
+            let cause = fs::read_dir(&locked[0]).unwrap_err();
+            assert_eq!(
+                result,
+                formatdoc! {"
+                    new.rs:1:hit
+                    a.rs:1:hit
+                    b.rs:1:hit
+
+                    Skipped (exceeds 1 MiB size limit):
+                      large_a.txt (1.0 MiB)
+                      large_b.txt (1.0 MiB)
+
+                    Could not read:
+                      locked_a: {cause}
+                      locked_b: {cause}"
+                },
+            );
         }
 
         #[test]
@@ -1806,182 +1848,214 @@ mod tests {
         }
     }
 
-    mod search_file {
-        use std::io::Cursor;
-
+    mod search {
         use super::*;
 
-        /// Searches `path` for `pattern` with `context` lines around matches, rendering lines as
-        /// `number:text` for matches, `number-text` for context, and `--` for breaks.
-        fn search_lines(
-            pattern: &str,
-            context: usize,
-            path: &Path,
-        ) -> (Vec<String>, Vec<Unreadable>) {
-            let cancel = CancellationToken::new();
-            let matcher = matcher(pattern, false).unwrap();
-            let mut search = Search::new(matcher, context, MAX_WALK_FILE_SIZE, &cancel, Vec::new());
-            let mut lines = Vec::new();
+        mod file {
+            use super::*;
 
-            search.file(path, |line| {
-                lines.push(match line {
-                    Line::Match { number, bytes } => format!("{number}:{}", line_text(bytes)),
-                    Line::Context { number, bytes } => format!("{number}-{}", line_text(bytes)),
-                    Line::Break => "--".to_owned(),
+            /// Searches `path` for `pattern` with `context` lines around matches, rendering lines
+            /// as `number:text` for matches, `number-text` for context, and `--` for breaks.
+            fn search_lines(
+                pattern: &str,
+                context: usize,
+                path: &Path,
+            ) -> (Vec<String>, Vec<Unreadable>) {
+                let cancel = CancellationToken::new();
+                let matcher = matcher(pattern, false).unwrap();
+                let mut search =
+                    Search::new(matcher, context, MAX_WALK_FILE_SIZE, &cancel, Vec::new());
+                let mut lines = Vec::new();
+
+                search.file(path, |line| {
+                    lines.push(match line {
+                        Line::Text {
+                            number,
+                            bytes,
+                            is_match,
+                        } => {
+                            let separator = if is_match { ':' } else { '-' };
+                            format!("{number}{separator}{}", line_text(bytes))
+                        }
+                        Line::Break => "--".to_owned(),
+                    });
+                    true
                 });
-                true
-            });
 
-            (lines, search.unreadable)
-        }
+                (lines, search.unreadable)
+            }
 
-        #[test]
-        fn reports_matches_and_context_without_their_line_endings() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("a.txt");
-            fs::write(&path, "a\r\nb\r\nc\r\nd\r\ne\r\nb\n").unwrap();
-
-            let (lines, unreadable) = search_lines("b$", 1, &path);
-
-            assert_eq!(lines, ["1-a", "2:b", "3-c", "--", "5-e", "6:b"]);
-            assert_eq!(unreadable, []);
-        }
-
-        #[test]
-        fn binary_data_ends_the_search() {
-            let filler = "x\n".repeat(64 * 1024);
-            for (name, contents, expected) in [
-                ("NUL beside the match", "hit\n\0".to_owned(), &[][..]),
-                (
-                    "NUL past the first buffer",
-                    format!("hit\n{filler}\0hit\n"),
-                    &["1:hit"][..],
-                ),
-            ] {
+            #[test]
+            fn reports_matches_and_context_without_their_line_endings() {
                 let dir = canonical_tempdir();
-                let path = dir.path().join("a.bin");
-                fs::write(&path, contents).unwrap();
+                let path = dir.path().join("a.txt");
+                fs::write(&path, "a\r\nb\r\nc\r\nd\r\ne\r\nb\n").unwrap();
+
+                let (lines, unreadable) = search_lines("b$", 1, &path);
+
+                assert_eq!(lines, ["1-a", "2:b", "3-c", "--", "5-e", "6:b"]);
+                assert_eq!(unreadable, []);
+            }
+
+            #[test]
+            fn matches_a_carriage_return_within_a_line() {
+                let dir = canonical_tempdir();
+                let path = dir.path().join("a.txt");
+                fs::write(&path, "a\rb\r\nab\n").unwrap();
+
+                let (lines, unreadable) = search_lines(r"a\rb", 0, &path);
+
+                assert_eq!(lines, ["1:a\rb"]);
+                assert_eq!(unreadable, []);
+            }
+
+            #[test]
+            fn skips_a_file_read_refuses_as_binary_and_searches_later_nul_lines() {
+                let filler = "x\n".repeat(4096);
+                for (case, contents, expected) in [
+                    ("NUL beside the match", "hit\n\0".to_owned(), &[][..]),
+                    ("NUL after a short first line", "hi\n\0".to_owned(), &[][..]),
+                    (
+                        "NUL past the first 8 KiB",
+                        format!("hit\n{filler}\0\nhit\n"),
+                        &["1:hit", "4099:hit"][..],
+                    ),
+                ] {
+                    let dir = canonical_tempdir();
+                    let path = dir.path().join("a.bin");
+                    fs::write(&path, contents).unwrap();
+
+                    let (lines, unreadable) = search_lines("hi", 0, &path);
+
+                    assert_eq!(lines, expected, "{case}");
+                    assert_eq!(unreadable, [], "{case}");
+                }
+            }
+
+            #[test]
+            fn skips_a_utf16_file_as_binary() {
+                let dir = canonical_tempdir();
+                let path = dir.path().join("a.txt");
+                let text: Vec<u8> = "\u{feff}miss\nhit\n"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect();
+                fs::write(&path, text).unwrap();
 
                 let (lines, unreadable) = search_lines("hit", 0, &path);
 
-                assert_eq!(lines, expected, "{name}");
-                assert_eq!(unreadable, [], "{name}");
+                assert_eq!(lines, [] as [String; 0]);
+                assert_eq!(unreadable, []);
             }
-        }
 
-        #[test]
-        fn searches_a_utf16_file_with_a_byte_order_mark_as_text() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("a.txt");
-            let text: Vec<u8> = "\u{feff}miss\nhit\n"
-                .encode_utf16()
-                .flat_map(u16::to_le_bytes)
-                .collect();
-            fs::write(&path, text).unwrap();
+            #[test]
+            fn matches_invalid_utf8_as_its_replacement_character() {
+                let dir = canonical_tempdir();
+                let path = dir.path().join("latin1.txt");
+                fs::write(&path, b"caf\xE9 au lait\n").unwrap();
 
-            let (lines, unreadable) = search_lines("hit", 0, &path);
+                for pattern in ["caf. au", "caf\u{FFFD}"] {
+                    let (lines, unreadable) = search_lines(pattern, 0, &path);
 
-            assert_eq!(lines, ["2:hit"]);
-            assert_eq!(unreadable, []);
-        }
+                    assert_eq!(lines, ["1:caf\u{FFFD} au lait"], "{pattern}");
+                    assert_eq!(unreadable, [], "{pattern}");
+                }
+            }
 
-        #[test]
-        fn records_a_failed_read_but_skips_a_file_that_vanished() {
-            let dir = canonical_tempdir();
-            let secret = dir.path().join("secret.txt");
-            fs::write(&secret, "x").unwrap();
-            let _denied = deny_read_access(&secret);
+            #[test]
+            fn drops_a_utf8_bom_from_the_first_line() {
+                let dir = canonical_tempdir();
+                let path = dir.path().join("a.txt");
+                fs::write(&path, "\u{feff}hit\n").unwrap();
 
-            let (gone_lines, gone_unreadable) = search_lines("x", 0, &dir.path().join("gone.txt"));
-            let (secret_lines, secret_unreadable) = search_lines("x", 0, &secret);
+                let (lines, unreadable) = search_lines("^hit", 0, &path);
 
-            assert_eq!(gone_lines, Vec::<String>::new());
-            assert_eq!(gone_unreadable, []);
-            let cause = fs::read(&secret).unwrap_err().to_string();
-            assert_eq!(secret_lines, Vec::<String>::new());
-            assert_eq!(
-                secret_unreadable,
-                [Unreadable {
-                    path: Some(secret),
-                    error: cause,
-                }]
-            );
-        }
+                assert_eq!(lines, ["1:hit"]);
+                assert_eq!(unreadable, []);
+            }
 
-        #[test]
-        fn records_a_file_past_the_size_limit() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("big.txt");
-            fs::write(&path, vec![b'a'; 1024 * 1024 + 1]).unwrap();
+            #[test]
+            fn records_a_failed_read_but_skips_a_file_that_vanished() {
+                let dir = canonical_tempdir();
+                let secret = dir.path().join("secret.txt");
+                fs::write(&secret, "x").unwrap();
+                let _denied = deny_read_access(&secret);
 
-            let (_, unreadable) = search_lines("a", 0, &path);
+                let (gone_lines, gone_unreadable) =
+                    search_lines("x", 0, &dir.path().join("gone.txt"));
+                let (secret_lines, secret_unreadable) = search_lines("x", 0, &secret);
 
-            assert_eq!(
-                unreadable,
-                [Unreadable {
-                    path: Some(path),
-                    error: "grew past the 1 MiB size limit".to_owned(),
-                }]
-            );
-        }
+                assert_eq!(gone_lines, [] as [String; 0]);
+                assert_eq!(gone_unreadable, []);
+                let cause = fs::read(&secret).unwrap_err().to_string();
+                assert_eq!(secret_lines, [] as [String; 0]);
+                assert_eq!(
+                    secret_unreadable,
+                    [Unreadable {
+                        path: Some(secret),
+                        error: cause,
+                    }]
+                );
+            }
 
-        #[test]
-        fn refuses_a_symlink() {
-            let dir = canonical_tempdir();
-            let target = dir.path().join("target.txt");
-            fs::write(&target, "SECRET=1").unwrap();
-            let link = dir.path().join("link.txt");
-            symlink_file(&target, &link);
+            #[test]
+            fn records_a_file_past_the_size_limit() {
+                let dir = canonical_tempdir();
+                let path = dir.path().join("big.txt");
+                fs::write(&path, vec![b'a'; 1024 * 1024 + 1]).unwrap();
 
-            let (lines, unreadable) = search_lines("SECRET", 0, &link);
+                let (_, unreadable) = search_lines("a", 0, &path);
+
+                assert_eq!(
+                    unreadable,
+                    [Unreadable {
+                        path: Some(path),
+                        error: "grew past the 1 MiB size limit".to_owned(),
+                    }]
+                );
+            }
+
+            #[test]
+            fn refuses_a_symlink() {
+                let dir = canonical_tempdir();
+                let target = dir.path().join("target.txt");
+                fs::write(&target, "SECRET=1").unwrap();
+                let link = dir.path().join("link.txt");
+                symlink_file(&target, &link);
+
+                let (lines, unreadable) = search_lines("SECRET", 0, &link);
+
+                #[cfg(unix)]
+                let cause =
+                    io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32).to_string();
+                #[cfg(windows)]
+                let cause = "the final path component is a symlink".to_owned();
+                assert_eq!(lines, Vec::<String>::new());
+                assert_eq!(
+                    unreadable,
+                    [Unreadable {
+                        path: Some(link),
+                        error: cause,
+                    }]
+                );
+            }
 
             #[cfg(unix)]
-            let cause = io::Error::from_raw_os_error(nix::errno::Errno::ELOOP as i32).to_string();
-            #[cfg(windows)]
-            let cause = "the final path component is a symlink".to_owned();
-            assert_eq!(lines, Vec::<String>::new());
-            assert_eq!(
-                unreadable,
-                [Unreadable {
-                    path: Some(link),
-                    error: cause,
-                }]
-            );
-        }
+            #[test]
+            fn refuses_a_fifo_without_blocking() {
+                let dir = canonical_tempdir();
+                let path = dir.path().join("fifo");
+                nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
 
-        #[cfg(unix)]
-        #[test]
-        fn refuses_a_fifo_without_blocking() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("fifo");
-            nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+                let (_, unreadable) = search_lines("x", 0, &path);
 
-            let (_, unreadable) = search_lines("x", 0, &path);
-
-            assert_eq!(
-                unreadable,
-                [Unreadable {
-                    path: Some(path),
-                    error: "not a regular file".to_owned(),
-                }]
-            );
-        }
-
-        #[test]
-        fn size_capped_fails_once_the_file_grows_past_its_limit() {
-            for (contents, expected) in [
-                (&b"abc"[..], Ok(b"abc".to_vec())),
-                (&b"abcd"[..], Err("grew past the 3 B size limit".to_owned())),
-            ] {
-                let mut reader = SizeCapped {
-                    reader: Cursor::new(contents).take(4),
-                    limit: 3,
-                };
-                let mut read = Vec::new();
-
-                let result = reader.read_to_end(&mut read).map(|_| read);
-
-                assert_eq!(result.map_err(|e| e.to_string()), expected, "{contents:?}");
+                assert_eq!(
+                    unreadable,
+                    [Unreadable {
+                        path: Some(path),
+                        error: "not a regular file".to_owned(),
+                    }]
+                );
             }
         }
     }
@@ -2020,30 +2094,51 @@ mod tests {
         }
 
         #[test]
-        fn stops_between_ranges_once_the_rows_are_full() {
+        fn shows_a_separator_only_with_a_row_after_it() {
             let dir = canonical_tempdir();
             let path = dir.path().join("f.txt");
             fs::write(&path, "a\nx\nx\nx\na\n").unwrap();
             let cancel = CancellationToken::new();
-            let mut search = Search::new(
-                matcher("a", false).unwrap(),
-                1,
-                MAX_WALK_FILE_SIZE,
-                &cancel,
-                Vec::new(),
-            );
 
-            let output = format_content(&mut search, &[path], dir.path(), 2).content;
+            for (head_limit, expected) in [
+                (
+                    3,
+                    indoc! {"
+                        f.txt:1:a
+                        f.txt:2-x
 
-            assert_eq!(
-                output,
-                indoc! {"
-                    f.txt:1:a
-                    f.txt:2-x
+                        (Results limited to 3 lines)"
+                    },
+                ),
+                (
+                    4,
+                    indoc! {"
+                        f.txt:1:a
+                        f.txt:2-x
+                        --
+                        f.txt:4-x
 
-                    (Results limited to 2 lines)"
-                },
-            );
+                        (Results limited to 4 lines)"
+                    },
+                ),
+            ] {
+                let mut search = Search::new(
+                    matcher("a", false).unwrap(),
+                    1,
+                    MAX_WALK_FILE_SIZE,
+                    &cancel,
+                    Vec::new(),
+                );
+
+                let output = format_content(
+                    &mut search,
+                    std::slice::from_ref(&path),
+                    dir.path(),
+                    head_limit,
+                );
+
+                assert_eq!(output.content, expected, "head_limit {head_limit}");
+            }
         }
     }
 
@@ -2245,6 +2340,26 @@ mod tests {
                     (Results limited to 1 files)"
                 },
             );
+        }
+
+        #[test]
+        fn searches_nothing_once_cancelled() {
+            let dir = canonical_tempdir();
+            let path = dir.path().join("a.rs");
+            fs::write(&path, "hit\n").unwrap();
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            let mut search = Search::new(
+                matcher("hit", false).unwrap(),
+                0,
+                MAX_WALK_FILE_SIZE,
+                &cancel,
+                Vec::new(),
+            );
+
+            let output = format_count(&mut search, &[path], dir.path(), 1);
+
+            assert_eq!(output.content, NO_MATCHES_FOUND);
         }
     }
 }

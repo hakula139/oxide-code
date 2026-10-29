@@ -139,7 +139,7 @@ async fn read_file(
     let key = super::file::tracker_key(path).await;
 
     let text = String::from_utf8_lossy(&bytes);
-    let text = strip_bom(&text);
+    let text = super::file::strip_bom(&text);
 
     let lines: Vec<&str> = text.lines().collect();
     let total_lines = lines.len();
@@ -194,10 +194,6 @@ async fn read_file(
         .tracker
         .record_read(&key, &bytes, view, &ctx.tool_use_id);
     Ok(stub_or(outcome, &output).to_owned())
-}
-
-fn strip_bom(text: &str) -> &str {
-    text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 fn stub_or(outcome: RecordRead, body: &str) -> &str {
@@ -838,16 +834,22 @@ mod tests {
 
         #[tokio::test]
         async fn binary_content_reports_error() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("binary.bin");
-            fs::write(&path, b"hello\x00world").unwrap();
+            let utf16: Vec<u8> = "\u{feff}hello\n"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            for (case, contents) in [("NUL", b"hello\x00world".to_vec()), ("UTF-16", utf16)] {
+                let dir = canonical_tempdir();
+                let path = dir.path().join("binary.bin");
+                fs::write(&path, contents).unwrap();
 
-            let err = read_file(&path, None, None, &temp_ctx()).await.unwrap_err();
+                let err = read_file(&path, None, None, &temp_ctx()).await.unwrap_err();
 
-            assert_eq!(
-                err,
-                "File appears to be binary. Use the bash tool to inspect binary files."
-            );
+                assert_eq!(
+                    err, "File appears to be binary. Use the bash tool to inspect binary files.",
+                    "{case}"
+                );
+            }
         }
 
         #[tokio::test]
@@ -899,20 +901,6 @@ mod tests {
                     path.display(),
                 ),
             );
-        }
-    }
-
-    mod strip_bom {
-        use super::*;
-
-        #[test]
-        fn removes_bom() {
-            assert_eq!(strip_bom("\u{feff}hello"), "hello");
-        }
-
-        #[test]
-        fn keeps_text_without_a_bom() {
-            assert_eq!(strip_bom("hello"), "hello");
         }
     }
 }
