@@ -707,8 +707,10 @@ mod tests {
             let dir = canonical_tempdir();
             fs::write(dir.path().join("public.rs"), "hit\n").unwrap();
             fs::write(dir.path().join("secret.rs"), "hit\n").unwrap();
-            let registry =
-                ToolRegistry::new(vec![Box::new(GrepTool::new(deny_reads(&["secret.rs"])))]);
+            let registry = ToolRegistry::new(vec![Box::new(GrepTool::new(deny_reads(
+                &["secret.rs"],
+                dir.path(),
+            )))]);
 
             for (mode, body) in [
                 ("content", "public.rs:1:hit"),
@@ -1283,7 +1285,7 @@ mod tests {
             fs::create_dir(&secrets).unwrap();
             let _denied = deny_read_access(&secrets);
             let mut p = params("hit", dir.path());
-            p.read_filter = deny_reads(&["secrets"]);
+            p.read_filter = deny_reads(&["secrets"], dir.path());
 
             let result = grep_files(&p).unwrap().content;
 
@@ -1325,7 +1327,7 @@ mod tests {
             fs::create_dir(dir.path().join("sub")).unwrap();
             fs::write(dir.path().join("sub/.env"), "TOKEN=secret\n").unwrap();
             let mut p = params("TOKEN", dir.path());
-            p.read_filter = deny_reads(&[".env"]);
+            p.read_filter = deny_reads(&[".env"], dir.path());
             assert_eq!(
                 grep_files(&p).unwrap().content,
                 indoc! {"
@@ -1417,7 +1419,7 @@ mod tests {
             std::os::unix::fs::symlink(&outside, cwd.join("config")).unwrap();
             let mut p = params("TOKEN", &cwd);
             p.root = search_root(&cwd, Some("config")).unwrap();
-            p.read_filter = deny_reads(&["secrets"]);
+            p.read_filter = deny_reads(&["secrets"], &cwd);
             let app = outside.join("app.toml").display().to_string();
             assert_eq!(
                 grep_files(&p).unwrap().content,
