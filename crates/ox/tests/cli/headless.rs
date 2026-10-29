@@ -251,7 +251,7 @@ async fn mode_flag_overrides_the_configured_mode() {
     assert!(
         result["content"]
             .as_str()
-            .is_some_and(|content| content.starts_with("The bash call was denied by `plan` mode.")),
+            .is_some_and(|content| content.starts_with("The bash call was denied by `plan` mode,")),
         "{result}"
     );
 }
