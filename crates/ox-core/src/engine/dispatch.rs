@@ -537,7 +537,7 @@ mod tests {
     use crate::permission::defaults::Shipped;
     use crate::permission::testing::exec_grant;
     use crate::permission::{PermissionClass, Tier};
-    use crate::protocol::testing::{CapturingSink, FailingSink};
+    use crate::protocol::local_testing::{CapturingSink, FailingSink};
     use crate::tool::ToolDefinition;
     use crate::tool::edit::EditTool;
     use crate::tool::tasks::TasksTool;

@@ -257,7 +257,7 @@ mod tests {
     use crate::model::TokenUsage;
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass};
-    use crate::protocol::testing::CapturingSink;
+    use crate::protocol::local_testing::CapturingSink;
     use crate::protocol::{Interaction, Op};
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;

@@ -214,9 +214,9 @@ A checked-in `.ox/config.toml` is untrusted, so `reject_project_keys` checks it 
 
 ## Stdio Frontends
 
-The `--no-tui` REPL and `-p` headless runs share `render_op`. It passes each `Event::ApprovalRequested` to an `Approver` and sends the decision back as `Op::Resolve`. The request itself never reaches the event sink, so `stream-json` output contains only the call's result.
+The `--no-tui` REPL and `-p` headless runs share `run_op`. It passes each `Event::ApprovalRequested` to an `Approver` and sends the decision back as `Op::Resolve`. The request itself is never printed, so `stream-json` output contains only the call's result.
 
-Whether anyone can answer is a session setting of the engine. `main` calls `Config::set_unattended` for a headless run and for a REPL whose stdin is not a terminal, and the policy then turns every call that would ask into `Decision::Unapproved`, which the gate denies without emitting a request. Such a run passes no `Approver` to `render_op`, and the REPL reads its attendance back from `Engine::attended`.
+Whether anyone can answer is a session setting of the engine. `main` calls `Config::set_unattended` for a headless run and for a REPL whose stdin is not a terminal, and the policy then turns every call that would ask into `Decision::Unapproved`, which the gate denies without emitting a request. Such a run passes no `Approver` to `run_op`, and the REPL reads its attendance back from `Engine::attended`.
 
 - **REPL:** When stdin is a terminal, the prompter writes the preview and the rule that made the call ask to stderr, escaping hidden characters, and reads the answer from the next stdin line: `y`, `a` followed by the pattern to allow, `n`, `f` followed by the feedback line, or `x` to abort. An unknown answer, empty feedback, or a pattern the grant does not admit returns to the choices. End of input aborts, and Ctrl+C interrupts the turn, which drops the question. Piped input runs unattended as a headless run does, so a scripted prompt line is never read as an answer.
 - **Headless:** When nobody is available to ask, rules and zones decide every call, so a headless run assumes an already-trusted invocation.

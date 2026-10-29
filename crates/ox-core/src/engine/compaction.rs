@@ -370,7 +370,7 @@ mod tests {
     use crate::model::TokenUsage;
     use crate::permission::Mode;
     use crate::prompt::SessionContext;
-    use crate::protocol::testing::CapturingSink;
+    use crate::protocol::local_testing::CapturingSink;
     use crate::protocol::{Op, ResumeTarget, UsageSnapshot};
     use crate::session::store::local_testing::fail_writes;
     use crate::session::store::testing::test_store;
