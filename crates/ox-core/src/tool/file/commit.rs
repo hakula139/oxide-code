@@ -77,6 +77,7 @@ impl Checked {
         bytes: &[u8],
         mut checkpoint: impl FnMut(Phase) -> io::Result<()>,
     ) -> io::Result<()> {
+        #[cfg(unix)]
         self.refuse_clearable_attributes()?;
         if !bytes_match(&mut self.file, &self.content)? {
             return Err(stale_content());
@@ -92,14 +93,12 @@ impl Checked {
         self.verify(path, bytes)
     }
 
-    /// Refuses set-ID permissions on Unix and a capability on Linux, which a write can clear.
+    /// Refuses set-ID permissions, and a capability on Linux, which a write can clear.
+    #[cfg(unix)]
     fn refuse_clearable_attributes(&self) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::MetadataExt as _;
 
-            validate_mode(self.file.metadata()?.mode() & 0o7777)?;
-        }
+        validate_mode(self.file.metadata()?.mode() & 0o7777)?;
         #[cfg(target_os = "linux")]
         if has_capability(&self.file)? {
             return Err(io::Error::other(
@@ -543,10 +542,10 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     mod checked {
         use super::*;
 
-        #[cfg(unix)]
         #[test]
         fn open_refuses_a_fifo_without_blocking() {
             let dir = tempfile::tempdir().unwrap();
