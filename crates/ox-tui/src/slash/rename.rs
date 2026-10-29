@@ -10,12 +10,12 @@ use ratatui::widgets::Paragraph;
 use ox_core::command;
 use ox_core::session::display::MAX_TITLE_WIDTH;
 
-use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome, typed_form};
 use crate::action::Action;
 use crate::modal::chrome::{FOOTER_HEIGHT, Header, render_footer};
 use crate::modal::line_editor::LineEditor;
 use crate::modal::{Modal, ModalAction, ModalKey};
+use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
 
 // ── Constants ──
@@ -48,13 +48,13 @@ impl SlashCommand for RenameCmd {
         !args.is_empty()
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, args: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         if args.is_empty() {
             return Ok(SlashOutcome::Modal(Box::new(RenameModal::new(
-                ctx.info.title.as_deref(),
+                info.title.as_deref(),
             ))));
         }
-        typed_form(self.name(), args, ctx)
+        typed_form(self.name(), args, info)
     }
 }
 
@@ -163,10 +163,7 @@ mod tests {
         fn bare_form_opens_modal_pre_filled_with_current_title() {
             let mut info = test_session_info();
             info.set_title(Some("Existing title".to_owned()));
-            let mut modal = RenameCmd
-                .execute("", &SlashContext::new(&info))
-                .unwrap()
-                .into_modal();
+            let mut modal = RenameCmd.execute("", &info).unwrap().into_modal();
             let result = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
             let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Rename { title }))) =
                 result

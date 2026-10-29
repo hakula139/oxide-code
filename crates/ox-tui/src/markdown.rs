@@ -12,51 +12,26 @@ use crate::theme::Theme;
 
 const OPTIONS: Options = Options::ENABLE_TABLES;
 
-/// Renders markdown into styled ratatui [`Text`].
+/// Renders markdown into styled ratatui [`Text`] for a body styled `base`, such as thinking, or
+/// `Style::default()` for plain text. Text without a color of its own takes `base`, while quoted
+/// text takes `muted` over a `base` with no color or in `text`, and `base` itself otherwise.
 ///
 /// `width == 0` disables wrapping entirely (useful for tests and width-agnostic callers). Any
 /// non-zero value wraps each block to that column budget, preserving the enclosing block's
 /// continuation indent (blockquote `│`, list-item gutter, etc.) on wrapped sub-lines.
-pub(crate) fn render_markdown(input: &str, theme: &Theme, width: usize) -> Text<'static> {
-    render_markdown_on(input, theme, Style::default(), width)
-}
-
-/// Renders markdown like [`render_markdown`] for the body of a block styled `base`, such as
-/// thinking. Text without a color of its own takes `base`, while quoted text takes `muted` over a
-/// `base` with no color or in `text`, and `base` itself otherwise.
-pub(crate) fn render_markdown_on(
+pub(crate) fn render_markdown(
     input: &str,
     theme: &Theme,
     base: Style,
     width: usize,
 ) -> Text<'static> {
-    render_document(input, theme, base, width, false).0
+    render_markdown_chunk(input, theme, base, width, false).0
 }
 
-/// Renders `input` as the next chunk of a document, where `after_block` says whether the chunks
-/// before it ended after a block. Returns the rows and that flag for the chunk after this one.
+/// Renders `input` as the next chunk of a document, as [`render_markdown`] renders a whole one,
+/// where `after_block` says whether the chunks before it ended after a block. Returns the rows and
+/// that flag for the chunk after this one.
 pub(crate) fn render_markdown_chunk(
-    input: &str,
-    theme: &Theme,
-    width: usize,
-    after_block: bool,
-) -> (Text<'static>, bool) {
-    render_markdown_chunk_on(input, theme, Style::default(), width, after_block)
-}
-
-/// Renders `input` as the next chunk of a document whose body is styled `base`, as
-/// [`render_markdown_on`] styles a whole one.
-pub(crate) fn render_markdown_chunk_on(
-    input: &str,
-    theme: &Theme,
-    base: Style,
-    width: usize,
-    after_block: bool,
-) -> (Text<'static>, bool) {
-    render_document(input, theme, base, width, after_block)
-}
-
-fn render_document(
     input: &str,
     theme: &Theme,
     base: Style,
@@ -107,7 +82,8 @@ mod tests {
         fn carries_the_block_flag_across_chunks() {
             let theme = Theme::default();
             let chunk = |input, after_block| {
-                let (text, after) = render_markdown_chunk(input, &theme, 0, after_block);
+                let (text, after) =
+                    render_markdown_chunk(input, &theme, Style::default(), 0, after_block);
                 let rows: Vec<String> = text.lines.iter().map(ToString::to_string).collect();
                 (rows, after)
             };
@@ -128,12 +104,17 @@ mod tests {
             let input = "> quote quote\n\npara text";
             let split = complete_blocks_len(input);
 
-            let (head, after_block) = render_markdown_chunk(&input[..split], &theme, 2, false);
-            let (tail, _) = render_markdown_chunk(&input[split..], &theme, 2, after_block);
+            let (head, after_block) =
+                render_markdown_chunk(&input[..split], &theme, Style::default(), 2, false);
+            let (tail, _) =
+                render_markdown_chunk(&input[split..], &theme, Style::default(), 2, after_block);
             let chunked: Vec<_> = head.lines.into_iter().chain(tail.lines).collect();
 
             assert_eq!(split, "> quote quote\n\n".len());
-            assert_eq!(chunked, render_markdown(input, &theme, 2).lines);
+            assert_eq!(
+                chunked,
+                render_markdown(input, &theme, Style::default(), 2).lines
+            );
         }
     }
 

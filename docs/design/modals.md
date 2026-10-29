@@ -64,7 +64,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 1. **Trait per modal.** Each concrete modal is its own type implementing `Modal`, so adding one is a new file plus a constructor with no central match arm.
 2. **Stack-based ownership (`Vec<Box<dyn Modal>>`).** The `Vec` lets an overlay stack on an open modal without a redesign, such as the confirm-delete modal over the `/resume` picker or an approval prompt over a read-only overview.
 3. **Typed result delivery via `ModalAction`, no callbacks.** Modal emits `ModalKey::Submitted(ModalAction)` and the manager dispatches. Boxed `FnOnce` callbacks were rejected for the lifetime / `Send` complexity and because they hide the dispatch graph.
-4. **Commands build modals from read-only App state.** `SlashContext` supplies the current `&LiveSessionInfo`, title included, when a command runs. The App clears every modal on resume and after manual or pre-turn compaction. Mid-turn compaction preserves open modals and their live previews, since the user may open one at any point during a long turn.
+4. **Commands build modals from read-only App state.** Each command runs on a borrow of the current `LiveSessionInfo`. The App clears every modal on resume and after manual or pre-turn compaction. Mid-turn compaction preserves open modals and their live previews, since the user may open one at any point during a long turn.
 5. **Layout band sized by `ModalStack::height(width, max_height)`.** When the stack is empty, the band takes no rows. When active, it shifts the chat upward, just like the slash popup. The App caps the band so the status bar and one chat row stay visible, and sizes it before the queued-prompt preview, which takes the rows left over. Pickers and `KvOverview` fit the cap by scrolling their bodies between a pinned header and footer, and the stack clips any fixed-size modal that still runs taller.
 6. **Bare `/model` and bare `/effort` open separate modals.** Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. `/model` keeps the multi-axis combined picker (one modal sets both axes), while `/effort` gets its own single-axis slider. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behavior for scripting and power users.
 7. **`ListPicker` handles state, navigation, and rendering.** Concrete pickers embed it, handle Enter and any keys of their own, and pass the rest to `ListPicker::navigate`, which steps on Up / `k` and Down / `j` and jumps on a row's digit. This keeps list selection apart from what Enter dispatches, with no callbacks. Each `ListPicker` roster is fixed, so `ListPicker::new` rejects an empty one and `selected` always returns a row. `/mode`, `/theme`, and `/init` draw through `ListPicker::render_with_footer`, while `/model + /effort` pins an effort row above its footer.
@@ -98,13 +98,12 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - `crates/ox-tui/src/modal/searchable_list.rs`: generic `SearchableList<T: SearchableItem>`.
 - `crates/ox-tui/src/slash/config.rs`: `/config` row builder plus sectioned `KvOverview`.
 - `crates/ox-tui/src/slash/confirm.rs`: `ConfirmDeleteSessionModal`.
-- `crates/ox-tui/src/slash/context.rs`: `SlashContext`, the read-only state each `execute` call receives.
 - `crates/ox-tui/src/slash/delete.rs`: `DeleteCmd`, which forwards `Op::FindSaved`, and `confirm_modal`, which builds the confirm-delete modal for the session the engine found.
 - `crates/ox-tui/src/slash/effort_slider.rs`: `/effort` slider.
 - `crates/ox-tui/src/slash/help.rs`: `/help` row builder plus `KvOverview`.
 - `crates/ox-tui/src/slash/init.rs`: `/init` instruction-file picker (`InitPicker`).
 - `crates/ox-tui/src/slash/mode.rs`: `/mode` picker (`ModeCmd` plus `ModePicker`).
-- `crates/ox-tui/src/slash/picker.rs`: combined `/model + /effort` picker.
+- `crates/ox-tui/src/slash/model/picker.rs`: combined `/model + /effort` picker.
 - `crates/ox-tui/src/slash/registry.rs`: `SlashOutcome`, including the `Modal` variant.
 - `crates/ox-tui/src/slash/rename.rs`: `RenameCmd` plus `RenameModal` editor.
 - `crates/ox-tui/src/slash/resume.rs`: `ResumeCmd` plus `ResumePicker`.

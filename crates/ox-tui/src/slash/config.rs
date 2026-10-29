@@ -7,7 +7,6 @@ use ox_core::config::load::user_config_path;
 use ox_core::config::provenance::{Layer, Provenance, Source, TierPattern};
 use ox_core::util::path::tildify;
 
-use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::labels;
 use crate::modal::kv_overview::{KvOverview, KvSection};
@@ -30,10 +29,10 @@ impl SlashCommand for ConfigCmd {
         false
     }
 
-    fn execute(&self, _args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, _args: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         let user = user_config_path();
         Ok(SlashOutcome::Modal(Box::new(build_modal(
-            ctx.info,
+            info,
             user.as_deref(),
         ))))
     }

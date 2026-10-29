@@ -33,7 +33,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use self::rows::{MAX_ROW_BYTES, prefixed_row, truncate_to_bytes};
 use crate::glyphs::INLINE_SEPARATOR;
-use crate::markdown::{render_markdown_chunk_on, render_markdown_on};
+use crate::markdown::{render_markdown, render_markdown_chunk};
 use crate::theme::Theme;
 
 // ── Trait ──
@@ -189,7 +189,7 @@ fn bar_section(
 ) -> Vec<Line<'static>> {
     let width = usize::from(ctx.width).saturating_sub(prefix.width());
     bar_section_rows(ctx, prefix, styles, header, body.trim().is_empty(), || {
-        render_markdown_on(body, ctx.theme, styles.body, width).lines
+        render_markdown(body, ctx.theme, styles.body, width).lines
     })
 }
 
@@ -206,7 +206,7 @@ fn streaming_bar_section(
     bar_section_rows(ctx, prefix, styles, header, blank, || {
         body.render(ctx.width, |chunk, after_block| {
             let (text, after_block) =
-                render_markdown_chunk_on(chunk, ctx.theme, styles.body, width, after_block);
+                render_markdown_chunk(chunk, ctx.theme, styles.body, width, after_block);
             (text.lines, after_block)
         })
     })

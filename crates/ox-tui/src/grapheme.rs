@@ -134,20 +134,6 @@ fn retreat_cursor_to_boundary(textarea: &mut TextArea<'_>) {
     }
 }
 
-// ── Byte Budget ──
-
-/// The byte offset of the last grapheme boundary at or before `budget`.
-pub(crate) fn head_end(text: &str, budget: usize) -> usize {
-    let mut end = 0;
-    for (byte, grapheme) in text.grapheme_indices(true) {
-        if byte + grapheme.len() > budget {
-            break;
-        }
-        end = byte + grapheme.len();
-    }
-    end
-}
-
 // ── Cluster Stops ──
 
 /// The boundary before each grapheme cluster of a line, then its end, with the byte offset, char
@@ -398,26 +384,6 @@ mod tests {
             ));
 
             assert_eq!(textarea.cursor(), (0, 3), "the mark joins the cluster");
-        }
-    }
-
-    mod head_end {
-        use super::*;
-
-        #[test]
-        fn stops_at_the_last_cluster_boundary_within_the_budget() {
-            for (text, budget, expected) in [
-                ("abc", 10, 3),
-                ("abc", 2, 2),
-                ("a👨‍👩‍👧b", 2, 1),
-                ("a👨‍👩‍👧b", 6, 1),
-                ("a👨‍👩‍👧b", 19, 19),
-                ("e\u{301}x", 2, 0),
-                ("e\u{301}x", 3, 3),
-                ("abc", 0, 0),
-            ] {
-                assert_eq!(head_end(text, budget), expected, "{text:?} {budget}");
-            }
         }
     }
 }
