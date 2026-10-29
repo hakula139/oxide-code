@@ -16,9 +16,9 @@ During a session, `/mode` opens a picker of the three modes, and `/mode <mode>` 
 
 ## Approval Prompt
 
-When a call asks, the TUI opens an approval prompt. The prompt names the pattern or built-in rule that made the call ask, and a denied call tells the model which rule or mode denied it. Press **Y** to approve, **A** to approve and add a session rule that allows matching calls, **N** to deny, **F** to deny and tell the model why, or **Esc** to deny and end the turn. With **F**, type the feedback and press **Enter**, and the model receives it as the call's result. **Enter** alone does nothing in the prompt, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it.
+When a call asks, the TUI opens an approval prompt. The prompt names the pattern or built-in rule that made the call ask, and a denied call tells the model which rule or mode denied it. Press **Y** to approve, **A** to approve and add a session rule that allows matching calls, **N** to deny, **F** to deny and tell the model why, or **Esc** to deny and end the turn. With **F**, type the feedback and press **Enter**, and the model receives it as the call's result. **Enter** alone does nothing in the prompt, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it. The prompt shows the whole diff or command it approves, and one longer than 16 rows scrolls with **Up** / **Down**, **PageUp** / **PageDown**, and **Home** / **End**, with a `rows a-b of n` line giving the position.
 
-The `--no-tui` REPL asks on stderr with the same choices and reads the answer from the next input line, using `x` to end the turn. It asks only when stdin is a terminal. A REPL reading piped input and a headless run (`-p`) cannot ask, so they deny the call and tell the model the config change that would let it through, such as adding `"cargo test"` to the `exec` list under `[permission.allow]`, or otherwise the rule that made it ask.
+The `--no-tui` REPL asks on stderr with the same choices and reads the answer from the next input line, using `x` to end the turn, as end of input does too. It asks only when stdin is a terminal. A REPL reading piped input and a headless run (`-p`) cannot ask, so they deny the call and tell the model the config change that would let it through, such as adding `"cargo test"` to the `exec` list under `[permission.allow]`, or otherwise the rule that made it ask.
 
 The **A** key opens the pattern of the session rule it will add, in the syntax below, so you can widen or narrow it before pressing **Enter**. The pattern must still cover the call being approved. In the **A** and **F** editors, **Esc** goes back to the choice. The prompt offers **A** only when such a pattern would let the call run, so these calls offer none:
 
@@ -109,13 +109,23 @@ Deny and ask patterns see inside the wrappers above, `find -exec` and its varian
 
 ### Read-Only Commands
 
-Read-only commands such as `ls`, `cat`, `grep`, `[ -f x ]`, `find` without `-exec` or `-delete`, and `sed` without `-i` run without asking when the command runs under its bare name, every argument is a literal word without a glob, and nothing in the whole command expands a variable, so `echo $TOKEN` and `cat <<< $TOKEN` ask. A recursive `grep` asks, and so does `cat src/*.rs`, which an allow pattern such as `cat *` covers.
+These read-only commands run without asking:
+
+- `:`, `echo`, `false`, `printf`, `pwd`, and `true`
+- `export` of a variable that only changes output, such as `NO_COLOR`, and `set` turning the `e`, `u`, `v`, and `x` options or `pipefail` on or off
+- `[` and `test`
+- `cat`, `head`, `ls`, `tail`, and `wc`
+- `find` without `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fls`, `-fprint`, `-fprint0`, or `-fprintf`
+- `grep` without a recursive option or `-d`
+- `sed` without `-i`, `-I`, or a script file, and with a script that only prints, deletes, substitutes, or moves text between buffers
+
+Each runs without asking only when the command runs under its bare name, every argument is a literal word without a glob, and nothing in the whole command expands a variable, so `echo $TOKEN` and `cat <<< $TOKEN` ask, and so does `cat src/*.rs`, which an allow pattern such as `cat *` covers. GNU tools accept a long option by any unambiguous prefix, so `sed --in` asks as `--in-place` does.
 
 ### Path Patterns
 
 `read` and `edit` patterns are globs in the style of `.gitignore`, except that a leading `/` means the file system root. A pattern with no `/` other than a trailing one, such as `.env`, matches that name at any depth below the working directory and each extra root. A pattern that starts with `./` or has a `/` anywhere except at the end, such as `./secrets` or `src/*.json`, starts at those directories. A pattern that starts with `/` or `~/` is an absolute path, so `/**/.env` matches a `.env` anywhere on disk. `*` and `?` match within one path segment, `[abc]` matches one listed character, `{a,b}` matches either alternative, `**` spans segments, a trailing `/` is ignored, and a pattern also covers everything below a path it matches, so `secrets` covers `secrets/key`. A pattern with a `.` or `..` segment fails to load, so name a path outside these directories from `/` or `~/`. A leading `!` fails to load too, since rules have no negation. On Windows, `\` separates segments like `/`, and an absolute pattern starts with a drive, as in `C:/Users/me/.env`, so one that starts with `/` alone fails to load.
 
-Allow patterns match a path only as it resolves, with exact case and spelling. Deny and ask patterns also match the path as the call writes it and through equivalent filesystem directory aliases. When the pattern's literal leading directories run through a symlink at startup, they also cover the location it resolves to. They treat names that differ only in case, Unicode normalization, invisible characters, or trailing dots as the same name, so `deny.read = [".env"]` also blocks `.ENV`. A `read` deny or ask pattern also hides the files it matches from a `grep` or `glob` over their directory, and the output counts the hidden files without naming them.
+Allow patterns match a path only as it resolves, with exact case and spelling. Deny and ask patterns also match the path as the call writes it and through equivalent filesystem directory aliases. When the pattern's literal leading directories run through a symlink, at startup or when the call is checked, they also cover the location it resolves to. They treat names that differ only in case, Unicode normalization, invisible characters, or trailing dots as the same name, so `deny.read = [".env"]` also blocks `.ENV`. A `read` deny or ask pattern also hides the files it matches from a `grep` or `glob` over their directory, and the output counts the hidden files without naming them.
 
 ### `net` and `mcp` Patterns
 
@@ -140,7 +150,7 @@ oxide-code ships the rules below. The ones that ask about edits protect their pa
 | `cloud`       | Edits to `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.docker`, and `~/.kube` ask                                                                                                                                                                               |
 | `credentials` | Reads of oxide-code's `credentials.json`, Claude Code's `.credentials.json` in `~/.claude` or `$CLAUDE_CONFIG_DIR`, and git's `~/.git-credentials` and `~/.config/git/credentials` are denied, as are reads of any process's environment under `/proc` on Linux |
 
-Built-in rules sit in the deny and ask tiers, so an allow pattern cannot override one. To turn one off, set its name to `false` under `[permission.defaults]` in user config. A later drop-in can set it back to `true`.
+Built-in rules sit in the deny and ask tiers, so an allow pattern cannot override one. To turn one off, set its name to `false` under `[permission.defaults]` in user config. A later drop-in can set it back to `true`. An unknown name there, or an unknown class in a rule table, fails the config load and lists the accepted names.
 
 ```toml
 [permission.defaults]
