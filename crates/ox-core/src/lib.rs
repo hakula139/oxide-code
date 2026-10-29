@@ -7,6 +7,7 @@ pub mod command;
 pub mod config;
 pub mod engine;
 mod file_tracker;
+pub mod git;
 mod message;
 pub mod model;
 pub mod permission;

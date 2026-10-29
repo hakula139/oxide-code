@@ -7,6 +7,7 @@ use anyhow::Result;
 
 use super::usage::UsageLedger;
 use super::{Engine, turn};
+use crate::git::current_branch;
 use crate::protocol::notice::{previous_session_write_failed, session_write_failed};
 use crate::protocol::{Event, EventSink, ResumeTarget, SavedTarget};
 use crate::session::display::id_prefix;
@@ -14,7 +15,6 @@ use crate::session::handle::LoadedTranscript;
 use crate::session::saved::{self, SavedError};
 use crate::session::store::SessionStore;
 use crate::session::store::listing::ArchiveState;
-use crate::util::git::current_branch;
 use crate::util::text::plural;
 
 impl Engine {
@@ -285,6 +285,8 @@ mod tests {
         assert_writes_draining, blocked_write, poll_until_draining, seed_full_read,
     };
     use crate::file_tracker::{FileTracker, GateError, GatePurpose};
+    use crate::git::local_testing::init_fixture_repo;
+    use crate::git::testing::with_isolated_git_env_async;
     use crate::message::Message;
     use crate::model::TokenUsage;
     use crate::permission::rule::Rule;
@@ -302,8 +304,6 @@ mod tests {
     use crate::tool::bash::background::testing::shell;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
-    use crate::util::git::local_testing::init_fixture_repo;
-    use crate::util::git::testing::with_isolated_git_env_async;
 
     /// The branch the live session records, after one recorded message saves it.
     async fn saved_branch(engine: &Engine, store: &SessionStore) -> Option<String> {

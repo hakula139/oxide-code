@@ -21,6 +21,7 @@ use tracing::warn;
 use ox_core::client::anthropic::identity;
 use ox_core::config::Config;
 use ox_core::engine::{Engine, EnginePanic, SessionParts};
+use ox_core::git;
 use ox_core::permission::Mode;
 use ox_core::session::display::archive_notice;
 use ox_core::session::handle::ResumedSession;
@@ -434,7 +435,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
         warn!(error = %e, "failed to read the local timezone offset, so times show in UTC");
     }
     let cwd = env::current_dir().context("failed to read the current working directory")?;
-    let project_root = util::git::project_root(&cwd);
+    let project_root = util::path::project_root(&cwd);
 
     if cli.list {
         list_sessions(&cli, &cwd, &project_root)?;
@@ -456,7 +457,7 @@ async fn async_main(offset_error: Option<IndeterminateOffset>) -> Result<Exit> {
     config.resolve_auth(tui_mode).await?;
 
     let store = SessionStore::open(&cwd, &project_root)?;
-    let git_branch = util::git::current_branch(&cwd).await;
+    let git_branch = git::current_branch(&cwd).await;
     let ResumedSession {
         handle,
         transcript,
@@ -545,7 +546,7 @@ fn check_config() -> Result<Exit> {
 fn export(prefix: &str) -> Result<Exit> {
     _ = util::log::init_tracing(false)?;
     let cwd = env::current_dir().context("failed to read the current working directory")?;
-    let store = SessionStore::open(&cwd, &util::git::project_root(&cwd))?;
+    let store = SessionStore::open(&cwd, &util::path::project_root(&cwd))?;
     export_session(&store, prefix, &mut io::BufWriter::new(io::stdout().lock()))?;
     Ok(Exit::Success)
 }

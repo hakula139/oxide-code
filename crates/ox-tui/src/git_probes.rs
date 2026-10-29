@@ -2,6 +2,8 @@
 //! current. Probes run as tokio child processes and report back through a channel the event loop
 //! selects on, so a slow `git` or a network-bound `gh pr view` never stalls input or rendering.
 
+pub(crate) mod pull_request;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -9,8 +11,9 @@ use futures::FutureExt as _;
 use tokio::sync::mpsc;
 
 use ox_core::config::StatusLineSegment;
-use ox_core::util::git::{self, PullRequest, PullRequestDetail};
+use ox_core::git;
 
+use self::pull_request::{PullRequest, PullRequestDetail};
 use crate::now;
 
 /// Gap between a branch probe finishing and the next one starting. Branch changes outside the
@@ -99,7 +102,7 @@ impl GitProbes {
             let cwd = self.cwd.clone();
             let detail = self.pull_request_detail;
             spawn_probe(&self.tx, Probe::PullRequest, async move {
-                GitUpdate::PullRequest(git::current_pull_request(&cwd, detail).await)
+                GitUpdate::PullRequest(pull_request::current_pull_request(&cwd, detail).await)
             });
         }
     }
@@ -217,8 +220,9 @@ impl Schedule {
 
 #[cfg(test)]
 mod tests {
-    use ox_core::util::git::testing::{pull_request, with_isolated_git_env_async};
+    use ox_core::git::testing::with_isolated_git_env_async;
 
+    use super::pull_request::testing::pull_request;
     use super::*;
 
     const PULL_REQUEST: &[StatusLineSegment] = &[StatusLineSegment::PullRequest];

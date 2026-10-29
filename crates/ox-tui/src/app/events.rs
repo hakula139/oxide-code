@@ -547,7 +547,6 @@ mod tests {
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::{plan, task};
     use ox_core::tool::view::{ApprovalBody, ToolResultView};
-    use ox_core::util::git::testing::pull_request;
 
     use super::*;
     use crate::action::Action;
@@ -556,6 +555,7 @@ mod tests {
         test_app_with,
     };
     use crate::clipboard::CopyError;
+    use crate::git_probes::pull_request::testing::pull_request;
     use crate::glyphs::INTERRUPTED_MARKER;
     use crate::modal::UpdateReply;
     use crate::modal::testing::ScriptedModal;

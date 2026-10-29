@@ -13,7 +13,7 @@ use std::process::Output;
 
 use anyhow::{Result, anyhow, bail};
 
-use ox_core::util::git::{output_async, output_async_capped};
+use ox_core::git::{output_async, output_async_capped};
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
@@ -209,7 +209,7 @@ mod tests {
     use indoc::indoc;
     use tempfile::TempDir;
 
-    use ox_core::util::git::testing::{isolated_git, with_isolated_git_env_async};
+    use ox_core::git::testing::{isolated_git, with_isolated_git_env_async};
 
     use super::*;
     use crate::session_info::testing::test_session_info;
