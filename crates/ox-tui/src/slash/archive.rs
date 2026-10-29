@@ -3,7 +3,7 @@
 //! rolls to a fresh one. The typed-arg forms forward [`Op::SetArchive`] for the engine to resolve.
 
 use ox_core::command;
-use ox_core::protocol::{Op, SavedTarget};
+use ox_core::protocol::{Op, SessionRef};
 use ox_core::session::store::listing::ArchiveState;
 
 use super::registry::{SlashCommand, SlashOutcome};
@@ -83,7 +83,7 @@ impl SlashCommand for UnarchiveCmd {
 
 fn set_archive(prefix: &str, state: ArchiveState) -> SlashOutcome {
     SlashOutcome::Forward(Action::Op(Op::SetArchive {
-        target: SavedTarget::Prefix(prefix.to_owned()),
+        target: SessionRef::Prefix(prefix.to_owned()),
         state,
     }))
 }
@@ -114,7 +114,7 @@ mod tests {
                 assert_eq!(
                     outcome.into_forward(),
                     Action::Op(Op::SetArchive {
-                        target: SavedTarget::Prefix("abab".to_owned()),
+                        target: SessionRef::Prefix("abab".to_owned()),
                         state,
                     }),
                     "/{}",

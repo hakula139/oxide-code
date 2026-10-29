@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use time::OffsetDateTime;
 
-use ox_core::protocol::SavedTarget;
+use ox_core::protocol::SessionRef;
 use ox_core::session::display::{archive_notice, id_prefix};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::session::store::listing::ArchiveState;
@@ -30,7 +30,7 @@ pub(crate) fn saved_error_message(error: &SavedError, live_recovery: &str) -> St
 /// to `state`, as a note or, for a failure, as an error. An error for a typed prefix names the
 /// command that sent it.
 pub(crate) fn archive_message(
-    target: &SavedTarget,
+    target: &SessionRef,
     state: ArchiveState,
     result: &Result<ArchiveUpdate, SavedError>,
 ) -> Result<String, String> {
@@ -49,9 +49,9 @@ pub(crate) fn archive_message(
         Err(error) => {
             let message = saved_error_message(error, BARE_ARCHIVE_HINT);
             Err(match (target, state) {
-                (SavedTarget::Id(_), _) => message,
-                (SavedTarget::Prefix(_), ArchiveState::Archived) => format!("/archive: {message}"),
-                (SavedTarget::Prefix(_), ArchiveState::Active) => format!("/unarchive: {message}"),
+                (SessionRef::Id(_), _) => message,
+                (SessionRef::Prefix(_), ArchiveState::Archived) => format!("/archive: {message}"),
+                (SessionRef::Prefix(_), ArchiveState::Active) => format!("/unarchive: {message}"),
             })
         }
     }
@@ -225,8 +225,8 @@ mod tests {
                 cause: "disk full".to_owned(),
             });
 
-            let typed = SavedTarget::Prefix("abab".to_owned());
-            let picked = SavedTarget::Id(ID.to_owned());
+            let typed = SessionRef::Prefix("abab".to_owned());
+            let picked = SessionRef::Id(ID.to_owned());
             let no_match = || {
                 Err(SavedError::Resolve(ResolveError::NoMatch {
                     prefix: "zzzz".to_owned(),

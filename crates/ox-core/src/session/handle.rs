@@ -14,9 +14,8 @@ use tokio::task::JoinHandle;
 use tracing::{error, warn};
 use uuid::Uuid;
 
-use super::resolver::resolve_target;
+use super::resolver::resolve_ref;
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
-use super::saved::SavedError;
 use super::state::SessionState;
 use super::store::listing::{ArchiveState, ProjectScope};
 use super::store::load::load;
@@ -24,7 +23,7 @@ use super::store::{CompactInfo, CompactRecord, SessionStore, UsageRecord};
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::prompt::SessionContext;
-use crate::protocol::ResumeTarget;
+use crate::protocol::SessionRef;
 use crate::tool::ToolMetadata;
 use crate::tool::tasks::{self, Task};
 use crate::util::sync::lock_or_recover;
@@ -453,7 +452,7 @@ pub(crate) async fn roll_into(
     session: &mut SessionHandle,
     store: &SessionStore,
     snapshots: Vec<FileSnapshot>,
-    target: ResumeTarget,
+    target: SessionRef,
     model: &str,
 ) -> Result<RollIntoOutcome> {
     let store = store.clone();
@@ -465,10 +464,7 @@ pub(crate) async fn roll_into(
         title,
         prior,
     } = tokio::task::spawn_blocking(move || {
-        let session_id = resolve_target(&store, target, Some(&live_id), ProjectScope::Current)?;
-        if session_id == live_id {
-            return Err(SavedError::live(&live_id).into());
-        }
+        let session_id = resolve_ref(&store, &target, Some(&live_id), ProjectScope::Current)?;
         resume(&store, &session_id, &model)
     })
     .await
@@ -1187,7 +1183,7 @@ mod tests {
                     &mut session,
                     &store,
                     Vec::new(),
-                    ResumeTarget::Id("target".to_owned()),
+                    SessionRef::Id("target".to_owned()),
                     "m",
                 )
                 .await
@@ -1223,7 +1219,7 @@ mod tests {
                 &mut session,
                 &store,
                 tracker.snapshot_all(),
-                ResumeTarget::Id(target_id.clone()),
+                SessionRef::Id(target_id.clone()),
                 "test-model",
             )
             .await
@@ -1251,23 +1247,22 @@ mod tests {
 
         #[tokio::test]
         async fn keeps_the_live_session_when_the_target_fails_or_is_live() {
-            let (dir, store) = isolated_store();
+            let (_dir, store) = isolated_store();
             let mut session = start(&store, "test-model", None);
             let live_id = session.session_id();
             session.record_message(Message::user("live")).await;
-            let missing = dir.path().join("missing-target.jsonl");
 
             for (target, expected) in [
                 (
-                    ResumeTarget::Path(missing.clone()),
-                    format!("failed to open {}", missing.display()),
+                    SessionRef::Prefix("zzzz".to_owned()),
+                    "no session matching `zzzz`".to_owned(),
                 ),
                 (
-                    ResumeTarget::Id(live_id.clone()),
+                    SessionRef::Id(live_id.clone()),
                     format!("session {} is the live session", &live_id[..8]),
                 ),
                 (
-                    ResumeTarget::Id("missing".to_owned()),
+                    SessionRef::Id("missing".to_owned()),
                     "session not found: missing".to_owned(),
                 ),
             ] {

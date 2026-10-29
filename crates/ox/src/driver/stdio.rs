@@ -649,7 +649,7 @@ mod tests {
     use ox_core::permission::Mode;
     use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::{OpReceiver, ls_call, op_channel, op_id, text_result};
-    use ox_core::protocol::{CompactTrigger, ConfigPick, SavedTarget};
+    use ox_core::protocol::{CompactTrigger, ConfigPick, SessionRef};
     use ox_core::session::saved::{SavedAction, SavedError};
     use ox_core::session::store::testing::test_store;
     use ox_core::tool::bash::background::testing::shells_in_each_state;
@@ -1864,7 +1864,7 @@ mod tests {
                     Event::SummaryToken("Recap".to_owned()),
                     Event::SummaryDiscarded,
                     Event::ArchiveUpdated {
-                        target: SavedTarget::Prefix("saved".to_owned()),
+                        target: SessionRef::Prefix("saved".to_owned()),
                         state: ArchiveState::Archived,
                         result: Err(SavedError::Failed {
                             action: SavedAction::Archive,

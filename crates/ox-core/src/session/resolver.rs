@@ -1,5 +1,5 @@
-//! Resolution of the CLI `--continue` and `--resume` targets, of resume targets to session IDs, and
-//! of session-ID prefixes.
+//! Resolution of the CLI `--continue` and `--resume` targets, of saved-session references to
+//! session IDs, and of session-ID prefixes.
 
 use std::fs::File;
 use std::io::{BufReader, Write};
@@ -10,27 +10,45 @@ use tracing::debug;
 
 use super::display::id_prefix;
 use super::handle::{self, LoadedTranscript, ResumedSession};
+use super::saved::SavedError;
 use super::store::SessionStore;
 use super::store::listing::{ArchiveState, ProjectScope, SessionInfo};
-use crate::protocol::ResumeTarget;
+use crate::protocol::SessionRef;
 
 /// The saved session a run continues.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionTarget<'a> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionTarget {
     /// The most recent unarchived session in scope, as `--continue` picks.
     Latest,
-    /// The session an ID prefix or an export path names, as `--resume <session>` gives.
-    Named(&'a str),
+    /// The session that the export at this path holds, imported into the store first.
+    Import(PathBuf),
+    /// The saved session a reference names.
+    Ref(SessionRef),
 }
 
-/// Normalized form of the CLI's session target.
-enum ResumeMode {
-    /// No target starts a new session.
-    Fresh,
-    /// The most recent unarchived session in scope.
-    Latest,
-    /// The session an ID prefix or an export path names.
-    Named(ResumeTarget),
+impl SessionTarget {
+    /// Classifies the `--resume <session>` argument `raw`. An argument that contains a path
+    /// separator or has a `.jsonl` extension, which no session-ID prefix does, names an export, and
+    /// any other names a session-ID prefix. Rejects a blank argument, which names no session.
+    pub fn named(raw: &str) -> Result<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            bail!(
+                "empty session ID prefix \
+                 (run `ox -c` to continue the latest session or `ox -r` to pick one)"
+            );
+        }
+        let path = Path::new(trimmed);
+        let is_path = trimmed.contains(['/', '\\'])
+            || path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"));
+        Ok(if is_path {
+            Self::Import(path.to_path_buf())
+        } else {
+            Self::Ref(SessionRef::Prefix(trimmed.to_owned()))
+        })
+    }
 }
 
 /// Starts a new session, or resumes the one `target` names. A fresh session records `git_branch`. A
@@ -41,94 +59,68 @@ pub async fn resolve_session(
     store: &SessionStore,
     model: &str,
     git_branch: Option<String>,
-    target: Option<SessionTarget<'_>>,
+    target: Option<SessionTarget>,
     projects: ProjectScope,
 ) -> Result<ResumedSession> {
-    let target = match normalize_target(target)? {
-        ResumeMode::Fresh => {
-            return Ok(ResumedSession {
-                handle: handle::start(store, model, git_branch),
-                transcript: LoadedTranscript::default(),
-                title: None,
-                prior: ArchiveState::Active,
-            });
-        }
-        ResumeMode::Latest => {
-            let scope_hint = match projects {
-                ProjectScope::Current => " in this project (use --all to search every project)",
-                ProjectScope::Every => "",
-            };
-            let latest = store
-                .latest(projects)?
-                .with_context(|| format!("no sessions to resume{scope_hint}"))?;
-            ResumeTarget::Id(latest.session_id)
-        }
-        ResumeMode::Named(target) => target,
+    let Some(target) = target else {
+        return Ok(ResumedSession {
+            handle: handle::start(store, model, git_branch),
+            transcript: LoadedTranscript::default(),
+            title: None,
+            prior: ArchiveState::Active,
+        });
     };
 
     debug!(?target, "resuming session");
     let store = store.clone();
     let model = model.to_owned();
     tokio::task::spawn_blocking(move || {
-        let session_id = resolve_target(&store, target, None, projects)?;
+        let session_id = match target {
+            SessionTarget::Latest => latest(&store, projects)?,
+            SessionTarget::Import(path) => import(&store, &path)?,
+            SessionTarget::Ref(target) => resolve_ref(&store, &target, None, projects)?,
+        };
         handle::resume(&store, &session_id, &model)
     })
     .await
     .context("session resume task failed")?
 }
 
-/// Trims and classifies `target` into a [`ResumeMode`], rejecting a blank name, which names no
-/// session.
-fn normalize_target(target: Option<SessionTarget<'_>>) -> Result<ResumeMode> {
-    match target {
-        None => Ok(ResumeMode::Fresh),
-        Some(SessionTarget::Latest) => Ok(ResumeMode::Latest),
-        Some(SessionTarget::Named(raw)) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                bail!(
-                    "empty session ID prefix \
-                     (run `ox -c` to continue the latest session or `ox -r` to pick one)"
-                );
-            }
-            Ok(ResumeMode::Named(if looks_like_path(trimmed) {
-                ResumeTarget::Path(PathBuf::from(trimmed))
-            } else {
-                ResumeTarget::Prefix(trimmed.to_owned())
-            }))
-        }
-    }
+/// The ID of the most recent unarchived session in `projects`.
+fn latest(store: &SessionStore, projects: ProjectScope) -> Result<String> {
+    let scope_hint = match projects {
+        ProjectScope::Current => " in this project (use --all to search every project)",
+        ProjectScope::Every => "",
+    };
+    let latest = store
+        .latest(projects)?
+        .with_context(|| format!("no sessions to resume{scope_hint}"))?;
+    Ok(latest.session_id)
 }
 
-/// Returns whether `arg` contains a path separator or has a `.jsonl` extension, which no session-ID
-/// prefix does.
-fn looks_like_path(arg: &str) -> bool {
-    arg.contains('/')
-        || arg.contains('\\')
-        || Path::new(arg)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+/// Imports the export at `path` and returns the ID of the session it holds.
+fn import(store: &SessionStore, path: &Path) -> Result<String> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    store
+        .import(BufReader::new(file))
+        .with_context(|| format!("failed to import {}", path.display()))
 }
 
-/// The ID of the session `target` names. A prefix matches sessions other than `live_id` in
-/// `projects`, as [`resolve_prefix`] does, and a path names an export, which this imports first.
-pub(super) fn resolve_target(
+/// The ID of the saved session other than `live_id` that `target` names. A prefix matches in
+/// `projects` as [`resolve_prefix`] does.
+pub(super) fn resolve_ref(
     store: &SessionStore,
-    target: ResumeTarget,
+    target: &SessionRef,
     live_id: Option<&str>,
     projects: ProjectScope,
-) -> Result<String> {
+) -> Result<String, SavedError> {
     match target {
-        ResumeTarget::Id(session_id) => Ok(session_id),
-        ResumeTarget::Prefix(prefix) => {
-            Ok(resolve_prefix(store, &prefix, live_id, projects)?.session_id)
+        SessionRef::Id(session_id) if live_id == Some(session_id.as_str()) => {
+            Err(SavedError::live(session_id))
         }
-        ResumeTarget::Path(path) => {
-            let file =
-                File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
-            store
-                .import(BufReader::new(file))
-                .with_context(|| format!("failed to import {}", path.display()))
+        SessionRef::Id(session_id) => Ok(session_id.clone()),
+        SessionRef::Prefix(prefix) => {
+            Ok(resolve_prefix(store, prefix, live_id, projects)?.session_id)
         }
     }
 }
@@ -240,6 +232,66 @@ mod tests {
         SEEDED_PROMPT, archive_test_session, isolated_store, seed_test_session, test_store,
     };
 
+    /// The target `--resume raw` names.
+    fn named(raw: &str) -> SessionTarget {
+        SessionTarget::named(raw).unwrap()
+    }
+
+    mod session_target {
+        use super::*;
+
+        mod named {
+            use super::*;
+
+            #[test]
+            fn imports_a_path_and_resumes_anything_else_by_its_trimmed_prefix() {
+                for (raw, expected) in [
+                    (
+                        "/abs/path.jsonl",
+                        SessionTarget::Import("/abs/path.jsonl".into()),
+                    ),
+                    (
+                        "./relative.jsonl",
+                        SessionTarget::Import("./relative.jsonl".into()),
+                    ),
+                    (
+                        "sub/dir/session",
+                        SessionTarget::Import("sub/dir/session".into()),
+                    ),
+                    ("name.JSONL", SessionTarget::Import("name.JSONL".into())),
+                    (
+                        r"C:\Users\me\s",
+                        SessionTarget::Import(r"C:\Users\me\s".into()),
+                    ),
+                    (
+                        "  abc123 ",
+                        SessionTarget::Ref(SessionRef::Prefix("abc123".to_owned())),
+                    ),
+                    (
+                        "a1b2c3d4-e5f6-7890",
+                        SessionTarget::Ref(SessionRef::Prefix("a1b2c3d4-e5f6-7890".to_owned())),
+                    ),
+                ] {
+                    assert_eq!(SessionTarget::named(raw).unwrap(), expected, "{raw:?}");
+                }
+            }
+
+            #[test]
+            fn rejects_a_blank_argument() {
+                for raw in ["", "   ", "\t\n"] {
+                    let err = SessionTarget::named(raw).unwrap_err();
+
+                    assert_eq!(
+                        err.to_string(),
+                        "empty session ID prefix \
+                         (run `ox -c` to continue the latest session or `ox -r` to pick one)",
+                        "{raw:?}",
+                    );
+                }
+            }
+        }
+    }
+
     mod resolve_session {
         use super::*;
 
@@ -274,15 +326,10 @@ mod tests {
             let (_dir, store) = isolated_store();
 
             let arg = export.to_string_lossy().into_owned();
-            let resumed = resolve_session(
-                &store,
-                "m",
-                None,
-                Some(SessionTarget::Named(&arg)),
-                ProjectScope::Current,
-            )
-            .await
-            .unwrap();
+            let resumed =
+                resolve_session(&store, "m", None, Some(named(&arg)), ProjectScope::Current)
+                    .await
+                    .unwrap();
 
             assert_eq!(resumed.handle.session_id(), full_id);
             assert_eq!(resumed.transcript.messages, [Message::user("exported")]);
@@ -303,7 +350,7 @@ mod tests {
                 &store,
                 "m",
                 None,
-                Some(SessionTarget::Named(prefix)),
+                Some(named(prefix)),
                 ProjectScope::Current,
             )
             .await
@@ -322,15 +369,9 @@ mod tests {
             seed_test_session(&store, "abcd-local", Some("Local"), 1, at);
             seed_test_session(&other, "abcd-other", Some("Other"), 1, at);
             let resume = async |prefix: &str, projects: ProjectScope| {
-                resolve_session(
-                    &store,
-                    "m",
-                    None,
-                    Some(SessionTarget::Named(prefix)),
-                    projects,
-                )
-                .await
-                .map(|resumed| resumed.title)
+                resolve_session(&store, "m", None, Some(named(prefix)), projects)
+                    .await
+                    .map(|resumed| resumed.title)
             };
 
             assert_eq!(
@@ -431,7 +472,7 @@ mod tests {
                 &store,
                 "m",
                 None,
-                Some(SessionTarget::Named("arch")),
+                Some(named("arch")),
                 ProjectScope::Current,
             )
             .await
@@ -479,7 +520,7 @@ mod tests {
                 &store,
                 "m",
                 None,
-                Some(SessionTarget::Named("zzzz")),
+                Some(named("zzzz")),
                 ProjectScope::Current,
             )
             .await
@@ -502,17 +543,11 @@ mod tests {
                 );
             }
 
-            let err = resolve_session(
-                &store,
-                "m",
-                None,
-                Some(SessionTarget::Named("ab")),
-                ProjectScope::Current,
-            )
-            .await
-            .err()
-            .unwrap()
-            .to_string();
+            let err = resolve_session(&store, "m", None, Some(named("ab")), ProjectScope::Current)
+                .await
+                .err()
+                .unwrap()
+                .to_string();
             assert_eq!(
                 err,
                 "ambiguous prefix `ab` matches 7 sessions: \
@@ -531,16 +566,10 @@ mod tests {
                 (ProjectScope::Every, "all projects"),
             ] {
                 let cause = store.list_matching("ab", projects).unwrap_err();
-                let err = resolve_session(
-                    &store,
-                    "m",
-                    None,
-                    Some(SessionTarget::Named("ab")),
-                    projects,
-                )
-                .await
-                .err()
-                .unwrap();
+                let err = resolve_session(&store, "m", None, Some(named("ab")), projects)
+                    .await
+                    .err()
+                    .unwrap();
 
                 assert_eq!(
                     err.to_string(),
@@ -556,7 +585,7 @@ mod tests {
                 &store,
                 "m",
                 None,
-                Some(SessionTarget::Named("/does/not/exist.jsonl")),
+                Some(named("/does/not/exist.jsonl")),
                 ProjectScope::Current,
             )
             .await
@@ -570,109 +599,8 @@ mod tests {
         }
     }
 
-    mod normalize_target {
+    mod import {
         use super::*;
-
-        #[test]
-        fn maps_no_flag_to_fresh() {
-            assert!(matches!(normalize_target(None).unwrap(), ResumeMode::Fresh));
-        }
-
-        #[test]
-        fn maps_continue_to_latest() {
-            assert!(matches!(
-                normalize_target(Some(SessionTarget::Latest)).unwrap(),
-                ResumeMode::Latest
-            ));
-        }
-
-        #[test]
-        fn trims_valid_prefix() {
-            let mode = normalize_target(Some(SessionTarget::Named("  abc123 "))).unwrap();
-            assert!(matches!(
-                mode,
-                ResumeMode::Named(ResumeTarget::Prefix(prefix)) if prefix == "abc123"
-            ));
-        }
-
-        #[test]
-        fn classifies_path_arguments() {
-            for raw in [
-                "/abs/path.jsonl",
-                "./relative.jsonl",
-                "sub/dir/session.jsonl",
-                "name.jsonl",           // no separator but has .jsonl suffix
-                r"C:\Users\me\s.jsonl", // windows-shaped
-            ] {
-                let mode = normalize_target(Some(SessionTarget::Named(raw))).unwrap();
-                assert!(
-                    matches!(mode, ResumeMode::Named(ResumeTarget::Path(p)) if p == Path::new(raw)),
-                    "{raw:?} should classify as Path",
-                );
-            }
-        }
-
-        #[test]
-        fn keeps_uuid_shaped_prefix_as_prefix() {
-            let mode = normalize_target(Some(SessionTarget::Named("a1b2c3d4-e5f6-7890"))).unwrap();
-            assert!(matches!(
-                mode,
-                ResumeMode::Named(ResumeTarget::Prefix(prefix)) if prefix == "a1b2c3d4-e5f6-7890"
-            ));
-        }
-
-        #[test]
-        fn rejects_empty_and_whitespace_prefix() {
-            for raw in ["", "   ", "\t\n"] {
-                let err = normalize_target(Some(SessionTarget::Named(raw)))
-                    .err()
-                    .unwrap()
-                    .to_string();
-                assert_eq!(
-                    err,
-                    "empty session ID prefix \
-                     (run `ox -c` to continue the latest session or `ox -r` to pick one)",
-                    "{raw:?}",
-                );
-            }
-        }
-    }
-
-    mod resolve_target {
-        use super::*;
-
-        const ID: &str = "abcd1234-eeff-1122-3344-556677889900";
-
-        #[test]
-        fn resolves_an_id_a_prefix_and_an_imported_export() {
-            let (dir, source) = isolated_store();
-            seed_test_session(
-                &source,
-                ID,
-                Some("Saved"),
-                1,
-                time::macros::datetime!(2026-04-18 09:00:00 UTC),
-            );
-            let export = dir.path().join("session.jsonl");
-            source
-                .export(ID, &mut File::create(&export).unwrap())
-                .unwrap();
-            let (_dir, imported) = isolated_store();
-
-            for (store, target) in [
-                (&source, ResumeTarget::Id(ID.to_owned())),
-                (&source, ResumeTarget::Prefix("abcd".to_owned())),
-                (&imported, ResumeTarget::Path(export)),
-            ] {
-                let id = resolve_target(store, target.clone(), None, ProjectScope::Current);
-                assert_eq!(id.unwrap(), ID, "{target:?}");
-            }
-            assert_eq!(
-                saved_title(&imported, ID),
-                Some("Saved".to_owned()),
-                "the import saves the session"
-            );
-        }
 
         #[test]
         fn names_a_file_it_cannot_open_or_import() {
@@ -681,19 +609,15 @@ mod tests {
             let foreign = dir.path().join("foreign.jsonl");
             std::fs::write(&foreign, "{\"type\":\"header\"}\n").unwrap();
 
-            let resolve = |path: &Path| {
-                let target = ResumeTarget::Path(path.to_path_buf());
-                let err = resolve_target(&store, target, None, ProjectScope::Current).unwrap_err();
-                format!("{err:#}")
-            };
+            let failure = |path: &Path| format!("{:#}", import(&store, path).unwrap_err());
 
             assert!(
-                resolve(&missing).starts_with(&format!("failed to open {}: ", missing.display())),
+                failure(&missing).starts_with(&format!("failed to open {}: ", missing.display())),
                 "{}",
-                resolve(&missing),
+                failure(&missing),
             );
             assert_eq!(
-                resolve(&foreign),
+                failure(&foreign),
                 format!(
                     "failed to import {}: line 1: not an ox session export, which starts with a \
                      session record",
@@ -701,9 +625,49 @@ mod tests {
                 ),
             );
         }
+    }
 
-        fn saved_title(store: &SessionStore, id: &str) -> Option<String> {
-            store.find(id).unwrap()?.title
+    mod resolve_ref {
+        use super::*;
+
+        const ID: &str = "abcd1234-eeff-1122-3344-556677889900";
+
+        #[test]
+        fn resolves_an_id_or_a_prefix_other_than_the_live_session() {
+            let (_dir, store) = isolated_store();
+            seed_test_session(
+                &store,
+                ID,
+                Some("Saved"),
+                1,
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+
+            for (target, live_id, expected) in [
+                (SessionRef::Id(ID.to_owned()), None, Ok(ID.to_owned())),
+                (
+                    SessionRef::Prefix("abcd".to_owned()),
+                    Some("live"),
+                    Ok(ID.to_owned()),
+                ),
+                (
+                    SessionRef::Id(ID.to_owned()),
+                    Some(ID),
+                    Err(SavedError::live(ID)),
+                ),
+                (
+                    SessionRef::Prefix("abcd".to_owned()),
+                    Some(ID),
+                    Err(ResolveError::Live {
+                        prefix: "abcd".to_owned(),
+                    }
+                    .into()),
+                ),
+            ] {
+                let resolved = resolve_ref(&store, &target, live_id, ProjectScope::Current);
+
+                assert_eq!(resolved, expected, "{target:?}, live {live_id:?}");
+            }
         }
     }
 

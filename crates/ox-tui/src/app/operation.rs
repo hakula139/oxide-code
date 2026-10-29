@@ -147,7 +147,7 @@ mod tests {
     use ox_core::model::Effort;
     use ox_core::permission::Mode;
     use ox_core::protocol::testing::op_id;
-    use ox_core::protocol::{ApprovalDecision, ConfigPick, ResumeTarget, SavedTarget, SignInCode};
+    use ox_core::protocol::{ApprovalDecision, ConfigPick, SessionRef, SignInCode};
     use ox_core::session::store::listing::ArchiveState;
 
     use super::*;
@@ -174,7 +174,7 @@ mod tests {
                     Op::Clear,
                     Op::Archive,
                     Op::SetArchive {
-                        target: SavedTarget::Id("saved".to_owned()),
+                        target: SessionRef::Id("saved".to_owned()),
                         state: ArchiveState::Archived,
                     },
                     Op::FindSaved {
@@ -184,7 +184,7 @@ mod tests {
                         session_id: "saved".to_owned(),
                     },
                     Op::Resume {
-                        target: ResumeTarget::Id("saved".to_owned()),
+                        target: SessionRef::Id("saved".to_owned()),
                     },
                     Op::Rename {
                         title: "Renamed".to_owned(),

@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use strum::VariantArray;
 use time::OffsetDateTime;
 
-use ox_core::protocol::{Event, Op, ResumeTarget, SavedTarget};
+use ox_core::protocol::{Event, Op, SessionRef};
 use ox_core::session::display::{DisplayTitle, ID_PREFIX_WIDTH, id_prefix};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::session::store::SessionStore;
@@ -600,7 +600,7 @@ impl ResumePicker {
             return ModalKey::Consumed;
         };
         ModalKey::Emit(ModalAction::Dispatch(Action::Op(Op::SetArchive {
-            target: SavedTarget::Id(row.session_id.clone()),
+            target: SessionRef::Id(row.session_id.clone()),
             state: self.scope.archive.toggled(),
         })))
     }
@@ -608,7 +608,7 @@ impl ResumePicker {
     fn submit(&self) -> ModalKey {
         match self.list.selected() {
             Some(row) => ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
-                target: ResumeTarget::Id(row.session_id.clone()),
+                target: SessionRef::Id(row.session_id.clone()),
             }))),
             // Stay open so the user can Tab the scope or Esc out. Silent dismissal hides why
             // nothing happened.
@@ -651,11 +651,11 @@ impl ResumePicker {
     }
 
     /// Notes an archive toggle of the highlighted row that left for the engine.
-    fn archive_started(&mut self, target: &SavedTarget) {
+    fn archive_started(&mut self, target: &SessionRef) {
         let selected = self
             .list
             .selected()
-            .filter(|row| matches!(target, SavedTarget::Id(id) if *id == row.session_id));
+            .filter(|row| matches!(target, SessionRef::Id(id) if *id == row.session_id));
         if let Some(row) = selected {
             self.archive = Some(PendingArchive {
                 session_id: row.session_id.clone(),
@@ -668,13 +668,13 @@ impl ResumePicker {
     /// Shows how the noted archive toggle ended, dropping or reloading its row on success.
     fn archive_updated(
         &mut self,
-        target: &SavedTarget,
+        target: &SessionRef,
         state: ArchiveState,
         result: &Result<ArchiveUpdate, SavedError>,
     ) {
         let Some(pending) = self
             .archive
-            .take_if(|pending| matches!(target, SavedTarget::Id(id) if *id == pending.session_id))
+            .take_if(|pending| matches!(target, SessionRef::Id(id) if *id == pending.session_id))
         else {
             return;
         };
@@ -1088,7 +1088,7 @@ mod tests {
                 assert_eq!(
                     outcome.into_forward(),
                     Action::Op(Op::Resume {
-                        target: ResumeTarget::Prefix("ab12".to_owned()),
+                        target: SessionRef::Prefix("ab12".to_owned()),
                     }),
                 );
             }
@@ -1453,7 +1453,7 @@ mod tests {
 
             assert!(matches!(ctrl_enter, ModalKey::Consumed), "{ctrl_enter:?}");
             let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
-                target: ResumeTarget::Id(id),
+                target: SessionRef::Id(id),
             }))) = outcome
             else {
                 panic!("expected Submitted(Resume), got {outcome:?}");
@@ -1874,7 +1874,7 @@ mod tests {
                 matches!(
                     &outcome,
                     ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::Resume {
-                        target: ResumeTarget::Id(id),
+                        target: SessionRef::Id(id),
                     }))) if *id == stamped_id(0x33)
                 ),
                 "Enter must resume the archived session: {outcome:?}",
@@ -2169,7 +2169,7 @@ mod tests {
                 datetime!(2026-04-18 09:00:00 UTC),
             );
             let mut picker = opened(store, "live-session-id");
-            let target = SavedTarget::Id(id.clone());
+            let target = SessionRef::Id(id.clone());
             picker.handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
             picker.archive_started(&target);
 
@@ -2247,10 +2247,10 @@ mod tests {
                 picker.archive.is_none(),
                 "only accepted operations become pending"
             );
-            let accepted = SavedTarget::Id(target.clone());
+            let accepted = SessionRef::Id(target.clone());
             picker.archive_started(&accepted);
             picker.archive_updated(
-                &SavedTarget::Id("unrelated".to_owned()),
+                &SessionRef::Id("unrelated".to_owned()),
                 ArchiveState::Archived,
                 &Ok(ArchiveUpdate {
                     id: "unrelated".to_owned(),
@@ -2374,7 +2374,7 @@ mod tests {
             let mut picker = opened(store, "live-session-id");
 
             picker.on_engine(EngineUpdate::Admitted(&Op::SetArchive {
-                target: SavedTarget::Prefix("2222".to_owned()),
+                target: SessionRef::Prefix("2222".to_owned()),
                 state: ArchiveState::Archived,
             }));
             let reply = picker.on_engine(EngineUpdate::Event(&Event::OpEnded {

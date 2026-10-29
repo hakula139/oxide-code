@@ -12,7 +12,7 @@ use indoc::formatdoc;
 
 use crate::model::{Effort, MODELS, ModelInfo};
 use crate::permission::Mode;
-use crate::protocol::{ConfigPick, Op, ResumeTarget};
+use crate::protocol::{ConfigPick, Op, SessionRef};
 use crate::session::display::fit_title;
 use crate::util::variant;
 
@@ -199,7 +199,7 @@ pub fn rename(title: &str) -> Result<Op, String> {
 fn resume(prefix: &str) -> Result<Op, String> {
     let prefix = required(prefix, "session ID", "/resume <id-prefix>")?;
     Ok(Op::Resume {
-        target: ResumeTarget::Prefix(prefix.to_owned()),
+        target: SessionRef::Prefix(prefix.to_owned()),
     })
 }
 
@@ -277,7 +277,7 @@ mod tests {
             assert_eq!(
                 typed("/continue ab12"),
                 Some(Ok(Op::Resume {
-                    target: ResumeTarget::Prefix("ab12".to_owned()),
+                    target: SessionRef::Prefix("ab12".to_owned()),
                 })),
             );
         }
@@ -555,7 +555,7 @@ mod tests {
             assert_eq!(
                 resume(" 1a2b "),
                 Ok(Op::Resume {
-                    target: ResumeTarget::Prefix("1a2b".to_owned()),
+                    target: SessionRef::Prefix("1a2b".to_owned()),
                 }),
             );
         }

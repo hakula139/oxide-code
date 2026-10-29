@@ -576,7 +576,7 @@ mod tests {
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::testing::{OpReceiver, model_pick, text_result};
     use ox_core::protocol::{
-        ApprovalDecision, CompactTrigger, ConfigPick, Event, OpEnd, ResumeTarget, SavedTarget,
+        ApprovalDecision, CompactTrigger, ConfigPick, Event, OpEnd, SessionRef,
     };
     use ox_core::session::saved::{ArchiveUpdate, SavedAction, SavedError};
     use ox_core::session::store::listing::ArchiveState;
@@ -2082,7 +2082,7 @@ mod tests {
             // a typed prompt doesn't push into chat just before `apply_session_resumed` clears it.
             let (mut app, mut rx, _event_tx) = test_app(None);
             let action = Op::Resume {
-                target: ResumeTarget::Path("resume-target.jsonl".into()),
+                target: SessionRef::Id("resume-target".to_owned()),
             };
 
             app.dispatch_op(action.clone());
@@ -2229,7 +2229,7 @@ mod tests {
             let modal = ScriptedModal::new();
             let observed = Arc::clone(&modal.updates);
             app.push_modal(Box::new(modal));
-            let target = SavedTarget::Prefix("saved".to_owned());
+            let target = SessionRef::Prefix("saved".to_owned());
             let op = Op::SetArchive {
                 target: target.clone(),
                 state: ArchiveState::Archived,
@@ -2313,7 +2313,7 @@ mod tests {
             for (op, running) in [
                 (
                     Op::Resume {
-                        target: ResumeTarget::Id("saved".to_owned()),
+                        target: SessionRef::Id("saved".to_owned()),
                     },
                     Op::DeleteSaved {
                         session_id: "other".to_owned(),
@@ -2321,7 +2321,7 @@ mod tests {
                 ),
                 (
                     Op::SetArchive {
-                        target: SavedTarget::Id("saved".to_owned()),
+                        target: SessionRef::Id("saved".to_owned()),
                         state: ArchiveState::Archived,
                     },
                     Op::Rename {
@@ -2355,7 +2355,7 @@ mod tests {
                 (Op::Clear, None, Some(Activity::Clearing)),
                 (
                     Op::Resume {
-                        target: ResumeTarget::Prefix("saved-session".to_owned()),
+                        target: SessionRef::Prefix("saved-session".to_owned()),
                     },
                     None,
                     Some(Activity::Resuming),

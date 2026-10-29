@@ -4,10 +4,10 @@
 use tracing::warn;
 
 use super::display::id_prefix;
-use super::resolver::{ResolveError, resolve_prefix};
+use super::resolver::{ResolveError, resolve_prefix, resolve_ref};
 use super::store::SessionStore;
 use super::store::listing::{ArchiveState, ProjectScope, SessionInfo};
-use crate::protocol::SavedTarget;
+use crate::protocol::SessionRef;
 
 /// Why an operation on a saved session failed, where `id` is the session's [`id_prefix`]. Resume
 /// refuses the live session through [`Self::Live`] too. `Display` is the lowercase `anyhow`
@@ -102,15 +102,11 @@ pub(crate) fn find(
 /// writes to the store, so async callers must use a blocking worker.
 pub(crate) fn set_archived(
     store: &SessionStore,
-    target: &SavedTarget,
+    target: &SessionRef,
     state: ArchiveState,
     live_id: &str,
 ) -> Result<ArchiveUpdate, SavedError> {
-    let id = match target {
-        SavedTarget::Id(id) if id == live_id => return Err(SavedError::live(id)),
-        SavedTarget::Id(id) => id.clone(),
-        SavedTarget::Prefix(prefix) => find(store, prefix, live_id)?.session_id,
-    };
+    let id = resolve_ref(store, target, Some(live_id), ProjectScope::Current)?;
     let action = match state {
         ArchiveState::Archived => SavedAction::Archive,
         ArchiveState::Active => SavedAction::Unarchive,
@@ -141,12 +137,12 @@ pub(crate) fn delete(
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
-    use super::{ArchiveState, ArchiveUpdate, SavedError, SavedTarget, SessionStore};
+    use super::{ArchiveState, ArchiveUpdate, SavedError, SessionRef, SessionStore};
 
     /// [`super::set_archived`] for a frontend test that stands in for the engine.
     pub fn set_archived(
         store: &SessionStore,
-        target: &SavedTarget,
+        target: &SessionRef,
         state: ArchiveState,
         live_id: &str,
     ) -> Result<ArchiveUpdate, SavedError> {
@@ -232,22 +228,22 @@ mod tests {
 
             for (target, state, changed) in [
                 (
-                    SavedTarget::Id(SAVED_ID.to_owned()),
+                    SessionRef::Id(SAVED_ID.to_owned()),
                     ArchiveState::Archived,
                     true,
                 ),
                 (
-                    SavedTarget::Prefix("saved".to_owned()),
+                    SessionRef::Prefix("saved".to_owned()),
                     ArchiveState::Archived,
                     false,
                 ),
                 (
-                    SavedTarget::Prefix("saved".to_owned()),
+                    SessionRef::Prefix("saved".to_owned()),
                     ArchiveState::Active,
                     true,
                 ),
                 (
-                    SavedTarget::Id(SAVED_ID.to_owned()),
+                    SessionRef::Id(SAVED_ID.to_owned()),
                     ArchiveState::Active,
                     false,
                 ),
@@ -293,7 +289,7 @@ mod tests {
                 1,
                 datetime!(2026-04-18 09:00:00 UTC),
             );
-            let target = SavedTarget::Id("foreign-session".to_owned());
+            let target = SessionRef::Id("foreign-session".to_owned());
 
             let update = set_archived(&store, &target, ArchiveState::Archived, LIVE_ID);
 
@@ -314,25 +310,25 @@ mod tests {
 
             for (target, expected) in [
                 (
-                    SavedTarget::Id(LIVE_ID.to_owned()),
+                    SessionRef::Id(LIVE_ID.to_owned()),
                     SavedError::Live {
                         id: "live-ses".to_owned(),
                     },
                 ),
                 (
-                    SavedTarget::Prefix("live".to_owned()),
+                    SessionRef::Prefix("live".to_owned()),
                     SavedError::Resolve(ResolveError::Live {
                         prefix: "live".to_owned(),
                     }),
                 ),
                 (
-                    SavedTarget::Id("saved".to_owned()),
+                    SessionRef::Id("saved".to_owned()),
                     SavedError::Resolve(ResolveError::NoMatch {
                         prefix: "saved".to_owned(),
                     }),
                 ),
                 (
-                    SavedTarget::Prefix("zzz".to_owned()),
+                    SessionRef::Prefix("zzz".to_owned()),
                     SavedError::Resolve(ResolveError::NoMatch {
                         prefix: "zzz".to_owned(),
                     }),
@@ -350,7 +346,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = seeded_store(dir.path());
             fail_writes(&store);
-            let target = SavedTarget::Id(SAVED_ID.to_owned());
+            let target = SessionRef::Id(SAVED_ID.to_owned());
 
             let err = set_archived(&store, &target, ArchiveState::Archived, LIVE_ID).unwrap_err();
 
