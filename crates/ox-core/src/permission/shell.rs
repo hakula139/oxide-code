@@ -1205,6 +1205,7 @@ impl Walk<'_> {
         let target = match dir_target(name, args) {
             DirTarget::Home => home(),
             DirTarget::Path(path) => Some(path.to_owned()),
+            DirTarget::Stay => return,
             DirTarget::Unknown => None,
         };
         let Some(target) = target.filter(|_| self.repeats == 0) else {
@@ -1260,8 +1261,10 @@ impl Walk<'_> {
     /// Returns whether `name` with `args` enters one literal directory in a workspace root, with
     /// no `..`, which bash's `cd` applies to the spelled path while the gate resolves links first.
     fn enters_workspace(&mut self, name: &str, args: &[Word]) -> bool {
-        let DirTarget::Path(path) = dir_target(name, args) else {
-            return false;
+        let path = match dir_target(name, args) {
+            DirTarget::Path(path) => path,
+            DirTarget::Stay => return true,
+            DirTarget::Home | DirTarget::Unknown => return false,
         };
         Some(path)
             .filter(|path| {
@@ -1461,13 +1464,15 @@ enum DirTarget<'w> {
     Home,
     /// One literal directory.
     Path(&'w str),
+    /// Nowhere, since `pushd -n` changes only the directory stack.
+    Stay,
     /// Anywhere: `cd -`, `popd`, a stack rotation, or a target that expands.
     Unknown,
 }
 
 /// The target of directory changer `name` with `args`, after the options bash's `cd` (`-L`, `-P`,
 /// and `-e`) or `pushd` (`-n`) takes and a `--` that ends them. `cd -@` enters a file's extended
-/// attributes, which no path names, so it goes anywhere.
+/// attributes, which no path names, so it goes anywhere, and `pushd -n` stays.
 fn dir_target<'w>(name: &str, args: &'w [Word]) -> DirTarget<'w> {
     let options = match name {
         "cd" => "LPe",
@@ -1487,6 +1492,8 @@ fn dir_target<'w>(name: &str, args: &'w [Word]) -> DirTarget<'w> {
             .is_some_and(|flags| !flags.is_empty() && flags.chars().all(|c| options.contains(c)))
         {
             break;
+        } else if name == "pushd" {
+            return DirTarget::Stay;
         }
         rest = after;
         if ended {
@@ -4553,6 +4560,7 @@ mod tests {
                     "cd x && make",
                     "cd -P x && make",
                     "cd -L -- x && make",
+                    "pushd -n /tmp/evil && make",
                     "cd /repo/x && make",
                     "for i in 1 2; do echo $i; done; cd x && make",
                     "cd /tmp/evil",
