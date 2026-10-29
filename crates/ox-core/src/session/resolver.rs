@@ -1,5 +1,5 @@
 //! Resolution of the CLI `--continue` and `--resume` targets, of resume targets to session IDs, and
-//! of session IDs and their prefixes.
+//! of session-ID prefixes.
 
 use std::fs::File;
 use std::io::{BufReader, Write};
@@ -168,19 +168,6 @@ impl ResolveError {
             cause: format!("{cause:#}"),
         }
     }
-}
-
-/// The saved session `session_id`, in any project.
-pub(super) fn resolve_id(
-    store: &SessionStore,
-    session_id: &str,
-) -> Result<SessionInfo, ResolveError> {
-    store
-        .find(session_id)
-        .map_err(|cause| ResolveError::list(ProjectScope::Every, &cause))?
-        .ok_or_else(|| ResolveError::NoMatch {
-            prefix: session_id.to_owned(),
-        })
 }
 
 /// The one saved session other than `live_id` whose ID starts with `prefix`, telling a prefix that
@@ -753,34 +740,6 @@ mod tests {
                     .unwrap_err()
                     .to_string(),
                 "no session matching `zzzz`",
-            );
-        }
-    }
-
-    mod resolve_id {
-        use super::*;
-
-        #[test]
-        fn finds_the_session_in_another_project_and_tells_an_unknown_id() {
-            let dir = tempfile::tempdir().unwrap();
-            let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-            let id = "abcd1234-eeff-1122-3344-556677889900";
-            seed_test_session(
-                &other,
-                id,
-                Some("Foreign"),
-                1,
-                time::macros::datetime!(2026-04-18 09:00:00 UTC),
-            );
-            let current = test_store(dir.path());
-
-            assert_eq!(resolve_id(&current, id).unwrap().session_id, id);
-            assert_eq!(
-                resolve_id(&current, "abcd1234"),
-                Err(ResolveError::NoMatch {
-                    prefix: "abcd1234".to_owned()
-                }),
-                "an ID matches only in full",
             );
         }
     }
