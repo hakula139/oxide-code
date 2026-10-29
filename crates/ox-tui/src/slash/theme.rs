@@ -7,13 +7,13 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
-use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashOutcome};
 use crate::action::Action;
 use crate::modal::chrome::CONFIRM_HINTS;
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
+use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
 use crate::theme::builtin::{self, BUILT_IN, BuiltinTheme};
 
@@ -48,10 +48,10 @@ impl SlashCommand for ThemeCmd {
         !args.is_empty()
     }
 
-    fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, arg: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         if arg.is_empty() {
             return Ok(SlashOutcome::Modal(Box::new(ThemePicker::new(
-                &ctx.info.config.theme_name,
+                &info.config.theme_name,
             ))));
         }
         let theme = resolve_theme_arg(arg)?;

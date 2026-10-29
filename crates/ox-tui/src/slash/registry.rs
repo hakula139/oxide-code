@@ -10,7 +10,6 @@ use super::archive::{ArchiveCmd, UnarchiveCmd};
 use super::clear::ClearCmd;
 use super::compact::CompactCmd;
 use super::config::ConfigCmd;
-use super::context::SlashContext;
 use super::delete::DeleteCmd;
 use super::diff::{DiffCmd, WorkingTreeDiff};
 use super::effort::EffortCmd;
@@ -26,6 +25,7 @@ use super::status::StatusCmd;
 use super::theme::ThemeCmd;
 use crate::action::Action;
 use crate::modal::Modal;
+use crate::session_info::LiveSessionInfo;
 
 /// What a command hands back for the App to apply, at submit or once its background task finishes.
 pub(crate) enum SlashOutcome {
@@ -119,7 +119,7 @@ pub(super) trait SlashCommand: Sync {
     }
 
     /// `Err(msg)` renders as an `ErrorBlock`.
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String>;
+    fn execute(&self, args: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String>;
 }
 
 /// Alphabetical for stable `/help` and empty-query popup ordering.
@@ -154,9 +154,9 @@ pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
 pub(super) fn typed_form(
     name: &str,
     args: &str,
-    ctx: &SlashContext<'_>,
+    info: &LiveSessionInfo,
 ) -> Result<SlashOutcome, String> {
-    let op = command::typed_form(name, args, &ctx.info.project_root)
+    let op = command::typed_form(name, args, &info.project_root)
         .unwrap_or_else(|| panic!("/{name} has no typed form"))?;
     Ok(SlashOutcome::Forward(Action::Op(op)))
 }
@@ -176,12 +176,13 @@ pub(super) fn lookup_in<'a>(
 
 #[cfg(test)]
 pub(super) mod testing {
-    use super::{SlashCommand, SlashContext, SlashOutcome};
+    use super::{SlashCommand, SlashOutcome};
+    use crate::session_info::LiveSessionInfo;
     use crate::session_info::testing::test_session_info;
 
-    /// Runs `cmd` with `args` against [`test_session_info`] and no session title.
+    /// Runs `cmd` with `args` against [`test_session_info`].
     pub(crate) fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
-        cmd.execute(args, &SlashContext::new(&test_session_info()))
+        cmd.execute(args, &test_session_info())
     }
 
     /// A command that fails with `error`, answering to the aliases the shared table gives `name`.
@@ -211,7 +212,7 @@ pub(super) mod testing {
             self.description
         }
 
-        fn execute(&self, _: &str, _: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+        fn execute(&self, _: &str, _: &LiveSessionInfo) -> Result<SlashOutcome, String> {
             let error = self.error.to_owned();
             if self.background {
                 Ok(SlashOutcome::Background(Box::pin(async { Err(error) })))
@@ -352,14 +353,13 @@ mod tests {
         #[test]
         fn forms_that_run_mid_turn_never_start_a_turn_or_send_an_idle_only_op() {
             let info = test_session_info();
-            let ctx = SlashContext::new(&info);
             let forms: Vec<_> = forms()
                 .into_iter()
                 .filter(|(cmd, _)| !cmd.idle_only())
                 .collect();
             assert!(
                 forms.iter().any(|(cmd, args)| matches!(
-                    cmd.execute(args, &ctx),
+                    cmd.execute(args, &info),
                     Ok(SlashOutcome::Forward(Action::Op(_)))
                 )),
                 "no mid-turn form sends an op",
@@ -368,7 +368,7 @@ mod tests {
             let racing: Vec<String> = forms
                 .iter()
                 .filter_map(|(cmd, args)| {
-                    let outcome = cmd.execute(args, &ctx);
+                    let outcome = cmd.execute(args, &info);
                     let races = match &outcome {
                         Ok(SlashOutcome::Forward(Action::Op(op))) => op.is_idle_only(),
                         Ok(SlashOutcome::Modal(modal)) => modal.sends_idle_only_ops(),
@@ -388,12 +388,11 @@ mod tests {
         #[test]
         fn overview_commands_open_a_modal() {
             let info = test_session_info();
-            let ctx = SlashContext::new(&info);
 
             for name in ["help", "status", "config"] {
                 let cmd = lookup_in(BUILT_INS, name).unwrap();
 
-                let outcome = cmd.execute("", &ctx);
+                let outcome = cmd.execute("", &info);
 
                 assert!(
                     matches!(outcome, Ok(SlashOutcome::Modal(_))),
@@ -405,11 +404,10 @@ mod tests {
         #[test]
         fn turns_start_only_from_prompts_whose_line_is_echoed() {
             let info = test_session_info();
-            let ctx = SlashContext::new(&info);
 
             let offenders: Vec<String> = forms()
                 .iter()
-                .filter_map(|(cmd, args)| match cmd.execute(args, &ctx) {
+                .filter_map(|(cmd, args)| match cmd.execute(args, &info) {
                     Ok(SlashOutcome::Forward(Action::Op(Op::Prompt { .. } | Op::Queue(_)))) => {
                         Some(format!("/{} {args} bypasses the prompt queue", cmd.name()))
                     }

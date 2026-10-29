@@ -12,20 +12,16 @@ use tokio_util::sync::CancellationToken;
 
 use super::spill::MAX_SPILL_BYTES;
 use super::view::{GrepFileGroup, GrepMatchLine};
-use super::{
-    Prepared, StoredView, ToolCtx, ToolOutput, display_path, extract_input_field, tool_path,
-};
+use super::{StoredView, ToolCtx, ToolOutput, display_path, tool_path};
 use crate::permission::{Access, WalkFilter, Workspace};
 use crate::util::text::{ELLIPSIS, format_size, plural};
 
 // ── Search Root ──
 
-/// Prepares a search tool's call, resolving its `path` argument, the cwd by default, as the root
-/// the gate checks and the walk covers.
-pub(super) fn prepare_search_root(input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
-    let root = search_path(extract_input_field(&input, "path"));
-    let access = Access::for_path(root, &ctx.workspace);
-    Prepared { input, access }
+/// What a search tool's call accesses: its `path` argument, the cwd by default, as the root the
+/// gate checks and the walk covers.
+pub(super) fn root_access(path: Option<&str>, ctx: &ToolCtx) -> Access {
+    Access::for_path(search_path(path), &ctx.workspace)
 }
 
 /// Resolves the search root through [`tool_path`], defaulting to cwd. Shared by the gate and the
@@ -692,104 +688,108 @@ mod tests {
         }
     }
 
-    mod push {
+    mod search_rows {
         use super::*;
 
-        #[test]
-        fn retains_only_the_requested_prefix_when_later_matches_are_counted() {
-            let mut rows = SearchRows::new(2);
+        mod push {
+            use super::*;
 
-            for index in 0..10_000 {
-                rows.push(SearchRow::Count {
-                    path: format!("file-{index}"),
-                    count: index + 1,
+            #[test]
+            fn retains_only_the_requested_prefix_when_later_matches_are_counted() {
+                let mut rows = SearchRows::new(2);
+
+                for index in 0..10_000 {
+                    rows.push(SearchRow::Count {
+                        path: format!("file-{index}"),
+                        count: index + 1,
+                    });
+                }
+
+                assert_eq!(
+                    rows.kept,
+                    [
+                        SearchRow::Count {
+                            path: "file-0".to_owned(),
+                            count: 1
+                        },
+                        SearchRow::Count {
+                            path: "file-1".to_owned(),
+                            count: 2
+                        },
+                    ]
+                );
+                assert_eq!(rows.render(), "file-0:1\nfile-1:2");
+                assert_eq!(rows.limit_description("files").as_deref(), Some("2 files"));
+                assert!(rows.full());
+            }
+
+            #[test]
+            fn stops_at_the_spill_limit_without_a_row_limit() {
+                let row = "x".repeat(1 << 20);
+                let mut rows = SearchRows::new(usize::MAX);
+                let mut pushed = 0;
+
+                while !rows.full() {
+                    rows.push(SearchRow::Path(row.clone()));
+                    pushed += 1;
+                }
+                rows.push(SearchRow::Path("omitted".to_owned()));
+
+                assert_eq!(pushed, 10);
+                assert_eq!(rows.render(), vec![row; 10].join("\n"));
+                assert_eq!(
+                    rows.limit_description("files").as_deref(),
+                    Some("10 MiB of output")
+                );
+            }
+        }
+
+        mod into_groups {
+            use super::*;
+
+            #[test]
+            fn keeps_native_paths_and_context_across_separators() {
+                let first = GrepMatchLine {
+                    number: 5,
+                    text: "hit".to_owned(),
+                    is_match: true,
+                };
+                let context = GrepMatchLine {
+                    number: 10,
+                    text: "context".to_owned(),
+                    is_match: false,
+                };
+                let mut rows = SearchRows::new(10);
+                rows.push(SearchRow::Match {
+                    path: "name:12:part.rs".to_owned(),
+                    line: first.clone(),
                 });
+                rows.push(SearchRow::Separator);
+                rows.push(SearchRow::Match {
+                    path: "name:12:part.rs".to_owned(),
+                    line: context.clone(),
+                });
+                rows.push(SearchRow::Match {
+                    path: "line\nname.rs".to_owned(),
+                    line: first.clone(),
+                });
+
+                let groups = rows.into_groups();
+
+                assert_eq!(
+                    groups,
+                    [
+                        GrepFileGroup {
+                            path: "name:12:part.rs".to_owned(),
+                            lines: vec![first.clone(), context]
+                        },
+                        GrepFileGroup {
+                            path: "line\nname.rs".to_owned(),
+                            lines: vec![first]
+                        },
+                    ]
+                );
             }
-
-            assert_eq!(
-                rows.kept,
-                [
-                    SearchRow::Count {
-                        path: "file-0".to_owned(),
-                        count: 1
-                    },
-                    SearchRow::Count {
-                        path: "file-1".to_owned(),
-                        count: 2
-                    },
-                ]
-            );
-            assert_eq!(rows.render(), "file-0:1\nfile-1:2");
-            assert_eq!(rows.limit_description("files").as_deref(), Some("2 files"));
-            assert!(rows.full());
-        }
-
-        #[test]
-        fn stops_at_the_spill_limit_without_a_row_limit() {
-            let row = "x".repeat(1 << 20);
-            let mut rows = SearchRows::new(usize::MAX);
-            let mut pushed = 0;
-
-            while !rows.full() {
-                rows.push(SearchRow::Path(row.clone()));
-                pushed += 1;
-            }
-            rows.push(SearchRow::Path("omitted".to_owned()));
-
-            assert_eq!(pushed, 10);
-            assert_eq!(rows.render(), vec![row; 10].join("\n"));
-            assert_eq!(
-                rows.limit_description("files").as_deref(),
-                Some("10 MiB of output")
-            );
-        }
-    }
-
-    mod into_groups {
-        use super::*;
-
-        #[test]
-        fn keeps_native_paths_and_context_across_separators() {
-            let first = GrepMatchLine {
-                number: 5,
-                text: "hit".to_owned(),
-                is_match: true,
-            };
-            let context = GrepMatchLine {
-                number: 10,
-                text: "context".to_owned(),
-                is_match: false,
-            };
-            let mut rows = SearchRows::new(10);
-            rows.push(SearchRow::Match {
-                path: "name:12:part.rs".to_owned(),
-                line: first.clone(),
-            });
-            rows.push(SearchRow::Separator);
-            rows.push(SearchRow::Match {
-                path: "name:12:part.rs".to_owned(),
-                line: context.clone(),
-            });
-            rows.push(SearchRow::Match {
-                path: "line\nname.rs".to_owned(),
-                line: first.clone(),
-            });
-
-            let groups = rows.into_groups();
-
-            assert_eq!(
-                groups,
-                [
-                    GrepFileGroup {
-                        path: "name:12:part.rs".to_owned(),
-                        lines: vec![first.clone(), context]
-                    },
-                    GrepFileGroup {
-                        path: "line\nname.rs".to_owned(),
-                        lines: vec![first]
-                    },
-                ]
-            );
         }
     }
 

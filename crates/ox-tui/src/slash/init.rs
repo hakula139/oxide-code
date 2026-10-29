@@ -11,13 +11,13 @@ use ratatui::layout::Rect;
 
 use ox_core::command::init::{self, FILE_CHOICES};
 
-use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashOutcome};
 use crate::action::Action;
 use crate::modal::chrome::CONFIRM_HINTS;
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
+use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
 
 // ── InitCmd ──
@@ -51,8 +51,8 @@ impl SlashCommand for InitCmd {
             .collect()
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        let root = &ctx.info.project_root;
+    fn execute(&self, args: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
+        let root = &info.project_root;
         Ok(match init::resolve(args, root)? {
             Some(prompt) => SlashOutcome::Prompt(prompt),
             None => SlashOutcome::Modal(Box::new(InitPicker::new(root))),
@@ -201,7 +201,7 @@ mod tests {
         fn execute_in(project_root: &Path, args: &str) -> Result<SlashOutcome, String> {
             let mut info = test_session_info();
             info.project_root = project_root.to_owned();
-            InitCmd.execute(args, &SlashContext::new(&info))
+            InitCmd.execute(args, &info)
         }
 
         #[test]

@@ -1,8 +1,8 @@
 //! `/compact [instructions]` compresses the conversation into a summary, appending any trailing
 //! text to the rubric as focus instructions.
 
-use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome, typed_form};
+use crate::session_info::LiveSessionInfo;
 
 // ── CompactCmd ──
 
@@ -25,8 +25,8 @@ impl SlashCommand for CompactCmd {
         Some("[<instructions>]")
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        typed_form(self.name(), args, ctx)
+    fn execute(&self, args: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
+        typed_form(self.name(), args, info)
     }
 }
 

@@ -1,6 +1,5 @@
 //! `/status` opens a read-only [`KvOverview`] of the live session and its runtime settings.
 
-use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::labels;
 use crate::modal::kv_overview::{KvOverview, KvSection};
@@ -23,8 +22,8 @@ impl SlashCommand for StatusCmd {
         false
     }
 
-    fn execute(&self, _args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        Ok(SlashOutcome::Modal(Box::new(build_modal(ctx.info))))
+    fn execute(&self, _args: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
+        Ok(SlashOutcome::Modal(Box::new(build_modal(info))))
     }
 }
 

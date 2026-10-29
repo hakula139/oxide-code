@@ -303,8 +303,8 @@ impl Access {
     /// Builds a path target for the location the tool will touch, resolving `path` against the
     /// workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling with
     /// no rooted forms, so it never auto-allows. The tool follows native filesystem behavior. A
-    /// resolved path that is not valid UTF-8 never auto-allows either, since the input a file tool
-    /// opens can only pin its lossy spelling.
+    /// resolved path that is not valid UTF-8 never auto-allows either, since rules match it only by
+    /// its lossy spelling.
     pub(crate) fn for_path(path: impl AsRef<Path>, workspace: &Workspace) -> Self {
         PathResolver::new(workspace).resolve(path)
     }
@@ -1106,17 +1106,17 @@ impl Policy {
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
     /// 2. `plan` denies an edit, exec, or net call.
-    /// 3. Outside `yolo`, a call [`Self::asks`] holds asks. In `yolo`, a call [`Self::yolo_hold`]
-    ///    holds asks or is denied.
+    /// 3. Outside `yolo`, a call [`Self::asks`] holds asks. In `yolo`, a call a configured ask rule
+    ///    holds asks.
     /// 4. A read-class call allows.
     /// 5. An edit-class call inside a workspace root allows.
     /// 6. An allow rule or a session allow rule allows.
     /// 7. `yolo` allows, and the other modes ask.
     ///
     /// A `bash` command is denied when a deny rule matches one of its simple commands, an edit of a
-    /// file it writes, or a read of a file it redirects into its input. It asks at step 3 in each
-    /// case [`Self::asks`] lists, and step 6 allows it only when the analysis recognizes it and
-    /// [`Self::allows_command`] holds.
+    /// file it writes, or a read of a file it reads for certain, such as an input redirection or a
+    /// reader's literal file argument. It asks at step 3 in each case [`Self::asks`] lists, and
+    /// step 6 allows it only when the analysis recognizes it and [`Self::allows_command`] holds.
     ///
     /// A call that would ask is [unapproved](Decision::Unapproved) in a run nobody attends.
     pub(crate) fn verdict(&self, class: PermissionClass, target: &Target<'_>) -> Verdict {
@@ -1147,8 +1147,9 @@ impl Policy {
         }
 
         if self.mode == Mode::Yolo {
-            if let Some(held) = self.yolo_hold(class, target) {
-                return held;
+            let configured = self.ask.iter().filter(|entry| entry.builtin.is_none());
+            if let Some(rule) = held_by(&configured, class, target) {
+                return verdict(Decision::Ask, rule.basis(Tier::Ask));
             }
         } else if let Some(basis) = self.asks(class, target) {
             return verdict(Decision::Ask, basis);
@@ -1182,8 +1183,8 @@ impl Policy {
 
     /// What holds the call in the ask tier: an ask rule, the protected group of a path the call
     /// edits or a command writes, a command the analysis does not recognize, the [`read`
-    /// rule](read_holder) for a file a reader opens, or the `rm` group for a [forced recursive
-    /// delete](Segment::removes_recursively_by_force).
+    /// rule](Self::possible_read_holder) for a file a reader may read, or the `rm` group for a
+    /// [forced recursive delete](Segment::removes_recursively_by_force).
     fn asks(&self, class: PermissionClass, target: &Target<'_>) -> Option<Basis> {
         if let Some(rule) = held_by(&self.ask.iter(), class, target) {
             return Some(rule.basis(Tier::Ask));
@@ -1201,11 +1202,6 @@ impl Policy {
                 construct: construct.to_owned(),
             });
         }
-        let tiers = self
-            .deny
-            .iter()
-            .map(|rule| (rule, Tier::Deny))
-            .chain(self.ask.iter().map(|rule| (rule, Tier::Ask)));
         command
             .writes()
             .iter()
@@ -1215,7 +1211,7 @@ impl Policy {
                 command
                     .segments()
                     .iter()
-                    .find_map(|segment| read_holder(segment, &tiers))
+                    .find_map(|segment| self.possible_read_holder(segment))
             })
             .or_else(|| {
                 (self.enabled.contains(&Shipped::Rm)
@@ -1227,37 +1223,31 @@ impl Policy {
             })
     }
 
-    /// What holds a call in `yolo` past the deny tier: a deny `read` rule matching a file a reader
-    /// names denies, and a configured ask rule asks. `yolo` runs what only the built-in ask rules,
-    /// protected paths, or the analysis would hold.
-    fn yolo_hold(&self, class: PermissionClass, target: &Target<'_>) -> Option<Verdict> {
-        let segments = match target {
-            Target::Command(command) => command.segments(),
-            _ => &[],
-        };
-        let deny = self.deny.iter().map(|rule| (rule, Tier::Deny));
-        if let Some(basis) = segments
+    /// The first deny or ask `read` rule that may match a file `segment` may read beyond those the
+    /// command reads for certain, or the first such rule when the segment may read any file.
+    fn possible_read_holder(&self, segment: &Segment) -> Option<Basis> {
+        let rules = self
+            .deny
             .iter()
-            .find_map(|segment| named_read_holder(segment, &deny))
-        {
-            return Some(Verdict {
-                decision: Decision::Deny,
-                basis,
-            });
-        }
-        let configured = self.ask.iter().filter(|entry| entry.builtin.is_none());
-        held_by(&configured, class, target)
-            .map(|rule| rule.basis(Tier::Ask))
+            .map(|rule| (rule, Tier::Deny))
+            .chain(self.ask.iter().map(|rule| (rule, Tier::Ask)))
+            .filter(|(rule, _)| rule.rule.class() == PermissionClass::Read);
+        segment
+            .reads()
+            .iter()
+            .find_map(|read| {
+                let target = read.path.as_target();
+                rules
+                    .clone()
+                    .find(|(rule, _)| rule.rule.holds_read(&target, read.recursive))
+            })
             .or_else(|| {
-                let ask = configured.map(|rule| (rule, Tier::Ask));
-                segments
-                    .iter()
-                    .find_map(|segment| named_read_holder(segment, &ask))
+                segment
+                    .reads_anything()
+                    .then(|| rules.clone().next())
+                    .flatten()
             })
-            .map(|basis| Verdict {
-                decision: Decision::Ask,
-                basis,
-            })
+            .map(|(rule, tier)| rule.basis(tier))
     }
 
     /// The enabled protected group that holds `target`, if it is a path one does.
@@ -1289,7 +1279,7 @@ impl Policy {
         }
         let segments = command.segments().iter().map(|segment| {
             self.allow_rule(|rule| rule.allows(segment))
-                .or_else(|| segment.safe_reads().map(|_| Basis::SafeRead))
+                .or_else(|| segment.is_safe().then_some(Basis::SafeRead))
         });
         let writes = command.writes().iter().map(|write| {
             let write = write.as_target();
@@ -1332,7 +1322,7 @@ impl Policy {
 }
 
 /// The first of the deny or ask `rules` that matches the call, or, for a command, an edit of a file
-/// it writes or a read of a file it redirects into its input.
+/// it writes or a read of a file it reads for certain.
 fn held_by<'a>(
     rules: &(impl Iterator<Item = &'a TierRule> + Clone),
     class: PermissionClass,
@@ -1356,39 +1346,6 @@ fn held_by<'a>(
                         .find_map(|read| held_by(rules, PermissionClass::Read, &read.as_target()))
                 })
         })
-}
-
-/// The first `read` rule among the deny or ask `tiers` that matches a file `segment` names, or the
-/// first `read` rule among them when the segment may read any file.
-fn read_holder<'a>(
-    segment: &Segment,
-    tiers: &(impl Iterator<Item = (&'a TierRule, Tier)> + Clone),
-) -> Option<Basis> {
-    named_read_holder(segment, tiers).or_else(|| {
-        segment
-            .reads_anything()
-            .then(|| {
-                tiers
-                    .clone()
-                    .find(|(rule, _)| rule.rule.class() == PermissionClass::Read)
-                    .map(|(rule, tier)| rule.basis(tier))
-            })
-            .flatten()
-    })
-}
-
-/// The first `read` rule among the deny or ask `tiers` that may match a named read or a descendant.
-fn named_read_holder<'a>(
-    segment: &Segment,
-    tiers: &(impl Iterator<Item = (&'a TierRule, Tier)> + Clone),
-) -> Option<Basis> {
-    segment.reads().iter().find_map(|read| {
-        let target = read.path.as_target();
-        tiers
-            .clone()
-            .find(|(rule, _)| rule.rule.holds_read(&target, read.recursive))
-            .map(|(rule, tier)| rule.basis(tier))
-    })
 }
 
 /// An approval's "allow for this session" offer: the suggested rule, plus the call that any edit of
@@ -1883,7 +1840,7 @@ mod tests {
                         decide(&policy, EXEC, &Access::for_command(command, &workspace))
                     };
 
-                    assert_eq!(run(r#"cat "~/../.env""#), Decision::Ask);
+                    assert_eq!(run(r#"cat "~/../.env""#), Decision::Deny);
                     assert_eq!(run(r#"cat < "~/../.env""#), Decision::Deny);
                 });
             }
@@ -3241,7 +3198,7 @@ mod tests {
                     assert_eq!(decide(&p, READ, &target), Decision::Deny, "{name}");
                 }
                 let cat = Access::for_command("cat env", &workspace);
-                assert_eq!(decide(&p, EXEC, &cat), Decision::Ask);
+                assert_eq!(decide(&p, EXEC, &cat), Decision::Deny);
             }
         }
 
@@ -4070,8 +4027,8 @@ mod tests {
                     decide(&manual, "cat <<'EOF' README.md\nx\nEOF"),
                     Decision::Allow
                 );
+                assert_eq!(decide(&manual, "cat <<'EOF' .env\nx\nEOF"), Decision::Deny);
                 for case in [
-                    "cat <<'EOF' .env\nx\nEOF",
                     "find <<EOF . -delete\nx\nEOF",
                     "{ cat; } <<EOF README.md\nx\nEOF",
                 ] {
@@ -4206,29 +4163,47 @@ mod tests {
             }
 
             #[test]
-            fn command_asks_for_a_known_safe_read_of_a_denied_or_asked_file() {
+            fn command_settles_a_known_safe_read_of_a_held_file_by_its_rule_tier() {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
-                let p = policy(
-                    Mode::Manual,
-                    &[(READ, ".env")],
-                    &[(READ, "secrets")],
-                    &[(EXEC, "cat *")],
-                );
                 let workspace = Workspace::new(cwd);
-                let decide = |case: &str| decide_command(&p, case, &workspace);
-                assert_eq!(decide("cat README.md"), Decision::Allow);
-                assert_eq!(decide("cat .env"), Decision::Ask);
-                assert_eq!(decide("cat secrets/key"), Decision::Ask);
-                assert_eq!(decide("grep --file=.env x"), Decision::Ask);
-                assert_eq!(decide("grep --reg=x .env"), Decision::Ask);
-                assert_eq!(decide("grep --binary x .env"), Decision::Ask);
-                assert_eq!(decide("grep x README.md -e .env"), Decision::Ask);
-                assert_eq!(decide("grep --unknown=x key .env"), Decision::Ask);
+                for mode in [Mode::Manual, Mode::Yolo] {
+                    let p = policy(
+                        mode,
+                        &[(READ, ".env")],
+                        &[(READ, "secrets")],
+                        &[(EXEC, "cat *"), (EXEC, "grep *")],
+                    );
+                    for (case, expected) in [
+                        ("cat README.md", Decision::Allow),
+                        ("cat .env", Decision::Deny),
+                        ("cat secrets/key", Decision::Ask),
+                        ("grep --file=.env x", Decision::Deny),
+                        ("grep --reg=x .env", Decision::Deny),
+                        ("grep --binary x .env", Decision::Deny),
+                        ("grep --unknown=x key .env", Decision::Deny),
+                    ] {
+                        assert_eq!(
+                            decide_command(&p, case, &workspace),
+                            expected,
+                            "{mode:?}: {case}"
+                        );
+                    }
+                    let possible = if mode == Mode::Yolo {
+                        Decision::Allow
+                    } else {
+                        Decision::Ask
+                    };
+                    assert_eq!(
+                        decide_command(&p, "grep x README.md -e .env", &workspace),
+                        possible,
+                        "{mode:?}: an option getopt may read as a file"
+                    );
+                }
             }
 
             #[test]
-            fn command_asks_for_a_reader_glob_or_variable_that_may_name_a_denied_file() {
+            fn command_denies_a_reader_glob_naming_a_denied_file_and_asks_for_a_variable() {
                 let root_dir = canonical_tempdir();
                 let root = root_dir.path();
                 let (cwd, home) = (root.join("repo"), root.join("home"));
@@ -4253,12 +4228,16 @@ mod tests {
                     for (case, expected) in [
                         ("cat src/*.rs", Decision::Allow),
                         ("cat ~/*/id_rsa", Decision::Allow),
-                        ("cat ~/.ssh/id_*", Decision::Ask),
-                        ("cat ~/.ss?/id_rsa", Decision::Ask),
-                        ("cat ~/.*/id_rsa", Decision::Ask),
-                        ("grep -r key ~/.ssh", Decision::Ask),
-                        ("cat $HOME/.ssh/id_rsa", Decision::Ask),
-                        ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Ask),
+                        ("cat ~/.ssh/id_*", Decision::Deny),
+                        ("cat ~/.ss?/id_rsa", Decision::Deny),
+                        ("cat ~/.*/id_rsa", Decision::Deny),
+                        ("grep -r key ~/.ssh", Decision::Deny),
+                        ("ls -R ~/.ssh", Decision::Deny),
+                        ("grep -r key ~", Decision::Ask),
+                        ("wc --files0-from ~/.ssh/id_rsa", Decision::Deny),
+                        ("wc --files0-from=secrets/list", Decision::Ask),
+                        ("cat $HOME/.ssh/id_rsa", Decision::Deny),
+                        ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Deny),
                         ("cat $F", Decision::Ask),
                     ] {
                         assert_eq!(decide_command(&p, case, &workspace), expected, "{case}");
@@ -4273,13 +4252,15 @@ mod tests {
             }
 
             #[test]
-            fn yolo_holds_a_reader_only_for_the_files_it_names_by_their_rule_tier() {
+            fn yolo_holds_a_reader_only_for_the_files_it_reads_for_certain() {
                 let root_dir = canonical_tempdir();
                 let root = root_dir.path();
                 let (cwd, home) = (root.join("repo"), root.join("home"));
                 std::fs::create_dir_all(&cwd).unwrap();
                 std::fs::create_dir_all(home.join(".ssh")).unwrap();
                 std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
+                std::fs::write(cwd.join("-n"), "").unwrap();
+                std::fs::write(cwd.join("notes"), "").unwrap();
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
                     let yolo = resolved_policy(
@@ -4296,12 +4277,48 @@ mod tests {
                         ("cat $HOME/.ssh/id_rsa", Decision::Deny),
                         ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Deny),
                         ("cat secrets/key", Decision::Ask),
+                        ("grep -r key ~/.ssh", Decision::Deny),
+                        ("grep -r key ~", Decision::Allow),
+                        ("grep -r key secrets", Decision::Ask),
+                        ("cat ~/.ssh/id_rsa *", Decision::Deny),
+                        ("cat * ~/.ssh/id_rsa", Decision::Deny),
+                        ("head * ~/.ssh/id_rsa", Decision::Deny),
+                        ("grep key * ~/.ssh/id_rsa", Decision::Deny),
+                        ("grep * ~/.ssh/id_rsa", Decision::Deny),
+                        ("grep -e key * ~/.ssh/id_rsa", Decision::Deny),
+                        ("find ~ -path ~/.ssh/id_rsa", Decision::Allow),
+                        ("wc --files0-from ~/.ssh/id_rsa", Decision::Deny),
+                        ("wc --files0-from=secrets/list", Decision::Ask),
+                        ("test -f ~/.ssh/id_rsa", Decision::Allow),
                         ("cat $F", Decision::Allow),
                         ("echo x | xargs cat", Decision::Allow),
                     ] {
                         assert_eq!(decide_command(&yolo, case, &workspace), expected, "{case}");
                     }
                 });
+            }
+
+            #[test]
+            fn yolo_holds_a_recursive_read_of_the_cwd_that_a_rule_names() {
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let workspace = Workspace::new(cwd);
+                let yolo = resolved_policy(
+                    Mode::Yolo,
+                    &[],
+                    &[(READ, &slash_separated(cwd))],
+                    &[],
+                    &[],
+                    &workspace,
+                );
+
+                for case in ["grep -r key", "grep -r key .", "ls -R", "ls -R ."] {
+                    assert_eq!(
+                        decide_command(&yolo, case, &workspace),
+                        Decision::Ask,
+                        "{case}"
+                    );
+                }
             }
 
             #[test]
@@ -4327,23 +4344,27 @@ mod tests {
             }
 
             #[test]
-            fn command_denies_an_input_redirection_from_a_shipped_read_deny() {
+            fn command_denies_a_read_of_a_shipped_read_deny_in_every_mode() {
                 let base_dir = canonical_tempdir();
                 let base = base_dir.path();
                 let home = base.join("home");
                 let key = slash_separated(&home.join(".ssh/id_ed25519"));
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(base);
-                    let p = resolved_policy(Mode::Manual, &[], &[], &[], &[], &workspace);
+                    for mode in [Mode::Manual, Mode::Yolo] {
+                        let p = resolved_policy(mode, &[], &[], &[], &[], &workspace);
+                        for case in [format!("cat < {key}"), format!("cat {key}")] {
+                            let access = Access::for_command(&case, &workspace);
 
-                    assert_eq!(
-                        decide_command(&p, &format!("cat < {key}"), &workspace),
-                        Decision::Deny
-                    );
-                    assert_eq!(
-                        decide_command(&p, &format!("cat {key}"), &workspace),
-                        Decision::Ask
-                    );
+                            let verdict = p.verdict(EXEC, &access.as_target());
+
+                            assert_eq!(
+                                (verdict.decision, verdict.basis),
+                                (Decision::Deny, Basis::Builtin(Shipped::Ssh)),
+                                "{mode:?}: {case}"
+                            );
+                        }
+                    }
                 });
             }
         }
@@ -4361,7 +4382,7 @@ mod tests {
             }
 
             #[test]
-            fn recursive_readers_hold_shipped_descendants_by_mode() {
+            fn recursive_readers_ask_for_shipped_descendants_outside_yolo() {
                 let dir = canonical_tempdir();
                 let (cwd, home) = (dir.path().join("repo"), dir.path().join("home"));
                 std::fs::create_dir_all(cwd.join("src")).unwrap();
@@ -4369,7 +4390,7 @@ mod tests {
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
                     for (mode, expected) in
-                        [(Mode::Manual, Decision::Ask), (Mode::Yolo, Decision::Deny)]
+                        [(Mode::Manual, Decision::Ask), (Mode::Yolo, Decision::Allow)]
                     {
                         let p = resolved_policy(
                             mode,
@@ -4406,11 +4427,10 @@ mod tests {
 
                             let verdict = p.verdict(EXEC, &access.as_target());
 
-                            assert_eq!(
-                                (verdict.decision, verdict.basis),
-                                (expected, Basis::Builtin(Shipped::Ssh)),
-                                "{mode:?}: {case}"
-                            );
+                            assert_eq!(verdict.decision, expected, "{mode:?}: {case}");
+                            if mode == Mode::Manual {
+                                assert_eq!(verdict.basis, Basis::Builtin(Shipped::Ssh), "{case}");
+                            }
                         }
                         for case in ["grep -r TODO src", "find src -name needle", "ls -R src"] {
                             assert_eq!(
@@ -4433,56 +4453,41 @@ mod tests {
                         (Tier::Deny, &[(READ, "./vault/key")][..], &[][..]),
                         (Tier::Ask, &[][..], &[(READ, "./vault/key")][..]),
                     ] {
-                        for mode in [Mode::Manual, Mode::Yolo] {
-                            for attended in [true, false] {
-                                let mut p = resolved_policy(
-                                    mode,
-                                    deny,
-                                    ask,
-                                    &[(EXEC, "grep *")],
-                                    &[Shipped::Ssh, Shipped::Credentials],
-                                    &workspace,
-                                );
-                                if !attended {
-                                    p.set_unattended();
-                                }
-                                let expected = if mode == Mode::Yolo && tier == Tier::Deny {
-                                    Decision::Deny
-                                } else if attended {
-                                    Decision::Ask
-                                } else {
-                                    Decision::Unapproved
-                                };
-                                for case in [
-                                    "grep -r needle .",
-                                    "grep -r needle",
-                                    "find",
-                                    "find -name needle",
-                                    r"find \( -name needle \)",
-                                    "find ! -name needle",
-                                    "ls -R",
-                                ] {
-                                    let access = Access::for_command(case, &workspace);
+                        for attended in [true, false] {
+                            let mut p = resolved_policy(
+                                Mode::Manual,
+                                deny,
+                                ask,
+                                &[(EXEC, "grep *")],
+                                &[Shipped::Ssh, Shipped::Credentials],
+                                &workspace,
+                            );
+                            if !attended {
+                                p.set_unattended();
+                            }
+                            let expected = if attended {
+                                Decision::Ask
+                            } else {
+                                Decision::Unapproved
+                            };
+                            for case in [
+                                "grep -r needle .",
+                                "grep -r needle",
+                                "grep -r needle $DIR",
+                                "find",
+                                "find -name needle",
+                                r"find \( -name needle \)",
+                                "find ! -name needle",
+                                "ls -R",
+                            ] {
+                                let access = Access::for_command(case, &workspace);
 
-                                    let verdict = p.verdict(EXEC, &access.as_target());
-
-                                    assert_eq!(
-                                        (verdict.decision, verdict.basis),
-                                        (expected, rule_basis(tier, READ, "./vault/key")),
-                                        "{mode:?}, attended={attended}: {case}"
-                                    );
-                                }
-
-                                let unknown_expected = if mode == Mode::Yolo {
-                                    Decision::Allow
-                                } else {
-                                    expected
-                                };
+                                let verdict = p.verdict(EXEC, &access.as_target());
 
                                 assert_eq!(
-                                    decide_command(&p, "grep -r needle $DIR", &workspace),
-                                    unknown_expected,
-                                    "{mode:?}, attended={attended}: unknown recursive operand"
+                                    (verdict.decision, verdict.basis),
+                                    (expected, rule_basis(tier, READ, "./vault/key")),
+                                    "attended={attended}: {case}"
                                 );
                             }
                         }
@@ -4584,30 +4589,23 @@ mod tests {
                             (Tier::Deny, &[(READ, protected)][..], &[][..]),
                             (Tier::Ask, &[][..], &[(READ, protected)][..]),
                         ] {
-                            for mode in [Mode::Manual, Mode::Yolo] {
-                                let p = resolved_policy(
-                                    mode,
-                                    deny,
-                                    ask,
-                                    &[(EXEC, "grep *"), (EXEC, "find *"), (EXEC, "ls *")],
-                                    &[Shipped::Ssh, Shipped::Credentials],
-                                    &workspace,
-                                );
-                                let expected = if mode == Mode::Yolo && tier == Tier::Deny {
-                                    Decision::Deny
-                                } else {
-                                    Decision::Ask
-                                };
+                            let p = resolved_policy(
+                                Mode::Manual,
+                                deny,
+                                ask,
+                                &[(EXEC, "grep *"), (EXEC, "find *"), (EXEC, "ls *")],
+                                &[Shipped::Ssh, Shipped::Credentials],
+                                &workspace,
+                            );
 
-                                let access = Access::for_command(command, &workspace);
-                                let verdict = p.verdict(EXEC, &access.as_target());
+                            let access = Access::for_command(command, &workspace);
+                            let verdict = p.verdict(EXEC, &access.as_target());
 
-                                assert_eq!(
-                                    (verdict.decision, verdict.basis),
-                                    (expected, rule_basis(tier, READ, protected)),
-                                    "{name}, {mode:?}: {command}"
-                                );
-                            }
+                            assert_eq!(
+                                (verdict.decision, verdict.basis),
+                                (Decision::Ask, rule_basis(tier, READ, protected)),
+                                "{name}: {command}"
+                            );
                         }
                     });
                 }
@@ -4710,7 +4708,7 @@ mod tests {
                     );
                     assert_eq!(
                         decide_command(&protected, "grep -r -f patterns src", &workspace),
-                        Decision::Ask
+                        Decision::Deny
                     );
                 });
             }
@@ -4724,24 +4722,24 @@ mod tests {
                 temp_env::with_var(HOME_VAR, Some(cwd), || {
                     let workspace = Workspace::new(cwd);
                     let p = resolved_policy(
-                        Mode::Yolo,
+                        Mode::Manual,
                         &[(READ, "./alias/nested/key")],
                         &[],
-                        &[],
+                        &[(EXEC, "grep *")],
                         &[Shipped::Ssh, Shipped::Credentials],
                         &workspace,
                     );
 
                     for (case, expected) in [
-                        ("grep -r needle vault", Decision::Deny),
-                        ("grep -r needle alias", Decision::Deny),
+                        ("grep -r needle vault", Decision::Ask),
+                        ("grep -r needle alias", Decision::Ask),
                         ("grep -r needle other", Decision::Allow),
-                        ("grep -r needle ALIAS", Decision::Deny),
+                        ("grep -r needle ALIAS", Decision::Ask),
                     ] {
                         assert_eq!(decide_command(&p, case, &workspace), expected, "{case}");
                     }
                     let late = resolved_policy(
-                        Mode::Yolo,
+                        Mode::Manual,
                         &[(READ, "./late/nested/key")],
                         &[],
                         &[],
@@ -4752,7 +4750,7 @@ mod tests {
 
                     assert_eq!(
                         decide_command(&late, "grep -r needle vault", &workspace),
-                        Decision::Deny
+                        Decision::Ask
                     );
                 });
             }

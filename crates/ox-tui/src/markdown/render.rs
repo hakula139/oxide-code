@@ -939,7 +939,7 @@ mod tests {
     use ratatui::style::{Color, Stylize as _};
 
     use super::*;
-    use crate::markdown::{render_markdown, render_markdown_on};
+    use crate::markdown::render_markdown;
 
     mod render_markdown {
         use super::*;
@@ -951,7 +951,7 @@ mod tests {
         /// Renders `input` at `width` and joins each row's raw span text, with `width == 0`
         /// disabling wrapping. `Line::to_string` would drop a line ending left in a span.
         fn rendered_text_at_width(input: &str, width: usize) -> Vec<String> {
-            render_markdown(input, &theme(), width)
+            render_markdown(input, &theme(), Style::default(), width)
                 .lines
                 .iter()
                 .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -999,6 +999,7 @@ mod tests {
                     #### H4
                 "},
                 &t,
+                Style::default(),
                 0,
             );
 
@@ -1042,7 +1043,7 @@ mod tests {
         fn blockquote_draws_a_bar_before_muted_text() {
             let t = theme();
 
-            let text = render_markdown("> Quoted *text*", &t, 0);
+            let text = render_markdown("> Quoted *text*", &t, Style::default(), 0);
 
             assert_eq!(
                 text.lines,
@@ -1058,7 +1059,7 @@ mod tests {
         fn blockquote_text_returns_to_the_default_style_after_the_quote() {
             let t = theme();
 
-            let text = render_markdown("> quoted\n\nafter", &t, 0);
+            let text = render_markdown("> quoted\n\nafter", &t, Style::default(), 0);
 
             assert_eq!(text.lines[2], Line::from(Span::raw("after")));
         }
@@ -1067,7 +1068,7 @@ mod tests {
         fn blockquote_leaves_code_in_its_line_color() {
             let t = theme();
 
-            let text = render_markdown("> ```\n> plain\n> ```", &t, 0);
+            let text = render_markdown("> ```\n> plain\n> ```", &t, Style::default(), 0);
 
             let quoted = Line::from(vec![Span::styled("│ ", t.blockquote()), Span::raw("plain")]);
             assert_eq!(text.lines, [quoted.style(t.code())]);
@@ -1094,6 +1095,7 @@ mod tests {
                     Below
                 "},
                 &t,
+                Style::default(),
                 0,
             );
             let rule_span = text
@@ -1197,7 +1199,7 @@ mod tests {
         #[test]
         fn list_marker_uses_accent_color() {
             let t = theme();
-            let text = render_markdown("- Item", &t, 0);
+            let text = render_markdown("- Item", &t, Style::default(), 0);
             let marker_span = text
                 .lines
                 .iter()
@@ -1210,7 +1212,7 @@ mod tests {
         fn inline_code_leading_a_list_item_keeps_its_style_after_the_marker() {
             let t = theme();
 
-            let text = render_markdown("- a\n- `foo()` here", &t, 0);
+            let text = render_markdown("- a\n- `foo()` here", &t, Style::default(), 0);
 
             assert_eq!(
                 text.lines[1].spans,
@@ -1261,6 +1263,7 @@ mod tests {
                     ```
                 "},
                 &t,
+                Style::default(),
                 0,
             );
             let code_lines: Vec<_> = text
@@ -1307,6 +1310,7 @@ mod tests {
                     ```
                 "},
                 &theme(),
+                Style::default(),
                 0,
             );
             let has_rgb = text.lines.iter().any(|line| {
@@ -1339,6 +1343,7 @@ mod tests {
                     ```
                 "},
                 &t,
+                Style::default(),
                 12,
             );
             let rows: Vec<String> = text.lines.iter().map(ToString::to_string).collect();
@@ -1463,8 +1468,8 @@ mod tests {
                 | b    |
             "};
 
-            let boxed = render_markdown(input, &t, 0).lines;
-            let stacked = render_markdown(input, &t, 7).lines;
+            let boxed = render_markdown(input, &t, Style::default(), 0).lines;
+            let stacked = render_markdown(input, &t, Style::default(), 7).lines;
 
             assert_eq!(boxed[1].spans[2], Span::styled("Name", t.table_header()));
             assert_eq!(boxed[3].spans[2], Span::raw("a"));
@@ -1498,6 +1503,7 @@ mod tests {
                     | `body` |
                 "},
                 &t,
+                Style::default(),
                 0,
             );
 
@@ -1663,7 +1669,7 @@ mod tests {
             ];
 
             for input in narrowest_tables {
-                let lines = render_markdown(input, &theme(), 14).lines;
+                let lines = render_markdown(input, &theme(), Style::default(), 14).lines;
 
                 assert_eq!(lines[0].width(), 14, "{lines:?}");
                 for line in &lines {
@@ -1820,7 +1826,12 @@ mod tests {
         fn table_in_blockquote_keeps_its_header_style() {
             let t = theme();
 
-            let text = render_markdown("> | Name |\n> |------|\n> | a    |", &t, 0);
+            let text = render_markdown(
+                "> | Name |\n> |------|\n> | a    |",
+                &t,
+                Style::default(),
+                0,
+            );
 
             assert_eq!(
                 text.lines[1].spans[3],
@@ -1869,7 +1880,7 @@ mod tests {
 
         #[test]
         fn strong_and_emphasis_set_bold_and_italic() {
-            let text = render_markdown("**bold** and *italic*", &theme(), 0);
+            let text = render_markdown("**bold** and *italic*", &theme(), Style::default(), 0);
             assert_eq!(
                 text.lines[0].spans,
                 [
@@ -1882,7 +1893,7 @@ mod tests {
 
         #[test]
         fn strong_emphasis_sets_bold_and_italic_together() {
-            let text = render_markdown("***bold italic***", &theme(), 0);
+            let text = render_markdown("***bold italic***", &theme(), Style::default(), 0);
             assert_eq!(
                 text.lines[0].spans,
                 [Span::raw("bold italic").bold().italic()]
@@ -1893,7 +1904,7 @@ mod tests {
         fn tildes_are_kept_as_literal_text() {
             let input = "~~struck~~ and cost ~$1-~$2 per run";
 
-            let text = render_markdown(input, &theme(), 0);
+            let text = render_markdown(input, &theme(), Style::default(), 0);
 
             assert_eq!(text.lines[0].spans, [Span::raw(input)]);
         }
@@ -1901,7 +1912,7 @@ mod tests {
         #[test]
         fn inline_code_uses_the_inline_code_style() {
             let t = theme();
-            let text = render_markdown("Use `foo()` here", &t, 0);
+            let text = render_markdown("Use `foo()` here", &t, Style::default(), 0);
             assert_eq!(
                 text.lines[0].spans,
                 [
@@ -1923,7 +1934,7 @@ mod tests {
         #[test]
         fn inline_code_inside_bold_inherits_bold() {
             let t = theme();
-            let text = render_markdown("**use `foo()` here**", &t, 0);
+            let text = render_markdown("**use `foo()` here**", &t, Style::default(), 0);
             let span = text.lines[0]
                 .spans
                 .iter()
@@ -1943,7 +1954,7 @@ mod tests {
         #[test]
         fn inline_code_inside_heading_inherits_modifiers() {
             let t = theme();
-            let text = render_markdown("# see `foo()`", &t, 0);
+            let text = render_markdown("# see `foo()`", &t, Style::default(), 0);
             let span = text
                 .lines
                 .iter()
@@ -1999,7 +2010,7 @@ mod tests {
         #[test]
         fn link_url_has_accent_underline_style() {
             let t = theme();
-            let text = render_markdown("[text](https://example.com)", &t, 0);
+            let text = render_markdown("[text](https://example.com)", &t, Style::default(), 0);
             let url_span = text.lines[0]
                 .spans
                 .iter()
@@ -2012,7 +2023,7 @@ mod tests {
         #[test]
         fn link_autolink_renders_url_once_in_link_style() {
             let t = theme();
-            let text = render_markdown("<https://x.io>", &t, 0);
+            let text = render_markdown("<https://x.io>", &t, Style::default(), 0);
             assert_eq!(
                 text.lines[0].spans,
                 [Span::styled("https://x.io", t.link())]
@@ -2191,16 +2202,12 @@ mod tests {
                 ],
             );
         }
-    }
-
-    mod render_markdown_on {
-        use super::*;
 
         #[test]
         fn fills_only_text_without_a_color_with_the_base() {
             let t = Theme::default();
 
-            let text = render_markdown_on("plain `code`", &t, t.thinking(), 0);
+            let text = render_markdown("plain `code`", &t, t.thinking(), 0);
 
             assert_eq!(
                 text.lines,
@@ -2216,7 +2223,7 @@ mod tests {
             let t = Theme::default();
             let base = t.text().add_modifier(Modifier::BOLD);
 
-            let text = render_markdown_on("> quoted", &t, base, 0);
+            let text = render_markdown("> quoted", &t, base, 0);
 
             assert_eq!(
                 text.lines,
@@ -2231,7 +2238,7 @@ mod tests {
         fn quote_in_a_thinking_body_keeps_the_thinking_style() {
             let t = Theme::default();
 
-            let text = render_markdown_on("> Quoted **text**", &t, t.thinking(), 0);
+            let text = render_markdown("> Quoted **text**", &t, t.thinking(), 0);
 
             assert_eq!(
                 text.lines,
