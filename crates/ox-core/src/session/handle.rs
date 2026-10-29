@@ -589,7 +589,7 @@ mod tests {
     use crate::file_tracker::{
         FileSource, FileState, FileTracker, GateError, GatePurpose, LastView,
     };
-    use crate::message::{ContentBlock, Replay, Role, TextOrigin};
+    use crate::message::{ContentBlock, INTERRUPTION_MARKER, Replay, Role, TextOrigin};
     use crate::model::PromptCacheTtl;
     use crate::prompt::PromptParts;
     use crate::session::handle::testing::record_write_call;
@@ -1597,7 +1597,7 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn generated_reminders_and_interruptions_keep_their_saved_presentation() {
+        async fn text_origins_survive_save_and_resume() {
             let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id();
@@ -1607,6 +1607,7 @@ mod tests {
                     role: Role::User,
                     content: vec![
                         ContentBlock::text(literal),
+                        ContentBlock::text(INTERRUPTION_MARKER),
                         ContentBlock::generated_text(literal, TextOrigin::SystemReminder),
                     ],
                 },
@@ -1622,33 +1623,6 @@ mod tests {
             resumed.handle.shutdown().await;
 
             assert_eq!(resumed.transcript.messages, messages);
-        }
-
-        #[tokio::test]
-        async fn keeps_literal_control_text_visible_after_save_and_resume() {
-            for (name, text) in [
-                (
-                    "literal reminder",
-                    "<system-reminder>Explain this tag.</system-reminder>",
-                ),
-                ("literal interruption", crate::message::INTERRUPTION_MARKER),
-            ] {
-                let (_dir, store) = isolated_store();
-                let original = start(&store, "m", None);
-                let session_id = original.session_id();
-                let recorded = original.record_message(Message::user(text)).await;
-                assert_eq!(recorded.report, WriteReport::default(), "{name}");
-                assert_eq!(
-                    original.finalize(Vec::new()).await,
-                    WriteReport::default(),
-                    "{name}"
-                );
-
-                let resumed = resume_id(&store, &session_id).unwrap();
-                resumed.handle.shutdown().await;
-
-                assert_eq!(resumed.transcript.messages, [Message::user(text)], "{name}");
-            }
         }
 
         #[tokio::test]
@@ -1875,10 +1849,10 @@ mod tests {
 
         use super::*;
 
-        /// Writes a session holding every row kind and content block, with messages, contexts, and
-        /// metadata after its compaction, since a resume drops those from before it. Returns the
-        /// store and the session's ID. A release copies the store's dump and the session's export
-        /// as its fixtures.
+        /// Writes a session holding every row kind, content block, and saved text origin, with
+        /// messages, contexts, and metadata after its compaction, since a resume drops those from
+        /// before it. Returns the store and the session's ID. A release copies the store's dump and
+        /// the session's export as its fixtures.
         async fn write_every_row_kind(dir: &Path) -> (SessionStore, String) {
             let store = test_store(dir);
             let session = start(&store, "m", Some("main".to_owned()));
@@ -1911,10 +1885,16 @@ mod tests {
                     },
                     Message {
                         role: Role::User,
-                        content: vec![ContentBlock::generated_text(
-                            "Asked to edit f.rs.",
-                            TextOrigin::CompactionSummary,
-                        )],
+                        content: vec![
+                            ContentBlock::generated_text(
+                                "Asked to edit f.rs.",
+                                TextOrigin::CompactionSummary,
+                            ),
+                            ContentBlock::generated_text(
+                                "<system-reminder>Edit f.rs is in progress.</system-reminder>",
+                                TextOrigin::SystemReminder,
+                            ),
+                        ],
                     },
                 )
                 .await;
@@ -1929,6 +1909,10 @@ mod tests {
                 .await;
             record_tool_turns(&session).await;
             session.record_message(Message::assistant("Done.")).await;
+            session
+                .record_prompt(Message::user("Explain f.rs"), None, None)
+                .await;
+            session.record_message(Message::interruption()).await;
             let refused = session.record_message(Message::user("Delete f.rs")).await;
             session
                 .rewind(refused.checkpoint.expect("the actor is running"))

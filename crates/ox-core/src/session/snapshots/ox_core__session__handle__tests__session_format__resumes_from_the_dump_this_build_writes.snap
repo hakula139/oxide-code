@@ -67,7 +67,7 @@ expression: recovered
   "listed": {
     "archive_state": "archived",
     "git_branch": "main",
-    "message_count": 7,
+    "message_count": 9,
     "title": "Fix f.rs"
   },
   "messages": [
@@ -76,6 +76,11 @@ expression: recovered
         {
           "origin": "compaction_summary",
           "text": "Asked to edit f.rs.",
+          "type": "text"
+        },
+        {
+          "origin": "system_reminder",
+          "text": "<system-reminder>Edit f.rs is in progress.</system-reminder>",
           "type": "text"
         }
       ],
@@ -226,6 +231,25 @@ expression: recovered
         }
       ],
       "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "Explain f.rs",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "origin": "interruption",
+          "text": "[Request interrupted by user]",
+          "type": "text"
+        }
+      ],
+      "role": "user"
     }
   ],
   "prior": "archived",

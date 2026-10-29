@@ -106,22 +106,36 @@ mod tests {
     mod synthesize_post_compact_message {
         use super::*;
 
+        const TASK_REMINDER: &str = indoc! {"
+            <system-reminder>
+            Your task list carries over from before the summary. Keep it current with the tasks tool:
+
+            - [completed] Read the config loader
+            - [in_progress] Add the entry type
+            - [pending] Write the tests
+            </system-reminder>"
+        };
+
+        fn reminder(text: &str) -> ContentBlock {
+            ContentBlock::generated_text(text, TextOrigin::SystemReminder)
+        }
+
         #[test]
         fn prepends_summary_prefix() {
             let m =
                 synthesize_post_compact_message(" did X, Y, Z\n", &[], &[], CompactTrigger::Manual);
 
             assert_eq!(m.role, Role::User);
-            let [ContentBlock::Text { text, .. }] = &m.content[..] else {
-                panic!("expected one text block: {m:?}");
-            };
             assert_eq!(
-                text,
-                indoc! {"
-                    This conversation has been compacted. The summary below covers the prior work. Continue from here without re-asking the engineer what to do.
+                m.content,
+                [ContentBlock::generated_text(
+                    indoc! {"
+                        This conversation has been compacted. The summary below covers the prior work. Continue from here without re-asking the engineer what to do.
 
-                    did X, Y, Z
-                "},
+                        did X, Y, Z
+                    "},
+                    TextOrigin::CompactionSummary,
+                )],
             );
         }
 
@@ -129,26 +143,7 @@ mod tests {
         fn reminds_the_model_of_the_task_list() {
             let m = synthesize_post_compact_message("did X", &plan(), &[], CompactTrigger::Manual);
 
-            let [
-                ContentBlock::Text { text: summary, .. },
-                ContentBlock::Text { text: reminder, .. },
-            ] = &m.content[..]
-            else {
-                panic!("expected the summary and a reminder: {m:?}");
-            };
-            assert!(summary.ends_with("did X\n"), "{summary:?}");
-            assert_eq!(
-                reminder,
-                indoc! {"
-                    <system-reminder>
-                    Your task list carries over from before the summary. Keep it current with the tasks tool:
-
-                    - [completed] Read the config loader
-                    - [in_progress] Add the entry type
-                    - [pending] Write the tests
-                    </system-reminder>"
-                },
-            );
+            assert_eq!(m.content[1..], [reminder(TASK_REMINDER)], "{m:?}");
         }
 
         #[test]
@@ -160,26 +155,21 @@ mod tests {
                 CompactTrigger::Manual,
             );
 
-            let [
-                _,
-                ContentBlock::Text { text: tasks, .. },
-                ContentBlock::Text { text: shells, .. },
-            ] = &m.content[..]
-            else {
-                panic!("expected the summary and two reminders: {m:?}");
-            };
-            assert!(tasks.contains("Your task list carries over"), "{tasks:?}");
             assert_eq!(
-                shells,
-                indoc! {"
-                    <system-reminder>
-                    These background shells are still open from before the summary. Read them with bash_output, and stop the ones you no longer need with bash_stop:
+                m.content[1..],
+                [
+                    reminder(TASK_REMINDER),
+                    reminder(indoc! {"
+                        <system-reminder>
+                        These background shells are still open from before the summary. Read them with bash_output, and stop the ones you no longer need with bash_stop:
 
-                    - shell-1 (running): cargo watch
-                    - shell-2 (exit code 2): make test
-                    - shell-3 (killed by signal 15): sleep 60
-                    </system-reminder>"
-                },
+                        - shell-1 (running): cargo watch
+                        - shell-2 (exit code 2): make test
+                        - shell-3 (killed by signal 15): sleep 60
+                        </system-reminder>"
+                    }),
+                ],
+                "{m:?}",
             );
         }
 
@@ -192,21 +182,16 @@ mod tests {
                 synthesize_post_compact_message("did X", &[], &[], CompactTrigger::MidTurn);
 
             for m in between_prompts {
-                assert!(
-                    matches!(&m.content[..], [ContentBlock::Text { .. }]),
-                    "{m:?}"
-                );
+                assert_eq!(m.content, mid_turn.content[..1], "{m:?}");
             }
-            let [_, ContentBlock::Text { text, .. }] = &mid_turn.content[..] else {
-                panic!("expected the summary and the continuation: {mid_turn:?}");
-            };
             assert_eq!(
-                text,
-                indoc! {"
+                mid_turn.content[1..],
+                [reminder(indoc! {"
                     <system-reminder>
                     You were partway through your turn when the conversation was compacted. Resume the task directly: do not acknowledge the summary, recap what was happening, or announce that you are continuing.
                     </system-reminder>"
-                },
+                })],
+                "{mid_turn:?}",
             );
         }
     }
