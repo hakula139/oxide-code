@@ -183,7 +183,7 @@ This prints the version string. If you see `command not found`, the binary is no
 To also remove session data and config:
 
 ```bash
-rm -rf ${XDG_DATA_HOME:-$HOME/.local/share}/ox        # Sessions, device ID, and the oxide-code login
-rm -rf ${XDG_STATE_HOME:-$HOME/.local/state}/ox       # Log files
-rm -rf ${XDG_CONFIG_HOME:-$HOME/.config}/ox           # User config (if you wrote one)
+rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/ox"      # Sessions, device ID, and the oxide-code login
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/ox"     # Log files
+rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/ox"         # User config (if you wrote one)
 ```
