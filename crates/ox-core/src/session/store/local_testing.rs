@@ -168,12 +168,10 @@ pub(crate) fn save(
     };
     let session = SessionRow {
         id: session_id.to_owned(),
-        forked_from: None,
         cwd: "/repo".to_owned(),
         project_root: "/repo".to_owned(),
         git_branch: None,
         model: "m".to_owned(),
-        created_at: 0,
         title: None,
         title_manual: false,
     };

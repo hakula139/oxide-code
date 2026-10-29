@@ -1,10 +1,7 @@
-//! `/clear` forwards [`Op::Clear`]. The engine rolls the session.
-
-use ox_core::protocol::Op;
+//! `/clear` forwards [`Op::Clear`](ox_core::protocol::Op::Clear). The engine rolls the session.
 
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use crate::action::Action;
+use super::registry::{SlashCommand, SlashOutcome, typed_form};
 
 // ── ClearCmd ──
 
@@ -19,28 +16,22 @@ impl SlashCommand for ClearCmd {
         "Start a new session (this one stays resumable)"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        SlashKind::Mutating
+    fn idle_only(&self) -> bool {
+        true
     }
 
-    fn execute(&self, _args: &str, _ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
-        Ok(SlashOutcome::Forward(Action::Op(Op::Clear)))
+    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+        typed_form(self.name(), args, ctx)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use ox_core::protocol::Op;
+
     use super::*;
+    use crate::action::Action;
     use crate::slash::registry::testing::run_execute;
-
-    mod classify {
-        use super::*;
-
-        #[test]
-        fn is_mutating() {
-            assert_eq!(ClearCmd.classify(""), SlashKind::Mutating);
-        }
-    }
 
     mod execute {
         use super::*;

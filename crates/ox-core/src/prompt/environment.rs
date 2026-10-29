@@ -22,6 +22,7 @@ pub(super) struct Environment {
     cwd: String,
     is_git: bool,
     platform: String,
+    /// The user's login shell from `$SHELL`, which the `bash` tool does not run commands in.
     shell: String,
     os_version: String,
 }
@@ -63,7 +64,8 @@ impl Environment {
             - Primary working directory: {cwd}
               - Is a git repository: {is_git}
             - Platform: {platform}
-            - Shell: {shell}
+            - Shell: bash, which runs each `bash` tool call
+            - User's login shell: {shell}
             - OS Version: {os_version}"
         }
     }
@@ -187,7 +189,7 @@ mod tests {
                 cwd: "/home/user/project".to_owned(),
                 is_git: true,
                 platform: "linux".to_owned(),
-                shell: "bash".to_owned(),
+                shell: "fish".to_owned(),
                 os_version: "Linux 6.1.0".to_owned(),
             };
 
@@ -201,7 +203,8 @@ mod tests {
                     - Primary working directory: /home/user/project
                       - Is a git repository: true
                     - Platform: linux
-                    - Shell: bash
+                    - Shell: bash, which runs each `bash` tool call
+                    - User's login shell: fish
                     - OS Version: Linux 6.1.0"
                 },
             );

@@ -29,7 +29,9 @@ impl Tool for ReadTool {
         ToolSpec {
             definition: ToolDefinition {
                 name: "read".to_owned(),
-                description: "Read the contents of a file with line numbers.".to_owned(),
+                description: "Read a text file as rows of a line number, a tab, \
+                              and the line's text."
+                    .to_owned(),
                 input_schema: input_schema(),
             },
             class: PermissionClass::Read,
@@ -80,7 +82,9 @@ fn input_schema() -> serde_json::Value {
             },
             "limit": {
                 "type": "integer",
-                "description": "The number of lines to read (default: 2000)"
+                "description": format!(
+                    "The number of lines to read (default: {DEFAULT_LINE_LIMIT})"
+                )
             }
         },
         "required": ["file_path"]

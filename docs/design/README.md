@@ -2,7 +2,7 @@
 
 Architecture decisions and implementation specs for oxide-code.
 
-Each page covers one topic, and [`docs/research/`](../research/) holds the external surveys and API references behind them.
+Each page covers one topic, and [`docs/research/`](../research/) holds the API references and the surveys behind open design questions.
 
 ## Overview
 
@@ -16,6 +16,7 @@ Each page covers one topic, and [`docs/research/`](../research/) holds the exter
 | Document                    | Description                                                           |
 | --------------------------- | --------------------------------------------------------------------- |
 | [Engine](engine.md)         | `Op` / `Event` contract, terminal events, turn pipeline               |
+| [System Prompt](prompt.md)  | Static sections, environment, user context, tool descriptions         |
 | [Compaction](compaction.md) | Manual and automatic compaction, threshold, summarizer, failure reset |
 
 ## Session

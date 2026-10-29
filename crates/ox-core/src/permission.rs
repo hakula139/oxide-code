@@ -1697,6 +1697,7 @@ mod tests {
                 };
                 let fs_root = slash_separated(base.ancestors().last().unwrap());
                 let base_raw = slash_separated(base);
+                let home_raw = slash_separated(&home);
 
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     for (raw, expected) in [
@@ -1705,7 +1706,7 @@ mod tests {
                             r#"invalid extra root "shared": expected an absolute or `~/` path"#
                                 .to_owned(),
                         ),
-                        ("~", too_broad("~")),
+                        (home_raw.as_str(), too_broad(&home_raw)),
                         (fs_root.as_str(), too_broad(&fs_root)),
                         (base_raw.as_str(), too_broad(&base_raw)),
                     ] {

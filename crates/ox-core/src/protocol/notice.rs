@@ -98,6 +98,11 @@ pub fn session_write_failed(failure: &str) -> String {
     format!("Session write failed: {failure}")
 }
 
+/// The message that reports a failure to finalize the session a roll or resume left behind.
+pub(crate) fn previous_session_write_failed(failure: &str) -> String {
+    format!("Previous session write failed: {failure}")
+}
+
 /// The message that reports the fork from session `from` to session `id`.
 pub fn session_forked(id: &str, from: &str) -> String {
     format!(
@@ -111,7 +116,7 @@ pub fn session_forked(id: &str, from: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::compaction::testing::WINDOW_1M_THRESHOLD;
-    use crate::model::ResolvedModelId;
+    use crate::protocol::testing::model_pick;
     use crate::util::text::compact_count;
 
     mod compacted {
@@ -143,13 +148,6 @@ mod tests {
              and cost tracking stays off. \
              Auto-compaction requires an explicit token threshold.";
 
-        fn model_pick(model: &ModelSpec, effort: Option<Effort>) -> ConfigPick {
-            ConfigPick::Model {
-                id: ResolvedModelId::new(model.id()),
-                effort,
-            }
-        }
-
         fn settings(model: &ModelSpec, effort: Option<Effort>) -> ConfigSettings {
             ConfigSettings {
                 model: model.clone(),
@@ -169,7 +167,7 @@ mod tests {
             let s = config_changed(
                 &settings(&opus, None),
                 &settings(&custom, None),
-                &model_pick(&custom, None),
+                &model_pick(custom.id(), None),
             );
 
             assert_eq!(
@@ -188,7 +186,7 @@ mod tests {
             let s = config_changed(
                 &settings(&opus, None),
                 &settings(&custom, None),
-                &model_pick(&custom, Some(Effort::High)),
+                &model_pick(custom.id(), Some(Effort::High)),
             );
 
             assert_eq!(
@@ -209,7 +207,7 @@ mod tests {
             let s = config_changed(
                 &settings(&opus, Some(Effort::Xhigh)),
                 &settings(&custom, None),
-                &model_pick(&custom, None),
+                &model_pick(custom.id(), None),
             );
 
             assert_eq!(
@@ -232,7 +230,7 @@ mod tests {
             let s = config_changed(
                 &settings(&custom, None),
                 &settings(&opus, Some(Effort::Medium)),
-                &model_pick(&opus, None),
+                &model_pick(opus.id(), None),
             );
 
             assert_eq!(
@@ -252,7 +250,7 @@ mod tests {
                 let s = config_changed(
                     &settings(&sonnet, Some(prev)),
                     &settings(&opus, Some(new)),
-                    &model_pick(&opus, requested),
+                    &model_pick(opus.id(), requested),
                 );
 
                 assert_eq!(
@@ -269,7 +267,7 @@ mod tests {
             let s = config_changed(
                 &settings(&opus, Some(Effort::High)),
                 &settings(&opus, Some(Effort::High)),
-                &model_pick(&opus, None),
+                &model_pick(opus.id(), None),
             );
 
             assert_eq!(s, "Using Claude Opus 5.5 (claude-opus-5-5) · effort high");
@@ -312,7 +310,7 @@ mod tests {
             let s = config_changed(
                 &settings(&opus, Some(Effort::High)),
                 &settings(&typo, Some(Effort::High)),
-                &model_pick(&typo, None),
+                &model_pick(typo.id(), None),
             );
 
             assert_eq!(
@@ -357,7 +355,7 @@ mod tests {
             let s = config_changed(
                 &settings(&opus, Some(Effort::High)),
                 &after,
-                &model_pick(&sonnet, None),
+                &model_pick(sonnet.id(), None),
             );
 
             assert_eq!(
@@ -385,7 +383,7 @@ mod tests {
             let s = config_changed(
                 &settings(&opus, Some(Effort::High)),
                 &after,
-                &model_pick(&custom, Some(Effort::Max)),
+                &model_pick(custom.id(), Some(Effort::Max)),
             );
 
             assert_eq!(

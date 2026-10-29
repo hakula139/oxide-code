@@ -297,7 +297,8 @@ fn reject_project_keys(table: &Table, path: &Path) -> Result<()> {
     }
     bail!(
         "{} cannot set {}. \
-         A project file may only set {} in [client] and add deny and ask rules in [permission]. \
+         A project file may only set {} in [client], keys in [tui], \
+         and deny and ask rules in [permission]. \
          Set other keys in {} or a config.d drop-in, and credentials in environment variables.",
         path.display(),
         blocked.join(", "),
@@ -1060,6 +1061,97 @@ mod tests {
         }
 
         #[test]
+        fn a_private_key_error_names_the_shape_without_the_value() {
+            let dir = tempfile::tempdir().unwrap();
+            for (body, expected) in [
+                (
+                    "client.auth = 'private-token-sentinel'",
+                    "expected a table with type bearer, api-key, oauth, or login",
+                ),
+                (
+                    "client.auth = { type = 'private-token-sentinel', value = 'private-token-sentinel' }",
+                    "in `client.auth.type`: expected one of `bearer`, `api-key`, `oauth`, `login`",
+                ),
+                (
+                    "client.auth = { type = 'bearer', value = ['private-token-sentinel'] }",
+                    "in `client.auth`: expected a string",
+                ),
+                (
+                    "client.auth = { type = 'bearer', value = 987654321 }",
+                    "in `client.auth`: expected a string",
+                ),
+                (
+                    "client.auth = { type = 'bearer', file = ['private-token-sentinel'] }",
+                    "in `client.auth`: expected a string",
+                ),
+                (
+                    "client.auth = { type = 'bearer', value = 'private-token-sentinel', file = '/token' }",
+                    "client.auth requires exactly one of value or file",
+                ),
+                (
+                    "client.auth = { type = 'login', value = 'private-token-sentinel' }",
+                    "client.auth type login takes no other keys",
+                ),
+                (
+                    "client.auth = { type = 'bearer', value = 'private-token-sentinel', extra = true }",
+                    "unknown field `extra`, expected `value` or `file`",
+                ),
+                (
+                    r#"client.auth = { type = "bearer", value = "private-token-sentinel\u0007" }"#,
+                    "invalid client.auth.value: expected an HTTP header value",
+                ),
+                (
+                    "client.api_key = 'private-token-sentinel'",
+                    "unknown field `api_key`",
+                ),
+                (
+                    "client.headers = 'private-header-sentinel'",
+                    "in `client.headers`: expected a map",
+                ),
+                (
+                    "client.headers = { x-private = ['private-header-sentinel'] }",
+                    "in `client.headers.x-private`: expected a string",
+                ),
+                (
+                    "client.headers = { 'private-header-sentinel name' = 'private-header-sentinel' }",
+                    "invalid client.headers: invalid header name",
+                ),
+                (
+                    r#"client.headers = { x-private = "private-header-sentinel\nsecond-line" }"#,
+                    "invalid client.headers: the x-private value contains a character a header \
+                     cannot carry",
+                ),
+                (
+                    "client.headers = { X-Private = 'private-header-sentinel', x-private = 'private-header-sentinel' }",
+                    "invalid client.headers: x-private is set more than once",
+                ),
+                (
+                    indoc! {"
+                        client.auth = { type = 'bearer', value = 'private-token-sentinel' }
+                        [private-token-sentinel
+                    "},
+                    "unclosed table, expected `]`",
+                ),
+            ] {
+                let path = write(&dir.path().join("config.toml"), body);
+
+                let err = read_layer(&Layer::User(path.clone())).expect_err(body);
+
+                let message = format!("{err:#}");
+                let prefix = format!("invalid config at {}: ", path.display());
+                assert!(message.starts_with(&prefix), "{body}: {message}");
+                assert!(message.contains(expected), "{body}: {message}");
+                for secret in [
+                    "private-token-sentinel",
+                    "private-header-sentinel",
+                    "987654321",
+                ] {
+                    assert!(!message.contains(secret), "{body}: {message}");
+                }
+            }
+        }
+
+        #[test]
         fn rejects_unknown_keys_at_every_level() {
             let dir = tempfile::tempdir().unwrap();
             for (body, key) in [
@@ -1173,7 +1265,7 @@ mod tests {
                      permission.mode. \
                      A project file may only set \
                      model, effort, max_tokens, max_tool_rounds, prompt_cache_ttl, and compaction \
-                     in [client] and add deny and ask rules in [permission]. \
+                     in [client], keys in [tui], and deny and ask rules in [permission]. \
                      Set other keys in ~/config-home/ox/config.toml or a config.d drop-in, \
                      and credentials in environment variables.",
                     path.display(),

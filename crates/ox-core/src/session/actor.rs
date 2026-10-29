@@ -9,7 +9,8 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use super::handle::{
-    Checkpoint, CompactBoundary, CompactOutcome, Fork, RecordOutcome, SharedState, WriteReport,
+    AiTitleOutcome, Checkpoint, CompactBoundary, CompactOutcome, Fork, RecordOutcome, SharedState,
+    WriteReport,
 };
 use super::state::SessionState;
 use super::store::UsageRecord;
@@ -40,9 +41,10 @@ pub(super) enum SessionCmd {
         records: Vec<UsageRecord>,
         ack: oneshot::Sender<WriteReport>,
     },
+    /// AI title, which a manual title keeps from applying.
     AppendAiTitle {
         title: String,
-        ack: oneshot::Sender<WriteReport>,
+        ack: oneshot::Sender<AiTitleOutcome>,
     },
     /// User-supplied title from `/rename`.
     SetManualTitle {
@@ -97,6 +99,10 @@ enum PendingAck {
         ack: oneshot::Sender<WriteReport>,
         moves_head: bool,
     },
+    AiTitle {
+        ack: oneshot::Sender<AiTitleOutcome>,
+        applied: bool,
+    },
     Archive(oneshot::Sender<WriteReport>),
     Compact {
         ack: oneshot::Sender<CompactOutcome>,
@@ -114,9 +120,9 @@ pub(super) async fn run(
 ) {
     while let Some(first) = rx.recv().await {
         let mut batch = Batch::default();
-        batch.absorb(first, &mut state, &shared);
+        batch.absorb(first, &mut state);
         while let Ok(next) = rx.try_recv() {
-            batch.absorb(next, &mut state, &shared);
+            batch.absorb(next, &mut state);
         }
         let (committed, result) = tokio::task::spawn_blocking(move || {
             let result = state.flush();
@@ -139,7 +145,8 @@ pub(super) async fn run(
         if fork.is_some() {
             shared.set_live(state.session_id(), state.artifact_dir());
         }
-        settle_acks(batch.acks, failure.as_deref(), fork, &shared);
+        let title_manual = state.title_manual();
+        settle_acks(batch.acks, failure.as_deref(), fork, title_manual, &shared);
         if batch.should_exit {
             break;
         }
@@ -153,7 +160,7 @@ struct Batch {
 }
 
 impl Batch {
-    fn absorb(&mut self, cmd: SessionCmd, state: &mut SessionState, shared: &SharedState) {
+    fn absorb(&mut self, cmd: SessionCmd, state: &mut SessionState) {
         match cmd {
             SessionCmd::Record(Record {
                 msg,
@@ -162,13 +169,8 @@ impl Batch {
                 ack,
             }) => {
                 let checkpoint = state.checkpoint();
-                let ai_title_seed = state.queue_message(
-                    msg,
-                    context,
-                    BTreeMap::new(),
-                    title.as_deref(),
-                    shared.manual_title_set(),
-                );
+                let ai_title_seed =
+                    state.queue_message(msg, context, BTreeMap::new(), title.as_deref());
                 self.acks.push(PendingAck::Record {
                     ack,
                     checkpoint,
@@ -176,7 +178,7 @@ impl Batch {
                 });
             }
             SessionCmd::Rewind { checkpoint, ack } => {
-                state.rewind(checkpoint, shared.manual_title_set());
+                state.rewind(checkpoint);
                 self.report(ack, true);
             }
             SessionCmd::RecordRound {
@@ -185,13 +187,12 @@ impl Batch {
                 metadata,
                 ack,
             } => {
-                let manual_title_set = shared.manual_title_set();
                 let metadata = metadata
                     .into_iter()
                     .filter(|(_, metadata)| *metadata != ToolMetadata::default())
                     .collect();
-                _ = state.queue_message(assistant, None, BTreeMap::new(), None, manual_title_set);
-                _ = state.queue_message(tool_results, None, metadata, None, manual_title_set);
+                _ = state.queue_message(assistant, None, BTreeMap::new(), None);
+                _ = state.queue_message(tool_results, None, metadata, None);
                 self.report(ack, true);
             }
             SessionCmd::Usage { records, ack } => {
@@ -199,10 +200,8 @@ impl Batch {
                 self.report(ack, false);
             }
             SessionCmd::AppendAiTitle { title, ack } => {
-                if !shared.manual_title_set() {
-                    state.set_title(title, false);
-                }
-                self.report(ack, false);
+                let applied = state.set_ai_title(title);
+                self.acks.push(PendingAck::AiTitle { ack, applied });
             }
             SessionCmd::SetManualTitle { title, ack } => {
                 state.set_title(title, true);
@@ -241,11 +240,14 @@ impl Batch {
 }
 
 /// Acks each absorbed cmd once its batch commit returns `failure`. The first ack of a cmd that
-/// moved the head carries `fork`, which only such a cmd can trigger.
+/// moved the head carries `fork`, which only such a cmd can trigger. An AI title applied only if
+/// the title the batch left is not manual (`title_manual`), since the store or a later cmd in the
+/// batch may have kept or set a manual one.
 fn settle_acks(
     acks: Vec<PendingAck>,
     failure: Option<&str>,
     mut fork: Option<Fork>,
+    title_manual: bool,
     shared: &SharedState,
 ) {
     let surfaced = failure.filter(|_| shared.surface_first_flush_failure());
@@ -269,6 +271,12 @@ fn settle_acks(
             PendingAck::Report { ack, moves_head } => {
                 let fork = if moves_head { fork.take() } else { None };
                 _ = ack.send(report(fork));
+            }
+            PendingAck::AiTitle { ack, applied } => {
+                _ = ack.send(AiTitleOutcome {
+                    applied: applied && !title_manual,
+                    report: report(None),
+                });
             }
             PendingAck::Archive(ack) => {
                 _ = ack.send(WriteReport {
@@ -358,7 +366,7 @@ mod tests {
         }
 
         fn shared() -> SharedState {
-            SharedState::new("source", PathBuf::from("/artifacts/source"), false)
+            SharedState::new("source", PathBuf::from("/artifacts/source"))
         }
 
         fn report(moves_head: bool) -> (PendingAck, oneshot::Receiver<WriteReport>) {
@@ -385,6 +393,7 @@ mod tests {
                 vec![usage, round, record],
                 None,
                 Some(fork.clone()),
+                false,
                 &shared(),
             );
 
@@ -415,7 +424,7 @@ mod tests {
             ];
             let (compact_first, compact_first_rx) = oneshot::channel();
 
-            settle_acks(acks, None, Some(fork.clone()), &shared());
+            settle_acks(acks, None, Some(fork.clone()), false, &shared());
             settle_acks(
                 vec![PendingAck::Compact {
                     ack: compact_first,
@@ -424,6 +433,7 @@ mod tests {
                 }],
                 None,
                 Some(fork.clone()),
+                false,
                 &shared(),
             );
 
@@ -450,6 +460,7 @@ mod tests {
                     vec![write, PendingAck::Archive(archive_ack)],
                     Some("disk full"),
                     None,
+                    false,
                     &shared,
                 );
                 received.push((
