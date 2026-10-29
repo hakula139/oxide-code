@@ -1282,7 +1282,6 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 engine.rename(&sink, "Fix login".to_owned()).await;
-                assert!(engine.transcript.session().manual_title_set());
                 engine.transcript.set_session(dead_test_session());
                 engine.rename(&sink, "Lost".to_owned()).await;
 

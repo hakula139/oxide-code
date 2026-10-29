@@ -103,12 +103,10 @@ pub fn stamped_id(byte: u8) -> String {
 /// Session `session_id` as a listing reports it: in the [`test_store`] project, last active at
 /// 2026-04-18 09:00 UTC, untitled, unarchived, and empty.
 pub fn listed_session(session_id: &str) -> SessionInfo {
-    let project = format!("/work/{TEST_PROJECT}");
     SessionInfo {
         session_id: session_id.to_owned(),
         forked_from: None,
-        cwd: project.clone(),
-        project_root: project,
+        project_root: format!("/work/{TEST_PROJECT}"),
         last_active_at: time::macros::datetime!(2026-04-18 09:00:00 UTC),
         title: None,
         message_count: 0,

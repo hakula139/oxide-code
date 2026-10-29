@@ -594,7 +594,8 @@ mod tests {
                 let landed = store.load_session_data(&target).unwrap();
                 assert_eq!(texts(&landed.messages), landed_texts, "{name}");
                 let forked_from = (outcome == Fork).then(|| SESSION.to_owned());
-                assert_eq!(landed.forked_from, forked_from, "{name}");
+                let listed = store.find(&target).unwrap().unwrap();
+                assert_eq!(listed.forked_from, forked_from, "{name}");
                 let landed_title = if outcome == Keep { "Local" } else { "Exported" };
                 assert_eq!(landed.title.as_deref(), Some(landed_title), "{name}");
                 if outcome == Fork {
