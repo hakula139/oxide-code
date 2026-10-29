@@ -392,12 +392,13 @@ fn placements(
         old_line += breaks;
         new_line += breaks;
 
-        // The 0-based old lines the match spans. An insertion right after them still belongs to it.
+        // The 0-based old lines the match spans. An insertion right after them still belongs to it,
+        // unless it ends before the match's first new line, where the previous match wrote it.
         let span = old_line - 1..old_line + old_breaks;
         while changes
             .next_if(|change| {
                 if change.old.is_empty() {
-                    change.old.start < span.start
+                    change.old.start < span.start || change.new.end < new_line
                 } else {
                     change.old.end <= span.start
                 }
@@ -1335,6 +1336,13 @@ mod tests {
                     "a\n",
                     "c\n",
                     vec![1, 2],
+                ),
+                (
+                    "adjacent insertions",
+                    "foo();\nfoo();\n",
+                    "foo();",
+                    "foo();\nbar();",
+                    vec![2, 4],
                 ),
             ] {
                 let (locations, _) = placements_in(content, old, new);

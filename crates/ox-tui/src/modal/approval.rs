@@ -19,8 +19,7 @@ use super::chrome::{HINT_SEPARATOR, KEY_UP_DOWN, wrap_hints};
 use super::line_editor::LineEditor;
 use super::{Modal, ModalAction, ModalKey};
 use crate::action::Action;
-use crate::components::overflow_count;
-use crate::glyphs::{HUNK_GAP, diff_sign};
+use crate::glyphs::{DIFF_SIGN_WIDTH, HUNK_GAP, diff_cap_row, diff_sign};
 use crate::keymap::{KeyChord, hint};
 use crate::saturating_u16;
 use crate::theme::Theme;
@@ -40,8 +39,6 @@ const CHROME_ROWS: usize = 2;
 /// The label and the editor. A rejected answer's error wraps below them.
 const EDIT_ROWS: usize = 2;
 const CONTINUATION_INDENT: usize = 2;
-/// The width of the [`diff_sign`] column between a diff line's number and its text.
-const DIFF_SIGN_WIDTH: usize = 3;
 
 /// Stands in for each character of a whitespace run a plain space would misrepresent.
 const WHITESPACE_MARKER: char = '·';
@@ -599,7 +596,7 @@ fn diff_rows(diff: &Diff) -> Vec<BodyLine> {
                 line: line.clone(),
             },
             DiffRow::Gap => BodyLine::Marker(format!("{HUNK_GAP:>width$}")),
-            DiffRow::Omitted(lines) => BodyLine::Marker(overflow_count(lines, "line", "lines")),
+            DiffRow::Omitted(lines) => BodyLine::Marker(diff_cap_row(lines)),
         })
         .collect()
 }
@@ -1648,7 +1645,7 @@ mod tests {
             let last = rows.last().unwrap().to_line(&palette);
 
             assert_eq!(rows.len(), 2);
-            assert_eq!(last.to_string(), "... +1 line");
+            assert_eq!(last.to_string(), "... +1 line past the diff limit");
             assert_eq!(last.spans[0].style, palette.marker);
         }
     }

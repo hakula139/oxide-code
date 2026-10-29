@@ -3,13 +3,13 @@
 
 use ratatui::style::Style;
 
-use ox_core::tool::view::{Diff, DiffLine, DiffLineKind, EditDiff};
+use ox_core::tool::view::{Diff, DiffLineKind, DiffRow, EditDiff};
 use ox_core::util::text::plural;
 
 use super::overflow_footer;
 use crate::components::chat::blocks::rows::{NumberedRows, body_row};
 use crate::components::chat::blocks::{BlockRows, RenderCtx};
-use crate::glyphs::HUNK_GAP;
+use crate::glyphs::{HUNK_GAP, diff_cap_row};
 
 /// Diff line rows the compact view shows.
 const MAX_DIFF_BODY_LINES: usize = 20;
@@ -50,7 +50,7 @@ fn render_hunks(out: &mut BlockRows, ctx: &RenderCtx<'_>, border_style: Style, d
 
     for row in rows(diff, ctx.cap(MAX_DIFF_BODY_LINES)) {
         match row {
-            Row::Line(line) => {
+            Row::Diff(DiffRow::Line(line)) => {
                 let (rows, text_style) = match line.kind {
                     DiffLineKind::Context => (&context, ctx.theme.dim()),
                     DiffLineKind::Removed => (&removed, ctx.theme.text()),
@@ -58,19 +58,19 @@ fn render_hunks(out: &mut BlockRows, ctx: &RenderCtx<'_>, border_style: Style, d
                 };
                 rows.render_segments(&mut out.lines, line.number, line.segments(), text_style);
             }
-            Row::Gap => {
+            Row::Diff(DiffRow::Gap) => {
                 let gap = format!("{HUNK_GAP:>width$}", width = max_number.to_string().len());
                 body_row(&mut out.lines, ctx, border_style, gap, ctx.theme.dim());
+            }
+            Row::Diff(DiffRow::Omitted(lines)) => {
+                let text = diff_cap_row(lines);
+                body_row(&mut out.lines, ctx, border_style, text, ctx.theme.dim());
             }
             Row::Elided(lines) => {
                 overflow_footer(out, ctx, border_style, lines, "line", "lines", false);
             }
-            Row::Omitted(hunks) => {
-                let capped = diff.omitted_lines > 0;
-                overflow_footer(out, ctx, border_style, hunks, "hunk", "hunks", capped);
-            }
-            Row::Capped(lines) => {
-                overflow_footer(out, ctx, border_style, lines, "line", "lines", true);
+            Row::FoldedHunks(hunks) => {
+                overflow_footer(out, ctx, border_style, hunks, "hunk", "hunks", false);
             }
         }
     }
@@ -78,47 +78,47 @@ fn render_hunks(out: &mut BlockRows, ctx: &RenderCtx<'_>, border_style: Style, d
 
 /// One row of a diff body as [`rows`] lays it out.
 enum Row<'a> {
-    Line(&'a DiffLine),
-    /// The break between two hunks.
-    Gap,
+    Diff(DiffRow<'a>),
     /// The middle lines of an over-budget hunk.
     Elided(usize),
     /// The hunks left out once the budget filled.
-    Omitted(usize),
-    /// The lines the diff itself left out past its row cap.
-    Capped(usize),
+    FoldedHunks(usize),
 }
 
-/// The rows `diff` shows within `budget` line rows, which must be at least 2. Hunks follow each
-/// other with a [`Row::Gap`] while they fit, and the rest collapse into one [`Row::Omitted`]. A
-/// first hunk longer than the budget keeps a half at each end around a [`Row::Elided`]. A diff its
-/// own cap cut ends in a [`Row::Capped`] unless a [`Row::Omitted`] already ends it.
+/// The rows of [`Diff::rows`] that fit `budget` line rows, which must be at least 2. Hunks keep
+/// their rows while they fit, and the rest fold into one [`Row::FoldedHunks`]. A first hunk longer
+/// than the budget keeps a half at each end around a [`Row::Elided`]. The cap row always shows,
+/// since expanding cannot reveal the lines it counts.
 fn rows(diff: &Diff, budget: usize) -> Vec<Row<'_>> {
+    let mut lens = diff.hunks.iter().map(|hunk| hunk.lines.len());
+    let first = lens.next().unwrap_or(0);
+    let shown = if first > budget {
+        1
+    } else {
+        1 + lens
+            .scan(budget - first, |left, len| {
+                (len <= *left).then(|| *left -= len)
+            })
+            .count()
+    };
+
     let mut rows = Vec::new();
-    let mut left = budget;
-    for (index, hunk) in diff.hunks.iter().enumerate() {
-        let lines = &hunk.lines;
-        if index == 0 && lines.len() > budget {
-            let head = budget.div_ceil(2);
-            let tail = lines.len() - (budget - head);
-            rows.extend(lines[..head].iter().map(Row::Line));
-            rows.push(Row::Elided(tail - head));
-            rows.extend(lines[tail..].iter().map(Row::Line));
-            left = 0;
-            continue;
+    let mut hunk = 0;
+    for row in diff.rows() {
+        if row == DiffRow::Gap {
+            hunk += 1;
+            if hunk == shown {
+                rows.push(Row::FoldedHunks(diff.hunks.len() - shown));
+            }
         }
-        if lines.len() > left {
-            rows.push(Row::Omitted(diff.hunks.len() - index));
-            break;
+        if hunk < shown || matches!(row, DiffRow::Omitted(_)) {
+            rows.push(Row::Diff(row));
         }
-        if index > 0 {
-            rows.push(Row::Gap);
-        }
-        rows.extend(lines.iter().map(Row::Line));
-        left -= lines.len();
     }
-    if diff.omitted_lines > 0 && !matches!(rows.last(), Some(Row::Omitted(_))) {
-        rows.push(Row::Capped(diff.omitted_lines));
+    if first > budget {
+        let head = budget.div_ceil(2);
+        let tail = first - (budget - head);
+        rows.splice(head..tail, [Row::Elided(tail - head)]);
     }
     rows
 }
@@ -157,7 +157,7 @@ mod tests {
     use std::ops::Range;
 
     use ox_core::tool::testing::diff_line;
-    use ox_core::tool::view::DiffHunk;
+    use ox_core::tool::view::{DiffHunk, DiffLine};
     use ratatui::text::Line;
 
     use super::*;
@@ -374,31 +374,53 @@ mod tests {
         }
 
         #[test]
-        fn ends_a_capped_diff_with_the_count_it_left_out() {
+        fn ends_a_capped_diff_with_a_plain_count_of_the_lines_it_left_out() {
             let theme = Theme::default();
             let hunk = |number: usize| vec![diff_line(DiffLineKind::Added, number, "new")];
-            let capped = |hunks: usize| EditDiff {
+            let diff = EditDiff {
                 diff: Diff {
                     omitted_lines: 5,
-                    ..edit_diff((1..=hunks).map(|n| hunk(n * 10)).collect(), Vec::new()).diff
+                    ..edit_diff(
+                        (1..=MAX_DIFF_BODY_LINES + 2)
+                            .map(|n| hunk(n * 10))
+                            .collect(),
+                        Vec::new(),
+                    )
+                    .diff
                 },
                 locations: Vec::new(),
             };
+            let hint = Some("Ctrl+O to expand");
 
-            let shown = render_rows(&RenderCtx::new(80, &theme), &capped(2));
-            let folded = render_rows(
-                &RenderCtx::new(80, &theme),
-                &capped(MAX_DIFF_BODY_LINES + 2),
+            let compact = render_rows(
+                &RenderCtx {
+                    expand_hint: hint,
+                    ..RenderCtx::new(80, &theme)
+                },
+                &diff,
+            );
+            let expanded = render_rows(
+                &RenderCtx {
+                    expand_hint: hint,
+                    ..expanded_ctx(&theme)
+                },
+                &diff,
             );
 
+            let compact_rows = text_rows(&compact.lines);
             assert_eq!(
-                text_rows(&shown.lines).last().unwrap(),
-                "▎   ... +5 lines (limit reached)"
+                compact_rows[compact_rows.len() - 2..],
+                [
+                    "▎   ... +2 hunks · Ctrl+O to expand",
+                    "▎   ... +5 lines past the diff limit",
+                ],
             );
+            assert_eq!(compact.expander_rows(), [compact_rows.len() - 2]);
             assert_eq!(
-                text_rows(&folded.lines).last().unwrap(),
-                "▎   ... +2 hunks (limit reached)"
+                text_rows(&expanded.lines).last().unwrap(),
+                "▎   ... +5 lines past the diff limit"
             );
+            assert_eq!(expanded.expander_rows(), Vec::<usize>::new());
         }
     }
 

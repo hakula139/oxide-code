@@ -19,8 +19,8 @@ use ox_core::permission::{Basis, SessionGrant};
 use ox_core::protocol::notice::ENGINE_STOPPED;
 use ox_core::protocol::{ApprovalDecision, Event, Op, OpEnd};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview, DiffRow};
-use ox_core::util::text::{escape_hidden, plural};
-use ox_tui::glyphs::{HUNK_GAP, diff_sign};
+use ox_core::util::text::escape_hidden;
+use ox_tui::glyphs::{HUNK_GAP, diff_cap_row, diff_sign};
 
 use super::stdio::{Approver, Output, OutputFormat, RunEnd, run_op};
 use super::{Exit, Shutdown, Signals, decode_input};
@@ -350,9 +350,7 @@ fn write_preview(out: &mut impl Write, preview: &ApprovalPreview, basis: &Basis)
                         writeln!(out, "  {:>width$}{sign}{text}", line.number)?;
                     }
                     DiffRow::Gap => writeln!(out, "  {HUNK_GAP:>width$}")?,
-                    DiffRow::Omitted(lines) => {
-                        writeln!(out, "  ... +{lines} {}", plural(lines, "line", "lines"))?;
-                    }
+                    DiffRow::Omitted(lines) => writeln!(out, "  {}", diff_cap_row(lines))?,
                 }
             }
         }
@@ -1632,7 +1630,7 @@ mod tests {
                        3 + let a = 2;\u{1b}[2K\u{200b}
                        ⋮
                       12 + g();
-                      ... +7 lines
+                      ... +7 lines past the diff limit
                     Asks because of the `ask.edit` pattern `src/\u{200b}*.rs`
                 "},
             );
