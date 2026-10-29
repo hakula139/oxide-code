@@ -42,7 +42,7 @@ pub(super) struct SessionState {
     /// The message the next one chains from.
     tip: Option<Uuid>,
     message_count: u32,
-    /// Whether an earlier prompt or manual title consumed the first-prompt title opportunity.
+    /// Whether a prompt or compaction root on the branch used the first-prompt title opportunity.
     first_user_prompt_seen: bool,
     /// Records absorbed since the last commit.
     records: Vec<Record>,
@@ -65,12 +65,10 @@ impl SessionState {
         let project = store.project();
         let row = SessionRow {
             id: Uuid::new_v4().to_string(),
-            forked_from: None,
             cwd: project.cwd.clone(),
             project_root: project.root.clone(),
             git_branch,
             model: model.to_owned(),
-            created_at: now_millis(),
             title: None,
             title_manual: false,
         };
@@ -89,12 +87,10 @@ impl SessionState {
         let project = store.project();
         let row = SessionRow {
             id: data.session_id.clone(),
-            forked_from: data.forked_from.clone(),
             cwd: project.cwd.clone(),
             project_root: project.root.clone(),
             git_branch: data.git_branch.clone(),
             model: model.to_owned(),
-            created_at: data.created_at,
             title: data.title.clone(),
             title_manual: data.title_manual,
         };
@@ -139,6 +135,11 @@ impl SessionState {
         &self.row.id
     }
 
+    /// Whether `/rename` set the title, in this process or in the store as the last commit read it.
+    pub(super) fn title_manual(&self) -> bool {
+        self.row.title_manual
+    }
+
     /// The directory the session's artifacts go to, which follows a fork.
     pub(super) fn artifact_dir(&self) -> PathBuf {
         self.store.artifact_dir(&self.row.id)
@@ -146,22 +147,20 @@ impl SessionState {
 
     /// Queues `message` with the prompt state it is the first to carry and the metadata of its tool
     /// results, and returns the AI-title seed on the first user text. The first-prompt title is
-    /// `title`, or else that text. `manual_title_set` skips both the first-prompt title and the
-    /// AI-title seed.
+    /// `title`, or else that text. A manual title skips both the first-prompt title and the seed.
     pub(super) fn queue_message(
         &mut self,
         message: Message,
         context: Option<SessionContext>,
         tool_metadata: BTreeMap<String, ToolMetadata>,
         title: Option<&str>,
-        manual_title_set: bool,
     ) -> Option<String> {
         let mut ai_title_seed = None;
         if !self.first_user_prompt_seen
             && let Some(text) = extract_user_text(&message)
         {
             self.first_user_prompt_seen = true;
-            if !manual_title_set {
+            if !self.row.title_manual {
                 ai_title_seed = Some(text.to_owned());
                 let title = fit_title(title.unwrap_or(text));
                 self.set_title(title, false);
@@ -192,10 +191,10 @@ impl SessionState {
 
     /// Moves the head back to `checkpoint`. A rewind to before the first user prompt lets the next
     /// one title the session again.
-    pub(super) fn rewind(&mut self, checkpoint: Checkpoint, manual_title_set: bool) {
+    pub(super) fn rewind(&mut self, checkpoint: Checkpoint) {
         self.tip = checkpoint.tip;
         self.message_count = checkpoint.message_count;
-        self.first_user_prompt_seen = checkpoint.first_user_prompt_seen || manual_title_set;
+        self.first_user_prompt_seen = checkpoint.first_user_prompt_seen;
         self.head_moved = true;
     }
 
@@ -250,6 +249,15 @@ impl SessionState {
         }
         self.row.title = Some(title);
         self.row.title_manual = manual;
+    }
+
+    /// Titles the session with an AI title unless a manual title holds, and returns whether it did.
+    pub(super) fn set_ai_title(&mut self, title: String) -> bool {
+        let applies = !self.row.title_manual;
+        if applies {
+            self.set_title(title, false);
+        }
+        applies
     }
 
     pub(super) fn queue_archive(&mut self) {
@@ -310,7 +318,7 @@ impl SessionState {
             Some(saved) => Saved::At { base: saved.base },
             None => Saved::Fresh,
         };
-        let landed = commit::commit(
+        let committed = commit::commit(
             conn,
             &self.store,
             &Commit {
@@ -324,7 +332,11 @@ impl SessionState {
             Some(saved) if head.is_none() => saved.base,
             _ => self.tip,
         };
-        let (lock, forked) = match landed {
+        if let Some(stored) = committed.title {
+            self.row.title = stored.title;
+            self.row.title_manual = stored.manual;
+        }
+        let (lock, forked) = match committed.landed {
             Landed::InPlace => {
                 if let Some(saved) = &mut self.saved {
                     saved.base = base;
@@ -332,16 +344,8 @@ impl SessionState {
                 return Ok(None);
             }
             Landed::Created(lock) => (lock, None),
-            Landed::Forked {
-                id,
-                lock,
-                title,
-                title_manual,
-            } => {
+            Landed::Forked { id, lock } => {
                 let from = std::mem::replace(&mut self.row.id, id);
-                self.row.forked_from = Some(from.clone());
-                self.row.title = title;
-                self.row.title_manual = title_manual;
                 let to = self.row.id.clone();
                 (lock, Some(Fork { from, to }))
             }
@@ -430,11 +434,11 @@ mod tests {
     }
 
     fn queue_user(state: &mut SessionState, text: &str) -> Option<String> {
-        state.queue_message(Message::user(text), None, BTreeMap::new(), None, false)
+        state.queue_message(Message::user(text), None, BTreeMap::new(), None)
     }
 
     fn queue_assistant(state: &mut SessionState, text: &str) {
-        state.queue_message(Message::assistant(text), None, BTreeMap::new(), None, false);
+        state.queue_message(Message::assistant(text), None, BTreeMap::new(), None);
     }
 
     /// Resumes the saved session `session_id` as another process would, recording `model`.
@@ -472,25 +476,28 @@ mod tests {
 
         #[test]
         fn titles_and_seeds_only_on_the_first_user_text() {
-            for (name, title, manual_title_set, expected_title, expected_seed) in [
+            for (name, title, manual_title, expected_title, expected_seed) in [
                 (
                     "plain",
                     None,
-                    false,
+                    None,
                     Some("Fix the auth bug"),
                     Some("Fix the auth bug"),
                 ),
                 (
                     "given title",
                     Some("/init AGENTS.md"),
-                    false,
+                    None,
                     Some("/init AGENTS.md"),
                     Some("Fix the auth bug"),
                 ),
-                ("manual title", None, true, None, None),
+                ("manual title", None, Some("Named"), Some("Named"), None),
             ] {
                 let (_dir, store) = isolated_store();
                 let mut state = SessionState::fresh(store, "m", None);
+                if let Some(manual_title) = manual_title {
+                    state.set_title(manual_title.to_owned(), true);
+                }
                 state.queue_message(
                     Message {
                         role: Role::User,
@@ -499,7 +506,6 @@ mod tests {
                     None,
                     BTreeMap::new(),
                     None,
-                    manual_title_set,
                 );
                 queue_assistant(&mut state, "reply");
 
@@ -508,7 +514,6 @@ mod tests {
                     None,
                     BTreeMap::new(),
                     title,
-                    manual_title_set,
                 );
                 let again = queue_user(&mut state, "follow up");
 
@@ -533,7 +538,7 @@ mod tests {
 
             assert_eq!(state.flush().unwrap(), None);
             assert_eq!(store.find(&id).unwrap(), None, "no message, no row");
-            state.queue_message(Message::user("hello"), None, BTreeMap::new(), None, true);
+            state.queue_message(Message::user("hello"), None, BTreeMap::new(), None);
             assert_eq!(state.flush().unwrap(), None);
 
             let info = store.find(&id).unwrap().unwrap();
@@ -566,7 +571,6 @@ mod tests {
                 None,
                 BTreeMap::from([("t1".to_owned(), metadata.clone())]),
                 None,
-                false,
             );
 
             state.flush().unwrap();
@@ -614,7 +618,7 @@ mod tests {
             queue_user(&mut state, "refused");
             state.flush().unwrap();
 
-            state.rewind(checkpoint, false);
+            state.rewind(checkpoint);
             state.flush().unwrap();
             queue_user(&mut state, "next");
             state.flush().unwrap();
@@ -622,6 +626,38 @@ mod tests {
             assert_eq!(chain(&store, &id), ["kept", "next"]);
             assert_eq!(row_ids(&store, &id).len(), 3);
             assert_eq!(store.find(&id).unwrap().unwrap().message_count, 2);
+        }
+
+        #[test]
+        fn fails_a_commit_that_repeats_an_id() {
+            for name in ["message", "usage"] {
+                let (_dir, store) = isolated_store();
+                let source = saved_session(&store, "start");
+                let mut state = open(&store, &source, "m");
+                if name == "message" {
+                    state.push_message(MessageRow {
+                        id: row_ids(&store, &source)[0],
+                        ..message_row(0, None, Message::user("again"))
+                    });
+                } else {
+                    let row = UsageRow {
+                        id: Uuid::new_v4(),
+                        record: usage(),
+                        created_at: 0,
+                    };
+                    state.records.push(Record::Usage(row.clone()));
+                    state.records.push(Record::Usage(row));
+                }
+
+                let err = state.flush().unwrap_err();
+
+                assert!(
+                    format!("{err:#}").contains("UNIQUE constraint failed"),
+                    "{name}: {err:#}"
+                );
+                assert_eq!(chain(&store, &source), ["start"], "{name}");
+                assert_eq!(usage_rows(&store, &source), 0, "{name}");
+            }
         }
 
         #[test]
@@ -768,7 +804,7 @@ mod tests {
                         }
                         Rewind(who) => {
                             let state = writers[who].as_mut().unwrap();
-                            state.rewind(checkpoints[who].unwrap(), false);
+                            state.rewind(checkpoints[who].unwrap());
                             state.flush().unwrap();
                         }
                         Rename(who) => {
@@ -815,7 +851,7 @@ mod tests {
             queue_user(&mut original, "kept");
             let checkpoint = original.checkpoint();
             queue_user(&mut original, "abandoned");
-            original.rewind(checkpoint, false);
+            original.rewind(checkpoint);
             original.queue_usage(vec![usage()]);
             original.set_title("Manual".to_owned(), true);
             original.flush().unwrap();
@@ -886,7 +922,7 @@ mod tests {
             let checkpoint = stale.checkpoint();
             queue_user(&mut stale, "refused");
             stale.flush().unwrap();
-            stale.rewind(checkpoint, false);
+            stale.rewind(checkpoint);
             stale.flush().unwrap();
             let elsewhere = message_row(9, None, Message::user("elsewhere"));
             save(&store, &source, vec![elsewhere], Vec::new(), Some(9));
@@ -897,6 +933,48 @@ mod tests {
             assert_eq!(fork.from, source);
             assert_eq!(chain(&store, &fork.to), ["next"]);
             assert_eq!(chain(&store, &source), ["elsewhere"]);
+        }
+
+        #[test]
+        fn the_fork_keeps_the_title_its_batch_leaves() {
+            for (name, elsewhere, in_batch, expected) in [
+                (
+                    "manual in the batch",
+                    ("Other", false),
+                    ("Mine", true),
+                    ("Mine", true),
+                ),
+                (
+                    "AI in the batch",
+                    ("Renamed", true),
+                    ("AI", false),
+                    ("Renamed", true),
+                ),
+            ] {
+                let (_dir, store) = isolated_store();
+                let source = saved_session(&store, "start");
+                let mut stale = open(&store, &source, "m");
+                let mut writer = open(&store, &source, "m");
+                queue_user(&mut writer, "moved");
+                writer.set_title(elsewhere.0.to_owned(), elsewhere.1);
+                writer.flush().unwrap();
+
+                queue_user(&mut stale, "forked");
+                stale.set_title(in_batch.0.to_owned(), in_batch.1);
+                let fork = stale.flush().unwrap().expect("the stale write forks");
+
+                let data = store.load_session_data(&fork.to).unwrap();
+                assert_eq!(
+                    (data.title.as_deref(), data.title_manual),
+                    (Some(expected.0), expected.1),
+                    "{name}: stored"
+                );
+                assert_eq!(
+                    (stale.row.title.as_deref(), stale.row.title_manual),
+                    (Some(expected.0), expected.1),
+                    "{name}: in memory"
+                );
+            }
         }
 
         #[test]

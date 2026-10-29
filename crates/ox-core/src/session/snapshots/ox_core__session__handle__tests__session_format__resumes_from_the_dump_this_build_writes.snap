@@ -70,7 +70,6 @@ expression: recovered
     "message_count": 7,
     "title": "Fix f.rs"
   },
-  "manual_title_set": true,
   "messages": [
     {
       "content": [
@@ -246,6 +245,7 @@ expression: recovered
     }
   ],
   "title": "Fix f.rs",
+  "title_manual": true,
   "tool_metadata": {
     "t1": {
       "result_view": {

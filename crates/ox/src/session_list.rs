@@ -294,7 +294,7 @@ mod tests {
         }
 
         #[test]
-        fn all_mode_inserts_project_column_aligned_to_widest_cwd() {
+        fn all_mode_inserts_project_column_aligned_to_widest_project() {
             let mut short = session("aaaaaaaaaaaa", datetime!(2026-04-18 09:00:00 UTC));
             short.project_root = "/a".to_owned();
             let mut longer = session("bbbbbbbbbbbb", datetime!(2026-04-18 09:05:00 UTC));
@@ -310,12 +310,8 @@ mod tests {
             );
             let rows: Vec<&str> = lines.collect();
             assert_eq!(rows.len(), 2);
-            assert!(rows[0].contains("/a"), "row 0 missing cwd: {:?}", rows[0]);
-            assert!(
-                rows[1].contains("/work/oxide-code"),
-                "row 1 missing cwd: {:?}",
-                rows[1],
-            );
+            assert!(rows[0].contains("/a"), "{out}");
+            assert!(rows[1].contains("/work/oxide-code"), "{out}");
             let header_title_col = header.find("Title").expect("header must contain Title");
             let row_title_cols: Vec<usize> = rows
                 .iter()
@@ -369,12 +365,12 @@ mod tests {
 
         #[test]
         fn project_col_width_respects_maximum() {
-            let long_cwd: String = "/deep/"
+            let long_project: String = "/deep/"
                 .chars()
                 .chain(std::iter::repeat_n('x', 80))
                 .collect();
             let mut s = session("cccccccccccc", datetime!(2026-04-18 09:00:00 UTC));
-            s.project_root = long_cwd.clone();
+            s.project_root = long_project.clone();
 
             let out = rendered(&[s], true, None);
 
@@ -387,25 +383,9 @@ mod tests {
             );
             let row = lines.next().unwrap();
             assert!(
-                row.ends_with(&format!("{long_cwd} (untitled)")),
-                "an overlong cwd overflows its column in full: {row:?}",
+                row.ends_with(&format!("{long_project} (untitled)")),
+                "an overlong project overflows its column in full: {row:?}",
             );
-        }
-
-        #[test]
-        fn shows_the_project_root_over_the_launch_directory() {
-            let mut s = session("eeeeeeeeeeee", datetime!(2026-04-18 09:00:00 UTC));
-            s.cwd = "/work/repo/crates/core".to_owned();
-            s.project_root = "/work/repo".to_owned();
-
-            let out = rendered(&[s], true, None);
-
-            let projects: Vec<_> = out
-                .lines()
-                .skip(1)
-                .filter_map(|row| row.split_whitespace().nth(4))
-                .collect();
-            assert_eq!(projects, ["/work/repo"], "{out}");
         }
 
         #[test]

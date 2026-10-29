@@ -1,17 +1,17 @@
-//! Session listing: indexed page queries, the latest session, and lookup by ID or ID prefix.
+//! Session listing: indexed page queries, the latest session, and lookup by ID prefix.
 
 use anyhow::Result;
 use rusqlite::{Connection, Row, params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{CONTENT_VERSION, SessionStore, time_column, to_millis};
+use super::{CONTENT_VERSION, SessionStore, is_session_id_byte, time_column, to_millis};
 
 pub const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
 
 /// The `sessions` columns [`read_info`] decodes, in its order.
 const INFO_COLUMNS: &str =
-    "id, forked_from, cwd, project_root, git_branch, updated_at, title, message_count, archived_at";
+    "id, forked_from, project_root, git_branch, updated_at, title, message_count, archived_at";
 
 // ── SessionInfo ──
 
@@ -21,7 +21,6 @@ pub struct SessionInfo {
     pub session_id: String,
     /// The session this one forked from, which may since have been deleted.
     pub forked_from: Option<String>,
-    pub cwd: String,
     pub project_root: String,
     /// When the session's head last moved, which orders listings.
     pub last_active_at: OffsetDateTime,
@@ -201,10 +200,7 @@ impl SessionStore {
         prefix: &str,
         projects: ProjectScope,
     ) -> Result<Vec<SessionInfo>> {
-        if !prefix
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
+        if !prefix.bytes().all(is_session_id_byte) {
             return Ok(Vec::new());
         }
         let mut params = vec![Value::Text(format!("{prefix}*"))];
@@ -223,6 +219,7 @@ impl SessionStore {
     }
 
     /// The session `session_id`, in any project and either archive state.
+    #[cfg(test)]
     pub(crate) fn find(&self, session_id: &str) -> Result<Option<SessionInfo>> {
         let sql = format!("SELECT {INFO_COLUMNS} FROM sessions WHERE id = ?1");
         let params = vec![Value::Text(session_id.to_owned())];
@@ -277,13 +274,12 @@ fn read_info(row: &Row<'_>) -> rusqlite::Result<SessionInfo> {
     Ok(SessionInfo {
         session_id: row.get(0)?,
         forked_from: row.get(1)?,
-        cwd: row.get(2)?,
-        project_root: row.get(3)?,
-        git_branch: row.get(4)?,
-        last_active_at: time_column(row, 5)?,
-        title: row.get(6)?,
-        message_count: row.get(7)?,
-        archive_state: row.get::<_, Option<i64>>(8)?.is_some().into(),
+        project_root: row.get(2)?,
+        git_branch: row.get(3)?,
+        last_active_at: time_column(row, 4)?,
+        title: row.get(5)?,
+        message_count: row.get(6)?,
+        archive_state: row.get::<_, Option<i64>>(7)?.is_some().into(),
     })
 }
 

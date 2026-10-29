@@ -11,7 +11,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::commit::{
-    MESSAGE_COLUMNS, MessageRow, UsageRow, find_head, insert_message, insert_usage, parse_id,
+    Duplicate, MESSAGE_COLUMNS, MessageRow, UsageRow, find_head, insert_message, insert_usage,
+    parse_id,
 };
 use super::{
     CompactInfo, Project, SessionStore, UsageRecord, check_format, from_millis, time_column,
@@ -290,10 +291,10 @@ impl Export {
             },
         };
         for message in &self.messages {
-            insert_message(tx, &target, message)?;
+            insert_message(tx, &target, message, Duplicate::Keep)?;
         }
         for usage in &self.usage {
-            insert_usage(tx, &target, usage)?;
+            insert_usage(tx, &target, usage, Duplicate::Keep)?;
         }
         Ok(target)
     }
@@ -594,7 +595,8 @@ mod tests {
                 let landed = store.load_session_data(&target).unwrap();
                 assert_eq!(texts(&landed.messages), landed_texts, "{name}");
                 let forked_from = (outcome == Fork).then(|| SESSION.to_owned());
-                assert_eq!(landed.forked_from, forked_from, "{name}");
+                let listed = store.find(&target).unwrap().unwrap();
+                assert_eq!(listed.forked_from, forked_from, "{name}");
                 let landed_title = if outcome == Keep { "Local" } else { "Exported" };
                 assert_eq!(landed.title.as_deref(), Some(landed_title), "{name}");
                 if outcome == Fork {
