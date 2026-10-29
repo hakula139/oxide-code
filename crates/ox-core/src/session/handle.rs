@@ -1,21 +1,19 @@
-//! Public session API. Every write method sends a [`super::actor::SessionCmd`] and awaits the
-//! actor's ack without holding a lock across `await`.
+//! Public session API. Every write method applies its change to the session state and commits it
+//! under the state's lock on a blocking thread, so no lock is held across `await`.
 
 #[cfg(test)]
 pub(crate) mod testing;
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context as _, Result, bail};
-use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, warn};
 use uuid::Uuid;
 
-use super::actor::{self, Record, SessionCmd};
 use super::resolver::resolve_target;
 use super::sanitize::{retain_visible_file_snapshots, sanitize_resumed_messages};
 use super::saved::SavedError;
@@ -31,32 +29,24 @@ use crate::tool::ToolMetadata;
 use crate::tool::tasks::{self, Task};
 use crate::util::sync::lock_or_recover;
 
-/// Headroom for burst tool-round writes and the concurrent title generator.
-const CHANNEL_CAPACITY: usize = 1024;
-
 // ── SessionHandle ──
 
-/// Cheap to clone because clones share one actor task. Every write method returns after the batch
-/// commit that its cmd lands in.
+/// Cheap to clone because clones share one session state. Every write method returns after the
+/// commit that saves its change.
 #[derive(Clone)]
 pub struct SessionHandle {
-    cmd_tx: mpsc::Sender<SessionCmd>,
-    shared: Arc<SharedState>,
-    /// Taken by the first `shutdown` among the clones.
-    actor_join: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Locked only on blocking threads, since a commit holds it while the store is busy.
+    state: Arc<Mutex<SessionState>>,
+    shared: Arc<Shared>,
     title_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
-/// State the actor and every handle clone share. Each `surface_first_*` method returns `true` on
-/// its first call and `false` after.
-pub(super) struct SharedState {
+/// What every handle clone reads without the state's lock.
+struct Shared {
     /// The session the handle writes to, which a fork replaces.
     live: Mutex<Live>,
-    flush_failure_surfaced: AtomicBool,
-    actor_gone_surfaced: AtomicBool,
-    /// The write failure that stopped persistence, threaded into actor-gone messages so the user
-    /// sees the cause.
-    last_flush_failure: Mutex<Option<String>>,
+    /// Whether a write already reported a commit failure, which the next ones then omit.
+    failure_surfaced: AtomicBool,
 }
 
 /// The live session's ID and artifact directory.
@@ -65,46 +55,13 @@ struct Live {
     artifact_dir: Arc<Path>,
 }
 
-impl SharedState {
-    pub(super) fn new(session_id: &str, artifact_dir: PathBuf) -> Self {
+impl Live {
+    fn of(state: &SessionState) -> Self {
         Self {
-            live: Mutex::new(Live {
-                id: Arc::from(session_id),
-                artifact_dir: artifact_dir.into(),
-            }),
-            flush_failure_surfaced: AtomicBool::new(false),
-            actor_gone_surfaced: AtomicBool::new(false),
-            last_flush_failure: Mutex::new(None),
+            id: Arc::from(state.session_id()),
+            artifact_dir: state.artifact_dir().into(),
         }
     }
-
-    /// Points every handle clone at session `session_id`, which a fork continues as.
-    pub(super) fn set_live(&self, session_id: &str, artifact_dir: PathBuf) {
-        *lock_or_recover(&self.live, "live") = Live {
-            id: Arc::from(session_id),
-            artifact_dir: artifact_dir.into(),
-        };
-    }
-
-    pub(super) fn record_flush_failure(&self, msg: &str) {
-        *lock_or_recover(&self.last_flush_failure, "last_flush_failure") = Some(msg.to_owned());
-    }
-
-    pub(super) fn surface_first_flush_failure(&self) -> bool {
-        surface_once(&self.flush_failure_surfaced)
-    }
-
-    fn surface_first_actor_gone(&self) -> bool {
-        surface_once(&self.actor_gone_surfaced)
-    }
-
-    pub(super) fn last_flush_failure(&self) -> Option<String> {
-        lock_or_recover(&self.last_flush_failure, "last_flush_failure").clone()
-    }
-}
-
-fn surface_once(surfaced: &AtomicBool) -> bool {
-    !surfaced.swap(true, Ordering::AcqRel)
 }
 
 /// A point in the active branch that [`SessionHandle::rewind`] can move the tip back to.
@@ -125,13 +82,13 @@ pub(crate) struct CompactBoundary {
     pub(crate) context: SessionContext,
 }
 
-/// What a write cmd's batch commit reports.
+/// What a write's commit reports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteReport {
     /// A write failure, reported only the first time one occurs, except by
     /// [`SessionHandle::archive`], which reports every failure.
     pub failure: Option<String>,
-    /// The fork the batch made, carried by the first cmd in it that moved the head.
+    /// The fork the commit made.
     pub fork: Option<Fork>,
 }
 
@@ -143,30 +100,29 @@ pub struct Fork {
     pub to: String,
 }
 
-/// Ack from [`SessionHandle::record_message`].
+/// What [`SessionHandle::record_message`] returns.
 #[derive(Debug)]
 pub(crate) struct RecordOutcome {
-    /// The branch point the message chained from, `None` when the actor is gone.
-    pub(crate) checkpoint: Option<Checkpoint>,
+    /// The branch point the message chained from.
+    pub(crate) checkpoint: Checkpoint,
     /// `Some` when this ordinary user message may seed the session's automatic title.
     pub(crate) ai_title_seed: Option<String>,
     pub(crate) report: WriteReport,
 }
 
-/// Ack from [`SessionHandle::compact`]. `pre_count` is the message count when the request reached
-/// the actor.
+/// What [`SessionHandle::compact`] returns. `pre_count` is the message count the compaction
+/// replaced.
 #[derive(Debug)]
 pub(crate) struct CompactOutcome {
     pub(crate) pre_count: u32,
-    /// The synthetic root as a rewind point, `None` only when the actor is gone. The boundary takes
-    /// effect in memory whether or not its commit lands.
-    pub(crate) checkpoint: Option<Checkpoint>,
+    /// The synthetic root as a rewind point. The boundary takes effect in memory whether or not its
+    /// commit lands.
+    pub(crate) checkpoint: Checkpoint,
     pub(crate) report: WriteReport,
 }
 
-/// Ack from [`SessionHandle::append_ai_title`]. `applied` is whether the title is the session's
-/// once its batch commits, `false` when a manual title in memory or in the store held or the
-/// writer is gone.
+/// What [`SessionHandle::append_ai_title`] returns. `applied` is whether the title is the
+/// session's once its write commits, `false` when a manual title in memory or in the store held.
 #[derive(Debug)]
 pub(super) struct AiTitleOutcome {
     pub(super) applied: bool,
@@ -174,6 +130,17 @@ pub(super) struct AiTitleOutcome {
 }
 
 impl SessionHandle {
+    fn new(state: SessionState) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                live: Mutex::new(Live::of(&state)),
+                failure_surfaced: AtomicBool::new(false),
+            }),
+            state: Arc::new(Mutex::new(state)),
+            title_task: Arc::default(),
+        }
+    }
+
     /// The live session's ID, which a fork replaces.
     pub fn session_id(&self) -> String {
         lock_or_recover(&self.shared.live, "live").id.to_string()
@@ -202,20 +169,18 @@ impl SessionHandle {
         context: Option<SessionContext>,
         title: Option<String>,
     ) -> RecordOutcome {
-        let (ack, rx) = oneshot::channel();
-        let record = Record {
-            msg,
-            context,
-            title,
-            ack,
-        };
-        self.request(SessionCmd::Record(record), rx)
-            .await
-            .unwrap_or_else(|| RecordOutcome {
-                checkpoint: None,
-                ai_title_seed: None,
-                report: self.actor_gone_report(),
+        let ((checkpoint, ai_title_seed), report) = self
+            .write(move |state| {
+                let checkpoint = state.checkpoint();
+                let seed = state.queue_message(msg, context, BTreeMap::new(), title.as_deref());
+                (checkpoint, seed)
             })
+            .await;
+        RecordOutcome {
+            checkpoint,
+            ai_title_seed,
+            report,
+        }
     }
 
     /// Moves the session's head back to `checkpoint`, abandoning the messages recorded after it.
@@ -226,53 +191,52 @@ impl SessionHandle {
         if !checkpoint.first_user_prompt_seen {
             self.stop_title_task().await;
         }
-        let (ack, rx) = oneshot::channel();
-        self.dispatch(SessionCmd::Rewind { checkpoint, ack }, rx)
-            .await
+        self.write(move |state| state.rewind(checkpoint)).await.1
     }
 
-    /// Records one tool round in one cmd: the assistant message and the tool results answering it,
-    /// which carry their metadata. Default metadata is skipped.
+    /// Records one tool round in one commit: the assistant message and the tool results answering
+    /// it, which carry their metadata. Default metadata is skipped.
     pub(crate) async fn record_round(
         &self,
         assistant: Message,
         tool_results: Message,
         metadata: Vec<(String, ToolMetadata)>,
     ) -> WriteReport {
-        let (ack, rx) = oneshot::channel();
-        let cmd = SessionCmd::RecordRound {
-            assistant,
-            tool_results,
-            metadata,
-            ack,
-        };
-        self.dispatch(cmd, rx).await
+        let metadata = metadata
+            .into_iter()
+            .filter(|(_, metadata)| *metadata != ToolMetadata::default())
+            .collect();
+        self.write(move |state| {
+            _ = state.queue_message(assistant, None, BTreeMap::new(), None);
+            _ = state.queue_message(tool_results, None, metadata, None);
+        })
+        .await
+        .1
     }
 
     /// Records the token usage of billed requests, one row each.
     pub(crate) async fn record_usage(&self, records: Vec<UsageRecord>) -> WriteReport {
-        let (ack, rx) = oneshot::channel();
-        self.dispatch(SessionCmd::Usage { records, ack }, rx).await
+        self.write(move |state| state.queue_usage(records)).await.1
     }
 
     /// Records an AI-generated session title, which supersedes the first-prompt title but never a
-    /// manual one.
+    /// manual one, including a manual one the commit reads from the store.
     pub(super) async fn append_ai_title(&self, title: String) -> AiTitleOutcome {
-        let (ack, rx) = oneshot::channel();
-        self.request(SessionCmd::AppendAiTitle { title, ack }, rx)
-            .await
-            .unwrap_or_else(|| AiTitleOutcome {
-                applied: false,
-                report: self.actor_gone_report(),
-            })
+        let (applied, report) = self
+            .write_then(
+                move |state| state.set_ai_title(title),
+                |applied, state| applied && !state.title_manual(),
+            )
+            .await;
+        AiTitleOutcome { applied, report }
     }
 
     /// Persists a user-supplied title, suppressing AI titles for the rest of the session.
     pub(crate) async fn set_manual_title(&self, title: String) -> WriteReport {
         self.stop_title_task().await;
-        let (ack, rx) = oneshot::channel();
-        self.dispatch(SessionCmd::SetManualTitle { title, ack }, rx)
+        self.write(move |state| state.set_title(title, true))
             .await
+            .1
     }
 
     /// Writes the synthetic post-compact root carrying the compaction boundary, which resets the
@@ -282,51 +246,41 @@ impl SessionHandle {
         boundary: CompactBoundary,
         synthetic_message: Message,
     ) -> CompactOutcome {
-        let (ack, rx) = oneshot::channel();
-        let cmd = SessionCmd::Compact {
-            boundary,
-            synthetic_message,
-            ack,
-        };
-        self.request(cmd, rx)
-            .await
-            .unwrap_or_else(|| CompactOutcome {
-                pre_count: 0,
-                checkpoint: None,
-                report: WriteReport {
-                    failure: Some(self.actor_stopped_failure()),
-                    fork: None,
-                },
+        let ((pre_count, checkpoint), report) = self
+            .write(move |state| {
+                let pre_count = state.compact(boundary, synthetic_message);
+                (pre_count, state.checkpoint())
             })
+            .await;
+        CompactOutcome {
+            pre_count,
+            checkpoint,
+            report,
+        }
     }
 
     /// Marks the session archived, reporting every failure since the caller rolls away only once
     /// the archive is saved. Call it only after a message is recorded, since a session without one
     /// has no row to archive.
     pub(crate) async fn archive(&self) -> WriteReport {
-        let (ack, rx) = oneshot::channel();
-        self.request(SessionCmd::Archive { ack }, rx)
-            .await
-            .unwrap_or_else(|| WriteReport {
-                failure: Some(self.actor_stopped_failure()),
-                fork: None,
-            })
+        let ((), committed) = self.commit(SessionState::queue_archive, |(), _| ()).await;
+        let failure = committed.as_ref().err().map(|e| format!("{e:#}"));
+        _ = self.report(committed);
+        WriteReport {
+            failure,
+            fork: None,
+        }
     }
 
     /// Saves `snapshots`, the file tracker state that closes the session, once.
     pub(crate) async fn finish(&self, snapshots: Vec<FileSnapshot>) -> WriteReport {
-        let (ack, rx) = oneshot::channel();
-        self.dispatch(SessionCmd::Finish { snapshots, ack }, rx)
-            .await
+        self.write(move |state| state.finish(snapshots)).await.1
     }
 
-    /// Stops the title request, saves the file snapshots, and shuts the actor down, returning the
-    /// last write's report.
+    /// Stops the title request and saves the file snapshots, returning the last write's report.
     pub(crate) async fn finalize(self, snapshots: Vec<FileSnapshot>) -> WriteReport {
         self.stop_title_task().await;
-        let report = self.finish(snapshots).await;
-        self.shutdown().await;
-        report
+        self.finish(snapshots).await
     }
 
     /// Aborts the title request and waits for it to end, so it never writes to or reports on a
@@ -343,71 +297,81 @@ impl SessionHandle {
         }
     }
 
-    /// Sends [`SessionCmd::Shutdown`] so the actor breaks after the current batch, then awaits the
-    /// join handle. Cmd-driven exit keeps a clone held elsewhere from pinning the actor.
-    pub(crate) async fn shutdown(self) {
-        let Self {
-            cmd_tx, actor_join, ..
-        } = self;
-        let (ack, rx) = oneshot::channel();
-        if cmd_tx.send(SessionCmd::Shutdown { ack }).await.is_ok() {
-            _ = rx.await;
-        }
-        drop(cmd_tx);
-        let join = lock_or_recover(&actor_join, "actor_join").take();
-        if let Some(j) = join
-            && let Err(e) = j.await
-        {
-            if e.is_panic() {
-                error!(error = %e, "session actor panicked");
-            } else {
-                warn!(error = %e, "session actor task cancelled");
+    /// Applies `apply` to the state and commits what it queued, returning its value and the
+    /// commit's report.
+    async fn write<T: Send + 'static>(
+        &self,
+        apply: impl FnOnce(&mut SessionState) -> T + Send + 'static,
+    ) -> (T, WriteReport) {
+        self.write_then(apply, |value, _| value).await
+    }
+
+    /// Like [`Self::write`], but returns what `settle` makes of `apply`'s value and the committed
+    /// state.
+    async fn write_then<T: Send + 'static, U: Send + 'static>(
+        &self,
+        apply: impl FnOnce(&mut SessionState) -> T + Send + 'static,
+        settle: impl FnOnce(T, &SessionState) -> U + Send + 'static,
+    ) -> (U, WriteReport) {
+        let (value, committed) = self.commit(apply, settle).await;
+        (value, self.report(committed))
+    }
+
+    /// Applies `apply`, commits, and settles under the state's lock on a blocking thread, so a
+    /// busy store never stalls the runtime. A fork points every clone at the new session. A panic
+    /// while the lock is held stops persistence, which the next write that saves anything reports.
+    /// A cancelled caller leaves the write to run to the end.
+    async fn commit<T: Send + 'static, U: Send + 'static>(
+        &self,
+        apply: impl FnOnce(&mut SessionState) -> T + Send + 'static,
+        settle: impl FnOnce(T, &SessionState) -> U + Send + 'static,
+    ) -> (U, Result<Option<Fork>>) {
+        let state = Arc::clone(&self.state);
+        let shared = Arc::clone(&self.shared);
+        tokio::task::spawn_blocking(move || {
+            let mut state = lock_state(&state);
+            let value = apply(&mut state);
+            let committed = state.flush();
+            if let Ok(Some(_)) = committed {
+                *lock_or_recover(&shared.live, "live") = Live::of(&state);
+            }
+            (settle(value, &state), committed)
+        })
+        .await
+        .expect("session write task panicked")
+    }
+
+    /// The report of a commit that returned `committed`, which carries a failure only the first
+    /// time one occurs.
+    fn report(&self, committed: Result<Option<Fork>>) -> WriteReport {
+        match committed {
+            Ok(fork) => WriteReport {
+                failure: None,
+                fork,
+            },
+            Err(e) => {
+                let failure = format!("{e:#}");
+                warn!(error = %failure, "session write failed");
+                let first = !self.shared.failure_surfaced.swap(true, Ordering::AcqRel);
+                WriteReport {
+                    failure: first.then_some(failure),
+                    fork: None,
+                }
             }
         }
     }
+}
 
-    /// Sends a cmd and awaits its report, falling back to actor-gone on failure.
-    async fn dispatch(&self, cmd: SessionCmd, rx: oneshot::Receiver<WriteReport>) -> WriteReport {
-        self.request(cmd, rx)
-            .await
-            .unwrap_or_else(|| self.actor_gone_report())
-    }
-
-    async fn request<T>(&self, cmd: SessionCmd, rx: oneshot::Receiver<T>) -> Option<T> {
-        self.cmd_tx.send(cmd).await.ok()?;
-        rx.await.ok()
-    }
-
-    /// The actor-gone failure for a write the caller must know failed, in full the first time.
-    fn actor_stopped_failure(&self) -> String {
-        self.actor_gone_failure()
-            .unwrap_or_else(|| "session writer task has stopped".to_owned())
-    }
-
-    fn actor_gone_report(&self) -> WriteReport {
-        WriteReport {
-            failure: self.actor_gone_failure(),
-            fork: None,
-        }
-    }
-
-    /// Surfaces actor-gone failure once, including the underlying cause if known.
-    fn actor_gone_failure(&self) -> Option<String> {
-        if !self.shared.surface_first_actor_gone() {
-            return None;
-        }
-        warn!("session actor task is gone, so the recording was dropped");
-        let cause = self.shared.last_flush_failure();
-        let msg = match cause {
-            Some(io_err) => format!(
-                "session writer task has stopped after I/O error: {io_err}. \
-                 Conversation history may be incomplete."
-            ),
-            None => "session writer task has stopped. Conversation history may be incomplete."
-                .to_owned(),
-        };
-        Some(msg)
-    }
+/// Locks `state`. A write that panicked while holding the lock may have left it half applied, so
+/// the lock recovers with persistence stopped.
+fn lock_state(state: &Mutex<SessionState>) -> MutexGuard<'_, SessionState> {
+    state.lock().unwrap_or_else(|poisoned| {
+        error!("a session write panicked, so persistence stops");
+        state.clear_poison();
+        let mut guard = poisoned.into_inner();
+        guard.stop();
+        guard
+    })
 }
 
 // ── Resumed Sessions ──
@@ -440,13 +404,13 @@ pub struct ResumedSession {
 
 // ── Constructors ──
 
-/// Starts a fresh session on `git_branch` and spawns its actor. The first record creates its row.
+/// Starts a fresh session on `git_branch`. The first record creates its row.
 pub(crate) fn start(
     store: &SessionStore,
     model: &str,
     git_branch: Option<String>,
 ) -> SessionHandle {
-    spawn_actor(SessionState::fresh(store.clone(), model, git_branch))
+    SessionHandle::new(SessionState::fresh(store.clone(), model, git_branch))
 }
 
 /// The new session ID and the old session's last write report.
@@ -520,7 +484,7 @@ pub(crate) async fn roll_into(
 }
 
 /// Resumes saved session `session_id`: takes its liveness lock, loads and sanitizes it, unarchives
-/// it, and spawns the actor. A fork it makes records `model`.
+/// it. A fork it makes records `model`.
 pub(super) fn resume(
     store: &SessionStore,
     session_id: &str,
@@ -549,9 +513,8 @@ pub(super) fn resume(
         .unwrap_or_default();
     let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);
     let state = SessionState::resumed(store.clone(), &data, message_count, model, lock);
-    let handle = spawn_actor(state);
     Ok(ResumedSession {
-        handle,
+        handle: SessionHandle::new(state),
         transcript: LoadedTranscript {
             messages: data.messages,
             context: data.context,
@@ -566,23 +529,12 @@ pub(super) fn resume(
     })
 }
 
-fn spawn_actor(state: SessionState) -> SessionHandle {
-    let shared = Arc::new(SharedState::new(state.session_id(), state.artifact_dir()));
-    let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_CAPACITY);
-    let join = tokio::spawn(actor::run(state, cmd_rx, Arc::clone(&shared)));
-    SessionHandle {
-        cmd_tx,
-        shared,
-        actor_join: Arc::new(Mutex::new(Some(join))),
-        title_task: Arc::default(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use time::macros::datetime;
+    use tokio::sync::oneshot;
 
     use super::*;
     use crate::file_tracker::testing::{record_tracked_file, seed_full_read};
@@ -590,23 +542,19 @@ mod tests {
         FileSource, FileState, FileTracker, GateError, GatePurpose, LastView,
     };
     use crate::message::{ContentBlock, INTERRUPTION_MARKER, Replay, Role, TextOrigin};
-    use crate::model::PromptCacheTtl;
     use crate::prompt::PromptParts;
     use crate::session::handle::testing::record_write_call;
-    use crate::session::store::local_testing::{load_dump, mask_export, sql_dump, unmask};
+    use crate::session::state::STOPPED;
+    use crate::session::store::local_testing::{
+        fail_writes, load_dump, mask_export, sql_dump, unmask,
+    };
     use crate::session::store::testing::{
-        WriterBarrier, archive_test_session, isolated_store, seed_test_session, test_store,
+        WriterBarrier, archive_test_session, isolated_store, saved_message_count,
+        seed_test_session, test_store,
     };
     use crate::tool::StoredView;
     use crate::tool::tasks::testing::plan;
     use crate::tool::view::{DiffChunk, EditDiff, NumberedLine, ToolResultView};
-
-    /// The failure the first write after the actor stops reports.
-    const STOPPED: &str =
-        "session writer task has stopped. Conversation history may be incomplete.";
-
-    /// The failure every later write reports once [`STOPPED`] was surfaced.
-    const STOPPED_AGAIN: &str = "session writer task has stopped";
 
     fn resume_id(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
         resume(store, session_id, "m")
@@ -641,6 +589,51 @@ mod tests {
         ended
     }
 
+    mod write {
+        use super::*;
+
+        #[tokio::test]
+        async fn surfaces_a_failed_commit_once_but_to_every_archive() {
+            let (_dir, store) = isolated_store();
+            let handle = start(&store, "m", None);
+            fail_writes(&store);
+
+            let first = handle.record_message(Message::user("a")).await;
+            let second = handle.record_message(Message::user("b")).await;
+            let archived = handle.archive().await;
+
+            assert_eq!(
+                first.report.failure.as_deref(),
+                Some("disk full: Error code 1811: constraint failed")
+            );
+            assert_eq!(second.report, WriteReport::default());
+            assert_eq!(archived.failure.as_deref(), Some(STOPPED));
+        }
+
+        #[tokio::test]
+        async fn a_panicked_write_stops_persistence_for_every_clone() {
+            let (_dir, store) = isolated_store();
+            let handle = start(&store, "m", None);
+            let sid = handle.session_id();
+            handle.record_message(Message::user("saved")).await;
+            let clone = handle.clone();
+
+            let panicked = tokio::spawn(async move {
+                clone
+                    .write(|_| -> u8 { panic!("deliberate write panic") })
+                    .await
+            })
+            .await;
+            let first = handle.record_message(Message::user("dropped")).await;
+            let second = handle.record_message(Message::user("also dropped")).await;
+
+            assert!(panicked.unwrap_err().is_panic());
+            assert_eq!(first.report.failure.as_deref(), Some(STOPPED));
+            assert_eq!(second.report, WriteReport::default());
+            assert_eq!(saved_message_count(&store, &sid), 1);
+        }
+    }
+
     mod record_message {
         use super::*;
 
@@ -663,51 +656,16 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn actor_gone_surfaces_failure_once_then_silences() {
-            let handle = testing::dead("dead");
-
-            let first = handle.record_message(Message::user("a")).await;
-            let second = handle.record_message(Message::user("b")).await;
-
-            assert_eq!(first.report.failure.as_deref(), Some(STOPPED));
-            assert_eq!(second.report, WriteReport::default());
-        }
-
-        #[tokio::test]
-        async fn actor_gone_carries_the_failure_that_stopped_persistence() {
-            for surfaced in [false, true] {
-                let handle = testing::dead("dead");
-                handle.shared.record_flush_failure("disk full");
-                if surfaced {
-                    assert!(handle.shared.surface_first_flush_failure());
-                }
-
-                let first = handle.record_message(Message::user("a")).await;
-
-                assert_eq!(
-                    first.report.failure.as_deref(),
-                    Some(
-                        "session writer task has stopped after I/O error: disk full. \
-                         Conversation history may be incomplete."
-                    ),
-                    "surfaced: {surfaced}",
-                );
-            }
-        }
-
-        #[tokio::test]
         async fn resumed_session_does_not_seed_ai_title() {
             let (_dir, store) = isolated_store();
             let original = start(&store, "m", None);
             let session_id = original.session_id();
             original.record_message(Message::user("hello")).await;
-            original.shutdown().await;
 
             let resumed = resume_id(&store, &session_id).unwrap().handle;
             let outcome = resumed.record_message(Message::user("more text")).await;
 
             assert!(outcome.ai_title_seed.is_none());
-            resumed.shutdown().await;
         }
     }
 
@@ -721,9 +679,7 @@ mod tests {
             let refused = handle.record_message(Message::user("refused")).await;
             let mut ended = pending_title_task(&handle).await;
 
-            let report = handle
-                .rewind(refused.checkpoint.expect("the actor is running"))
-                .await;
+            let report = handle.rewind(refused.checkpoint).await;
 
             assert_eq!(report, WriteReport::default());
             assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Closed));
@@ -737,9 +693,7 @@ mod tests {
             let refused = handle.record_message(Message::user("refused")).await;
             let mut ended = pending_title_task(&handle).await;
 
-            handle
-                .rewind(refused.checkpoint.expect("the actor is running"))
-                .await;
+            handle.rewind(refused.checkpoint).await;
 
             assert_eq!(ended.try_recv(), Err(oneshot::error::TryRecvError::Empty));
             handle.finalize(Vec::new()).await;
@@ -775,7 +729,6 @@ mod tests {
                     ],
                 )
                 .await;
-            handle.shutdown().await;
 
             assert_eq!(report, WriteReport::default());
             let data = store.load_session_data(&sid).unwrap();
@@ -794,39 +747,6 @@ mod tests {
                 "default-only metadata is skipped",
             );
         }
-
-        #[tokio::test]
-        async fn actor_drops_ack_surfaces_actor_gone_failure() {
-            // Five healthy acks cover each cmd `dispatch` sends. The actor drops the sixth.
-            let handle = testing::acks_then_drops("acks-then-drops", 5);
-
-            let title = handle.append_ai_title("ok".to_owned()).await;
-            let manual = handle.set_manual_title("manual".to_owned()).await;
-            let finish = handle.finish(Vec::new()).await;
-            let usage = handle.record_usage(Vec::new()).await;
-            let round_ok = handle
-                .record_round(Message::assistant("a"), Message::user("b"), Vec::new())
-                .await;
-            let round_dropped = handle
-                .record_round(Message::assistant("c"), Message::user("d"), Vec::new())
-                .await;
-
-            for (name, report) in [
-                ("AppendAiTitle", title.report),
-                ("SetManualTitle", manual),
-                ("Finish", finish),
-                ("Usage", usage),
-                ("RecordRound", round_ok),
-            ] {
-                assert_eq!(report, WriteReport::default(), "{name} is acked healthily");
-            }
-            assert_eq!(
-                round_dropped.failure.as_deref(),
-                Some(STOPPED),
-                "dropped ack surfaces actor-gone",
-            );
-            handle.shutdown().await;
-        }
     }
 
     mod append_ai_title {
@@ -842,7 +762,6 @@ mod tests {
             handle
                 .append_ai_title("Fix auth flow for mobile".to_owned())
                 .await;
-            handle.shutdown().await;
 
             assert_eq!(
                 listed_title(&store, &sid).as_deref(),
@@ -859,12 +778,10 @@ mod tests {
             let other = resume_id(&store, &source).unwrap().handle;
             other.record_message(Message::user("elsewhere")).await;
             other.set_manual_title("Renamed".to_owned()).await;
-            other.shutdown().await;
             let forked = stale.record_message(Message::assistant("reply")).await;
             let fork = forked.report.fork.expect("the stale handle forks").to;
 
             let ai = stale.append_ai_title("AI title".to_owned()).await;
-            stale.shutdown().await;
 
             assert!(!ai.applied);
             let data = store.load_session_data(&fork).unwrap();
@@ -873,7 +790,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn keeps_the_manual_title_a_fork_in_its_batch_copied() {
+        async fn keeps_the_manual_title_beside_a_concurrent_fork() {
             let (_dir, store) = isolated_store();
             let stale = start(&store, "m", None);
             let source = stale.session_id();
@@ -881,13 +798,11 @@ mod tests {
             let other = resume_id(&store, &source).unwrap().handle;
             other.record_message(Message::user("elsewhere")).await;
             other.set_manual_title("Renamed".to_owned()).await;
-            other.shutdown().await;
 
             let (forked, ai) = tokio::join!(
                 stale.record_message(Message::assistant("reply")),
                 stale.append_ai_title("AI title".to_owned()),
             );
-            stale.shutdown().await;
 
             assert!(!ai.applied);
             let fork = forked.report.fork.expect("the stale handle forks").to;
@@ -904,10 +819,8 @@ mod tests {
             stale.record_message(Message::user("first prompt")).await;
             let other = resume_id(&store, &sid).unwrap().handle;
             other.set_manual_title("Renamed".to_owned()).await;
-            other.shutdown().await;
 
             let ai = stale.append_ai_title("AI title".to_owned()).await;
-            stale.shutdown().await;
 
             assert!(!ai.applied);
             let data = store.load_session_data(&sid).unwrap();
@@ -922,11 +835,9 @@ mod tests {
             let sid = original.session_id();
             original.record_message(Message::user("seed")).await;
             original.set_manual_title("Manual".to_owned()).await;
-            original.shutdown().await;
             let resumed = resume_id(&store, &sid).unwrap().handle;
 
             let ai = resumed.append_ai_title("AI title".to_owned()).await;
-            resumed.shutdown().await;
 
             assert!(!ai.applied);
             assert_eq!(listed_title(&store, &sid).as_deref(), Some("Manual"));
@@ -935,105 +846,6 @@ mod tests {
 
     mod set_manual_title {
         use super::*;
-
-        async fn title_notification_race(accept_before_rename: bool) {
-            use wiremock::matchers::{method, path as wm_path};
-            use wiremock::{Mock, MockServer, ResponseTemplate};
-
-            use crate::client::anthropic::local_testing::{completion_body, test_client};
-            use crate::client::anthropic::testing::api_key;
-            use crate::protocol::{Event, EventSink};
-            use crate::session::title_generator;
-
-            #[derive(Clone)]
-            struct TitleSink(mpsc::UnboundedSender<Event>);
-
-            impl EventSink for TitleSink {
-                fn send(&self, event: Event) -> Result<()> {
-                    Ok(self.0.send(event)?)
-                }
-            }
-
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(wm_path("/v1/messages"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_string(completion_body(r#"{"title":"AI title"}"#)),
-                )
-                .mount(&server)
-                .await;
-            let (_dir, store) = isolated_store();
-            let mut session = start(&store, "claude-haiku-5-5", None);
-            session.record_message(Message::user("first prompt")).await;
-            let session_id = session.session_id();
-            let actor = session.cmd_tx.clone();
-            let (cmd_tx, mut commands) = mpsc::channel(8);
-            session.cmd_tx = cmd_tx;
-            let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
-            title_generator::spawn(
-                test_client(server.uri()),
-                api_key(),
-                PromptCacheTtl::OneHour,
-                session.clone(),
-                TitleSink(tx),
-                "prompt".to_owned(),
-            );
-            let usage = commands.recv().await.unwrap();
-            assert!(matches!(usage, SessionCmd::Usage { .. }));
-            actor.send(usage).await.unwrap();
-            let SessionCmd::AppendAiTitle { title, ack } = commands.recv().await.unwrap() else {
-                panic!("title generator must request AI append");
-            };
-            if accept_before_rename {
-                let (accepted, accepted_rx) = oneshot::channel();
-                actor
-                    .send(SessionCmd::AppendAiTitle {
-                        title: title.clone(),
-                        ack: accepted,
-                    })
-                    .await
-                    .unwrap();
-                let accepted = accepted_rx.await.unwrap();
-                assert!(accepted.applied);
-                assert_eq!(accepted.report, WriteReport::default());
-            }
-            let renamed = session.clone();
-            let rename =
-                tokio::spawn(
-                    async move { renamed.set_manual_title("Manual title".to_owned()).await },
-                );
-            let manual = commands.recv().await.unwrap();
-            assert!(matches!(manual, SessionCmd::SetManualTitle { .. }));
-
-            actor.send(manual).await.unwrap();
-            assert_eq!(rename.await.unwrap(), WriteReport::default());
-            if accept_before_rename {
-                _ = ack.send(AiTitleOutcome {
-                    applied: true,
-                    report: WriteReport::default(),
-                });
-            } else {
-                actor
-                    .send(SessionCmd::AppendAiTitle { title, ack })
-                    .await
-                    .unwrap();
-            }
-
-            assert_eq!(
-                store
-                    .load_session_data(&session_id)
-                    .unwrap()
-                    .title
-                    .as_deref(),
-                Some("Manual title")
-            );
-            assert_eq!(
-                events.recv().await,
-                None,
-                "a completed manual rename must suppress the delayed AI event"
-            );
-        }
 
         #[tokio::test]
         async fn writes_user_provided_title() {
@@ -1045,7 +857,6 @@ mod tests {
             let report = handle.set_manual_title("User wins".to_owned()).await;
 
             assert_eq!(report, WriteReport::default());
-            handle.shutdown().await;
             assert_eq!(listed_title(&store, &sid).as_deref(), Some("User wins"));
         }
 
@@ -1057,88 +868,9 @@ mod tests {
 
             handle.set_manual_title("Named early".to_owned()).await;
             let first = handle.record_message(Message::user("first")).await;
-            handle.shutdown().await;
 
             assert_eq!(first.ai_title_seed, None);
             assert_eq!(listed_title(&store, &sid).as_deref(), Some("Named early"));
-        }
-
-        #[tokio::test]
-        async fn suppresses_ai_notification_when_actor_skips_append() {
-            title_notification_race(false).await;
-        }
-
-        #[tokio::test]
-        async fn suppresses_ai_notification_after_accepted_append() {
-            title_notification_race(true).await;
-        }
-
-        #[tokio::test]
-        async fn aborting_the_title_usage_write_still_delivers_its_cost() {
-            use wiremock::matchers::{method, path as wm_path};
-            use wiremock::{Mock, MockServer, ResponseTemplate};
-
-            use crate::client::anthropic::local_testing::{completion_body, test_client};
-            use crate::client::anthropic::testing::api_key;
-            use crate::protocol::local_testing::CapturingSink;
-            use crate::session::title_generator;
-
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(wm_path("/v1/messages"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_string(completion_body(r#"{"title":"AI title"}"#)),
-                )
-                .mount(&server)
-                .await;
-            let (_dir, store) = isolated_store();
-            let mut session = start(&store, "claude-haiku-5-5", None);
-            session.record_message(Message::user("first prompt")).await;
-            let session_id = session.session_id();
-            let actor = session.cmd_tx.clone();
-            let (cmd_tx, mut commands) = mpsc::channel(8);
-            session.cmd_tx = cmd_tx;
-            let usage = title_generator::spawn(
-                test_client(server.uri()),
-                api_key(),
-                PromptCacheTtl::OneHour,
-                session.clone(),
-                CapturingSink::default(),
-                "prompt".to_owned(),
-            );
-            let SessionCmd::Usage {
-                records,
-                ack: _unanswered,
-            } = commands.recv().await.unwrap()
-            else {
-                panic!("title generator must record its usage first");
-            };
-            let (written, written_rx) = oneshot::channel();
-            actor
-                .send(SessionCmd::Usage {
-                    records,
-                    ack: written,
-                })
-                .await
-                .unwrap();
-            assert_eq!(written_rx.await.unwrap(), WriteReport::default());
-
-            let renamed = session.clone();
-            let rename =
-                tokio::spawn(
-                    async move { renamed.set_manual_title("Manual title".to_owned()).await },
-                );
-            actor.send(commands.recv().await.unwrap()).await.unwrap();
-            assert_eq!(rename.await.unwrap(), WriteReport::default());
-
-            let data = store.load_session_data(&session_id).unwrap();
-            assert_eq!(
-                data.usage,
-                [usage
-                    .await
-                    .expect("a cost the store keeps must also reach the engine")]
-            );
         }
     }
 
@@ -1156,10 +888,8 @@ mod tests {
             boundary.record.instructions = Some("focus".to_owned());
 
             let outcome = handle.compact(boundary, Message::user("post")).await;
-            handle.shutdown().await;
 
             assert_eq!(outcome.pre_count, 2, "pre_count snapshots before reset");
-            assert!(outcome.checkpoint.is_some());
             assert_eq!(outcome.report, WriteReport::default());
             let data = store.load_session_data(&sid).unwrap();
             assert_eq!(data.messages, [Message::user("post")]);
@@ -1169,27 +899,27 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn reports_every_failure_to_reach_the_actor() {
-            async fn compact(handle: &SessionHandle) -> CompactOutcome {
-                handle
-                    .compact(testing::boundary("s"), Message::user("synth"))
-                    .await
-            }
+        async fn takes_effect_in_memory_when_its_commit_fails() {
+            let (_dir, store) = isolated_store();
+            let handle = start(&store, "m", None);
+            handle.record_message(Message::user("a")).await;
+            handle.record_message(Message::assistant("b")).await;
+            fail_writes(&store);
 
-            let dead = testing::dead("dead");
-            for expected in [STOPPED, STOPPED_AGAIN] {
-                let outcome = compact(&dead).await;
-                assert_eq!(outcome.pre_count, 0, "no actor means no pre-count signal");
-                assert!(outcome.checkpoint.is_none());
-                assert_eq!(outcome.report.failure.as_deref(), Some(expected));
-            }
+            let outcome = handle
+                .compact(testing::boundary("s"), Message::user("synth"))
+                .await;
+            let next = handle.record_message(Message::user("c")).await;
 
-            let stalled = testing::acks_then_drops("stalled", 1);
-            assert!(compact(&stalled).await.checkpoint.is_some());
-            let dropped = compact(&stalled).await;
-            assert!(dropped.checkpoint.is_none());
-            assert_eq!(dropped.report.failure.as_deref(), Some(STOPPED));
-            stalled.shutdown().await;
+            assert_eq!(outcome.pre_count, 2);
+            assert_eq!(
+                outcome.report.failure.as_deref(),
+                Some("disk full: Error code 1811: constraint failed")
+            );
+            assert_eq!(
+                next.checkpoint.message_count, 1,
+                "the next message chains from the synthetic root"
+            );
         }
     }
 
@@ -1204,13 +934,10 @@ mod tests {
             original.record_message(Message::user("hello")).await;
 
             let report = original.archive().await;
-            original.shutdown().await;
             let archived = store.load_session_data(&session_id).unwrap().archive_state;
             let resumed = resume_id(&store, &session_id).unwrap();
-            resumed.handle.shutdown().await;
             let unarchived = store.load_session_data(&session_id).unwrap().archive_state;
             let again = resume_id(&store, &session_id).unwrap();
-            again.handle.shutdown().await;
 
             assert_eq!(report, WriteReport::default());
             assert_eq!(archived, ArchiveState::Archived);
@@ -1218,22 +945,6 @@ mod tests {
             assert_eq!(resumed.transcript.messages, [Message::user("hello")]);
             assert_eq!(unarchived, ArchiveState::Active);
             assert_eq!(again.prior, ArchiveState::Active);
-        }
-
-        #[tokio::test]
-        async fn reports_every_failure_to_reach_the_actor() {
-            let dead = testing::dead("dead");
-            assert_eq!(dead.archive().await.failure.as_deref(), Some(STOPPED));
-            assert_eq!(
-                dead.archive().await.failure.as_deref(),
-                Some(STOPPED_AGAIN),
-                "a second failure must not read as success once actor-gone was surfaced",
-            );
-
-            let stalled = testing::acks_then_drops("stalled", 1);
-            assert_eq!(stalled.archive().await.failure, None);
-            assert_eq!(stalled.archive().await.failure.as_deref(), Some(STOPPED));
-            stalled.shutdown().await;
         }
     }
 
@@ -1250,7 +961,6 @@ mod tests {
                 .await;
 
             handle.finish(Vec::new()).await;
-            handle.shutdown().await;
 
             let info = store.find(&sid).unwrap().unwrap();
             assert_eq!(info.title.as_deref(), Some("Fix the auth bug"));
@@ -1263,20 +973,8 @@ mod tests {
             let handle = start(&store, "m", None);
 
             handle.finish(Vec::new()).await;
-            handle.shutdown().await;
 
             assert_eq!(store.list().unwrap(), []);
-        }
-
-        #[tokio::test]
-        async fn actor_gone_surfaces_failure_once_then_silences() {
-            let handle = testing::dead("dead");
-
-            let first = handle.finish(Vec::new()).await;
-            let second = handle.finish(Vec::new()).await;
-
-            assert_eq!(first.failure.as_deref(), Some(STOPPED));
-            assert_eq!(second, WriteReport::default());
         }
 
         #[tokio::test]
@@ -1297,7 +995,6 @@ mod tests {
                 .collect();
 
             handle.finish(tracker.snapshot_all()).await;
-            handle.shutdown().await;
 
             let mut saved = saved_snapshot_paths(&store, &sid);
             saved.sort();
@@ -1310,12 +1007,11 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn saves_the_snapshots_then_shuts_down() {
+        async fn saves_the_snapshots_then_releases_the_session() {
             let (_dir, store) = isolated_store();
             let handle = start(&store, "m", None);
             let sid = handle.session_id();
             handle.record_message(Message::user("hi")).await;
-            let closed = handle.cmd_tx.clone();
 
             let report = handle.finalize(vec![snapshot("/repo/f.rs")]).await;
 
@@ -1324,16 +1020,9 @@ mod tests {
                 saved_snapshot_paths(&store, &sid),
                 [PathBuf::from("/repo/f.rs")]
             );
-            assert!(closed.is_closed(), "the actor exited");
-        }
-
-        #[tokio::test]
-        async fn fails_when_actor_dead() {
-            let handle = testing::dead("dead");
-
-            let report = handle.finalize(Vec::new()).await;
-
-            assert_eq!(report.failure.as_deref(), Some(STOPPED));
+            store
+                .delete(&sid)
+                .expect("the finalized session's liveness lock is released");
         }
 
         #[tokio::test]
@@ -1371,37 +1060,6 @@ mod tests {
         }
     }
 
-    mod shutdown {
-        use super::*;
-
-        #[tokio::test]
-        async fn commits_the_records_before_the_actor_exits() {
-            let (_dir, store) = isolated_store();
-            let handle = start(&store, "m", None);
-            let sid = handle.session_id();
-            handle.record_message(Message::user("hello")).await;
-
-            handle.shutdown().await;
-
-            assert_eq!(
-                store.load_session_data(&sid).unwrap().messages,
-                [Message::user("hello")]
-            );
-        }
-
-        #[tokio::test]
-        async fn completes_without_panicking_whatever_ended_the_actor() {
-            testing::dead("dead").shutdown().await;
-            testing::panicked("panicked").shutdown().await;
-            let (_dir, store) = isolated_store();
-            let cancelled = start(&store, "m", None);
-            if let Some(join) = cancelled.actor_join.lock().unwrap().as_ref() {
-                join.abort();
-            }
-            cancelled.shutdown().await;
-        }
-    }
-
     mod start {
         use super::*;
 
@@ -1419,7 +1077,6 @@ mod tests {
                 "a fresh session has no row before its first record"
             );
             assert!(store.find(&sid).unwrap().is_some());
-            handle.shutdown().await;
         }
 
         #[tokio::test]
@@ -1459,7 +1116,6 @@ mod tests {
             )
             .await;
             session.record_message(Message::user("rolled")).await;
-            session.shutdown().await;
 
             assert_ne!(outcome.new_id, original_id, "id must roll");
             assert_eq!(outcome.finalize, WriteReport::default());
@@ -1491,7 +1147,7 @@ mod tests {
             let mut session = start(&store, "m", None);
 
             let resume = tokio::spawn(async move {
-                let outcome = roll_into(
+                roll_into(
                     &mut session,
                     &store,
                     Vec::new(),
@@ -1499,9 +1155,7 @@ mod tests {
                     "m",
                 )
                 .await
-                .unwrap();
-                session.shutdown().await;
-                outcome
+                .unwrap()
             });
             let independent = tokio::spawn(async { "runtime event" });
 
@@ -1557,7 +1211,6 @@ mod tests {
                 .map(|s| s.path)
                 .collect();
             assert_eq!(loaded, [target_seed]);
-            session.shutdown().await;
         }
 
         #[tokio::test]
@@ -1589,7 +1242,6 @@ mod tests {
                 assert_eq!(err.to_string(), expected);
                 assert_eq!(session.session_id(), live_id, "{expected}");
             }
-            session.shutdown().await;
         }
     }
 
@@ -1620,7 +1272,6 @@ mod tests {
             assert_eq!(original.finalize(Vec::new()).await, WriteReport::default());
 
             let resumed = resume_id(&store, &session_id).unwrap();
-            resumed.handle.shutdown().await;
 
             assert_eq!(resumed.transcript.messages, messages);
         }
@@ -1652,9 +1303,7 @@ mod tests {
                 rename(RenameAt::BeforePrompt).await;
                 let refused = original.record_message(Message::user("refused")).await;
                 rename(RenameAt::BeforeRewind).await;
-                let rewound = original
-                    .rewind(refused.checkpoint.expect("the actor is running"))
-                    .await;
+                let rewound = original.rewind(refused.checkpoint).await;
                 assert_eq!(rewound, WriteReport::default(), "{name}");
                 rename(RenameAt::AfterRewind).await;
                 assert_eq!(
@@ -1696,7 +1345,6 @@ mod tests {
                 if finished {
                     original.finish(Vec::new()).await;
                 }
-                original.shutdown().await;
 
                 let resumed = resume_id(&store, &session_id).unwrap();
 
@@ -1711,7 +1359,6 @@ mod tests {
                     store.artifact_dir(&session_id),
                     "{finished}"
                 );
-                resumed.handle.shutdown().await;
             }
         }
 
@@ -1753,14 +1400,12 @@ mod tests {
                 for message in messages {
                     original.record_message(message).await;
                 }
-                original.shutdown().await;
 
                 let resumed = resume_id(&store, &session_id);
 
                 match (resumed, expected) {
                     (Ok(resumed), Ok(expected)) => {
                         assert_eq!(resumed.transcript.messages, expected, "{name}");
-                        resumed.handle.shutdown().await;
                     }
                     (Err(err), Err(())) => assert_eq!(
                         format!("{err:#}"),
@@ -1779,12 +1424,10 @@ mod tests {
             let session_id = original.session_id();
             original.record_message(Message::user("hello")).await;
             original.record_message(Message::assistant("hi")).await;
-            original.shutdown().await;
             let head = store.load_session_data(&session_id).unwrap().head;
 
             let resumed = resume_id(&store, &session_id).unwrap().handle;
             resumed.record_message(Message::user("follow up")).await;
-            resumed.shutdown().await;
 
             let parent: Option<String> = store
                 .connect()
@@ -1824,7 +1467,6 @@ mod tests {
             let resumed = resume_id(&store, &session_id).unwrap();
             let (resumed_tracker, _) =
                 FileTracker::restored(resumed.transcript.file_snapshots).await;
-            resumed.handle.shutdown().await;
 
             assert_eq!(
                 resumed_tracker.verify_current_content(&kept, b"alpha", GatePurpose::Edit),
@@ -1914,9 +1556,7 @@ mod tests {
                 .await;
             session.record_message(Message::interruption()).await;
             let refused = session.record_message(Message::user("Delete f.rs")).await;
-            session
-                .rewind(refused.checkpoint.expect("the actor is running"))
-                .await;
+            session.rewind(refused.checkpoint).await;
             session
                 .record_usage(vec![usage("1h", 3), usage("1h", 4)])
                 .await;
@@ -1940,7 +1580,6 @@ mod tests {
                 ])
                 .await;
             let session_id = session.session_id();
-            session.shutdown().await;
 
             (store, session_id)
         }
@@ -2135,7 +1774,6 @@ mod tests {
                 .handle
                 .record_message(Message::user("after resume"))
                 .await;
-            resumed.handle.shutdown().await;
             let after = store.load_session_data(&session_id).unwrap().messages;
             assert_eq!(
                 after,

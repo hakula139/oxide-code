@@ -265,7 +265,6 @@ mod tests {
     use crate::config::testing::test_config;
     use crate::message::Message;
     use crate::protocol::local_testing::CapturingSink;
-    use crate::session::handle::testing::dead;
     use crate::session::store::local_testing::fail_writes;
     use crate::session::store::testing::test_store;
 
@@ -693,43 +692,6 @@ mod tests {
                         title: "Fix auth".to_owned(),
                     },
                 ],
-            );
-        }
-
-        #[tokio::test]
-        async fn skips_the_title_event_when_the_writer_is_gone() {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(wm_path("/v1/messages"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_string(body_without_usage(r#"{"title":"Fix auth"}"#)),
-                )
-                .mount(&server)
-                .await;
-            let session = dead("dead-session");
-            let client = title_client(server.uri());
-            let sink = CapturingSink::default();
-
-            generate_and_record(
-                &client,
-                &api_key(),
-                CACHE_TTL,
-                &session,
-                &sink,
-                "first prompt",
-                oneshot::channel().0,
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(
-                sink.events(),
-                [Event::Error(
-                    "Session write failed: session writer task has stopped. \
-                     Conversation history may be incomplete."
-                        .to_owned(),
-                )],
             );
         }
 

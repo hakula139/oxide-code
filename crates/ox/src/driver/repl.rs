@@ -526,7 +526,7 @@ mod tests {
 
         #[tokio::test]
         async fn exits_with_failure_when_the_session_cannot_be_saved() {
-            let failure = "session writer task has stopped";
+            let failure = "disk full";
             let (mut output, _, stderr) = output(OutputFormat::Text);
             let input: &[u8] = b"hello\n";
             let handle = unsaved_session_handle(failure);

@@ -247,8 +247,8 @@ mod tests {
     use crate::engine::compaction::{AutoCompactFailures, auto_compaction_due};
     use crate::engine::estimate::request_tokens;
     use crate::engine::local_testing::{
-        EchoTool, dead_test_session, finished_session, greeting_title, inert_mailbox, mount_title,
-        next_matching, system_prompt, texts, tracked_paths, write_unreadable_instructions,
+        EchoTool, finished_session, greeting_title, inert_mailbox, mount_title, next_matching,
+        system_prompt, texts, tracked_paths, write_unreadable_instructions,
     };
     use crate::engine::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, mount_tool_call_once, request_bodies,
@@ -270,6 +270,7 @@ mod tests {
     use crate::session::handle::testing::record_write_call;
     use crate::session::saved::ArchiveUpdate;
     use crate::session::store::SessionStore;
+    use crate::session::store::local_testing::fail_writes;
     use crate::session::store::testing::{listed_ids, test_store};
     use crate::tool::ToolRegistry;
     use crate::tool::bash::background::ShellState;
@@ -737,8 +738,14 @@ mod tests {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
-                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
-                engine.transcript.set_session(dead_test_session());
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path()).await;
+                engine
+                    .transcript
+                    .session()
+                    .record_message(Message::user("saved"))
+                    .await;
+                fail_writes(&store);
                 let warning = write_unreadable_instructions(dir.path());
                 let sink = CapturingSink::default();
 
@@ -756,8 +763,7 @@ mod tests {
                             Event::Error(failure),
                             Event::Notice(notice),
                         ] if failure == "Previous session write failed: \
-                                         session writer task has stopped. \
-                                         Conversation history may be incomplete."
+                                         disk full: Error code 1811: constraint failed"
                             && *notice == warning
                     ),
                     "{events:?}",
@@ -824,14 +830,14 @@ mod tests {
                 assert_eq!(engine.transcript.session().session_id(), live_id);
                 engine
                     .transcript
-                    .set_messages(vec![Message::user("unsaved")]);
-                engine.transcript.set_session(dead_test_session());
+                    .session()
+                    .record_message(Message::user("saved"))
+                    .await;
+                engine.transcript.set_messages(vec![Message::user("saved")]);
+                fail_writes(&store);
                 engine.archive(&sink).await;
                 engine.archive(&sink).await;
-                assert_eq!(
-                    engine.transcript.session().session_id(),
-                    "dead-test-session"
-                );
+                assert_eq!(engine.transcript.session().session_id(), live_id);
 
                 let events = sink.events();
                 assert!(
@@ -842,9 +848,10 @@ mod tests {
                             Event::TurnFailed(first),
                             Event::TurnFailed(again),
                         ] if empty == "Nothing to archive: this session has no messages yet"
-                            && first == "Archive failed: session writer task has stopped. \
-                                         Conversation history may be incomplete."
-                            && again == "Archive failed: session writer task has stopped"
+                            && first == "Archive failed: \
+                                         disk full: Error code 1811: constraint failed"
+                            && again == "Archive failed: \
+                                         session persistence stopped after an earlier write failed"
                     ),
                     "{events:?}",
                 );
@@ -1166,7 +1173,12 @@ mod tests {
                 let store = test_store(dir.path());
                 let target_id = finished_session(&store).await;
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
-                engine.transcript.set_session(dead_test_session());
+                engine
+                    .transcript
+                    .session()
+                    .record_message(Message::user("saved"))
+                    .await;
+                fail_writes(&store);
                 let sink = CapturingSink::default();
 
                 engine
@@ -1182,8 +1194,7 @@ mod tests {
                             Event::Error(msg),
                         ] if *id == target_id
                                 && msg == "Previous session write failed: \
-                                           session writer task has stopped. \
-                                           Conversation history may be incomplete."
+                                           disk full: Error code 1811: constraint failed"
                     ),
                     "{events:?}"
                 );
@@ -1258,12 +1269,18 @@ mod tests {
             with_pinned_home(async {
                 let server = MockServer::start().await;
                 let dir = tempfile::tempdir().unwrap();
-                let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
+                let store = test_store(dir.path());
+                let engine = engine(server.uri(), &store, dir.path()).await;
                 let live_id = engine.transcript.session().session_id();
+                engine
+                    .transcript
+                    .session()
+                    .record_message(Message::user("saved"))
+                    .await;
                 let sink = CapturingSink::default();
 
                 engine.rename(&sink, "Fix login".to_owned()).await;
-                engine.transcript.set_session(dead_test_session());
+                fail_writes(&store);
                 engine.rename(&sink, "Lost".to_owned()).await;
 
                 let events = sink.events();
@@ -1274,8 +1291,8 @@ mod tests {
                             Event::SessionTitleUpdated { id, title },
                             Event::RenameFailed(write),
                         ] if *id == live_id && title == "Fix login"
-                            && write == "Session write failed: session writer task has stopped. \
-                                         Conversation history may be incomplete."
+                            && write == "Session write failed: \
+                                         disk full: Error code 1811: constraint failed"
                     ),
                     "{events:?}",
                 );

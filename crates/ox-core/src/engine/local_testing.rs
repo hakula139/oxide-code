@@ -19,7 +19,7 @@ use crate::message::{ContentBlock, Message, Replay, Role};
 use crate::permission::rule::Rule;
 use crate::permission::{Mode, PermissionClass, Policy, Workspace};
 use crate::protocol::{Event, Op};
-use crate::session::handle::{self, SessionHandle};
+use crate::session::handle;
 use crate::session::store::SessionStore;
 use crate::tool::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
 
@@ -223,14 +223,9 @@ pub(super) fn dispatch_with(
     DispatchContext {
         policy,
         workspace,
-        session: handle::testing::dead("test-session"),
+        session: handle::testing::unsaved(),
         tracker: tracker(),
     }
-}
-
-/// Handle whose actor channel is closed. Every write returns actor-gone.
-pub(super) fn dead_test_session() -> SessionHandle {
-    handle::testing::dead("dead-test-session")
 }
 
 // ── Compaction ──
