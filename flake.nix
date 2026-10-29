@@ -18,8 +18,6 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
-    flake-utils.url = "github:numtide/flake-utils";
-
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -43,13 +41,14 @@
     {
       self,
       nixpkgs,
-      flake-utils,
       rust-overlay,
       git-hooks-nix,
       home-manager,
       ...
     }:
     let
+      inherit (nixpkgs) lib;
+
       # git-hooks.nix has dropped x86_64-darwin, which Nixpkgs supports only through 26.05.
       systems = [
         "aarch64-darwin"
@@ -57,20 +56,17 @@
         "x86_64-linux"
       ];
 
-      toolchainFor =
-        pkgs: (rust-overlay.lib.mkRustBin { } pkgs).fromRustupToolchainFile ./rust-toolchain.toml;
-
-      mkOxideCode =
-        pkgs:
+      eachSystem =
+        f:
         let
-          toolchain = toolchainFor pkgs.buildPackages;
+          bySystem = lib.genAttrs systems f;
+          outputs = builtins.attrNames bySystem.${builtins.head systems};
         in
-        pkgs.callPackage ./nix/package.nix {
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = toolchain;
-            rustc = toolchain;
-          };
-        };
+        lib.genAttrs outputs (output: builtins.mapAttrs (_: attrs: attrs.${output}) bySystem);
+
+      # The package builds with the Rust compiler of the given package set, so consumers that follow
+      # their own nixpkgs never fetch the toolchain `rust-toolchain.toml` pins.
+      mkOxideCode = pkgs: pkgs.callPackage ./nix/package.nix { };
 
       # A key lets the module system deduplicate the module when it is imported twice.
       homeModuleKey = "${self}/flake.nix#homeModules.default";
@@ -88,12 +84,14 @@
         imports = [ (import ./nix/home-manager.nix { inherit mkOxideCode; }) ];
       };
     }
-    // flake-utils.lib.eachSystem systems (
+    // eachSystem (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        nodejs = pkgs.nodejs_24;
 
-        rustToolchain = toolchainFor pkgs;
+        rustBin = rust-overlay.lib.mkRustBin { } pkgs;
+        rustToolchain = rustBin.fromRustupToolchainFile ./rust-toolchain.toml;
         rustDevToolchain = rustToolchain.override (prev: {
           extensions = prev.extensions ++ [
             "rust-analyzer"
@@ -155,7 +153,7 @@
             pkgs.writeShellApplication {
               inherit name;
               runtimeInputs = with pkgs; [
-                nodejs_24
+                nodejs
                 pnpm
               ];
 
@@ -193,12 +191,13 @@
         };
 
         preCommit = git-hooks-nix.lib.${system}.run {
-          src = ./.;
           hooks = hooks // nodeHooks;
+          src = ./.;
         };
 
+        # The flake check leaves rustfmt to CI's Rust job, so it never fetches the pinned toolchain.
         preCommitCheck = git-hooks-nix.lib.${system}.run {
-          inherit hooks;
+          hooks = removeAttrs hooks [ "rustfmt" ];
           src = ./.;
         };
 
@@ -207,7 +206,7 @@
       in
       {
         # ------------------------------------------------------------------------------------------
-        # Dev Shell
+        # Dev Shells
         # ------------------------------------------------------------------------------------------
         devShells.default = pkgs.mkShell {
           name = "oxide-code-dev";
@@ -224,7 +223,7 @@
             cargo-llvm-cov
             cargo-mutants
             git-cliff
-            nodejs_24
+            nodejs
             pnpm
             sqlite
           ]);
@@ -245,6 +244,20 @@
               ) 9>"$common/git-hooks.lock"
             fi
           '';
+        };
+
+        # CI's Lint job runs in this shell, which leaves out the pinned toolchain so that every tool
+        # comes from the nixpkgs binary cache. `cargo deny` needs only `cargo metadata`, which
+        # nixpkgs' cargo serves for this workspace.
+        devShells.lint = pkgs.mkShell {
+          name = "oxide-code-lint";
+
+          packages = with pkgs; [
+            cargo
+            cargo-deny
+            nodejs
+            pnpm
+          ];
         };
 
         # ------------------------------------------------------------------------------------------
@@ -269,6 +282,15 @@
           overlay =
             assert (pkgs.extend self.overlays.default).oxide-code.drvPath == oxide-code.drvPath;
             pkgs.emptyFile;
+
+          # Runs the test suite in the build sandbox, without the package's release build.
+          tests = oxide-code.overrideAttrs {
+            pname = "oxide-code-tests";
+            buildPhase = "true";
+            doCheck = true;
+            installPhase = "touch $out";
+            doInstallCheck = false;
+          };
         };
 
         # ------------------------------------------------------------------------------------------

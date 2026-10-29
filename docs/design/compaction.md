@@ -4,7 +4,7 @@ Context compression replaces the visible transcript with a summary so a long ses
 
 ## Triggers
 
-Manual compaction runs only when asked for. `/compact` accepts optional instructions that steer the summary, and the slash registry classifies it as `Mutating`, so a turn in flight finishes first. Auto-compaction is default on and can be disabled independently, and manual `/compact` ignores that setting.
+Manual compaction runs only when asked for. `/compact` accepts optional instructions that steer the summary, and the slash registry marks it idle-only, so a turn in flight finishes first. Auto-compaction is default on and can be disabled independently, and manual `/compact` ignores that setting.
 
 Before recording a new prompt, the engine runs automatic compaction when the previous turn left its estimate over the threshold, whether that turn completed, failed, or was cancelled. Inside a turn, it runs at a round boundary where the next request would cross the threshold, and the turn then continues from the summary. It never interrupts an in-flight stream or tool call. A prompt that arrives during compaction stays queued and drains afterward, unless the compaction fails, in which case the queue waits for the user.
 
@@ -51,7 +51,7 @@ A request the API rejects with HTTP 400 `prompt is too long`, or a reply that st
 
 On resume, the chain walk from the head stops at the synthetic root because it has no parent, so the loader reads only the post-compact tail. The root's `CompactInfo` lets the TUI render the boundary block while the model transcript keeps the synthetic root, and its context is the newest one on the chain. `session::sanitize` treats the synthetic continuation as an ordinary `role: user` text message.
 
-`Engine::run_compaction` is the pipeline both paths run. On success, it reloads the instruction files and hands the summary, the session's task list, and the refreshed session context to `Engine::replace_with_summary`, which builds the synthetic continuation and passes it to `LiveTranscript::compact`. That method saves the boundary and then, once the boundary commits, clears the file tracker, replaces the in-memory messages, and adopts the refreshed prompt. The engine emits `Event::SessionCompacted { summary, pre_count, instructions, trigger }`, shows any instruction warning the rebuilt prompt newly raises, and ends the compaction with `SessionReady`. A failure emits `Event::TurnFailed` and leaves the transcript unchanged. A summary whose boundary write fails is discarded before the failure is reported, and once session persistence has stopped, the summary still replaces the transcript, with the stop reported after `SessionCompacted`. Cancellation emits `Event::Cancelled` like a regular turn, and a quit ends the compaction without a terminal event.
+`Engine::run_compaction` is the pipeline both paths run. On success, it reloads the instruction files and hands the summary, the session's task list, and the refreshed session context to `Engine::replace_with_summary`, which builds the synthetic continuation and passes it to `LiveTranscript::compact`. That method saves the boundary, then clears the file tracker, replaces the in-memory messages, and adopts the refreshed prompt. The engine emits `Event::SessionCompacted { summary, pre_count, instructions, trigger }`, shows any instruction warning the rebuilt prompt newly raises, and ends the compaction with `SessionReady`. A summarizer failure emits `Event::TurnFailed` and leaves the transcript unchanged. A failed boundary write stops session persistence like any failed write, but the summary still replaces the transcript in memory, and the failure is reported after `SessionCompacted`. Only a session writer that is gone discards the summary, with `Event::SummaryDiscarded`, and fails the compaction with the transcript unchanged. Cancellation emits `Event::Cancelled` like a regular turn, and a quit ends the compaction without a terminal event.
 
 Each summary request is recorded as a `usage` entry, and its estimated cost joins the session total whether the summary succeeds, fails, or is cancelled. An `Event::UsageUpdated` then shows the new total, between `SessionCompacted` and `SessionReady` on success, and before the terminal event when a failed or cancelled summary request reported usage.
 
@@ -86,7 +86,7 @@ The failure counter lives on the engine's `UsageLedger`, which starts each sessi
 
 Manual and automatic compaction use the same visible `CompactedBlock`. While the summary streams, the TUI shows it below the chat under a `Summarizing the conversation...` header through `CompactedBlock::render_streaming`, laid out like the block it becomes, and `Event::SummaryDiscarded` removes it. `App::apply_session_compacted` clears the chat, pushes a single `CompactedBlock`, keeps queued prompts, and clears the modal stack. The block has an accent-bar surface and no footer. It fills its `Compacted N messages into a summary` header from `pre_count`, adding a `(focus: ...)` suffix when `instructions` were given, and renders `summary` as Markdown below it. Resume renders the same boundary block and skips the synthetic root in visible chat.
 
-When the attempt ahead of a prompt fails, the prompt is not sent, and chat shows why. A summarizer failure reads `Auto-compaction failed: ...`, and a failed boundary write shows a `Session write failed: ...` notice followed by `Auto-compaction was not saved`. On the `PromptUnsent` event that precedes the failure, the TUI hands the prompt back as [**The TUI owns the queue**](cancellation.md#design-decisions) describes. Sending the prompt again retries compaction. During the pause, the next send goes out without compaction, and `/status` shows that auto-compaction is paused and points to `/compact`.
+When the attempt ahead of a prompt fails, the prompt is not sent, and chat shows why. A summarizer failure reads `Auto-compaction failed: ...`, and a session writer that is gone reads `Auto-compaction was not saved`. On the `PromptUnsent` event that precedes the failure, the TUI hands the prompt back as [**The TUI owns the queue**](cancellation.md#design-decisions) describes. Sending the prompt again retries compaction. During the pause, the next send goes out without compaction, and `/status` shows that auto-compaction is paused and points to `/compact`. A failed boundary write does not fail the attempt, so the prompt goes out after the boundary block and a `Session write failed: ...` notice.
 
 During a manual or automatic compaction, the TUI status bar shows the `Compacting` state and holds prompts submitted meanwhile, so a failed `/compact` or a failed mid-turn attempt leaves them waiting for the user. Automatic `SessionCompacted` events keep the TUI busy until the queued prompt drains or the prompt submission finishes. After a mid-turn compaction, the reply continues below the boundary block, and the summary stands in for the prompt and the prompts the turn drained before it, so a later rollback hands back only the prompts drained after it. At `Event::SessionReady`, a manual compact returns to idle and submits the queue head, so the prompt renders below the notices the rebuilt prompt raises, or only returns to idle after a cancel that lost the race to the swap.
 
@@ -102,17 +102,17 @@ In the bare REPL and headless runs, `driver::stdio::StdioSink` writes `Compactin
 
 4. **Reserve output headroom in the threshold.** Claude Code and opencode both compact below the advertised context limit, and the summarizer needs room to produce its summary. The 20k reserve and 13k buffer follow that floor.
 
-5. **Boundary-only compaction.** Compaction runs between persisting a coherent transcript unit and starting the next prompt or the next round of a turn, once every call of the round has its result recorded. It never interrupts a stream or a running tool, so the summarized transcript holds no unresolved call, and session replay matches manual `/compact`. The round boundary is a compaction site because a long tool loop would otherwise fill the context window before its turn ends.
+5. **Boundary-only compaction.** Compaction runs between persisting a coherent transcript unit and starting the next prompt or the next round of a turn, once every call of the round has its result recorded. It never interrupts a stream or a running tool, so the summarized transcript holds no unresolved call, and session replay matches manual `/compact`. The round boundary is a compaction site because a long tool loop would otherwise fill the context window before its turn ends. Claude Code's microcompact and opencode's prune, which clear old tool-output bodies between summaries, would add a second retention policy with its own UI and persistence for the need these boundaries already cover.
 
-6. **Refuse manual compaction mid-turn.** Claude Code, Codex, and opencode treat manual compaction as a between-turns operation. The `Mutating` classification refuses a `/compact` while a turn is in flight, and the user retries after the reply finishes.
+6. **Refuse manual compaction mid-turn.** Claude Code, Codex, and opencode treat manual compaction as a between-turns operation. The slash dispatcher refuses an idle-only `/compact` while a turn is in flight, and the user retries after the reply finishes.
 
-7. **Same request path as a turn.** The summarization request goes through the same `Wire` and `collect_response` as a turn, so it reuses the live model, effort and thinking settings, credentials, betas, and cache handling. `request_summary` checks the stop reason itself, so a summary cut off by `max_tokens` or stopped early fails before it can replace the transcript.
+7. **Same request path as a turn.** The summarization request goes through the same `Wire` and `collect_response` as a turn, so it reuses the live model, effort and thinking settings, credentials, betas, and cache handling. `request_summary` checks the stop reason itself, so a summary cut off by `max_tokens` or stopped early fails before it can replace the transcript. Codex rewrites history server-side on its OpenAI and Azure paths, while this path needs only the Messages stream every supported endpoint already serves.
 
 8. **Send the conversation's own request prefix.** The system prompt, tools, and message prefix match what the conversation sends, so the summarizer reads the conversation's prompt cache and pays cache-read rates for most of its input. Codex forks the same way.
 
    - **Preserve the prefix.** Editing the history first would miss that cache. On models that bind thinking blocks to the conversation prefix, such as Opus 5.5, it would also invalidate the thinking blocks the request replays, which enforced accounts reject with a 400.
    - **Keep the tools and ask for text only.** The tools array is part of the cached prefix. The rubric asks the model not to call any tool, and a reply that stops on `tool_use` fails the compaction.
-   - **Replace history after success.** The summary replaces the whole history, so later requests replay no earlier thinking.
+   - **Replace history after success.** The summary replaces the whole history, so later requests replay no earlier thinking. The next compaction summarizes a transcript that already starts from this summary, so opencode's anchored re-compaction, which updates the previous summary in place, would add a second prompt path without new input.
    - **Trim on overflow.** Retries drop the oldest API rounds and strip every thinking block, since a new turn may omit earlier thinking but must not replay it after a changed prefix. A retry whose kept rounds end on a tool result closes that turn with a short assistant message before the rubric.
    - **Reserve summary room.** Claude Code's `truncateHeadForPTLRetry` frees just the reported overflow. oxide-code frees about 20k tokens beyond it so the retry leaves the summary room to finish, and marks no cache breakpoint on a transcript no later request reads.
 
@@ -142,38 +142,20 @@ In the bare REPL and headless runs, `driver::stdio::StdioSink` writes `Compactin
 
 ## Out of Scope
 
-- **Anchored re-compaction (`<previous-summary>` block).** opencode updates a previous summary in place, which pays off only when one session is compacted many times. Each compaction summarizes the transcript since the last boundary, which already starts from the previous summary, and repeated lossy rewrites need usage data before they earn their complexity.
-
-- **Microcompact and prune (in-place tool-result deletion).** Claude Code's microcompact and opencode's prune clear old tool-output bodies before a full summary. They are a separate retention policy with their own UI and persistence, and whole-transcript summaries at turn and round boundaries cover the same need with one mechanism.
-
 - **Partial and range compaction.** Claude Code's message-selector rewind adds a selector UI, a dual-direction summarizer, and a transcript splice for a case `/compact` already covers.
-
-- **Provider-specific remote compaction.** Codex's OpenAI and Azure paths rewrite history server-side. oxide-code talks to the Anthropic Messages API, where the normal stream already works.
-
-- **A pre-flight `count_tokens` request.** Every reference implementation reads the last usage plus an estimate and accepts a few percent of drift, which the extra round trip does not repay.
-
 - **Compaction hooks.** Hooks belong to a general surface tracked in [#157](https://github.com/hakula139/oxide-code/issues/157), with command hooks in [#159](https://github.com/hakula139/oxide-code/issues/159) and the `pre_compact` event in [#168](https://github.com/hakula139/oxide-code/issues/168).
 
 ## Sources
 
-- `crates/ox-core/src/client/anthropic/transport.rs`: `prompt_too_long_message`, which types an HTTP 400 `prompt is too long` as `PromptTooLong`.
 - `crates/ox-core/src/config/compaction.rs`: `CompactionConfig`, which resolves the threshold and its snapping.
-- `crates/ox-core/src/engine.rs`: `Engine::submit_prompt`, which compacts between the segments of a turn, and `Engine::account_usage`.
+- `crates/ox-core/src/engine.rs`: `Engine::submit_prompt`, which compacts between the segments of a turn.
 - `crates/ox-core/src/engine/compaction.rs`: `Engine::compact`, `Engine::run_compaction`, `Engine::replace_with_summary`, `request_summary`, the `SummaryStream` sink, the context-window retries, `AutoCompactFailures`, and `request_tokens`.
 - `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::compact`, which saves the boundary and swaps the transcript to the synthetic continuation.
 - `crates/ox-core/src/engine/turn.rs`: `agent_turn`, `TurnStop::Compact`, `collect_response`, and `TurnReport::context_estimate`.
-- `crates/ox-core/src/engine/usage.rs`: session-cost accounting and `Engine::reset_context_usage`.
+- `crates/ox-core/src/engine/usage.rs`: `UsageLedger`, which accounts the session cost and context usage, and `Engine::account_usage` and `Engine::reset_context_usage`, which feed it.
 - `crates/ox-core/src/protocol.rs`: `Op::Compact`, the `SessionCompacted`, `SummaryToken`, `SummaryDiscarded`, `AutoCompactionStarted`, and `AutoCompactionPaused` events, and `CompactTrigger`.
-- `crates/ox-core/src/protocol/notice.rs`: `compacted`, the boundary header every frontend shows.
-- `crates/ox-core/src/session/actor.rs`: the `SessionCmd::Compact` handler.
-- `crates/ox-core/src/session/handle.rs`: `SessionHandle::compact` and `CompactOutcome`.
-- `crates/ox-core/src/session/history.rs`: `TranscriptWalker::push_message`, which skips the generated summary block when the compaction boundary already displays it.
 - `crates/ox-core/src/session/post_compact.rs`: `SUMMARY_PREFIX` and `synthesize_post_compact_message`.
 - `crates/ox-core/src/session/state.rs`: `SessionState::compact`, which queues the synthetic root.
 - `crates/ox-core/src/session/store.rs`: `CompactInfo`, the record a compaction root stores.
 - `crates/ox-core/src/session/store/load.rs`: the chain walk that stops at the root.
-- `crates/ox-tui/src/app/events.rs`: `apply_session_compacted` and the auto-compaction event handling.
-- `crates/ox-tui/src/app/queue.rs`: `PromptQueue::fail_turn`, which hands back an unsent prompt.
 - `crates/ox-tui/src/components/chat/blocks/compacted.rs`: `CompactedBlock`.
-- `crates/ox-tui/src/slash/compact.rs`: `CompactCmd`.
-- `crates/ox/src/driver/stdio.rs`: `StdioSink`, which prints the compaction line on stderr.

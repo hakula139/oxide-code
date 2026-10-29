@@ -5,14 +5,12 @@ use std::borrow::Cow;
 
 use strum::VariantArray as _;
 
-use ox_core::command;
 use ox_core::model::{Effort, ModelSpec};
 
 use super::context::SlashContext;
 use super::effort_slider::EffortSlider;
 use super::matcher::rank_by_prefix;
-use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
-use crate::action::Action;
+use super::registry::{ArgCompletion, SlashCommand, SlashOutcome, typed_form};
 
 // ── EffortCmd ──
 
@@ -27,8 +25,8 @@ impl SlashCommand for EffortCmd {
         "Adjust reasoning effort"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        SlashKind::Mutating
+    fn idle_only(&self) -> bool {
+        true
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -58,11 +56,11 @@ impl SlashCommand for EffortCmd {
             };
             return Ok(SlashOutcome::Modal(Box::new(slider)));
         }
-        let op = command::effort(arg)?;
+        let outcome = typed_form(self.name(), arg, ctx)?;
         if ctx.info.config.model.info().is_none() {
             return Err(no_effort_levels_msg(&ctx.info.config.model));
         }
-        Ok(SlashOutcome::Forward(Action::Op(op)))
+        Ok(outcome)
     }
 }
 
@@ -81,18 +79,9 @@ mod tests {
     use ox_core::protocol::{ConfigPick, Op};
 
     use super::*;
+    use crate::action::Action;
     use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
-
-    mod classify {
-        use super::*;
-
-        #[test]
-        fn is_mutating_for_modal_and_direct_forms() {
-            assert_eq!(EffortCmd.classify(""), SlashKind::Mutating);
-            assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
-        }
-    }
 
     mod complete_arg {
         use super::*;

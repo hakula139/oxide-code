@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use super::usage::UsageLedger;
 use super::{Engine, turn};
-use crate::protocol::notice::session_write_failed;
+use crate::protocol::notice::{previous_session_write_failed, session_write_failed};
 use crate::protocol::{Event, EventSink, ResumeTarget, SavedTarget};
 use crate::session::display::id_prefix;
 use crate::session::handle::LoadedTranscript;
@@ -221,7 +221,7 @@ impl Engine {
 fn report_finalize_failure(sink: &dyn EventSink, failure: Option<String>) {
     if let Some(failure) = failure {
         sink.emit(
-            Event::Error(format!("Previous session write failed: {failure}")),
+            Event::Error(previous_session_write_failed(&failure)),
             "previous-session-finalize-failed",
         );
     }
@@ -459,7 +459,7 @@ mod tests {
             );
 
             SESSION_CONTEXT.clone_into(&mut engine.transcript.prompt_mut().user_context);
-            engine.usage.total_estimated_cost_usd = 1.23;
+            engine.usage.set_total_estimated_cost_usd(1.23);
             engine.policy.allow_for_session(rule);
             engine
                 .resume(&sink, ResumeTarget::Id(target_id.clone()))
@@ -469,7 +469,7 @@ mod tests {
             assert_eq!(engine.transcript.messages().len(), 2);
             assert_ne!(engine.transcript.prompt().user_context, SESSION_CONTEXT);
             assert!(
-                engine.usage.total_estimated_cost_usd.abs() < f64::EPSILON,
+                engine.usage.total_estimated_cost_usd().abs() < f64::EPSILON,
                 "a session that recorded no usage resumes at zero"
             );
         })
@@ -739,16 +739,16 @@ mod tests {
                 })
                 .await;
                 assert!(
-                    engine.usage.total_estimated_cost_usd.abs() < f64::EPSILON,
+                    engine.usage.total_estimated_cost_usd().abs() < f64::EPSILON,
                     "a turn without usage emits nothing, so the title cost is still pending"
                 );
 
                 engine.clear(&sink).await;
 
                 assert!(
-                    engine.usage.total_estimated_cost_usd.abs() < f64::EPSILON,
+                    engine.usage.total_estimated_cost_usd().abs() < f64::EPSILON,
                     "the new session starts at zero: {}",
-                    engine.usage.total_estimated_cost_usd,
+                    engine.usage.total_estimated_cost_usd(),
                 );
             })
             .await;
@@ -1008,7 +1008,7 @@ mod tests {
                     .await;
 
                 assert_eq!(
-                    engine.usage.context_estimate,
+                    engine.usage.context_estimate(),
                     request_tokens(
                         engine.transcript.prompt(),
                         &[],
@@ -1017,7 +1017,7 @@ mod tests {
                 );
                 assert!(auto_compaction_due(
                     engine.auto_compaction(),
-                    engine.usage.context_estimate,
+                    engine.usage.context_estimate(),
                     engine.transcript.messages()
                 ));
             })
@@ -1224,9 +1224,9 @@ mod tests {
                     .transcript
                     .set_messages(vec![Message::user("still here")]);
                 engine.usage.auto_compaction_failures = AutoCompactFailures::new(2);
-                engine.usage.context_estimate = context_estimate;
-                engine.usage.displayed_usage = Some(displayed_usage);
-                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.set_context_estimate(context_estimate);
+                engine.usage.set_displayed_usage(displayed_usage);
+                engine.usage.set_total_estimated_cost_usd(1.23);
                 let rule = Rule::parse(PermissionClass::Exec, "cargo test *").unwrap();
                 engine.policy.allow_for_session(rule.clone());
                 start_shell(&engine.shells, "sleep 30").await;
@@ -1245,9 +1245,9 @@ mod tests {
                     engine.usage.auto_compaction_failures,
                     AutoCompactFailures::new(2)
                 );
-                assert_eq!(engine.usage.context_estimate, context_estimate);
-                assert_eq!(engine.usage.displayed_usage, Some(displayed_usage));
-                assert!((engine.usage.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON);
+                assert_eq!(engine.usage.context_estimate(), context_estimate);
+                assert_eq!(engine.usage.displayed_usage(), Some(displayed_usage));
+                assert!((engine.usage.total_estimated_cost_usd() - 1.23).abs() < f64::EPSILON);
                 assert_eq!(engine.policy.session_allow(), [rule]);
                 assert_eq!(tracked_paths(&engine), [read]);
                 assert_eq!(

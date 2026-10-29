@@ -20,9 +20,9 @@ use super::{App, EXIT_WINDOW, SlashTask};
 use crate::action::{APP_KEYMAP, Action, AppAction, next_mode};
 use crate::components::input::InputOutcome;
 use crate::keymap::{CTRL_C, CTRL_D};
-use crate::modal::ModalAction;
+use crate::modal::{EngineUpdate, ModalAction};
 use crate::now;
-use crate::slash::{self, SlashContext, SlashKind, SlashOutcome};
+use crate::slash::{self, SlashContext, SlashOutcome};
 use crate::theme::Theme;
 use crate::theme::builtin::BuiltinTheme;
 use crate::viewport::Direction;
@@ -184,20 +184,24 @@ impl App {
 
     pub(super) fn apply_modal_action(&mut self, action: ModalAction) {
         match action {
-            ModalAction::Cancelled => self.cancel_theme_preview(),
             ModalAction::Dispatch(action) => self.dispatch_action(action),
             ModalAction::SystemMessage(msg) => self.chat.push_system_message(msg),
         }
     }
 
-    fn cancel_theme_preview(&mut self) {
-        if let Some(theme) = self.preview_theme_snapshot.take() {
-            self.apply_theme(&theme);
+    /// Passes `update` to the open modals and applies the actions of those it closes. Returns
+    /// whether a modal shows the update.
+    pub(super) fn notify_modals(&mut self, update: EngineUpdate<'_>) -> bool {
+        let Some(actions) = self.modals.notify(update) else {
+            return false;
+        };
+        for action in actions {
+            self.apply_modal_action(action);
         }
+        true
     }
 
     pub(super) fn clear_modals(&mut self) {
-        self.cancel_theme_preview();
         for action in self.modals.clear() {
             self.apply_modal_action(action);
         }
@@ -253,6 +257,7 @@ impl App {
             }
             Action::CycleMode(direction) => self.cycle_mode(direction),
             Action::PreviewTheme(theme) => self.preview_theme(theme),
+            Action::RevertThemePreview => self.revert_theme_preview(),
             Action::SwapTheme(theme) => self.swap_theme(theme),
         }
     }
@@ -281,13 +286,13 @@ impl App {
             Op::Clear | Op::Archive => self.queue.mark_switch(SwitchTo::Fresh),
             Op::Resume { .. } => self.queue.mark_switch(SwitchTo::Saved),
             Op::Compact { .. } => self.queue.mark_compacting(),
-            Op::SetArchive { target, .. } => self.modals.archive_started(target),
-            Op::DeleteSaved { session_id } => self.modals.delete_started(session_id),
             Op::SetMode(mode) => self.requested_mode = *mode,
             Op::Prompt { .. }
             | Op::Queue(_)
             | Op::Resolve { .. }
             | Op::FindSaved { .. }
+            | Op::SetArchive { .. }
+            | Op::DeleteSaved { .. }
             | Op::SetModel(_)
             | Op::Rename { .. }
             | Op::Login
@@ -296,7 +301,11 @@ impl App {
             | Op::Shutdown => {}
         }
         self.begin(&op);
+        let closed = self.modals.notify(EngineUpdate::Admitted(&op));
         permit.send(op);
+        for action in closed.into_iter().flatten() {
+            self.apply_modal_action(action);
+        }
     }
 
     /// Puts `op` in flight when it runs until a terminal event, which also closes an exit window.
@@ -370,6 +379,12 @@ impl App {
         self.apply_theme(&preview);
     }
 
+    fn revert_theme_preview(&mut self) {
+        if let Some(theme) = self.preview_theme_snapshot.take() {
+            self.apply_theme(&theme);
+        }
+    }
+
     fn swap_theme(&mut self, builtin: &BuiltinTheme) {
         self.preview_theme_snapshot = None;
         let theme = self.with_overrides(builtin);
@@ -412,8 +427,11 @@ impl App {
         if echoes {
             self.chat.push_user_message(text.to_owned());
         }
-        let kind = slash::classify(&parsed);
-        if !self.allows_mutating(&parsed.name, kind) {
+        if self.in_flight.is_some() && slash::idle_only(&parsed.name) {
+            self.chat.push_system_message(format!(
+                "/{} runs only when idle. Try again after the turn finishes.",
+                parsed.name,
+            ));
             return;
         }
         if let Some(action) = self.run_slash(&parsed, text) {
@@ -492,18 +510,6 @@ impl App {
         self.apply_slash_outcome(outcome, line)
     }
 
-    /// Refuses a `Mutating` command while the App is busy, naming it in a chat notice. Returns
-    /// whether the command may run.
-    fn allows_mutating(&mut self, name: &str, kind: Option<SlashKind>) -> bool {
-        if self.in_flight.is_none() || kind != Some(SlashKind::Mutating) {
-            return true;
-        }
-        self.chat.push_system_message(format!(
-            "/{name} runs only when idle. Try again after the turn finishes.",
-        ));
-        false
-    }
-
     /// Applies a slash command's outcome: shows its chat output or modal, starts its background
     /// task, or hands back the action it forwards or the [`Action::SlashPrompt`] that runs a built
     /// prompt under the typed `line`, unapplied. Must run inside a tokio runtime.
@@ -561,10 +567,10 @@ mod tests {
 
     use ox_core::config::ThemeConfig;
     use ox_core::config::provenance::Source;
-    use ox_core::model::{Effort, ResolvedModelId};
+    use ox_core::model::Effort;
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
-    use ox_core::protocol::testing::text_result;
+    use ox_core::protocol::testing::{model_pick, text_result};
     use ox_core::protocol::{
         ApprovalDecision, CompactTrigger, ConfigPick, Event, ResumeTarget, SavedTarget,
     };
@@ -580,6 +586,7 @@ mod tests {
         push_answerable_approval, render_app, rendered_text, start_op, test_app,
     };
     use crate::components::status::StatusHyperlink;
+    use crate::modal::UpdateReply;
     use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::modal::testing::ScriptedModal;
     use crate::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};
@@ -725,7 +732,7 @@ mod tests {
         #[tokio::test]
         async fn a_modal_takes_keys_before_the_input() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Dispatch(
+            app.push_modal(Box::new(ScriptedModal::submitting(ModalAction::Dispatch(
                 Action::Op(Op::Interrupt),
             ))));
 
@@ -826,7 +833,7 @@ mod tests {
         #[test]
         fn cancelling_a_modal_closes_it_without_dispatching() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
+            app.push_modal(Box::new(ScriptedModal::new()));
 
             app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
 
@@ -1286,19 +1293,6 @@ mod tests {
         use super::*;
 
         #[test]
-        fn cancel_without_snapshot_is_a_noop() {
-            // Modals that never previewed (e.g. /model picker) cancel through the same
-            // ModalAction::Cancelled path, so the rollback arm must skip cleanly with no snapshot.
-            let (mut app, _rx, _event_tx) = test_app(None);
-            let original_text = app.theme.text;
-
-            app.apply_modal_action(ModalAction::Cancelled);
-
-            assert!(app.preview_theme_snapshot.is_none());
-            assert_eq!(app.theme.text, original_text);
-        }
-
-        #[test]
         fn system_message_action_pushes_into_chat() {
             // Destructive-action modals report success in chat so the user can confirm the action
             // ran.
@@ -1350,11 +1344,15 @@ mod tests {
         }
 
         #[test]
-        fn rolls_back_theme_preview() {
+        fn rolls_back_the_theme_picker_preview() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let original = app.theme.clone();
-            app.push_modal(Box::new(ScriptedModal::new(ModalAction::Cancelled)));
-            app.dispatch_action(Action::PreviewTheme(latte()));
+            app.dispatch_action(Action::Submit("/theme".to_owned()));
+            app.handle_crossterm_event(&key_event(KeyCode::Down, KeyModifiers::NONE));
+            assert_ne!(
+                app.theme.text, original.text,
+                "the highlight previews a theme"
+            );
 
             app.clear_modals();
 
@@ -1862,7 +1860,7 @@ mod tests {
 
         #[tokio::test]
         async fn init_during_busy_refuses_with_system_message_no_forward() {
-            // Mutating: refuse. The typed `/init` row lands, but its synthesized body doesn't.
+            // Idle-only: refuse. The typed `/init` row lands, but its synthesized body doesn't.
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("active".to_owned()));
             rx.try_recv().expect("active submit forwarded");
@@ -1990,6 +1988,24 @@ mod tests {
 
     mod dispatch_op {
         use super::*;
+
+        #[tokio::test]
+        async fn sends_the_admitted_op_before_the_action_of_a_modal_it_closes() {
+            let (mut app, mut rx, _event_tx) = test_app(None);
+            let mut modal = ScriptedModal::new();
+            modal.reply = Some(UpdateReply::Closed(ModalAction::Dispatch(Action::Op(
+                Op::Clear,
+            ))));
+            app.push_modal(Box::new(modal));
+
+            app.dispatch_op(Op::Compact { instructions: None });
+
+            assert_eq!(rx.try_recv(), Ok(Op::Compact { instructions: None }));
+            assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+            assert!(!app.modals.is_active());
+            assert_eq!(app.chat.last_error_text(), Some(BUSY_DROPPED));
+            assert_eq!(activity(&app), Some(&Activity::Compacting));
+        }
 
         #[tokio::test]
         async fn an_operation_closes_the_exit_window() {
@@ -2191,10 +2207,7 @@ mod tests {
         async fn forwards_engine_ops_unchanged() {
             // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
             for op in [
-                Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5"),
-                    effort: None,
-                }),
+                Op::SetModel(model_pick("claude-opus-5-5", None)),
                 Op::SetModel(ConfigPick::Effort(Effort::High)),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
@@ -2211,8 +2224,8 @@ mod tests {
         #[test]
         fn saved_archive_retains_ownership_and_reports_after_the_picker_closes() {
             let (mut app, mut rx, _event_tx) = test_app(None);
-            let modal = ScriptedModal::new(ModalAction::Cancelled);
-            let observed = Arc::clone(&modal.saved_events);
+            let modal = ScriptedModal::new();
+            let observed = Arc::clone(&modal.updates);
             app.push_modal(Box::new(modal));
             let target = SavedTarget::Prefix("saved".to_owned());
             let op = Op::SetArchive {
@@ -2233,7 +2246,7 @@ mod tests {
 
             assert_eq!(rx.try_recv(), Ok(op.clone()));
             assert_eq!(activity(&app), Some(&Activity::Archiving));
-            let started = r#"started:Prefix("saved")"#;
+            let started = r#"Admitted(SetArchive { target: Prefix("saved"), state: Archived })"#;
             assert_eq!(*observed.lock().unwrap(), [started]);
 
             app.handle_engine_event(Event::ArchiveUpdated {
@@ -2246,7 +2259,7 @@ mod tests {
             });
 
             assert_eq!(activity(&app), None);
-            let completed = r#"completed:Prefix("saved"):Archived:Ok(ArchiveUpdate { id: "saved", changed: true })"#;
+            let completed = r#"Event(ArchiveUpdated { target: Prefix("saved"), state: Archived, result: Ok(ArchiveUpdate { id: "saved", changed: true }) })"#;
             assert_eq!(*observed.lock().unwrap(), [started, completed]);
             assert_eq!(
                 app.chat.last_system_text(),
@@ -2566,14 +2579,28 @@ mod tests {
         }
 
         #[test]
-        fn then_modal_cancel_restores_the_theme_from_before_the_first_preview() {
-            // Esc / Ctrl+C surface as ModalAction::Cancelled, so the snapshot must roll back.
+        fn keeps_the_configured_overrides() {
+            let (mut app, _rx, _event_tx) = test_app(None);
+            app.theme_overrides = red_text_overrides();
+
+            app.dispatch_action(Action::PreviewTheme(latte()));
+
+            assert_eq!(app.theme.text.fg, Some(RED));
+            assert_ne!(app.theme.accent, Theme::default().accent, "latte applies");
+        }
+    }
+
+    mod revert_theme_preview {
+        use super::*;
+
+        #[test]
+        fn restores_the_theme_from_before_the_first_preview() {
             let (mut app, _rx, _event_tx) = test_app(None);
             let original = app.theme.clone();
             app.dispatch_action(Action::PreviewTheme(latte()));
             app.dispatch_action(Action::PreviewTheme(built_in_theme("frappe")));
 
-            app.apply_modal_action(ModalAction::Cancelled);
+            app.dispatch_action(Action::RevertThemePreview);
 
             assert!(
                 app.preview_theme_snapshot.is_none(),
@@ -2583,14 +2610,16 @@ mod tests {
         }
 
         #[test]
-        fn keeps_the_configured_overrides() {
+        fn keeps_the_theme_without_a_preview() {
+            // The `/theme` picker reverts on every cancel, including Enter on its original row
+            // before any preview.
             let (mut app, _rx, _event_tx) = test_app(None);
-            app.theme_overrides = red_text_overrides();
+            let original_text = app.theme.text;
 
-            app.dispatch_action(Action::PreviewTheme(latte()));
+            app.dispatch_action(Action::RevertThemePreview);
 
-            assert_eq!(app.theme.text.fg, Some(RED));
-            assert_ne!(app.theme.accent, Theme::default().accent, "latte applies");
+            assert!(app.preview_theme_snapshot.is_none());
+            assert_eq!(app.theme.text, original_text);
         }
     }
 
@@ -2610,7 +2639,7 @@ mod tests {
             assert_eq!(app.session_info.config.provenance.theme, Source::Session);
             assert_eq!(app.theme.text, previewed.text);
 
-            app.apply_modal_action(ModalAction::Cancelled);
+            app.dispatch_action(Action::RevertThemePreview);
 
             assert_eq!(
                 app.session_info.config.theme_name, "latte",
@@ -2744,10 +2773,7 @@ mod tests {
             let forwarded = rx.try_recv().expect("SetModel forwarded to the engine");
             assert_eq!(
                 forwarded,
-                Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-haiku-5-5"),
-                    effort: None,
-                }),
+                Op::SetModel(model_pick("claude-haiku-5-5", None)),
             );
         }
 
