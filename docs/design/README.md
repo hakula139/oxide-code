@@ -2,7 +2,7 @@
 
 Architecture decisions and implementation specs for oxide-code.
 
-Each page covers one topic, and [`docs/research/`](../research/) holds the external surveys and API references behind them.
+Each page covers one topic, and [`docs/research/`](../research/) holds the API references and the surveys behind open design questions.
 
 ## Overview
 
