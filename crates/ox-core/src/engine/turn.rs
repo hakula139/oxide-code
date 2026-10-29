@@ -536,11 +536,9 @@ mod tests {
     };
     use crate::engine::testing::MODEL;
     use crate::message::{Replay, Role};
-    use crate::model::{Effort, ResolvedModelId};
-    use crate::protocol::testing::CapturingSink;
-    use crate::protocol::{
-        ApprovalDecision, ConfigPick, ResumeTarget, SavedTarget, ToolCall, ToolResult,
-    };
+    use crate::model::Effort;
+    use crate::protocol::testing::{CapturingSink, model_pick};
+    use crate::protocol::{ApprovalDecision, ResumeTarget, SavedTarget, ToolCall, ToolResult};
     use crate::session::handle;
     use crate::session::handle::SessionHandle;
     use crate::session::store::testing::test_store;
@@ -695,7 +693,7 @@ mod tests {
             events
         }
 
-        /// Path tool whose result view shows the input it was resolved from.
+        /// A tool whose result view shows the path its input names.
         struct PathViewTool;
 
         impl Tool for PathViewTool {
@@ -709,10 +707,6 @@ mod tests {
                     class: crate::permission::PermissionClass::Read,
                     parallel_safe: true,
                 }
-            }
-
-            fn path_field(&self) -> Option<&'static str> {
-                Some("file_path")
             }
 
             fn run<'a>(
@@ -1135,7 +1129,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn resolves_result_views_from_the_unpinned_input() {
+        async fn resolves_result_views_from_the_call_input() {
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());
             let cwd = canonical_tempdir();
@@ -1164,15 +1158,13 @@ mod tests {
             .into_result()
             .unwrap();
 
-            let pinned = cwd.path().join("notes.txt");
-            let pinned = pinned.to_str().unwrap();
             let (_, results) = tool_events(&sink.events());
             assert_eq!(
                 results,
                 [
                     ToolResult {
                         id: "tool_1".to_owned(),
-                        content: pinned.to_owned(),
+                        content: "notes.txt".to_owned(),
                         is_error: false,
                         title: Some("Viewed notes".to_owned()),
                         view: ToolResultView::ReadExcerpt {
@@ -1474,10 +1466,7 @@ mod tests {
                     id: "stale".to_owned(),
                     decision: ApprovalDecision::Approve,
                 },
-                Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5"),
-                    effort: Some(Effort::High),
-                }),
+                Op::SetModel(model_pick("claude-opus-5-5", Some(Effort::High))),
                 Op::Compact { instructions: None },
                 Op::Clear,
                 Op::Archive,
@@ -2641,7 +2630,7 @@ mod tests {
                 panic!("expected ToolResult, got {:?}", messages[2].content[0]);
             };
             assert!(
-                content.starts_with("The echo call was denied by `plan` mode."),
+                content.starts_with("The echo call was denied by `plan` mode,"),
                 "{content}"
             );
             assert!(

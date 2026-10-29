@@ -1,48 +1,36 @@
-//! Preparation and publication of workspace file changes.
+//! Publication of workspace file changes.
 
-#[cfg(target_os = "linux")]
-mod metadata;
-
-#[cfg(target_os = "linux")]
-use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::Path;
-
-#[cfg(target_os = "linux")]
-use tempfile::NamedTempFile;
 
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
 use crate::util::fs::{open_no_follow, validate_regular_file};
 use crate::util::path::requires_directory;
 
 pub(super) fn write(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> io::Result<()> {
-    write_with(path, bytes, expected, |_, _| Ok(()))
+    write_with(path, bytes, expected, |_| Ok(()))
 }
 
+/// The points of an in-place write where a test can act on the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    Prepared,
+    /// The new bytes are written over the truncated original, before the sync.
     Written,
+    /// The new bytes are synced, before the final check.
     Synced,
-    Validated,
 }
 
 fn write_with(
     path: &Path,
     bytes: &[u8],
     expected: Option<&[u8]>,
-    mut checkpoint: impl FnMut(Phase, &File) -> io::Result<()>,
+    checkpoint: impl FnMut(Phase) -> io::Result<()>,
 ) -> io::Result<()> {
-    let Some(expected) = expected else {
-        return create(path, bytes);
-    };
-    let mut original = Original::open(path, expected)?;
-    #[cfg(target_os = "linux")]
-    if replace_atomically(path, bytes, expected, &original, &mut checkpoint)? {
-        return Ok(());
+    match expected {
+        Some(expected) => write_in_place(path, bytes, expected, checkpoint),
+        None => create(path, bytes),
     }
-    write_in_place(path, bytes, expected, &mut original, &mut checkpoint)
 }
 
 /// Creates `path` with an exclusive open, which never replaces an existing entry, including a
@@ -68,115 +56,48 @@ fn left_partial_file(error: &io::Error) -> io::Error {
     )
 }
 
-/// Replaces `path` with a staged copy when a rename preserves every piece of metadata, which is
-/// when the staged file with the original's mode alone captures the same snapshot.
-#[cfg(target_os = "linux")]
-fn replace_atomically(
-    path: &Path,
-    bytes: &[u8],
-    expected: &[u8],
-    original: &Original,
-    checkpoint: &mut impl FnMut(Phase, &File) -> io::Result<()>,
-) -> io::Result<bool> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    if original.nlink != 1 {
-        return Ok(false);
-    }
-    let parent = path
-        .parent()
-        .expect("prepare resolves an absolute file path");
-    let mut staged = match staged_file(parent) {
-        Ok(staged) => staged,
-        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    checkpoint(Phase::Prepared, staged.as_file())?;
-    staged.as_file_mut().write_all(bytes)?;
-    checkpoint(Phase::Written, staged.as_file())?;
-    staged
-        .as_file()
-        .set_permissions(fs::Permissions::from_mode(original.snapshot.mode))?;
-    if metadata::Snapshot::capture(staged.as_file())? != original.snapshot {
-        return Ok(false);
-    }
-    seal(&mut staged, bytes, checkpoint)?;
-    original.verify(path, expected)?;
-    fs::rename(staged.path(), path).map(|()| true)
-}
-
-/// Writes through the original's held handle, which preserves every piece of metadata and every
-/// hard link without recreating any of it.
+/// Rewrites `path` through the handle checked against `expected`, which keeps the inode with its
+/// metadata and every hard link. A crash mid-write can leave partial content, and a failed write
+/// after the truncation says so.
 fn write_in_place(
     path: &Path,
     bytes: &[u8],
     expected: &[u8],
-    original: &mut Original,
-    checkpoint: &mut impl FnMut(Phase, &File) -> io::Result<()>,
+    mut checkpoint: impl FnMut(Phase) -> io::Result<()>,
 ) -> io::Result<()> {
+    let mut original = Original::open(path, expected)?;
     original.verify(path, expected)?;
-    checkpoint(Phase::Prepared, &original.file)?;
     original.file.set_len(0)?;
-    original.file.rewind()?;
-    original.file.write_all(bytes)?;
-    checkpoint(Phase::Written, &original.file)?;
-    original.file.sync_all()?;
-    checkpoint(Phase::Synced, &original.file)?;
-    original.verify(path, bytes)?;
-    checkpoint(Phase::Validated, &original.file)
-}
-
-/// Syncs the staged copy, then checks that it still holds `bytes` under its own name.
-#[cfg(target_os = "linux")]
-fn seal(
-    staged: &mut NamedTempFile,
-    bytes: &[u8],
-    checkpoint: &mut impl FnMut(Phase, &File) -> io::Result<()>,
-) -> io::Result<()> {
-    staged.as_file().sync_all()?;
-    checkpoint(Phase::Synced, staged.as_file())?;
-    if !bytes_match(staged.as_file_mut(), bytes)? {
-        return Err(io::Error::other(
-            "the prepared file changed before publication",
-        ));
-    }
-    checkpoint(Phase::Validated, staged.as_file())?;
-    verify_name(staged.as_file(), staged.path())
-}
-
-#[cfg(target_os = "linux")]
-fn staged_file(parent: &Path) -> io::Result<NamedTempFile> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    tempfile::Builder::new()
-        .prefix(".ox-write.")
-        .permissions(fs::Permissions::from_mode(0o600))
-        .tempfile_in(parent)
+    original
+        .file
+        .rewind()
+        .and_then(|()| original.file.write_all(bytes))
+        .and_then(|()| checkpoint(Phase::Written))
+        .and_then(|()| original.file.sync_all())
+        .map_err(|error| left_partial_file(&error))?;
+    checkpoint(Phase::Synced)?;
+    original.verify(path, bytes)
 }
 
 struct Original {
     file: File,
-    /// The link count. A rename would leave every other link on the old content.
-    #[cfg(target_os = "linux")]
-    nlink: u64,
-    #[cfg(target_os = "linux")]
-    snapshot: metadata::Snapshot,
 }
 
 impl Original {
     fn open(path: &Path, expected: &[u8]) -> io::Result<Self> {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt as _;
-
         let mut options = OpenOptions::new();
         options.read(true).write(true);
         let mut file = open_no_follow(path, options)?;
         let metadata = file.metadata()?;
         validate_regular_file(&metadata, MAX_TRACKED_FILE_SIZE).map_err(io::Error::other)?;
         #[cfg(unix)]
-        validate_mode(metadata.mode() & 0o7777)?;
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            validate_mode(metadata.mode() & 0o7777)?;
+        }
         #[cfg(target_os = "linux")]
-        if metadata::has_capability(&file)? {
+        if has_capability(&file)? {
             return Err(io::Error::other(
                 "refusing to write a file with a capability set",
             ));
@@ -184,15 +105,7 @@ impl Original {
         if !bytes_match(&mut file, expected)? {
             return Err(stale_content());
         }
-        #[cfg(target_os = "linux")]
-        let snapshot = metadata::Snapshot::capture(&file)?;
-        Ok(Self {
-            file,
-            #[cfg(target_os = "linux")]
-            nlink: metadata.nlink(),
-            #[cfg(target_os = "linux")]
-            snapshot,
-        })
+        Ok(Self { file })
     }
 
     fn verify(&self, path: &Path, expected: &[u8]) -> io::Result<()> {
@@ -247,22 +160,16 @@ fn identity(file: &File) -> io::Result<(u64, [u8; 16])> {
     crate::util::fs::file_id(file)
 }
 
-/// Checks that `path` still names `file`, reopening without following a symlink so a stage
-/// replaced by another file, a symlink, or a directory is refused.
+/// Whether `file` carries `security.capability`, which the kernel clears on a write.
 #[cfg(target_os = "linux")]
-fn verify_name(file: &File, path: &Path) -> io::Result<()> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    let same = match open_no_follow(path, options) {
-        Ok(named) => identity(&named)? == identity(file)?,
-        Err(_) => false,
-    };
-    if !same {
-        return Err(io::Error::other(
-            "the prepared file's pathname changed before publication",
-        ));
+fn has_capability(file: &File) -> io::Result<bool> {
+    use xattr::FileExt as _;
+
+    match file.get_xattr("security.capability") {
+        Ok(value) => Ok(value.is_some()),
+        Err(error) if error.raw_os_error() == Some(nix::libc::EOPNOTSUPP) => Ok(false),
+        Err(error) => Err(error),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -297,15 +204,19 @@ mod tests {
             ] {
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("target");
-                if existing {
+                let before = existing.then(|| {
                     fs::write(&path, b"original").unwrap();
-                }
+                    identity_of(&path)
+                });
 
                 let result = write(&path, bytes, existing.then_some(b"original".as_slice()));
 
                 result.unwrap();
                 assert_eq!(fs::read(&path).unwrap(), bytes);
                 assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+                if let Some(before) = before {
+                    assert_eq!(identity_of(&path), before, "the write keeps the inode");
+                }
             }
         }
 
@@ -420,7 +331,7 @@ mod tests {
 
         #[cfg(target_os = "linux")]
         #[test]
-        fn writes_in_place_when_attributes_cannot_be_reproduced() {
+        fn keeps_the_mode_and_extended_attributes() {
             use std::os::unix::fs::PermissionsExt as _;
             use xattr::FileExt as _;
 
@@ -436,48 +347,41 @@ mod tests {
 
             let current = File::open(&path).unwrap();
             assert_eq!(fs::read(&path).unwrap(), b"new");
+            assert_eq!(identity_of(&path), before);
             assert_eq!(
                 current.metadata().unwrap().permissions().mode() & 0o7777,
                 0o751
             );
             if attributes_supported {
-                assert_eq!(identity_of(&path), before);
                 assert_eq!(
                     current.get_xattr("user.ox.value").unwrap(),
                     Some(b"\x00\xff".to_vec())
                 );
-            } else {
-                assert_ne!(identity_of(&path), before);
             }
-        }
-
-        /// A POSIX ACL whose owner entry grants `owner` permissions.
-        #[cfg(target_os = "linux")]
-        fn acl(owner: u16) -> Vec<u8> {
-            let mut bytes = 2_u32.to_le_bytes().to_vec();
-            for (tag, permissions, id) in [
-                (1_u16, owner, u32::MAX),
-                (2, 4_u16, 65534),
-                (4, 4, u32::MAX),
-                (16, 4, u32::MAX),
-                (32, 0, u32::MAX),
-            ] {
-                bytes.extend(tag.to_le_bytes());
-                bytes.extend(permissions.to_le_bytes());
-                bytes.extend(id.to_le_bytes());
-            }
-            bytes
         }
 
         #[cfg(target_os = "linux")]
         #[test]
-        fn keeps_a_named_user_acl_by_writing_in_place() {
+        fn keeps_a_named_user_acl() {
             use xattr::FileExt as _;
 
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("target");
             fs::write(&path, b"original").unwrap();
-            let acl = acl(6);
+            // The kernel's version 2 ACL encoding: owner rw, user 65534 r, group r, mask r, other
+            // none, each as a little-endian (tag, permissions, id) entry.
+            let mut acl = 2_u32.to_le_bytes().to_vec();
+            for (tag, permissions, id) in [
+                (1_u16, 6_u16, u32::MAX),
+                (2, 4, 65534),
+                (4, 4, u32::MAX),
+                (16, 4, u32::MAX),
+                (32, 0, u32::MAX),
+            ] {
+                acl.extend(tag.to_le_bytes());
+                acl.extend(permissions.to_le_bytes());
+                acl.extend(id.to_le_bytes());
+            }
             let file = File::open(&path).unwrap();
             let acl_supported = match file.set_xattr("system.posix_acl_access", &acl) {
                 Ok(()) => true,
@@ -491,59 +395,22 @@ mod tests {
             write(&path, b"new", Some(b"original")).unwrap();
 
             assert_eq!(fs::read(&path).unwrap(), b"new");
-            let current = File::open(&path).unwrap();
+            assert_eq!(identity_of(&path), before);
             if acl_supported {
-                assert_eq!(identity_of(&path), before);
                 assert_eq!(
-                    current.get_xattr("system.posix_acl_access").unwrap(),
+                    File::open(&path)
+                        .unwrap()
+                        .get_xattr("system.posix_acl_access")
+                        .unwrap(),
                     Some(acl)
                 );
-            } else {
-                assert_ne!(identity_of(&path), before);
             }
-            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-        }
-
-        #[cfg(target_os = "linux")]
-        #[test]
-        fn writes_in_place_when_the_stage_inherits_a_parent_default_acl() {
-            use xattr::FileExt as _;
-
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("target");
-            fs::write(&path, b"original").unwrap();
-            let parent = File::open(dir.path()).unwrap();
-            let inherited = match parent.set_xattr("system.posix_acl_default", &acl(7)) {
-                Ok(()) => true,
-                Err(error) => {
-                    assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
-                    false
-                }
-            };
-            if !inherited {
-                write(&path, b"new", Some(b"original")).unwrap();
-                assert_eq!(fs::read(&path).unwrap(), b"new");
-                return;
-            }
-            let before = identity_of(&path);
-
-            write(&path, b"new", Some(b"original")).unwrap();
-
-            assert_eq!(identity_of(&path), before);
-            assert_eq!(fs::read(&path).unwrap(), b"new");
-            assert_eq!(
-                File::open(&path)
-                    .unwrap()
-                    .get_xattr("system.posix_acl_access")
-                    .unwrap(),
-                None,
-            );
             assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
         }
 
         #[cfg(unix)]
         #[test]
-        fn falls_back_to_in_place_without_parent_write_access() {
+        fn writes_without_parent_write_access() {
             use std::os::unix::fs::PermissionsExt as _;
 
             let dir = tempfile::tempdir().unwrap();
@@ -588,69 +455,24 @@ mod tests {
         use super::*;
 
         #[test]
-        fn preparation_failures_leave_the_original_unchanged() {
-            // Only an atomic publication can stop after writing without the original changing.
-            let phases: &[Phase] = if cfg!(target_os = "linux") {
-                &[
-                    Phase::Prepared,
-                    Phase::Written,
-                    Phase::Synced,
-                    Phase::Validated,
-                ]
-            } else {
-                &[Phase::Prepared]
-            };
-            for &phase in phases {
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("target");
-                fs::write(&path, b"original").unwrap();
-                let before = entries(dir.path());
-                let mut visited = Vec::new();
-
-                let error = write_with(&path, b"replacement", Some(b"original"), |at, _| {
-                    visited.push(at);
-                    if at == phase {
-                        return Err(io::Error::other("injected preparation failure"));
-                    }
-                    Ok(())
-                })
-                .unwrap_err();
-
-                assert!(error.to_string().contains("injected"), "{phase:?}");
-                assert_eq!(visited.last(), Some(&phase));
-                assert_eq!(entries(dir.path()), before, "{phase:?}");
-                assert_eq!(fs::read(&path).unwrap(), b"original", "{phase:?}");
-            }
-        }
-
-        #[test]
-        fn ordinary_replacements_keep_or_replace_the_inode_by_platform() {
+        fn a_failed_write_says_a_partial_file_remains() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("target");
             fs::write(&path, b"original").unwrap();
-            let before = identity_of(&path);
-            let mut visited = Vec::new();
 
-            write_with(&path, b"new", Some(b"original"), |phase, _| {
-                visited.push(phase);
-                Ok(())
+            let error = write_with(&path, b"new", Some(b"original"), |phase| {
+                assert_eq!(phase, Phase::Written);
+                Err(io::Error::new(io::ErrorKind::StorageFull, "disk full"))
             })
-            .unwrap();
+            .unwrap_err();
 
+            assert_eq!(error.kind(), io::ErrorKind::StorageFull);
             assert_eq!(
-                visited,
-                [
-                    Phase::Prepared,
-                    Phase::Written,
-                    Phase::Synced,
-                    Phase::Validated,
-                ]
+                error.to_string(),
+                "disk full. A partial file remains. Read it before writing again."
             );
             assert_eq!(fs::read(&path).unwrap(), b"new");
-            #[cfg(target_os = "linux")]
-            assert_ne!(identity_of(&path), before);
-            #[cfg(not(target_os = "linux"))]
-            assert_eq!(identity_of(&path), before);
+            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
         }
 
         #[test]
@@ -677,7 +499,7 @@ mod tests {
                 fs::write(&path, b"original").unwrap();
                 let mut visited = Vec::new();
 
-                let result = write_with(&path, b"ours", Some(b"original"), |phase, _| {
+                let result = write_with(&path, b"ours", Some(b"original"), |phase| {
                     visited.push(phase);
                     if phase == Phase::Synced {
                         if replace {
@@ -711,89 +533,6 @@ mod tests {
                 assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
             }
         }
-
-        #[cfg(target_os = "linux")]
-        #[test]
-        fn refuses_stage_content_changes_after_original_validation() {
-            for changed in [b"".as_slice(), b"OURS", b"ours-extra"] {
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("target");
-                fs::write(&path, b"original").unwrap();
-                let mut visited = Vec::new();
-
-                let error = write_with(&path, b"ours", Some(b"original"), |phase, mut staged| {
-                    visited.push(phase);
-                    if phase == Phase::Synced {
-                        staged.set_len(0)?;
-                        staged.rewind()?;
-                        staged.write_all(changed)?;
-                    }
-                    Ok(())
-                })
-                .unwrap_err();
-
-                assert!(
-                    error.to_string().contains("prepared file changed"),
-                    "{error}"
-                );
-                assert_eq!(visited.last(), Some(&Phase::Synced));
-                assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-                assert_eq!(fs::read(&path).unwrap(), b"original");
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        #[test]
-        fn refuses_substituted_stage_names() {
-            for replacement in ["content", "symlink"] {
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("target");
-                let victim = dir.path().join("victim");
-                fs::write(&path, b"original").unwrap();
-                fs::write(&victim, b"victim").unwrap();
-                let parent = dir.path().to_owned();
-                let target = victim.clone();
-
-                let error = write_with(&path, b"ours", Some(b"original"), |phase, _| {
-                    if phase == Phase::Validated {
-                        let staged = fs::read_dir(&parent)?
-                            .map(Result::unwrap)
-                            .map(|entry| entry.path())
-                            .find(|candidate| {
-                                candidate
-                                    .file_name()
-                                    .unwrap()
-                                    .to_string_lossy()
-                                    .starts_with(".ox-write.")
-                            })
-                            .expect("the call staged a file");
-                        fs::remove_file(&staged)?;
-                        if replacement == "content" {
-                            fs::write(&staged, b"substituted")?;
-                        } else {
-                            symlink_file(&target, &staged);
-                        }
-                    }
-                    Ok(())
-                })
-                .unwrap_err();
-
-                assert!(
-                    error.to_string().contains("pathname changed"),
-                    "{replacement}: {error}"
-                );
-                assert_eq!(fs::read(&path).unwrap(), b"original", "{replacement}");
-                assert_eq!(fs::read(&victim).unwrap(), b"victim", "{replacement}");
-                assert_eq!(
-                    entries(dir.path()),
-                    [
-                        std::ffi::OsString::from("target"),
-                        std::ffi::OsString::from("victim"),
-                    ],
-                    "{replacement}"
-                );
-            }
-        }
     }
 
     mod left_partial_file {
@@ -825,6 +564,18 @@ mod tests {
 
                 assert!(error.to_string().contains("set-ID"), "mode={mode:o}");
             }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod has_capability {
+        use super::*;
+
+        #[test]
+        fn reads_a_file_without_extended_attribute_support_as_having_none() {
+            let file = File::open("/proc/self/status").unwrap();
+
+            assert!(!has_capability(&file).unwrap());
         }
     }
 }

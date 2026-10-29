@@ -1,14 +1,16 @@
 //! `/model` opens the picker, or swaps with `/model <id>`, which
 //! [`ox_core::command::typed_form`] resolves.
 
+mod picker;
+
 use std::borrow::Cow;
 
 use ox_core::model::MODELS;
 
-use super::context::SlashContext;
+use self::picker::ModelEffortPicker;
 use super::matcher::rank_by_prefix;
-use super::picker::ModelEffortPicker;
 use super::registry::{ArgCompletion, SlashCommand, SlashOutcome, typed_form};
+use crate::session_info::LiveSessionInfo;
 
 // ── ModelCmd ──
 
@@ -45,20 +47,18 @@ impl SlashCommand for ModelCmd {
         !args.is_empty()
     }
 
-    fn execute(&self, arg: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, arg: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         if arg.is_empty() {
-            return Ok(SlashOutcome::Modal(Box::new(ModelEffortPicker::new(
-                ctx.info,
-            ))));
+            return Ok(SlashOutcome::Modal(Box::new(ModelEffortPicker::new(info))));
         }
-        typed_form(self.name(), arg, ctx)
+        typed_form(self.name(), arg, info)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use ox_core::model::ResolvedModelId;
-    use ox_core::protocol::{ConfigPick, Op};
+    use ox_core::protocol::Op;
+    use ox_core::protocol::testing::model_pick;
 
     use super::*;
     use crate::action::Action;
@@ -108,10 +108,7 @@ mod tests {
         fn typed_id_forwards_the_resolved_model() {
             assert_eq!(
                 run_execute(&ModelCmd, "sonnet").unwrap().into_forward(),
-                Action::Op(Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-sonnet-5-5"),
-                    effort: None,
-                })),
+                Action::Op(Op::SetModel(model_pick("claude-sonnet-5-5", None))),
             );
         }
 
@@ -119,10 +116,7 @@ mod tests {
         fn unknown_id_forwards_verbatim() {
             assert_eq!(
                 run_execute(&ModelCmd, "gpt-4").unwrap().into_forward(),
-                Action::Op(Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("gpt-4"),
-                    effort: None,
-                })),
+                Action::Op(Op::SetModel(model_pick("gpt-4", None))),
             );
         }
     }

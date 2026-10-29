@@ -22,7 +22,7 @@ use crate::components::input::InputOutcome;
 use crate::keymap::{CTRL_C, CTRL_D};
 use crate::modal::{EngineUpdate, ModalAction};
 use crate::now;
-use crate::slash::{self, SlashContext, SlashOutcome};
+use crate::slash::{self, SlashOutcome};
 use crate::theme::Theme;
 use crate::theme::builtin::BuiltinTheme;
 use crate::viewport::Direction;
@@ -505,8 +505,7 @@ impl App {
     /// Runs `parsed`, the command the user typed as `line`, and applies its outcome, returning the
     /// action it asks the caller to route.
     fn run_slash(&mut self, parsed: &Parsed, line: &str) -> Option<Action> {
-        let ctx = SlashContext::new(&self.session_info);
-        let outcome = slash::dispatch(parsed, &ctx);
+        let outcome = slash::dispatch(parsed, &self.session_info);
         self.apply_slash_outcome(outcome, line)
     }
 
@@ -567,10 +566,10 @@ mod tests {
 
     use ox_core::config::ThemeConfig;
     use ox_core::config::provenance::Source;
-    use ox_core::model::{Effort, ResolvedModelId};
+    use ox_core::model::Effort;
     use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
-    use ox_core::protocol::testing::text_result;
+    use ox_core::protocol::testing::{model_pick, text_result};
     use ox_core::protocol::{
         ApprovalDecision, CompactTrigger, ConfigPick, Event, ResumeTarget, SavedTarget,
     };
@@ -2207,10 +2206,7 @@ mod tests {
         async fn forwards_engine_ops_unchanged() {
             // A modal-emitted `SetModel` must reach the engine so it can emit `ConfigChanged`.
             for op in [
-                Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-opus-5-5"),
-                    effort: None,
-                }),
+                Op::SetModel(model_pick("claude-opus-5-5", None)),
                 Op::SetModel(ConfigPick::Effort(Effort::High)),
             ] {
                 let (mut app, mut rx, _event_tx) = test_app(None);
@@ -2776,10 +2772,7 @@ mod tests {
             let forwarded = rx.try_recv().expect("SetModel forwarded to the engine");
             assert_eq!(
                 forwarded,
-                Op::SetModel(ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-haiku-5-5"),
-                    effort: None,
-                }),
+                Op::SetModel(model_pick("claude-haiku-5-5", None)),
             );
         }
 

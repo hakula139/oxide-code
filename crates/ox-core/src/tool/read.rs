@@ -29,7 +29,9 @@ impl Tool for ReadTool {
         ToolSpec {
             definition: ToolDefinition {
                 name: "read".to_owned(),
-                description: "Read the contents of a file with line numbers.".to_owned(),
+                description: "Read a text file as rows of a line number, a tab, \
+                              and the line's text."
+                    .to_owned(),
                 input_schema: input_schema(),
             },
             class: PermissionClass::Read,
@@ -39,6 +41,10 @@ impl Tool for ReadTool {
 
     fn path_field(&self) -> Option<&'static str> {
         Some("file_path")
+    }
+
+    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |input: &Input| Ok(ctx.path_access(&input.file_path)))
     }
 
     fn icon(&self) -> &'static str {
@@ -80,15 +86,20 @@ fn input_schema() -> serde_json::Value {
             },
             "limit": {
                 "type": "integer",
-                "description": "The number of lines to read (default: 2000)"
+                "description": format!(
+                    "The number of lines to read (default: {DEFAULT_LINE_LIMIT})"
+                )
             }
         },
-        "required": ["file_path"]
+        "required": ["file_path"],
+        "additionalProperties": false
     })
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Input {
+    file_path: String,
     offset: Option<usize>,
     limit: Option<usize>,
 }
@@ -96,10 +107,7 @@ struct Input {
 // ── Execution ──
 
 async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
-    let (input, path): (Input, _) = match prepared.into_path_input() {
-        Ok(v) => v,
-        Err(msg) => return ToolOutput::error(msg),
-    };
+    let (input, path): (Input, _) = prepared.into_path_input();
     match read_file(&path, input.offset, input.limit, ctx).await {
         Ok(content) => {
             ToolOutput::success(content).with_title(format!("Read {}", super::file_name(&path)))
@@ -517,14 +525,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn missing_file_path_reports_input_error() {
-            let output = local_testing::run(&ReadTool, serde_json::json!({}), &temp_ctx()).await;
-
-            assert!(output.is_error);
-            assert_eq!(output.content, "Invalid input: missing field `file_path`");
-        }
-
-        #[tokio::test]
         async fn read_error_omits_title() {
             let output = local_testing::run(
                 &ReadTool,
@@ -865,8 +865,8 @@ mod tests {
 
         #[tokio::test]
         async fn refuses_a_symlink_at_the_final_component() {
-            // The gate pins the resolved path, so a link there was swapped in after the check and
-            // its target was never gated.
+            // The run opens the path the gate resolved, so a link there was swapped in after the
+            // check and its target was never gated.
             let dir = canonical_tempdir();
             let secret = dir.path().join("secret.txt");
             fs::write(&secret, "SECRET=1\n").unwrap();

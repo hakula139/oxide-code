@@ -18,11 +18,11 @@ use super::{
     Bash, DRAIN_GRACE, MAX_TIMEOUT, PipeCapture, ShellTree, push_footer, read_chunks,
     render_output, spawn_failure,
 };
-use crate::permission::PermissionClass;
+use crate::permission::{Access, PermissionClass};
 use crate::protocol::{Event, EventSink};
 use crate::tool::spill::Spills;
 use crate::tool::{
-    Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field, parse_input,
+    Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field,
 };
 use crate::util::sync::lock_or_recover;
 use crate::util::text::ELLIPSIS;
@@ -455,6 +455,10 @@ impl Tool for BashOutputTool {
         }
     }
 
+    fn prepare(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |_: &OutputInput| Ok(Access::None))
+    }
+
     fn icon(&self) -> &'static str {
         "»"
     }
@@ -468,7 +472,7 @@ impl Tool for BashOutputTool {
         prepared: Prepared,
         _ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(read(&self.shells, prepared.input))
+        Box::pin(read(&self.shells, prepared.into_input()))
     }
 }
 
@@ -503,6 +507,10 @@ impl Tool for BashStopTool {
         }
     }
 
+    fn prepare(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |_: &StopInput| Ok(Access::None))
+    }
+
     fn icon(&self) -> &'static str {
         "■"
     }
@@ -516,7 +524,7 @@ impl Tool for BashStopTool {
         prepared: Prepared,
         _ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(stop(&self.shells, prepared.input))
+        Box::pin(stop(&self.shells, prepared.into_input()))
     }
 }
 
@@ -534,11 +542,13 @@ fn output_input_schema() -> serde_json::Value {
                                 Omit or pass 0 to read at once."
             }
         },
-        "required": ["shell_id"]
+        "required": ["shell_id"],
+        "additionalProperties": false
     })
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OutputInput {
     shell_id: String,
     timeout: Option<u64>,
@@ -550,11 +560,13 @@ fn stop_input_schema() -> serde_json::Value {
         "properties": {
             "shell_id": shell_id_property()
         },
-        "required": ["shell_id"]
+        "required": ["shell_id"],
+        "additionalProperties": false
     })
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StopInput {
     shell_id: String,
 }
@@ -568,11 +580,7 @@ fn shell_id_property() -> serde_json::Value {
 
 // ── Execution ──
 
-async fn read(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
-    let input: OutputInput = match parse_input(raw) {
-        Ok(input) => input,
-        Err(msg) => return ToolOutput::error(msg),
-    };
+async fn read(shells: &BackgroundShells, input: OutputInput) -> ToolOutput {
     let output = match shells.output(&input.shell_id) {
         Ok(output) => output,
         Err(message) => return ToolOutput::error(message),
@@ -594,11 +602,7 @@ fn wait_limit(millis: Option<u64>) -> Option<Duration> {
         .map(|ms| Duration::from_millis(ms).min(MAX_TIMEOUT))
 }
 
-async fn stop(shells: &BackgroundShells, raw: serde_json::Value) -> ToolOutput {
-    let input: StopInput = match parse_input(raw) {
-        Ok(input) => input,
-        Err(msg) => return ToolOutput::error(msg),
-    };
+async fn stop(shells: &BackgroundShells, input: StopInput) -> ToolOutput {
     let Shell {
         output,
         stop,
@@ -1093,33 +1097,6 @@ mod tests {
                 stopped.content,
                 "(no new output)\n\n(stopped after it exited with code 0)"
             );
-        }
-    }
-
-    mod shell_id_input {
-        use super::*;
-
-        #[tokio::test]
-        async fn is_required_by_bash_output_and_bash_stop() {
-            let ctx = temp_ctx();
-
-            let read = local_testing::run(
-                &BashOutputTool::new(Arc::default()),
-                serde_json::json!({}),
-                &ctx,
-            )
-            .await;
-            let stopped = local_testing::run(
-                &BashStopTool::new(Arc::default()),
-                serde_json::json!({}),
-                &ctx,
-            )
-            .await;
-
-            for output in [read, stopped] {
-                assert!(output.is_error);
-                assert_eq!(output.content, "Invalid input: missing field `shell_id`");
-            }
         }
     }
 }

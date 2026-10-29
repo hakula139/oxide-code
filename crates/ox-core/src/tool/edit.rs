@@ -10,7 +10,7 @@ use super::file::FileVerb;
 use super::view::{
     ApprovalBody, ApprovalPreview, DiffChunk, EditDiff, NumberedLine, ToolResultView,
 };
-use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field};
+use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
 use crate::file_tracker::{GatePurpose, LastView};
 use crate::permission::PermissionClass;
 
@@ -24,6 +24,9 @@ impl Tool for EditTool {
                 description: "Perform exact string replacement in a file. \
                               The old_string must be unique in the file \
                               unless replace_all is true. \
+                              Copy it from after the tab that follows the line number \
+                              in `read` output, keeping the line's own indentation, \
+                              and keep line numbers out of new_string too. \
                               Read the file with the `read` tool in this session \
                               before editing it. \
                               A `read` of the lines being changed is enough. \
@@ -41,6 +44,20 @@ impl Tool for EditTool {
         Some("file_path")
     }
 
+    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |input: &Input| {
+            if input.old_string.is_empty() {
+                return Err("old_string must not be empty.".to_owned());
+            }
+            if normalize_eol(&input.old_string) == normalize_eol(&input.new_string) {
+                return Err(
+                    "old_string and new_string are identical. No changes to make.".to_owned(),
+                );
+            }
+            Ok(ctx.path_access(&input.file_path))
+        })
+    }
+
     fn icon(&self) -> &'static str {
         "✎"
     }
@@ -51,11 +68,10 @@ impl Tool for EditTool {
         prepared: &'a Prepared,
         cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
-        let old = extract_input_field(&prepared.input, "old_string").unwrap_or_default();
-        let new = extract_input_field(&prepared.input, "new_string").unwrap_or_default();
+        let input: Input = prepared.parsed();
         Box::pin(std::future::ready(ApprovalPreview {
-            title: self.summarize_call(name, &prepared.input, cwd),
-            body: ApprovalBody::Diff(synthesize_chunk(old, new)),
+            title: prepared.path_title(name, cwd),
+            body: ApprovalBody::Diff(synthesize_chunk(&input.old_string, &input.new_string)),
         }))
     }
 
@@ -92,12 +108,15 @@ fn input_schema() -> serde_json::Value {
                 "description": "Replace all occurrences (default: false)"
             }
         },
-        "required": ["file_path", "old_string", "new_string"]
+        "required": ["file_path", "old_string", "new_string"],
+        "additionalProperties": false
     })
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Input {
+    file_path: String,
     old_string: String,
     new_string: String,
     #[serde(default)]
@@ -107,10 +126,7 @@ struct Input {
 // ── Execution ──
 
 async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
-    let (input, path): (Input, _) = match prepared.into_path_input() {
-        Ok(v) => v,
-        Err(msg) => return ToolOutput::error(msg),
-    };
+    let (input, path): (Input, _) = prepared.into_path_input();
 
     match edit_file(
         &path,
@@ -135,7 +151,8 @@ async fn run(prepared: Prepared, ctx: &ToolCtx) -> ToolOutput {
     }
 }
 
-/// Replaces `old_string` in the file at `path`, which `prepare` resolved.
+/// Replaces `old_string` in the file at `path`, which `prepare` resolved after checking that
+/// `old_string` is not empty and differs from `new_string`.
 ///
 /// - `old_string` must occur once without `replace_all`, and each line break in it matches either
 ///   ending, so the model cannot edit the wrong site.
@@ -148,14 +165,6 @@ async fn edit_file(
     replace_all: bool,
     ctx: &ToolCtx,
 ) -> Result<Edited, String> {
-    if old_string.is_empty() {
-        return Err("old_string must not be empty.".to_owned());
-    }
-
-    if old_string == new_string {
-        return Err("old_string and new_string are identical. No changes to make.".to_owned());
-    }
-
     let content_bytes = super::file::read_validated(path, FileVerb::Edit).await?;
     let key = super::file::tracker_key(path).await;
     ctx.tracker
@@ -436,7 +445,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::testing::{tracker, tracker_seeded};
     use crate::file_tracker::{CACHE_HIT_STUB, LastView, MAX_TRACKED_FILE_SIZE};
-    use crate::tool::local_testing::{self, ctx_with, temp_ctx};
+    use crate::tool::local_testing::{self, ctx, ctx_with, temp_ctx};
     use crate::tool::read::ReadTool;
     use crate::tool::write::WriteTool;
     use crate::util::fs::testing::make_read_only;
@@ -453,25 +462,65 @@ mod tests {
         }
     }
 
+    mod prepare {
+        use super::*;
+
+        #[test]
+        fn rejects_a_call_that_cannot_change_the_file() {
+            let cases = [
+                (
+                    serde_json::json!({"file_path": "a.rs", "old_string": "a"}),
+                    "Invalid input: missing field `new_string`",
+                ),
+                (
+                    serde_json::json!({"file_path": "a.rs", "old_string": "", "new_string": "x"}),
+                    "old_string must not be empty.",
+                ),
+                (
+                    serde_json::json!({"file_path": "a.rs", "old_string": "a", "new_string": "a"}),
+                    "old_string and new_string are identical. No changes to make.",
+                ),
+                (
+                    serde_json::json!({
+                        "file_path": "a.rs",
+                        "old_string": "a\r\nb",
+                        "new_string": "a\nb",
+                    }),
+                    "old_string and new_string are identical. No changes to make.",
+                ),
+            ];
+            for (input, message) in cases {
+                assert_eq!(
+                    EditTool.prepare(input.clone(), &temp_ctx()).unwrap_err(),
+                    message,
+                    "{input}",
+                );
+            }
+        }
+    }
+
     mod approval_preview {
         use super::*;
 
         #[tokio::test]
-        async fn renders_old_and_new_as_a_diff() {
-            let tool = EditTool;
-            let preview = tool
-                .approval_preview(
-                    "edit",
-                    &crate::tool::local_testing::prepared(serde_json::json!({
-                        "file_path": "/repo/src/main.rs",
+        async fn titles_the_resolved_path_over_old_and_new_as_a_diff() {
+            let dir = canonical_tempdir();
+            let prepared = EditTool
+                .prepare(
+                    serde_json::json!({
+                        "file_path": "./main.rs",
                         "old_string": "let a = 1;",
                         "new_string": "let a = 2;",
-                    })),
-                    Path::new("/repo"),
+                    }),
+                    &ctx(dir.path()),
                 )
+                .unwrap();
+
+            let preview = EditTool
+                .approval_preview("edit", &prepared, dir.path())
                 .await;
 
-            assert_eq!(preview.title, "Edit(src/main.rs)");
+            assert_eq!(preview.title, "Edit(main.rs)");
             assert_eq!(
                 preview.body,
                 ApprovalBody::Diff(DiffChunk {
@@ -639,22 +688,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn missing_required_fields_reports_input_error() {
-            let output = local_testing::run(
-                &EditTool,
-                serde_json::json!({
-                    "file_path": "/tmp/x",
-                    "old_string": "a"
-                }),
-                &temp_ctx(),
-            )
-            .await;
-
-            assert!(output.is_error);
-            assert_eq!(output.content, "Invalid input: missing field `new_string`");
-        }
-
-        #[tokio::test]
         async fn edit_error_omits_edited_title() {
             let dir = canonical_tempdir();
             let path = dir.path().join("test.txt");
@@ -803,36 +836,6 @@ mod tests {
                 ),
             );
             assert_eq!(fs::read_to_string(&path).unwrap(), "uno\ntwo\nthree\n");
-        }
-
-        #[tokio::test]
-        async fn rejects_empty_old_string() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("test.txt");
-            fs::write(&path, "hello").unwrap();
-
-            let err = edit_file(&path, "", "x", false, &temp_ctx())
-                .await
-                .unwrap_err();
-
-            assert_eq!(err, "old_string must not be empty.");
-            assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
-        }
-
-        #[tokio::test]
-        async fn rejects_identical_strings() {
-            let dir = canonical_tempdir();
-            let path = dir.path().join("test.txt");
-            fs::write(&path, "hello").unwrap();
-
-            let err = edit_file(&path, "hello", "hello", false, &temp_ctx())
-                .await
-                .unwrap_err();
-
-            assert_eq!(
-                err,
-                "old_string and new_string are identical. No changes to make."
-            );
         }
 
         #[tokio::test]
@@ -1190,6 +1193,25 @@ mod tests {
         }
     }
 
+    mod synthesize_chunk {
+        use super::*;
+
+        #[test]
+        fn starts_numbering_at_one() {
+            let chunk = synthesize_chunk("a\nb", "x\ny");
+            assert_eq!(chunk.old[0].number, 1);
+            assert_eq!(chunk.new[0].number, 1);
+        }
+
+        #[test]
+        fn applies_trim() {
+            let chunk = synthesize_chunk("fn foo()", "fn foo()\n    body");
+            assert_eq!(chunk.old, []);
+            assert_eq!(chunk.new.len(), 1);
+            assert_eq!(chunk.new[0].text, "    body");
+        }
+    }
+
     mod build_diff {
         use super::*;
 
@@ -1468,25 +1490,6 @@ mod tests {
             for (case, eol, expected) in [("CRLF", "\r\n", "a\r\nb\r\n"), ("LF", "\n", "a\nb\n")] {
                 assert_eq!(apply_eol("a\nb\n".to_owned(), eol), expected, "{case}");
             }
-        }
-    }
-
-    mod synthesize_chunk {
-        use super::*;
-
-        #[test]
-        fn starts_numbering_at_one() {
-            let chunk = synthesize_chunk("a\nb", "x\ny");
-            assert_eq!(chunk.old[0].number, 1);
-            assert_eq!(chunk.new[0].number, 1);
-        }
-
-        #[test]
-        fn applies_trim() {
-            let chunk = synthesize_chunk("fn foo()", "fn foo()\n    body");
-            assert_eq!(chunk.old, []);
-            assert_eq!(chunk.new.len(), 1);
-            assert_eq!(chunk.new[0].text, "    body");
         }
     }
 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use super::search::{NO_FILES_FOUND, SearchOutput, SearchRoot, SearchRow, SearchRows};
+use super::search::{NO_FILES_FOUND, SearchOutput, SearchRoot};
 use super::view::ToolResultView;
 use super::{
     Prepared, StoredView, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec, extract_input_field,
@@ -34,8 +34,9 @@ impl Tool for GlobTool {
         ToolSpec {
             definition: ToolDefinition {
                 name: "glob".to_owned(),
-                description: "Find files matching a glob pattern. \
-                              Returns paths sorted by modification time (newest first)."
+                description: "Find files matching a glob pattern, newest first, \
+                              including hidden files and skipping VCS directories \
+                              and files that `.gitignore` excludes."
                     .to_owned(),
                 input_schema: input_schema(),
             },
@@ -44,8 +45,10 @@ impl Tool for GlobTool {
         }
     }
 
-    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
-        super::search::prepare_search_root(input, ctx)
+    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |input: &Input| {
+            Ok(super::search::root_access(input.path.as_deref(), ctx))
+        })
     }
 
     fn icon(&self) -> &'static str {
@@ -83,11 +86,13 @@ fn input_schema() -> serde_json::Value {
                 "description": "The directory to search in (default: current working directory)"
             }
         },
-        "required": ["pattern"]
+        "required": ["pattern"],
+        "additionalProperties": false
     })
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Input {
     pattern: String,
     path: Option<String>,
@@ -96,13 +101,7 @@ struct Input {
 // ── Execution ──
 
 async fn run(prepared: Prepared, ctx: &ToolCtx, read_filter: ReadFilter) -> ToolOutput {
-    let Prepared { input: raw, access } = prepared;
-    let input: Input = match super::parse_input(raw) {
-        Ok(v) => v,
-        Err(msg) => return ToolOutput::error(msg),
-    };
-
-    let Input { pattern, path } = input;
+    let (Input { pattern, path }, access) = prepared.into_parts();
 
     let workspace = Arc::clone(&ctx.workspace);
     let cancel = ctx.cancel.clone();
@@ -153,20 +152,20 @@ fn glob_files(
             !held
         });
     let (entries, total) = super::search::newest_first(entries, MAX_RESULTS);
-    let mut rows = SearchRows::new(MAX_RESULTS);
-    for entry in entries {
-        rows.push(SearchRow::Path(super::display_path(entry.path(), cwd)));
-    }
+    let files: Vec<String> = entries
+        .iter()
+        .map(|entry| super::display_path(entry.path(), cwd))
+        .collect();
     withheld += super::search::withhold_unreadable(&mut unreadable, &read_filter);
 
     let truncated = total > MAX_RESULTS;
 
-    let (mut content, title) = if rows.kept.is_empty() {
+    let (mut content, title) = if files.is_empty() {
         (NO_FILES_FOUND.to_owned(), NO_FILES_FOUND.to_owned())
     } else {
-        let count = rows.kept.len();
+        let count = files.len();
         let word = plural(count, "file", "files");
-        (rows.render(), format!("Found {count} {word}"))
+        (files.join("\n"), format!("Found {count} {word}"))
     };
     if truncated {
         _ = write!(
@@ -179,7 +178,7 @@ fn glob_files(
     let view = if unreadable.is_empty() && withheld == 0 {
         StoredView::View(ToolResultView::GlobFiles {
             pattern: pattern.to_owned(),
-            files: rows.kept.iter().map(ToString::to_string).collect(),
+            files,
             total,
         })
     } else {
@@ -244,8 +243,9 @@ mod tests {
             // A deny scoped to the project root must apply when `path` is omitted.
             let dir = canonical_tempdir();
 
-            let prepared =
-                glob_tool().prepare(serde_json::json!({"pattern": "*.rs"}), &ctx(dir.path()));
+            let prepared = glob_tool()
+                .prepare(serde_json::json!({"pattern": "*.rs"}), &ctx(dir.path()))
+                .unwrap();
 
             let Access::Path {
                 canonical,
@@ -361,14 +361,6 @@ mod tests {
                     total: 1,
                 })),
             );
-        }
-
-        #[tokio::test]
-        async fn missing_pattern_reports_input_error() {
-            let output = local_testing::run(&glob_tool(), serde_json::json!({}), &temp_ctx()).await;
-
-            assert!(output.is_error);
-            assert_eq!(output.content, "Invalid input: missing field `pattern`");
         }
 
         #[tokio::test]

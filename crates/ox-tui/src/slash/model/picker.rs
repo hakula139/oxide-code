@@ -9,10 +9,9 @@ use ratatui::widgets::Paragraph;
 use strum::VariantArray as _;
 
 use ox_core::config::DEFAULT_MODEL;
-use ox_core::model::{Effort, MODELS, ModelInfo, ResolvedModelId};
+use ox_core::model::{Effort, MODELS, ModelInfo};
 use ox_core::protocol::{ConfigPick, Op};
 
-use super::effort_slider::step_level;
 use crate::action::Action;
 use crate::glyphs::RADIO_SELECTED;
 use crate::keymap::hint;
@@ -22,6 +21,7 @@ use crate::modal::chrome::{
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::session_info::LiveSessionInfo;
+use crate::slash::effort_slider::step_level;
 use crate::theme::Theme;
 use crate::viewport::Direction;
 
@@ -132,7 +132,7 @@ impl ModelEffortPicker {
 
         let pick = if model != self.active_model {
             ConfigPick::Model {
-                id: ResolvedModelId::new(model.to_owned()),
+                id: model.to_owned(),
                 effort,
             }
         } else if let Some(effort) = effort {
@@ -201,6 +201,7 @@ impl Modal for ModelEffortPicker {
 #[cfg(test)]
 mod tests {
     use ox_core::model::ModelSpec;
+    use ox_core::protocol::testing::model_pick;
 
     use super::*;
     use crate::modal::testing::{render_modal, render_rows};
@@ -320,13 +321,6 @@ mod tests {
             }
         }
 
-        fn model_only(id: &str) -> ConfigPick {
-            ConfigPick::Model {
-                id: ResolvedModelId::new(id),
-                effort: None,
-            }
-        }
-
         #[test]
         fn numeric_jump_routes_cursor_to_matching_row() {
             let mut p = picker();
@@ -380,7 +374,7 @@ mod tests {
 
             let pick = submitted_pick(p.handle_key(&KeyEvent::from(KeyCode::Enter)));
 
-            assert_eq!(pick, model_only("claude-sonnet-5-5"));
+            assert_eq!(pick, model_pick("claude-sonnet-5-5", None));
         }
 
         #[test]
@@ -401,13 +395,7 @@ mod tests {
 
             let pick = submitted_pick(p.handle_key(&KeyEvent::from(KeyCode::Enter)));
 
-            assert_eq!(
-                pick,
-                ConfigPick::Model {
-                    id: ResolvedModelId::new("claude-sonnet-5-5"),
-                    effort: Some(Effort::Xhigh),
-                },
-            );
+            assert_eq!(pick, model_pick("claude-sonnet-5-5", Some(Effort::Xhigh)));
         }
 
         #[test]
@@ -417,7 +405,7 @@ mod tests {
 
             let pick = submitted_pick(p.handle_key(&KeyEvent::from(KeyCode::Enter)));
 
-            assert_eq!(pick, model_only("claude-opus-5-5"));
+            assert_eq!(pick, model_pick("claude-opus-5-5", None));
         }
     }
 

@@ -74,7 +74,15 @@ impl Tool for BashTool {
         ToolSpec {
             definition: ToolDefinition {
                 name: "bash".to_owned(),
-                description: "Execute a shell command and return its output. \
+                description: "Run a command with `bash -c` in the session's working directory \
+                              and return its output. \
+                              Each call starts a new shell, \
+                              so a `cd`, variable, or function from an earlier call is gone. \
+                              Chain dependent steps in one call with `&&`. \
+                              Commands read no stdin, \
+                              and `EDITOR`, `VISUAL`, and `GIT_EDITOR` are set to `true`, \
+                              so pass messages inline, as in `git commit -m`, \
+                              and avoid commands that prompt for input, such as a password. \
                               For a dev server, a watcher, or a long build, set run_in_background, \
                               without a trailing `&`: the call returns a shell ID at once. \
                               You are not notified when the command finishes, \
@@ -89,11 +97,10 @@ impl Tool for BashTool {
         }
     }
 
-    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Prepared {
-        let access = extract_input_field(&input, "command")
-            .map(|command| Access::for_command(command, &ctx.workspace))
-            .unwrap_or_default();
-        Prepared { input, access }
+    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
+        Prepared::parse(input, |input: &Input| {
+            Ok(Access::for_command(&input.command, &ctx.workspace))
+        })
     }
 
     fn icon(&self) -> &'static str {
@@ -108,21 +115,17 @@ impl Tool for BashTool {
         &'a self,
         name: &'a str,
         prepared: &'a Prepared,
-        cwd: &'a Path,
+        _cwd: &'a Path,
     ) -> Pin<Box<dyn Future<Output = ApprovalPreview> + Send + 'a>> {
-        let background = prepared
-            .input
-            .get("run_in_background")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true);
+        let input: Input = prepared.parsed();
         let label = pascal_case(name);
         Box::pin(std::future::ready(ApprovalPreview {
-            title: if background {
+            title: if input.run_in_background {
                 format!("{label} (background)")
             } else {
                 label
             },
-            body: ApprovalBody::Command(self.summarize_call(name, &prepared.input, cwd)),
+            body: ApprovalBody::Command(input.command),
         }))
     }
 
@@ -131,7 +134,7 @@ impl Tool for BashTool {
         prepared: Prepared,
         ctx: &'a ToolCtx,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>> {
-        Box::pin(run(&self.shells, prepared.input, ctx))
+        Box::pin(run(&self.shells, prepared.into_input(), ctx))
     }
 }
 
@@ -161,11 +164,13 @@ fn input_schema() -> serde_json::Value {
                                 The timeout field does not apply."
             }
         },
-        "required": ["command"]
+        "required": ["command"],
+        "additionalProperties": false
     })
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Input {
     command: String,
     description: Option<String>,
@@ -176,12 +181,7 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(shells: &Arc<BackgroundShells>, raw: serde_json::Value, ctx: &ToolCtx) -> ToolOutput {
-    let input: Input = match super::parse_input(raw) {
-        Ok(v) => v,
-        Err(msg) => return ToolOutput::error(msg),
-    };
-
+async fn run(shells: &Arc<BackgroundShells>, input: Input, ctx: &ToolCtx) -> ToolOutput {
     let mut output = if input.run_in_background {
         background::start(shells, &input.command, ctx).await
     } else {
@@ -817,14 +817,34 @@ mod tests {
         }
     }
 
+    mod spec {
+        use super::*;
+
+        #[test]
+        fn states_how_each_call_runs() {
+            let description = BashTool::new(Arc::default()).spec().definition.description;
+
+            for rule in [
+                "Each call starts a new shell",
+                "Chain dependent steps in one call with `&&`.",
+                "Commands read no stdin",
+            ] {
+                assert!(description.contains(rule), "should state: {rule}");
+            }
+        }
+    }
+
     mod prepare {
         use super::*;
 
         #[test]
         fn extracts_the_command() {
             let ctx = temp_ctx();
+
             let prepared = BashTool::new(Arc::default())
-                .prepare(serde_json::json!({"command": "ls -la"}), &ctx);
+                .prepare(serde_json::json!({"command": "ls -la"}), &ctx)
+                .unwrap();
+
             assert_eq!(
                 prepared.access,
                 Access::for_command("ls -la", &ctx.workspace)
@@ -832,12 +852,26 @@ mod tests {
         }
 
         #[test]
-        fn missing_command_has_no_target() {
-            // Only a tool-wide rule matches `None`, so a malformed call cannot slip past a
-            // command-specific allow.
-            let prepared =
-                BashTool::new(Arc::default()).prepare(serde_json::json!({}), &temp_ctx());
-            assert!(matches!(prepared.access, Access::None));
+        fn rejects_input_that_does_not_parse() {
+            let cases = [
+                (
+                    serde_json::json!({"command": 1}),
+                    "Invalid input: invalid type: integer `1`, expected a string",
+                ),
+                (
+                    serde_json::json!({"command": "ls", "cwd": "/tmp"}),
+                    "Invalid input: unknown field `cwd`, expected one of `command`, \
+                     `description`, `timeout`, `run_in_background`",
+                ),
+            ];
+            let tool = BashTool::new(Arc::default());
+            for (input, message) in cases {
+                assert_eq!(
+                    tool.prepare(input.clone(), &temp_ctx()).unwrap_err(),
+                    message,
+                    "{input}"
+                );
+            }
         }
     }
 
@@ -847,25 +881,19 @@ mod tests {
         #[tokio::test]
         async fn marks_a_background_command_in_the_title() {
             let tool = BashTool::new(Arc::default());
-            let cwd = Path::new("/repo");
-
+            let ctx = temp_ctx();
             let foreground = tool
-                .approval_preview(
-                    "bash",
-                    &local_testing::prepared(serde_json::json!({"command": "cargo test"})),
-                    cwd,
-                )
-                .await;
+                .prepare(serde_json::json!({"command": "cargo test"}), &ctx)
+                .unwrap();
             let background = tool
-                .approval_preview(
-                    "bash",
-                    &local_testing::prepared(serde_json::json!({
-                        "command": "cargo watch",
-                        "run_in_background": true,
-                    })),
-                    cwd,
+                .prepare(
+                    serde_json::json!({"command": "cargo watch", "run_in_background": true}),
+                    &ctx,
                 )
-                .await;
+                .unwrap();
+
+            let foreground = tool.approval_preview("bash", &foreground, ctx.cwd()).await;
+            let background = tool.approval_preview("bash", &background, ctx.cwd()).await;
 
             assert_eq!(foreground, bash_preview("cargo test"));
             assert_eq!(
@@ -883,22 +911,14 @@ mod tests {
 
         #[tokio::test]
         async fn returns_the_output_of_a_command_that_succeeds() {
-            let output = run(
-                &Arc::default(),
+            let output = local_testing::run(
+                &BashTool::new(Arc::default()),
                 serde_json::json!({"command": "echo hello"}),
                 &temp_ctx(),
             )
             .await;
             assert!(!output.is_error);
             assert_eq!(output.content, "hello");
-        }
-
-        #[tokio::test]
-        async fn missing_command_field_reports_input_error() {
-            let output = run(&Arc::default(), serde_json::json!({}), &temp_ctx()).await;
-
-            assert!(output.is_error);
-            assert_eq!(output.content, "Invalid input: missing field `command`");
         }
 
         #[tokio::test]
@@ -918,8 +938,8 @@ mod tests {
 
         #[tokio::test]
         async fn times_out_after_the_input_timeout() {
-            let output = run(
-                &Arc::default(),
+            let output = local_testing::run(
+                &BashTool::new(Arc::default()),
                 serde_json::json!({"command": "sleep 30", "timeout": 1}),
                 &temp_ctx(),
             )

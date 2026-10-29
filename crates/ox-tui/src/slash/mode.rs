@@ -12,13 +12,13 @@ use strum::VariantArray as _;
 use ox_core::permission::Mode;
 use ox_core::protocol::Op;
 
-use super::context::SlashContext;
 use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashOutcome, typed_form};
 use crate::action::Action;
 use crate::modal::chrome::CONFIRM_HINTS;
 use crate::modal::list_picker::{ListPicker, PickerItem, numeric_hint};
 use crate::modal::{Modal, ModalAction, ModalKey};
+use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
 
 // ── ModeCmd ──
@@ -52,13 +52,13 @@ impl SlashCommand for ModeCmd {
         !args.is_empty()
     }
 
-    fn execute(&self, args: &str, ctx: &SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, args: &str, info: &LiveSessionInfo) -> Result<SlashOutcome, String> {
         if args.is_empty() {
             return Ok(SlashOutcome::Modal(Box::new(ModePicker::new(
-                ctx.info.config.permission_mode,
+                info.config.permission_mode,
             ))));
         }
-        typed_form(self.name(), args, ctx)
+        typed_form(self.name(), args, info)
     }
 }
 

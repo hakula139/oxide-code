@@ -4,7 +4,7 @@
 use tracing::warn;
 
 use super::display::id_prefix;
-use super::resolver::{ResolveError, resolve_id, resolve_prefix};
+use super::resolver::{ResolveError, resolve_prefix};
 use super::store::SessionStore;
 use super::store::listing::{ArchiveState, ProjectScope, SessionInfo};
 use crate::protocol::SavedTarget;
@@ -106,25 +106,20 @@ pub(crate) fn set_archived(
     state: ArchiveState,
     live_id: &str,
 ) -> Result<ArchiveUpdate, SavedError> {
-    let info = match target {
+    let id = match target {
         SavedTarget::Id(id) if id == live_id => return Err(SavedError::live(id)),
-        SavedTarget::Id(id) => resolve_id(store, id)?,
-        SavedTarget::Prefix(prefix) => find(store, prefix, live_id)?,
+        SavedTarget::Id(id) => id.clone(),
+        SavedTarget::Prefix(prefix) => find(store, prefix, live_id)?.session_id,
     };
-    let changed = info.archive_state != state;
-    if changed {
-        let action = match state {
-            ArchiveState::Archived => SavedAction::Archive,
-            ArchiveState::Active => SavedAction::Unarchive,
-        };
-        store
-            .set_archived(&info.session_id, state)
-            .map_err(|e| SavedError::failed(action, &info.session_id, &e))?;
-    }
-    Ok(ArchiveUpdate {
-        id: info.session_id,
-        changed,
-    })
+    let action = match state {
+        ArchiveState::Archived => SavedAction::Archive,
+        ArchiveState::Active => SavedAction::Unarchive,
+    };
+    let changed = store
+        .set_archived(&id, state)
+        .map_err(|e| SavedError::failed(action, &id, &e))?
+        .ok_or_else(|| ResolveError::NoMatch { prefix: id.clone() })?;
+    Ok(ArchiveUpdate { id, changed })
 }
 
 /// Deletes saved session `session_id` and its artifact directory. Refuses the live session, and the
@@ -284,6 +279,32 @@ mod tests {
                     "{case}"
                 );
             }
+        }
+
+        #[test]
+        fn archives_another_projects_session_by_its_full_id() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = seeded_store(dir.path());
+            let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+            seed_test_session(
+                &other,
+                "foreign-session",
+                Some("Foreign"),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let target = SavedTarget::Id("foreign-session".to_owned());
+
+            let update = set_archived(&store, &target, ArchiveState::Archived, LIVE_ID);
+
+            assert_eq!(
+                update,
+                Ok(ArchiveUpdate {
+                    id: "foreign-session".to_owned(),
+                    changed: true,
+                }),
+            );
+            assert!(archive_times(&store, "foreign-session").0.is_some());
         }
 
         #[test]

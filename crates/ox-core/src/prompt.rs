@@ -13,8 +13,8 @@ use self::environment::Environment;
 use self::sections::{
     CAUTION, INTRO, OUTPUT_EFFICIENCY, STYLE, SYSTEM_SECTION, TASK_GUIDANCE, TOOL_GUIDANCE,
 };
+use crate::git::repo_root;
 use crate::model::ModelSpec;
-use crate::util::git::repo_root;
 
 /// Output of [`build_prompt`] or [`restore_prompt`], held for a whole session so every request
 /// shares a byte-identical prefix.
@@ -247,8 +247,8 @@ mod tests {
     use time::{Date, OffsetDateTime};
 
     use super::*;
-    use crate::util::git::local_testing::init_fixture_repo;
-    use crate::util::git::testing::with_isolated_git_env_async;
+    use crate::git::local_testing::init_fixture_repo;
+    use crate::git::testing::with_isolated_git_env_async;
     use crate::util::path::testing::pinned_home;
 
     const IDENTITY: &str = "You are powered by the model test-model.";
@@ -668,7 +668,25 @@ mod tests {
 
         #[test]
         fn state_their_distinctive_rules() {
-            let sections: [(&str, &str, &[&str]); 3] = [
+            let sections: [(&str, &str, &[&str]); 6] = [
+                (
+                    "INTRO",
+                    INTRO,
+                    &[
+                        "You run in oxide-code",
+                        "A project's config cannot add allow rules",
+                        "have no effect in oxide-code",
+                    ],
+                ),
+                (
+                    "SYSTEM_SECTION",
+                    SYSTEM_SECTION,
+                    &[
+                        "In `plan`, every `edit`, `write`, and `bash` call is denied",
+                        "reads each command of a chain",
+                        "needs approval in `manual`, so prefer plain commands",
+                    ],
+                ),
                 (
                     "TASK_GUIDANCE",
                     TASK_GUIDANCE,
@@ -688,6 +706,7 @@ mod tests {
                     CAUTION,
                     &["Never print credentials", "redact any credential"],
                 ),
+                ("STYLE", STYLE, &["give its full URL"]),
                 (
                     "OUTPUT_EFFICIENCY",
                     OUTPUT_EFFICIENCY,

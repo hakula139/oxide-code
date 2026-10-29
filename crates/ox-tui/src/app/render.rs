@@ -264,10 +264,10 @@ fn bottom_row(area: Rect, x: u16, width: u16) -> Rect {
 }
 
 fn jump_overlay_label(new_count: u32, width: usize) -> String {
-    let jump = hint(CTRL_END, "jump to bottom");
     if width < JUMP_LABEL_FULL_MIN_WIDTH {
         return CTRL_END.to_string();
     }
+    let jump = hint(CTRL_END, "jump to bottom");
     let label = match new_count {
         0 => jump,
         1 => format!("1 new message · {jump}"),
@@ -307,7 +307,6 @@ mod tests {
     use ox_core::protocol::{ApprovalDecision, CompactTrigger, Event, Op};
     use ox_core::tool::tasks::testing::plan;
     use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
-    use ox_core::util::git::testing::pull_request;
 
     use super::*;
     use crate::action::Action;
@@ -319,6 +318,7 @@ mod tests {
     use crate::clipboard::CopyError;
     use crate::components::status::StatusBar;
     use crate::git_probes::GitUpdate;
+    use crate::git_probes::pull_request::testing::pull_request;
     use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::now;
     use crate::terminal::testing::{BEGIN_SYNC, END_SYNC, FLUSH, FRAME, capture_terminal};

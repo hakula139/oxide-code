@@ -21,10 +21,10 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use ox_core::engine::testing::{mount_reply, mount_tool_call_once, request_bodies};
+use ox_core::git::testing::{isolate_git, isolated_git};
 use ox_core::session::resolver::export_session;
 use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{ArchiveState, ListScope, ProjectScope, SessionInfo};
-use ox_core::util::git::testing::{isolate_git, isolated_git};
 use ox_core::util::tls::testing::TEST_CA_PATH;
 
 fn ox(root: &Path) -> Command {

@@ -23,7 +23,7 @@ use tokio::task::{JoinError, JoinHandle};
 
 use self::abort::{Inbox, TurnAbort};
 use self::login::SignIn;
-use self::transcript::{LiveTranscript, TranscriptStart};
+use self::transcript::LiveTranscript;
 use self::turn::{TurnContext, TurnOutcome, TurnReport, TurnStop};
 use self::usage::UsageLedger;
 use crate::auth::Auth;
@@ -31,13 +31,12 @@ use crate::auth::oauth::{self, ClaudeCodeKeychain};
 use crate::client::anthropic::Client;
 use crate::config::Config;
 use crate::config::compaction::CompactionConfig;
-use crate::message::{ContentBlock, Message, TextOrigin};
 use crate::model::ModelSettings;
 use crate::permission::{Mode, Policy, Workspace};
 use crate::prompt::UserContext;
 use crate::protocol::notice::{self, ConfigSettings};
 use crate::protocol::{ConfigPick, Event, EventSink, Interaction, Op, TurnEnd};
-use crate::session::handle::{Checkpoint, LoadedTranscript, SessionHandle};
+use crate::session::handle::{LoadedTranscript, SessionHandle};
 use crate::session::store::SessionStore;
 use crate::session::{history, title_generator};
 use crate::tool::ToolRegistry;
@@ -250,10 +249,8 @@ impl Engine {
         loop {
             let op = tokio::select! {
                 biased;
-                usage = async { self.usage.title_usage.as_mut()?.await.ok() },
-                    if self.usage.title_usage.is_some() =>
-                {
-                    if self.account_title_usage(usage) {
+                billed = self.usage.title_usage_landed() => {
+                    if billed {
                         self.emit_usage_update(&sink);
                     }
                     continue;
@@ -324,23 +321,15 @@ impl Engine {
             return report_unsent(sink, abort, "auto-compact-failed");
         }
 
-        let mut start = self.transcript.start_of_turn();
-        let mut user_msg = Message::user(text);
         let fresh = self.load_user_context(sink).await;
-        if let Some(reminder) = self.transcript.catch_up(fresh) {
-            user_msg.content.push(ContentBlock::generated_text(
-                reminder,
-                TextOrigin::SystemReminder,
-            ));
-        }
-        let outcome = self.transcript.record_prompt(user_msg, title).await;
+        let outcome = self.transcript.begin_turn(text, fresh, title).await;
         sink.session_write(&outcome.report);
         turn::record_drained_prompts(inbox.prompts.drain(..), &mut self.transcript, sink).await;
 
         if self.generates_titles
             && let Some(seed) = outcome.ai_title_seed
         {
-            self.usage.title_usage = Some(title_generator::spawn(
+            self.usage.track_title_usage(title_generator::spawn(
                 self.client.clone(),
                 auth.clone(),
                 self.settings.prompt_cache_ttl(),
@@ -350,14 +339,13 @@ impl Engine {
             ));
         }
 
-        let mut checkpoint = outcome.checkpoint;
         let mut rounds_run = 0;
         let result = loop {
             let TurnOutcome { mut report, result } = self
                 .run_turn(&auth, sink, ops, &mut inbox, rounds_run)
                 .await;
             if let Err(TurnAbort::Refused(notice)) = result {
-                self.roll_back(sink, start, checkpoint, &report).await;
+                self.roll_back(sink, &report).await;
                 break Err(TurnAbort::Refused(notice));
             }
             self.account_usage(sink, &report).await;
@@ -370,14 +358,13 @@ impl Engine {
 
             let compacted = self.compact_mid_turn(&auth, sink, ops, &mut inbox).await;
             self.adopt_mode(&mut inbox);
-            match compacted {
-                Ok(summary) => checkpoint = Some(summary),
-                Err(abort) => break Err(abort),
+            if let Err(abort) = compacted {
+                break Err(abort);
             }
-            start = self.transcript.start_of_turn();
             rounds_run = run;
             turn::record_drained_prompts(inbox.prompts.drain(..), &mut self.transcript, sink).await;
         };
+        self.transcript.end_turn();
         match result {
             Ok(_) => {
                 sink.emit(Event::TurnComplete, "turn-complete");
@@ -425,18 +412,12 @@ impl Engine {
         outcome
     }
 
-    /// Returns the transcript and the session to `start` and `checkpoint` after the model refused
+    /// Returns the transcript and the session to the turn's rollback point after the model refused
     /// the turn `report` describes. Keeps context usage from before the turn, as the transcript its
     /// requests measured is gone.
-    async fn roll_back(
-        &mut self,
-        sink: &dyn EventSink,
-        start: TranscriptStart,
-        checkpoint: Option<Checkpoint>,
-        report: &TurnReport,
-    ) {
+    async fn roll_back(&mut self, sink: &dyn EventSink, report: &TurnReport) {
         self.bill(sink, &report.billable_rounds).await;
-        let written = self.transcript.roll_back(start, checkpoint).await;
+        let written = self.transcript.roll_back().await;
         sink.session_write(&written);
         if report.tasks.is_some() {
             let tasks = self.transcript.tasks.clone();
@@ -472,7 +453,7 @@ impl Engine {
             auto_compaction: self.compaction.auto,
         };
         if let ConfigPick::Model { id, .. } = &pick {
-            self.settings.set_model(id.clone().into_inner());
+            self.settings.set_model(id.clone());
             self.compaction = self
                 .compaction
                 .for_model(self.settings.model(), self.settings.max_tokens());
@@ -603,12 +584,12 @@ mod tests {
         seed_full_read,
     };
     use crate::file_tracker::{FileSnapshot, FileTracker, GateError, GatePurpose};
-    use crate::message::{Replay, Role};
+    use crate::message::{ContentBlock, Message, Replay, Role};
     use crate::model;
-    use crate::model::{Effort, ModelSpec, PromptCacheTtl, ResolvedModelId, TokenUsage};
+    use crate::model::{Effort, ModelSpec, PromptCacheTtl, TokenUsage};
     use crate::permission::PermissionClass;
     use crate::permission::rule::Rule;
-    use crate::protocol::testing::CapturingSink;
+    use crate::protocol::testing::{CapturingSink, model_pick};
     use crate::protocol::{CompactTrigger, ResumeTarget, SavedTarget, UsageSnapshot};
     use crate::session::handle;
     use crate::session::handle::testing::record_write_call;
@@ -742,9 +723,9 @@ mod tests {
                     .unwrap();
 
                     assert!(
-                        (engine.usage.total_estimated_cost_usd - 0.006).abs() < 1e-12,
+                        (engine.usage.total_estimated_cost_usd() - 0.006).abs() < 1e-12,
                         "priced at the recorded model's rates: {}",
-                        engine.usage.total_estimated_cost_usd,
+                        engine.usage.total_estimated_cost_usd(),
                     );
                     assert_eq!(
                         engine.transcript.prompt().user_context == SESSION_CONTEXT,
@@ -925,7 +906,7 @@ mod tests {
                         }],
                     },
                 ]);
-                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.set_total_estimated_cost_usd(1.23);
                 engine.transcript.tasks = plan();
                 engine.transcript.drifted = vec![PathBuf::from("a.rs")];
 
@@ -1098,7 +1079,7 @@ mod tests {
                 let session = engine.transcript.session().clone();
                 let session_id = engine.session_id();
                 let (billed, usage) = oneshot::channel();
-                engine.usage.title_usage = Some(usage);
+                engine.usage.track_title_usage(usage);
                 let (ops, op_rx) = mpsc::channel(OP_CHANNEL_CAP);
                 let (sink, events) = mpsc::unbounded_channel();
                 let task = EngineTask(tokio::spawn(engine.run(sink.clone(), op_rx)));
@@ -1163,7 +1144,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let (billed, usage) = oneshot::channel();
-                engine.usage.title_usage = Some(usage);
+                engine.usage.track_title_usage(usage);
                 drop(billed);
                 let mut handle = engine.spawn();
 
@@ -1885,7 +1866,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.context_estimate = 50_000;
+                engine.usage.set_context_estimate(50_000);
                 let mut handle = engine.spawn();
 
                 handle.ops.send(Op::prompt("five")).await.unwrap();
@@ -2742,7 +2723,7 @@ mod tests {
                         "hello".to_owned(),
                     );
                     let (billed, usage) = oneshot::channel();
-                    engine.usage.title_usage = Some(usage);
+                    engine.usage.track_title_usage(usage);
                     let failure = async {
                         assert!(
                             title.await.is_err(),
@@ -2906,7 +2887,7 @@ mod tests {
                         .await;
                     assert_eq!(end, TurnEnd::Completed);
                     if manual {
-                        assert!(resumed.usage.title_usage.is_none());
+                        assert!(!resumed.usage.tracks_title_usage());
                     } else {
                         let title = tokio::time::timeout(Duration::from_secs(5), async {
                             loop {
@@ -3097,9 +3078,9 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.context_estimate = 50_000;
-                engine.usage.displayed_usage = Some(TokenUsage::new(50_000, 1));
-                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.set_context_estimate(50_000);
+                engine.usage.set_displayed_usage(TokenUsage::new(50_000, 1));
+                engine.usage.set_total_estimated_cost_usd(1.23);
                 engine.usage.auto_compaction_failures = AutoCompactFailures::new(2);
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
@@ -3133,14 +3114,15 @@ mod tests {
                 ));
                 assert_eq!(engine.transcript.messages().len(), 3);
                 assert_eq!(
-                    engine.usage.context_estimate,
+                    engine.usage.context_estimate(),
                     1_000 + compaction::transcript_tokens(&engine.transcript.messages()[2..]),
                     "the turn's input plus its reply",
                 );
                 assert!(
-                    (engine.usage.total_estimated_cost_usd - (1.23 + 0.006 + 0.006)).abs() < 1e-12,
+                    (engine.usage.total_estimated_cost_usd() - (1.23 + 0.006 + 0.006)).abs()
+                        < 1e-12,
                     "the session cost keeps earlier turns and adds the summary and the turn: {}",
-                    engine.usage.total_estimated_cost_usd,
+                    engine.usage.total_estimated_cost_usd(),
                 );
                 let events = sink.events();
                 let compacted = events
@@ -3198,7 +3180,7 @@ mod tests {
                 let first = engine.submit_prompt("hello", None, &sink, &mut ops).await;
                 assert_eq!(first, TurnEnd::Completed);
                 assert_eq!(
-                    engine.usage.context_estimate,
+                    engine.usage.context_estimate(),
                     1_000 + compaction::transcript_tokens(&engine.transcript.messages()[1..])
                 );
                 let rejected = engine
@@ -3259,7 +3241,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.context_estimate = 50_000;
+                engine.usage.set_context_estimate(50_000);
                 let sink = CapturingSink::default();
                 let mut ops = inert_ops();
 
@@ -3312,7 +3294,7 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.compaction = CompactionConfig::with_threshold(50_000);
                 engine.transcript.set_messages(tool_heavy_transcript());
-                engine.usage.context_estimate = 50_000;
+                engine.usage.set_context_estimate(50_000);
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
                 ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
@@ -3680,13 +3662,14 @@ mod tests {
                 let path = dir.path().join("notes.txt");
                 std::fs::write(&path, b"original").unwrap();
                 seed_full_read(&engine.transcript.file_tracker, &path);
-                let start = engine.transcript.start_of_turn();
+                let seen = engine.transcript.prompt().seen.clone();
+                engine.transcript.begin_turn("edit it", seen, None).await;
                 let snapshots = engine.transcript.file_tracker.snapshot_all();
                 let tracker = Arc::clone(&engine.transcript.file_tracker);
                 let release = blocked_write(&tracker, &path, b"committed", "toolu_write").await;
                 let sink = CapturingSink::default();
                 let report = TurnReport::default();
-                let mut rollback = std::pin::pin!(engine.roll_back(&sink, start, None, &report));
+                let mut rollback = std::pin::pin!(engine.roll_back(&sink, &report));
 
                 poll_until_draining(&tracker, rollback.as_mut()).await;
                 assert_writes_draining(&tracker);
@@ -3718,13 +3701,6 @@ mod tests {
     mod set_model {
         use super::*;
 
-        fn sonnet_pick() -> ConfigPick {
-            ConfigPick::Model {
-                id: ResolvedModelId::new("claude-sonnet-5-5"),
-                effort: None,
-            }
-        }
-
         #[tokio::test]
         async fn notices_the_change_against_the_settings_before_it() {
             with_pinned_home(async {
@@ -3738,8 +3714,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 for id in ["custom-model", MODEL] {
-                    let id = ResolvedModelId::new(id);
-                    engine.set_model(&sink, ConfigPick::Model { id, effort: None });
+                    engine.set_model(&sink, model_pick(id, None));
                 }
 
                 let notices: Vec<String> = sink
@@ -3782,7 +3757,7 @@ mod tests {
                 let mut ops = inert_ops();
 
                 engine.submit_prompt("first", None, &sink, &mut ops).await;
-                engine.set_model(&sink, sonnet_pick());
+                engine.set_model(&sink, model_pick("claude-sonnet-5-5", None));
                 engine.submit_prompt("second", None, &sink, &mut ops).await;
 
                 let turns = request_bodies(&server).await;
@@ -3830,7 +3805,7 @@ mod tests {
                 let mut ops = inert_ops();
 
                 engine.submit_prompt("first", None, &sink, &mut ops).await;
-                engine.set_model(&sink, sonnet_pick());
+                engine.set_model(&sink, model_pick("claude-sonnet-5-5", None));
                 engine.submit_prompt("second", None, &sink, &mut ops).await;
 
                 let turns = request_bodies(&server).await;
@@ -3880,7 +3855,7 @@ mod tests {
                     engine.settings = config.model_settings();
                     engine.compaction = configured;
 
-                    engine.set_model(&sink, sonnet_pick());
+                    engine.set_model(&sink, model_pick("claude-sonnet-5-5", None));
 
                     assert_eq!(
                         engine.compaction.auto.threshold_tokens,
@@ -3911,8 +3886,8 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 engine.usage.auto_compaction_failures = AutoCompactFailures::new(3);
-                engine.usage.context_estimate = 100_000;
-                engine.usage.total_estimated_cost_usd = 1.23;
+                engine.usage.set_context_estimate(100_000);
+                engine.usage.set_total_estimated_cost_usd(1.23);
                 let sink = CapturingSink::default();
 
                 engine.set_model(&sink, ConfigPick::Effort(Effort::Xhigh));
@@ -3921,11 +3896,11 @@ mod tests {
                     engine.usage.auto_compaction_failures,
                     AutoCompactFailures::default()
                 );
-                assert_eq!(engine.usage.context_estimate, 100_000);
+                assert_eq!(engine.usage.context_estimate(), 100_000);
                 assert!(
-                    (engine.usage.total_estimated_cost_usd - 1.23).abs() < f64::EPSILON,
+                    (engine.usage.total_estimated_cost_usd() - 1.23).abs() < f64::EPSILON,
                     "session cost must accumulate across swaps: {}",
-                    engine.usage.total_estimated_cost_usd,
+                    engine.usage.total_estimated_cost_usd(),
                 );
                 let events = sink.events();
                 assert!(

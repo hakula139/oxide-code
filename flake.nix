@@ -88,7 +88,7 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        nodejs = pkgs.nodejs_24;
+        nodejs = pkgs.nodejs_26;
 
         rustBin = rust-overlay.lib.mkRustBin { } pkgs;
         rustToolchain = rustBin.fromRustupToolchainFile ./rust-toolchain.toml;

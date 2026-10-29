@@ -17,9 +17,7 @@ use ox_core::tool::bash::background::BackgroundShell;
 pub(crate) struct LiveSessionInfo {
     /// The process's session store, which the `/resume` picker lists from.
     pub(crate) store: SessionStore,
-    /// The working directory, which the git probes use.
-    pub(crate) cwd: PathBuf,
-    /// [`Self::cwd`] as shown, with the home directory as `~`.
+    /// The working directory as shown, with the home directory as `~`.
     pub(crate) display_cwd: String,
     /// The session's project, which scopes the session store, where `/init` checks for instruction
     /// files, and where `/diff` runs git: the git repository containing the session's working
@@ -99,7 +97,6 @@ pub(crate) mod testing {
     pub(crate) fn test_session_info() -> LiveSessionInfo {
         LiveSessionInfo {
             store: SessionStore::unopened("repo"),
-            cwd: PathBuf::from("/repo"),
             display_cwd: "~/test".to_owned(),
             project_root: PathBuf::from("/repo"),
             version: "0.0.0-test",

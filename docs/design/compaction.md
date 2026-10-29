@@ -102,17 +102,17 @@ In the bare REPL and headless runs, `driver::stdio::StdioSink` writes `Compactin
 
 4. **Reserve output headroom in the threshold.** Claude Code and opencode both compact below the advertised context limit, and the summarizer needs room to produce its summary. The 20k reserve and 13k buffer follow that floor.
 
-5. **Boundary-only compaction.** Compaction runs between persisting a coherent transcript unit and starting the next prompt or the next round of a turn, once every call of the round has its result recorded. It never interrupts a stream or a running tool, so the summarized transcript holds no unresolved call, and session replay matches manual `/compact`. The round boundary is a compaction site because a long tool loop would otherwise fill the context window before its turn ends.
+5. **Boundary-only compaction.** Compaction runs between persisting a coherent transcript unit and starting the next prompt or the next round of a turn, once every call of the round has its result recorded. It never interrupts a stream or a running tool, so the summarized transcript holds no unresolved call, and session replay matches manual `/compact`. The round boundary is a compaction site because a long tool loop would otherwise fill the context window before its turn ends. Claude Code's microcompact and opencode's prune, which clear old tool-output bodies between summaries, would add a second retention policy with its own UI and persistence for the need these boundaries already cover.
 
 6. **Refuse manual compaction mid-turn.** Claude Code, Codex, and opencode treat manual compaction as a between-turns operation. The slash dispatcher refuses an idle-only `/compact` while a turn is in flight, and the user retries after the reply finishes.
 
-7. **Same request path as a turn.** The summarization request goes through the same `Wire` and `collect_response` as a turn, so it reuses the live model, effort and thinking settings, credentials, betas, and cache handling. `request_summary` checks the stop reason itself, so a summary cut off by `max_tokens` or stopped early fails before it can replace the transcript.
+7. **Same request path as a turn.** The summarization request goes through the same `Wire` and `collect_response` as a turn, so it reuses the live model, effort and thinking settings, credentials, betas, and cache handling. `request_summary` checks the stop reason itself, so a summary cut off by `max_tokens` or stopped early fails before it can replace the transcript. Codex rewrites history server-side on its OpenAI and Azure paths, while this path needs only the Messages stream every supported endpoint already serves.
 
 8. **Send the conversation's own request prefix.** The system prompt, tools, and message prefix match what the conversation sends, so the summarizer reads the conversation's prompt cache and pays cache-read rates for most of its input. Codex forks the same way.
 
    - **Preserve the prefix.** Editing the history first would miss that cache. On models that bind thinking blocks to the conversation prefix, such as Opus 5.5, it would also invalidate the thinking blocks the request replays, which enforced accounts reject with a 400.
    - **Keep the tools and ask for text only.** The tools array is part of the cached prefix. The rubric asks the model not to call any tool, and a reply that stops on `tool_use` fails the compaction.
-   - **Replace history after success.** The summary replaces the whole history, so later requests replay no earlier thinking.
+   - **Replace history after success.** The summary replaces the whole history, so later requests replay no earlier thinking. The next compaction summarizes a transcript that already starts from this summary, so opencode's anchored re-compaction, which updates the previous summary in place, would add a second prompt path without new input.
    - **Trim on overflow.** Retries drop the oldest API rounds and strip every thinking block, since a new turn may omit earlier thinking but must not replay it after a changed prefix. A retry whose kept rounds end on a tool result closes that turn with a short assistant message before the rubric.
    - **Reserve summary room.** Claude Code's `truncateHeadForPTLRetry` frees just the reported overflow. oxide-code frees about 20k tokens beyond it so the retry leaves the summary room to finish, and marks no cache breakpoint on a transcript no later request reads.
 
@@ -142,38 +142,20 @@ In the bare REPL and headless runs, `driver::stdio::StdioSink` writes `Compactin
 
 ## Out of Scope
 
-- **Anchored re-compaction (`<previous-summary>` block).** opencode updates a previous summary in place, which pays off only when one session is compacted many times. Each compaction summarizes the transcript since the last boundary, which already starts from the previous summary, and repeated lossy rewrites need usage data before they earn their complexity.
-
-- **Microcompact and prune (in-place tool-result deletion).** Claude Code's microcompact and opencode's prune clear old tool-output bodies before a full summary. They are a separate retention policy with their own UI and persistence, and whole-transcript summaries at turn and round boundaries cover the same need with one mechanism.
-
 - **Partial and range compaction.** Claude Code's message-selector rewind adds a selector UI, a dual-direction summarizer, and a transcript splice for a case `/compact` already covers.
-
-- **Provider-specific remote compaction.** Codex's OpenAI and Azure paths rewrite history server-side. oxide-code talks to the Anthropic Messages API, where the normal stream already works.
-
-- **A pre-flight `count_tokens` request.** Every reference implementation reads the last usage plus an estimate and accepts a few percent of drift, which the extra round trip does not repay.
-
 - **Compaction hooks.** Hooks belong to a general surface tracked in [#157](https://github.com/hakula139/oxide-code/issues/157), with command hooks in [#159](https://github.com/hakula139/oxide-code/issues/159) and the `pre_compact` event in [#168](https://github.com/hakula139/oxide-code/issues/168).
 
 ## Sources
 
-- `crates/ox-core/src/client/anthropic/transport.rs`: `prompt_too_long_message`, which types an HTTP 400 `prompt is too long` as `PromptTooLong`.
 - `crates/ox-core/src/config/compaction.rs`: `CompactionConfig`, which resolves the threshold and its snapping.
-- `crates/ox-core/src/engine.rs`: `Engine::submit_prompt`, which compacts between the segments of a turn, and `Engine::account_usage`.
+- `crates/ox-core/src/engine.rs`: `Engine::submit_prompt`, which compacts between the segments of a turn.
 - `crates/ox-core/src/engine/compaction.rs`: `Engine::compact`, `Engine::run_compaction`, `Engine::replace_with_summary`, `request_summary`, the `SummaryStream` sink, the context-window retries, `AutoCompactFailures`, and `request_tokens`.
 - `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::compact`, which saves the boundary and swaps the transcript to the synthetic continuation.
 - `crates/ox-core/src/engine/turn.rs`: `agent_turn`, `TurnStop::Compact`, `collect_response`, and `TurnReport::context_estimate`.
-- `crates/ox-core/src/engine/usage.rs`: session-cost accounting and `Engine::reset_context_usage`.
+- `crates/ox-core/src/engine/usage.rs`: `UsageLedger`, which accounts the session cost and context usage, and `Engine::account_usage` and `Engine::reset_context_usage`, which feed it.
 - `crates/ox-core/src/protocol.rs`: `Op::Compact`, the `SessionCompacted`, `SummaryToken`, `SummaryDiscarded`, `AutoCompactionStarted`, and `AutoCompactionPaused` events, and `CompactTrigger`.
-- `crates/ox-core/src/protocol/notice.rs`: `compacted`, the boundary header every frontend shows.
-- `crates/ox-core/src/session/actor.rs`: the `SessionCmd::Compact` handler.
-- `crates/ox-core/src/session/handle.rs`: `SessionHandle::compact` and `CompactOutcome`.
-- `crates/ox-core/src/session/history.rs`: `TranscriptWalker::push_message`, which skips the generated summary block when the compaction boundary already displays it.
 - `crates/ox-core/src/session/post_compact.rs`: `SUMMARY_PREFIX` and `synthesize_post_compact_message`.
 - `crates/ox-core/src/session/state.rs`: `SessionState::compact`, which queues the synthetic root.
 - `crates/ox-core/src/session/store.rs`: `CompactInfo`, the record a compaction root stores.
 - `crates/ox-core/src/session/store/load.rs`: the chain walk that stops at the root.
-- `crates/ox-tui/src/app/events.rs`: `apply_session_compacted` and the auto-compaction event handling.
-- `crates/ox-tui/src/app/queue.rs`: `PromptQueue::fail_turn`, which hands back an unsent prompt.
 - `crates/ox-tui/src/components/chat/blocks/compacted.rs`: `CompactedBlock`.
-- `crates/ox-tui/src/slash/compact.rs`: `CompactCmd`.
-- `crates/ox/src/driver/stdio.rs`: `StdioSink`, which prints the compaction line on stderr.

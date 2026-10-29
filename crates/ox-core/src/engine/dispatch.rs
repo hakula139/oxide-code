@@ -15,7 +15,7 @@ use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
 use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
-use crate::permission::{Basis, ConfigFix, Decision, Policy, SessionGrant, Workspace};
+use crate::permission::{Basis, ConfigFix, Decision, Mode, Policy, SessionGrant, Workspace};
 use crate::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::handle::SessionHandle;
 use crate::tool::spill::run_capped;
@@ -158,7 +158,7 @@ struct Call<'r> {
 }
 
 impl Call<'_> {
-    /// Runs the call under the time cap and returns its output.
+    /// Runs the call and caps its output.
     async fn run(self) -> ToolOutput {
         run_capped(self.tool, self.prepared, &self.ctx).await
     }
@@ -319,7 +319,10 @@ impl<'r> Dispatcher<'r, '_> {
         };
 
         let ctx = self.dispatch_ctx.tool_ctx(id);
-        let prepared = tool.prepare(input, &ctx);
+        let prepared = match tool.prepare(input, &ctx) {
+            Ok(prepared) => prepared,
+            Err(message) => return Ok(Err(ToolOutput::error(message))),
+        };
         Ok(
             match self.check_permission(spec, tool, id, &prepared).await? {
                 None => Ok(Call {
@@ -361,10 +364,10 @@ impl<'r> Dispatcher<'r, '_> {
         );
         match verdict.decision {
             Decision::Allow => Ok(None),
-            Decision::Deny => Ok(Some(denied_output(
-                name,
-                format_args!("by {}", verdict.basis),
-            ))),
+            Decision::Deny => Ok(Some(match verdict.basis {
+                Basis::Mode(Mode::Plan) => plan_denied_output(name),
+                basis => denied_output(name, format_args!("by {basis}")),
+            })),
             Decision::Unapproved => {
                 let policy = &self.dispatch_ctx.policy;
                 let fix = policy.config_fix(class, &prepared.access);
@@ -451,6 +454,16 @@ fn denied_output(name: &str, reason: impl fmt::Display) -> ToolOutput {
         "The {name} call was denied {reason}. \
          Do not retry it. \
          Choose a different approach or ask the user to adjust permissions."
+    ))
+}
+
+/// The synthetic error result for a call `plan` mode denies. It steers the model toward the plan
+/// the mode exists for, since asking the user to adjust permissions would defeat the mode.
+fn plan_denied_output(name: &str) -> ToolOutput {
+    ToolOutput::error(format!(
+        "The {name} call was denied by `plan` mode, which allows only reads. \
+         Do not retry it. \
+         Finish investigating with `read`, `glob`, and `grep`, then present your plan."
     ))
 }
 
@@ -542,11 +555,10 @@ mod tests {
     use crate::engine::local_testing::{EchoTool, dispatch_with, inert_ops};
     use crate::permission::defaults::Shipped;
     use crate::permission::testing::exec_grant;
-    use crate::permission::{Mode, PermissionClass, Tier};
+    use crate::permission::{PermissionClass, Tier};
     use crate::protocol::testing::{CapturingSink, FailingSink};
     use crate::tool::ToolDefinition;
-    #[cfg(unix)]
-    use crate::tool::read::ReadTool;
+    use crate::tool::edit::EditTool;
     use crate::tool::tasks::TasksTool;
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::bash_registry;
@@ -992,6 +1004,39 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn plan_mode_denial_steers_toward_the_plan() {
+                let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Plan, &[], &[], Path::new("/repo"));
+
+                let denial = gate_call(
+                    &tools,
+                    "tool_1",
+                    "echo",
+                    json!({}),
+                    &sink,
+                    &mut inert_ops(),
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("deny resolves without abort");
+                let denial = expect_settled(denial);
+
+                assert!(denial.is_error);
+                assert_eq!(
+                    denial.content,
+                    "The echo call was denied by `plan` mode, which allows only reads. \
+                     Do not retry it. \
+                     Finish investigating with `read`, `glob`, and `grep`, then present your plan."
+                );
+                assert_eq!(
+                    approval_ids(&sink),
+                    [] as [&str; 0],
+                    "plan mode never prompts"
+                );
+            }
+
+            #[tokio::test]
             async fn ask_emits_event_and_approve_proceeds() {
                 let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
                 let sink = CapturingSink::default();
@@ -1307,32 +1352,32 @@ mod tests {
                 assert_eq!(approval_ids(&sink), [] as [&str; 0]);
             }
 
-            #[cfg(unix)]
             #[tokio::test]
-            async fn pins_a_path_input_to_the_resolved_target() {
-                let dir = canonical_tempdir();
-                let cwd = dir.path();
-                std::fs::write(cwd.join("real.txt"), "x").unwrap();
-                std::os::unix::fs::symlink("real.txt", cwd.join("link.txt")).unwrap();
-                let tools = ToolRegistry::new(vec![Box::new(ReadTool)]);
-                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], cwd);
+            async fn malformed_input_settles_without_asking() {
+                // An edit without a path has no workspace target, so in `manual` the policy would
+                // ask about a call that cannot run.
+                let tools = ToolRegistry::new(vec![Box::new(EditTool)]);
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
 
-                let gate = gate_call(
+                let output = gate_call(
                     &tools,
                     "tool_1",
-                    "read",
-                    json!({"file_path": "link.txt"}),
-                    &CapturingSink::default(),
+                    "edit",
+                    json!({"old_string": "a", "new_string": "b"}),
+                    &sink,
                     &mut inert_ops(),
                     &mut dispatch_ctx,
                 )
                 .await
-                .expect("a read resolves without abort");
+                .expect("malformed input resolves without abort");
+                let output = expect_settled(output);
 
                 assert_eq!(
-                    expect_ready(gate).input,
-                    json!({"file_path": cwd.join("real.txt")}),
+                    (output.content.as_str(), output.is_error),
+                    ("Invalid input: missing field `file_path`", true),
                 );
+                assert_eq!(approval_ids(&sink), [] as [&str; 0]);
             }
 
             #[cfg(unix)]

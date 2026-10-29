@@ -9,4 +9,4 @@ User guides for running oxide-code, plus the conventions, design specs, and rese
 | [`conventions/`](conventions/) | Contributor conventions: Rust, testing, writing, GitHub, development                                                                        |
 | [`design/`](design/)           | Architecture and implementation decisions for the agent, sessions, commands, tools, and TUI                                                 |
 | [`guide/`](guide/)             | Installation, quickstart, authentication, terminal UI, configuration, permissions, commands, instructions, sessions, headless mode, theming |
-| [`research/`](research/)       | External research: reference coding agents, Anthropic API                                                                                   |
+| [`research/`](research/)       | Anthropic API references and surveys of reference coding agents for open design questions                                                   |

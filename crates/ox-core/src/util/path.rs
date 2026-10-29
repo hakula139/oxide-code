@@ -1,5 +1,5 @@
 //! XDG and Claude Code directory lookup, `~` expansion and display, lexical path normalization,
-//! and the slash-separated spelling of paths the model reads.
+//! the slash-separated spelling of paths the model reads, and the project root lookup.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -151,6 +151,17 @@ pub(crate) fn slash_separated(path: &Path) -> String {
     path.to_string_lossy().replace(std::path::is_separator, "/")
 }
 
+/// The nearest directory at or above `cwd` with a `.git` entry, which is a file in a worktree or
+/// submodule, or `cwd` itself outside a repository. Project config and project instruction files
+/// are read only within it. It reads `.git` entries directly, since a `.git/config` a checkout
+/// ships can point git's `core.worktree` at an ancestor.
+pub fn project_root(cwd: &Path) -> PathBuf {
+    cwd.ancestors()
+        .find(|dir| dir.join(".git").symlink_metadata().is_ok())
+        .unwrap_or(cwd)
+        .to_owned()
+}
+
 // ── Testing ──
 
 #[cfg(test)]
@@ -193,7 +204,7 @@ pub mod testing {
 
     /// Variables for `temp_env` that point the home directory at `home` and unset `XDG_CONFIG_HOME`
     /// and `CLAUDE_CONFIG_DIR`, so user-level config and instructions resolve under `home` alone.
-    pub fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 3] {
+    pub(crate) fn pinned_home(home: &Path) -> [(&'static str, Option<&Path>); 3] {
         [
             (HOME_VAR, Some(home)),
             ("XDG_CONFIG_HOME", None),
@@ -443,6 +454,33 @@ mod tests {
                     "{case}"
                 );
             }
+        }
+    }
+
+    mod project_root {
+        use super::*;
+
+        #[test]
+        fn is_the_nearest_directory_with_a_git_entry() {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path().join("repo");
+            let submodule = repo.join("vendor").join("lib");
+            std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+            std::fs::create_dir_all(repo.join(".git")).unwrap();
+            std::fs::create_dir_all(submodule.join("src")).unwrap();
+            std::fs::write(submodule.join(".git"), "gitdir: ../../.git/modules/lib\n").unwrap();
+
+            assert_eq!(project_root(&repo.join("vendor")), repo);
+            assert_eq!(project_root(&submodule.join("src")), submodule);
+        }
+
+        #[test]
+        fn outside_a_repo_is_the_working_directory() {
+            let dir = tempfile::tempdir().unwrap();
+
+            let root = project_root(dir.path());
+
+            assert_eq!(root, dir.path());
         }
     }
 }
