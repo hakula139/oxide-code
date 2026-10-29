@@ -7,11 +7,10 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
+use super::abort::{AbortResult, Mailbox, TurnAbort};
 use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
@@ -94,8 +93,7 @@ pub(super) async fn run_tool_round(
     tool_uses: Vec<PendingToolUse>,
     parse_errors: &HashMap<String, String>,
     sink: &dyn EventSink,
-    ops: &mut mpsc::Receiver<Op>,
-    inbox: &mut Inbox,
+    mailbox: &mut Mailbox<'_>,
     dispatch_ctx: &mut DispatchContext<'_>,
 ) -> ToolRound {
     dispatch_ctx.tracker.reopen_writes();
@@ -109,8 +107,7 @@ pub(super) async fn run_tool_round(
         tools,
         parse_errors,
         sink,
-        ops,
-        inbox,
+        mailbox,
         dispatch_ctx,
     };
     let parallel_safe = |name: &str| tools.get(name).is_some_and(|(spec, _)| spec.parallel_safe);
@@ -141,12 +138,11 @@ const INTERRUPTED: &str =
     "The user interrupted this call before it finished, so it may have run partially.";
 
 /// The state one round's calls share.
-struct Dispatcher<'r, 'd> {
+struct Dispatcher<'r, 'm, 'd> {
     tools: &'r ToolRegistry,
     parse_errors: &'r HashMap<String, String>,
     sink: &'r dyn EventSink,
-    ops: &'r mut mpsc::Receiver<Op>,
-    inbox: &'r mut Inbox,
+    mailbox: &'r mut Mailbox<'m>,
     dispatch_ctx: &'r mut DispatchContext<'d>,
 }
 
@@ -178,7 +174,7 @@ struct Started {
     output: Option<ToolOutput>,
 }
 
-impl<'r> Dispatcher<'r, '_> {
+impl<'r> Dispatcher<'r, '_, '_> {
     /// Starts each call of `batch` and gates it, runs the allowed ones together, then ends each
     /// started call with its result. Returns the abort that stopped the batch, once every call in
     /// it has a result.
@@ -273,9 +269,7 @@ impl<'r> Dispatcher<'r, '_> {
             .map(|ready| async move { (ready.slot, ready.call.run().await) })
             .collect();
         while !runs.is_empty() {
-            match await_unless_aborted(runs.select_next_some(), self.ops, self.inbox, self.sink)
-                .await
-            {
+            match self.mailbox.race(runs.select_next_some(), self.sink).await {
                 Ok((slot, output)) => started[slot].output = Some(output),
                 Err(abort) => {
                     drop(runs);
@@ -341,7 +335,7 @@ impl<'r> Dispatcher<'r, '_> {
     ) -> AbortResult<Option<ToolOutput>> {
         let name = spec.definition.name.as_str();
         let class = spec.class;
-        if let Some(mode) = self.inbox.mode.take() {
+        if let Some(mode) = self.mailbox.take_mode() {
             self.dispatch_ctx.policy.set_mode(mode);
         }
         let verdict = self
@@ -389,7 +383,7 @@ impl<'r> Dispatcher<'r, '_> {
                         "because its approval request could not reach the user",
                     )));
                 }
-                match await_approval(id, self.ops, self.inbox, self.sink).await? {
+                match await_approval(id, self.mailbox, self.sink).await? {
                     ApprovalDecision::Approve => Ok(None),
                     ApprovalDecision::AllowForSession { rule } => {
                         Ok(self.allow_for_session(grant.as_ref(), *rule, name))
@@ -510,25 +504,26 @@ fn allow_entry(rule: &Rule) -> String {
     )
 }
 
-/// Blocks on `ops` for the [`Op::Resolve`] matching `id`, while [`Inbox::absorb`] handles the other
-/// ops. A decision for a different ID is a stale reply for an already-resolved call, so it is
-/// ignored, like any op the gate must not act on mid-approval. Cancel-safe by drop.
+/// Waits for the [`Op::Resolve`] matching `id`. A decision for a different ID is a stale reply for
+/// an already-resolved call, so it is ignored, like any op the gate must not act on mid-approval.
+/// Cancel-safe by drop.
 async fn await_approval(
     id: &str,
-    ops: &mut mpsc::Receiver<Op>,
-    inbox: &mut Inbox,
+    mailbox: &mut Mailbox<'_>,
     sink: &dyn EventSink,
 ) -> AbortResult<ApprovalDecision> {
-    loop {
-        match inbox.absorb(ops.recv().await, sink)? {
-            Some(Op::Resolve {
+    mailbox
+        .race_or(std::future::pending(), sink, |op| match op {
+            Op::Resolve {
                 id: target,
                 decision,
-            }) if target == id => return Ok(decision),
-            Some(other) => warn!(id, op = ?other, "ignored op while awaiting approval"),
-            None => {}
-        }
-    }
+            } if target == id => Some(decision),
+            other => {
+                warn!(id, op = ?other, "ignored op while awaiting approval");
+                None
+            }
+        })
+        .await
 }
 
 #[cfg(test)]
@@ -538,10 +533,10 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::json;
-    use tokio::sync::Barrier;
+    use tokio::sync::{Barrier, mpsc};
 
     use super::*;
-    use crate::engine::local_testing::{EchoTool, dispatch_with, inert_ops};
+    use crate::engine::local_testing::{EchoTool, dispatch_with, inert_mailbox};
     use crate::permission::defaults::Shipped;
     use crate::permission::testing::exec_grant;
     use crate::permission::{PermissionClass, Tier};
@@ -688,8 +683,7 @@ mod tests {
                 calls,
                 &HashMap::new(),
                 &sink,
-                &mut rx,
-                &mut Inbox::default(),
+                &mut Mailbox::new(&mut rx),
                 &mut dispatch_ctx,
             )
             .await;
@@ -744,8 +738,7 @@ mod tests {
                     calls,
                     &parse_errors,
                     &sink,
-                    &mut inert_ops(),
-                    &mut Inbox::default(),
+                    &mut inert_mailbox(),
                     &mut dispatch_ctx,
                 ),
             )
@@ -801,12 +794,13 @@ mod tests {
             let sink = CapturingSink::default();
             let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
             let (tx, mut rx) = mpsc::channel::<Op>(1);
+            let mut mailbox = Mailbox::new(&mut rx);
             let calls = vec![
                 call("tool_1", "meet", json!({"v": 1})),
                 call("tool_2", "hang", json!({})),
                 call("tool_3", "hang", json!({})),
             ];
-            let (parse_errors, mut inbox) = (HashMap::new(), Inbox::default());
+            let parse_errors = HashMap::new();
             let interrupt = async {
                 let tokens = [started.recv().await.unwrap(), started.recv().await.unwrap()];
                 assert!(tokens.iter().all(|token| !token.is_cancelled()));
@@ -820,8 +814,7 @@ mod tests {
                     calls,
                     &parse_errors,
                     &sink,
-                    &mut rx,
-                    &mut inbox,
+                    &mut mailbox,
                     &mut dispatch_ctx,
                 ),
                 interrupt,
@@ -862,8 +855,7 @@ mod tests {
                 calls,
                 &HashMap::new(),
                 &sink,
-                &mut inert_ops(),
-                &mut Inbox::default(),
+                &mut inert_mailbox(),
                 &mut dispatch_ctx,
             )
             .await;
@@ -907,17 +899,15 @@ mod tests {
                 name: &str,
                 input: serde_json::Value,
                 sink: &dyn EventSink,
-                ops: &mut mpsc::Receiver<Op>,
+                mailbox: &mut Mailbox<'_>,
                 dispatch_ctx: &mut DispatchContext<'_>,
             ) -> AbortResult<Result<Prepared, ToolOutput>> {
                 let parse_errors = HashMap::new();
-                let mut inbox = Inbox::default();
                 let mut dispatcher = Dispatcher {
                     tools,
                     parse_errors: &parse_errors,
                     sink,
-                    ops,
-                    inbox: &mut inbox,
+                    mailbox,
                     dispatch_ctx,
                 };
                 Ok(dispatcher
@@ -949,7 +939,7 @@ mod tests {
                     "echo",
                     json!({"v": 1}),
                     &sink,
-                    &mut inert_ops(),
+                    &mut inert_mailbox(),
                     &mut dispatch_ctx,
                 )
                 .await
@@ -971,7 +961,7 @@ mod tests {
                     "echo",
                     json!({}),
                     &sink,
-                    &mut inert_ops(),
+                    &mut inert_mailbox(),
                     &mut dispatch_ctx,
                 )
                 .await
@@ -1004,7 +994,7 @@ mod tests {
                     "echo",
                     json!({}),
                     &sink,
-                    &mut inert_ops(),
+                    &mut inert_mailbox(),
                     &mut dispatch_ctx,
                 )
                 .await
@@ -1043,7 +1033,7 @@ mod tests {
                     "echo",
                     json!({}),
                     &sink,
-                    &mut rx,
+                    &mut Mailbox::new(&mut rx),
                     &mut dispatch_ctx,
                 )
                 .await
@@ -1088,7 +1078,7 @@ mod tests {
                         "bash",
                         json!({ "command": command }),
                         &sink,
-                        &mut rx,
+                        &mut Mailbox::new(&mut rx),
                         &mut dispatch_ctx,
                     )
                     .await
@@ -1160,7 +1150,7 @@ mod tests {
                         name,
                         input,
                         &sink,
-                        &mut rx,
+                        &mut Mailbox::new(&mut rx),
                         &mut dispatch_ctx,
                     )
                     .await
@@ -1207,7 +1197,7 @@ mod tests {
                     "echo",
                     json!({}),
                     &FailingSink,
-                    &mut rx,
+                    &mut Mailbox::new(&mut rx),
                     &mut dispatch_ctx,
                 )
                 .await
@@ -1241,7 +1231,7 @@ mod tests {
                     "echo",
                     json!({}),
                     &sink,
-                    &mut rx,
+                    &mut Mailbox::new(&mut rx),
                     &mut dispatch_ctx,
                 )
                 .await
@@ -1294,7 +1284,7 @@ mod tests {
                         "bash",
                         json!({ "command": command }),
                         &sink,
-                        &mut ops,
+                        &mut Mailbox::new(&mut ops),
                         &mut dispatch_ctx,
                     )
                     .await
@@ -1327,7 +1317,7 @@ mod tests {
                     "mystery",
                     json!({}),
                     &sink,
-                    &mut inert_ops(),
+                    &mut inert_mailbox(),
                     &mut dispatch_ctx,
                 )
                 .await
@@ -1355,7 +1345,7 @@ mod tests {
                     "edit",
                     json!({"old_string": "a", "new_string": "b"}),
                     &sink,
-                    &mut inert_ops(),
+                    &mut inert_mailbox(),
                     &mut dispatch_ctx,
                 )
                 .await
@@ -1413,7 +1403,7 @@ mod tests {
                         "write",
                         json!({"file_path": path, "content": "x"}),
                         &sink,
-                        &mut rx,
+                        &mut Mailbox::new(&mut rx),
                         &mut dispatch_ctx,
                     )
                     .await
@@ -1524,61 +1514,12 @@ mod tests {
 
             let decision = await_approval(
                 "tool_1",
-                &mut rx,
-                &mut Inbox::default(),
+                &mut Mailbox::new(&mut rx),
                 &CapturingSink::default(),
             )
             .await
             .expect("matching decision resolves");
             assert_eq!(decision, ApprovalDecision::Deny);
-        }
-
-        #[tokio::test]
-        async fn holds_a_mid_approval_submit_and_mode_switch_in_the_inbox() {
-            let (tx, mut rx) = mpsc::channel::<Op>(3);
-            tx.try_send(Op::Queue("queued".to_owned())).unwrap();
-            tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
-            tx.try_send(Op::Resolve {
-                id: "tool_1".to_owned(),
-                decision: ApprovalDecision::Approve,
-            })
-            .unwrap();
-            let mut inbox = Inbox::default();
-            let sink = CapturingSink::default();
-
-            let decision = await_approval("tool_1", &mut rx, &mut inbox, &sink)
-                .await
-                .expect("approval resolves");
-
-            assert_eq!(decision, ApprovalDecision::Approve);
-            assert_eq!(inbox.prompts, vec!["queued".to_owned()]);
-            assert_eq!(inbox.mode, Some(Mode::Plan));
-            assert!(
-                matches!(sink.events().as_slice(), [Event::ModeChanged(Mode::Plan)]),
-                "{:?}",
-                sink.events(),
-            );
-        }
-
-        #[tokio::test]
-        async fn interrupt_and_shutdown_abort_the_turn() {
-            for (op, want_shutdown) in [(Op::Interrupt, false), (Op::Shutdown, true)] {
-                let (tx, mut rx) = mpsc::channel::<Op>(1);
-                tx.try_send(op.clone()).unwrap();
-                let abort = await_approval(
-                    "tool_1",
-                    &mut rx,
-                    &mut Inbox::default(),
-                    &CapturingSink::default(),
-                )
-                .await
-                .expect_err("interrupt / shutdown abort the wait");
-                if want_shutdown {
-                    assert!(matches!(abort, TurnAbort::Shutdown), "{op:?}");
-                } else {
-                    assert!(matches!(abort, TurnAbort::Cancelled), "{op:?}");
-                }
-            }
         }
     }
 }

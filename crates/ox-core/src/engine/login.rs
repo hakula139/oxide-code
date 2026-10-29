@@ -1,11 +1,10 @@
 //! The engine's sign-in state, with `/login` and `/logout` to change it.
 
 use anyhow::{Result, anyhow, bail};
-use tokio::sync::mpsc;
 use tracing::warn;
 
-use super::abort::{AbortResult, Inbox, TurnAbort};
-use super::{Engine, TurnEnd, abort, report_abort};
+use super::abort::{AbortResult, Mailbox, TurnAbort};
+use super::{Engine, TurnEnd, report_abort};
 use crate::auth::oauth;
 use crate::auth::oauth::login::{Grant, PendingLogin};
 use crate::auth::{self, Auth, AuthSource};
@@ -63,8 +62,7 @@ impl Engine {
     pub(super) async fn ensure_signed_in(
         &mut self,
         sink: &dyn EventSink,
-        ops: &mut mpsc::Receiver<Op>,
-        inbox: &mut Inbox,
+        mailbox: &mut Mailbox<'_>,
     ) -> AbortResult<Auth> {
         let retry = match &self.sign_in {
             SignIn::SignedIn(auth) => return Ok(auth.clone()),
@@ -73,7 +71,7 @@ impl Engine {
                 self.client.retry_stored_login(self.claude_code_keychain)
             }
         };
-        match abort::await_unless_aborted(retry, ops, inbox, sink).await? {
+        match mailbox.race(retry, sink).await? {
             Ok(auth) => {
                 let source = auth.source();
                 self.sign_in = SignIn::SignedIn(auth.clone());
@@ -93,7 +91,7 @@ impl Engine {
     pub(super) async fn login(
         &mut self,
         sink: &dyn EventSink,
-        ops: &mut mpsc::Receiver<Op>,
+        mailbox: &mut Mailbox<'_>,
     ) -> TurnEnd {
         let pending = match PendingLogin::start().await {
             Ok(pending) => pending,
@@ -104,16 +102,14 @@ impl Engine {
             manual_url: pending.manual_url().to_owned(),
         });
 
-        let mut inbox = Inbox::default();
-        let signed_in = match await_grant(&pending, ops, &mut inbox, sink).await {
+        let signed_in = match await_grant(&pending, mailbox, sink).await {
             Ok(Ok(grant)) => {
                 let finish = pending.finish(grant, &self.oauth_token_url, self.client.trust());
-                abort::await_unless_aborted(finish, ops, &mut inbox, sink).await
+                mailbox.race(finish, sink).await
             }
             Ok(Err(e)) => Ok(Err(e)),
             Err(abort) => Err(abort),
         };
-        self.adopt_mode(&mut inbox);
         match signed_in {
             Ok(Ok(auth)) => {
                 self.adopt_login(sink, auth);
@@ -174,24 +170,24 @@ impl Engine {
 /// matches it. A code that does not match reports why on `sink`, and the wait goes on.
 async fn await_grant(
     pending: &PendingLogin,
-    ops: &mut mpsc::Receiver<Op>,
-    inbox: &mut Inbox,
+    mailbox: &mut Mailbox<'_>,
     sink: &dyn EventSink,
 ) -> AbortResult<anyhow::Result<Grant>> {
-    abort::await_or_op(pending.await_redirect(), ops, inbox, sink, |op| match op {
-        Op::LoginCode(SignInCode(input)) => match pending.paste(&input) {
-            Ok(grant) => Some(Ok(grant)),
-            Err(e) => {
-                sink.emit(Event::Error(e.to_string()));
+    mailbox
+        .race_or(pending.await_redirect(), sink, |op| match op {
+            Op::LoginCode(SignInCode(input)) => match pending.paste(&input) {
+                Ok(grant) => Some(Ok(grant)),
+                Err(e) => {
+                    sink.emit(Event::Error(e.to_string()));
+                    None
+                }
+            },
+            op => {
+                warn!(?op, "dropped mid-login op");
                 None
             }
-        },
-        op => {
-            warn!(?op, "dropped mid-login op");
-            None
-        }
-    })
-    .await
+        })
+        .await
 }
 
 fn signed_out() -> TurnAbort {
@@ -212,13 +208,14 @@ mod tests {
 
     use indoc::formatdoc;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::sync::mpsc;
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::auth::LoginUnavailable;
     use crate::auth::oauth::testing::write_creds;
-    use crate::engine::local_testing::{inert_ops, login_urls, submit, tool_heavy_transcript};
+    use crate::engine::local_testing::{inert_mailbox, login_urls, submit, tool_heavy_transcript};
     use crate::engine::testing::{engine, mount_reply, with_pinned_home};
     use crate::permission::Mode;
     use crate::protocol::testing::CapturingSink;
@@ -312,9 +309,9 @@ mod tests {
                         engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                     engine.sign_in = SignIn::SignedOut { retry: true };
                     let sink = CapturingSink::default();
-                    let mut ops = inert_ops();
+                    let mut mailbox = inert_mailbox();
 
-                    let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
+                    let end = engine.submit_prompt("hi", None, &sink, &mut mailbox).await;
 
                     assert_eq!(end, TurnEnd::Completed);
                     assert!(
@@ -360,9 +357,9 @@ mod tests {
                     engine.transcript.set_messages(tool_heavy_transcript());
                     engine.sign_in = SignIn::SignedOut { retry: true };
                     let sink = CapturingSink::default();
-                    let mut ops = inert_ops();
+                    let mut mailbox = inert_mailbox();
 
-                    let end = engine.compact(&sink, &mut ops, None).await;
+                    let end = engine.compact(&sink, &mut mailbox, None).await;
 
                     let events = sink.events();
                     assert_eq!(end, TurnEnd::Completed, "{events:?}");
@@ -403,9 +400,9 @@ mod tests {
                     .await;
                     engine.sign_in = SignIn::SignedOut { retry: true };
                     let sink = CapturingSink::default();
-                    let mut ops = inert_ops();
+                    let mut mailbox = inert_mailbox();
 
-                    let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
+                    let end = engine.submit_prompt("hi", None, &sink, &mut mailbox).await;
 
                     assert_eq!(end, TurnEnd::Failed);
                     assert!(
@@ -444,9 +441,10 @@ mod tests {
                     engine.sign_in = SignIn::SignedOut { retry: true };
                     let sink = CapturingSink::default();
                     let (tx, mut ops) = mpsc::channel(1);
+                    let mut mailbox = Mailbox::new(&mut ops);
                     tx.try_send(Op::Interrupt).unwrap();
 
-                    let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
+                    let end = engine.submit_prompt("hi", None, &sink, &mut mailbox).await;
                     engine.client.finish_reloads().await;
 
                     assert_eq!(end, TurnEnd::Cancelled);
@@ -483,9 +481,9 @@ mod tests {
                     .await;
                     engine.sign_in = SignIn::SignedOut { retry: true };
                     let sink = CapturingSink::default();
-                    let mut ops = inert_ops();
+                    let mut mailbox = inert_mailbox();
 
-                    let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
+                    let end = engine.submit_prompt("hi", None, &sink, &mut mailbox).await;
 
                     assert_eq!(end, TurnEnd::Failed);
                     assert!(
@@ -523,9 +521,9 @@ mod tests {
                     .await;
                     engine.sign_in = SignIn::SignedOut { retry: false };
                     let sink = CapturingSink::default();
-                    let mut ops = inert_ops();
+                    let mut mailbox = inert_mailbox();
 
-                    let end = engine.submit_prompt("hi", None, &sink, &mut ops).await;
+                    let end = engine.submit_prompt("hi", None, &sink, &mut mailbox).await;
 
                     assert_eq!(end, TurnEnd::Failed);
                     assert!(
@@ -750,13 +748,14 @@ mod tests {
                 let mut engine = engine(server.uri(), &test_store(dir.path()), dir.path()).await;
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(2);
+                let mut mailbox = Mailbox::new(&mut ops);
                 ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
                 ops_tx.try_send(Op::Interrupt).unwrap();
 
-                let end = engine.login(&sink, &mut ops).await;
+                let end = engine.login(&sink, &mut mailbox).await;
 
                 assert_eq!(end, TurnEnd::Cancelled);
-                assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert_eq!(mailbox.take_mode(), Some(Mode::Plan));
             })
             .await;
         }
@@ -980,9 +979,7 @@ mod tests {
                         None,
                         9_999_999_999_999,
                     );
-                    let restored = engine
-                        .ensure_signed_in(&sink, &mut inert_ops(), &mut Inbox::default())
-                        .await;
+                    let restored = engine.ensure_signed_in(&sink, &mut inert_mailbox()).await;
 
                     assert!(retrying);
                     assert_eq!(

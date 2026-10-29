@@ -10,7 +10,7 @@ use indoc::{formatdoc, indoc};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use super::abort::{AbortResult, Inbox, TurnAbort, await_unless_aborted};
+use super::abort::{AbortResult, Mailbox, TurnAbort};
 use super::turn::{collect_response, conversation_request, record_interruption};
 use super::{Engine, TurnEnd, report_abort};
 use crate::auth::Auth;
@@ -19,7 +19,7 @@ use crate::config::compaction::AutoCompactionConfig;
 use crate::message::{ContentBlock, Message, Role, TextOrigin};
 use crate::model::TokenUsage;
 use crate::prompt::{PromptParts, UserContext};
-use crate::protocol::{CompactTrigger, Event, EventSink, Op};
+use crate::protocol::{CompactTrigger, Event, EventSink};
 use crate::session::handle::CompactBoundary;
 use crate::session::post_compact::synthesize_post_compact_message;
 use crate::session::store::CompactRecord;
@@ -174,8 +174,7 @@ impl Engine {
         &mut self,
         auth: &Auth,
         sink: &dyn EventSink,
-        ops: &mut mpsc::Receiver<Op>,
-        inbox: &mut Inbox,
+        mailbox: &mut Mailbox<'_>,
     ) -> AbortResult<()> {
         if !auto_compaction_due(
             self.auto_compaction(),
@@ -185,7 +184,7 @@ impl Engine {
             return Ok(());
         }
 
-        self.run_auto_compaction(auth, sink, ops, inbox, AutoPoint::BeforePrompt)
+        self.run_auto_compaction(auth, sink, mailbox, AutoPoint::BeforePrompt)
             .await
     }
 
@@ -196,11 +195,10 @@ impl Engine {
         &mut self,
         auth: &Auth,
         sink: &dyn EventSink,
-        ops: &mut mpsc::Receiver<Op>,
-        inbox: &mut Inbox,
+        mailbox: &mut Mailbox<'_>,
     ) -> AbortResult<()> {
         let compacted = self
-            .run_auto_compaction(auth, sink, ops, inbox, AutoPoint::MidTurn)
+            .run_auto_compaction(auth, sink, mailbox, AutoPoint::MidTurn)
             .await;
         if let Err(TurnAbort::Cancelled | TurnAbort::Shutdown) = compacted {
             record_interruption(&mut self.transcript, sink).await;
@@ -213,13 +211,12 @@ impl Engine {
         &mut self,
         auth: &Auth,
         sink: &dyn EventSink,
-        ops: &mut mpsc::Receiver<Op>,
-        inbox: &mut Inbox,
+        mailbox: &mut Mailbox<'_>,
         point: AutoPoint,
     ) -> AbortResult<()> {
         sink.emit(Event::AutoCompactionStarted);
         let cause = match self
-            .run_compaction(auth, sink, ops, inbox, None, point.into())
+            .run_compaction(auth, sink, mailbox, None, point.into())
             .await
         {
             Ok(()) => return Ok(()),
@@ -240,28 +237,16 @@ impl Engine {
     pub(super) async fn compact(
         &mut self,
         sink: &dyn EventSink,
-        ops: &mut mpsc::Receiver<Op>,
+        mailbox: &mut Mailbox<'_>,
         instructions: Option<String>,
     ) -> TurnEnd {
-        let mut inbox = Inbox::default();
-        let auth = match self.ensure_signed_in(sink, ops, &mut inbox).await {
+        let auth = match self.ensure_signed_in(sink, mailbox).await {
             Ok(auth) => auth,
-            Err(abort) => {
-                self.adopt_mode(&mut inbox);
-                return report_abort(sink, abort);
-            }
+            Err(abort) => return report_abort(sink, abort),
         };
         let compacted = self
-            .run_compaction(
-                &auth,
-                sink,
-                ops,
-                &mut inbox,
-                instructions,
-                CompactTrigger::Manual,
-            )
+            .run_compaction(&auth, sink, mailbox, instructions, CompactTrigger::Manual)
             .await;
-        self.adopt_mode(&mut inbox);
         let abort = match compacted {
             Ok(()) => {
                 sink.emit(Event::SessionReady);
@@ -283,27 +268,31 @@ impl Engine {
         &mut self,
         auth: &Auth,
         sink: &dyn EventSink,
-        ops: &mut mpsc::Receiver<Op>,
-        inbox: &mut Inbox,
+        mailbox: &mut Mailbox<'_>,
         instructions: Option<String>,
         trigger: CompactTrigger,
     ) -> Result<(), CompactFailure> {
         let tools = self.tools.definitions();
         let mut spent = Vec::new();
         let session_id = self.session_id();
-        let summary = await_unless_aborted(
-            request_summary(
-                &self.client,
-                conversation_request(&session_id, auth, &self.settings, &self.transcript, &tools),
-                instructions.as_deref(),
+        let summary = mailbox
+            .race(
+                request_summary(
+                    &self.client,
+                    conversation_request(
+                        &session_id,
+                        auth,
+                        &self.settings,
+                        &self.transcript,
+                        &tools,
+                    ),
+                    instructions.as_deref(),
+                    sink,
+                    &mut spent,
+                ),
                 sink,
-                &mut spent,
-            ),
-            ops,
-            inbox,
-            sink,
-        )
-        .await;
+            )
+            .await;
         let compacted = match summary {
             Ok(Ok(summary)) => {
                 let (fresh, warnings) = UserContext::load(self.cwd(), self.settings.model()).await;
@@ -729,7 +718,7 @@ mod tests {
     use crate::client::anthropic::testing::{api_key, sse_body, sse_response, text_stream_body};
     use crate::client::testing::five_hour_limit;
     use crate::config::compaction::CompactionConfig;
-    use crate::engine::local_testing::{dead_test_session, inert_ops, tool_heavy_transcript};
+    use crate::engine::local_testing::{dead_test_session, inert_mailbox, tool_heavy_transcript};
     use crate::engine::login::SignIn;
     use crate::engine::testing::{
         MODEL, SESSION_CONTEXT, engine, mount_reply, request_bodies, with_pinned_home,
@@ -743,7 +732,7 @@ mod tests {
     use crate::permission::Mode;
     use crate::prompt::SessionContext;
     use crate::protocol::testing::CapturingSink;
-    use crate::protocol::{ResumeTarget, UsageSnapshot};
+    use crate::protocol::{Op, ResumeTarget, UsageSnapshot};
     use crate::session::store::local_testing::fail_writes;
     use crate::session::store::testing::test_store;
     use crate::tool::bash::background::ShellState;
@@ -908,7 +897,7 @@ mod tests {
                     let sink = CapturingSink::default();
 
                     let compacted = engine
-                        .auto_compact(&api_key(), &sink, &mut inert_ops(), &mut Inbox::default())
+                        .auto_compact(&api_key(), &sink, &mut inert_mailbox())
                         .await;
 
                     assert!(compacted.is_ok(), "{compacted:?}");
@@ -932,14 +921,10 @@ mod tests {
                 engine.usage.auto_compaction_failures =
                     AutoCompactFailures::new(MAX_AUTO_COMPACT_FAILURES - 1);
                 let sink = CapturingSink::default();
-                let mut ops = inert_ops();
+                let mut mailbox = inert_mailbox();
 
-                let third = engine
-                    .auto_compact(&api_key(), &sink, &mut ops, &mut Inbox::default())
-                    .await;
-                let fourth = engine
-                    .auto_compact(&api_key(), &sink, &mut ops, &mut Inbox::default())
-                    .await;
+                let third = engine.auto_compact(&api_key(), &sink, &mut mailbox).await;
+                let fourth = engine.auto_compact(&api_key(), &sink, &mut mailbox).await;
 
                 assert!(matches!(third, Err(TurnAbort::Failed(_))), "{third:?}");
                 assert!(
@@ -979,7 +964,7 @@ mod tests {
                 let sink = CapturingSink::default();
 
                 let e = engine
-                    .auto_compact(&api_key(), &sink, &mut inert_ops(), &mut Inbox::default())
+                    .auto_compact(&api_key(), &sink, &mut inert_mailbox())
                     .await
                     .unwrap_err()
                     .into_failure();
@@ -1032,17 +1017,18 @@ mod tests {
                 engine.transcript.tasks = plan();
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
+                let mut mailbox = Mailbox::new(&mut ops);
                 ops_tx
                     .try_send(Op::Queue("queued after summary".to_owned()))
                     .unwrap();
-                let mut inbox = Inbox::default();
 
-                let compacted = engine
-                    .auto_compact(&api_key(), &sink, &mut ops, &mut inbox)
-                    .await;
+                let compacted = engine.auto_compact(&api_key(), &sink, &mut mailbox).await;
 
                 assert!(compacted.is_ok(), "{compacted:?}");
-                assert_eq!(inbox.prompts, ["queued after summary"]);
+                assert_eq!(
+                    mailbox.drain_prompts().collect::<Vec<_>>(),
+                    ["queued after summary"]
+                );
                 assert_eq!(
                     engine.transcript.messages(),
                     [synthesize_post_compact_message(
@@ -1111,10 +1097,10 @@ mod tests {
                 engine.usage.set_total_estimated_cost_usd(1.23);
                 engine.usage.auto_compaction_failures = AutoCompactFailures::new(3);
                 let sink = CapturingSink::default();
-                let mut ops = inert_ops();
+                let mut mailbox = inert_mailbox();
 
                 let end = engine
-                    .compact(&sink, &mut ops, Some("focus".to_owned()))
+                    .compact(&sink, &mut mailbox, Some("focus".to_owned()))
                     .await;
 
                 assert_eq!(end, TurnEnd::Completed);
@@ -1187,10 +1173,10 @@ mod tests {
                 let session_id = engine.session_id();
                 engine.transcript.set_messages(tool_heavy_transcript());
                 engine.transcript.tasks = plan();
-                let mut ops = inert_ops();
+                let mut mailbox = inert_mailbox();
 
                 let end = engine
-                    .compact(&CapturingSink::default(), &mut ops, None)
+                    .compact(&CapturingSink::default(), &mut mailbox, None)
                     .await;
 
                 assert_eq!(end, TurnEnd::Completed);
@@ -1229,10 +1215,10 @@ mod tests {
                 let mut engine = engine(server.uri(), &store, dir.path()).await;
                 engine.transcript.set_messages(tool_heavy_transcript());
                 start_shell(&engine.shells, "sleep 30").await;
-                let mut ops = inert_ops();
+                let mut mailbox = inert_mailbox();
 
                 let end = engine
-                    .compact(&CapturingSink::default(), &mut ops, None)
+                    .compact(&CapturingSink::default(), &mut mailbox, None)
                     .await;
 
                 assert_eq!(end, TurnEnd::Completed);
@@ -1260,22 +1246,23 @@ mod tests {
                 engine.usage.set_total_estimated_cost_usd(1.23);
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
+                let mut mailbox = Mailbox::new(&mut ops);
 
                 engine
                     .transcript
                     .set_messages(vec![Message::user("too short")]);
-                let end = engine.compact(&sink, &mut ops, None).await;
+                let end = engine.compact(&sink, &mut mailbox, None).await;
                 assert_eq!(end, TurnEnd::Failed);
                 assert_eq!(engine.transcript.messages(), [Message::user("too short")]);
 
                 engine.transcript.set_messages(tool_heavy_transcript());
                 ops_tx.send(Op::Interrupt).await.unwrap();
-                let end = engine.compact(&sink, &mut ops, None).await;
+                let end = engine.compact(&sink, &mut mailbox, None).await;
                 assert_eq!(end, TurnEnd::Cancelled);
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
 
                 engine.transcript.set_session(dead_test_session());
-                let end = engine.compact(&sink, &mut ops, None).await;
+                let end = engine.compact(&sink, &mut mailbox, None).await;
                 assert_eq!(
                     end,
                     TurnEnd::Failed,
@@ -1337,7 +1324,7 @@ mod tests {
                 engine.usage.set_total_estimated_cost_usd(1.23);
                 let sink = CapturingSink::default();
 
-                let end = engine.compact(&sink, &mut inert_ops(), None).await;
+                let end = engine.compact(&sink, &mut inert_mailbox(), None).await;
 
                 assert_eq!(end, TurnEnd::Completed);
                 let events = sink.events();
@@ -1371,9 +1358,9 @@ mod tests {
                 engine.sign_in = SignIn::SignedOut { retry: false };
                 engine.transcript.set_messages(tool_heavy_transcript());
                 let sink = CapturingSink::default();
-                let mut ops = inert_ops();
+                let mut mailbox = inert_mailbox();
 
-                let end = engine.compact(&sink, &mut ops, None).await;
+                let end = engine.compact(&sink, &mut mailbox, None).await;
 
                 assert_eq!(end, TurnEnd::Failed);
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
@@ -1399,13 +1386,14 @@ mod tests {
                 engine.transcript.set_messages(tool_heavy_transcript());
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(2);
+                let mut mailbox = Mailbox::new(&mut ops);
                 ops_tx.try_send(Op::SetMode(Mode::Plan)).unwrap();
                 ops_tx.try_send(Op::Interrupt).unwrap();
 
-                let end = engine.compact(&sink, &mut ops, None).await;
+                let end = engine.compact(&sink, &mut mailbox, None).await;
 
                 assert_eq!(end, TurnEnd::Cancelled);
-                assert_eq!(engine.policy.mode(), Mode::Plan);
+                assert_eq!(mailbox.take_mode(), Some(Mode::Plan));
             })
             .await;
         }
@@ -1419,6 +1407,7 @@ mod tests {
                 engine.transcript.set_messages(tool_heavy_transcript());
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = mpsc::channel(1);
+                let mut mailbox = Mailbox::new(&mut ops);
                 let interrupt_once_streaming = async {
                     while sink.events().is_empty() {
                         tokio::task::yield_now().await;
@@ -1427,7 +1416,7 @@ mod tests {
                 };
 
                 let (end, ()) = tokio::join!(
-                    engine.compact(&sink, &mut ops, None),
+                    engine.compact(&sink, &mut mailbox, None),
                     interrupt_once_streaming,
                 );
 
@@ -1467,9 +1456,9 @@ mod tests {
                 engine.usage.set_displayed_usage(TokenUsage::new(50_000, 1));
                 engine.usage.set_total_estimated_cost_usd(1.23);
                 let sink = CapturingSink::default();
-                let mut ops = inert_ops();
+                let mut mailbox = inert_mailbox();
 
-                let end = engine.compact(&sink, &mut ops, None).await;
+                let end = engine.compact(&sink, &mut mailbox, None).await;
 
                 assert_eq!(end, TurnEnd::Failed);
                 assert_eq!(engine.transcript.messages(), tool_heavy_transcript());
