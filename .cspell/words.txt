@@ -84,11 +84,14 @@ nlink
 nocapture
 nohup
 noprefix
+noprofile
+norc
 NOTADB
 nptu
 NTFS
 OCSP
 okdir
+OLDPWD
 onig
 otool
 oxalica
@@ -103,6 +106,7 @@ pushd
 pytest
 PYTHONDONTWRITEBYTECODE
 PYTHONUNBUFFERED
+rcfile
 rects
 replacen
 rfind
@@ -154,3 +158,4 @@ xhigh
 XPRESS
 xtrace
 xxhash
+ZDOTDIR

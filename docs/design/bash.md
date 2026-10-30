@@ -19,7 +19,7 @@ A process that starts once the region is set up skips the lock, so a shell kille
 
 ## Environment
 
-The command inherits ox's environment minus the [credentials](#credentials) ox authenticates with and `CDPATH`, and it adds these variables:
+The command inherits ox's environment minus the [credentials](#credentials) ox authenticates with, `CDPATH`, and `OLDPWD`, and it adds these variables:
 
 | Variable                         | Value            | Purpose                                                                                          |
 | -------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------ |
@@ -28,7 +28,7 @@ The command inherits ox's environment minus the [credentials](#credentials) ox a
 
 With the editor set to `true`, `git rebase --continue` and `git cherry-pick --continue` keep the prepared message, while `git commit` without `-m` stops with `Aborting commit due to empty commit message`. `GIT_EDITOR` takes precedence over git's `core.editor`, which takes precedence over `VISUAL` and `EDITOR`, so all three are needed for git and for tools that fall back to the generic pair, such as `gh` and `crontab -e`.
 
-An exported `CDPATH` makes `cd sub` try each of its entries before the working directory, while the [permission gate](permissions.md#command-targets) resolves `sub` against the working directory alone. Dropping it keeps `cd` where the gate placed it, so an allowed `cd sub && make` cannot run `make` in another `sub`.
+An exported `CDPATH` makes `cd sub` try each of its entries before the working directory, while the [permission gate](permissions.md#command-targets) resolves `sub` against the working directory alone. Dropping it keeps `cd` where the gate placed it, so an allowed `cd sub && make` cannot run `make` in another `sub`. An inherited `OLDPWD` names a directory the gate never sees for `~-`, so dropping it leaves `~-` as written until the command's own first `cd`, `pushd`, or `popd`.
 
 ### Credentials
 
@@ -90,7 +90,7 @@ Whenever a shell starts, exits, or stops, the engine emits `Event::BackgroundShe
 - `crates/ox-core/src/engine/sessions.rs`: `adopt_session`, which ends the old session's shells.
 - `crates/ox-core/src/protocol.rs`: `Event::BackgroundShellsUpdated`.
 - `crates/ox-core/src/tool.rs`: `ToolRegistry::built_in`, which hands one `BackgroundShells` to the three tools.
-- `crates/ox-core/src/tool/bash.rs`: `ShellTree`, `SESSION_ID_VAR`, `EDITOR_VARS`, `CDPATH_VAR`, `run_in_background`, `PipeCapture`, `render_output`, `bash`, which finds Git Bash on Windows, and `Bash::ready`, which waits for the MSYS runtime before a shell starts.
+- `crates/ox-core/src/tool/bash.rs`: `ShellTree`, `SESSION_ID_VAR`, `EDITOR_VARS`, `DIRECTORY_VARS`, `run_in_background`, `PipeCapture`, `render_output`, `bash`, which finds Git Bash on Windows, and `Bash::ready`, which waits for the MSYS runtime before a shell starts.
 - `crates/ox-core/src/tool/bash/background.rs`: `BackgroundShells`, `supervise`, `BashOutputTool`, `BashStopTool`, and `BackgroundShells::start`, which spawns a background shell through the same `ShellTree`.
 - `crates/ox-core/src/tool/bash/msys.rs`: `MsysRuntime`, which holds the MSYS runtime.
 - `crates/ox-tui/src/app/events.rs`: the list shown by `/status`, replaced on each `BackgroundShellsUpdated` and cleared on `SessionRolled` and `SessionResumed`.

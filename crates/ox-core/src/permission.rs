@@ -4273,9 +4273,11 @@ mod tests {
                 let (cwd, home) = (root.join("repo"), root.join("home"));
                 std::fs::create_dir_all(cwd.join("secrets")).unwrap();
                 std::fs::create_dir_all(cwd.join("src")).unwrap();
+                std::fs::create_dir_all(cwd.join("sub/private")).unwrap();
                 std::fs::create_dir_all(cwd.join("vault")).unwrap();
                 std::fs::create_dir_all(home.join(".ssh")).unwrap();
                 std::fs::write(cwd.join("secrets/key"), "").unwrap();
+                std::fs::write(cwd.join("sub/private/key"), "").unwrap();
                 std::fs::write(cwd.join("notes"), "").unwrap();
                 std::fs::write(cwd.join("vault/key"), "").unwrap();
                 std::fs::write(cwd.join("vault/readme"), "").unwrap();
@@ -4292,6 +4294,7 @@ mod tests {
                             &[
                                 (READ, "./secrets"),
                                 (EDIT, "./secrets"),
+                                (READ, "./sub/private"),
                                 (READ, "./vault/key"),
                             ],
                             &[],
@@ -4322,8 +4325,24 @@ mod tests {
                             ("cd secrets || cat key", Decision::Deny),
                             ("cd secrets && echo x > key", Decision::Deny),
                             (&sed_write, Decision::Deny),
+                            ("cat $PWD/secrets/key", Decision::Deny),
+                            ("cat \"${PWD}/secrets/key\"", Decision::Deny),
+                            ("cd secrets && cat $PWD/key", Decision::Deny),
+                            ("cat ~+/secrets/key", Decision::Deny),
+                            ("cd secrets; cd ..; cat ~-/key", Decision::Deny),
+                            ("pushd -n secrets; cat ~1/key", Decision::Deny),
+                            ("pushd -n secrets; cd sub; cat ~1/key", Decision::Deny),
+                            ("pushd -n private; cd sub; cat ~1/key", Decision::Deny),
+                            ("cat ~\\\n/.ssh/id_rsa", Decision::Deny),
+                            ("pushd -n ~/.ssh; cat ~+1/id_rsa", Decision::Deny),
+                            ("cd ~/.ssh; cd ..; head ~-/id_rsa", Decision::Deny),
                             ("cd src && cat main.rs", moved),
                             ("cd $DIR && cat key", moved),
+                            ("pushd -n $DIR; cat ~1/key", moved),
+                            ("cd ~1 && cat key", moved),
+                            ("echo x > $PWD.log", moved),
+                            ("echo x > ${PWD}x", moved),
+                            ("cd ${PWD}x && cat key", moved),
                         ] {
                             assert_eq!(
                                 decide_command(&p, case, &workspace),
@@ -4416,6 +4435,183 @@ mod tests {
                 });
             }
 
+            /// Checks each of the `cases` in `manual` and `yolo` under `deny.read = ["./secrets"]`
+            /// and `allow.exec = ["*"]`, with `secrets/key`, `env.sh`, and `~/.ssh/id_rsa` in
+            /// place. `cases` takes the decision a call the gate holds gets, which asks in `manual`
+            /// and runs in `yolo`.
+            fn assert_script_decisions(cases: impl Fn(Decision) -> Vec<(&'static str, Decision)>) {
+                let root_dir = canonical_tempdir();
+                let root = root_dir.path();
+                let (cwd, home) = (root.join("repo"), root.join("home"));
+                std::fs::create_dir_all(cwd.join("secrets")).unwrap();
+                std::fs::create_dir_all(home.join(".ssh")).unwrap();
+                std::fs::write(cwd.join("secrets/key"), "").unwrap();
+                std::fs::write(cwd.join("env.sh"), "").unwrap();
+                std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
+                temp_env::with_var(HOME_VAR, Some(&home), || {
+                    let workspace = Workspace::new(&cwd);
+                    for mode in [Mode::Manual, Mode::Yolo] {
+                        let p = resolved_policy(
+                            mode,
+                            &[(READ, "./secrets")],
+                            &[],
+                            &[(EXEC, "*")],
+                            &[],
+                            &workspace,
+                        );
+                        let held = if mode == Mode::Yolo {
+                            Decision::Allow
+                        } else {
+                            Decision::Ask
+                        };
+                        for (case, expected) in cases(held) {
+                            assert_eq!(
+                                decide_command(&p, case, &workspace),
+                                expected,
+                                "{mode} {case}"
+                            );
+                        }
+                    }
+                });
+            }
+
+            #[test]
+            fn command_weighs_the_script_source_or_a_shell_runs() {
+                assert_script_decisions(|held| {
+                    vec![
+                        ("source ~/.ssh/id_rsa", Decision::Deny),
+                        (". secrets/key", Decision::Deny),
+                        (". -- secrets/key", Decision::Deny),
+                        ("cd secrets && . ./key", Decision::Deny),
+                        ("bash ~/.ssh/id_rsa", Decision::Deny),
+                        ("sh -e -o pipefail secrets/key arg", Decision::Deny),
+                        ("bash --rcfile env.sh -- secrets/key", Decision::Deny),
+                        ("bash -init-file env.sh secrets/key", Decision::Deny),
+                        ("bash --norc secrets/key", Decision::Deny),
+                        ("bash -noprofile secrets/key", Decision::Deny),
+                        ("bash - secrets/key", Decision::Deny),
+                        ("bash + secrets/key", Decision::Deny),
+                        ("bash -O extglob secrets/key", Decision::Deny),
+                        ("bash -oO pipefail extglob secrets/key", Decision::Deny),
+                        ("bash secrets/key -c debug", Decision::Deny),
+                        ("bash +c 'cat secrets/key'", Decision::Deny),
+                        ("bash -c -x 'cat secrets/key'", Decision::Deny),
+                        ("dash -eu secrets/key", Decision::Deny),
+                        ("fish secrets/key", Decision::Deny),
+                        ("bash --rcfile secrets/key -i", Decision::Deny),
+                        ("fish -c 'cat secrets/key'", Decision::Deny),
+                        ("bash --rcfile '~/.ssh/id_rsa' -i", Decision::Deny),
+                        ("bash --init-file \\~/.ssh/id_rsa -c true", Decision::Deny),
+                        ("source -p . key", held),
+                        ("bash $F", held),
+                        ("bash -c \"$X\"", held),
+                        ("bash --bogus secrets/key", held),
+                        ("fish -n secrets/key", held),
+                        ("dash -O extglob secrets/key", held),
+                        ("zsh -ovi secrets/key", held),
+                        ("echo secrets/key | xargs bash", held),
+                        ("echo secrets/key | xargs -I % bash -c 'cat %'", held),
+                        ("echo secrets/key | xargs su root", held),
+                        ("su root secrets/key", held),
+                        ("su -s/bin/sh root secrets/key", held),
+                        ("su -- -x secrets/key", held),
+                        ("source env.sh", Decision::Allow),
+                        ("bash -s secrets/key < env.sh", Decision::Allow),
+                        ("bash -s -- \"$V\" < env.sh", Decision::Allow),
+                        ("echo a | xargs bash env.sh", Decision::Allow),
+                        ("bash -o secrets/key env.sh", Decision::Allow),
+                        ("su secrets/key", Decision::Allow),
+                        ("su - secrets/key", Decision::Allow),
+                        ("su -s /bin/sh secrets/key", Decision::Allow),
+                        ("su --sh /bin/sh secrets/key", Decision::Allow),
+                    ]
+                });
+            }
+
+            #[test]
+            fn command_weighs_what_the_environment_a_command_sets_names() {
+                assert_script_decisions(|held| {
+                    vec![
+                        ("BASH_ENV=secrets/key bash -c true", Decision::Deny),
+                        ("env BASH_ENV=secrets/key bash -c true", Decision::Deny),
+                        ("ENV=secrets/key dash -i", Decision::Deny),
+                        ("ZDOTDIR=secrets zsh -c true", Decision::Deny),
+                        ("env BASH_ENV=~/.ssh/id_rsa bash -c true", Decision::Deny),
+                        ("BASH_ENV='~/.ssh/id_rsa' bash -c true", Decision::Deny),
+                        ("BASH_ENV=secrets/key eval 'bash -c true'", Decision::Deny),
+                        ("BASH_ENV=secrets/key sh -c 'bash -c true'", Decision::Deny),
+                        ("BASH_ENV=secrets/key su root -c true", Decision::Deny),
+                        ("HOME=secrets zsh -c true", Decision::Deny),
+                        ("HOME=secrets bash -i", Decision::Deny),
+                        ("HOME=secrets bash -c true", Decision::Deny),
+                        ("HOME=secrets fish", Decision::Deny),
+                        ("HOME=secrets exec -l dash -c true", Decision::Deny),
+                        ("HOME=secrets su -m root", Decision::Deny),
+                        ("HOME=secrets eval 'ksh -i -c true'", Decision::Deny),
+                        (
+                            "BASH_ENV='~/key' sh -c 'HOME=secrets dash -c true'",
+                            Decision::Deny,
+                        ),
+                        ("env X.Y=1 cat secrets/key", Decision::Deny),
+                        ("env A=1 -x=y cat secrets/key", Decision::Deny),
+                        ("env -- -x=y cat secrets/key", Decision::Deny),
+                        ("BASH_ENV='$(cat secrets/key)' bash -c true", held),
+                        ("env -S 'cat secrets/key'", held),
+                        ("HOME=./secrets cat ~/.ssh/id_rsa", held),
+                        ("env HOME=./secrets cat ~/.ssh/id_rsa", held),
+                        ("HOME=./secrets eval 'cat ${HOME}/.ssh/id_rsa'", held),
+                        ("PWD=./secrets eval 'cat ${PWD}/key'", held),
+                        ("HOME=. bash -c true", held),
+                        ("ZDOTDIR=. zsh -c true", held),
+                        (
+                            "BASH_ENV='~+/key' sh -c 'true; PWD=./secrets bash -c true'",
+                            held,
+                        ),
+                        ("HOME=./secrets eval 'cat ~/.ssh/id_rsa'", held),
+                        ("PWD=./secrets eval 'cat $PWD/key'", held),
+                        ("PWD=./secrets eval 'cat ~+/key'", held),
+                        ("OLDPWD=./secrets eval 'cat ~-/key'", held),
+                        ("PWD=./secrets BASH_ENV=~+/key bash -c true", held),
+                        ("OLDPWD=./secrets BASH_ENV='~-/key' bash -c true", held),
+                        ("PWD=./secrets sh -c 'BASH_ENV=~+/key bash -c true'", held),
+                        ("HOME=./secrets X=\"$(cat $HOME/.ssh/id_rsa)\" env", held),
+                        ("HOME=./secrets cd && cat key", held),
+                        (
+                            "echo BASH_ENV | xargs -I % env %=secrets/key bash -c true",
+                            held,
+                        ),
+                        ("env A=1 -x=y rm -rf y", held),
+                        ("ENV=secrets/key zsh -c true", Decision::Allow),
+                        ("HOME=secrets/sub su root -c true", Decision::Allow),
+                    ]
+                });
+            }
+
+            #[cfg(unix)]
+            #[test]
+            fn command_weighs_a_tilde_user_path_under_that_users_home() {
+                let cwd_dir = canonical_tempdir();
+                let workspace = Workspace::new(cwd_dir.path());
+                let root = nix::unistd::User::from_name("root").unwrap().unwrap();
+                let secret = slash_separated(&root.dir.join("secret"));
+                for mode in [Mode::Manual, Mode::Yolo] {
+                    let p = resolved_policy(
+                        mode,
+                        &[(READ, &secret)],
+                        &[],
+                        &[(EXEC, "*")],
+                        &[],
+                        &workspace,
+                    );
+
+                    assert_eq!(
+                        decide_command(&p, "cat ~root/secret", &workspace),
+                        Decision::Deny,
+                        "{mode}"
+                    );
+                }
+            }
+
             #[test]
             fn yolo_holds_a_recursive_read_of_the_cwd_that_a_rule_names() {
                 let cwd_dir = canonical_tempdir();
@@ -4440,13 +4636,13 @@ mod tests {
             }
 
             #[test]
-            fn command_weighs_each_input_redirection_as_a_read() {
+            fn command_weighs_each_input_redirection_as_a_read_and_each_read_write_one_as_both() {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 let workspace = Workspace::new(cwd);
                 let p = policy_in(
                     Mode::Yolo,
-                    &[(READ, ".env")],
+                    &[(READ, ".env"), (EDIT, "locked")],
                     &[(READ, "secrets")],
                     &[(EXEC, "*")],
                     &workspace,
@@ -4457,6 +4653,14 @@ mod tests {
                     ("cat < .env", Decision::Deny),
                     ("wc -l 3< config/.env", Decision::Deny),
                     ("python3 run.py < secrets/key", Decision::Ask),
+                    ("cat <> .env", Decision::Deny),
+                    ("cat 3<>.env", Decision::Deny),
+                    ("cat <>\".env\"", Decision::Deny),
+                    ("cat <\\\n>.env", Decision::Deny),
+                    ("cat 3<\\\n> .env", Decision::Deny),
+                    ("echo x <> locked", Decision::Deny),
+                    ("echo x 3<>locked", Decision::Deny),
+                    ("echo a\\<>.env", Decision::Allow),
                 ] {
                     assert_eq!(decide(case), expected, "{case}");
                 }

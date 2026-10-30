@@ -45,9 +45,10 @@ const SESSION_ID_VAR: &str = "OX_SESSION_ID";
 /// and `EDITOR`.
 const EDITOR_VARS: [&str; 3] = ["EDITOR", "GIT_EDITOR", "VISUAL"];
 
-/// The variable each command's environment drops, so `cd sub` reaches the `sub` the permission gate
-/// checked, where an exported `CDPATH` would look elsewhere first.
-const CDPATH_VAR: &str = "CDPATH";
+/// The variables each command's environment drops, so `cd sub` reaches the `sub` the permission
+/// gate checked, where an exported `CDPATH` would look elsewhere first, and `~-` names a directory
+/// the command left, where bash would expand it to an inherited `OLDPWD`.
+const DIRECTORY_VARS: [&str; 2] = ["CDPATH", "OLDPWD"];
 
 /// Bytes of command output one call renders, less the spill path its omission marker names. The
 /// reserve below the dispatcher cap holds the rest of the marker and the footer, so the dispatcher
@@ -624,10 +625,12 @@ impl ShellTree {
                 .current_dir(ctx.cwd())
                 .env(SESSION_ID_VAR, &ctx.session_id)
                 .envs(EDITOR_VARS.map(|var| (var, "true")))
-                .env_remove(CDPATH_VAR)
                 .stdin(Stdio::null())
                 .stdout(stdout)
                 .stderr(stderr);
+            for var in DIRECTORY_VARS {
+                cmd.env_remove(var);
+            }
             withhold_secrets(cmd.as_std_mut());
         });
         #[cfg(unix)]
@@ -1657,6 +1660,27 @@ mod tests {
                 pipe.read_to_string(&mut output).await.unwrap();
 
                 assert_eq!(output, "cwd");
+            }
+
+            #[tokio::test]
+            async fn expands_the_previous_directory_only_after_a_cd_whatever_oldpwd_ox_inherits() {
+                let cwd = tempfile::tempdir().unwrap();
+                fs::create_dir_all(cwd.path().join("sub")).unwrap();
+                let bash = Bash::ready().await.unwrap();
+
+                let (_tree, mut pipe) =
+                    temp_env::with_var("OLDPWD", Some(cwd.path().join("sub")), || {
+                        ShellTree::spawn(
+                            bash,
+                            r#"echo ~-; was=$PWD; cd sub && [ ~- = "$was" ] && echo left"#,
+                            &ctx(cwd.path()),
+                        )
+                        .unwrap()
+                    });
+                let mut output = String::new();
+                pipe.read_to_string(&mut output).await.unwrap();
+
+                assert_eq!(output, "~-\nleft\n");
             }
 
             #[cfg(unix)]
