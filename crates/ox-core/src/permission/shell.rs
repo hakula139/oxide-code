@@ -392,12 +392,17 @@ mod tests {
             #[test]
             fn hands_the_words_a_redirection_carries_to_the_command_bash_gives_them() {
                 for (command, expected) in [
+                    ("<<< x", &[][..]),
                     ("cat <<'EOF' a b\nx\nEOF", &["cat a b"][..]),
                     ("cat x <<'EOF' a\nx\nEOF", &["cat x a"]),
                     ("true && cat <<'EOF' a\nx\nEOF", &["true", "cat a"]),
                     ("ls | cat <<'EOF' a\nx\nEOF", &["ls", "cat a"]),
                     ("! git <<'EOF' push\nx\nEOF", &["git push"]),
                     ("FOO=1 <<'EOF' git push\nx\nEOF", &["FOO=1 git push"]),
+                    (
+                        "FOO=1 BAR=2 <<'EOF' git push\nx\nEOF",
+                        &["FOO=1 BAR=2 git push"],
+                    ),
                     (">/dev/null <<'EOF' git push\nx\nEOF", &["git push"]),
                     ("git <<'EOF' 2>&1 push -f\nx\nEOF", &["git push -f"]),
                     ("git >/dev/null push -f", &["git push -f"]),
@@ -1195,6 +1200,7 @@ mod tests {
                     ("echo $((1 + 2)); let x=1", "$((1 + 2))"),
                     ("[ a > b ] && ls", "[ a > b ]"),
                     ("if true; then ls", "if true; then ls"),
+                    ("if true; then echo ok;", "if true; then echo ok;"),
                     ("f() {\n  ls\n}", "f() {..."),
                     (long.as_str(), cut.as_str()),
                 ] {

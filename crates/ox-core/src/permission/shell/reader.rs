@@ -1555,6 +1555,7 @@ mod tests {
         fn flag_a_reader_word_whose_files_are_unknown() {
             for command in [
                 "cat $F",
+                "cat ~*/x",
                 r#"cat "$X/.ssh/id_rsa""#,
                 "/bin/cat $F",
                 "grep -r x $DIR",

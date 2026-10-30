@@ -1,4 +1,5 @@
-//! Reads transparent wrappers, their option effects, and the input they feed commands.
+//! Reads command wrappers, their option effects, and the input they feed commands.
+
 use anyhow::Result;
 
 use super::word::Word;
