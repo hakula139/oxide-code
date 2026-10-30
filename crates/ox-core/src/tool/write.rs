@@ -2,11 +2,12 @@
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use serde::Deserialize;
 
-use super::file::FileVerb;
+use super::file::{Checked, FileVerb};
 use super::view::{ApprovalBody, ApprovalPreview};
 use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
 use crate::file_tracker::{FileTracker, GatePurpose, LastView};
@@ -156,7 +157,7 @@ where
         Err(e) => return Err(format!("Failed to access {}: {e}", path.display())),
     };
 
-    let expected = if let Some(meta) = &pre_meta {
+    let original = if let Some(meta) = &pre_meta {
         validate_write_target(path, meta)?;
         Some(check_gate(path, &ctx.tracker).await?)
     } else {
@@ -177,7 +178,10 @@ where
                     .await
                     .with_context(|| format!("Failed to create directory {}", parent.display()))?;
             }
-            super::file::write_file(file_path, bytes, expected).await
+            match original {
+                Some((checked, key)) => super::file::rewrite_file(checked, key, bytes).await,
+                None => super::file::create_file(file_path, bytes).await,
+            }
         })
         .await
         .map_err(|error| format!("{error:#}"))?;
@@ -196,16 +200,17 @@ fn validate_write_target(path: &Path, metadata: &std::fs::Metadata) -> Result<()
     Ok(())
 }
 
-async fn check_gate(path: &Path, tracker: &FileTracker) -> Result<Vec<u8>, String> {
-    let bytes = super::file::read_validated(path, FileVerb::Write).await?;
-    tracker
-        .verify_current_content(
-            &super::file::tracker_key(path).await,
-            &bytes,
-            GatePurpose::Write,
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(bytes)
+/// Opens the existing file at `path` for the overwrite and checks the content it read against the
+/// Read-before-Write gate, returning the handle with its tracker key.
+async fn check_gate(path: &Path, tracker: &Arc<FileTracker>) -> Result<(Checked, PathBuf), String> {
+    let key = super::file::tracker_key(path).await;
+    let tracker = Arc::clone(tracker);
+    let path = path.to_owned();
+    super::run_blocking(move || {
+        let checked = super::file::open_gated(&path, &key, &tracker, GatePurpose::Write)?;
+        Ok((checked, key))
+    })
+    .await
 }
 
 // ── Testing ──
@@ -486,6 +491,27 @@ mod tests {
 
             assert_eq!(result.unwrap(), WriteMode::Overwrite);
             assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
+        }
+
+        #[tokio::test]
+        async fn accepts_a_read_under_another_spelling_of_the_path() {
+            let dir = canonical_tempdir();
+            fs::create_dir(dir.path().join("sub")).unwrap();
+            let path = dir.path().join("existing.txt");
+            fs::write(&path, "old content").unwrap();
+            let ctx = temp_ctx();
+            seed_full_read(&ctx.tracker, &path);
+            let detour = dir.path().join("sub").join("..").join("existing.txt");
+
+            let result = write_file(&detour, "new content", &ctx).await;
+
+            assert_eq!(result.unwrap(), WriteMode::Overwrite);
+            assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
+            assert_eq!(
+                ctx.tracker
+                    .verify_current_content(&path, b"new content", GatePurpose::Write),
+                Ok(()),
+            );
         }
 
         #[tokio::test]

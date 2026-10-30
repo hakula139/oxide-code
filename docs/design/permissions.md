@@ -140,7 +140,7 @@ The `--no-tui` REPL and `-p` headless runs share `run_op`, which passes each `Ev
 - `crates/ox-core/src/permission/shell.rs`: `CommandTarget::parse`, the wrapper grammars, the recognized syntax, the known-safe commands, the reader grammars, and the forced recursive `rm` check.
 - `crates/ox-core/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Event::ModeChanged`, `Op::Resolve`, `Op::SetMode`, and `ApprovalDecision`.
 - `crates/ox-core/src/tool.rs`: the `Tool` trait, `ToolSpec`, `ToolCtx`, and `Prepared`.
-- `crates/ox-core/src/tool/file.rs`: `read_validated`, the size and type checks on the opened file.
+- `crates/ox-core/src/tool/file.rs`: `read_validated` and `open_gated`, the size and type checks on the opened file.
 - `crates/ox-core/src/tool/search.rs`: `SearchRoot` and the withheld-file note.
 - `crates/ox-core/src/util/fs.rs`: `open_no_follow`, the open that refuses a swapped symlink.
 - `crates/ox-tui/src/action.rs`: `next_mode`, the Tab and Shift+Tab cycle.
