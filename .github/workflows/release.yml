@@ -56,14 +56,17 @@ jobs:
       actions: read
     steps:
       - name: Wait for CI on the tagged commit
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Pull request runs test a merge commit, so only push and dispatched runs count.
           while true; do
             verdict=$(
-              gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA" \
-                --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")]
+              gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=100" \
+                --paginate \
+                --slurp |
+                jq -r '[.[].workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")]
                   | if any(.[]; .conclusion == "success") then
                       "passed \(map(select(.conclusion == "success"))[0].html_url)"
                     elif any(.[]; .status != "completed") then "running"
