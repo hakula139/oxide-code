@@ -1309,7 +1309,7 @@ mod tests {
 
             let bases = rule.prefix_bases(&anchors);
 
-            assert_eq!(bases, Vec::<PathBuf>::new());
+            assert_eq!(bases, [] as [PathBuf; 0]);
         }
 
         #[test]

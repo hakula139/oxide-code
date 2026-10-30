@@ -1457,7 +1457,7 @@ mod tests {
             .collect()
     }
 
-    /// A policy in `/repo` with the given tiers and the shipped groups that hold no patterns.
+    /// A policy in `/repo` with given tiers and the device, SSH, and credential groups disabled.
     fn policy(
         mode: Mode,
         deny: &[(PermissionClass, &str)],

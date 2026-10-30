@@ -52,8 +52,8 @@ pub enum Shipped {
 }
 
 impl Shipped {
-    /// Whether the group guards secret files, which no config change should offer to expose.
-    pub(crate) const fn guards_secrets(self) -> bool {
+    /// Returns whether the group guards secrets that no config change should offer to expose.
+    pub(super) const fn guards_secrets(self) -> bool {
         matches!(self, Self::Ssh | Self::Credentials)
     }
 
@@ -187,7 +187,7 @@ fn path_pattern(path: &std::path::Path) -> String {
 /// The tier a shipped rule joins. A shipped default only holds calls back, so none joins the allow
 /// tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ShippedTier {
+pub(super) enum ShippedTier {
     Deny,
     Ask,
 }
