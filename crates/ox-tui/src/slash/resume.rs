@@ -41,7 +41,7 @@ use crate::modal::chrome::{
 };
 use crate::modal::line_editor::LineEditor;
 use crate::modal::pages::{Loaded, ModalPage, Pages};
-use crate::modal::searchable_list::{SearchableItem, SearchableList};
+use crate::modal::searchable_list::{LoadState, SearchableItem, SearchableList};
 use crate::modal::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
 use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
@@ -427,6 +427,7 @@ impl ResumePicker {
         self.pages.replace(self.store.walk(self.scope));
         self.load_error = None;
         self.list.replace_items(Vec::new());
+        self.list.set_load_state(LoadState::Loading);
         self.load_ahead();
     }
 
@@ -436,7 +437,6 @@ impl ResumePicker {
         if self.list.rows_below_cursor() < LOAD_AHEAD {
             self.pages.request(&self.events, PAGE_SIZE);
         }
-        self.list.set_has_more(self.pages.has_more());
     }
 
     /// Appends a loaded page and asks for the next one when needed.
@@ -455,6 +455,11 @@ impl ResumePicker {
             .collect();
         self.list.append_items(rows);
         self.load_ahead();
+        self.list.set_load_state(if self.pages.has_more() {
+            LoadState::Loading
+        } else {
+            LoadState::Complete
+        });
     }
 
     fn run(&mut self, action: PickerAction) -> ModalKey {
@@ -621,11 +626,11 @@ impl ResumePicker {
                     "resume picker failed to list sessions"
                 );
                 self.load_error = Some(format!("Failed to load sessions: {err:#}"));
-                self.list.set_has_more(false);
+                self.list.set_load_state(LoadState::Failed);
             }
             Loaded::Stopped => {
                 self.load_error = Some(LOADER_STOPPED.to_owned());
-                self.list.set_has_more(false);
+                self.list.set_load_state(LoadState::Failed);
             }
         }
     }
@@ -2307,13 +2312,28 @@ mod tests {
         /// A request number no worker uses, since workers count up from zero.
         const AWAITED: u64 = u64::MAX;
 
+        #[test]
+        fn leaves_prompt_pages_for_their_own_picker() {
+            let (_dir, store) = isolated_store();
+            let mut picker = unsettled(store.clone(), "live-session-id");
+            let page = ModalPage::Prompts(PageEnd::for_request(
+                AWAITED,
+                store.prompt_history(ProjectScope::Current, ""),
+                Some(Ok(Vec::new())),
+            ));
+
+            let unclaimed = picker.on_page(page);
+
+            assert!(matches!(unclaimed, Some(ModalPage::Prompts(_))));
+        }
+
         /// `picker` waiting on [`AWAITED`], which `page` answers.
         fn awaiting(
             picker: &mut ResumePicker,
             page: Option<anyhow::Result<Vec<SessionInfo>>>,
         ) -> ModalPage {
             picker.pages = Pages::Loading(AWAITED);
-            picker.list.set_has_more(true);
+            picker.list.set_load_state(LoadState::Loading);
             ModalPage::Sessions(PageEnd::for_request(
                 AWAITED,
                 picker.store.walk(ListScope::default()),

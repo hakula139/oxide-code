@@ -25,7 +25,7 @@ use crate::keymap::{KeyAction, KeyChord, Keymap, is_unmodified};
 use crate::modal::chrome::{FOOTER_HEIGHT, render_footer};
 use crate::modal::line_editor::LineEditor;
 use crate::modal::pages::{Loaded, ModalPage, Pages};
-use crate::modal::searchable_list::{SearchableItem, SearchableList};
+use crate::modal::searchable_list::{LoadState, SearchableItem, SearchableList};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
@@ -151,8 +151,8 @@ impl PromptHistoryPicker {
             ProjectScope::Every => "Every project",
         };
         self.list.set_header(TITLE, scope);
-        self.list.set_empty_text(EMPTY);
         self.list.replace_items(Vec::new());
+        self.list.set_load_state(LoadState::Loading);
         self.preview_offset = 0;
         self.load_ahead();
     }
@@ -161,7 +161,6 @@ impl PromptHistoryPicker {
         if self.list.rows_below_cursor() < usize::from(VISIBLE_ROWS) {
             self.pages.request(&self.events, PAGE_SIZE);
         }
-        self.list.set_has_more(self.pages.has_more());
     }
 
     fn page_loaded(&mut self, loaded: Loaded<PromptEntry>) {
@@ -177,6 +176,11 @@ impl PromptHistoryPicker {
                     .collect();
                 self.list.append_items(rows);
                 self.load_ahead();
+                self.list.set_load_state(if self.pages.has_more() {
+                    LoadState::Loading
+                } else {
+                    LoadState::Complete
+                });
             }
             Loaded::Failed(error) => {
                 tracing::warn!(error = %format_args!("{error:#}"), "prompt history failed to load");
@@ -190,8 +194,7 @@ impl PromptHistoryPicker {
 
     fn failed(&mut self, error: String) {
         self.list.set_header(TITLE, error);
-        self.list.set_empty_text("");
-        self.list.set_has_more(false);
+        self.list.set_load_state(LoadState::Failed);
     }
 
     fn layout(&self, width: u16, max_height: u16) -> (u16, u16, u16) {
@@ -450,12 +453,10 @@ mod tests {
             history.key(KeyCode::Enter, KeyModifiers::SHIFT),
             ModalKey::Consumed
         ));
-        let ModalKey::Submitted(ModalAction::Dispatch(Action::ReplaceInput(text))) =
-            history.key(KeyCode::Enter, KeyModifiers::NONE)
-        else {
-            panic!("plain Enter recalls a draft");
-        };
-        assert_eq!(text, SEEDED_PROMPT);
+        assert!(matches!(
+            history.key(KeyCode::Enter, KeyModifiers::NONE),
+            ModalKey::Submitted(ModalAction::Dispatch(Action::ReplaceInput(text))) if text == SEEDED_PROMPT
+        ));
         assert!(matches!(
             history.key(KeyCode::Esc, KeyModifiers::NONE),
             ModalKey::Cancelled
@@ -497,12 +498,10 @@ mod tests {
         for _ in 0..5 {
             history.key(KeyCode::PageDown, KeyModifiers::NONE);
         }
-        let ModalKey::Submitted(ModalAction::Dispatch(Action::ReplaceInput(recalled))) =
-            history.key(KeyCode::Enter, KeyModifiers::NONE)
-        else {
-            panic!("recall");
-        };
-        assert_eq!(recalled, text);
+        assert!(matches!(
+            history.key(KeyCode::Enter, KeyModifiers::NONE),
+            ModalKey::Submitted(ModalAction::Dispatch(Action::ReplaceInput(recalled))) if recalled == text
+        ));
         for (width, height) in [(1, 1), (2, 3), (10, 7), (25, 12)] {
             let rows = render_modal(&mut history.picker, width, height);
             assert!(rows.len() <= usize::from(height));
@@ -568,7 +567,24 @@ mod tests {
         history.picker.page_loaded(Loaded::Stopped);
         let failed = render_modal(&mut history.picker, 60, 20).join("\n");
         assert!(failed.contains("page loader stopped"));
+        assert!(!failed.contains("No matches"), "{failed}");
+        assert!(!failed.contains("Searching for"), "{failed}");
         insta::assert_snapshot!("prompt_failed", failed);
+
+        history.key(KeyCode::Up, KeyModifiers::NONE);
+        let failed = render_modal(&mut history.picker, 60, 20).join("\n");
+        assert!(failed.contains("page loader stopped"));
+        assert!(!failed.contains("No matches"), "{failed}");
+        assert_eq!(history.picker.list.query(), "absent");
+
+        history.key(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let retrying = render_modal(&mut history.picker, 60, 20).join("\n");
+        assert!(retrying.contains("Searching for `absent`"), "{retrying}");
+        assert!(!retrying.contains("page loader stopped"), "{retrying}");
+        history.settle();
+        let complete = render_modal(&mut history.picker, 60, 20).join("\n");
+        assert!(complete.contains("No matches for `absent`"), "{complete}");
+        assert_eq!(history.picker.list.query(), "absent");
 
         let mut unavailable = Harness::new(SessionStore::unopened("project"));
         unavailable.settle();
@@ -600,10 +616,18 @@ mod tests {
             history.picker.on_page(page),
             Some(ModalPage::Sessions(_))
         ));
-        history.key(KeyCode::Down, KeyModifiers::NONE);
+        for (key, expected) in [(KeyCode::Down, "second"), (KeyCode::Up, "first")] {
+            history.picker.preview_offset = 5;
 
-        assert_eq!(history.picker.preview_offset, 0);
-        assert_eq!(history.picker.list.selected().unwrap().entry.text, "second");
+            history.key(key, KeyModifiers::NONE);
+
+            assert_eq!(history.picker.preview_offset, 0, "{key:?}");
+            assert_eq!(
+                history.picker.list.selected().unwrap().entry.text,
+                expected,
+                "{key:?}"
+            );
+        }
         assert!(
             render_modal(&mut history.picker, 60, 20)
                 .join("\n")
