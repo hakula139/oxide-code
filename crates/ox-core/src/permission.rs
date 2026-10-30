@@ -612,7 +612,12 @@ fn long_names(path: PathBuf, canonicalize: impl Fn(&Path) -> io::Result<PathBuf>
 /// substituted for a directory, the canonical path stays whole.
 #[cfg(windows)]
 fn respell(existing: &Path, long: &Path) -> PathBuf {
-    if names(existing).count() != names(long).count() {
+    let name_count = |path: &Path| {
+        path.components()
+            .filter(|c| matches!(c, Component::Normal(_)))
+            .count()
+    };
+    if name_count(existing) != name_count(long) {
         return dunce::simplified(long).to_path_buf();
     }
     existing
