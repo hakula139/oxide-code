@@ -28,6 +28,7 @@ dotenv
 ELOOP
 ENOENT
 ENOTDIR
+entr
 envrc
 eopnotsupp
 EPERM

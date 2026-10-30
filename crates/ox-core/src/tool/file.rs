@@ -3,21 +3,21 @@
 
 mod commit;
 
-use std::fs::Metadata;
+pub(super) use self::commit::Checked;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use strum::Display;
 
-pub(super) use self::commit::Checked;
-use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
+use crate::file_tracker::{FileTracker, GatePurpose, MAX_TRACKED_FILE_SIZE};
 use crate::util::fs::{FileReadError, read_regular_file, validate_regular_file};
 use crate::util::path::lexical_normalize;
 use crate::util::text::format_size;
 
 // ── Tracker Keys ──
 
-/// The [`FileTracker`](crate::file_tracker::FileTracker) key for the absolute `path` a file tool
+/// The [`FileTracker`] key for the absolute `path` a file tool
 /// acts on. An existing path canonicalizes, so dotted and symlinked spellings of one file share an
 /// entry. A missing path falls back to its lexically clean form. The gate's resolved path cannot
 /// stand in, since it keeps each name as spelled, while `canonicalize` returns the on-disk case on
@@ -40,10 +40,12 @@ pub(super) enum FileVerb {
     Write,
 }
 
-/// Rejects targets the [`FileTracker`](crate::file_tracker::FileTracker) cannot gate, phrasing each
-/// refusal for `verb`.
-fn validate_file_target(path: &Path, metadata: &Metadata, verb: FileVerb) -> Result<(), String> {
-    validate_regular_file(metadata, MAX_TRACKED_FILE_SIZE)
+/// Rejects targets the [`FileTracker`] cannot gate by their metadata before an open, phrasing each
+/// refusal for `verb`. Blocks, so callers run it on the blocking pool.
+fn validate_file_target(path: &Path, verb: FileVerb) -> Result<(), String> {
+    let metadata =
+        std::fs::metadata(path).map_err(|e| format!("Failed to access {}: {e}", path.display()))?;
+    validate_regular_file(&metadata, MAX_TRACKED_FILE_SIZE)
         .map_err(|error| file_read_error(path, error, verb))
 }
 
@@ -92,44 +94,51 @@ pub(super) fn strip_bom(text: &str) -> &str {
 /// Reads a bounded regular file, checking its metadata before opening and through the opened
 /// no-follow handle. Errors name `path` and phrase refusals for `verb`.
 pub(super) async fn read_validated(path: &Path, verb: FileVerb) -> Result<Vec<u8>, String> {
-    let metadata = tokio::fs::metadata(path)
-        .await
-        .map_err(|e| format!("Failed to access {}: {e}", path.display()))?;
-    validate_file_target(path, &metadata, verb)?;
-
     let read_path = path.to_owned();
-    tokio::task::spawn_blocking(move || read_regular_file(&read_path, MAX_TRACKED_FILE_SIZE))
-        .await
-        .map_err(|error| format!("Failed to read {}: {error}", path.display()))?
-        .map_err(|error| file_read_error(path, error, verb))
+    tokio::task::spawn_blocking(move || {
+        validate_file_target(&read_path, verb)?;
+        read_regular_file(&read_path, MAX_TRACKED_FILE_SIZE)
+            .map_err(|error| file_read_error(&read_path, error, verb))
+    })
+    .await
+    .map_err(|error| format!("Failed to read {}: {error}", path.display()))?
 }
 
 // ── File Writing ──
 
-/// Opens the existing file at `path` once for a rewrite, checking its metadata before the open and
-/// through the opened no-follow handle. Errors name `path` and phrase refusals for `verb`. Blocks,
-/// so callers run it on the blocking pool.
-pub(super) fn open_checked(path: &Path, verb: FileVerb) -> Result<Checked, String> {
-    let metadata =
-        std::fs::metadata(path).map_err(|e| format!("Failed to access {}: {e}", path.display()))?;
-    validate_file_target(path, &metadata, verb)?;
-    Checked::open(path).map_err(|error| match error {
-        FileReadError::Io(error) => format!("Failed to write {}: {error}", path.display()),
-        error => file_read_error(path, error, verb),
-    })
+/// Opens the existing file at `path` for an edit or an overwrite, checking its metadata before the
+/// open and through the opened no-follow handle, and passes the content it read through the
+/// Read-before-Edit gate under the tracker `key`. Errors name `path` and phrase refusals for the
+/// purpose. Blocks, so callers run it on the blocking pool.
+pub(super) fn open_gated(
+    path: &Path,
+    key: &Path,
+    tracker: &FileTracker,
+    purpose: GatePurpose,
+) -> Result<Checked, String> {
+    let verb = match purpose {
+        GatePurpose::Edit => FileVerb::Edit,
+        GatePurpose::Write => FileVerb::Write,
+    };
+    validate_file_target(path, verb)?;
+    let checked = Checked::open(path).map_err(|error| file_read_error(path, error, verb))?;
+    tracker
+        .verify_current_content(key, checked.content(), purpose)
+        .map_err(|e| e.to_string())?;
+    Ok(checked)
 }
 
 /// Rewrites the file `checked` holds with `bytes` and returns them under the tracker `key`. The
 /// caller must use the tracker's owned write operation.
 pub(super) async fn rewrite_file(
     checked: Checked,
-    path: PathBuf,
     key: PathBuf,
     bytes: Vec<u8>,
 ) -> anyhow::Result<(PathBuf, Vec<u8>)> {
     tokio::task::spawn_blocking(move || {
+        let path = checked.path().to_owned();
         checked
-            .rewrite(&path, &bytes)
+            .rewrite(&bytes)
             .with_context(|| format!("Failed to write {}", path.display()))?;
         Ok((key, bytes))
     })
@@ -287,9 +296,9 @@ mod tests {
 
             let bytes = read_validated(&path, FileVerb::Read).await.unwrap();
             assert_eq!(bytes, content.as_bytes());
-            let checked = open_checked(&path, FileVerb::Write).unwrap();
+            let checked = Checked::open(&path).unwrap();
             assert_eq!(checked.content(), content.as_bytes());
-            checked.rewrite(&path, b"rewritten").unwrap();
+            checked.rewrite(b"rewritten").unwrap();
             assert_eq!(fs::read(&path).unwrap(), b"rewritten");
         }
     }
