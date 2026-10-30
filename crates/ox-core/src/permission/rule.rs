@@ -210,13 +210,12 @@ impl Rule {
         }
         self.class == PermissionClass::Read
             && recursive
-            && match &self.pattern {
-                Pattern::Path(glob) => {
-                    (glob.absolute && glob.literal.as_os_str().is_empty())
+            && matches!(
+                &self.pattern,
+                Pattern::Path(glob)
+                    if (glob.absolute && glob.literal.as_os_str().is_empty())
                         || may_match_below(bases, [&path.canonical, &path.requested])
-                }
-                Pattern::Any | Pattern::Exec(_) | Pattern::Host(_) | Pattern::Tool(_) => false,
-            }
+            )
     }
 
     /// Where this rule's literal path prefix lands, rooted at each absolute anchor unless the
