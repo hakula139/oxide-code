@@ -179,6 +179,9 @@ impl App {
     fn apply_app_action(&mut self, action: AppAction) {
         match action {
             AppAction::ToggleExpanded => self.chat.toggle_expanded(),
+            AppAction::SearchPrompts => self.push_modal(Box::new(
+                crate::prompt_history::PromptHistoryPicker::new(&self.session_info),
+            )),
         }
     }
 
@@ -251,6 +254,7 @@ impl App {
     pub(crate) fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Submit(text) => self.handle_submit_prompt(&text),
+            Action::ReplaceInput(text) => self.input.set_text(&text),
             Action::Op(op) => self.dispatch_op(op),
             Action::SlashPrompt { line, prompt } => {
                 self.start_turn(QueuedPrompt::slash(line, prompt));
@@ -632,6 +636,43 @@ mod tests {
 
     mod handle_crossterm_event {
         use super::*;
+
+        #[test]
+        fn prompt_search_cancel_preserves_selection_yank_undo_and_running_turn() {
+            for cancel in [
+                key_event(KeyCode::Esc, KeyModifiers::NONE),
+                key_event(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            ] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.input.set_text("alpha\nbeta");
+                app.handle_crossterm_event(&key_event(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                app.handle_crossterm_event(&CrosstermEvent::Paste("plan.".to_owned()));
+                app.handle_crossterm_event(&key_event(KeyCode::Left, KeyModifiers::SHIFT));
+                app.queue.push("queued".to_owned());
+                start_op(&mut app, &Op::prompt("running"));
+
+                app.handle_crossterm_event(&key_event(
+                    KeyCode::Char('R'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ));
+                assert!(app.modals.is_active());
+                app.handle_crossterm_event(&CrosstermEvent::Paste("filter".to_owned()));
+                app.handle_crossterm_event(&key_event(KeyCode::Char('s'), KeyModifiers::CONTROL));
+                app.handle_engine_event(Event::StreamToken("background reply".to_owned()));
+                assert!(app.modals.is_active());
+                app.handle_crossterm_event(&cancel);
+                app.handle_crossterm_event(&CrosstermEvent::Paste(" ".to_owned()));
+                assert_eq!(app.input.lines(), ["alpha", "plan "]);
+                app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::CONTROL));
+                assert_eq!(app.input.lines(), ["alpha", "plan beta"]);
+                app.handle_crossterm_event(&key_event(KeyCode::Char('z'), KeyModifiers::CONTROL));
+
+                assert_eq!(app.input.lines(), ["alpha", "plan "]);
+                assert_eq!(activity(&app), Some(&Activity::Streaming));
+                assert_eq!(app.queue.pending()[0].prompt(), "queued");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+            }
+        }
 
         #[tokio::test]
         async fn buffered_confirmation_keys_leave_the_saved_session_untouched() {
@@ -1438,6 +1479,37 @@ mod tests {
 
     mod dispatch_action {
         use super::*;
+
+        #[test]
+        fn recalled_draft_keeps_native_undo_refreshes_popup_and_leaves_ops_and_queue_alone() {
+            for (draft, steps) in [("", 1), ("original\ndraft", 2)] {
+                let (mut app, mut rx, _event_tx) = test_app(None);
+                app.input.set_text(draft);
+                app.queue.push("queued".to_owned());
+                start_op(&mut app, &Op::prompt("running"));
+
+                app.dispatch_action(Action::ReplaceInput("/res".to_owned()));
+
+                assert_eq!(app.input.lines(), ["/res"]);
+                assert!(app.input.popup_visible());
+                assert_eq!(app.queue.pending()[0].prompt(), "queued");
+                assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+                for _ in 0..steps {
+                    app.handle_crossterm_event(&key_event(
+                        KeyCode::Char('z'),
+                        KeyModifiers::CONTROL,
+                    ));
+                }
+                assert_eq!(app.input.lines(), draft.split('\n').collect::<Vec<_>>());
+                for _ in 0..steps {
+                    app.handle_crossterm_event(&key_event(
+                        KeyCode::Char('R'),
+                        KeyModifiers::ALT | KeyModifiers::SHIFT,
+                    ));
+                }
+                assert_eq!(app.input.lines(), ["/res"]);
+            }
+        }
 
         #[tokio::test]
         async fn submit_prompt_updates_chat_status_and_forwards_action() {

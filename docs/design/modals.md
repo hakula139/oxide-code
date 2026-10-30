@@ -22,12 +22,13 @@ A modal is `Send`, since the App lives on tokio, but not `Sync`, since modals ow
 
 The stack routes keys before any component sees them. A modal whose `captures_esc` returns true takes Esc itself, while Ctrl+C still cancels. The stack drops every key held with a modifier other than Shift unless `binds_modified_key` claims it, so a picker's `j` or Enter never fires as Alt+J or Ctrl+Enter. Bracketed pastes reach `handle_paste`, which text fields implement, and a paste never answers a confirm or approval prompt. The frame tick calls `tick` on the top modal, and `next_tick` tells the loop when its time-driven state, such as an expiring notice, next changes, so an idle modal does not keep the loop awake.
 
-A page of sessions that a `/resume` picker's worker read reaches the stack as an app event, and `ModalStack::deliver_sessions_page` offers it through `Modal::on_sessions_page` to each open modal from the top until the picker whose request it answers takes it, so a picker keeps loading under a confirm dialog.
+Session and prompt pages reach the stack through the closed `ModalPage` app event. `ModalStack::deliver_page` offers each result through `Modal::on_page` from the top until the picker awaiting its request takes it, so a picker keeps loading under a confirm dialog. Shared typed `Pages` workers return the walk with each bounded page. While one page runs, query or scope replacements retain only the latest desired walk, which starts after the old result returns. Globally unique request IDs discard completions for closed pickers.
 
 ## Shared Primitives
 
 - `list_picker`: cursor, navigation, and rendering for a fixed roster, which `/mode`, `/theme`, `/init`, and the `/model + /effort` picker embed.
-- `searchable_list`: a substring filter over paged rows, behind the `/resume` picker.
+- `searchable_list`: a substring filter over paged rows, shared by session and prompt history pickers.
+- `pages`: typed bounded page workers and request routing for both pickers.
 - `kv_overview`: a sectioned read-only table, behind `/status`, `/config`, and `/help`.
 - `line_editor`: the single-line text field behind `/rename`, the picker search, and the approval rule and feedback editors. It keeps its text in a `ratatui-textarea` buffer and edits through the prompt's grapheme-aware table.
 - `chrome`: the title header and hint footer, which cuts trailing hints on a narrow row, so callers list the essential hints first.
@@ -41,6 +42,7 @@ A page of sessions that a `/resume` picker's worker read reaches the stack as an
 - **`/mode`, `/theme`, and `/init` pickers**: list pickers over the permission modes, the built-in themes, and the instruction files `/init` can create.
 - **`/rename` editor**: a `LineEditor` prefilled with the title, which submits through `command::rename`, the typed form's parser.
 - **`/resume` picker**: a `SearchableList` of saved sessions, which [Resume](resume.md) covers.
+- **Prompt history picker**: retained ordinary user prompts with an escaped, scrollable multiline preview. Enter recalls exact text as an undoable composer edit, while cancellation leaves the editor untouched.
 - **Confirm-delete modal**: a Y / N gate for deleting a saved session, pushed by `/delete <id-prefix>` and by the `/resume` picker. A failure stays inline until a retry replaces it or the modal closes, so a stray key cannot wipe the diagnostic.
 - **Approval modal**: the gate for a tool call that needs approval, showing the command or the diff it would apply. [Permissions](permissions.md) covers its choices and guard.
 - **`/status`, `/config`, and `/help` overviews**: `KvOverview` tables of the session, the resolved config with each value's source, and the registered commands.

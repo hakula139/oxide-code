@@ -1,0 +1,26 @@
+---
+source: crates/ox-tui/src/prompt_history.rs
+expression: "render_modal(&mut history.picker, 65, 25).join(\"\\n\")"
+---
+Search prompts
+Every project
+
+/ SEEDED
+
+> 2026-01-01  seeded prompt                    /work/test-project
+
+
+
+
+
+Preview 1-1 / 1 (PageUp / PageDown to scroll)
+seeded prompt
+
+
+
+
+
+
+
+
+Enter to edit  ·  Esc to cancel  ·  Ctrl+S to search this project

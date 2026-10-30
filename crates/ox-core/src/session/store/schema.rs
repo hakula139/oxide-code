@@ -11,7 +11,7 @@ use crate::util::fs::open_private_file;
 
 /// The schema revision this build creates. A revision only adds tables, indexes, and nullable or
 /// defaulted columns, so a build keeps working on a store a newer build migrated.
-pub(super) const REVISION: i64 = 1;
+pub(super) const REVISION: i64 = 2;
 
 /// How long a write waits for another connection's write lock before it fails.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -60,6 +60,11 @@ const SCHEMA_V1: &str = indoc! {"
         created_at INTEGER NOT NULL
     ) STRICT;
     CREATE INDEX usage_by_session ON usage (session_id);
+"};
+
+const SCHEMA_V2: &str = indoc! {"
+    CREATE INDEX messages_by_prompt_time
+        ON messages (created_at DESC, id DESC, seq DESC) WHERE role = 'user';
 "};
 
 /// Opens the store at `path`, switching a fresh file to WAL and creating its schema. A file SQLite
@@ -127,8 +132,9 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if revision(&tx)? == 0 {
         tx.execute_batch(SCHEMA_V1)?;
-        tx.pragma_update(None, "user_version", REVISION)?;
     }
+    tx.execute_batch(SCHEMA_V2)?;
+    tx.pragma_update(None, "user_version", REVISION)?;
     tx.commit()?;
     Ok(())
 }
@@ -157,6 +163,43 @@ mod tests {
 
     mod open {
         use super::*;
+
+        #[test]
+        fn upgrades_v1_and_preserves_its_rows_and_queries() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = store_path(&dir);
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(indoc! {"
+                PRAGMA user_version = 1;
+                INSERT INTO sessions (
+                    id, project_root, cwd, model, format, created_at, updated_at,
+                    title_manual, message_count
+                ) VALUES ('session', '/home/u/src/app', '/home/u/src/app', 'model', 1, 0, 0, 0, 0);
+            "})
+                .unwrap();
+            drop(conn);
+
+            let conn = open(&path).unwrap();
+            let project: String = conn
+                .query_row(
+                    "SELECT project_root FROM sessions WHERE id = 'session'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let index: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE name = 'messages_by_prompt_time'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+
+            assert_eq!(project, "/home/u/src/app");
+            assert_eq!(revision(&conn).unwrap(), REVISION);
+            assert!(index.contains("created_at DESC, id DESC, seq DESC"));
+        }
 
         #[test]
         fn creates_the_schema_of_a_fresh_file_in_wal_mode() {
@@ -194,12 +237,15 @@ mod tests {
             let path = store_path(&dir);
             open(&path)
                 .unwrap()
-                .execute_batch("CREATE TABLE later (id TEXT); PRAGMA user_version = 2;")
+                .execute_batch(&format!(
+                    "CREATE TABLE later (id TEXT); PRAGMA user_version = {};",
+                    REVISION + 1
+                ))
                 .unwrap();
 
             let conn = open(&path).unwrap();
 
-            assert_eq!(revision(&conn).unwrap(), 2);
+            assert_eq!(revision(&conn).unwrap(), REVISION + 1);
             assert_eq!(tables(&conn), ["later", "messages", "sessions", "usage"]);
         }
 

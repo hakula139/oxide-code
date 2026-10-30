@@ -31,12 +31,12 @@ pub(crate) fn edit(textarea: &mut TextArea<'_>, key: &KeyEvent) -> bool {
         }
         // Readline kills to the line start and keeps the text for Ctrl+Y, where the default undoes.
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => kill_to_head(textarea),
-        // Terminal paste never reaches the textarea as a key, so the page-scroll default only
-        // surprises a readline user.
-        (KeyCode::Char('v'), KeyModifiers::CONTROL) => false,
+        // Ctrl+R belongs to history search and Ctrl+V stays with terminal paste.
+        (KeyCode::Char('v' | 'r' | 'R'), KeyModifiers::CONTROL) => false,
         // Ctrl+_ arrives as Ctrl+7 from a legacy terminal (0x1F) and as Ctrl+Shift+- under the
         // kitty keyboard protocol, which reports the base key with Shift as a modifier.
         (KeyCode::Char('z' | '_' | '-' | '7'), KeyModifiers::CONTROL) => textarea.undo(),
+        (KeyCode::Char('r' | 'R'), KeyModifiers::ALT) => textarea.redo(),
         _ => textarea.input(*key),
     };
 
@@ -264,6 +264,30 @@ mod tests {
 
     mod edit {
         use super::*;
+
+        #[test]
+        fn alt_r_redoes_while_ctrl_r_keeps_the_undone_edit() {
+            for code in ['r', 'R'] {
+                let mut textarea = textarea_with("draft");
+                textarea.insert_str(" recalled");
+                edit(
+                    &mut textarea,
+                    &KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
+                );
+
+                assert!(!edit(
+                    &mut textarea,
+                    &KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL)
+                ));
+                assert_eq!(textarea.lines(), ["draft"]);
+                assert!(edit(
+                    &mut textarea,
+                    &KeyEvent::new(KeyCode::Char(code), KeyModifiers::ALT)
+                ));
+
+                assert_eq!(textarea.lines(), ["draft recalled"]);
+            }
+        }
 
         #[test]
         fn steps_cursor_moves_to_the_next_cluster_boundary() {

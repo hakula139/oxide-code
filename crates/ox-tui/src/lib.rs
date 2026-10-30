@@ -14,6 +14,7 @@ mod labels;
 mod markdown;
 mod modal;
 mod pending_calls;
+mod prompt_history;
 mod session_info;
 pub mod slash;
 pub mod terminal;

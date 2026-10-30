@@ -1,0 +1,24 @@
+---
+source: crates/ox-tui/src/prompt_history.rs
+expression: failed
+---
+Search prompts
+Failed to load prompts: the page loader stopped
+
+/ absent
+
+  No matches for `absent`
+
+
+
+
+
+
+
+
+
+
+
+
+
+Esc to cancel  ·  Ctrl+S to search everywhere
