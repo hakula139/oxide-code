@@ -17,11 +17,10 @@ use crate::util::text::format_size;
 
 // ── Tracker Keys ──
 
-/// The [`FileTracker`] key for the absolute `path` a file tool
-/// acts on. An existing path canonicalizes, so dotted and symlinked spellings of one file share an
-/// entry. A missing path falls back to its lexically clean form. The gate's resolved path cannot
-/// stand in, since it keeps each name as spelled, while `canonicalize` returns the on-disk case on
-/// a case-insensitive volume.
+/// The [`FileTracker`] key for the absolute `path` a tool acts on. Existing paths canonicalize,
+/// so dotted and symlinked spellings share an entry. Missing paths use their lexically clean form.
+/// The gate's resolved path cannot stand in, since it keeps each name as spelled, while
+/// `canonicalize` returns the on-disk case on a case-insensitive volume.
 pub(super) async fn tracker_key(path: &Path) -> PathBuf {
     tokio::fs::canonicalize(path).await.map_or_else(
         |_| lexical_normalize(path),

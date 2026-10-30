@@ -37,9 +37,6 @@ pub(crate) struct Checked {
     path: PathBuf,
     file: File,
     content: Vec<u8>,
-    /// The permission bits the open saw.
-    #[cfg(unix)]
-    mode: u32,
 }
 
 /// The points of a rewrite where a test can act on the file.
@@ -56,9 +53,6 @@ impl Checked {
     /// a FIFO, then reads it, refusing anything but a regular file within
     /// [`MAX_TRACKED_FILE_SIZE`].
     pub(super) fn open(path: &Path) -> Result<Self, FileReadError> {
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt as _;
-
         let mut options = OpenOptions::new();
         options.read(true);
         let mut file = open_no_follow(path, options)?;
@@ -68,8 +62,6 @@ impl Checked {
             path: path.to_owned(),
             file,
             content,
-            #[cfg(unix)]
-            mode: metadata.mode() & 0o7777,
         })
     }
 
@@ -98,12 +90,27 @@ impl Checked {
         mut checkpoint: impl FnMut(Phase) -> io::Result<()>,
     ) -> io::Result<()> {
         #[cfg(unix)]
-        self.refuse_clearable_attributes()?;
+        use std::os::unix::fs::MetadataExt as _;
+
         let mut options = OpenOptions::new();
         options.read(true).write(true);
         let mut file = open_no_follow(&self.path, options)?;
-        if identity(&file)? != identity(&self.file)? {
+        #[cfg(unix)]
+        let metadata = file.metadata()?;
+        #[cfg(unix)]
+        let current_identity = (metadata.dev(), metadata.ino());
+        #[cfg(windows)]
+        let current_identity = identity(&file)?;
+        if current_identity != identity(&self.file)? {
             return Err(replaced());
+        }
+        #[cfg(unix)]
+        validate_mode(metadata.mode())?;
+        #[cfg(target_os = "linux")]
+        if has_capability(&file)? {
+            return Err(io::Error::other(
+                "refusing to write a file with a capability set",
+            ));
         }
         if !bytes_match(&mut file, &self.content)? {
             return Err(stale_content());
@@ -116,19 +123,6 @@ impl Checked {
             .map_err(|error| left_partial_file(&error))?;
         checkpoint(Phase::Synced)?;
         self.verify(bytes)
-    }
-
-    /// Refuses set-ID permissions, and a capability on Linux, which a write can clear.
-    #[cfg(unix)]
-    fn refuse_clearable_attributes(&self) -> io::Result<()> {
-        validate_mode(self.mode)?;
-        #[cfg(target_os = "linux")]
-        if has_capability(&self.file)? {
-            return Err(io::Error::other(
-                "refusing to write a file with a capability set",
-            ));
-        }
-        Ok(())
     }
 
     /// Checks that the path still names the held file and holds `expected`.
@@ -412,25 +406,6 @@ mod tests {
 
             #[cfg(unix)]
             #[test]
-            fn refuses_set_id_permissions() {
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("target");
-                fs::write(&path, b"original").unwrap();
-                // The Nix build sandbox refuses a chmod that sets a set-ID bit.
-                let mut checked = Checked::open(&path).unwrap();
-                checked.mode |= 0o4000;
-
-                let error = checked.rewrite(b"new").unwrap_err();
-
-                assert_eq!(
-                    error.to_string(),
-                    "refusing to write a file with set-ID permissions"
-                );
-                assert_eq!(fs::read(&path).unwrap(), b"original");
-            }
-
-            #[cfg(unix)]
-            #[test]
             fn writes_without_parent_write_access() {
                 use std::os::unix::fs::PermissionsExt as _;
 
@@ -611,13 +586,26 @@ mod tests {
 
         #[test]
         fn accepts_ordinary_permissions_and_refuses_either_set_id_bit() {
-            for mode in [0o600, 0o751, 0o1777] {
-                validate_mode(mode).unwrap();
-            }
-            for mode in [0o4755, 0o2755, 0o6755] {
-                let error = validate_mode(mode).unwrap_err();
+            for (mode, refused) in [
+                (0o600, false),
+                (0o751, false),
+                (0o755, false),
+                (0o1777, false),
+                (0o4755, true),
+                (0o2755, true),
+                (0o6755, true),
+            ] {
+                let result = validate_mode(mode);
 
-                assert!(error.to_string().contains("set-ID"), "mode={mode:o}");
+                if refused {
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "refusing to write a file with set-ID permissions",
+                        "mode={mode:o}"
+                    );
+                } else {
+                    result.unwrap_or_else(|error| panic!("mode={mode:o}: {error}"));
+                }
             }
         }
     }
