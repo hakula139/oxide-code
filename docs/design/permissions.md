@@ -131,7 +131,7 @@ The `--no-tui` REPL and `-p` headless runs share `run_op`, which passes each `Ev
 ## Sources
 
 - `crates/ox-core/src/config.rs`: `resolve_permission`, `Config::set_unattended`, and `OX_PERMISSION_MODE`.
-- `crates/ox-core/src/config/load.rs`: `reject_project_keys` and the project allowlists.
+- `crates/ox-core/src/config/load.rs`: `ParsedPermission`, `reject_project_keys`, and the project allowlists.
 - `crates/ox-core/src/engine.rs`: the live policy, `Engine::set_mode`, and `Engine::serve`.
 - `crates/ox-core/src/engine/abort.rs`: `Mailbox`, which keeps the mode switches and queued prompts that arrive mid-operation.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round`, `Dispatcher::gate`, `check_permission`, `allow_for_session`, and `await_approval`.
