@@ -976,10 +976,10 @@ mod tests {
         #[test]
         fn exec_star_allows_only_a_command_the_analysis_recognizes() {
             let rule = exec("*");
-            for command in ["cargo test && rm -rf /", r#"sh -c "$X""#, "eval ls"] {
+            for command in ["cargo test && rm -rf /", "sh -c ls", "eval ls"] {
                 assert!(allows(&rule, command), "{command}");
             }
-            for command in [r#"eval "$CMD""#, "$EDITOR notes", "FOO=1"] {
+            for command in [r#"eval "$CMD""#, r#"sh -c "$X""#, "$EDITOR notes", "FOO=1"] {
                 assert!(!allows(&rule, command), "{command}");
             }
         }

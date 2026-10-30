@@ -6,6 +6,7 @@
 //! here too, so they read words the way commands do.
 
 use std::iter::{self, Peekable};
+use std::mem;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::str::Chars;
@@ -18,8 +19,9 @@ use tree_sitter::{Node, Parser, Tree};
 use super::{PathResolver, PathTarget, Workspace, Zone, fold_name};
 use crate::util::path::expand_user;
 
-/// Shells and the commands that start one as another user, whose literal `-c` script the walk
-/// follows, so deny rules see the commands inside it.
+/// Shells and the commands that start one as another user. The walk follows the literal `-c`
+/// script each runs, so deny rules see the commands inside it, and reads the script file a shell
+/// runs, as [`shell_run`] finds them.
 const SHELLS: &[&str] = &[
     "ash", "bash", "csh", "dash", "fish", "hush", "ksh", "mksh", "pwsh", "runuser", "sh", "su",
     "tcsh", "zsh",
@@ -118,6 +120,7 @@ const WRAPPERS: &[Wrapper] = &[
             flag("-"),
             flag("-0"),
             valued("-C").with(Effect::Directory),
+            valued("-S").with(Effect::Splits),
             flag("-i"),
             valued("-u"),
             flag("-v"),
@@ -125,6 +128,7 @@ const WRAPPERS: &[Wrapper] = &[
             flag("--debug"),
             flag("--ignore-environment"),
             flag("--null"),
+            valued("--split-string").with(Effect::Splits),
             valued("--unset"),
         ],
         assignments: Assignments::After,
@@ -342,11 +346,13 @@ pub(crate) struct CommandTarget {
     /// Each simple command it runs, including those inside substitutions and literal `sh -c` or
     /// `eval` scripts.
     segments: Vec<Segment>,
-    /// The files its output redirections write, resolved like an edit's path.
+    /// The files it writes, resolved like an edit's path: each output or read-write redirection,
+    /// and each file a `sed` script or in-place edit writes.
     writes: Vec<PathTarget>,
-    /// The files it reads for certain, resolved like a read's path: each input redirection, each
-    /// file a wrapper option names, and each [certain](Operand::certain) operand of one of
-    /// [`READERS`], including the root of a tree it traverses.
+    /// The files it reads for certain, resolved like a read's path: each input or read-write
+    /// redirection, each file a wrapper option names, the script `source`, `.`, or a shell runs,
+    /// and each [certain](Operand::certain) operand of one of [`READERS`], including the root of a
+    /// tree it traverses.
     reads: Vec<PathTarget>,
     /// The first construct the analysis does not recognize, as [`construct`] cuts it for a prompt.
     unrecognized: Option<String>,
@@ -374,6 +380,7 @@ impl CommandTarget {
             reads: Vec::new(),
             dir_change: None,
             entered: EnteredDirs::default(),
+            environment: Vec::new(),
             leaves_workspace: false,
             repeats: 0,
             relative_path: false,
@@ -549,6 +556,17 @@ impl Operand {
         }
     }
 
+    /// The root of a tree read for certain, below which the command may read any file.
+    const fn tree(path: String) -> Self {
+        Self {
+            read: ReaderPath {
+                path,
+                recursive: true,
+            },
+            certain: true,
+        }
+    }
+
     const fn possible(read: ReaderPath<String>) -> Self {
         Self {
             read,
@@ -659,14 +677,17 @@ struct Walk<'a> {
     /// The first directory change, as [`construct`] cuts it for a prompt.
     dir_change: Option<String>,
     entered: EnteredDirs,
+    /// The variables that the commands enclosing the node the walk is at set for it, as
+    /// [`Inherited::variables`] lists them, such as a `BASH_ENV` before an `eval` or a `bash -c`.
+    environment: Vec<(String, Option<String>)>,
     /// Whether some directory change may leave the workspace. Only a first `cd` or `pushd` that
     /// runs once, to a target [`Walk::enters_workspace`] accepts, stays inside.
     leaves_workspace: bool,
     /// How many loop bodies enclose the node the walk is at, where a directory change may run more
     /// than once.
     repeats: usize,
-    /// Whether some redirection, reader operand, sourced file, or program spelled with a directory
-    /// names a relative path.
+    /// Whether some redirection, reader operand, script that `source` or a shell runs, or program
+    /// spelled with a directory names a relative path.
     relative_path: bool,
     /// Whether any part of the command expands a variable at run time, wherever the value ends up.
     expands: bool,
@@ -681,9 +702,15 @@ struct EnteredDirs {
     /// path also names a file under each, since a failed change, a subshell, or `||` may leave any
     /// of them, or the working directory itself, current.
     dirs: Vec<PathBuf>,
+    /// Each directory a `pushd -n` adds to the directory stack without entering it, as written,
+    /// which only a [`stack_tilde`] names, resolved from the directory current where it does.
+    stacked: Vec<PathBuf>,
     /// Whether a change may have entered a directory the analysis cannot spell, so a later
     /// relative path may name any file.
     unknown: bool,
+    /// Whether a `pushd -n` may have stacked a directory the analysis cannot spell, so a later
+    /// [`stack_tilde`] may name any file.
+    unknown_stacked: bool,
 }
 
 impl Walk<'_> {
@@ -870,6 +897,28 @@ impl Walk<'_> {
         let mut words = words(&nodes, src);
         words.extend(parts.last().and_then(|&last| dropped_dash(last, src)));
         words.extend(trailing);
+        let prefix = (parts.iter())
+            .filter(|part| part.kind() == "variable_assignment")
+            .map(|part| assigned(&src[part.byte_range()]));
+        let wrapped = (words.iter())
+            .filter_map(|word| word.value.as_deref()?.split_once('='))
+            .map(|(name, _)| name);
+        let mut environment = self.environment.clone();
+        environment.extend(
+            prefix
+                .chain(wrapped)
+                .filter(|name| DIR_VARIABLES.contains(name))
+                .map(|name| (name.to_owned(), None)),
+        );
+        self.within(environment, |walk| walk.assigned_parts(parts, words, src));
+    }
+
+    /// Records the simple command of `parts` with its `words`, once the environment holds each of
+    /// the [`DIR_VARIABLES`] the command may set, which its words then cannot resolve.
+    fn assigned_parts(&mut self, parts: &[Node<'_>], words: Vec<Word>, src: &str) {
+        let words: Vec<Word> = (words.into_iter())
+            .map(|word| self.resolvable(word, src))
+            .collect();
         let mut assignments = Vec::new();
         let mut unsafe_assignment = None;
         for &part in parts {
@@ -877,14 +926,42 @@ impl Walk<'_> {
                 if !SAFE_VARIABLES.contains(&assigned(&src[part.byte_range()])) {
                     unsafe_assignment.get_or_insert(assignments.len());
                 }
-                assignments.push(assignment_word(part, src));
+                assignments.push(self.assignment_word(part, src));
                 self.visit_children(part, src);
             } else if part.is_named() {
                 self.visit(part, src);
             }
         }
 
-        self.simple_command(&words, assignments, unsafe_assignment, None, src);
+        self.simple_command(&words, assignments, unsafe_assignment, Fed::default(), src);
+    }
+
+    /// Returns whether the environment sets one of the [`DIR_VARIABLES`], so the analysis cannot
+    /// resolve a tilde or a [`DirVariable`] from its own.
+    fn sets_dir_variable(&self) -> bool {
+        sets_dir_variable(&self.environment)
+    }
+
+    /// `word` with no value the analysis knows where it may expand one of the [`DIR_VARIABLES`]
+    /// the environment sets.
+    fn resolvable(&self, mut word: Word, src: &str) -> Word {
+        if self.sets_dir_variable() && reads_dir_variable(&src[word.span.clone()]) {
+            word.value = None;
+        }
+        word
+    }
+
+    /// The prefix assignment `node` as [`assignment_word`] reads it, which is not literal where it
+    /// may expand one of the [`DIR_VARIABLES`] the environment sets.
+    fn assignment_word(&self, node: Node<'_>, src: &str) -> ShellWord {
+        let text = &src[node.byte_range()];
+        if self.sets_dir_variable() && reads_dir_variable(text) {
+            return ShellWord {
+                text: text.to_owned(),
+                literal: false,
+            };
+        }
+        assignment_word(node, src)
     }
 
     /// Records a `declare`, `export`, `local`, `readonly`, `typeset`, or `unset` command, which the
@@ -905,7 +982,7 @@ impl Walk<'_> {
                 self.visit(part, src);
             }
         }
-        self.simple_command(&all, Vec::new(), None, None, src);
+        self.simple_command(&all, Vec::new(), None, Fed::default(), src);
     }
 
     /// Records a `[ ... ]` test as the simple command of the `[` builtin, whose words are the
@@ -937,7 +1014,7 @@ impl Walk<'_> {
         let mut all = vec![Word::token(open, src)];
         all.extend(words(&tokens, src));
         all.push(Word::token(close, src));
-        self.simple_command(&all, Vec::new(), None, None, src);
+        self.simple_command(&all, Vec::new(), None, Fed::default(), src);
     }
 
     /// Weighs a `${...}` expansion, which leaves its word expanding, and the words of its operands.
@@ -963,29 +1040,26 @@ impl Walk<'_> {
 
     /// Records the simple command of `all` and the commands it runs through `find`, led by the
     /// `assignments` before it, of which the one at `unsafe_assignment` is the first to set a
-    /// variable outside [`SAFE_VARIABLES`]. `found` is the placeholder `find` replaces with each
-    /// path it finds, for the command of a `find` action.
+    /// variable outside [`SAFE_VARIABLES`]. `fed` holds what an `xargs` or `find` around it passes
+    /// it, such as the placeholder a `find` action's paths replace.
     fn simple_command(
         &mut self,
         all: &[Word],
         mut assignments: Vec<ShellWord>,
         unsafe_assignment: Option<usize>,
-        found: Option<Placeholder>,
+        fed: Fed,
         src: &str,
     ) {
         if all.is_empty() {
             return;
         }
-        let mut unwrapped = self.unwrap(all, src);
-        unwrapped
-            .replaces
-            .extend(found.map(|placeholder| (0, placeholder)));
+        let unwrapped = self.unwrap(all, fed, src);
         let pinned = unsafe_assignment.is_some() || unwrapped.named < unwrapped.starts[0];
         let safe = all[unwrapped.starts[0]..]
             .split_first()
             .filter(|_| !pinned)
             .and_then(|(first, args)| {
-                let name = first.value.as_deref().filter(|_| !first.glob)?;
+                let name = first.literal()?;
                 if matches!(name, "cd" | "pushd") {
                     self.enters_workspace(name, args).then(Vec::new)
                 } else {
@@ -1004,31 +1078,30 @@ impl Walk<'_> {
             let Some(first) = all.get(start) else {
                 continue;
             };
-            let Some(name) = first.value.as_deref().filter(|_| !first.glob) else {
+            let Some(name) = first
+                .literal()
+                .filter(|name| !unwrapped.fed.replaced(start, name))
+            else {
                 if i == 0 {
                     self.mark_unrecognized(span_text(&all[start..], src));
                 }
                 continue;
             };
-            self.program(name, &all[start..], i == 0, src);
+            let inherited =
+                Inherited::new(&self.environment, &unwrapped, start, &assignments, all, src);
+            let shell = self.program(name, &all[start..], i == 0, &inherited, src);
+            reads_anything |= shell.anything;
+            operands.extend(shell.possible);
             let folded = fold_name(basename(name));
             if folded == "find" {
-                finds.push(start + 1);
+                finds.push((start + 1, inherited.variables));
             }
             match &safe {
                 Some(files) if i == 0 => operands.extend(files.iter().cloned()),
                 _ if READERS.contains(&folded.as_str()) => {
                     let args = &all[start + 1..];
-                    let (runs, anything) = self.reader_operands(&folded, args);
-                    reads_anything |= anything || unwrapped.passes_input();
-                    if folded == "sed" {
-                        reads_anything |= self.sed_scripts(args, &runs, &mut operands, src);
-                    }
-                    operands.extend(runs.into_iter().flat_map(|(dir, files)| {
-                        files
-                            .into_iter()
-                            .map(move |operand| operand.spelled_from(&dir))
-                    }));
+                    reads_anything |= self.reader_reads(&folded, args, &mut operands, src)
+                        || unwrapped.fed.passes_input();
                 }
                 _ => {}
             }
@@ -1041,7 +1114,7 @@ impl Walk<'_> {
             .enumerate()
             .map(|(i, word)| {
                 let mut word = word.shell_word(src);
-                word.literal &= !unwrapped.replaced(i, &word.text);
+                word.literal &= !unwrapped.fed.replaced(i, &word.text);
                 word
             })
             .collect();
@@ -1058,7 +1131,7 @@ impl Walk<'_> {
             .iter()
             .map(|start| named.len() + start - all.len())
             .collect();
-        if unwrapped.appends {
+        if unwrapped.fed.appends {
             named.push(ShellWord {
                 text: INPUT_WORD.to_owned(),
                 literal: false,
@@ -1071,9 +1144,42 @@ impl Walk<'_> {
             reads_anything,
             safe: safe.is_some(),
         });
-        for args in finds {
-            self.find_actions(&all[args..], src);
+        for (args, environment) in finds {
+            self.within(environment, |walk| walk.find_actions(&all[args..], src));
         }
+    }
+
+    /// Runs `walk` on this walk with `environment` as the variables the enclosing commands set.
+    fn within<T>(
+        &mut self,
+        environment: Vec<(String, Option<String>)>,
+        walk: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let outer = mem::replace(&mut self.environment, environment);
+        let result = walk(self);
+        self.environment = outer;
+        result
+    }
+
+    /// Adds the files reader `name` with `args` reads to `operands`, its own and, for `sed`, those
+    /// its scripts read, and returns whether it may read any file.
+    fn reader_reads(
+        &mut self,
+        name: &str,
+        args: &[Word],
+        operands: &mut Vec<Operand>,
+        src: &str,
+    ) -> bool {
+        let (runs, mut anything) = self.reader_operands(name, args);
+        if name == "sed" {
+            anything |= self.sed_scripts(args, &runs, operands, src);
+        }
+        operands.extend(runs.into_iter().flat_map(|(dir, files)| {
+            files
+                .into_iter()
+                .map(move |operand| operand.spelled_from(&dir))
+        }));
+        anything
     }
 
     /// Resolves the `operands` of one simple command under each directory it may run in,
@@ -1086,6 +1192,11 @@ impl Walk<'_> {
             .iter()
             .any(|operand| Path::new(&operand.read.path).is_relative());
         self.relative_path |= relative;
+        let unknown = relative && self.entered.unknown
+            || self.entered.unknown_stacked
+                && operands
+                    .iter()
+                    .any(|operand| stack_tilde(&operand.read.path).is_some());
         let mut possible = Vec::new();
         for operand in operands {
             for path in self.spellings(&operand.read.path) {
@@ -1102,24 +1213,34 @@ impl Walk<'_> {
                 }
             }
         }
-        (possible, relative && self.entered.unknown)
+        (possible, unknown)
     }
 
     /// Weighs the program `name` that `words` run with their arguments: a shell whose literal
     /// script the walk follows, a directory change, a path relative to the working directory, and,
-    /// at the `primary` start bash runs, a builtin, as [`Self::builtin`] weighs it.
-    fn program(&mut self, name: &str, words: &[Word], primary: bool, src: &str) {
+    /// at the `primary` start bash runs, a builtin, as [`Self::builtin`] weighs it. It returns
+    /// what [`Self::nested_script`] does for a shell.
+    fn program(
+        &mut self,
+        name: &str,
+        words: &[Word],
+        primary: bool,
+        inherited: &Inherited<'_>,
+        src: &str,
+    ) -> ShellReads {
         let args = &words[1..];
         self.relative_path |= is_relative_program(name);
         let base = basename(name);
         let folded = fold_name(base);
-        if let Some(shell) = [base, folded.as_str()]
-            .into_iter()
-            .find(|shell| SHELLS.contains(shell))
-        {
-            self.nested_script(shell, args, src);
-        }
-        if primary && !self.builtin(name, args, src) {
+        let (shell, builtin) = self.within(inherited.variables.clone(), |walk| {
+            let shell = [base, folded.as_str()]
+                .into_iter()
+                .find(|shell| SHELLS.contains(shell))
+                .map(|shell| walk.nested_script(shell, words, inherited, src))
+                .unwrap_or_default();
+            (shell, !primary || walk.builtin(name, args, src))
+        });
+        if !builtin {
             self.mark_unrecognized(span_text(words, src));
         }
         if DIRECTORY_CHANGERS.contains(&name) {
@@ -1127,6 +1248,7 @@ impl Walk<'_> {
             self.change_dir(inside, words, src);
             self.enter_dir(name, args);
         }
+        shell
     }
 
     /// Returns whether the walk recognizes running `name` with `args`, which holds for any name no
@@ -1143,14 +1265,12 @@ impl Walk<'_> {
         };
         match name {
             _ if DISPATCH_BUILTINS.contains(&name) => false,
-            "." | "source" => match args.first().filter(|path| !path.glob) {
-                Some(Word {
-                    value: Some(path), ..
-                }) => {
-                    self.relative_path |= Path::new(path).is_relative();
+            "." | "source" => match sourced_file(args) {
+                Some(path) => {
+                    self.open(path, true);
                     true
                 }
-                _ => false,
+                None => false,
             },
             "eval" => match literal_script(args) {
                 Some(script) => {
@@ -1215,23 +1335,35 @@ impl Walk<'_> {
 
     /// Records where `name` with `args` may move the working directory: a `cd` or `pushd` to one
     /// literal target, or a bare `cd` to the home directory, joined to each directory the walk
-    /// already knows. Any other change, or one that may run more than once, leaves it unknown.
+    /// already knows. A `pushd -n` stacks its literal target as written, or else leaves the stack
+    /// unknown. Any other change, or one that may run more than once, leaves the directory unknown.
     fn enter_dir(&mut self, name: &str, args: &[Word]) {
         let target = match dir_target(name, args) {
-            DirTarget::Home => home(),
+            DirTarget::Home => home().filter(|_| !self.sets_dir_variable()),
             DirTarget::Path(path) => Some(path.to_owned()),
-            DirTarget::Stay => return,
+            DirTarget::Stay(Stacked::Nothing) => return,
+            DirTarget::Stay(Stacked::Path(path)) => {
+                let path = PathBuf::from(path);
+                if !self.entered.stacked.contains(&path) {
+                    self.entered.stacked.push(path);
+                }
+                return;
+            }
+            DirTarget::Stay(Stacked::Unknown) => {
+                self.entered.unknown_stacked = true;
+                return;
+            }
             DirTarget::Unknown => None,
         };
         let Some(target) = target.filter(|_| self.repeats == 0) else {
             self.entered.unknown = true;
             return;
         };
-        let entered: Vec<_> = iter::once(Path::new(""))
+        let joined: Vec<_> = iter::once(Path::new(""))
             .chain(self.entered.dirs.iter().map(PathBuf::as_path))
             .map(|dir| dir.join(&target))
             .collect();
-        for dir in entered {
+        for dir in joined {
             if !self.entered.dirs.contains(&dir) {
                 self.entered.dirs.push(dir);
             }
@@ -1257,7 +1389,10 @@ impl Walk<'_> {
         (runs, anything)
     }
 
-    /// `path` as the working directory and each directory the walk may have entered name it.
+    /// `path` as the working directory and each directory the walk may have entered name it. A
+    /// path that starts with a [`stack_tilde`] also names its rest under the working directory,
+    /// each entered directory, and each stacked one as either of those resolves it, any of which
+    /// the tilde may name.
     fn spellings(&self, path: &str) -> Vec<String> {
         let mut spellings = vec![path.to_owned()];
         if Path::new(path).is_relative() {
@@ -1268,16 +1403,34 @@ impl Walk<'_> {
                     .map(|dir| dir.join(path).to_string_lossy().into_owned()),
             );
         }
+        if let Some(rest) = stack_tilde(path) {
+            let rest = rest.trim_start_matches('/');
+            let currents =
+                iter::once(Path::new("")).chain(self.entered.dirs.iter().map(PathBuf::as_path));
+            let named = currents.flat_map(|current| {
+                iter::once(current.to_path_buf()).chain(
+                    self.entered
+                        .stacked
+                        .iter()
+                        .map(move |stacked| current.join(stacked)),
+                )
+            });
+            spellings.extend(named.map(|dir| match dir.join(rest) {
+                spelled if spelled.as_os_str().is_empty() => ".".to_owned(),
+                spelled => spelled.to_string_lossy().into_owned(),
+            }));
+        }
         spellings
     }
 
-    /// Returns whether `name` with `args` stays inside a workspace root, either as a `pushd -n`
-    /// that enters nothing or by entering one literal directory in a root spelled without `..`,
-    /// which bash's `cd` applies to the spelled path while the gate resolves links first.
+    /// Returns whether `name` with `args` stays inside a workspace root, either as a `pushd -n`,
+    /// which enters nothing whatever it stacks, or by entering one literal directory in a root
+    /// spelled without `..`, which bash's `cd` applies to the spelled path while the gate resolves
+    /// links first.
     fn enters_workspace(&mut self, name: &str, args: &[Word]) -> bool {
         let path = match dir_target(name, args) {
             DirTarget::Path(path) => path,
-            DirTarget::Stay => return true,
+            DirTarget::Stay(_) => return true,
             DirTarget::Home | DirTarget::Unknown => return false,
         };
         Some(path)
@@ -1293,8 +1446,10 @@ impl Walk<'_> {
     /// allow rules do not see through, that sets a variable outside [`SAFE_VARIABLES`], that is
     /// spelled with a directory, since `./nice` may be any program, or whose options the analysis
     /// cannot read. An option it does not know hides where the command starts, so the program may
-    /// then start at any later word.
-    fn unwrap(&mut self, words: &[Word], src: &str) -> Unwrapped {
+    /// then start at any later word. What an enclosing `xargs` or `find` has `fed` the words joins
+    /// what the wrappers feed it, and input that replaces part of an assignment's name, which
+    /// sets a variable the analysis cannot name, leaves the command unrecognized.
+    fn unwrap(&mut self, words: &[Word], fed: Fed, src: &str) -> Unwrapped {
         let mut unwrapped = Unwrapped::default();
         let mut pending = vec![0];
         // Every word from here on has been pending, so an unknown option past it adds none.
@@ -1311,8 +1466,14 @@ impl Walk<'_> {
                 let run = match wrapper.invocation(args) {
                     Ok(run) => run,
                     Err(unknown) => {
-                        unwrapped.appends |= wrapper.kind == Kind::Input;
+                        unwrapped.fed.appends |= wrapper.kind == Kind::Input;
                         let from = at + 1 + unknown;
+                        if wrapper.assignments != Assignments::None {
+                            unwrapped.assignments.extend(
+                                (from..words.len())
+                                    .filter(|&index| src[words[index].span.clone()].contains('=')),
+                            );
+                        }
                         if from < spread {
                             pending.extend((from..spread).rev());
                             spread = from;
@@ -1323,18 +1484,20 @@ impl Walk<'_> {
                 if run.elsewhere {
                     self.change_dir(false, &words[at..], src);
                 }
+                if run.splits {
+                    self.mark_unrecognized(span_text(&words[at..], src));
+                }
                 unwrapped.reads.extend(run.reads);
                 if run.start == args.len() {
                     let input = wrapper.kind == Kind::Input;
-                    input_runs |= unwrapped.appends && !input;
-                    unwrapped.appends |= input && run.replace.is_none();
+                    input_runs |= unwrapped.fed.appends && !input;
+                    unwrapped.fed.appends |= input && run.replace.is_none();
                     break;
                 }
-                let sets_unsafe = args[..run.start]
-                    .iter()
-                    .filter_map(|word| word.value.as_deref())
-                    .filter(|arg| is_assignment(arg))
-                    .any(|arg| !SAFE_VARIABLES.contains(&assigned(arg)));
+                let sets_unsafe = (run.assignments.iter())
+                    .filter_map(|&index| args[index].value.as_deref())
+                    .any(|arg| !SAFE_VARIABLES.contains(&env_name(arg)));
+                (unwrapped.assignments).extend(run.assignments.iter().map(|index| at + 1 + index));
                 at += 1 + run.start;
                 if wrapper.kind == Kind::Input {
                     match run.replace {
@@ -1344,9 +1507,9 @@ impl Walk<'_> {
                                     word.value.as_deref() == Some(placeholder.text.as_str())
                                 }) =>
                         {
-                            unwrapped.replaces.push((at, placeholder));
+                            unwrapped.fed.replaces.push((at, placeholder));
                         }
-                        _ => unwrapped.appends = true,
+                        _ => unwrapped.fed.appends = true,
                     }
                 }
                 pinned |= sets_unsafe || name != wrapper.name || wrapper.kind != Kind::Transparent;
@@ -1360,6 +1523,14 @@ impl Walk<'_> {
         }
         if input_runs {
             unwrapped.starts.push(words.len());
+        }
+        unwrapped.fed.appends |= fed.appends;
+        unwrapped.fed.replaces.extend(fed.replaces);
+        if unwrapped.assignments.iter().any(|&index| {
+            (words[index].value.as_deref())
+                .is_some_and(|text| unwrapped.fed.replaced(index, env_name(text)))
+        }) {
+            self.mark_unrecognized(span_text(words, src));
         }
         unwrapped
     }
@@ -1394,14 +1565,29 @@ impl Walk<'_> {
                 text: DEFAULT_REPLACE.to_owned(),
                 whole: false,
             };
-            self.simple_command(&body[..end], Vec::new(), None, Some(found), src);
+            let fed = Fed {
+                appends: false,
+                replaces: vec![(0, found)],
+            };
+            self.simple_command(&body[..end], Vec::new(), None, fed, src);
             rest = body.get(end + 1..).unwrap_or_default();
         }
     }
 
-    /// Walks the literal script a shell's `-c` or `--command` option runs, and the command
-    /// `runuser -u` runs without a shell, so deny rules see the commands inside them.
-    fn nested_script(&mut self, runner: &str, args: &[Word], src: &str) {
+    /// Weighs what `runner`, one of the [`SHELLS`], runs with the arguments after `words[0]`: the
+    /// literal script a shell's `-c` runs, which the walk follows so deny rules see the commands
+    /// inside it, the script file and startup files it runs, which are reads, or the command
+    /// `runuser -u` runs without a shell. A script [`shell_run`] cannot tell, or one the
+    /// `inherited` input replaces, leaves the command unrecognized. It returns the files the shell
+    /// may run that the walk cannot name for certain or reads as trees.
+    fn nested_script(
+        &mut self,
+        runner: &str,
+        words: &[Word],
+        inherited: &Inherited<'_>,
+        src: &str,
+    ) -> ShellReads {
+        let args = &words[1..];
         if runner == "runuser"
             && let Ok(run) = RUNUSER.invocation(args)
             && args[..run.start].iter().any(|word| {
@@ -1410,33 +1596,128 @@ impl Walk<'_> {
                     .is_some_and(|arg| arg == "-u" || arg == "--user" || arg.starts_with("--user="))
             })
         {
-            self.simple_command(&args[run.start..], Vec::new(), None, None, src);
-            return;
+            let fed = inherited
+                .fed
+                .for_command_at(inherited.start + 1 + run.start);
+            self.simple_command(&args[run.start..], Vec::new(), None, fed, src);
+            return ShellReads::default();
         }
-        let script = args.iter().enumerate().find_map(|(i, word)| {
-            let arg = word.value.as_deref()?;
-            if let Some(script) = arg.strip_prefix("--command=") {
-                return Some(script.to_owned());
+        // `su` and `runuser` hand the words after the user name to the user's shell, whose
+        // grammar the analysis does not know, so a command option anywhere names their script and
+        // any other word there, or an input word, may name a script file. The shell keeps the
+        // environment but for `HOME`, which they set to the user's home directory unless an
+        // option preserves the environment.
+        if matches!(runner, "runuser" | "su") {
+            let script = command_option_script(args);
+            if let Some(script) = &script {
+                if (1..words.len()).any(|index| inherited.replaced(index, &words[index])) {
+                    self.mark_unrecognized(span_text(words, src));
+                }
+                self.script(script);
             }
-            (is_command_option(arg) || arg == "--command")
-                .then(|| args.get(i + 1)?.value.clone())
-                .flatten()
-        });
-        if let Some(script) = script {
-            self.script(&script);
+            let su = su_args(args);
+            let home = su.keeps_home.then_some(&HOME_VARIABLE);
+            let variables = [&BASH_GRAMMAR, &POSIX_SHELL_GRAMMAR, &ZSH_GRAMMAR]
+                .into_iter()
+                .flat_map(|grammar| grammar.variables)
+                .chain(home);
+            let mut reads = self.startup_variables(variables, inherited, words, src);
+            reads.anything |= script.is_none() && inherited.fed.passes_input();
+            reads.possible.extend(
+                su.shell
+                    .iter()
+                    .filter_map(Word::literal)
+                    .filter(|arg| !arg.starts_with('-'))
+                    .map(|path| Operand::possible(ReaderPath::exact(path.to_owned()))),
+            );
+            return reads;
         }
+        let shell = shell_run(runner, args);
+        let variables = shell_grammar(runner)
+            .map_or(&[][..], |grammar| grammar.variables)
+            .iter()
+            .chain([&HOME_VARIABLE]);
+        let mut reads = self.startup_variables(variables, inherited, words, src);
+        for (index, file) in shell.startup {
+            match expand_tilde(file).filter(|_| !inherited.replaced(1 + index, &args[index])) {
+                Some(file) => self.open(&file, true),
+                None => reads.anything = true,
+            }
+        }
+        match shell.run {
+            ShellRun::Command { index, script } if !inherited.replaced(1 + index, &args[index]) => {
+                self.script(script);
+            }
+            ShellRun::File { index, .. } if inherited.replaced(1 + index, &args[index]) => {
+                reads.anything = true;
+            }
+            ShellRun::File { path, .. } => self.open(path, true),
+            ShellRun::Bare => reads.anything |= inherited.fed.appends,
+            ShellRun::Stdin => {}
+            ShellRun::Command { .. } | ShellRun::Unknown => {
+                if let Some(script) = command_option_script(args) {
+                    self.script(&script);
+                }
+                self.mark_unrecognized(span_text(words, src));
+            }
+        }
+        reads
+    }
+
+    /// Weighs the startup files that the `inherited` values of the startup `variables` name for a
+    /// shell: a file a value names opens, and the directory one names is a tree the shell may read
+    /// any file below. The shell `words` run stays unrecognized when a file's name runs a command
+    /// substitution as bash expands it.
+    fn startup_variables<'v>(
+        &mut self,
+        variables: impl IntoIterator<Item = &'v StartupVariable>,
+        inherited: &Inherited<'_>,
+        words: &[Word],
+        src: &str,
+    ) -> ShellReads {
+        let mut reads = ShellReads::default();
+        for variable in variables {
+            match inherited.value(variable.name).map(Option::as_deref) {
+                None | Some(Some("")) => {}
+                Some(Some(dir)) if variable.directory => {
+                    reads.possible.push(Operand::tree(dir.to_owned()));
+                }
+                Some(Some(value)) => {
+                    if value.contains("$(") || value.contains('`') {
+                        self.mark_unrecognized(span_text(words, src));
+                    }
+                    match expanded_file(value, !inherited.sets_dir_variable()) {
+                        Some(files) => files.iter().for_each(|file| self.open(file, true)),
+                        None => reads.anything = true,
+                    }
+                }
+                Some(None) => reads.anything = true,
+            }
+        }
+        reads
     }
 
     fn redirect(&mut self, node: Node<'_>, src: &str) {
         self.visit_children(node, src);
         let mut cursor = node.walk();
-        let Some(operator) = node
-            .children(&mut cursor)
-            .find(|child| !child.is_named())
-            .map(|child| child.kind())
-        else {
+        let Some(operator) = node.children(&mut cursor).find(|child| !child.is_named()) else {
             return;
         };
+        // tree-sitter-bash has no `<>`, so it parses one as a `<` before an error `>` or as an
+        // error `<` before a `>`. Bash drops a line continuation between the two first.
+        let read_write = match operator.kind() {
+            "<" => src[operator.end_byte()..]
+                .trim_start_matches("\\\n")
+                .starts_with('>'),
+            ">" => src[..operator.start_byte()]
+                .trim_end_matches("\\\n")
+                .strip_suffix('<')
+                .is_some_and(|before| {
+                    before.chars().rev().take_while(|&c| c == '\\').count() % 2 == 0
+                }),
+            _ => false,
+        };
+        let operator = operator.kind();
         let reads = operator == "<";
         if !reads && !WRITE_OPERATORS.contains(&operator) {
             return;
@@ -1450,14 +1731,19 @@ impl Walk<'_> {
         };
 
         let word = Word::new(&[destination], src);
-        let Some(path) = word.value.filter(|_| !word.glob) else {
+        let Some(path) = word.literal() else {
             self.mark_unrecognized(&src[node.byte_range()]);
             return;
         };
         if operator == ">&" && (destination.kind() == "number" || path == "-") {
             return;
         }
-        self.open(&path, reads);
+        if reads || read_write {
+            self.open(path, true);
+        }
+        if !reads || read_write {
+            self.open(path, false);
+        }
     }
 
     /// Records that the command opens `path` to read it, or else to write it, unless it is one of
@@ -1546,14 +1832,27 @@ fn spelled_from(dir: &Path, path: &str) -> String {
 }
 
 /// Where a `cd`, `pushd`, or `popd` with `args` moves the working directory.
+#[derive(Debug, PartialEq, Eq)]
 enum DirTarget<'w> {
     /// The home directory, where a bare `cd` goes.
     Home,
     /// One literal directory.
     Path(&'w str),
     /// Nowhere, since `pushd -n` changes only the directory stack.
-    Stay,
-    /// Anywhere: `cd -`, `popd`, a stack rotation, or a target that expands.
+    Stay(Stacked<'w>),
+    /// Anywhere: `cd -`, `popd`, a stack rotation, a [`stack_tilde`], or a target that expands.
+    Unknown,
+}
+
+/// What a `pushd -n` adds to the directory stack.
+#[derive(Debug, PartialEq, Eq)]
+enum Stacked<'w> {
+    /// Nothing, since with no operand or a rotation it only reorders the stack.
+    Nothing,
+    /// The literal directory it names, as written, which bash resolves only when a
+    /// [`stack_tilde`] uses it.
+    Path(&'w str),
+    /// A directory the analysis cannot spell, as a target that expands or a [`stack_tilde`] names.
     Unknown,
 }
 
@@ -1568,9 +1867,10 @@ fn dir_target<'w>(name: &str, args: &'w [Word]) -> DirTarget<'w> {
     };
     let mut rest = args;
     let mut ended = false;
+    let mut stays = false;
     while let Some((first, after)) = rest.split_first() {
-        let Some(value) = first.value.as_deref().filter(|_| !first.glob) else {
-            return DirTarget::Unknown;
+        let Some(value) = first.literal() else {
+            break;
         };
         if value == "--" {
             ended = true;
@@ -1579,26 +1879,42 @@ fn dir_target<'w>(name: &str, args: &'w [Word]) -> DirTarget<'w> {
             .is_some_and(|flags| !flags.is_empty() && flags.chars().all(|c| options.contains(c)))
         {
             break;
-        } else if name == "pushd" {
-            return DirTarget::Stay;
+        } else {
+            stays |= name == "pushd";
         }
         rest = after;
         if ended {
             break;
         }
     }
-    match rest {
-        [] if name == "cd" => DirTarget::Home,
-        [target] => match target.value.as_deref() {
-            Some(path)
-                if !target.glob && !path.is_empty() && (ended || !path.starts_with(['-', '+'])) =>
-            {
+    let target = match rest {
+        [] if name == "cd" => return DirTarget::Home,
+        [] if stays => return DirTarget::Stay(Stacked::Nothing),
+        [target] => target
+            .literal()
+            .filter(|path| !path.is_empty() && stack_tilde(path).is_none()),
+        _ => None,
+    };
+    match target {
+        Some(rotation) if stays && !ended && is_stack_rotation(rotation) => {
+            DirTarget::Stay(Stacked::Nothing)
+        }
+        Some(path) if ended || !path.starts_with(['-', '+']) => {
+            if stays {
+                DirTarget::Stay(Stacked::Path(path))
+            } else {
                 DirTarget::Path(path)
             }
-            _ => DirTarget::Unknown,
-        },
+        }
+        _ if stays => DirTarget::Stay(Stacked::Unknown),
         _ => DirTarget::Unknown,
     }
+}
+
+/// Returns whether `arg` rotates the directory stack, as in `pushd +1` or `pushd -0`.
+fn is_stack_rotation(arg: &str) -> bool {
+    arg.strip_prefix(['+', '-'])
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// The children of `command` that make up its simple command: assignments, name, redirections, and
@@ -1981,9 +2297,444 @@ fn is_relative_program(name: &str) -> bool {
     name.contains('/') && Path::new(name).is_relative()
 }
 
-/// Returns whether a shell option cluster such as `-c` or `-lc` takes the script as the next word.
-fn is_command_option(arg: &str) -> bool {
-    arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')
+// ── Shell ──
+
+/// What a shell runs, as [`shell_run`] reads its arguments.
+enum ShellRun<'w> {
+    /// The literal script `-c` runs, from the argument at `index`.
+    Command { index: usize, script: &'w str },
+    /// The literal script file it runs, from the argument at `index`.
+    File { index: usize, path: &'w str },
+    /// The script `-s` reads from standard input, whose operands are its arguments.
+    Stdin,
+    /// No script word, so it reads standard input, or runs the script file the first word an
+    /// `xargs` appends names.
+    Bare,
+    /// A script the analysis cannot tell, since a word may expand or an option is one the shell's
+    /// [`ShellGrammar`] does not list.
+    Unknown,
+}
+
+/// A shell's arguments as [`shell_run`] reads them.
+struct ShellArgs<'w> {
+    run: ShellRun<'w>,
+    /// The startup files a long option names, which an interactive shell sources, each with the
+    /// index of its argument.
+    startup: Vec<(usize, &'w str)>,
+}
+
+/// A variable a shell reads as it starts, which names a startup file or a directory of them.
+struct StartupVariable {
+    name: &'static str,
+    /// Whether the value names a directory the shell may read any file below, since the startup
+    /// files each shell and mode reads there differ, or else the file itself, which the shell
+    /// expands as [`expanded_file`] reads it.
+    directory: bool,
+}
+
+impl StartupVariable {
+    const fn file(name: &'static str) -> Self {
+        Self {
+            name,
+            directory: false,
+        }
+    }
+
+    const fn directory(name: &'static str) -> Self {
+        Self {
+            name,
+            directory: true,
+        }
+    }
+}
+
+/// The variable every shell reads its startup files below, whatever its grammar.
+const HOME_VARIABLE: StartupVariable = StartupVariable::directory("HOME");
+
+/// The variables a leading tilde or a [`DirVariable`] expands from. Where a command sets one, the
+/// analysis cannot resolve those expansions from its own environment.
+const DIR_VARIABLES: &[&str] = &["HOME", "OLDPWD", "PWD"];
+
+/// The files that `value`, a startup file's name, may name once a shell expands it: as written,
+/// as dash leaves it, and with a leading tilde expanded, as bash does it. `None` when it may name
+/// any file, since a parameter expansion or command substitution in it, which bash runs, has no
+/// value the analysis knows, or its tilde names a user the analysis cannot find or expands from a
+/// variable the command sets, which `tilde_known` rules out.
+fn expanded_file(value: &str, tilde_known: bool) -> Option<Vec<String>> {
+    if value.contains(['$', '`']) || !tilde_known && value.contains('~') {
+        return None;
+    }
+    let expanded = expand_tilde(value)?;
+    let mut files = vec![value.to_owned()];
+    if expanded != value {
+        files.push(expanded);
+    }
+    Some(files)
+}
+
+/// The files a shell may run that the walk cannot name for certain.
+#[derive(Default)]
+struct ShellReads {
+    /// Words that may name a script file it runs, as the words `su` hands its user's shell may,
+    /// and the trees of startup files it may run below a directory a startup variable names.
+    possible: Vec<Operand>,
+    /// Whether it may run any file, such as one an `xargs` input word names or one a startup
+    /// variable names with a value that expands.
+    anything: bool,
+}
+
+/// What a program inherits from the rest of its simple command.
+struct Inherited<'c> {
+    /// What an `xargs` or `find` around the command passes it.
+    fed: &'c Fed,
+    /// Where the program's words start among the command's, which `fed` indexes.
+    start: usize,
+    /// Each variable that the enclosing commands, the command's prefix assignments, and its
+    /// wrappers set for the program, in order, with its value when literal.
+    variables: Vec<(String, Option<String>)>,
+}
+
+impl<'c> Inherited<'c> {
+    /// What the program at `start` among the words `all` inherits from the `environment` the
+    /// enclosing commands set and from the prefix `assignments`, the wrapper assignments at the
+    /// indices `unwrapped` lists, and the input `unwrapped` feeds it. An appending `NAME+=VALUE`,
+    /// or a value that input words replace, has no known value.
+    fn new(
+        environment: &[(String, Option<String>)],
+        unwrapped: &'c Unwrapped,
+        start: usize,
+        assignments: &[ShellWord],
+        all: &[Word],
+        src: &str,
+    ) -> Self {
+        let fed = &unwrapped.fed;
+        let prefix = assignments.iter().map(|word| {
+            let name = assigned(&word.text);
+            let value = word.text[name.len()..]
+                .strip_prefix('=')
+                .filter(|_| word.literal);
+            (name, value)
+        });
+        let wrapped = (unwrapped.assignments.iter())
+            .filter(|&&index| index < start)
+            .map(|&index| {
+                let word = &all[index];
+                let literal = word.literal();
+                let text = literal.unwrap_or(&src[word.span.clone()]);
+                let value = (text.split_once('=').map(|(_, value)| value))
+                    .filter(|_| literal.is_some() && !fed.replaced(index, text));
+                (env_name(text), value)
+            });
+        let mut variables = environment.to_vec();
+        variables.extend(
+            prefix
+                .chain(wrapped)
+                .map(|(name, value)| (name.to_owned(), value.map(str::to_owned))),
+        );
+        Self {
+            fed,
+            start,
+            variables,
+        }
+    }
+
+    /// Returns whether input words replace part of `word`, the program's word at `index`.
+    fn replaced(&self, index: usize, word: &Word) -> bool {
+        word.value
+            .as_deref()
+            .is_some_and(|text| self.fed.replaced(self.start + index, text))
+    }
+
+    /// The value the program's variables last set `name` to, `None` when none sets it, and
+    /// `Some(None)` when that value is unknown.
+    fn value(&self, name: &str) -> Option<&Option<String>> {
+        self.variables
+            .iter()
+            .rev()
+            .find(|(variable, _)| variable == name)
+            .map(|(_, value)| value)
+    }
+
+    /// Returns whether the program's variables set one of the [`DIR_VARIABLES`].
+    fn sets_dir_variable(&self) -> bool {
+        sets_dir_variable(&self.variables)
+    }
+}
+
+/// Returns whether `variables` set one of the [`DIR_VARIABLES`].
+fn sets_dir_variable(variables: &[(String, Option<String>)]) -> bool {
+    variables
+        .iter()
+        .any(|(name, _)| DIR_VARIABLES.contains(&name.as_str()))
+}
+
+/// Returns whether the word written `text` may expand a tilde or a [`DirVariable`], each of which
+/// one of the [`DIR_VARIABLES`] names.
+fn reads_dir_variable(text: &str) -> bool {
+    text.contains('~')
+        || ["$HOME", "${HOME}", "$PWD", "${PWD}"]
+            .iter()
+            .any(|variable| text.contains(variable))
+}
+
+/// The variable a `NAME=VALUE` word that `env` or `sudo` takes sets, which is everything before
+/// the first `=`, whatever it holds.
+fn env_name(word: &str) -> &str {
+    word.split_once('=').map_or(word, |(name, _)| name)
+}
+
+/// The startup options of a shell, as its manual lists them.
+struct ShellGrammar {
+    /// The long options it takes before any other, with one dash or two, and whether each names a
+    /// startup file in the next word.
+    long: &'static [(&'static str, bool)],
+    /// The letters a `-` or `+` cluster may hold besides `c` and `s`, each a flag or, as `values`
+    /// says, an option that takes a value.
+    letters: &'static str,
+    values: &'static str,
+    /// Whether each value letter in a cluster takes the next word in turn, as bash's do. Otherwise
+    /// one before the end of its cluster leaves the run unknown, since zsh, ksh, and mksh take the
+    /// rest of the cluster as its value, and dash rejects it.
+    stacked_values: bool,
+    /// The letters that end the options with their cluster, as zsh's `-b` does.
+    ends: &'static str,
+    /// Whether a lone `+` ends the options, as in zsh, or is skipped, as in bash.
+    plus_ends: bool,
+    /// The variables besides [`HOME_VARIABLE`] whose value names a startup file it may run.
+    variables: &'static [StartupVariable],
+}
+
+/// What `shell` runs with `args`, read as bash reads its startup options: long options first, then
+/// `-` and `+` clusters up to the first operand or a `-` or `--` that ends them, where an option
+/// that takes a value takes the next word. The first operand is the script `-c` runs, or else,
+/// without `-s`, the script file, and with neither the shell reads its script from standard input.
+/// A shell without a [`ShellGrammar`] runs an unknown script once it has an option.
+fn shell_run<'w>(shell: &str, args: &'w [Word]) -> ShellArgs<'w> {
+    let grammar = shell_grammar(shell);
+    let mut startup = Vec::new();
+    let run = 'run: {
+        let (mut command, mut stdin) = (false, false);
+        let mut long = true;
+        let mut words = args.iter().enumerate();
+        let operand = loop {
+            let Some((index, word)) = words.next() else {
+                break None;
+            };
+            let Some(arg) = word.literal() else {
+                break 'run ShellRun::Unknown;
+            };
+            if !arg.starts_with(['-', '+']) {
+                break Some((index, word));
+            }
+            let Some(grammar) = grammar else {
+                break 'run ShellRun::Unknown;
+            };
+            if matches!(arg, "-" | "--") || arg == "+" && grammar.plus_ends {
+                break words.next();
+            }
+            let named = arg.strip_prefix("--").or_else(|| arg.strip_prefix('-'));
+            if long
+                && let Some(&(_, sources)) =
+                    grammar.long.iter().find(|(name, _)| Some(*name) == named)
+            {
+                if sources {
+                    let Some(file) = words
+                        .next()
+                        .and_then(|(index, word)| Some((index, word.literal()?)))
+                    else {
+                        break 'run ShellRun::Unknown;
+                    };
+                    startup.push(file);
+                }
+                continue;
+            }
+            long = false;
+            let cluster = &arg[1..];
+            for (offset, letter) in cluster.char_indices() {
+                match letter {
+                    'c' => command = true,
+                    's' => stdin = true,
+                    _ if !grammar.letters.contains(letter) => break 'run ShellRun::Unknown,
+                    _ if grammar.values.contains(letter) => {
+                        let last = offset + letter.len_utf8() == cluster.len();
+                        if !last && !grammar.stacked_values
+                            || words.next().and_then(|(_, word)| word.literal()).is_none()
+                        {
+                            break 'run ShellRun::Unknown;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if cluster.contains(|letter| grammar.ends.contains(letter)) {
+                break words.next();
+            }
+        };
+        let operand = operand.map(|(index, word)| (index, word.literal()));
+        match (operand, command) {
+            (Some((index, Some(script))), true) => ShellRun::Command { index, script },
+            (_, true) => ShellRun::Unknown,
+            _ if stdin => ShellRun::Stdin,
+            (Some((index, Some(path))), false) => ShellRun::File { index, path },
+            (Some((_, None)), false) => ShellRun::Unknown,
+            (None, false) => ShellRun::Bare,
+        }
+    };
+    ShellArgs { run, startup }
+}
+
+/// The grammar of `shell`, or `None` for one whose options differ from the Bourne shells', such as
+/// `fish`, `csh`, or `pwsh`.
+fn shell_grammar(shell: &str) -> Option<&'static ShellGrammar> {
+    match shell {
+        "bash" => Some(&BASH_GRAMMAR),
+        "zsh" => Some(&ZSH_GRAMMAR),
+        "ash" | "dash" | "hush" | "ksh" | "mksh" | "sh" => Some(&POSIX_SHELL_GRAMMAR),
+        _ => None,
+    }
+}
+
+/// Bash's startup options in versions 3.2 through 5.3, one of which may reject an option another
+/// takes and then exit before running anything.
+const BASH_GRAMMAR: ShellGrammar = ShellGrammar {
+    long: &[
+        ("debug", false),
+        ("debugger", false),
+        ("dump-po-strings", false),
+        ("dump-strings", false),
+        ("help", false),
+        ("init-file", true),
+        ("login", false),
+        ("noediting", false),
+        ("noprofile", false),
+        ("norc", false),
+        ("posix", false),
+        ("pretty-print", false),
+        ("protected", false),
+        ("rcfile", true),
+        ("restricted", false),
+        ("verbose", false),
+        ("version", false),
+        ("wordexp", false),
+    ],
+    // cspell:ignore abefhiklmnoprtuvx BCDEHIOPT
+    letters: "abefhiklmnoprtuvxBCDEHIOPT",
+    values: "oO",
+    stacked_values: true,
+    ends: "",
+    plus_ends: false,
+    variables: &[
+        StartupVariable::file("BASH_ENV"),
+        StartupVariable::file("ENV"),
+    ],
+};
+
+/// The startup options POSIX gives `sh`, which the other Bourne-style shells share.
+const POSIX_SHELL_GRAMMAR: ShellGrammar = ShellGrammar {
+    long: &[],
+    // cspell:ignore Cefhilmnouvx
+    letters: "abCefhilmnouvx",
+    values: "o",
+    stacked_values: false,
+    ends: "",
+    plus_ends: false,
+    variables: &[StartupVariable::file("ENV")],
+};
+
+/// zsh's startup options among POSIX's, where `-b` and a lone `+` also end the options.
+const ZSH_GRAMMAR: ShellGrammar = ShellGrammar {
+    ends: "b",
+    plus_ends: true,
+    variables: &[StartupVariable::directory("ZDOTDIR")],
+    ..POSIX_SHELL_GRAMMAR
+};
+
+/// The arguments of `su` or `runuser` as util-linux reads them.
+struct SuArgs<'w> {
+    /// The words it passes its user's shell after the user name.
+    shell: &'w [Word],
+    /// Whether the shell keeps the `HOME` the command sets: an option preserves the environment,
+    /// as `-m`, `-p`, or `--preserve-environment` does, and none asks for a login shell, as `-`,
+    /// `-l`, or `--login` does.
+    keeps_home: bool,
+}
+
+/// What `su` or `runuser` with `args` passes its user's shell, as util-linux reads its arguments:
+/// options end at the first operand, a lone `-` after them asks for a login shell, and the next
+/// word names the user. A word that expands where an option stands ends the options as the user
+/// does, so every later word counts.
+fn su_args(args: &[Word]) -> SuArgs<'_> {
+    const VALUES: &[&str] = &[
+        "command",
+        "group",
+        "session-command",
+        "shell",
+        "supp-group",
+        "user",
+        "whitelist-environment",
+    ];
+    // cspell:ignore cgGsuw
+    const VALUE_LETTERS: &str = "cgGsuw";
+    let (mut login, mut preserves) = (false, false);
+    let mut i = 0;
+    while let Some(arg) = args.get(i).and_then(Word::literal) {
+        if arg == "-" || !arg.starts_with('-') {
+            break;
+        }
+        i += 1;
+        if arg == "--" {
+            break;
+        }
+        let takes = if let Some(long) = arg.strip_prefix("--") {
+            let name = long.split_once('=').map_or(long, |(name, _)| name);
+            login |= "login".starts_with(name);
+            preserves |= "preserve-environment".starts_with(name);
+            !long.contains('=') && VALUES.iter().any(|value| value.starts_with(long))
+        } else {
+            let cluster = &arg[1..];
+            let value = cluster.find(|letter| VALUE_LETTERS.contains(letter));
+            let flags = &cluster[..value.unwrap_or(cluster.len())];
+            login |= flags.contains('l');
+            preserves |= flags.contains(['m', 'p']);
+            value.is_some_and(|at| at + 1 == cluster.len())
+        };
+        i += usize::from(takes);
+    }
+    if args.get(i).and_then(Word::literal) == Some("-") {
+        login = true;
+        i += 1;
+    }
+    SuArgs {
+        shell: args.get(i + 1..).unwrap_or(&[]),
+        keeps_home: preserves && !login,
+    }
+}
+
+/// The literal file `source` or `.` with `args` runs, after a `--` that ends its options. `None`
+/// for any option, since bash 5.3's `-p` searches a path for the file and other options fail.
+fn sourced_file(args: &[Word]) -> Option<&str> {
+    match args {
+        [first, rest @ ..] if first.literal() == Some("--") => rest.first()?.literal(),
+        [first, ..] => first
+            .literal()
+            .filter(|path| *path == "-" || !path.starts_with('-')),
+        [] => None,
+    }
+}
+
+/// The script the word after a `--command` or a `-c` cluster such as `-lc` names, wherever it
+/// stands, or a `--command=` value.
+fn command_option_script(args: &[Word]) -> Option<String> {
+    args.iter().enumerate().find_map(|(i, word)| {
+        let arg = word.value.as_deref()?;
+        if let Some(script) = arg.strip_prefix("--command=") {
+            return Some(script.to_owned());
+        }
+        let command = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+        (command || arg == "--command")
+            .then(|| args.get(i + 1)?.value.clone())
+            .flatten()
+    })
 }
 
 // ── Wrapper ──
@@ -2047,7 +2798,8 @@ impl Wrapper {
                 break;
             }
             if !arg.starts_with('-') || (arg == "-" && self.option("-").is_none()) {
-                if self.assignments == Assignments::Among && is_sudo_assignment(arg) {
+                if self.assignments == Assignments::Among && self.assignments.takes(arg) {
+                    run.assignments.push(at);
                     i += 1;
                     continue;
                 }
@@ -2103,16 +2855,12 @@ impl Wrapper {
             }
         }
         i += self.positionals;
-        let assignment = match self.assignments {
-            Assignments::None => |_: &str| false,
-            Assignments::After => is_assignment,
-            Assignments::Among => is_sudo_assignment,
-        };
         while args
             .get(i)
             .and_then(|arg| arg.value.as_deref())
-            .is_some_and(assignment)
+            .is_some_and(|arg| self.assignments.takes(arg))
         {
+            run.assignments.push(i);
             i += 1;
         }
         run.start = i.min(args.len());
@@ -2184,11 +2932,23 @@ enum Value {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Assignments {
     None,
-    /// After the options, as `env` takes them.
+    /// After the options or a `--` that ends them, as `env` takes any word holding a `=`, whatever
+    /// its name, even one that starts with `-`.
     After,
     /// Before, between, and after the options, as `sudo` takes any word holding a `=` that does not
     /// start with `/` or `=`.
     Among,
+}
+
+impl Assignments {
+    /// Returns whether a wrapper that takes assignments this way reads `arg` as one.
+    fn takes(self, arg: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::After => arg.contains('='),
+            Self::Among => arg.contains('=') && !arg.starts_with(['/', '=']),
+        }
+    }
 }
 
 /// What a wrapper changes about the command it runs.
@@ -2230,6 +2990,9 @@ enum Effect {
     Insert,
     /// The value names a file the wrapper reads.
     Reads,
+    /// The value is a command line the wrapper splits into words of its own, as `env -S` does,
+    /// which the analysis does not follow.
+    Splits,
 }
 
 /// How a wrapper runs its command, from the options before it.
@@ -2243,6 +3006,10 @@ struct Invocation {
     replace: Option<Placeholder>,
     /// The files an option names for the wrapper to read.
     reads: Vec<String>,
+    /// Whether an option hands the wrapper a command line it splits itself.
+    splits: bool,
+    /// The arguments the wrapper takes as `NAME=VALUE` assignments.
+    assignments: Vec<usize>,
 }
 
 impl Invocation {
@@ -2267,12 +3034,14 @@ impl Invocation {
                 Arg::Literal(path) => self.reads.push(path),
                 Arg::None | Arg::Expands => return None,
             },
+            Effect::Splits => self.splits = true,
         }
         Some(())
     }
 }
 
 /// A word that input words replace when the command runs.
+#[derive(Clone)]
 struct Placeholder {
     text: String,
     /// Whether only a word that is exactly `text` is replaced.
@@ -2288,16 +3057,37 @@ struct Unwrapped {
     /// each word past an option that is not. The word count stands for the input words of an
     /// `xargs` whose wrapped wrapper takes its command from them.
     starts: Vec<usize>,
+    fed: Fed,
+    /// The files wrapper options read.
+    reads: Vec<String>,
+    /// The `NAME=VALUE` words that wrappers such as `env` take as assignments, or may take past an
+    /// option the analysis cannot read.
+    assignments: Vec<usize>,
+}
+
+/// The words an `xargs` or `find` passes a command, as indices into its words.
+#[derive(Default)]
+struct Fed {
     /// Whether an `xargs` appends its input words to the command.
     appends: bool,
     /// The placeholders `xargs` or `find` replaces with its input words or found paths, each with
     /// where its command starts.
     replaces: Vec<(usize, Placeholder)>,
-    /// The files wrapper options read.
-    reads: Vec<String>,
 }
 
-impl Unwrapped {
+impl Fed {
+    /// What reaches the command whose words start at `offset` among these words.
+    fn for_command_at(&self, offset: usize) -> Self {
+        Self {
+            appends: self.appends,
+            replaces: self
+                .replaces
+                .iter()
+                .map(|(start, placeholder)| (start.saturating_sub(offset), placeholder.clone()))
+                .collect(),
+        }
+    }
+
     /// Returns whether `xargs` or `find` passes words to the command, which may name any file.
     fn passes_input(&self) -> bool {
         self.appends || !self.replaces.is_empty()
@@ -2321,17 +3111,6 @@ fn assigned(assignment: &str) -> &str {
     assignment
         .find(['=', '+', '['])
         .map_or(assignment, |end| &assignment[..end])
-}
-
-/// Returns whether `sudo` reads `arg` as an environment assignment.
-fn is_sudo_assignment(arg: &str) -> bool {
-    arg.contains('=') && !arg.starts_with(['/', '='])
-}
-
-/// Returns whether `arg` is a `NAME=VALUE` environment assignment.
-fn is_assignment(arg: &str) -> bool {
-    arg.split_once('=')
-        .is_some_and(|(name, _)| is_identifier(name))
 }
 
 /// Returns whether `name` is a shell identifier: a letter or `_`, then letters, digits, or `_`.
@@ -2493,7 +3272,9 @@ impl Word {
     /// The word bash reads from `parts`, which the grammar may split one word into with no blank
     /// between them, as in `=="x"`.
     fn new(parts: &[Node<'_>], src: &str) -> Self {
-        let (value, glob) = unquote_parts(parts.iter().copied(), src, true).unzip();
+        let (value, glob) = unquote_parts(parts.iter().copied(), src, true)
+            .filter(|(value, _)| pwd_bounded(parts[0], src, value))
+            .unzip();
         Self {
             span: parts[0].start_byte()..parts[parts.len() - 1].end_byte(),
             value,
@@ -2513,13 +3294,18 @@ impl Word {
         }
     }
 
+    /// The word's value when it is known and leaves nothing to pathname or brace expansion.
+    fn literal(&self) -> Option<&str> {
+        self.value.as_deref().filter(|_| !self.glob)
+    }
+
     fn shell_word(&self, src: &str) -> ShellWord {
         ShellWord {
             text: self
                 .value
                 .clone()
                 .unwrap_or_else(|| src[self.span.clone()].to_owned()),
-            literal: self.value.is_some() && !self.glob,
+            literal: self.literal().is_some(),
         }
     }
 }
@@ -2544,7 +3330,7 @@ fn assignment_word(node: Node<'_>, src: &str) -> ShellWord {
             literal: true,
         };
     };
-    match unquote(value, src, true) {
+    match unquote(value, src, true).filter(|(unquoted, _)| pwd_bounded(value, src, unquoted)) {
         Some((unquoted, _)) => ShellWord {
             text: format!("{}{unquoted}", &src[node.start_byte()..value.start_byte()]),
             literal: true,
@@ -2553,9 +3339,8 @@ fn assignment_word(node: Node<'_>, src: &str) -> ShellWord {
     }
 }
 
-/// `node`'s value and whether it globs, for [`Word`]. Tilde expansion and a `$HOME` or `${HOME}`
-/// expansion, which bash also reads from `HOME`, apply to a `leading` word alone, and `~user` has
-/// no value, since the analysis does not look users up.
+/// `node`'s value and whether it globs, for [`Word`]. Tilde expansion and a [`DirVariable`]
+/// expansion apply to a `leading` word alone.
 fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
     let text = &src[node.byte_range()];
     match node.kind() {
@@ -2569,22 +3354,21 @@ fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
         }
         "raw_string" => Some((text.get(1..text.len() - 1)?.to_owned(), false)),
         "ansi_c_string" => Some((unquote_ansi_c(text.get(2..text.len() - 1)?)?, false)),
-        "simple_expansion" | "expansion" if leading && is_home(text) => Some((home()?, false)),
+        "simple_expansion" | "expansion" if leading => {
+            Some((dir_prefix(node, src)?.0.value()?, false))
+        }
         "string" => {
+            let dir = dir_prefix(node, src).filter(|_| leading);
             let mut cursor = node.walk();
-            let mut parts = node.named_children(&mut cursor).peekable();
-            let home = parts
-                .next_if(|part| {
-                    leading
-                        && part.start_byte() == node.start_byte() + 1
-                        && is_home(&src[part.byte_range()])
-                })
-                .map(|part| (home(), part.end_byte()));
-            if !parts.all(|part| part.kind() == "string_content") {
+            if !node
+                .named_children(&mut cursor)
+                .skip(usize::from(dir.is_some()))
+                .all(|part| part.kind() == "string_content")
+            {
                 return None;
             }
-            let (prefix, start) = match home {
-                Some((home, end)) => (home?, end),
+            let (prefix, start) = match dir {
+                Some((dir, end)) => (dir.value()?, end),
                 None => (String::new(), node.start_byte() + 1),
             };
             let inner = src.get(start..node.end_byte() - 1)?;
@@ -2599,30 +3383,99 @@ fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
 }
 
 /// The value and glob flag of the one word `parts` spell in order, each read as [`unquote`] reads
-/// it and joined by the [`Gap::value`] between them, or `None` when any part has none.
+/// it and joined by the [`Gap::value`] between them, or `None` when any part has none. Adjacent
+/// unquoted parts are read as one, with the escapes and line continuations between them, so a
+/// tilde prefix spans them. A leading tilde expands only when its unquoted run holds the `/` that
+/// ends the prefix or ends the word, since bash leaves a prefix with a quoted character as written.
 fn unquote_parts<'t>(
     parts: impl IntoIterator<Item = Node<'t>>,
     src: &str,
     leading: bool,
 ) -> Option<(String, bool)> {
+    let parts: Vec<Node<'t>> = parts.into_iter().collect();
     let mut value = String::new();
     let mut glob = false;
     let mut previous: Option<Node<'t>> = None;
-    for part in parts {
+    let mut runs = parts
+        .chunk_by(|left, right| left.kind() == "word" && right.kind() == "word")
+        .peekable();
+    while let Some(run) = runs.next() {
+        let (first, last) = (run[0], run[run.len() - 1]);
         if let Some(previous) = previous {
-            value.push_str(&Gap::value(&src[previous.end_byte()..part.start_byte()]));
+            value.push_str(&Gap::value(&src[previous.end_byte()..first.start_byte()]));
         }
-        let (text, part_glob) = unquote(part, src, leading && previous.is_none())?;
+        let leading = leading && previous.is_none();
+        let (text, run_glob) = if first.kind() == "word" {
+            let text = &src[first.start_byte()..last.end_byte()];
+            let quoted_prefix =
+                text.starts_with('~') && !text.contains('/') && runs.peek().is_some();
+            unquote_word(text, leading && !quoted_prefix)?
+        } else {
+            unquote(first, src, leading)?
+        };
         value.push_str(&text);
-        glob |= part_glob;
-        previous = Some(part);
+        glob |= run_glob;
+        previous = Some(last);
     }
     Some((value, glob))
 }
 
-/// Returns whether `text` expands `HOME` in a plain form, as `$HOME` or `${HOME}`.
-fn is_home(text: &str) -> bool {
-    matches!(text, "$HOME" | "${HOME}")
+/// A variable that names a directory. The analysis resolves its plain expansion, such as `$HOME`
+/// or `${PWD}`, at the start of a word, and `PWD`'s only where [`pwd_bounded`] holds.
+#[derive(Clone, Copy)]
+enum DirVariable {
+    /// `HOME`, which bash reads from the environment as the analysis does.
+    Home,
+    /// `PWD`, which bash keeps current across directory changes, so it names the working
+    /// directory as `.` does.
+    Pwd,
+}
+
+impl DirVariable {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "$HOME" | "${HOME}" => Some(Self::Home),
+            "$PWD" | "${PWD}" => Some(Self::Pwd),
+            _ => None,
+        }
+    }
+
+    /// The directory the variable expands to, or `None` without a home directory.
+    fn value(self) -> Option<String> {
+        match self {
+            Self::Home => home(),
+            Self::Pwd => Some(".".to_owned()),
+        }
+    }
+}
+
+/// The [`DirVariable`] whose plain expansion starts the word part `node`, bare or first in a
+/// double-quoted string, with the byte where that expansion ends.
+fn dir_prefix(node: Node<'_>, src: &str) -> Option<(DirVariable, usize)> {
+    match node.kind() {
+        "simple_expansion" | "expansion" => Some((
+            DirVariable::parse(&src[node.byte_range()])?,
+            node.end_byte(),
+        )),
+        "string" => node
+            .named_child(0)
+            .filter(|part| {
+                part.start_byte() == node.start_byte() + 1
+                    && matches!(part.kind(), "simple_expansion" | "expansion")
+            })
+            .and_then(|part| dir_prefix(part, src)),
+        "concatenation" => dir_prefix(node.child(0)?, src),
+        _ => None,
+    }
+}
+
+/// Returns whether `value`, the word that the part `first` leads, names what bash expands it to.
+/// The `.` a leading `$PWD` stands for does only when the expansion ends the word or a `/`
+/// follows it, as bash requires of `~+`, since `$PWD.log` names a sibling of the directory.
+fn pwd_bounded(first: Node<'_>, src: &str, value: &str) -> bool {
+    !matches!(dir_prefix(first, src), Some((DirVariable::Pwd, _)))
+        || value == "."
+        || value.starts_with("./")
 }
 
 /// The home directory a leading `~` expands to, or `None` without one.
@@ -2630,7 +3483,8 @@ fn home() -> Option<String> {
     Some(expand_user("~").ok()?.to_string_lossy().into_owned())
 }
 
-/// An unquoted word's value, with backslash escapes removed and a leading `~` expanded.
+/// An unquoted word's value, with backslash escapes removed and the tilde [`tilde_at`] finds
+/// expanded by [`expand_tilde`].
 fn unquote_word(text: &str, leading: bool) -> Option<(String, bool)> {
     let mut value = String::with_capacity(text.len());
     let mut glob = false;
@@ -2645,13 +3499,71 @@ fn unquote_word(text: &str, leading: bool) -> Option<(String, bool)> {
             _ => value.push(c),
         }
     }
-    if leading && text.starts_with('~') {
-        if value != "~" && !value.starts_with("~/") {
+    let joined = text.replace("\\\n", "");
+    if leading && let Some(at) = tilde_at(&joined) {
+        let tail = &joined[at + 1..];
+        let name = &tail[..tail.find('/').unwrap_or(tail.len())];
+        if name.contains(['*', '?', '[', '{']) {
             return None;
         }
-        value = expand_user(&value).ok()?.to_string_lossy().into_owned();
+        if !name.contains('\\') {
+            value = value[..at].to_owned() + &expand_tilde(&value[at..])?;
+        }
     }
     Some((value, glob))
+}
+
+/// Where the tilde bash may expand in `word` stands: leading it, or after the first `=` of a word
+/// that reads as an assignment, as in `env BASH_ENV=~/x`.
+fn tilde_at(word: &str) -> Option<usize> {
+    if word.starts_with('~') {
+        return Some(0);
+    }
+    let (name, value) = word.split_once('=')?;
+    (is_identifier(name) && value.starts_with('~')).then_some(name.len() + 1)
+}
+
+/// `path` with a leading tilde prefix expanded as bash expands it, or `None` for a user the
+/// analysis cannot find. A [`stack_tilde`] stays as written, since the directory it names depends
+/// on the changes before it, which [`Walk::spellings`] weighs.
+fn expand_tilde(path: &str) -> Option<String> {
+    let Some(tail) = path.strip_prefix('~') else {
+        return Some(path.to_owned());
+    };
+    let name = &tail[..tail.find('/').unwrap_or(tail.len())];
+    Some(match name {
+        "" => expand_user(path).ok()?.to_string_lossy().into_owned(),
+        "+" => format!(".{}", &path[2..]),
+        _ if stack_tilde(path).is_some() => path.to_owned(),
+        _ => user_home(name)? + &path[1 + name.len()..],
+    })
+}
+
+/// The rest of `path` after a leading tilde that names a directory on the stack: `~-`, the
+/// previous directory, or `~N`, `~+N`, or `~-N`, the stack's Nth entry. Each names the working
+/// directory, a directory a `cd` or `pushd` entered, or one a `pushd -n` stacked, or else stays
+/// as written, since `ox` starts `bash` without `OLDPWD` and with only the working directory on
+/// the stack.
+fn stack_tilde(path: &str) -> Option<&str> {
+    let tail = path.strip_prefix('~')?;
+    let end = tail.find('/').unwrap_or(tail.len());
+    let (name, rest) = tail.split_at(end);
+    let index = name.strip_prefix(['+', '-']).unwrap_or(name);
+    let stack = name == "-" || !index.is_empty() && index.chars().all(|c| c.is_ascii_digit());
+    stack.then_some(rest)
+}
+
+/// The home directory of the user `name`, as bash's `~name` finds it.
+#[cfg(unix)]
+fn user_home(name: &str) -> Option<String> {
+    let user = nix::unistd::User::from_name(name).ok()??;
+    Some(user.dir.to_string_lossy().into_owned())
+}
+
+/// The home directory of the user `name`, which the analysis does not look up off Unix.
+#[cfg(not(unix))]
+fn user_home(_name: &str) -> Option<String> {
+    None
 }
 
 /// Returns whether bash may expand the word part `node` into other than one word: by splitting an
@@ -2869,10 +3781,7 @@ const TEST_OPERATORS: &[&str] = &["!", "!=", "(", ")", "<", "=", "==", ">", "]"]
 /// `test` or `[` call other than an option or a [`TEST_OPERATORS`] word counts as a file, so a
 /// string it compares reads as one too.
 fn safe_operands(name: &str, args: &[Word]) -> Option<Vec<Operand>> {
-    let values = args
-        .iter()
-        .map(|word| word.value.as_deref().filter(|_| !word.glob))
-        .collect::<Option<Vec<_>>>()?;
+    let values = args.iter().map(Word::literal).collect::<Option<Vec<_>>>()?;
     let files = || {
         let known: Vec<Option<&str>> = values.iter().copied().map(Some).collect();
         let operands = reader_args(name, &known);
@@ -4247,6 +5156,14 @@ mod tests {
                     assert!(!segment.is_safe(), "{command:?}");
                     assert!(command.unrecognized().is_none(), "{command:?}");
                 }
+                for (command, text) in [
+                    ("LD_PRELOAD=$PWD/x.so cat a", "LD_PRELOAD=./x.so cat a"),
+                    ("LD_PRELOAD=$PWD.so cat a", "LD_PRELOAD=$PWD.so cat a"),
+                ] {
+                    let segment = &parse(command).segments[0];
+
+                    assert_eq!(joined(segment.named()), text, "{command:?}");
+                }
                 assert!(is_safe("LANG=C TZ=UTC env NO_COLOR=1 cat a"));
             }
 
@@ -4379,7 +5296,7 @@ mod tests {
             }
 
             #[test]
-            fn expands_a_leading_tilde_or_home_only() {
+            fn expands_a_leading_tilde_home_or_working_directory_only() {
                 temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
                     let home = abs("/home/u");
                     let expanded = PathBuf::from(&home).join("x");
@@ -4392,7 +5309,59 @@ mod tests {
                             "a~b".to_owned()
                         ]
                     );
-                    assert_eq!(words("cat ~u/x"), ["cat", "~u/x"], "kept as written");
+                    assert_eq!(
+                        words("cat ~no-such-user/x ~- ~1/x ~+2 ~-0/x"),
+                        ["cat", "~no-such-user/x", "~-", "~1/x", "~+2", "~-0/x"],
+                        "an unknown user and the directory stack are kept as written"
+                    );
+                    assert_eq!(words("cat ~+/x ~+"), ["cat", "./x", "."]);
+                    assert_eq!(
+                        words("env A=~/x B=~+/y 1=~/z C=a=~/w"),
+                        [
+                            "env".to_owned(),
+                            format!("A={}", expanded.to_string_lossy()),
+                            "B=./y".to_owned(),
+                            "1=~/z".to_owned(),
+                            "C=a=~/w".to_owned()
+                        ],
+                        "a tilde after the first `=` of an assignment expands"
+                    );
+                    assert_eq!(
+                        words("cat ~\\\n/x"),
+                        ["cat", expanded.to_str().unwrap()],
+                        "a line continuation goes before the tilde prefix is read"
+                    );
+                    assert_eq!(
+                        words(r#"cat ~"/x" ~+"/x" ~root"/x" ~\r/x ~/"x""#),
+                        [
+                            "cat",
+                            "~/x",
+                            "~+/x",
+                            "~root/x",
+                            "~r/x",
+                            expanded.to_str().unwrap()
+                        ],
+                        "a quoted tilde prefix is kept as written"
+                    );
+                    assert_eq!(
+                        words(r#"cat $PWD/x "${PWD}/y" "$PWD" a$PWD"#),
+                        ["cat", "./x", "./y", ".", "a$PWD"]
+                    );
+                    assert_eq!(
+                        words(
+                            "cat ${PWD}x $PWD.log \"$PWD\"-old \"$PWD.x\" \" $PWD/x\" \"\n$PWD/x\""
+                        ),
+                        [
+                            "cat",
+                            "${PWD}x",
+                            "$PWD.log",
+                            "\"$PWD\"-old",
+                            "\"$PWD.x\"",
+                            "\" $PWD/x\"",
+                            "\"\n$PWD/x\""
+                        ],
+                        "$PWD keeps no value unless it starts the word and ends it or a `/` follows"
+                    );
                     assert_eq!(
                         words(r#"cat $HOME/x "${HOME}/y z" "$HOME" a$HOME $HOMES "$HOME$X""#),
                         [
@@ -4406,6 +5375,18 @@ mod tests {
                         ]
                     );
                 });
+            }
+
+            #[cfg(unix)]
+            #[test]
+            fn expands_a_leading_tilde_user_to_that_users_home() {
+                let root = nix::unistd::User::from_name("root").unwrap().unwrap();
+                let home = root.dir.to_string_lossy();
+
+                assert_eq!(
+                    words("cat ~root/x ~root"),
+                    ["cat".to_owned(), format!("{home}/x"), home.into_owned()]
+                );
             }
 
             #[test]
@@ -4690,7 +5671,6 @@ mod tests {
                     ("sudo -s rm -rf x", "sudo -s rm -rf x"),
                     ("sudo --login rm -rf x", "sudo --login rm -rf x"),
                     ("doas -s", "doas -s"),
-                    ("env -S 'rm -rf x'", "env -S rm -rf x"),
                     ("nice --weird rm", "nice --weird rm"),
                     ("nice $LEVEL rm", "nice $LEVEL rm"),
                     ("timeout --what 5 rm", "timeout --what 5 rm"),
@@ -4705,6 +5685,33 @@ mod tests {
                     joined(program(&parse("sudo -i rm -rf x").segments[0])),
                     "rm -rf x"
                 );
+            }
+
+            #[test]
+            fn reads_every_env_word_with_an_equals_sign_as_an_assignment() {
+                for (command, runs) in [
+                    ("env X.Y=1 cat a", "cat a"),
+                    ("env 1X=y 'A B=c' cat a", "cat a"),
+                    ("env -i =x cat a", "cat a"),
+                ] {
+                    let parsed = parse(command);
+
+                    let program = joined(program(&parsed.segments[0]));
+
+                    assert_eq!(program, runs, "{command:?}");
+                }
+            }
+
+            #[test]
+            fn leaves_a_command_line_env_splits_unrecognized() {
+                for command in [
+                    "env -S 'cat a'",
+                    "env -vS'cat a'",
+                    "env --split-string='cat a'",
+                    "env --split-string 'cat a'",
+                ] {
+                    assert!(parse(command).unrecognized().is_some(), "{command:?}");
+                }
             }
 
             #[test]
@@ -5180,6 +6187,197 @@ mod tests {
     mod walk {
         use super::*;
 
+        /// Each write's path relative to `cwd`, or as requested outside it.
+        fn writes(command: &str, cwd: &Path) -> Vec<String> {
+            spelled(CommandTarget::parse(command, &Workspace::new(cwd)).writes)
+        }
+
+        /// Each certain read's path relative to `cwd`, or as requested outside it.
+        fn reads(command: &str, cwd: &Path) -> Vec<String> {
+            spelled(CommandTarget::parse(command, &Workspace::new(cwd)).reads)
+        }
+
+        fn spelled(targets: Vec<PathTarget>) -> Vec<String> {
+            targets
+                .into_iter()
+                .map(|target| target.relative.unwrap_or(target.requested))
+                .collect()
+        }
+
+        mod nested_script {
+            use super::*;
+
+            #[test]
+            fn reads_the_script_and_startup_files_a_shell_runs_after_its_options() {
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                for (command, read) in [
+                    ("bash -- -x", &["-x"][..]),
+                    ("bash - -x", &["-x"]),
+                    ("bash + f", &["f"]),
+                    ("bash -o -c f", &["f"]),
+                    ("bash -oO a b f", &["f"]),
+                    ("bash -x --norc f", &[]),
+                    ("bash -s f", &[]),
+                    ("bash -s -- f", &[]),
+                    ("bash --rcfile rc -i", &["rc"]),
+                    ("bash -init-file rc f", &["f", "rc"]),
+                    ("zsh -b -x f", &["-x"]),
+                    ("zsh + -x f", &["-x"]),
+                    ("dash -o vi f", &["f"]),
+                    ("fish f", &["f"]),
+                ] {
+                    let mut read_paths = reads(command, cwd);
+                    read_paths.sort();
+
+                    assert_eq!(read_paths, read, "{command:?}");
+                }
+            }
+
+            #[test]
+            fn leaves_a_shell_unrecognized_when_its_script_is_unknown() {
+                // cspell:ignore eovi
+                for command in [
+                    "bash $F",
+                    "bash -- $F",
+                    "bash -c",
+                    "bash -c \"$X\"",
+                    "bash -c -- \"$X\"",
+                    "bash --rcfile",
+                    "bash --rcfile $F f",
+                    "bash -o",
+                    "bash -o $X f",
+                    "bash --bogus f",
+                    "zsh -ovi f",
+                    "ksh -ovi f",
+                    "mksh -eovi f",
+                    "fish -n f",
+                    "source",
+                    "source -p . key",
+                ] {
+                    assert!(parse(command).unrecognized().is_some(), "{command:?}");
+                }
+                for command in [
+                    "bash -s -- \"$V\"",
+                    "bash -c ls",
+                    "bash -oO a b f",
+                    "zsh -o vi f",
+                ] {
+                    assert!(parse(command).unrecognized().is_none(), "{command:?}");
+                }
+            }
+
+            #[test]
+            fn leaves_a_shell_unrecognized_when_input_words_replace_its_script() {
+                for (command, replaced) in [
+                    ("echo a | xargs -I % bash -c 'cat %'", true),
+                    ("echo a | xargs -i bash -c 'cat {}'", true),
+                    ("echo a | xargs -I % su -c 'cat %' root", true),
+                    ("echo a | xargs -I % runuser -u root bash -c 'cat %'", true),
+                    ("find . -exec sh -c 'cat {}' \\;", true),
+                    ("find . -execdir bash -c 'cat {}' \\;", true),
+                    ("echo bash | xargs -I % % -c true", true),
+                    ("BASH_ENV='$(true)' bash -c true", true),
+                    ("env 'ENV=`true`' sh -i", true),
+                    ("echo a | xargs -I % env %=x bash -c true", true),
+                    ("echo a | xargs -I % sudo A%=x bash -c true", true),
+                    ("echo a | xargs -I % env A=% bash -c true", false),
+                    ("echo a | xargs -I % bash -c 'cat x' %", false),
+                    ("echo a | xargs su -c 'cat x' root", false),
+                    ("find . -exec sh -c 'cat x' \\;", false),
+                ] {
+                    let parsed = parse(command);
+
+                    assert_eq!(parsed.unrecognized().is_some(), replaced, "{command:?}");
+                }
+            }
+
+            #[test]
+            fn flags_a_shell_that_may_run_any_file() {
+                for (command, anything) in [
+                    ("echo a | xargs bash", true),
+                    ("echo a | xargs -I % bash %", true),
+                    ("find . -exec bash '{}' \\;", true),
+                    ("echo a | xargs su root", true),
+                    ("echo a | xargs runuser -u root bash", true),
+                    ("BASH_ENV=$F bash -c true", true),
+                    ("env BASH_ENV=\"$F\" bash -c true", true),
+                    ("BASH_ENV+=x bash -c true", true),
+                    ("ENV=$F dash -c true", true),
+                    ("ZDOTDIR=$D zsh -c true", true),
+                    ("HOME=$H bash -i", true),
+                    ("BASH_ENV='$HOME/x' bash -c true", true),
+                    ("BASH_ENV='~no-such-user/x' bash -c true", true),
+                    ("echo a | xargs -I % bash --rcfile % -i", true),
+                    ("echo a | xargs -I % env BASH_ENV=% bash -c true", true),
+                    ("BASH_ENV=$F su root -c true", true),
+                    ("BASH_ENV=$F eval 'bash -c true'", true),
+                    ("HOME=$H bash -c true", true),
+                    ("HOME=$H fish -c true", true),
+                    ("HOME=$H su -m root -c true", true),
+                    ("env BASH_ENV=a* bash -c true", true),
+                    ("HOME=$H su root -c true", false),
+                    ("env --bogus BASH_ENV bash -c true", false),
+                    ("echo a | xargs bash script.sh", false),
+                    ("echo a | xargs su -c true root", false),
+                    ("BASH_ENV= bash -c true", false),
+                    ("ENV=$F zsh -c true", false),
+                    ("BASH_ENV=$F fish", false),
+                    ("bash -c true", false),
+                ] {
+                    let parsed = parse(command);
+
+                    let flagged = parsed.segments.iter().any(Segment::reads_anything);
+
+                    assert_eq!(flagged, anything, "{command:?}");
+                }
+            }
+
+            #[test]
+            fn reads_the_startup_files_a_variable_names() {
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                let tilde_path = Path::new("~+").join("a").to_string_lossy().into_owned();
+                for (command, read) in [
+                    ("BASH_ENV=a bash -c true", &["a"][..]),
+                    ("env ENV=a BASH_ENV=b bash x", &["a", "b", "x"]),
+                    ("ENV=a sh -i", &["a"]),
+                    ("BASH_ENV=a ENV=b dash -c true", &["b"]),
+                    ("BASH_ENV=a BASH_ENV=b bash -c true", &["b"]),
+                    ("BASH_ENV='~+/a' bash -c true", &["a", &tilde_path]),
+                    ("BASH_ENV=a true; bash -c true", &[]),
+                    ("BASH_ENV=a eval 'bash -c true'", &["a"]),
+                    ("BASH_ENV=a sh -c 'bash -c true'", &["a"]),
+                    ("BASH_ENV=a find . -exec bash -c true \\;", &["", "a"]),
+                    ("BASH_ENV=a su root -c true", &["a"]),
+                    ("BASH_ENV=a runuser -u root bash -c true", &["a"]),
+                    ("ZDOTDIR=d zsh", &["d"]),
+                    ("ZDOTDIR=d HOME=h zsh", &["d", "h"]),
+                    ("BASH_ENV=a HOME=h bash -c true", &["a", "h"]),
+                    ("HOME=h ksh -i", &["h"]),
+                    ("HOME=h fish", &["h"]),
+                    ("HOME=h su -m root -c true", &["h"]),
+                    ("HOME=h su --preserve-environment root", &["h"]),
+                    ("HOME=h runuser -p root -c true", &["h"]),
+                    ("HOME=h su -c -l -m root", &["h"]),
+                    ("HOME=h su -m -sl root -c true", &["h"]),
+                    ("env --bogus bash -c true BASH_ENV=a", &[]),
+                    ("HOME=h su root -c true", &[]),
+                    ("HOME=h su -m - root -c true", &[]),
+                    ("HOME=h su -mpl root -c true", &[]),
+                    ("HOME=h su -m --login root -c true", &[]),
+                    ("BASH_ENV= bash -c true", &[]),
+                    ("ENV=a zsh", &[]),
+                    ("ENV=a fish", &[]),
+                ] {
+                    let mut read_paths = reads(command, cwd);
+                    read_paths.sort();
+
+                    assert_eq!(read_paths, read, "{command:?}");
+                }
+            }
+        }
+
         mod visit {
             use std::collections::BTreeSet;
 
@@ -5282,23 +6480,6 @@ mod tests {
         mod redirect {
             use super::*;
 
-            /// Each write's path relative to `cwd`, or as requested outside it.
-            fn writes(command: &str, cwd: &Path) -> Vec<String> {
-                spelled(CommandTarget::parse(command, &Workspace::new(cwd)).writes)
-            }
-
-            /// Each input redirection's path relative to `cwd`, or as requested outside it.
-            fn reads(command: &str, cwd: &Path) -> Vec<String> {
-                spelled(CommandTarget::parse(command, &Workspace::new(cwd)).reads)
-            }
-
-            fn spelled(targets: Vec<PathTarget>) -> Vec<String> {
-                targets
-                    .into_iter()
-                    .map(|target| target.relative.unwrap_or(target.requested))
-                    .collect()
-            }
-
             #[test]
             fn counts_each_file_an_output_redirection_writes() {
                 let cwd_dir = canonical_tempdir();
@@ -5332,6 +6513,25 @@ mod tests {
                     parse("cd x && cat < in.txt").unrecognized().is_some(),
                     "a relative input after a cd may name another file"
                 );
+            }
+
+            #[test]
+            fn counts_a_read_write_redirection_as_both() {
+                let cwd_dir = canonical_tempdir();
+                let cwd = cwd_dir.path();
+                for (command, read, written) in [
+                    ("cat <> key", "key", &["key"][..]),
+                    ("cat 3<>key", "key", &["key"]),
+                    ("sort <>in.txt > out.txt", "in.txt", &["in.txt", "out.txt"]),
+                    ("cat <\\\n>key", "key", &["key"]),
+                    ("cat <\\\n> key", "key", &["key"]),
+                    ("echo a\\\\<>key", "key", &["key"]),
+                ] {
+                    let target = CommandTarget::parse(command, &Workspace::new(cwd));
+
+                    assert_eq!(spelled(target.reads.clone()), [read], "{command:?}");
+                    assert_eq!(spelled(target.writes.clone()), written, "{command:?}");
+                }
             }
 
             #[test]
@@ -5530,6 +6730,55 @@ mod tests {
         }
     }
 
+    mod dir_target {
+        use super::*;
+
+        /// The words of the first simple command in `command`.
+        fn command_words(command: &str) -> Vec<Word> {
+            fn first_command(node: Node<'_>) -> Option<Node<'_>> {
+                if node.kind() == "command" {
+                    return Some(node);
+                }
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor).find_map(first_command)
+            }
+            let tree = parse_tree(command);
+            let node = first_command(tree.root_node()).unwrap();
+            let parts: Vec<Node<'_>> = command_parts(node)
+                .into_iter()
+                .map(|part| match part.kind() {
+                    "command_name" => part.named_child(0).unwrap(),
+                    _ => part,
+                })
+                .collect();
+            words(&parts, command)
+        }
+
+        #[test]
+        fn reads_where_a_change_goes_and_what_pushd_n_stacks() {
+            for (command, expected) in [
+                ("cd", DirTarget::Home),
+                ("cd -P -- src", DirTarget::Path("src")),
+                ("pushd src", DirTarget::Path("src")),
+                ("pushd -n", DirTarget::Stay(Stacked::Nothing)),
+                ("pushd -n +1", DirTarget::Stay(Stacked::Nothing)),
+                ("pushd -n src", DirTarget::Stay(Stacked::Path("src"))),
+                ("pushd -n -- -x", DirTarget::Stay(Stacked::Path("-x"))),
+                ("pushd -n \"$D\"", DirTarget::Stay(Stacked::Unknown)),
+                ("pushd -n ~1", DirTarget::Stay(Stacked::Unknown)),
+                ("pushd \"$D\"", DirTarget::Unknown),
+                ("cd -", DirTarget::Unknown),
+                ("popd", DirTarget::Unknown),
+            ] {
+                let words = command_words(command);
+
+                let target = dir_target(words[0].literal().unwrap(), &words[1..]);
+
+                assert_eq!(target, expected, "{command:?}");
+            }
+        }
+    }
+
     mod sed_files {
         use super::*;
 
@@ -5711,6 +6960,25 @@ mod tests {
             }
             for command in ["cat a", "cat *.rs", "echo $F", "cp $F b"] {
                 assert!(!parse(command).segments[0].reads_anything(), "{command:?}");
+            }
+        }
+
+        #[test]
+        fn flag_a_read_after_a_change_the_walk_cannot_spell() {
+            for (command, anything) in [
+                ("cd $D; cat a", true),
+                ("HOME=d cd; cat a", true),
+                ("cd; cat a", false),
+                ("pushd -n $D; cat ~1/a", true),
+                ("pushd -n $D; cat a", false),
+                ("pushd -n src; cat ~1/a", false),
+                ("pushd -n +1; cat ~1/a", false),
+            ] {
+                let parsed = parse(command);
+
+                let last = parsed.segments.last().unwrap();
+
+                assert_eq!(last.reads_anything(), anything, "{command:?}");
             }
         }
 
