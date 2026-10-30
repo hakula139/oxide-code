@@ -83,6 +83,7 @@ impl InputArea {
         self.textarea.select_all();
         self.textarea.insert_str(text);
         self.visual_lines.set(None);
+        self.refresh_popup();
     }
 
     pub(crate) fn is_empty(&self) -> bool {

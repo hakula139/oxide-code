@@ -37,9 +37,16 @@ const SEARCH_PLACEHOLDER: &str = "Type to filter (substring match)";
 const SEARCH_ROW_HEIGHT: u16 = 1;
 const SECTION_GAP: u16 = 1;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoadState {
+    Loading,
+    Complete,
+    Failed,
+}
+
 /// Selectable, searchable list with a scrolling viewport. The cursor walks the filtered rows, so
 /// navigation skips the rows the query hides. An owner that loads items in pages appends each page
-/// and marks the list [`has_more`](Self::set_has_more) until the last one.
+/// and updates its [`LoadState`] as pages arrive.
 pub(crate) struct SearchableList<T: SearchableItem> {
     header: Header,
     items: Vec<T>,
@@ -51,10 +58,7 @@ pub(crate) struct SearchableList<T: SearchableItem> {
     viewport: Viewport,
     /// Most items shown at once. Fewer show when the granted height is shorter.
     max_visible: u16,
-    /// Whether the owner may still append items. The cursor then stops at either end, since
-    /// wrapping would skip the items still to come, and a query without matches reads as a search
-    /// in progress.
-    has_more: bool,
+    load_state: LoadState,
     /// Shown in place of rows when there are no items and no more to come.
     empty_text: Option<String>,
 }
@@ -70,7 +74,7 @@ impl<T: SearchableItem> SearchableList<T> {
             cursor: 0,
             viewport: Viewport::default(),
             max_visible: max_visible.max(1),
-            has_more: false,
+            load_state: LoadState::Complete,
             empty_text: None,
         }
     }
@@ -89,7 +93,6 @@ impl<T: SearchableItem> SearchableList<T> {
         self.header = Header::new(title).with_description(description);
     }
 
-    #[cfg(test)]
     pub(crate) fn query(&self) -> &str {
         self.query.text()
     }
@@ -135,8 +138,8 @@ impl<T: SearchableItem> SearchableList<T> {
         self.cursor = self.cursor.min(self.visible.len().saturating_sub(1));
     }
 
-    pub(crate) fn set_has_more(&mut self, has_more: bool) {
-        self.has_more = has_more;
+    pub(crate) fn set_load_state(&mut self, state: LoadState) {
+        self.load_state = state;
     }
 
     pub(crate) fn selected(&self) -> Option<&T> {
@@ -145,7 +148,6 @@ impl<T: SearchableItem> SearchableList<T> {
             .and_then(|i| self.items.get(*i))
     }
 
-    #[cfg(test)]
     pub(crate) fn cursor_index(&self) -> usize {
         self.cursor
     }
@@ -175,10 +177,10 @@ impl<T: SearchableItem> SearchableList<T> {
         if self.visible.is_empty() {
             return;
         }
-        self.cursor = if self.has_more {
-            (self.cursor + 1).min(self.visible.len() - 1)
-        } else {
+        self.cursor = if self.load_state == LoadState::Complete {
             wrap_next(self.cursor, self.visible.len())
+        } else {
+            (self.cursor + 1).min(self.visible.len() - 1)
         };
     }
 
@@ -186,10 +188,10 @@ impl<T: SearchableItem> SearchableList<T> {
         if self.visible.is_empty() {
             return;
         }
-        self.cursor = if self.has_more {
-            self.cursor.saturating_sub(1)
-        } else {
+        self.cursor = if self.load_state == LoadState::Complete {
             wrap_prev(self.cursor, self.visible.len())
+        } else {
+            self.cursor.saturating_sub(1)
         };
     }
 
@@ -287,11 +289,11 @@ impl<T: SearchableItem> SearchableList<T> {
     /// nothing, or the empty text once nothing is left to load.
     fn empty_note(&self) -> Option<String> {
         let query = self.query.text();
-        match (self.is_filtered(), self.has_more) {
-            (true, true) => Some(format!("Searching for `{query}`...")),
-            (true, false) => Some(format!("No matches for `{query}`")),
-            (false, true) => None,
-            (false, false) => self.empty_text.clone(),
+        match (self.is_filtered(), self.load_state) {
+            (_, LoadState::Failed) | (false, LoadState::Loading) => None,
+            (true, LoadState::Loading) => Some(format!("Searching for `{query}`...")),
+            (true, LoadState::Complete) => Some(format!("No matches for `{query}`")),
+            (false, LoadState::Complete) => self.empty_text.clone(),
         }
     }
 
@@ -668,7 +670,7 @@ mod tests {
         #[test]
         fn stops_at_the_last_row_while_more_items_may_follow() {
             let mut l = list(vec![FakeItem::new("a"), FakeItem::new("b")]);
-            l.set_has_more(true);
+            l.set_load_state(LoadState::Loading);
 
             l.select_next();
             l.select_next();
@@ -720,7 +722,7 @@ mod tests {
         #[test]
         fn stops_at_the_first_row_while_more_items_may_follow() {
             let mut l = list(vec![FakeItem::new("a"), FakeItem::new("b")]);
-            l.set_has_more(true);
+            l.set_load_state(LoadState::Loading);
 
             l.select_prev();
 
@@ -914,19 +916,48 @@ mod tests {
         fn says_an_unmatched_query_is_searching_while_more_items_may_follow() {
             let mut l = list(vec![FakeItem::new("alpha")]);
             l.set_query("zzz");
-            l.set_has_more(true);
+            l.set_load_state(LoadState::Loading);
 
             assert_eq!(first_row(&mut l), "  Searching for `zzz`...");
         }
 
         #[test]
+        fn load_state_controls_empty_notes_and_wrapping_without_losing_items_or_query() {
+            for (state, note, wraps) in [
+                (LoadState::Loading, "  Searching for `absent`...", false),
+                (LoadState::Complete, "  No matches for `absent`", true),
+                (LoadState::Failed, "", false),
+            ] {
+                let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
+                l.set_query("absent");
+
+                l.set_load_state(state);
+
+                assert_eq!(l.query(), "absent");
+                assert_eq!(first_row(&mut l), note);
+
+                l.set_query("");
+                l.select_next();
+                assert_eq!(l.selected().unwrap().haystack(), "beta");
+                l.select_next();
+                assert_eq!(
+                    l.selected().unwrap().haystack(),
+                    if wraps { "alpha" } else { "beta" }
+                );
+                l.select_prev();
+                l.select_prev();
+                assert_eq!(l.selected().unwrap().haystack(), "alpha");
+            }
+        }
+
+        #[test]
         fn shows_the_empty_text_once_no_items_are_left_to_load() {
             let mut l = list(Vec::new()).with_empty_text("nothing here");
-            l.set_has_more(true);
+            l.set_load_state(LoadState::Loading);
 
             assert_eq!(first_row(&mut l), "", "more items may still come");
 
-            l.set_has_more(false);
+            l.set_load_state(LoadState::Complete);
 
             assert_eq!(first_row(&mut l), "  nothing here");
         }

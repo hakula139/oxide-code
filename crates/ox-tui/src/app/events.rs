@@ -482,7 +482,7 @@ impl App {
                 }
             }
             AppEvent::Slash(end) => self.apply_slash_end(end),
-            AppEvent::Page(page) => self.dirty |= self.modals.deliver_sessions_page(page),
+            AppEvent::Page(page) => self.dirty |= self.modals.deliver_page(page),
         }
     }
 

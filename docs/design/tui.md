@@ -21,7 +21,7 @@ Components are concrete structs (`ChatView`, `InputArea`, `StatusBar`, modals) t
 
 ### Named Keys
 
-The app's global key, Ctrl+O, lives in `APP_KEYMAP` in `ox_tui::action`, a table of named `AppAction`s built from the `KeyAction`, `KeyChord`, and `Keymap` types in `ox_tui::keymap`. Each entry carries its key and hint, so the hint a footer shows comes from the entry the key dispatches through. It works while no modal holds the keyboard and reaches the app before the input box. The `/resume` picker builds its keys and footer from the same types. Other keys are matched beside the state they change: the prompt's editing table in `ox_tui::grapheme`, the app's exit and interrupt keys in `app::dispatch`, and each modal's keys in its own module. Every hint takes the `Key to effect` shape from `keymap::hint`.
+The app's global keys, Ctrl+O for expanded output and Ctrl+R for prompt history, live in `APP_KEYMAP` in `ox_tui::action`, a table of named `AppAction`s built from the `KeyAction`, `KeyChord`, and `Keymap` types in `ox_tui::keymap`. Each entry carries its key and hint, so the hint a footer shows comes from the entry the key dispatches through. They work while no modal holds the keyboard and reach the app before the input box. The `/resume` picker builds its keys and footer from the same types. Other keys are matched beside the state they change: the prompt's editing table in `ox_tui::grapheme`, the app's exit and interrupt keys in `app::dispatch`, and each modal's keys in its own module. Every hint takes the `Key to effect` shape from `keymap::hint`.
 
 ### Async Event Loop
 

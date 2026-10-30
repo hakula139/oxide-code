@@ -1,0 +1,24 @@
+---
+source: crates/ox-tui/src/prompt_history.rs
+expression: "render_modal(&mut history.picker, 60, 20).join(\"\\n\")"
+---
+Search prompts
+This project
+
+/ absent
+
+  No matches for `absent`
+
+
+
+
+
+
+
+
+
+
+
+
+
+Esc to cancel  ·  Ctrl+S to search everywhere

@@ -2,7 +2,7 @@
 source: crates/ox-core/src/session/handle.rs
 expression: sql_dump(&store)
 ---
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 CREATE TABLE sessions (
     id             TEXT PRIMARY KEY,
     forked_from    TEXT,
@@ -42,6 +42,8 @@ CREATE TABLE usage (
     created_at INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX usage_by_session ON usage (session_id);
+CREATE INDEX messages_by_prompt_time
+    ON messages (created_at DESC, id DESC, seq DESC) WHERE role = 'user';
 INSERT INTO sessions VALUES ('<UUID-1>', NULL, '/work/test-project', '/work/test-project', 'main', 'm', 2, <TS-1>, <TS-2>, 'Fix f.rs', 1, <TS-3>, '<UUID-2>', 9, '[{"path":"/repo/f.rs","content_hash":42,"last_view":{"kind":"full"},"recorded_at":"2026-01-01T00:00:01Z","tool_use_id":"t1"},{"path":"/repo/g.rs","content_hash":43,"last_view":{"kind":"partial","ranges":[[1,20]],"total_lines":40},"recorded_at":"2026-01-01T00:00:02Z","tool_use_id":"t2"}]');
 INSERT INTO messages VALUES (1, '<UUID-1>', '<UUID-3>', NULL, 'user', '[{"type":"text","text":"Edit f.rs"}]', '{"environment":{"cwd":"","is_git":false,"platform":"","shell":"","os_version":""},"user_context":"","seen":{"instructions":"","date":"2026-01-01","model":"","mode":""}}', NULL, NULL, <TS-4>);
 INSERT INTO messages VALUES (2, '<UUID-1>', '<UUID-4>', '<UUID-3>', 'assistant', '[{"type":"text","text":"Which change?"}]', NULL, NULL, NULL, <TS-5>);

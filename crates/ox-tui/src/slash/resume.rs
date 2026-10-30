@@ -3,10 +3,7 @@
 //! startup.
 
 use std::borrow::Cow;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -18,7 +15,9 @@ use strum::VariantArray;
 use time::OffsetDateTime;
 
 use ox_core::protocol::{Event, Op, SessionRef};
-use ox_core::session::display::{DisplayTitle, ID_PREFIX_WIDTH, id_prefix};
+use ox_core::session::display::{
+    DisplayTitle, ID_PREFIX_WIDTH, SHORT_RELATIVE_TIME_WIDTH, format_short_relative_time, id_prefix,
+};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{ArchiveState, SessionInfo};
@@ -32,19 +31,17 @@ use ox_core::util::time::now_local;
 
 use super::confirm::ConfirmDeleteSessionModal;
 use super::registry::{SlashCommand, SlashOutcome, typed_form};
-use super::sessions::{
-    BARE_ARCHIVE_HINT, SHORT_RELATIVE_TIME_WIDTH, format_metadata_line, format_short_relative_time,
-    saved_error_message,
-};
+use super::sessions::{BARE_ARCHIVE_HINT, format_metadata_line, saved_error_message};
 use crate::action::Action;
-use crate::app_event::{AppEvent, AppEventSender};
+use crate::app_event::AppEventSender;
 use crate::glyphs::MODAL_ERROR_PREFIX;
 use crate::keymap::{KeyAction, KeyChord, Keymap, is_unmodified};
 use crate::modal::chrome::{
     COLUMN_GAP, FOOTER_HEIGHT, above, height_above, render_footer, render_footer_text,
 };
 use crate::modal::line_editor::LineEditor;
-use crate::modal::searchable_list::{SearchableItem, SearchableList};
+use crate::modal::pages::{Loaded, ModalPage, Pages};
+use crate::modal::searchable_list::{LoadState, SearchableItem, SearchableList};
 use crate::modal::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
 use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
@@ -346,104 +343,6 @@ const ACTIONS: Keymap<PickerAction, ResumePicker> = Keymap::new(&[
     },
 ]);
 
-// ── Pages ──
-
-/// Numbers the page requests of every picker, so a page reaches only the request it answers.
-static NEXT_REQUEST: AtomicU64 = AtomicU64::new(0);
-
-/// The sessions still to load, read a page at a time on a worker thread so a slow store never
-/// stalls the render loop.
-enum Pages {
-    /// Waiting for the next request.
-    Idle(SessionWalk),
-    /// A worker is reading the next page for the request numbered here.
-    Loading(u64),
-    /// Every session in scope is loaded.
-    Done,
-}
-
-/// A page a picker's worker read, which hands the walk back with it. Only the picker whose request
-/// is still in flight takes it, so a page from a reloaded or closed listing goes nowhere.
-pub(crate) struct PageEnd {
-    request: u64,
-    walk: SessionWalk,
-    /// `None` when the worker panicked.
-    page: Option<anyhow::Result<Vec<SessionInfo>>>,
-}
-
-/// What a [`PageEnd`] brought.
-enum Loaded {
-    Page(Vec<SessionInfo>),
-    /// The store failed to read the page, which ends the listing.
-    Failed(anyhow::Error),
-    /// The worker panicked without a page.
-    Stopped,
-}
-
-impl Pages {
-    fn has_more(&self) -> bool {
-        !matches!(self, Self::Done)
-    }
-
-    /// `walk` back at rest, or [`Self::Done`] once it has nothing left.
-    fn rest(walk: SessionWalk) -> Self {
-        if walk.is_exhausted() {
-            Self::Done
-        } else {
-            Self::Idle(walk)
-        }
-    }
-
-    /// Starts reading the next page when idle, for a worker that sends it to `events`. No-op while
-    /// loading or done.
-    fn request(&mut self, events: &AppEventSender) {
-        match std::mem::replace(self, Self::Done) {
-            Self::Idle(mut walk) => {
-                let request = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
-                let events = events.clone();
-                thread::spawn(move || {
-                    let page = panic::catch_unwind(AssertUnwindSafe(|| walk.next_page(PAGE_SIZE)));
-                    let page = PageEnd {
-                        request,
-                        walk,
-                        page: page.ok(),
-                    };
-                    _ = events.send(AppEvent::Page(page));
-                });
-                *self = Self::Loading(request);
-            }
-            pages => *self = pages,
-        }
-    }
-
-    /// What `page` brought when it answers the request in flight, putting its walk back at rest.
-    /// Hands back a page for any other request untouched.
-    #[expect(
-        clippy::result_large_err,
-        reason = "a page moves once per load, the same move `Modal::on_sessions_page` makes"
-    )]
-    fn take(&mut self, page: PageEnd) -> Result<Loaded, PageEnd> {
-        if !matches!(self, Self::Loading(request) if *request == page.request) {
-            return Err(page);
-        }
-        let PageEnd { walk, page, .. } = page;
-        Ok(match page {
-            Some(Ok(page)) => {
-                *self = Self::rest(walk);
-                Loaded::Page(page)
-            }
-            Some(Err(err)) => {
-                *self = Self::Done;
-                Loaded::Failed(err)
-            }
-            None => {
-                *self = Self::Done;
-                Loaded::Stopped
-            }
-        })
-    }
-}
-
 // ── ResumePicker ──
 
 /// What Esc does to the picker.
@@ -476,7 +375,7 @@ pub(crate) struct ResumePicker {
     dismissal: Dismissal,
     /// Filtered out of every page, since resume, archive, and delete all refuse the live session.
     live_session_id: String,
-    pages: Pages,
+    pages: Pages<SessionWalk>,
     /// Where page workers send what they read.
     events: AppEventSender,
     /// When the last reload started, in local time, which every page's rows count from.
@@ -525,9 +424,10 @@ impl ResumePicker {
     /// top. Rows arrive as pages load.
     fn reload(&mut self) {
         self.listed_at = now_local();
-        self.pages = Pages::rest(self.store.walk(self.scope));
+        self.pages.replace(self.store.walk(self.scope));
         self.load_error = None;
         self.list.replace_items(Vec::new());
+        self.list.set_load_state(LoadState::Loading);
         self.load_ahead();
     }
 
@@ -535,9 +435,8 @@ impl ResumePicker {
     /// cursor, so scrolling reaches the end and a search covers every session in scope.
     fn load_ahead(&mut self) {
         if self.list.rows_below_cursor() < LOAD_AHEAD {
-            self.pages.request(&self.events);
+            self.pages.request(&self.events, PAGE_SIZE);
         }
-        self.list.set_has_more(self.pages.has_more());
     }
 
     /// Appends a loaded page and asks for the next one when needed.
@@ -556,6 +455,11 @@ impl ResumePicker {
             .collect();
         self.list.append_items(rows);
         self.load_ahead();
+        self.list.set_load_state(if self.pages.has_more() {
+            LoadState::Loading
+        } else {
+            LoadState::Complete
+        });
     }
 
     fn run(&mut self, action: PickerAction) -> ModalKey {
@@ -713,7 +617,7 @@ impl ResumePicker {
     }
 
     /// Shows what a page brought, ending the listing on a failure.
-    fn page_loaded(&mut self, loaded: Loaded) {
+    fn page_loaded(&mut self, loaded: Loaded<SessionInfo>) {
         match loaded {
             Loaded::Page(page) => self.append_page(page),
             Loaded::Failed(err) => {
@@ -722,11 +626,11 @@ impl ResumePicker {
                     "resume picker failed to list sessions"
                 );
                 self.load_error = Some(format!("Failed to load sessions: {err:#}"));
-                self.list.set_has_more(false);
+                self.list.set_load_state(LoadState::Failed);
             }
             Loaded::Stopped => {
                 self.load_error = Some(LOADER_STOPPED.to_owned());
-                self.list.set_has_more(false);
+                self.list.set_load_state(LoadState::Failed);
             }
         }
     }
@@ -797,11 +701,20 @@ impl Modal for ResumePicker {
         UpdateReply::Unclaimed
     }
 
-    fn on_sessions_page(&mut self, page: PageEnd) -> Option<PageEnd> {
-        self.pages
-            .take(page)
-            .map(|loaded| self.page_loaded(loaded))
-            .err()
+    fn on_page(&mut self, page: ModalPage) -> Option<ModalPage> {
+        let ModalPage::Sessions(page) = page else {
+            return Some(page);
+        };
+        match self.pages.take(page) {
+            Ok(loaded) => {
+                self.page_loaded(loaded);
+                None
+            }
+            Err(page) => {
+                self.load_ahead();
+                Some(ModalPage::Sessions(page))
+            }
+        }
     }
 
     fn tick(&mut self, now: Instant) -> bool {
@@ -855,9 +768,11 @@ mod tests {
 
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
     use super::*;
+    use crate::app_event::AppEvent;
     use crate::modal::ModalStack;
     use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::modal::chrome::HINT_SEPARATOR;
+    use crate::modal::pages::PageEnd;
     use crate::modal::testing::{
         ScriptedModal, render_modal, render_rows, render_rows_with, rendered_text,
     };
@@ -983,7 +898,7 @@ mod tests {
         }
 
         /// The next page a worker sent, waiting for it.
-        fn next_page(&mut self) -> PageEnd {
+        fn next_page(&mut self) -> ModalPage {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 if let Ok(event) = self.inbox.try_recv() {
@@ -1003,9 +918,12 @@ mod tests {
         /// Hands the picker every page it asks for, waiting on each worker. A page from a listing
         /// the picker reloaded since goes nowhere, as in the App.
         fn settle(&mut self) {
-            while matches!(self.picker.pages, Pages::Loading(_)) {
+            while matches!(
+                self.picker.pages,
+                Pages::Loading(_) | Pages::Reloading { .. }
+            ) {
                 let page = self.next_page();
-                _ = self.picker.on_sessions_page(page);
+                _ = self.picker.on_page(page);
             }
         }
     }
@@ -2388,24 +2306,39 @@ mod tests {
         }
     }
 
-    mod on_sessions_page {
+    mod on_page {
         use super::*;
 
         /// A request number no worker uses, since workers count up from zero.
         const AWAITED: u64 = u64::MAX;
 
+        #[test]
+        fn leaves_prompt_pages_for_their_own_picker() {
+            let (_dir, store) = isolated_store();
+            let mut picker = unsettled(store.clone(), "live-session-id");
+            let page = ModalPage::Prompts(PageEnd::for_request(
+                AWAITED,
+                store.prompt_history(ProjectScope::Current, ""),
+                Some(Ok(Vec::new())),
+            ));
+
+            let unclaimed = picker.on_page(page);
+
+            assert!(matches!(unclaimed, Some(ModalPage::Prompts(_))));
+        }
+
         /// `picker` waiting on [`AWAITED`], which `page` answers.
         fn awaiting(
             picker: &mut ResumePicker,
             page: Option<anyhow::Result<Vec<SessionInfo>>>,
-        ) -> PageEnd {
+        ) -> ModalPage {
             picker.pages = Pages::Loading(AWAITED);
-            picker.list.set_has_more(true);
-            PageEnd {
-                request: AWAITED,
-                walk: picker.store.walk(ListScope::default()),
+            picker.list.set_load_state(LoadState::Loading);
+            ModalPage::Sessions(PageEnd::for_request(
+                AWAITED,
+                picker.store.walk(ListScope::default()),
                 page,
-            }
+            ))
         }
 
         #[test]
@@ -2420,7 +2353,7 @@ mod tests {
             );
             let page = picker.next_page();
 
-            let unclaimed = picker.on_sessions_page(page);
+            let unclaimed = picker.on_page(page);
 
             assert!(unclaimed.is_none());
             assert_eq!(row_ids(&picker), ids);
@@ -2435,7 +2368,7 @@ mod tests {
             let superseded = picker.next_page();
             picker.handle_key(&KeyEvent::from(KeyCode::Tab));
 
-            let unclaimed = picker.on_sessions_page(superseded);
+            let unclaimed = picker.on_page(superseded);
 
             assert!(unclaimed.is_some(), "the page answers the first listing");
             assert_eq!(row_ids(&picker), Vec::<String>::new());
@@ -2451,7 +2384,7 @@ mod tests {
             let mut second = unsettled(store, "live-session-id");
             let page = first.next_page();
 
-            let unclaimed = second.on_sessions_page(page);
+            let unclaimed = second.on_page(page);
 
             assert!(unclaimed.is_some());
             assert_eq!(row_ids(&second), Vec::<String>::new());
@@ -2467,7 +2400,7 @@ mod tests {
             stack.push(Box::new(picker.picker));
             stack.push(Box::new(ScriptedModal::new()));
 
-            let delivered = stack.deliver_sessions_page(page);
+            let delivered = stack.deliver_page(page);
 
             assert!(delivered);
             stack.handle_key(&KeyEvent::from(KeyCode::Char('c')));
@@ -2485,9 +2418,8 @@ mod tests {
             let page = awaiting(&mut picker, Some(Err(anyhow::anyhow!("disk I/O error"))));
             let logs = LogCapture::default();
 
-            let unclaimed = tracing::dispatcher::with_default(&logs.dispatch(), || {
-                picker.on_sessions_page(page)
-            });
+            let unclaimed =
+                tracing::dispatcher::with_default(&logs.dispatch(), || picker.on_page(page));
 
             assert!(unclaimed.is_none());
             let error = "Failed to load sessions: disk I/O error";
@@ -2515,7 +2447,7 @@ mod tests {
             let mut picker = opened(store, "live-session-id");
             let page = awaiting(&mut picker, None);
 
-            let unclaimed = picker.on_sessions_page(page);
+            let unclaimed = picker.on_page(page);
 
             assert!(unclaimed.is_none());
             assert_eq!(picker.load_error.as_deref(), Some(LOADER_STOPPED));

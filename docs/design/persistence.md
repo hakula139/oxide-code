@@ -37,6 +37,8 @@ Columns hold what SQL filters, sorts, joins, or compares. JSON text holds the pa
 2. **Parents first.** `messages` keys on `(session_id, id)`, and a composite foreign key on `(session_id, parent_id)` makes "a message never precedes its parent, and both belong to one session" a database invariant.
 3. **Last activity.** `updated_at` changes only when the head moves, so renaming or archiving a session keeps its place in listings.
 
+The prompt-history walk reads bounded batches of user-role rows in original `(created_at, id, seq)` order, newest first, through the revision 2 partial `messages_by_prompt_time` index. It advances past every examined candidate, including rows outside the project scope and generated text. A page can be empty before exhaustion. Supported-format and project eligibility are checked before decoding content, and only ordinary text blocks contribute to recall. Logical message IDs deduplicate fork and import copies, while separate submissions of the same text stay distinct. The query includes archived sessions and rows detached by rewind or compaction, and deleting a session removes only its owned copies.
+
 ## Compatibility
 
 The store follows the [stability surface](../../RELEASING.md#stability-surface) through two version numbers:
@@ -188,7 +190,6 @@ Listings render rows as follows:
 
 ## Out of Scope
 
-- **Prompt history across sessions** ([#421](https://github.com/hakula139/oxide-code/issues/421)). The store makes it a query over user messages joined to their project, and full-text search would arrive as an FTS5 revision.
 - **Rewind history** ([#293](https://github.com/hakula139/oxide-code/issues/293)). Abandoned rows already stay in the store, so browsing them needs no format change.
 - **Subagent sessions** ([#136](https://github.com/hakula139/oxide-code/issues/136), [#285](https://github.com/hakula139/oxide-code/issues/285)). A parent session column would arrive as an additive revision.
 
