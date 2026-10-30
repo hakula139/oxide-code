@@ -89,7 +89,6 @@ impl<T: SearchableItem> SearchableList<T> {
         self.header = Header::new(title).with_description(description);
     }
 
-    #[cfg(test)]
     pub(crate) fn query(&self) -> &str {
         self.query.text()
     }
@@ -139,13 +138,16 @@ impl<T: SearchableItem> SearchableList<T> {
         self.has_more = has_more;
     }
 
+    pub(crate) fn set_empty_text(&mut self, text: impl Into<String>) {
+        self.empty_text = Some(text.into());
+    }
+
     pub(crate) fn selected(&self) -> Option<&T> {
         self.visible
             .get(self.cursor)
             .and_then(|i| self.items.get(*i))
     }
 
-    #[cfg(test)]
     pub(crate) fn cursor_index(&self) -> usize {
         self.cursor
     }

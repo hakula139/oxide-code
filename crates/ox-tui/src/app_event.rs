@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use crate::app::SlashEnd;
 use crate::clipboard::CopyEnd;
 use crate::git_probes::ProbeEnd;
-use crate::slash::PageEnd;
+use crate::modal::pages::ModalPage;
 
 /// Sends [`AppEvent`]s to the event loop. A send fails only once the App is gone, so senders
 /// discard the error.
@@ -19,6 +19,6 @@ pub(crate) enum AppEvent {
     Copy(CopyEnd),
     /// A background slash command resolved.
     Slash(SlashEnd),
-    /// A `/resume` picker's worker read a page of sessions.
-    Page(PageEnd),
+    /// A picker's worker read a page.
+    Page(ModalPage),
 }

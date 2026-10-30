@@ -1,0 +1,26 @@
+---
+source: crates/ox-tui/src/prompt_history.rs
+expression: before
+---
+Search prompts
+This project
+
+/ Type to filter (substring match)
+
+> 2026-01-01    first\u{1b}[31m
+
+
+
+
+
+Preview 1-8 / 16 (PageUp / PageDown to scroll)
+  first\u{1b}[31m
+line 1
+line 2
+line 3
+line 4
+line 5
+line 6
+line 7
+
+Enter to edit  ·  Esc to cancel  ·  Ctrl+S to search everywhere
