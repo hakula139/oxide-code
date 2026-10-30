@@ -1119,17 +1119,24 @@ impl Policy {
     /// recognize, the [`read` rule](Self::possible_read_holder) for a file a reader may read, or
     /// the `rm` group for a [forced recursive delete](Segment::removes_recursively_by_force).
     fn asks(&self, class: PermissionClass, target: &Access) -> Option<Basis> {
-        if let Some(rule) = held_by(&self.ask.iter(), class, target) {
+        let configured = self.ask.iter().filter(|entry| entry.builtin.is_none());
+        if let Some(rule) = held_by(&configured, class, target) {
+            return Some(rule.basis(Tier::Ask));
+        }
+        if let Access::Command(command) = target
+            && let Some(construct) = command.unrecognized()
+        {
+            return Some(Basis::Unrecognized {
+                construct: construct.to_owned(),
+            });
+        }
+        let shipped = self.ask.iter().filter(|entry| entry.builtin.is_some());
+        if let Some(rule) = held_by(&shipped, class, target) {
             return Some(rule.basis(Tier::Ask));
         }
         let Access::Command(command) = target else {
             return None;
         };
-        if let Some(construct) = command.unrecognized() {
-            return Some(Basis::Unrecognized {
-                construct: construct.to_owned(),
-            });
-        }
         command
             .segments()
             .iter()
@@ -5148,6 +5155,53 @@ mod tests {
                     ),
                     (Decision::Ask, Basis::Builtin(Shipped::Git)),
                 );
+            }
+
+            #[test]
+            fn names_a_configured_ask_then_unrecognized_syntax_before_a_shipped_ask() {
+                let paths = [(".git/config", Shipped::Git)]
+                    .into_iter()
+                    .chain(cfg!(unix).then_some(("/dev/example", Shipped::Devices)));
+                let construct = "BASH_CMDS[echo]=/bin/printf";
+                let workspace = Workspace::new(Path::new("/repo"));
+                let plain =
+                    resolved_policy(Mode::Manual, &[], &[], &[(EXEC, "*")], &[], &workspace);
+                let configured = resolved_policy(
+                    Mode::Manual,
+                    &[],
+                    &[(EXEC, "echo *")],
+                    &[(EXEC, "*")],
+                    &[],
+                    &workspace,
+                );
+
+                for (path, group) in paths {
+                    let recognized = command(&format!("echo x > {path}"));
+                    let target = command(&format!("{construct}; echo x > {path}"));
+
+                    assert_eq!(
+                        verdict(&plain, EXEC, &recognized),
+                        (Decision::Ask, Basis::Builtin(group)),
+                        "{path}"
+                    );
+                    assert_eq!(
+                        verdict(&plain, EXEC, &target),
+                        (
+                            Decision::Ask,
+                            Basis::Unrecognized {
+                                construct: construct.to_owned()
+                            }
+                        ),
+                        "{path}"
+                    );
+                    assert_eq!(plain.config_fix(EXEC, &target), None, "{path}");
+                    assert_eq!(
+                        verdict(&configured, EXEC, &target),
+                        (Decision::Ask, rule_basis(Tier::Ask, EXEC, "echo *")),
+                        "{path}"
+                    );
+                    assert_eq!(configured.config_fix(EXEC, &target), None, "{path}");
+                }
             }
 
             #[test]

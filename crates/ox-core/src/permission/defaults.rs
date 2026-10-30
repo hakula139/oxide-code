@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, VariantArray};
 
 use super::PermissionClass;
-use super::rule::{Placement, Rule, escaped};
+use super::rule::{Rule, escaped};
 use crate::util::path::{
     CLAUDE_CREDENTIALS, XdgBase, app_dir, claude_dir, lexical_normalize, xdg_dir,
 };
@@ -60,15 +60,11 @@ impl Shipped {
     /// The group's rules, each with the tier it joins. Empty for `rm`.
     pub(super) fn rules(self) -> Result<Vec<(ShippedTier, Rule)>> {
         let mut rules = Vec::new();
-        if let Some(names) = self.names() {
-            let dirs = names.dirs.iter().map(|name| (name, true));
-            let files = names.files.iter().map(|name| (name, false));
-            for (name, dir) in dirs.chain(files) {
-                for placement in [Placement::Anywhere, Placement::Anchored] {
-                    let rule = Rule::protected_name(name, placement, dir)
-                        .with_context(|| format!("invalid built-in `{self}` name {name:?}"))?;
-                    rules.push((ShippedTier::Ask, rule));
-                }
+        for name in self.names() {
+            for pattern in [format!("/**/{name}"), format!("./{name}")] {
+                let rule = Rule::parse(PermissionClass::Edit, &pattern)
+                    .with_context(|| format!("invalid built-in `{self}` pattern {pattern:?}"))?;
+                rules.push((ShippedTier::Ask, rule));
             }
         }
         let tiers = [
@@ -85,18 +81,17 @@ impl Shipped {
         Ok(rules)
     }
 
-    /// The names this group asks about when edited wherever they sit, or `None` for a group that
-    /// protects none.
-    const fn names(self) -> Option<&'static Names> {
+    /// The names this group protects, with their descendants, wherever they sit.
+    const fn names(self) -> &'static [&'static str] {
         match self {
-            Self::Git => Some(&GIT),
-            Self::Direnv => Some(&DIRENV),
-            Self::Editors => Some(&EDITORS),
-            Self::Cargo => Some(&CARGO),
-            Self::Shell => Some(&SHELL),
-            Self::Agents => Some(&AGENTS),
-            Self::Ox => Some(&OX),
-            Self::Devices | Self::Rm | Self::Ssh | Self::Cloud | Self::Credentials => None,
+            Self::Git => GIT,
+            Self::Direnv => DIRENV,
+            Self::Editors => EDITORS,
+            Self::Cargo => CARGO,
+            Self::Shell => SHELL,
+            Self::Agents => AGENTS,
+            Self::Ox => OX,
+            Self::Devices | Self::Rm | Self::Ssh | Self::Cloud | Self::Credentials => &[],
         }
     }
 
@@ -199,87 +194,61 @@ pub(crate) enum ShippedTier {
 
 // ── Protected Names ──
 
-/// The relative paths one group protects from edits wherever they sit, each compared by
-/// [`fold_name`](super::fold_name).
-struct Names {
-    /// Directories, protected with everything below them.
-    dirs: &'static [&'static str],
-    /// Files, protected only where the last components of a path spell them.
-    files: &'static [&'static str],
-}
-
 /// VCS metadata, hook managers, and git config.
-const GIT: Names = Names {
-    dirs: &[".git", ".githooks", ".husky"],
-    files: &[".gitconfig", ".gitmodules"],
-};
+const GIT: &[&str] = &[".git", ".githooks", ".husky", ".gitconfig", ".gitmodules"];
 
-const DIRENV: Names = Names {
-    dirs: &[],
-    files: &[".envrc"],
-};
+const DIRENV: &[&str] = &[".envrc"];
 
 /// Editor and dev-container config, which can run tasks when the project opens.
-const EDITORS: Names = Names {
-    dirs: &[".devcontainer", ".idea", ".vscode"],
-    files: &[],
-};
+const EDITORS: &[&str] = &[".devcontainer", ".idea", ".vscode"];
 
 /// Cargo config, which can install a `runner` or `rustc-wrapper` that executes on the next build,
 /// and the rustup toolchain pin.
-const CARGO: Names = Names {
-    dirs: &[],
-    files: &[
-        "rust-toolchain",
-        "rust-toolchain.toml",
-        ".cargo/config",
-        ".cargo/config.toml",
-    ],
-};
+const CARGO: &[&str] = &[
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    ".cargo/config",
+    ".cargo/config.toml",
+];
 
 /// The startup and logout files of each shell, and fish's autoloaded config and functions.
-const SHELL: Names = Names {
-    dirs: &["fish/conf.d", "fish/functions"],
-    files: &[
-        ".bash_aliases",
-        ".bash_login",
-        ".bash_logout",
-        ".bash_profile",
-        ".bashrc",
-        ".cshrc",
-        ".kshrc",
-        ".login",
-        ".logout",
-        ".mkshrc",
-        ".profile",
-        ".tcshrc",
-        ".zlogin",
-        ".zlogout",
-        ".zprofile",
-        ".zshenv",
-        ".zshrc",
-        "fish/config.fish",
-    ],
-};
+const SHELL: &[&str] = &[
+    "fish/conf.d",
+    "fish/functions",
+    ".bash_aliases",
+    ".bash_login",
+    ".bash_logout",
+    ".bash_profile",
+    ".bashrc",
+    ".cshrc",
+    ".kshrc",
+    ".login",
+    ".logout",
+    ".mkshrc",
+    ".profile",
+    ".tcshrc",
+    ".zlogin",
+    ".zlogout",
+    ".zprofile",
+    ".zshenv",
+    ".zshrc",
+    "fish/config.fish",
+];
 
 /// Codex's project config, Claude Code's hooks, the settings that register them, and its MCP
 /// server list. The rest of `.claude`, such as worktrees and plans, stays editable.
-const AGENTS: Names = Names {
-    dirs: &[".codex", ".claude/hooks"],
-    files: &[
-        ".claude.json",
-        ".mcp.json",
-        ".claude/settings.json",
-        ".claude/settings.local.json",
-    ],
-};
+const AGENTS: &[&str] = &[
+    ".codex",
+    ".claude/hooks",
+    ".claude.json",
+    ".mcp.json",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+];
 
 /// oxide-code's project config. [`Shipped::edit_asks`] adds its own directories, where an edit
 /// could rewrite its config or session history.
-const OX: Names = Names {
-    dirs: &[".ox"],
-    files: &[],
-};
+const OX: &[&str] = &[".ox"];
 
 #[cfg(test)]
 mod tests {
@@ -533,6 +502,18 @@ mod tests {
         }
 
         #[test]
+        fn protect_descendants_of_directories_named_like_config_files() {
+            for (raw, group) in [
+                ("/repo/.bashrc/notes.md", Shipped::Shell),
+                ("/repo/.BASHRC/notes.md", Shipped::Shell),
+                ("/repo/.cargo/config/notes.md", Shipped::Cargo),
+                ("/repo/.claude/settings.json/notes.md", Shipped::Agents),
+            ] {
+                assert_eq!(protected_by(raw), [group], "{raw}");
+            }
+        }
+
+        #[test]
         fn leave_lookalike_names_unprotected() {
             for raw in [
                 "/repo/.github/workflows/ci.yml",
@@ -543,7 +524,6 @@ mod tests {
                 "/repo/box/config.toml",
                 "/repo/.claude/worktrees/feat/src/main.rs",
                 "/repo/.claude/plans/next.md",
-                "/repo/.claude/settings.json/notes.md",
                 "/repo/hooks/format.sh",
                 "/repo/fish/notes.md",
                 "/repo/docs/config.fish",

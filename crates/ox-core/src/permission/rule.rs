@@ -52,22 +52,9 @@ enum Pattern {
 struct PathGlob {
     /// Whether the glob matches absolute paths, or paths below each anchor directory.
     absolute: bool,
-    /// Whether the glob also matches everything below a path it matches, as every pattern a user
-    /// writes does.
-    below: bool,
     literal: PathBuf,
     exact: GlobSet,
     folded: GlobSet,
-}
-
-/// Where a [built-in protected name](Rule::protected_name) takes effect.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum Placement {
-    /// At any depth on disk, under any root.
-    Anywhere,
-    /// Directly under each anchor directory, so the policy also protects where the name resolves
-    /// when it is a link.
-    Anchored,
 }
 
 /// The tier a match is evaluated for, selecting how commands, symlinked paths, and name spellings
@@ -147,21 +134,6 @@ impl Rule {
             .then_some(rule)
     }
 
-    /// The built-in `edit` rule protecting `name`, a relative path such as `.git` or
-    /// `.cargo/config`, where it sits at `placement`. A `dir` also covers everything below it, and
-    /// any other name matches only itself.
-    pub(super) fn protected_name(name: &str, placement: Placement, dir: bool) -> Result<Self> {
-        let (glob, absolute, source) = match placement {
-            Placement::Anywhere => (format!("**/{name}"), true, format!("/**/{name}")),
-            Placement::Anchored => (name.to_owned(), false, format!("./{name}")),
-        };
-        Ok(Self {
-            class: PermissionClass::Edit,
-            source,
-            pattern: Pattern::Path(PathGlob::new(&glob, absolute, dir)?),
-        })
-    }
-
     pub const fn class(&self) -> PermissionClass {
         self.class
     }
@@ -238,8 +210,13 @@ impl Rule {
         }
         self.class == PermissionClass::Read
             && recursive
-            && matches!(self.pattern, Pattern::Path(_))
-            && may_match_below(bases, [&path.canonical, &path.requested])
+            && match &self.pattern {
+                Pattern::Path(glob) => {
+                    (glob.absolute && glob.literal.as_os_str().is_empty())
+                        || may_match_below(bases, [&path.canonical, &path.requested])
+                }
+                Pattern::Any | Pattern::Exec(_) | Pattern::Host(_) | Pattern::Tool(_) => false,
+            }
     }
 
     /// Where this rule's literal path prefix lands, rooted at each absolute anchor unless the
@@ -271,15 +248,10 @@ impl Rule {
     }
 }
 
-/// Rules compare by their class and pattern, which parse to the same matcher every time, and by
-/// whether a path pattern covers what lies below a match, which only a built-in name can turn off.
+/// Rules compare by their class and pattern, which parse to the same matcher every time.
 impl PartialEq for Rule {
     fn eq(&self, other: &Self) -> bool {
-        let below = |rule: &Self| match &rule.pattern {
-            Pattern::Path(glob) => glob.below,
-            Pattern::Any | Pattern::Exec(_) | Pattern::Host(_) | Pattern::Tool(_) => true,
-        };
-        self.class == other.class && self.source == other.source && below(self) == below(other)
+        self.class == other.class && self.source == other.source
     }
 }
 
@@ -381,7 +353,7 @@ impl PathGlob {
     /// Parses a gitignore-style `read` / `edit` pattern. `~/` and `/` anchor it absolutely, and
     /// `./` or a `/` before its last character anchors it at each anchor directory. Any other
     /// pattern matches a name at any depth below them. The pattern is [`slash_separated`], so a
-    /// rooted pattern without a drive fails on Windows, where it could never match.
+    /// `/**/` matches under any root. Other rooted patterns need a drive on Windows.
     fn parse(raw: &str) -> Result<Self> {
         ensure!(
             !raw.starts_with('!'),
@@ -412,6 +384,9 @@ impl PathGlob {
                  to name a path outside the working directory and extra roots."
             );
         }
+        if pattern.starts_with("/**/") {
+            return Self::new(pattern[1..].trim_end_matches('/'), true);
+        }
         let path = Path::new(&pattern);
         ensure!(
             path.is_absolute() || !path.has_root(),
@@ -422,7 +397,7 @@ impl PathGlob {
             if Path::new(trimmed).is_absolute() {
                 pattern.truncate(trimmed.len());
             }
-            return Self::new(&pattern, true, true);
+            return Self::new(&pattern, true);
         }
 
         let anchored = pattern.starts_with("./");
@@ -432,30 +407,28 @@ impl PathGlob {
             .to_owned();
         ensure!(!body.is_empty(), "the pattern names no path");
         if anchored || body.contains('/') {
-            Self::new(&body, false, true)
+            Self::new(&body, false)
         } else {
-            Self::new(&format!("**/{body}"), false, true)
+            Self::new(&format!("**/{body}"), false)
         }
     }
 
-    /// Compiles `glob`, and with `below` everything under a path it matches.
-    fn new(glob: &str, absolute: bool, below: bool) -> Result<Self> {
-        let globs: Vec<String> = std::iter::once(glob.to_owned())
-            .chain(below.then(|| format!("{}/**", glob.trim_end_matches('/'))))
-            .collect();
-        let set = |globs: &mut dyn Iterator<Item = String>| -> Result<GlobSet> {
+    fn new(glob: &str, absolute: bool) -> Result<Self> {
+        let below = format!("{}/**", glob.trim_end_matches('/'));
+        let set = |globs: [Glob; 2]| -> Result<GlobSet> {
             let mut builder = GlobSetBuilder::new();
             for glob in globs {
-                builder.add(path_glob(&glob)?);
+                builder.add(glob);
             }
             Ok(builder.build()?)
         };
+        let parsed = path_glob(glob)?;
+        let literal = literal_prefix(&parsed);
         Ok(Self {
-            exact: set(&mut globs.iter().cloned())?,
-            folded: set(&mut globs.iter().map(|glob| fold_path(glob)))?,
+            exact: set([parsed, path_glob(&below)?])?,
+            folded: set([path_glob(&fold_path(glob))?, path_glob(&fold_path(&below))?])?,
             absolute,
-            below,
-            literal: literal_prefix(&path_glob(glob)?),
+            literal,
         })
     }
 
@@ -1157,6 +1130,27 @@ mod tests {
         }
 
         #[test]
+        fn path_any_root_patterns_cover_posix_drive_and_share_paths() {
+            let rule = edit("/**/private");
+            for (raw, exact) in [
+                ("/private/key", true),
+                ("/repo/private/key", true),
+                ("C:/repo/private/key", true),
+                ("D:/repo/private/key", true),
+                ("//server/share/private/key", true),
+                ("/repo/PRIVATE./key", false),
+                ("C:/repo/PRIvate/key", false),
+                ("//server/share/PRIVATE /key", false),
+            ] {
+                let target = path(raw, &[]);
+
+                assert_eq!(allows_path(&rule, &target), exact, "{raw}");
+                assert!(denies_path(&rule, &target), "{raw}");
+            }
+            assert!(!denies_path(&rule, &path("/repo/private-key", &[])));
+        }
+
+        #[test]
         fn path_home_pattern_expands_a_home_spelled_with_a_trailing_slash_or_dot() {
             let home = abs("/home/u");
             for (spelling, target) in [
@@ -1207,7 +1201,7 @@ mod tests {
             let target = path(r"C:\repo\secrets.\key", &[]);
             assert!(denies_path(&dotted, &target));
             assert!(!allows_path(&dotted, &target));
-            for raw in ["/secrets/**", r"\tmp\**"] {
+            for raw in ["/secrets/**", "/**", r"\tmp\**"] {
                 let err = format!("{:#}", Rule::parse(PermissionClass::Read, raw).unwrap_err());
                 assert!(err.contains("needs a drive"), "{raw}: {err}");
             }
@@ -1284,6 +1278,18 @@ mod tests {
         }
 
         #[test]
+        fn any_root_patterns_may_read_below_every_recursive_root() {
+            let rule = rule(PermissionClass::Read, "/**/private/key");
+            let bases = rule.prefix_bases(&[PathBuf::from(abs("/repo"))]);
+            for raw in ["/repo/src", "D:/src", "//server/share/src"] {
+                let target = path(raw, &[]);
+
+                assert!(rule.holds_read(&target, true, &bases), "{raw}");
+                assert!(!rule.holds_read(&target, false, &bases), "{raw}");
+            }
+        }
+
+        #[test]
         fn keeps_class_requirements() {
             let vault = path(&abs("/repo/vault"), &["vault".to_owned()]);
             let any = rule(PermissionClass::Read, "*");
@@ -1296,6 +1302,16 @@ mod tests {
 
     mod prefix_bases {
         use super::*;
+
+        #[test]
+        fn any_root_patterns_have_no_anchor_to_project() {
+            let rule = edit("/**/private");
+            let anchors = [PathBuf::from(abs("/repo"))];
+
+            let bases = rule.prefix_bases(&anchors);
+
+            assert_eq!(bases, Vec::<PathBuf>::new());
+        }
 
         #[test]
         fn also_matches_where_a_literal_prefix_resolves() {
