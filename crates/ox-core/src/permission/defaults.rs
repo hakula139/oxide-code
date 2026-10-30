@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use strum::{Display, VariantArray};
 
 use super::PermissionClass;
@@ -22,17 +22,7 @@ const PROCESS_ENVIRONMENTS: [&str; 2] = ["/proc/*/environ", "/proc/*/task/*/envi
 
 /// A named group of shipped rules.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    Display,
-    VariantArray,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Display, VariantArray,
 )]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
@@ -252,6 +242,7 @@ const OX: &[&str] = &[".ox"];
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     use super::*;
@@ -367,12 +358,12 @@ mod tests {
         }
 
         #[test]
-        fn names_each_group_by_its_defaults_key() {
+        fn reads_each_group_from_its_defaults_key() {
             for &group in Shipped::VARIANTS {
-                assert_eq!(
-                    toml::Value::try_from(group).unwrap().as_str(),
-                    Some(group.to_string().as_str())
-                );
+                let defaults: BTreeMap<Shipped, bool> =
+                    toml::from_str(&format!("{group} = false")).unwrap();
+
+                assert_eq!(defaults, BTreeMap::from([(group, false)]));
             }
         }
 

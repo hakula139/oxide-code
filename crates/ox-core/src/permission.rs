@@ -19,16 +19,14 @@ use std::sync::{Arc, LazyLock};
 use anyhow::{Context as _, Result, bail, ensure};
 use caseless::Caseless as _;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 use unicode_normalization::UnicodeNormalization as _;
 
 use self::defaults::{Shipped, ShippedTier};
 use self::rule::{MatchDiscipline, Prefixes, Rule};
 use self::shell::{CommandTarget, Segment};
-use crate::util::path::{
-    expand_absolute, expand_user, lexical_normalize, requires_directory, slash_separated,
-};
+use crate::util::path::{expand_absolute, lexical_normalize, requires_directory, slash_separated};
 use crate::util::variant;
 
 // ── Mode ──
@@ -41,7 +39,6 @@ use crate::util::variant;
     Default,
     PartialEq,
     Eq,
-    Serialize,
     Deserialize,
     Display,
     EnumString,
@@ -92,8 +89,7 @@ impl Mode {
 /// The rule namespace a tool's calls fall under, which also sets the pipeline's default treatment.
 /// Rules address classes, so one `read` deny pattern covers every tool that reads a file. Each tool
 /// declares its class in its [`crate::tool::ToolSpec`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
 #[strum(serialize_all = "lowercase")]
 pub enum PermissionClass {
     /// Reads the workspace or acts only on state the session owns (`read`, `grep`, `glob`, `tasks`,
@@ -112,8 +108,7 @@ pub enum PermissionClass {
 // ── Tier ──
 
 /// Where a rule list sits in the pipeline: deny outranks ask, which outranks allow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
 #[strum(serialize_all = "lowercase")]
 pub enum Tier {
     Deny,
@@ -138,10 +133,31 @@ pub(crate) struct Workspace {
 
 /// One anchor directory in both of its spellings.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Anchor {
+pub(crate) struct Anchor {
     resolved: PathBuf,
     /// As configured or launched, lexically normalized.
     spelled: PathBuf,
+}
+
+impl Anchor {
+    /// Resolves an absolute or `~/` extra root, excluding `/`, home, and home's ancestors.
+    pub(crate) fn resolve(raw: &str) -> Result<Self> {
+        let spelled =
+            expand_absolute(raw).with_context(|| format!("invalid extra root {raw:?}"))?;
+        let resolved = match resolve(&spelled) {
+            Ok(root) => root,
+            Err(unreachable) => bail!("invalid extra root {raw:?}: {unreachable}"),
+        };
+        ensure!(
+            is_workspace(&resolved),
+            "invalid extra root {raw:?}: \
+             `/`, the home directory, and their ancestors cannot be workspace roots"
+        );
+        Ok(Self {
+            resolved,
+            spelled: lexical_normalize(&spelled),
+        })
+    }
 }
 
 impl Workspace {
@@ -162,18 +178,17 @@ impl Workspace {
         }
     }
 
-    /// The workspace launched in `cwd` plus the configured `extra_roots`, which config load
-    /// validates even when the launch directory leaves the workspace without roots.
+    #[cfg(test)]
     pub(crate) fn resolve(cwd: &Path, extra_roots: &[String]) -> Result<Self> {
-        let extra_roots = extra_roots
+        let roots = extra_roots
             .iter()
-            .map(|raw| {
-                Ok(Anchor {
-                    resolved: extra_root(raw)?,
-                    spelled: lexical_normalize(&expand_user(raw)?),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .map(|raw| Anchor::resolve(raw))
+            .collect::<Result<_>>()?;
+        Ok(Self::with_roots(cwd, roots))
+    }
+
+    /// The workspace launched in `cwd`, adding validated roots only when `cwd` permits roots.
+    pub(crate) fn with_roots(cwd: &Path, extra_roots: Vec<Anchor>) -> Self {
         let mut workspace = Self::new(cwd);
         if !workspace.roots.is_empty() {
             for root in extra_roots {
@@ -183,7 +198,7 @@ impl Workspace {
                 }
             }
         }
-        Ok(workspace)
+        workspace
     }
 
     pub(crate) fn cwd(&self) -> &Path {
@@ -214,22 +229,6 @@ impl Workspace {
             .filter_map(|base| aliases.relative_to(path, base))
             .collect()
     }
-}
-
-/// Resolves the configured extra root `raw`, which must be absolute or `~/`-rooted, resolvable, and
-/// neither `/`, `$HOME`, nor an ancestor of it.
-pub(crate) fn extra_root(raw: &str) -> Result<PathBuf> {
-    let root = expand_absolute(raw).with_context(|| format!("invalid extra root {raw:?}"))?;
-    let root = match resolve(&root) {
-        Ok(root) => root,
-        Err(unreachable) => bail!("invalid extra root {raw:?}: {unreachable}"),
-    };
-    ensure!(
-        is_workspace(&root),
-        "invalid extra root {raw:?}: \
-         `/`, the home directory, and their ancestors cannot be workspace roots"
-    );
-    Ok(root)
 }
 
 // ── Target ──
@@ -1050,7 +1049,7 @@ impl Policy {
         self.verdict(class, target).decision
     }
 
-    /// Resolves a call to a [`Verdict`] without I/O.
+    /// Resolves a call to a [`Verdict`], checking current deny and ask path prefixes.
     ///
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
@@ -1596,10 +1595,14 @@ mod tests {
         use super::*;
 
         #[test]
-        fn round_trips_through_serde_and_fromstr() {
+        fn parses_each_name_through_serde_and_fromstr() {
             for &mode in Mode::VARIANTS {
                 let token = mode.to_string();
-                assert_eq!(serde_json::to_value(mode).unwrap(), token);
+                assert_eq!(
+                    serde_json::from_value::<Mode>(serde_json::Value::String(token.clone()))
+                        .unwrap(),
+                    mode
+                );
                 assert_eq!(token.parse::<Mode>().unwrap(), mode);
             }
         }
