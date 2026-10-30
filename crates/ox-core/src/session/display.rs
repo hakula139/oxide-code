@@ -26,7 +26,7 @@ pub fn id_prefix(session_id: &str) -> &str {
 /// A session's title as listings show it: the title, or [`UNTITLED_MARKER`] when absent, escaped
 /// onto one line. A fork, which starts with its source's title, is labeled `(fork of {id})` with
 /// the source's [`id_prefix`].
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 pub struct DisplayTitle {
     title: String,
     fork_label: Option<String>,
@@ -123,9 +123,10 @@ fn format_date(ts: OffsetDateTime) -> String {
 
 #[cfg(test)]
 mod tests {
+    use time::macros::datetime;
+
     use super::*;
     use crate::session::store::testing::listed_session;
-    use time::macros::datetime;
 
     mod id_prefix {
         use super::*;
@@ -245,6 +246,7 @@ mod tests {
             );
         }
     }
+
     mod format_short_relative_time {
         use super::*;
 

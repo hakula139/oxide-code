@@ -93,17 +93,16 @@ mod tests {
         use super::*;
 
         #[test]
-        fn binds_ctrl_o_to_the_expanded_view_toggle_and_names_its_effect() {
-            let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        fn binds_app_actions_and_names_their_effects() {
+            for (key, action, hint) in [
+                ('o', AppAction::ToggleExpanded, "Ctrl+O to expand"),
+                ('r', AppAction::SearchPrompts, "Ctrl+R to search prompts"),
+            ] {
+                let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL);
 
-            assert_eq!(
-                APP_KEYMAP.action_for(&ctrl_o),
-                Some(AppAction::ToggleExpanded),
-            );
-            assert_eq!(
-                APP_KEYMAP.hint(AppAction::ToggleExpanded, &()).as_deref(),
-                Some("Ctrl+O to expand"),
-            );
+                assert_eq!(APP_KEYMAP.action_for(&event), Some(action), "{key}");
+                assert_eq!(APP_KEYMAP.hint(action, &()).as_deref(), Some(hint), "{key}");
+            }
         }
     }
 
