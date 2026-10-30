@@ -2031,10 +2031,17 @@ mod tests {
         fn counts_each_file_an_output_redirection_writes() {
             let cwd_dir = canonical_tempdir();
             let cwd = cwd_dir.path();
-            assert_eq!(
-                writes("echo a > out.txt 2>> log &> all >| clobber >& both", cwd),
-                ["out.txt", "log", "all", "clobber", "both"]
-            );
+
+            for (command, expected) in [
+                ("> out.txt", &["out.txt"][..]),
+                (
+                    "echo a > out.txt 2>> log &> all >| clobber >& both",
+                    &["out.txt", "log", "all", "clobber", "both"],
+                ),
+            ] {
+                assert_eq!(writes(command, cwd), expected, "{command:?}");
+            }
+
             let outside = abs("/etc/hosts");
             assert_eq!(
                 CommandTarget::parse(&format!("echo a > {outside}"), &Workspace::new(cwd)).writes,
