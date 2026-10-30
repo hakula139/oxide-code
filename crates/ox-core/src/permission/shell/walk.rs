@@ -368,7 +368,7 @@ impl Walk<'_> {
     }
 
     /// Returns whether the environment sets one of the [`DIR_VARIABLES`], so the analysis cannot
-    /// resolve a tilde or a [`DirVariable`] from its own.
+    /// resolve a tilde or directory variable from its own.
     fn sets_dir_variable(&self) -> bool {
         sets_dir_variable(&self.environment)
     }
