@@ -37,6 +37,9 @@ pub(crate) struct Checked {
     path: PathBuf,
     file: File,
     content: Vec<u8>,
+    /// The permission bits the open saw.
+    #[cfg(unix)]
+    mode: u32,
 }
 
 /// The points of a rewrite where a test can act on the file.
@@ -53,6 +56,9 @@ impl Checked {
     /// a FIFO, then reads it, refusing anything but a regular file within
     /// [`MAX_TRACKED_FILE_SIZE`].
     pub(super) fn open(path: &Path) -> Result<Self, FileReadError> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+
         let mut options = OpenOptions::new();
         options.read(true);
         let mut file = open_no_follow(path, options)?;
@@ -62,6 +68,8 @@ impl Checked {
             path: path.to_owned(),
             file,
             content,
+            #[cfg(unix)]
+            mode: metadata.mode() & 0o7777,
         })
     }
 
@@ -113,9 +121,7 @@ impl Checked {
     /// Refuses set-ID permissions, and a capability on Linux, which a write can clear.
     #[cfg(unix)]
     fn refuse_clearable_attributes(&self) -> io::Result<()> {
-        use std::os::unix::fs::MetadataExt as _;
-
-        validate_mode(self.file.metadata()?.mode() & 0o7777)?;
+        validate_mode(self.mode)?;
         #[cfg(target_os = "linux")]
         if has_capability(&self.file)? {
             return Err(io::Error::other(
@@ -407,14 +413,14 @@ mod tests {
             #[cfg(unix)]
             #[test]
             fn refuses_set_id_permissions() {
-                use std::os::unix::fs::PermissionsExt as _;
-
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("target");
                 fs::write(&path, b"original").unwrap();
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o4755)).unwrap();
+                // The Nix build sandbox refuses a chmod that sets a set-ID bit.
+                let mut checked = Checked::open(&path).unwrap();
+                checked.mode |= 0o4000;
 
-                let error = rewrite(&path, b"new").unwrap_err();
+                let error = checked.rewrite(b"new").unwrap_err();
 
                 assert_eq!(
                     error.to_string(),
