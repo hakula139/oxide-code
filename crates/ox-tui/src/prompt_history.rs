@@ -431,6 +431,14 @@ mod tests {
         }
     }
 
+    fn entry(text: &str) -> PromptEntry {
+        PromptEntry {
+            text: text.to_owned(),
+            created_at: datetime!(2026-01-01 00:00 UTC),
+            project_root: "/home/u/src/app".to_owned(),
+        }
+    }
+
     #[test]
     fn keeps_latest_filter_and_scope_and_recalls_exact_text_only_on_plain_enter() {
         let (_dir, store) = isolated_store();
@@ -517,30 +525,6 @@ mod tests {
     }
 
     #[test]
-    fn previews_lines_beyond_u16_and_shows_project_without_losing_recall_text() {
-        let (_dir, store) = isolated_store();
-        let mut history = Harness::new(store);
-        history.settle();
-        history.picker.scope = ProjectScope::Every;
-        let text = (0..65_540)
-            .map(|n| format!("row {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        history.picker.page_loaded(Loaded::Page(vec![PromptEntry {
-            text: text.clone(),
-            created_at: datetime!(2026-01-01 00:00 UTC),
-            project_root: "/home/u/src/app".to_owned(),
-        }]));
-        history.picker.preview_offset = 65_536;
-
-        let rendered = render_modal(&mut history.picker, 65, 25).join("\n");
-
-        assert!(rendered.contains("row 65539"), "{rendered}");
-        assert!(rendered.contains("/home/u/src/app"), "{rendered}");
-        assert_eq!(history.picker.list.selected().unwrap().entry.text, text);
-    }
-
-    #[test]
     fn renders_empty_no_match_and_failure_states() {
         let (_dir, store) = isolated_store();
         let mut history = Harness::new(store);
@@ -592,129 +576,166 @@ mod tests {
         assert!(failed.contains("Failed to load prompts:"), "{failed}");
     }
 
-    #[test]
-    fn leaves_session_pages_unclaimed_and_resets_preview_on_row_changes() {
-        let (_dir, store) = isolated_store();
-        let mut history = Harness::new(store.clone());
-        history.settle();
-        let entry = |text: &str| PromptEntry {
-            text: text.to_owned(),
-            created_at: datetime!(2026-01-01 00:00 UTC),
-            project_root: "/home/u/src/app".to_owned(),
-        };
-        history
-            .picker
-            .page_loaded(Loaded::Page(vec![entry("first"), entry("second")]));
-        history.picker.preview_offset = 5;
-        let page = ModalPage::Sessions(PageEnd::for_request(
-            999,
-            store.walk(ox_core::session::store::listing::ListScope::default()),
-            Some(Ok(Vec::new())),
-        ));
+    mod render {
+        use super::*;
 
-        assert!(matches!(
-            history.picker.on_page(page),
-            Some(ModalPage::Sessions(_))
-        ));
-        for (key, expected) in [(KeyCode::Down, "second"), (KeyCode::Up, "first")] {
-            history.picker.preview_offset = 5;
+        #[test]
+        fn previews_lines_beyond_u16_and_shows_project_without_losing_recall_text() {
+            let (_dir, store) = isolated_store();
+            let mut history = Harness::new(store);
+            history.settle();
+            history.picker.scope = ProjectScope::Every;
+            let text = (0..65_540)
+                .map(|n| format!("row {n}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            history.picker.page_loaded(Loaded::Page(vec![PromptEntry {
+                text: text.clone(),
+                created_at: datetime!(2026-01-01 00:00 UTC),
+                project_root: "/home/u/src/app".to_owned(),
+            }]));
+            history.picker.preview_offset = 65_536;
 
-            history.key(key, KeyModifiers::NONE);
+            let rendered = render_modal(&mut history.picker, 65, 25).join("\n");
 
-            assert_eq!(history.picker.preview_offset, 0, "{key:?}");
-            assert_eq!(
-                history.picker.list.selected().unwrap().entry.text,
-                expected,
-                "{key:?}"
-            );
+            assert!(rendered.contains("row 65539"), "{rendered}");
+            assert!(rendered.contains("/home/u/src/app"), "{rendered}");
+            assert_eq!(history.picker.list.selected().unwrap().entry.text, text);
         }
-        assert!(
-            render_modal(&mut history.picker, 60, 20)
-                .join("\n")
-                .contains("first")
-        );
-    }
 
-    #[test]
-    fn continues_an_empty_nonfinal_batch_to_the_matching_project() {
-        let (dir, store) = isolated_store();
-        let other = SessionStore::open_at(dir.path().to_path_buf(), "other").unwrap();
-        let at = datetime!(2026-01-01 00:00 UTC);
-        seed_test_session(&store, "local", None, 1, at);
-        for n in 0..31 {
-            seed_test_session(
-                &other,
-                &format!("other-{n}"),
-                None,
-                1,
-                at + time::Duration::hours(1),
+        #[test]
+        fn keeps_the_selected_row_visible_in_a_short_picker_and_renders_within_its_grant() {
+            let (_dir, store) = isolated_store();
+            let mut history = Harness::new(store);
+            history.settle();
+            history
+                .picker
+                .page_loaded(Loaded::Page(vec![entry("first"), entry("second")]));
+            history.key(KeyCode::Down, KeyModifiers::NONE);
+
+            let rendered = render_modal(&mut history.picker, 40, 8);
+
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.starts_with("> ") && line.ends_with("second")),
+                "{rendered:?}"
             );
-        }
-        let mut history = Harness::new(store);
+            let mut terminal = Terminal::new(TestBackend::new(42, 14)).unwrap();
+            for height in 8..12 {
+                terminal
+                    .draw(|frame| {
+                        frame.render_widget(
+                            Paragraph::new("sentinel\n".repeat(14))
+                                .style(Style::default().fg(Color::Red)),
+                            frame.area(),
+                        );
+                        let before = frame.buffer_mut().clone();
+                        let grant = Rect::new(1, 1, 40, height);
 
-        let page = history.next_page();
-        assert!(history.picker.on_page(page).is_none());
-        assert!(history.picker.list.selected().is_none());
-        assert!(history.picker.pages.has_more());
-        history.settle();
+                        history.picker.render(frame, grant, &Theme::default());
 
-        assert_eq!(
-            history.picker.list.selected().unwrap().entry.text,
-            SEEDED_PROMPT
-        );
-        assert!(!history.picker.pages.has_more());
-    }
-
-    #[test]
-    fn keeps_the_selected_row_visible_in_a_short_picker_and_renders_within_its_grant() {
-        let (_dir, store) = isolated_store();
-        let mut history = Harness::new(store);
-        history.settle();
-        let entry = |text: &str| PromptEntry {
-            text: text.to_owned(),
-            created_at: datetime!(2026-01-01 00:00 UTC),
-            project_root: "/home/u/src/app".to_owned(),
-        };
-        history
-            .picker
-            .page_loaded(Loaded::Page(vec![entry("first"), entry("second")]));
-        history.key(KeyCode::Down, KeyModifiers::NONE);
-
-        let rendered = render_modal(&mut history.picker, 40, 8);
-
-        assert!(
-            rendered
-                .iter()
-                .any(|line| line.starts_with("> ") && line.ends_with("second")),
-            "{rendered:?}"
-        );
-        let mut terminal = Terminal::new(TestBackend::new(42, 14)).unwrap();
-        for height in 8..12 {
-            terminal
-                .draw(|frame| {
-                    frame.render_widget(
-                        Paragraph::new("sentinel\n".repeat(14))
-                            .style(Style::default().fg(Color::Red)),
-                        frame.area(),
-                    );
-                    let before = frame.buffer_mut().clone();
-                    let grant = Rect::new(1, 1, 40, height);
-
-                    history.picker.render(frame, grant, &Theme::default());
-
-                    for y in 0..14 {
-                        for x in 0..42 {
-                            if !grant.contains((x, y).into()) {
-                                assert_eq!(
-                                    frame.buffer_mut()[(x, y)],
-                                    before[(x, y)],
-                                    "outside {grant:?} at ({x}, {y})"
-                                );
+                        for y in 0..14 {
+                            for x in 0..42 {
+                                if !grant.contains((x, y).into()) {
+                                    assert_eq!(
+                                        frame.buffer_mut()[(x, y)],
+                                        before[(x, y)],
+                                        "outside {grant:?} at ({x}, {y})"
+                                    );
+                                }
                             }
                         }
-                    }
-                })
-                .unwrap();
+                    })
+                    .unwrap();
+            }
+        }
+    }
+
+    mod handle_key {
+        use super::*;
+
+        #[test]
+        fn resets_preview_on_row_changes() {
+            let (_dir, store) = isolated_store();
+            let mut history = Harness::new(store);
+            history.settle();
+            history
+                .picker
+                .page_loaded(Loaded::Page(vec![entry("first"), entry("second")]));
+
+            for (key, expected) in [(KeyCode::Down, "second"), (KeyCode::Up, "first")] {
+                history.picker.preview_offset = 5;
+
+                history.key(key, KeyModifiers::NONE);
+
+                assert_eq!(history.picker.preview_offset, 0, "{key:?}");
+                assert_eq!(
+                    history.picker.list.selected().unwrap().entry.text,
+                    expected,
+                    "{key:?}"
+                );
+            }
+            assert!(
+                render_modal(&mut history.picker, 60, 20)
+                    .join("\n")
+                    .contains("first")
+            );
+        }
+    }
+
+    mod on_page {
+        use super::*;
+
+        #[test]
+        fn leaves_session_pages_unclaimed() {
+            let (_dir, store) = isolated_store();
+            let mut history = Harness::new(store.clone());
+            history.settle();
+            history
+                .picker
+                .page_loaded(Loaded::Page(vec![entry("first"), entry("second")]));
+            history.picker.preview_offset = 5;
+            let page = ModalPage::Sessions(PageEnd::for_request(
+                999,
+                store.walk(ox_core::session::store::listing::ListScope::default()),
+                Some(Ok(Vec::new())),
+            ));
+
+            assert!(matches!(
+                history.picker.on_page(page),
+                Some(ModalPage::Sessions(_))
+            ));
+        }
+
+        #[test]
+        fn continues_an_empty_nonfinal_batch_to_the_matching_project() {
+            let (dir, store) = isolated_store();
+            let other = SessionStore::open_at(dir.path().to_path_buf(), "other").unwrap();
+            let at = datetime!(2026-01-01 00:00 UTC);
+            seed_test_session(&store, "local", None, 1, at);
+            for n in 0..31 {
+                seed_test_session(
+                    &other,
+                    &format!("other-{n}"),
+                    None,
+                    1,
+                    at + time::Duration::hours(1),
+                );
+            }
+            let mut history = Harness::new(store);
+
+            let page = history.next_page();
+            assert!(history.picker.on_page(page).is_none());
+            assert!(history.picker.list.selected().is_none());
+            assert!(history.picker.pages.has_more());
+            history.settle();
+
+            assert_eq!(
+                history.picker.list.selected().unwrap().entry.text,
+                SEEDED_PROMPT
+            );
+            assert!(!history.picker.pages.has_more());
         }
     }
 }

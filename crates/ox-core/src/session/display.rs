@@ -253,13 +253,20 @@ mod tests {
         #[test]
         fn cuts_each_unit_to_its_letter_and_keeps_the_date_past_30_days() {
             let now = datetime!(2026-05-08 12:00:00 UTC);
-            let ago = |elapsed: time::Duration| format_short_relative_time(now - elapsed, now);
 
-            assert_eq!(ago(time::Duration::seconds(45)), "45s ago");
-            assert_eq!(ago(time::Duration::minutes(5)), "5m ago");
-            assert_eq!(ago(time::Duration::hours(23)), "23h ago");
-            assert_eq!(ago(time::Duration::days(29)), "29d ago");
-            assert_eq!(ago(time::Duration::days(30)), "2026-04-08");
+            for (elapsed, expected) in [
+                (time::Duration::seconds(45), "45s ago"),
+                (time::Duration::minutes(5), "5m ago"),
+                (time::Duration::hours(23), "23h ago"),
+                (time::Duration::days(29), "29d ago"),
+                (time::Duration::days(30), "2026-04-08"),
+            ] {
+                assert_eq!(
+                    format_short_relative_time(now - elapsed, now),
+                    expected,
+                    "{elapsed:?}"
+                );
+            }
             assert_eq!(SHORT_RELATIVE_TIME_WIDTH, "2026-04-08".len());
         }
 
@@ -279,47 +286,25 @@ mod tests {
         #[test]
         fn pluralizes_units_and_falls_back_to_iso_date_past_30_days() {
             let now = datetime!(2026-05-08 12:00:00 UTC);
-            assert_eq!(
-                format_relative_time(now - time::Duration::seconds(1), now),
-                "1 second ago",
-            );
-            assert_eq!(
-                format_relative_time(now - time::Duration::seconds(3), now),
-                "3 seconds ago",
-            );
-            assert_eq!(
-                format_relative_time(now - time::Duration::minutes(1), now),
-                "1 minute ago",
-            );
-            assert_eq!(
-                format_relative_time(now - time::Duration::minutes(2), now),
-                "2 minutes ago",
-            );
-            assert_eq!(
-                format_relative_time(now - time::Duration::hours(1), now),
-                "1 hour ago",
-            );
-            assert_eq!(
-                format_relative_time(now - time::Duration::hours(5), now),
-                "5 hours ago",
-            );
-            assert_eq!(
-                format_relative_time(now - time::Duration::days(1), now),
-                "1 day ago",
-            );
-            assert_eq!(
-                format_relative_time(now - time::Duration::days(3), now),
-                "3 days ago",
-            );
-            assert_eq!(
-                format_relative_time(now - time::Duration::days(60), now),
-                "2026-03-09",
-            );
-            assert_eq!(
-                format_relative_time(now + time::Duration::seconds(30), now),
-                "0 seconds ago",
-                "future stamps collapse to 0",
-            );
+
+            for (elapsed, expected) in [
+                (time::Duration::seconds(1), "1 second ago"),
+                (time::Duration::seconds(3), "3 seconds ago"),
+                (time::Duration::minutes(1), "1 minute ago"),
+                (time::Duration::minutes(2), "2 minutes ago"),
+                (time::Duration::hours(1), "1 hour ago"),
+                (time::Duration::hours(5), "5 hours ago"),
+                (time::Duration::days(1), "1 day ago"),
+                (time::Duration::days(3), "3 days ago"),
+                (time::Duration::days(60), "2026-03-09"),
+                (time::Duration::seconds(-30), "0 seconds ago"),
+            ] {
+                assert_eq!(
+                    format_relative_time(now - elapsed, now),
+                    expected,
+                    "{elapsed:?}"
+                );
+            }
         }
     }
 }

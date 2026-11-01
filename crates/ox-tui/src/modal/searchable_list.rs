@@ -913,40 +913,42 @@ mod tests {
         }
 
         #[test]
-        fn says_an_unmatched_query_is_searching_while_more_items_may_follow() {
-            let mut l = list(vec![FakeItem::new("alpha")]);
-            l.set_query("zzz");
-            l.set_load_state(LoadState::Loading);
-
-            assert_eq!(first_row(&mut l), "  Searching for `zzz`...");
-        }
-
-        #[test]
         fn load_state_controls_empty_notes_and_wrapping_without_losing_items_or_query() {
-            for (state, note, wraps) in [
-                (LoadState::Loading, "  Searching for `absent`...", false),
-                (LoadState::Complete, "  No matches for `absent`", true),
-                (LoadState::Failed, "", false),
+            for (state, load_state, note, wraps) in [
+                (
+                    "loading",
+                    LoadState::Loading,
+                    "  Searching for `absent`...",
+                    false,
+                ),
+                (
+                    "complete",
+                    LoadState::Complete,
+                    "  No matches for `absent`",
+                    true,
+                ),
+                ("failed", LoadState::Failed, "", false),
             ] {
                 let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
                 l.set_query("absent");
 
-                l.set_load_state(state);
+                l.set_load_state(load_state);
 
-                assert_eq!(l.query(), "absent");
-                assert_eq!(first_row(&mut l), note);
+                assert_eq!(l.query(), "absent", "{state}");
+                assert_eq!(first_row(&mut l), note, "{state}");
 
                 l.set_query("");
                 l.select_next();
-                assert_eq!(l.selected().unwrap().haystack(), "beta");
+                assert_eq!(l.selected().unwrap().haystack(), "beta", "{state}");
                 l.select_next();
                 assert_eq!(
                     l.selected().unwrap().haystack(),
-                    if wraps { "alpha" } else { "beta" }
+                    if wraps { "alpha" } else { "beta" },
+                    "{state}"
                 );
                 l.select_prev();
                 l.select_prev();
-                assert_eq!(l.selected().unwrap().haystack(), "alpha");
+                assert_eq!(l.selected().unwrap().haystack(), "alpha", "{state}");
             }
         }
 

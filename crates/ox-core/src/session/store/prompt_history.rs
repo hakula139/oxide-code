@@ -164,51 +164,58 @@ mod tests {
     use crate::message::TextOrigin;
     use crate::session::store::testing::{isolated_store, seed_test_session};
 
-    fn session(store: &SessionStore, id: &str) {
-        seed_test_session(store, id, None, 0, OffsetDateTime::UNIX_EPOCH);
-        store
-            .connect()
-            .unwrap()
-            .execute("DELETE FROM messages WHERE session_id = ?1", [id])
-            .unwrap();
-    }
-
-    fn save(store: &SessionStore, session: &str, id: &str, at: i64, role: &str, content: &str) {
-        store
-            .connect()
-            .unwrap()
-            .execute(
-                "INSERT INTO messages (session_id, id, role, content, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![session, id, role, content, at],
-            )
-            .unwrap();
-    }
-
-    fn prompt(store: &SessionStore, session: &str, id: &str, at: i64, text: &str) {
-        let content = serde_json::to_string(&vec![ContentBlock::text(text)]).unwrap();
-        save(store, session, id, at, "user", &content);
-    }
-
-    fn collect(mut walk: PromptWalk, limit: usize) -> Vec<String> {
-        let mut prompts = Vec::new();
-        while !walk.is_exhausted() {
-            prompts.extend(
-                walk.next_page(limit)
-                    .unwrap()
-                    .into_iter()
-                    .map(|entry| entry.text),
-            );
-        }
-        assert_eq!(walk.next_page(limit).unwrap(), []);
-        prompts
-    }
-
     mod prompt_walk {
         use super::*;
 
         mod next_page {
             use super::*;
+
+            fn session(store: &SessionStore, id: &str) {
+                seed_test_session(store, id, None, 0, OffsetDateTime::UNIX_EPOCH);
+                store
+                    .connect()
+                    .unwrap()
+                    .execute("DELETE FROM messages WHERE session_id = ?1", [id])
+                    .unwrap();
+            }
+
+            fn save(
+                store: &SessionStore,
+                session: &str,
+                id: &str,
+                at: i64,
+                role: &str,
+                content: &str,
+            ) {
+                store
+                    .connect()
+                    .unwrap()
+                    .execute(
+                        "INSERT INTO messages (session_id, id, role, content, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![session, id, role, content, at],
+                    )
+                    .unwrap();
+            }
+
+            fn prompt(store: &SessionStore, session: &str, id: &str, at: i64, text: &str) {
+                let content = serde_json::to_string(&vec![ContentBlock::text(text)]).unwrap();
+                save(store, session, id, at, "user", &content);
+            }
+
+            fn collect(mut walk: PromptWalk, limit: usize) -> Vec<String> {
+                let mut prompts = Vec::new();
+                while !walk.is_exhausted() {
+                    prompts.extend(
+                        walk.next_page(limit)
+                            .unwrap()
+                            .into_iter()
+                            .map(|entry| entry.text),
+                    );
+                }
+                assert_eq!(walk.next_page(limit).unwrap(), []);
+                prompts
+            }
 
             #[test]
             fn scans_past_empty_batches_and_orders_original_messages_once() {

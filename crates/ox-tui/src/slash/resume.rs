@@ -2312,6 +2312,20 @@ mod tests {
         /// A request number no worker uses, since workers count up from zero.
         const AWAITED: u64 = u64::MAX;
 
+        /// `picker` waiting on [`AWAITED`], which `page` answers.
+        fn awaiting(
+            picker: &mut ResumePicker,
+            page: Option<anyhow::Result<Vec<SessionInfo>>>,
+        ) -> ModalPage {
+            picker.pages = Pages::Loading(AWAITED);
+            picker.list.set_load_state(LoadState::Loading);
+            ModalPage::Sessions(PageEnd::for_request(
+                AWAITED,
+                picker.store.walk(ListScope::default()),
+                page,
+            ))
+        }
+
         #[test]
         fn leaves_prompt_pages_for_their_own_picker() {
             let (_dir, store) = isolated_store();
@@ -2325,20 +2339,6 @@ mod tests {
             let unclaimed = picker.on_page(page);
 
             assert!(matches!(unclaimed, Some(ModalPage::Prompts(_))));
-        }
-
-        /// `picker` waiting on [`AWAITED`], which `page` answers.
-        fn awaiting(
-            picker: &mut ResumePicker,
-            page: Option<anyhow::Result<Vec<SessionInfo>>>,
-        ) -> ModalPage {
-            picker.pages = Pages::Loading(AWAITED);
-            picker.list.set_load_state(LoadState::Loading);
-            ModalPage::Sessions(PageEnd::for_request(
-                AWAITED,
-                picker.store.walk(ListScope::default()),
-                page,
-            ))
         }
 
         #[test]
