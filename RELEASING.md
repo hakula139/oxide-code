@@ -13,7 +13,7 @@ To restore a published tag's cache pin, run `gh workflow run nix-cache.yml -f ta
 - **Main during a soak:** merge only `fix`, `docs`, `test`, and `chore(release)` PRs. Feature and refactor PRs wait for the stable tag, so the stable commit matches the soaked rc plus its fixes. Renovate automerges dependency bumps, so set `"enabled": false` in `.github/renovate.json` when the soak starts and revert it after the stable tag, both through `ci(renovate)` PRs.
 - **After 0.1.0:** a breaking change to the [stability surface](#stability-surface) bumps the minor version, and every other change bumps the patch version. Give a stable version a milestone (`v0.2.0`) once its scope is planned. Patch releases and prereleases get no milestone, and prereleases of the next minor (`v0.2.0-alpha.N`) follow the rules above.
 - **Breaking changes:** a PR that breaks the stability surface marks its title with [`!`](docs/conventions/github.md#commits-and-branches) both before and after 0.1.0. Before 0.1.0, the version still advances within the prerelease sequence.
-- **MSRV:** the CI MSRV job checks `rust-version`. A bump affects `cargo install` users and Nix users, whose builds use the Rust release of the nixpkgs they follow, so it ships as a normal change that names the new floor in its PR title. The Nix jobs fail when the floor passes the Rust release of the flake's nixpkgs.
+- **MSRV:** the CI MSRV job checks `rust-version`. A bump affects `cargo install` users and Nix source builds, so it ships as a normal change that names the new floor in its PR title. The Nix jobs fail when the floor passes the Rust release of the flake's nixpkgs.
 
 ### Stability Surface
 
