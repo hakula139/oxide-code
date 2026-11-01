@@ -692,10 +692,6 @@ mod tests {
             let (_dir, store) = isolated_store();
             let mut history = Harness::new(store.clone());
             history.settle();
-            history
-                .picker
-                .page_loaded(Loaded::Page(vec![entry("first"), entry("second")]));
-            history.picker.preview_offset = 5;
             let page = ModalPage::Sessions(PageEnd::for_request(
                 999,
                 store.walk(ox_core::session::store::listing::ListScope::default()),
