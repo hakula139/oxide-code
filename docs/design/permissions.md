@@ -138,7 +138,13 @@ The `--no-tui` REPL and `-p` headless runs share `run_op`, which passes each `Ev
 - `crates/ox-core/src/permission.rs`: `Mode`, `PermissionClass`, `Workspace`, `Access::for_path`, `Access::for_command`, `Verdict`, `Basis`, `Policy::verdict`, `Policy::config_fix`, and `ReadFilter`.
 - `crates/ox-core/src/permission/defaults.rs`: the shipped groups and their rules, `ShippedTier`, and the `[permission.defaults]` names.
 - `crates/ox-core/src/permission/rule.rs`: `Rule`, the patterns of each class, `MatchDiscipline`, and `Rule::for_call`.
-- `crates/ox-core/src/permission/shell.rs`: `CommandTarget::parse`, the wrapper grammars, the recognized syntax, the known-safe commands, the reader grammars, and the forced recursive `rm` check.
+- `crates/ox-core/src/permission/shell.rs`: the command target, segment and word contracts, the pattern parser entry point, and the forced recursive `rm` check.
+- `crates/ox-core/src/permission/shell/invocation.rs`: nested shell arguments, startup files, and inherited variables.
+- `crates/ox-core/src/permission/shell/pattern.rs`: the `exec` pattern grammar.
+- `crates/ox-core/src/permission/shell/reader.rs`: known-safe commands, reader operands, globs, and `sed` scripts.
+- `crates/ox-core/src/permission/shell/walk.rs`: recognized syntax and the commands, reads, and writes the walk collects.
+- `crates/ox-core/src/permission/shell/word.rs`: quote removal, expansions, and literal words.
+- `crates/ox-core/src/permission/shell/wrapper.rs`: wrapper option grammars and the input they pass commands.
 - `crates/ox-core/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Event::ModeChanged`, `Op::Resolve`, `Op::SetMode`, and `ApprovalDecision`.
 - `crates/ox-core/src/tool.rs`: the `Tool` trait, `ToolSpec`, `ToolCtx`, and `Prepared`.
 - `crates/ox-core/src/tool/file.rs`: `read_validated` and `open_gated`, the size and type checks on the opened file.
