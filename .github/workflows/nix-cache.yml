@@ -20,6 +20,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CACHIX_NAME: hakula
+
 jobs:
   publish:
     name: Pin (${{ matrix.system }})
@@ -50,6 +53,6 @@ jobs:
           TAG: ${{ inputs.tag }}
           SYSTEM: ${{ matrix.system }}
         run: |
-          out=$(nix build --no-link --print-out-paths)
-          cachix push hakula "$out"
-          cachix pin hakula "oxide-code-${TAG}-${SYSTEM}" "$out" --keep-revisions 1
+          store_path=$(nix build --no-link --print-out-paths --print-build-logs)
+          cachix push "$CACHIX_NAME" "$store_path"
+          cachix pin "$CACHIX_NAME" "oxide-code-${TAG}-${SYSTEM}" "$store_path" --keep-revisions 2
