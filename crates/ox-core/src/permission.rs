@@ -1055,8 +1055,7 @@ impl Policy {
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
     /// 2. `plan` denies an edit, exec, or net call.
-    /// 3. Outside `yolo`, a call [`Self::asks`] holds asks. In `yolo`, a call a configured ask rule
-    ///    holds asks.
+    /// 3. A configured ask rule asks. Outside `yolo`, a call [`Self::asks`] holds also asks.
     /// 4. A read-class call allows.
     /// 5. An edit-class call inside a workspace root allows.
     /// 6. An allow rule or a session allow rule allows.
@@ -1090,12 +1089,13 @@ impl Policy {
             return verdict(Decision::Deny, Basis::Mode(self.mode));
         }
 
-        if self.mode == Mode::Yolo {
-            let configured = self.ask.iter().filter(|entry| entry.builtin.is_none());
-            if let Some(rule) = held_by(&configured, class, target) {
-                return verdict(Decision::Ask, rule.basis(Tier::Ask));
-            }
-        } else if let Some(basis) = self.asks(class, target) {
+        let configured = self.ask.iter().filter(|entry| entry.builtin.is_none());
+        if let Some(rule) = held_by(&configured, class, target) {
+            return verdict(Decision::Ask, rule.basis(Tier::Ask));
+        }
+        if self.mode != Mode::Yolo
+            && let Some(basis) = self.asks(class, target)
+        {
             return verdict(Decision::Ask, basis);
         }
 
@@ -1120,14 +1120,10 @@ impl Policy {
         verdict(fallback, Basis::Mode(self.mode))
     }
 
-    /// What holds the call in the ask tier: an ask rule, a command the analysis does not
+    /// What holds a call outside `yolo`: a shipped ask rule, a command the analysis does not
     /// recognize, the [`read` rule](Self::possible_read_holder) for a file a reader may read, or
     /// the `rm` group for a [forced recursive delete](Segment::removes_recursively_by_force).
     fn asks(&self, class: PermissionClass, target: &Access) -> Option<Basis> {
-        let configured = self.ask.iter().filter(|entry| entry.builtin.is_none());
-        if let Some(rule) = held_by(&configured, class, target) {
-            return Some(rule.basis(Tier::Ask));
-        }
         if let Access::Command(command) = target
             && let Some(construct) = command.unrecognized()
         {
