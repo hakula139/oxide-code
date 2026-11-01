@@ -5,7 +5,7 @@ Documentation for using oxide-code (`ox`).
 | Document                             | Description                                                                                                               |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
 | [Installation](install.md)           | Requirements, prebuilt binary, Homebrew, Cargo, Nix, verify / update / uninstall                                          |
-| [Quickstart](quickstart.md)          | Credentials, first session, tool approval, built-in tools, instruction files                                              |
+| [Quickstart](quickstart.md)          | Credentials, first session, tool approval, instruction files                                                              |
 | [Authentication](authentication.md)  | Credential sources, browser sign-in, fixed credentials, LLM gateways                                                      |
 | [Terminal UI](terminal-ui.md)        | Input keys, queued prompts, interrupting and exiting, scrolling, selecting and copying                                    |
 | [Configuration](configuration.md)    | Layered config, models, compaction, TUI settings, themes, TLS, environment, logs                                          |

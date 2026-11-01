@@ -22,7 +22,7 @@ Releases up to 0.1.0-alpha.9 saved each session as a JSON lines file under `$XDG
 
 A session is saved with its first message, so launching `ox` and quitting without typing leaves nothing behind.
 
-When a tool's output is too long to send whole to the model, the full output is saved under `$XDG_DATA_HOME/ox/artifacts/` in a directory named after the session ID, where the model can read it back.
+Saved tool output lives under `$XDG_DATA_HOME/ox/artifacts/` in per-session directories. Each spill file retains up to 10 MiB, which the model can read back.
 
 ## Listing Sessions
 
@@ -93,7 +93,7 @@ ox -r --all        # Sessions in every project
 
 This opens the TUI to the same picker as [`/resume`](#mid-session-resume). Press **Enter** to resume the highlighted session or **Esc** to quit `ox` without saving a session. The picker cannot be combined with a prompt, `--continue`, `--list`, `--no-tui`, or `-p`. It requires the TUI and fails when stdout is not a terminal.
 
-On resume, oxide-code loads the saved history and adds new messages to the same session, so it keeps its original ID unless another `ox` process also writes to it, as [Several Processes on One Session](#several-processes-on-one-session) describes. The model's [task list](quickstart.md#what-it-can-do) returns as it was, while background shells do not, since they end with the run that started them. The status line's session cost continues from the requests the session recorded.
+On resume, oxide-code loads the saved history and adds new messages to the same session, so it keeps its original ID unless another `ox` process also writes to it, as [Several Processes on One Session](#several-processes-on-one-session) describes. The model's [task list](quickstart.md#tasks-and-background-commands) returns as it was, while background shells do not, since they end with the run that started them. The status line's session cost continues from the requests the session recorded.
 
 ### Mid-Session Resume
 

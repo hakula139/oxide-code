@@ -1,58 +1,49 @@
 # Architecture
 
-The `ox` binary consists of three crates organized into layers of top-level modules. The library `ox-core` in `crates/ox-core` holds the layers from the foundation through the engine. The frontends sit on top, with the terminal UI in the library `ox-tui` in `crates/ox-tui`, and the CLI, the bare REPL, and headless mode in the binary crate `ox` in `crates/ox`. This map lists those modules and shows the direction of their imports. The first `//!` line in each file describes that file, so the map covers only the top level. To list the first doc line from every file:
+The `ox` binary runs the same agent engine through a terminal UI, a bare REPL, or a headless driver.
 
-```bash
-grep -rm1 '^//!' crates/*/src
-```
+## Crates
 
-## Module Map
+| Crate                                        | Owns                                                                        | Depends On             |
+| -------------------------------------------- | --------------------------------------------------------------------------- | ---------------------- |
+| [`ox-core`](../../crates/ox-core/src/lib.rs) | Agent behavior, model requests, tools, permissions, and saved sessions      | Neither frontend crate |
+| [`ox-tui`](../../crates/ox-tui/src/lib.rs)   | Terminal interaction and presentation                                       | `ox-core`              |
+| [`ox`](../../crates/ox/src/main.rs)          | CLI parsing, startup, frontend selection, and the stdio drivers in `driver` | `ox-core`, `ox-tui`    |
 
-Layers run from the foundation to the frontends.
+Only `ox-tui` depends on terminal UI libraries such as ratatui and crossterm.
 
-| Crate     | Layer      | Module           | Responsibility                                                                                                                                                                                   |
-| --------- | ---------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ox-core` | Foundation | `file_tracker`   | Per-session Read-before-Edit gate with xxh64 staleness detection                                                                                                                                 |
-| `ox-core` | Foundation | `message`        | Conversation message and content-block types shared by the client, the engine, the session transcript, and the tools                                                                             |
-| `ox-core` | Foundation | `util`           | Shared helpers for environment variables, the filesystem, logging, paths and the project root, server error responses, mutex recovery, text width, local time, TLS, TOML, and enum variant names |
-| `ox-core` | Domain     | `auth`           | The credential requests send, and the stored OAuth logins it falls back on, with browser sign-in, refresh, and write-back                                                                        |
-| `ox-core` | Domain     | `config`         | Layered configuration with per-value provenance, credential resolution, and gateway settings                                                                                                     |
-| `ox-core` | Domain     | `git`            | Git and `gh` probes for the session's repository, which run with ox's secrets withheld                                                                                                           |
-| `ox-core` | Domain     | `model`          | Supported-model catalog, per-model request capabilities, effort and prompt cache TTL, the model settings each request carries, token usage, and pricing                                          |
-| `ox-core` | Domain     | `permission`     | Tool permission gate: modes, deny / ask / allow rules, shipped defaults, path resolution, shell-command parsing, and project file containment                                                    |
-| `ox-core` | Domain     | `prompt`         | System prompt assembly, environment detection, and instruction-file discovery                                                                                                                    |
-| `ox-core` | Services   | `client`         | The `Wire` streaming contract with the request it takes, and the Anthropic Messages API client: request bodies and headers, a retrying transport, SSE, and side queries                          |
-| `ox-core` | Services   | `command`        | The slash-command line parser, the command aliases, and the typed forms parsed into the `Op` each one runs, shared by the TUI and the bare REPL                                                  |
-| `ox-core` | Services   | `protocol`       | The `Op` / `Event` contract between the engine and its frontends, the `OpSender` and `EventSink` that carry it, its serializable payloads, and the notices that word events                      |
-| `ox-core` | Services   | `session`        | SQLite session store whose writes commit under each open session's lock, plus listing, archiving, resume, lazy forks, export and import, transcript repair, and AI titles                        |
-| `ox-core` | Services   | `tool`           | The `Tool` trait, the registry, and the built-in `bash`, `bash_output`, `bash_stop`, `edit`, `glob`, `grep`, `read`, `tasks`, and `write` tools                                                  |
-| `ox-core` | Engine     | `engine`         | The live conversation as a task that every frontend drives through `EngineHandle`, with its turn loop, tool dispatch, and compaction                                                             |
-| `ox-tui`  | Frontend   | `action`         | What the input box, slash commands, modals, and named keys ask the `App` to do                                                                                                                   |
-| `ox-tui`  | Frontend   | `app`            | The root `App`, whose `tokio::select!` loop multiplexes terminal input, engine events, background reports, and the render tick                                                                   |
-| `ox-tui`  | Frontend   | `app_event`      | The results of background work, which reach the `App`'s event loop on one channel                                                                                                                |
-| `ox-tui`  | Frontend   | `clipboard`      | Clipboard writes for chat selections through the system clipboard, a tmux paste buffer, or OSC 52                                                                                                |
-| `ox-tui`  | Frontend   | `components`     | The chat, input, status, task panel, and welcome views                                                                                                                                           |
-| `ox-tui`  | Frontend   | `cursor`         | Terminal-cursor placement for the chat input and the modal line editors                                                                                                                          |
-| `ox-tui`  | Frontend   | `git_probes`     | Background git and `gh` probes behind the status bar's branch and pull-request segments                                                                                                          |
-| `ox-tui`  | Frontend   | `glyphs`         | Visual glyphs shared by the TUI and the stdio drivers                                                                                                                                            |
-| `ox-tui`  | Frontend   | `grapheme`       | The grapheme-aware editing table the prompt and the modal text fields share                                                                                                                      |
-| `ox-tui`  | Frontend   | `keymap`         | Key chords, named key actions that bind a key to its footer hint, and `hint`, the shape every key hint takes                                                                                     |
-| `ox-tui`  | Frontend   | `labels`         | Labels for the resolved settings that `/status`, `/config`, and the welcome screen show                                                                                                          |
-| `ox-tui`  | Frontend   | `markdown`       | Markdown rendering with syntax highlighting                                                                                                                                                      |
-| `ox-tui`  | Frontend   | `modal`          | The modal stack and the shared pickers, overviews, and editors built on it                                                                                                                       |
-| `ox-tui`  | Frontend   | `pending_calls`  | Tool-call correlation shared by live streaming and transcript resume                                                                                                                             |
-| `ox-tui`  | Frontend   | `prompt_history` | Searchable retained prompts with exact draft recall and a multiline preview                                                                                                                      |
-| `ox-tui`  | Frontend   | `session_info`   | The `App`'s snapshot of the running session, which slash commands, the status bar, and the welcome screen read                                                                                   |
-| `ox-tui`  | Frontend   | `slash`          | Slash-command registry and built-in commands                                                                                                                                                     |
-| `ox-tui`  | Frontend   | `terminal`       | Terminal setup and restore, the panic hook, escape-sequence output, and the stdout width query                                                                                                   |
-| `ox-tui`  | Frontend   | `theme`          | Theme palette, built-in themes, and theme file loading                                                                                                                                           |
-| `ox-tui`  | Frontend   | `viewport`       | Wrapping list navigation and modal scroll windows                                                                                                                                                |
-| `ox-tui`  | Frontend   | `wrap`           | Word wrap with continuation indent for styled lines                                                                                                                                              |
-| `ox-tui`  | Frontend   | `lib.rs`         | `run`, which drives the `Engine` through `EngineHandle` in the TUI, and the `Startup` state it opens with                                                                                        |
-| `ox`      | Frontend   | `driver`         | The bare REPL and headless drivers, which drive the `Engine` through `EngineHandle`, plus exit status and shutdown signals                                                                       |
-| `ox`      | Frontend   | `session_list`   | The `ox --list` table of the active or archived sessions in this project or every project                                                                                                        |
-| `ox`      | Frontend   | `main.rs`        | CLI parsing, `ox config check`, config and session resolution, and handing a new `Engine` to a driver or the TUI                                                                                 |
+## Core Module Map
 
-## Dependency Direction
+Layers are ordered from shared primitives to orchestration. A module imports from its own layer or a lower layer.
 
-A module imports only from its own layer and lower layers. A helper that applies domain policy therefore belongs in the domain layer, which is why `git` sits beside `config`: it starts every `git` and `gh` probe with ox's secrets withheld, so no caller can leave them in the child's environment. `auth` sits in the Domain layer beside `config`, although it makes network and Keychain calls, because a resolved config holds the session's credential. `ox-tui` depends on `ox-core`, `ox` depends on both, and no dependency runs the other way. Only `ox-tui` depends on terminal UI crates, such as `ratatui` and `crossterm`. The crate manifests encode this direction and the terminal UI rule, and review of manifest changes enforces both, so `deny.toml` holds no crate-layering bans.
+| Layer      | Modules                                                  | Ownership                                                                                                           |
+| ---------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Foundation | `message`, `file_tracker`, `util`                        | Conversation types, read-before-write tracking, and shared filesystem, text, and runtime primitives                 |
+| Domain     | `auth`, `config`, `git`, `model`, `permission`, `prompt` | Credential and configuration resolution, repository probes, model settings, access policy, and prompt construction  |
+| Services   | `client`, `command`, `protocol`, `session`, `tool`       | Model transport, shared slash-command parsing, the frontend contract, persistent sessions, and tool implementations |
+| Engine     | `engine`                                                 | Operation scheduling, agent turns, tool dispatch, compaction, and the live transcript                               |
+
+`permission` decides whether an access is allowed. `engine::dispatch` applies that policy to calls, obtains approvals, and invokes tools. `tool` owns their preparation and execution.
+
+`session` owns storage and saved-session queries. `engine::transcript::LiveTranscript` coordinates changes to live messages with the writes that record them. Session-changing behavior belongs in the engine so every frontend observes the same result.
+
+Layer placement follows responsibility. `git` applies the credential policy to every repository probe, withholding ox's secrets because repository configuration can select programs Git executes. `auth` belongs beside `config` because credential resolution is part of session configuration, even when it needs Keychain access or HTTP.
+
+## Execution Flow
+
+1. `ox::main` resolves configuration, credentials, and the selected session, constructs an `Engine`, and starts the frontend.
+2. The frontend submits `protocol::Op` values through `EngineHandle::ops`. The engine runs independently and returns `protocol::Event` values. The operation channel is bounded, while events are unbounded so rendering never blocks engine progress.
+3. `engine::turn` sends the transcript through `client`, streams the response, and passes requested tools to `engine::dispatch`. Tool results enter the recorded transcript before the next model request.
+4. The frontend renders progress and session changes. It waits for the active operation's `OpEnded` before submitting another idle-only operation.
+
+[Engine](engine.md) defines operation ordering and turn behavior. [Client](client.md), [Permissions](permissions.md), and [Persistence](persistence.md) describe the corresponding service boundaries.
+
+## Terminal UI
+
+[`App`](../../crates/ox-tui/src/app.rs) owns the frontend's operation lifecycle and composes the chat, input, status, and modal state. Its event loop handles terminal input, engine events, background results, and frame deadlines. Components own their local interaction and rendering state.
+
+Background work returns through [`AppEvent`](../../crates/ox-tui/src/app_event.rs), keeping host probes, clipboard operations, and picker queries off the interaction path. State updates request a redraw, and the frame clock coalesces rendering.
+
+For example, [`prompt_history`](../../crates/ox-tui/src/prompt_history.rs) owns prompt search, preview, and recall into the composer. `session::store::prompt_history` supplies the saved-prompt query, while `modal::pages` runs page reads and delivers their results through `AppEvent`.
+
+[Terminal UI](tui.md) covers component composition, rendering, and input handling. [Modals](modals.md) describes picker interaction and background paging.

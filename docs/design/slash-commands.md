@@ -6,9 +6,7 @@ A slash command is an input line that starts with `/`, which the TUI runs itself
 
 Each command implements `SlashCommand` in its own `slash/<name>.rs` file, or one file per pair such as `/login` and `/logout`, and `BUILT_INS` lists them in alphabetical order. `ox-core`'s `command` module holds the command table, with each name's aliases and the parsers for its typed forms, so the TUI and the `--no-tui` REPL resolve the same names and arguments.
 
-## Dispatch
-
-On submit, `handle_submit_prompt` parses the line with `command::parse_slash`. While an op is in flight, the dispatcher refuses every form of a command whose `SlashCommand::idle_only` holds with a notice, and runs every other command, including an unknown name, which reports its error at once. The command runs on a borrow of the App's `LiveSessionInfo`, live title included, and returns a `SlashOutcome`. `Forward(Action)` hands an action back to the App, which applies a TUI-only action locally and sends an op to the engine. `Prompt(String)` starts a turn with a prompt the command built, which the chat and the prompt queue show as the typed line. `SystemMessage`, `GitDiff`, and `Modal` print a note, append a diff block, or open a modal. `Background` carries a future for slow I/O, which the App runs on its own task off the event loop. Its result returns to the loop as an app event and goes through the same path. A failure returns `Err(String)`, which the dispatcher prefixes with the typed command name.
+## Completion
 
 The popup lists the matching commands in two columns, the name and the description, ranked by name prefix, then alias prefix, then name substring, then alias substring, alphabetically within each tier. It splits the line with the `split_slash` that `parse_slash` uses, so both agree on every name, including namespaced ones such as `/plugin:cmd`. Once a space follows the name, the input shows the command's usage, dim at the cursor, until an argument starts.
 
