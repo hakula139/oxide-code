@@ -66,8 +66,8 @@
 
       packageFor =
         pkgs:
-        self.packages.${pkgs.stdenv.hostPlatform.system}.oxide-code or pkgs.callPackage ./nix/package.nix
-          { };
+        self.packages.${pkgs.stdenv.hostPlatform.system}.oxide-code
+          or (pkgs.callPackage ./nix/package.nix { });
 
       # A key lets the module system deduplicate the module when it is imported twice.
       homeModuleKey = "${self}/flake.nix#homeModules.default";
@@ -256,12 +256,17 @@
           pre-commit = preCommitCheck;
 
           home-manager = import ./nix/home-manager-tests.nix {
-            inherit home-manager pkgs;
+            inherit home-manager oxide-code pkgs;
             homeModule = self.homeModules.default;
           };
 
           overlay =
-            assert (pkgs.extend self.overlays.default).oxide-code.drvPath == oxide-code.drvPath;
+            let
+              callerPkgs = pkgs // {
+                callPackage = _: _: throw "consumer package reconstruction";
+              };
+            in
+            assert (self.overlays.default callerPkgs pkgs).oxide-code.drvPath == oxide-code.drvPath;
             pkgs.emptyFile;
 
           # Runs the test suite in the build sandbox, without the package's release build.

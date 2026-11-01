@@ -5,6 +5,7 @@
 {
   home-manager,
   homeModule,
+  oxide-code,
   pkgs,
 }:
 
@@ -157,11 +158,13 @@ let
 
     testDefaultsInstallAPackageWithoutWritingConfig = {
       expr = {
+        package = defaults.programs.oxide-code.package.drvPath;
         installsPackage = builtins.elem defaults.programs.oxide-code.package defaults.home.packages;
         targets = oxTargets defaults;
       };
 
       expected = {
+        package = oxide-code.drvPath;
         installsPackage = true;
         targets = [ ];
       };
