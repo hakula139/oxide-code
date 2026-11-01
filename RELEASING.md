@@ -4,6 +4,8 @@ Pushing a tag that matches `v[0-9]+.*` starts `.github/workflows/release.yml`, w
 
 Before publication, the workflow pushes the flake's x86_64 Linux and Apple Silicon macOS packages to the `hakula` Cachix cache and pins each as `oxide-code-<tag>-<system>` to retain its closure.
 
+To restore a published tag's cache pin, run `gh workflow run nix-cache.yml -f tag=vX.Y.Z`.
+
 ## Versioning
 
 - **Through 0.1.0:** tag `v0.1.0-alpha.N` from `main` whenever a user-visible batch or a fix for shipped behavior lands. Once only the release gates remain open in the [`v0.1.0` milestone](https://github.com/hakula139/oxide-code/milestone/1), tag `v0.1.0-rc.1`. There is no beta stage.

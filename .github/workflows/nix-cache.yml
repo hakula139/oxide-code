@@ -1,0 +1,55 @@
+name: Nix Cache
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag whose Nix packages to retain in Cachix
+        type: string
+        required: true
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag whose Nix packages to retain in Cachix
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Pin (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-darwin
+            runner: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+        with:
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build and pin package
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          out=$(nix build --no-link --print-out-paths)
+          cachix push hakula "$out"
+          cachix pin hakula "oxide-code-${TAG}-${SYSTEM}" "$out" --keep-revisions 1
