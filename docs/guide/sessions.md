@@ -22,7 +22,7 @@ Releases up to 0.1.0-alpha.9 saved each session as a JSON lines file under `$XDG
 
 A session is saved with its first message, so launching `ox` and quitting without typing leaves nothing behind.
 
-When a tool's output is too long to send whole to the model, the full output is saved under `$XDG_DATA_HOME/ox/artifacts/` in a directory named after the session ID, where the model can read it back.
+Saved tool output lives under `$XDG_DATA_HOME/ox/artifacts/` in per-session directories. Each spill file retains up to 10 MiB, which the model can read back.
 
 ## Listing Sessions
 
