@@ -1,7 +1,5 @@
 # Quickstart
 
-This guide walks through installing `ox`, signing in, and running a first session, including its tool approvals.
-
 ## Install
 
 On Apple Silicon macOS and x86_64 Linux, install with Homebrew:
@@ -36,8 +34,6 @@ Run `ox` to start an interactive terminal session, then type a task and press **
 ❯ Read main.rs and explain the agent loop.
 ```
 
-The assistant uses its built-in tools to read files, run commands, and edit code until it returns a final answer.
-
 In the chat:
 
 - **Scroll**: Use the mouse wheel or **PageUp** / **PageDown**, and press **Ctrl+End** to follow new output again.
@@ -71,25 +67,9 @@ When the prompt offers **A**, pressing it opens the pattern it will allow, such 
 
 See [Permissions](permissions.md) for the other modes, the rest of the prompt's behavior, and how to write patterns.
 
-## What It Can Do
+## Tasks and Background Commands
 
-oxide-code has nine built-in tools:
-
-| Tool          | Purpose                                          |
-| ------------- | ------------------------------------------------ |
-| `bash`        | Run shell commands                               |
-| `bash_output` | Read what a background shell printed             |
-| `bash_stop`   | Stop a background shell                          |
-| `read`        | Read files with line numbers                     |
-| `write`       | Create or overwrite files                        |
-| `edit`        | Replace exact strings in files                   |
-| `glob`        | Find files by pattern                            |
-| `grep`        | Search file contents with regex                  |
-| `tasks`       | Keep a task list for multi-step work, shown live |
-
-The assistant chooses tools based on your request, so specific requests work best. For example, "edit the function signature in `src/lib.rs`" is more useful than "fix the code".
-
-- **Task list**: For multi-step work, the assistant maintains a task list that the TUI displays above the input. It marks completed tasks with `✓`, the task in progress with `●`, and pending tasks with `○`. The list clears when all tasks are done and stays with the session through `/compact` and resume.
+- **Task list**: For multi-step work, the assistant maintains a task list that the TUI displays above the input. The list clears when all tasks are done and stays with the session through `/compact` and resume.
 - **Background shells**: For a dev server, watcher, or long build, the assistant can run a command in the background and read its output with `bash_output` while it continues working. `/status` lists open shells. They keep running if you interrupt a turn with **Esc** and end when you exit or start another session with `/clear`, `/archive`, or `/resume`. To stop one sooner, ask the assistant.
 
 ## Customize Behavior

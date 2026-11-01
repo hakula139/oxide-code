@@ -93,7 +93,7 @@ ox -r --all        # Sessions in every project
 
 This opens the TUI to the same picker as [`/resume`](#mid-session-resume). Press **Enter** to resume the highlighted session or **Esc** to quit `ox` without saving a session. The picker cannot be combined with a prompt, `--continue`, `--list`, `--no-tui`, or `-p`. It requires the TUI and fails when stdout is not a terminal.
 
-On resume, oxide-code loads the saved history and adds new messages to the same session, so it keeps its original ID unless another `ox` process also writes to it, as [Several Processes on One Session](#several-processes-on-one-session) describes. The model's [task list](quickstart.md#what-it-can-do) returns as it was, while background shells do not, since they end with the run that started them. The status line's session cost continues from the requests the session recorded.
+On resume, oxide-code loads the saved history and adds new messages to the same session, so it keeps its original ID unless another `ox` process also writes to it, as [Several Processes on One Session](#several-processes-on-one-session) describes. The model's [task list](quickstart.md#tasks-and-background-commands) returns as it was, while background shells do not, since they end with the run that started them. The status line's session cost continues from the requests the session recorded.
 
 ### Mid-Session Resume
 

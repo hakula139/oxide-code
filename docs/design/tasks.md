@@ -4,24 +4,26 @@ The `tasks` tool lets the model maintain a task list for multi-step work. The en
 
 ## Tool
 
-Each call sends the full list in order, replacing the session's previous list. Each task has a `content` description and a `status` of `pending`, `in_progress`, or `completed`.
+Each call sends the full list in order, replacing the session's previous list.
 
 - **Validation.** Each task's content is collapsed onto one line. If a task has blank content, an unknown status, or a second `in_progress` status, the call is rejected with an error explaining how to fix it. Rejected calls leave the list unchanged.
 - **Clearing.** The list clears when all tasks are completed or when the model sends an empty list. This removes a finished list once the work is done.
-- **Result.** The result reports progress (`Updated the task list: 1 of 3 completed.`) and prompts the model to continue, with a title such as `Updated 3 tasks, 1 completed`. The chat block lists the tasks sent in the call, so the step that finished the list remains visible after the list clears.
+- **Result.** The chat block lists the tasks sent in the call, so the step that finished the list remains visible after the list clears.
 - **Permission.** The tool belongs to the `read` class because it changes nothing in the workspace. It therefore runs without approval in every mode, including `plan`. A path-scoped `read` rule never matches it, while a class-wide `read` deny blocks it.
 
 ## Engine Flow
 
-The tool returns its list in `ToolOutput::tasks`. Immediately after the call's `ToolCallEnd`, `run_tool_round` emits `Event::TasksUpdated` with the full list and records it in `ToolRound`. `agent_turn` retains the last list set by a round as `TurnReport::tasks`, and `Engine::submit_prompt` adopts it when the turn ends. If a turn is cancelled or fails after a `tasks` call, the list is still adopted because the call's result is already in the transcript.
+The engine emits `TasksUpdated` after each successful call and adopts the last list set during the turn, even if the turn is cancelled or fails, because the call's result is already in the transcript.
 
 `/clear` starts the new session with an empty list. After a resumed session restores a non-empty list, `Engine::spawn` and `/resume` emit `TasksUpdated`. A frontend clears its copy on `SessionRolled` and `SessionResumed`, then replaces the list on each event without merging.
 
 ## Frontends
 
-- **TUI.** A task panel above the queued-prompt preview opens with a blank row that sets it apart from the chat, then uses up to six rows for tasks. For longer lists, it shows five tasks and a final row counting the rest, such as `... +3 tasks`. The window starts one task before the task in progress, or before the first unfinished task if none is in progress, keeping the step just finished beside the work ahead. The input, popup, modal, and queued-prompt preview get their rows first. A shorter panel keeps its count row and gives up the gap if retaining it would leave no room for a task row. Markers are `○` for pending, `●` for in progress, and `✓` for completed. The opt-in `task-progress` status-line segment shows `Tasks: 1/3` while the list contains a task.
-- **REPL.** `--no-tui` prints the list to stderr after each update, under a `Tasks: 1/3` header.
-- **Headless.** Every output format prints the list to stderr, as the REPL does. `stream-json` output also includes the `tasks_updated` event and the `tasks` result view, as described in the [headless guide](../guide/headless.md#events).
+| Frontend | Presentation                                                                                         |
+| -------- | ---------------------------------------------------------------------------------------------------- |
+| TUI      | Task panel and optional `task-progress` status-line segment                                          |
+| REPL     | Task list on stderr after each update                                                                |
+| Headless | Task list on stderr and [task events and result views](../guide/headless.md#events) in `stream-json` |
 
 ## Persistence
 
@@ -47,17 +49,12 @@ Manual and automatic compaction both pass the engine's list to `Engine::replace_
 - `crates/ox-core/src/engine/post_compact.rs`: `synthesize_post_compact_message` and `task_reminder`, the block listing tasks after the summary.
 - `crates/ox-core/src/engine/sessions.rs`: `emit_restored_tasks`.
 - `crates/ox-core/src/engine/transcript.rs`: `LiveTranscript::tasks`, adopted after each turn.
-- `crates/ox-core/src/engine/turn.rs`: `TurnReport::tasks`.
-- `crates/ox-core/src/protocol.rs`: `Event::TasksUpdated`.
 - `crates/ox-core/src/session/handle.rs`: `LoadedTranscript::tasks`, the list restored from a resumed transcript.
 - `crates/ox-core/src/session/store.rs`: the `tasks` field in `CompactRecord`.
-- `crates/ox-core/src/tool.rs`: `ToolOutput::tasks`.
 - `crates/ox-core/src/tool/tasks.rs`: `TasksTool`, validation, and `latest`.
-- `crates/ox-core/src/tool/view.rs`: `ToolResultView::Tasks`.
 - `crates/ox-tui/src/app/events.rs`: the panel's updates on `TasksUpdated`, `SessionRolled`, and `SessionResumed`.
 - `crates/ox-tui/src/app/render.rs`: `draw_frame`, which sizes the panel after the higher-priority bands.
 - `crates/ox-tui/src/components/chat/blocks/tool/tasks.rs`: the chat block for a `tasks` call.
 - `crates/ox-tui/src/components/status/line.rs`: the `task-progress` segment.
 - `crates/ox-tui/src/components/tasks.rs`: `TaskPanel` and `window`.
-- `crates/ox-tui/src/glyphs.rs`: `task_marker`.
 - `crates/ox/src/driver/stdio.rs`: `task_lines`, the REPL's task list.
