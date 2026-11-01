@@ -3,10 +3,14 @@ name: Homebrew Formula
 on:
   pull_request:
     paths:
+      - .github/actions/setup-nix/**
       - .github/workflows/formula.yml
       - .github/workflows/release.yml
       - Formula/oxide-code.rb
-      - scripts/update-homebrew-formula.sh
+      - flake.lock
+      - flake.nix
+      - scripts/oxide-code-formula.rb
+      - scripts/update-homebrew-formula.nu
   workflow_call:
     inputs:
       tag:
@@ -42,6 +46,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+        with:
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
       - name: Render formula
         env:
           GH_TOKEN: ${{ github.token }}
@@ -54,7 +63,7 @@ jobs:
           fi
           mkdir sidecars
           gh release download "$tag" --pattern '*.sha256' --dir sidecars
-          ./scripts/update-homebrew-formula.sh "$tag" sidecars
+          nix develop .#lint -c nu scripts/update-homebrew-formula.nu "$tag" sidecars
 
       - name: Put Homebrew on PATH
         if: runner.os == 'Linux'

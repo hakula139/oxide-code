@@ -118,24 +118,6 @@
 
           shellcheck.enable = true;
 
-          comment-width = {
-            enable = true;
-            entry = pkgs.lib.getExe (
-              pkgs.writeShellApplication {
-                name = "check-comment-width";
-                runtimeInputs = [ pkgs.gawk ];
-                text = builtins.readFile ./scripts/check-comment-width.sh;
-              }
-            );
-            types_or = [
-              "nix"
-              "rust"
-              "shell"
-              "toml"
-              "yaml"
-            ];
-          };
-
           rustfmt = {
             enable = true;
             packageOverrides = {
@@ -228,11 +210,8 @@
             sqlite
           ]);
 
-          # git-hooks.nix sets a hooks path relative to the main checkout, which linked worktrees
-          # cannot resolve (cachix/git-hooks.nix#688). Unset it to use the shared hooks directory.
-          # The lock prevents concurrent loads from setting the path during `pre-commit install`,
-          # which rejects it. Install only when the current repository is this project, since
-          # `nix develop` can borrow this toolchain from a sibling repository.
+          # Use shared hooks to avoid the relative path bug in linked worktrees (git-hooks.nix#688).
+          # Serialize installation, and leave sibling repositories that borrow this shell untouched.
           shellHook = ''
             if common=$(${git} rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
               top=$(${git} rev-parse --show-toplevel 2>/dev/null) &&
@@ -256,6 +235,7 @@
             cargo
             cargo-deny
             nodejs
+            nushell
             pnpm
           ];
         };
