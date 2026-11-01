@@ -116,23 +116,17 @@ programs.oxide-code = {
 };
 ```
 
-| Option        | Default                           | Purpose                                                                                                     |
-| ------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `enable`      | `false`                           | Install and configure `ox`                                                                                  |
-| `package`     | Built from this flake with `pkgs` | Package to install, or `null` to manage only the configuration                                              |
-| `checkConfig` | `package != null`                 | Validate the generated `config.toml` at build time with `ox config check`                                   |
-| `settings`    | `{ }`                             | TOML configuration written to `ox/config.toml` when nonempty                                                |
-| `context`     | `""`                              | User instructions for `ox/AGENTS.md`: inline text (any string), or a Nix path or package linked as the file |
+| Option        | Default                    | Purpose                                                                                                     |
+| ------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `enable`      | `false`                    | Install and configure `ox`                                                                                  |
+| `package`     | oxide-code from this flake | Package to install, or `null` to manage only the configuration                                              |
+| `checkConfig` | `package != null`          | Validate the generated `config.toml` at build time with `ox config check`                                   |
+| `settings`    | `{ }`                      | TOML configuration written to `ox/config.toml` when nonempty                                                |
+| `context`     | `""`                       | User instructions for `ox/AGENTS.md`: inline text (any string), or a Nix path or package linked as the file |
 
-File paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. A tag in the input URL pins the module together with the binary. The module owns `config.toml`, so keep local overrides in `ox/config.d/`, where they take precedence.
+File paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. The module owns `config.toml`, so keep local overrides in `ox/config.d/`, where they take precedence.
 
 The default `package` is built from the flake directly, so an override applied to `pkgs.oxide-code` does not reach it. To wrap or patch the package, apply `inputs.oxide-code.overlays.default` to your package set and set `programs.oxide-code.package` to your wrapper around `pkgs.oxide-code`.
-
-The default `package` and the overlay build `ox` with the Rust release of the package set they are applied to, which must meet the Rust version that [From Source via Cargo](#from-source-via-cargo) requires. If your nixpkgs ships an older Rust, drop `nixpkgs.follows` from the input and install the flake's own build, which uses the nixpkgs the flake pins:
-
-```nix
-programs.oxide-code.package = inputs.oxide-code.packages.${pkgs.stdenv.hostPlatform.system}.default;
-```
 
 With `checkConfig` on, the build runs the configured package's [`ox config check`](configuration.md#checking-the-config) on the generated `config.toml`, so a typo or an invalid value fails `home-manager switch` with `ox`'s own error. The check runs as a Nix build user with an empty scratch home directory and no credentials, inside the build sandbox where Nix enables one (macOS does not by default), so a wrapper `package` must start without your home directory or secrets.
 
@@ -154,8 +148,6 @@ The configuration check validates credential declarations without opening secret
 ```bash
 ox --version
 ```
-
-This prints the version string. If you see `command not found`, the binary is not in a directory on your `PATH`. Recheck the move or install step for your method.
 
 ## Update `ox`
 

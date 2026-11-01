@@ -58,7 +58,7 @@ in
     package = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
       default = packageFor pkgs;
-      defaultText = lib.literalMD "oxide-code built from this flake with `pkgs`";
+      defaultText = lib.literalMD "oxide-code from this flake";
       description = ''
         The oxide-code package to install, or `null` to manage only the configuration.
       '';
