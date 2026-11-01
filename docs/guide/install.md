@@ -72,7 +72,7 @@ This builds the `main` branch and installs `ox` to `~/.cargo/bin`. To pin a rele
 
 ### Nix
 
-The repo includes a flake that builds `ox` from source:
+The repo includes a flake whose packages are available from the `hakula` Cachix cache. Nix builds from source when a matching cached package is unavailable:
 
 ```bash
 nix run github:hakula139/oxide-code                     # One-shot
@@ -91,13 +91,12 @@ A ref without a tag builds the `main` branch. Tags from `v0.1.0-alpha.2` onward 
 
 ### Home Manager
 
-The flake's Home Manager module installs `ox` and writes its configuration from Nix options. Add the flake input, pointing each `follows` at your own input of that name and dropping those you don't have:
+The flake's Home Manager module installs `ox` and writes its configuration from Nix options. Keep oxide-code's nixpkgs input pinned upstream to reuse its cached package. Point the other `follows` at your own input of that name and drop those you don't have:
 
 ```nix
 inputs.oxide-code = {
   url = "github:hakula139/oxide-code";
   inputs = {
-    nixpkgs.follows = "nixpkgs";
     git-hooks-nix.follows = "git-hooks-nix";
     home-manager.follows = "home-manager";
     rust-overlay.follows = "rust-overlay";

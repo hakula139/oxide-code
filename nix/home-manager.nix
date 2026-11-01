@@ -3,7 +3,7 @@
 # ==================================================================================================
 
 {
-  mkOxideCode,
+  packageFor,
 }:
 
 {
@@ -57,7 +57,7 @@ in
 
     package = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
-      default = mkOxideCode pkgs;
+      default = packageFor pkgs;
       defaultText = lib.literalMD "oxide-code built from this flake with `pkgs`";
       description = ''
         The oxide-code package to install, or `null` to manage only the configuration.

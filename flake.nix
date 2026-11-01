@@ -64,9 +64,10 @@
         in
         lib.genAttrs outputs (output: builtins.mapAttrs (_: attrs: attrs.${output}) bySystem);
 
-      # The package builds with the Rust compiler of the given package set, so consumers that follow
-      # their own nixpkgs never fetch the toolchain `rust-toolchain.toml` pins.
-      mkOxideCode = pkgs: pkgs.callPackage ./nix/package.nix { };
+      packageFor =
+        pkgs:
+        self.packages.${pkgs.stdenv.hostPlatform.system}.oxide-code or pkgs.callPackage ./nix/package.nix
+          { };
 
       # A key lets the module system deduplicate the module when it is imported twice.
       homeModuleKey = "${self}/flake.nix#homeModules.default";
@@ -75,13 +76,13 @@
     # Overlay and Home Manager Module
     # ----------------------------------------------------------------------------------------------
     {
-      overlays.default = final: _: { oxide-code = mkOxideCode final; };
+      overlays.default = final: _: { oxide-code = packageFor final; };
 
       homeModules.default = {
         _class = "homeManager";
         _file = homeModuleKey;
         key = homeModuleKey;
-        imports = [ (import ./nix/home-manager.nix { inherit mkOxideCode; }) ];
+        imports = [ (import ./nix/home-manager.nix { inherit packageFor; }) ];
       };
     }
     // eachSystem (
@@ -99,7 +100,7 @@
           ];
         });
 
-        oxide-code = mkOxideCode pkgs;
+        oxide-code = pkgs.callPackage ./nix/package.nix { };
 
         # ------------------------------------------------------------------------------------------
         # Pre-commit Hooks
