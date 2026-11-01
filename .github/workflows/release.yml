@@ -206,10 +206,42 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
+  nix:
+    name: Pin Nix package (${{ matrix.system }})
+    if: github.ref_type == 'tag' && !inputs.notes
+    needs: tagged-ci
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-darwin
+            runner: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
+        with:
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build and pin package
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          out=$(nix build --no-link --print-out-paths)
+          cachix push hakula "$out"
+          cachix pin hakula "oxide-code-${GITHUB_REF_NAME}-${SYSTEM}" "$out" --keep-revisions 1
+
   publish:
     name: Publish GitHub Release
     if: github.ref_type == 'tag'
-    needs: [tagged-ci, build]
+    needs: [tagged-ci, build, nix]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -248,7 +280,14 @@ jobs:
             options+=(--prerelease)
           fi
 
-          gh release create "$GITHUB_REF_NAME" release-assets/* "${options[@]}"
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/oxide-code-x86_64-unknown-linux-gnu.tar.gz \
+            release-assets/oxide-code-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+            release-assets/oxide-code-aarch64-apple-darwin.tar.gz \
+            release-assets/oxide-code-aarch64-apple-darwin.tar.gz.sha256 \
+            release-assets/oxide-code-x86_64-pc-windows-msvc.zip \
+            release-assets/oxide-code-x86_64-pc-windows-msvc.zip.sha256 \
+            "${options[@]}"
 
   formula:
     name: Check Homebrew Formula
