@@ -7,6 +7,7 @@ pub mod listing;
 pub(crate) mod load;
 #[cfg(test)]
 pub(crate) mod local_testing;
+pub mod prompt_history;
 mod schema;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

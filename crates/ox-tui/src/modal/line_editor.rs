@@ -370,8 +370,8 @@ mod tests {
 
                     assert_eq!(editor.text(), text, "{name}: {grapheme:?}");
 
-                    let redone = editor
-                        .handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+                    let redone =
+                        editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
                     assert!(redone, "{name}: {grapheme:?}");
 
                     assert_eq!(editor.text(), "ab", "{name}: {grapheme:?}");
@@ -449,7 +449,7 @@ mod tests {
                 assert_eq!(editor.text(), "🇦x🇧", "{code:?}");
 
                 let redone =
-                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
                 assert!(redone, "{code:?}");
 
                 assert_eq!(editor.text(), "🇦🇧", "{code:?}");
@@ -474,8 +474,7 @@ mod tests {
 
             assert_eq!(editor.text(), "👨👩");
 
-            let redone =
-                editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+            let redone = editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
             assert!(redone);
 
             assert_eq!(editor.text(), "👨‍👩");
@@ -530,7 +529,7 @@ mod tests {
                 assert_eq!(editor.text(), initial, "{initial:?}: {text:?}");
 
                 let redone =
-                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
                 assert!(redone, "{initial:?}: {text:?}");
 
                 assert_eq!(editor.text(), expected, "{initial:?}: {text:?}");
@@ -624,7 +623,7 @@ mod tests {
                 assert_eq!(editor.text(), "❤", "cap {cap}: {text:?}");
 
                 let redone =
-                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
 
                 assert_eq!(redone, changed, "cap {cap}: {text:?}");
                 assert_eq!(editor.text(), expected, "cap {cap}: {text:?}");
@@ -658,7 +657,7 @@ mod tests {
                 assert_eq!(editor.textarea.yank_text(), "saved", "{text:?}");
 
                 let redone =
-                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+                    editor.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
                 assert!(redone, "{text:?}");
 
                 assert_eq!(editor.text(), format!("{initial}\u{301}"), "{text:?}");

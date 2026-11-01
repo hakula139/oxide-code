@@ -18,6 +18,8 @@ pub(crate) enum Action {
     /// Text submitted from the input box, which runs as a slash command or a prompt, or joins the
     /// queue while a turn runs.
     Submit(String),
+    /// Replaces the draft without submitting it or changing queued prompts.
+    ReplaceInput(String),
     Op(Op),
     /// A prompt built from `line`, whose slash command has already echoed in chat. A fresh session
     /// takes `line` as its first-prompt title, and auto-compaction replays it. A failed turn hands
@@ -61,17 +63,25 @@ pub(crate) fn next_mode(current: Mode, direction: Direction) -> Mode {
 pub(crate) enum AppAction {
     /// Switches the chat between its compact and expanded views.
     ToggleExpanded,
+    SearchPrompts,
 }
 
-/// Ctrl+O, which toggles the expanded chat view.
+/// Ctrl+O toggles the expanded chat view.
 pub(crate) const TOGGLE_EXPANDED: KeyChord = KeyChord::ctrl('o');
 
 /// The app's key actions, which take their keys before the input box sees them.
-pub(crate) const APP_KEYMAP: Keymap<AppAction, ()> = Keymap::new(&[KeyAction {
-    action: AppAction::ToggleExpanded,
-    key: TOGGLE_EXPANDED,
-    effect: |()| Some("expand"),
-}]);
+pub(crate) const APP_KEYMAP: Keymap<AppAction, ()> = Keymap::new(&[
+    KeyAction {
+        action: AppAction::ToggleExpanded,
+        key: TOGGLE_EXPANDED,
+        effect: |()| Some("expand"),
+    },
+    KeyAction {
+        action: AppAction::SearchPrompts,
+        key: KeyChord::ctrl('r'),
+        effect: |()| Some("search prompts"),
+    },
+]);
 
 #[cfg(test)]
 mod tests {
@@ -83,17 +93,16 @@ mod tests {
         use super::*;
 
         #[test]
-        fn binds_ctrl_o_to_the_expanded_view_toggle_and_names_its_effect() {
-            let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        fn binds_app_actions_and_names_their_effects() {
+            for (key, action, hint) in [
+                ('o', AppAction::ToggleExpanded, "Ctrl+O to expand"),
+                ('r', AppAction::SearchPrompts, "Ctrl+R to search prompts"),
+            ] {
+                let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL);
 
-            assert_eq!(
-                APP_KEYMAP.action_for(&ctrl_o),
-                Some(AppAction::ToggleExpanded),
-            );
-            assert_eq!(
-                APP_KEYMAP.hint(AppAction::ToggleExpanded, &()).as_deref(),
-                Some("Ctrl+O to expand"),
-            );
+                assert_eq!(APP_KEYMAP.action_for(&event), Some(action), "{key}");
+                assert_eq!(APP_KEYMAP.hint(action, &()).as_deref(), Some(hint), "{key}");
+            }
         }
     }
 

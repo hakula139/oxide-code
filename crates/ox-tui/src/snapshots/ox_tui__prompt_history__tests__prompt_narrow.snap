@@ -1,0 +1,16 @@
+---
+source: crates/ox-tui/src/prompt_history.rs
+expression: "render_modal(&mut history.picker, 25, 12).join(\"\\n\")"
+---
+Search prompts
+This project
+
+/ Type to filter (substri
+
+> 2026-01-01    first\...
+Preview 9-11 / 16 (PageUp
+line 8
+line 9
+line 10
+
+Enter to edit  ·  Esc ...

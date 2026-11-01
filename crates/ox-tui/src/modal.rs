@@ -6,6 +6,7 @@ pub(crate) mod chrome;
 pub(crate) mod kv_overview;
 pub(crate) mod line_editor;
 pub(crate) mod list_picker;
+pub(crate) mod pages;
 pub(crate) mod searchable_list;
 
 use std::fmt;
@@ -19,10 +20,10 @@ use ratatui::widgets::Paragraph;
 
 use ox_core::protocol::{Event, Op};
 
+use self::pages::ModalPage;
 use crate::action::Action;
 use crate::glyphs::HORIZONTAL_RULE;
 use crate::keymap::{CTRL_C, KeyChord, is_unmodified};
-use crate::slash::PageEnd;
 use crate::theme::Theme;
 
 const TOP_BORDER_HEIGHT: u16 = 1;
@@ -52,9 +53,9 @@ pub(crate) trait Modal: Send {
         UpdateReply::Unclaimed
     }
 
-    /// Receives a page of sessions that a `/resume` picker's worker read, wherever the modal sits
+    /// Receives a typed page that a picker's worker read, wherever the modal sits
     /// on the stack. Returns the page when it answers another modal's request. Default returns it.
-    fn on_sessions_page(&mut self, page: PageEnd) -> Option<PageEnd> {
+    fn on_page(&mut self, page: ModalPage) -> Option<ModalPage> {
         Some(page)
     }
 
@@ -202,11 +203,11 @@ impl ModalStack {
 
     /// Offers `page` to each modal from the top until one takes it. Returns whether one did, so the
     /// caller repaints.
-    pub(crate) fn deliver_sessions_page(&mut self, page: PageEnd) -> bool {
+    pub(crate) fn deliver_page(&mut self, page: ModalPage) -> bool {
         self.stack
             .iter_mut()
             .rev()
-            .try_fold(page, |page, modal| modal.on_sessions_page(page))
+            .try_fold(page, |page, modal| modal.on_page(page))
             .is_none()
     }
 

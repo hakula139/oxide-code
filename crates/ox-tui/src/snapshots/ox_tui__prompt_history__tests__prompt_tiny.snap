@@ -1,0 +1,10 @@
+---
+source: crates/ox-tui/src/prompt_history.rs
+expression: "render_modal(&mut history.picker, 10, 7).join(\"\\n\")"
+---
+Search ...
+This pr...
+
+/ Type to
+
+> 2026-...
