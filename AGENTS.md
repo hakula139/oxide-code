@@ -20,7 +20,7 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 ├── Formula/                                # Homebrew formula, served from this repo as a tap
 ├── licenses/                               # Third-party notice templates and bundled asset licenses
 ├── nix/                                    # Nix package and Home Manager module with its tests
-└── scripts/                                # Homebrew formula renderer
+└── scripts/                                # Homebrew formula renderer and Ruby template
 ```
 
 ## Read Before You Edit

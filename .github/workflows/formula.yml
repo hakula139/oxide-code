@@ -9,6 +9,7 @@ on:
       - Formula/oxide-code.rb
       - flake.lock
       - flake.nix
+      - scripts/oxide-code-formula.rb
       - scripts/update-homebrew-formula.nu
   workflow_call:
     inputs:
