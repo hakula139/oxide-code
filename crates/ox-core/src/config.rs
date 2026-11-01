@@ -2410,8 +2410,12 @@ mod tests {
         async fn permission_invalid_built_in_pattern_errors() {
             let dir = tempfile::tempdir().unwrap();
 
+            let config_home = dir.path().join("config");
             let err = Box::pin(temp_env::async_with_vars(
-                [(HOME_VAR, Some("!home"))],
+                [
+                    (HOME_VAR, Some(Path::new("!home"))),
+                    ("XDG_CONFIG_HOME", Some(&config_home)),
+                ],
                 load_with(&dir, &[]),
             ))
             .await
@@ -2419,7 +2423,7 @@ mod tests {
 
             assert_eq!(
                 format!("{err:#}"),
-                "invalid built-in `ssh` pattern \"!home/.ssh\": \
+                "invalid built-in `git` pattern \"!home/.git-credentials\": \
                  a pattern cannot start with `!`, since patterns have no negation. \
                  Write the paths to match instead, or turn off the built-in rule that covers them."
             );
