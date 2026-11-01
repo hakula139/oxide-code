@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde::Deserialize;
 
@@ -197,15 +198,13 @@ async fn edit_file(
         new_string: new_string.to_owned(),
         replace_all,
     };
-    let content_bytes = super::file::read_validated(path, FileVerb::Edit).await?;
     let key = super::file::tracker_key(path).await;
-    ctx.tracker
-        .verify_current_content(&key, &content_bytes, GatePurpose::Edit)
-        .map_err(|e| e.to_string())?;
-
-    let (expected, updated, edited, view) = super::run_blocking(move || {
-        let (updated, edited, view) = replacement.apply(&content_bytes)?;
-        Ok((content_bytes, updated, edited, view))
+    let tracker = Arc::clone(&ctx.tracker);
+    let (checked, key, updated, edited, view) = super::run_blocking(move || {
+        let checked =
+            super::file::open_gated(&replacement.path, &key, &tracker, GatePurpose::Edit)?;
+        let (updated, edited, view) = replacement.apply(checked.content())?;
+        Ok((checked, key, updated, edited, view))
     })
     .await?;
 
@@ -213,7 +212,7 @@ async fn edit_file(
         .write_and_record(
             &ctx.tool_use_id,
             view,
-            super::file::write_file(path.to_owned(), updated.into_bytes(), Some(expected)),
+            super::file::rewrite_file(checked, key, updated.into_bytes()),
         )
         .await
         .map_err(|error| format!("{error:#}"))?;
@@ -230,7 +229,7 @@ struct Edited {
 /// One edit call's replacement, which runs on the blocking pool since a `replace_all` over a large
 /// file is CPU-bound.
 struct Replacement {
-    /// The resolved file path, for error messages.
+    /// The resolved file path, which the edit opens and its errors name.
     path: PathBuf,
     old_string: String,
     new_string: String,
@@ -840,6 +839,11 @@ mod tests {
 
             result.unwrap();
             assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world");
+            assert_eq!(
+                ctx.tracker
+                    .verify_current_content(&path, b"goodbye world", GatePurpose::Edit),
+                Ok(()),
+            );
         }
 
         #[tokio::test]
