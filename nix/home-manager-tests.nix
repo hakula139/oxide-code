@@ -12,10 +12,16 @@
 let
   inherit (pkgs) lib;
 
+  callerPkgs = pkgs // {
+    callPackage = _: _: throw "consumer package reconstruction";
+  };
+
   evalHome =
     options:
     home-manager.lib.homeManagerConfiguration {
       inherit pkgs;
+      # Home Manager imports nixpkgs again, so pass the caller as the module argument.
+      extraSpecialArgs.pkgs = callerPkgs;
       modules = [
         homeModule
         {
