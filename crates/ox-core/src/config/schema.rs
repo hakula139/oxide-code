@@ -15,8 +15,7 @@ use super::StatusLineSegment;
 use super::compaction::ThresholdPercent;
 use crate::model::{Effort, PromptCacheTtl};
 use crate::permission::defaults::Shipped;
-use crate::permission::rule::Rule;
-use crate::permission::{Mode, PermissionClass, Tier};
+use crate::permission::{Mode, PermissionClass};
 use crate::util::env::whole_number_in;
 use crate::util::path::expand_absolute;
 
@@ -145,8 +144,8 @@ pub(super) struct CompactionTable {
     pub(super) threshold_percent: Option<u8>,
 }
 
-/// The tier tables hold raw patterns and `extra_roots` raw paths, which the loader parses per file,
-/// so a malformed entry fails at startup. `defaults` turns shipped rule groups off by name.
+/// Raw patterns and roots compile after layering, retaining each entry's file for errors.
+/// `defaults` turns shipped rule groups off by name.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct PermissionTable {
@@ -178,24 +177,6 @@ impl TierTable {
             (PermissionClass::Net, &self.net),
             (PermissionClass::Mcp, &self.mcp),
         ]
-    }
-
-    /// Parses every pattern of the `tier` table, naming the key and pattern of a malformed one.
-    pub(super) fn rules(&self, tier: Tier) -> Result<Vec<Rule>> {
-        self.classes()
-            .into_iter()
-            .flat_map(|(class, patterns)| {
-                patterns
-                    .iter()
-                    .flatten()
-                    .map(move |pattern| (class, pattern))
-            })
-            .map(|(class, pattern)| {
-                Rule::parse(class, pattern).with_context(|| {
-                    format!("invalid permission.{tier}.{class} pattern {pattern:?}")
-                })
-            })
-            .collect()
     }
 }
 

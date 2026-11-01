@@ -29,15 +29,15 @@ pub(crate) use self::base_url::BaseUrl;
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::credentials::{AuthState, CredentialError};
 use self::gateway::{GatewayCompat, GatewaySnapshot, ResolvedGateway};
-use self::load::Loaded;
+use self::load::{Loaded, ParsedPermission};
 use self::merge::Origins;
 use self::provenance::{Provenance, Source, Sourced, TierPattern};
-use self::schema::{ClientAuth, FileConfig, PermissionTable, ThemeTable, TierTable, TuiTable};
+use self::schema::{ClientAuth, FileConfig, PermissionTable, ThemeTable, TuiTable};
 use crate::auth::oauth::ClaudeCodeKeychain;
 use crate::auth::{self, AuthSource, LoginUnavailable};
 use crate::model::{Effort, ModelSettings, ModelSpec, PromptCacheTtl};
 use crate::permission::defaults::Shipped;
-use crate::permission::{Mode, Policy, Tier, Workspace};
+use crate::permission::{Mode, Policy, Workspace};
 use crate::util::env;
 use crate::util::path::{expand_absolute, expand_user, project_root, tildify};
 use crate::util::tls::{PlatformTrust, load_extra_ca_certs};
@@ -259,7 +259,11 @@ impl Config {
 
     /// Resolves the config, checking the CA bundle it picks with `check_ca_bundle`.
     fn resolve(cwd: &Path, check_ca_bundle: fn(&Path) -> Result<()>) -> Result<Self> {
-        let Loaded { config, origins } = load::load(cwd, &project_root(cwd))?;
+        let Loaded {
+            config,
+            origins,
+            permission: parsed_permission,
+        } = load::load(cwd, &project_root(cwd))?;
         let FileConfig {
             client,
             permission,
@@ -308,7 +312,7 @@ impl Config {
             model.resolve_max_tokens(max_tokens.value),
         )?;
 
-        let permission = resolve_permission(permission, &origins, cwd)?;
+        let permission = resolve_permission(permission, parsed_permission, &origins, cwd)?;
 
         let tui = resolve_tui(tui, &origins)?;
 
@@ -654,25 +658,21 @@ struct ResolvedPermission {
 /// `OX_PERMISSION_MODE`, which wins over the file mode.
 fn resolve_permission(
     file: PermissionTable,
+    parsed: ParsedPermission,
     origins: &Origins,
     cwd: &Path,
 ) -> Result<ResolvedPermission> {
-    let roots = file.extra_roots.unwrap_or_default();
-    let workspace = Workspace::resolve(cwd, &roots)?;
-    let extra_roots = origins.sourced_elements("permission.extra_roots", roots);
+    let ParsedPermission {
+        roots,
+        tiers: [deny, ask, allow],
+        extra_roots,
+        rules,
+    } = parsed;
+    let workspace = Workspace::with_roots(cwd, roots);
     let mode = env_parse::<Mode>("OX_PERMISSION_MODE")?
         .or_else(|| origins.sourced("permission.mode", file.mode))
         .unwrap_or_else(|| Sourced::fallback(Mode::default()));
 
-    let tiers = [
-        (Tier::Deny, file.deny.unwrap_or_default()),
-        (Tier::Ask, file.ask.unwrap_or_default()),
-        (Tier::Allow, file.allow.unwrap_or_default()),
-    ];
-    let rules = tiers
-        .iter()
-        .flat_map(|(tier, table)| tier_patterns(*tier, table, origins))
-        .collect();
     let disabled_defaults: Vec<_> = file
         .defaults
         .unwrap_or_default()
@@ -685,9 +685,8 @@ fn resolve_permission(
             )
         })
         .collect();
-    let [deny, ask, allow] = tiers.map(|(tier, table)| table.rules(tier));
     let disabled: Vec<_> = disabled_defaults.iter().map(|group| group.value).collect();
-    let policy = Policy::resolve(mode.value, deny?, ask?, allow?, &disabled, &workspace)?;
+    let policy = Policy::resolve(mode.value, deny, ask, allow, &disabled, &workspace)?;
     Ok(ResolvedPermission {
         policy,
         workspace,
@@ -696,22 +695,6 @@ fn resolve_permission(
         rules,
         disabled_defaults,
     })
-}
-
-/// The patterns of the `tier` table, each with the layer that added it.
-fn tier_patterns(tier: Tier, table: &TierTable, origins: &Origins) -> Vec<Sourced<TierPattern>> {
-    table
-        .classes()
-        .into_iter()
-        .flat_map(|(class, patterns)| {
-            let patterns = patterns.iter().flatten().map(|pattern| TierPattern {
-                tier,
-                class,
-                pattern: pattern.clone(),
-            });
-            origins.sourced_elements(&format!("permission.{tier}.{class}"), patterns)
-        })
-        .collect()
 }
 
 // ── Env Overrides ──
@@ -763,7 +746,7 @@ mod tests {
     use crate::auth::Auth;
     use crate::auth::oauth::LoginError;
     use crate::auth::oauth::testing::{creds_json, write_creds};
-    use crate::permission::{Access, Decision, PermissionClass};
+    use crate::permission::{Access, Decision, PermissionClass, Tier};
     use crate::util::fs::testing::deny_read_access;
     use crate::util::path::testing::HOME_VAR;
     use crate::util::tls::local_testing::TEST_CA_PEM;

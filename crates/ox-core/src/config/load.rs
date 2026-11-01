@@ -8,10 +8,11 @@ use toml::Table;
 use tracing::debug;
 
 use super::merge::{Origins, merge};
-use super::provenance::Layer;
-use super::schema::FileConfig;
+use super::provenance::{Layer, Source, Sourced, TierPattern};
+use super::schema::{FileConfig, PermissionTable, TierTable};
 use crate::permission::project::{ProjectFileError, resolve_project_file};
-use crate::permission::{Tier, extra_root};
+use crate::permission::rule::Rule;
+use crate::permission::{Anchor, Tier};
 use crate::util::path::{XdgBase, app_dir, tildify};
 use crate::util::text::list_with_and;
 use crate::util::toml::{error_location, redacted_message};
@@ -26,6 +27,17 @@ const PROJECT_DIR: &str = ".ox";
 pub(super) struct Loaded {
     pub(super) config: FileConfig,
     pub(super) origins: Origins,
+    pub(super) permission: ParsedPermission,
+}
+
+/// Compiled permission entries with their configured spellings and source layers.
+pub(super) struct ParsedPermission {
+    pub(super) roots: Vec<Anchor>,
+    /// Rules in deny / ask / allow order.
+    pub(super) tiers: [Vec<Rule>; 3],
+
+    pub(super) extra_roots: Vec<Sourced<String>>,
+    pub(super) rules: Vec<Sourced<TierPattern>>,
 }
 
 /// Loads the user file, its drop-ins in name order, then the project file nearest `cwd` within
@@ -46,10 +58,91 @@ fn load_layers(layers: Vec<Layer>) -> Result<Loaded> {
     }
 
     let (merged, origins) = merge(tables);
-    let config = merged
+    let config: FileConfig = merged
         .try_into()
         .context("invalid config after merging layers")?;
-    Ok(Loaded { config, origins })
+    let permission = ParsedPermission::parse(&config.permission, &origins)?;
+    Ok(Loaded {
+        config,
+        origins,
+        permission,
+    })
+}
+
+// ── Permission Parsing ──
+
+impl ParsedPermission {
+    fn parse(file: &PermissionTable, origins: &Origins) -> Result<Self> {
+        let extra_roots = origins.sourced_elements(
+            "permission.extra_roots",
+            file.extra_roots.iter().flatten().cloned(),
+        );
+        let roots = extra_roots
+            .iter()
+            .map(|root| {
+                Anchor::resolve(&root.value).with_context(|| invalid_permission_file(&root.source))
+            })
+            .collect::<Result<_>>()?;
+        let tables = [
+            (Tier::Deny, &file.deny),
+            (Tier::Ask, &file.ask),
+            (Tier::Allow, &file.allow),
+        ];
+        let rules: Vec<_> = tables
+            .into_iter()
+            .flat_map(|(tier, table)| {
+                table
+                    .iter()
+                    .flat_map(move |table| tier_patterns(tier, table, origins))
+            })
+            .collect();
+        let mut tiers = [Vec::new(), Vec::new(), Vec::new()];
+        for sourced in &rules {
+            let TierPattern {
+                tier,
+                class,
+                pattern,
+            } = &sourced.value;
+            let rule = Rule::parse(*class, pattern)
+                .with_context(|| format!("invalid permission.{tier}.{class} pattern {pattern:?}"))
+                .with_context(|| invalid_permission_file(&sourced.source))?;
+            let index = match tier {
+                Tier::Deny => 0,
+                Tier::Ask => 1,
+                Tier::Allow => 2,
+            };
+            tiers[index].push(rule);
+        }
+        Ok(Self {
+            roots,
+            tiers,
+            extra_roots,
+            rules,
+        })
+    }
+}
+
+fn invalid_permission_file(source: &Source) -> String {
+    let Source::File(layer) = source else {
+        unreachable!("permission lists come from config files");
+    };
+    format!("invalid config at {}", layer.path().display())
+}
+
+/// The patterns of the `tier` table, each with the layer that added it.
+fn tier_patterns(tier: Tier, table: &TierTable, origins: &Origins) -> Vec<Sourced<TierPattern>> {
+    table
+        .classes()
+        .into_iter()
+        .flat_map(|(class, patterns)| {
+            let patterns = patterns.iter().flatten().map(|pattern| TierPattern {
+                tier,
+                class,
+                pattern: pattern.clone(),
+            });
+            origins.sourced_elements(&format!("permission.{tier}.{class}"), patterns)
+        })
+        .collect()
 }
 
 // ── Discovery ──
@@ -166,8 +259,8 @@ pub fn user_config_path() -> Option<PathBuf> {
 
 // ── Reading ──
 
-/// Parses and validates one layer. A missing user file returns `Ok(None)`. Unreadable files,
-/// dangling drop-in symlinks, forbidden project keys, and invalid values return errors.
+/// Reads one layer and validates its schema and project keys. A missing user file returns
+/// `Ok(None)`. Unreadable files and dangling drop-in symlinks return errors.
 fn read_layer(layer: &Layer) -> Result<Option<Table>> {
     let path = layer.path();
     let content = match std::fs::read_to_string(path) {
@@ -180,8 +273,6 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
         }
     };
 
-    // The typed parse reports unknown keys and bad values with their line and column, and the rules
-    // and roots resolve here so a malformed one names its file before the lists concatenate.
     let invalid = || format!("invalid config at {}", path.display());
     // A value can be a credential, so a private key or a project file keeps only ox's own words
     // from a parser message: field names, expected shapes, and accepted values.
@@ -211,20 +302,7 @@ fn read_layer(layer: &Layer) -> Result<Option<Table>> {
         }
         reject_project_keys(&table, path)?;
     }
-    let config = parsed.map_err(invalid_toml)?;
-    let permission = &config.permission;
-    for (tier, table) in [
-        (Tier::Deny, &permission.deny),
-        (Tier::Ask, &permission.ask),
-        (Tier::Allow, &permission.allow),
-    ] {
-        if let Some(table) = table {
-            table.rules(tier).with_context(invalid)?;
-        }
-    }
-    for raw in permission.extra_roots.iter().flatten() {
-        extra_root(raw).with_context(invalid)?;
-    }
+    parsed.map_err(invalid_toml)?;
     debug!(path = %path.display(), "loaded config");
     Ok(Some(table))
 }
@@ -388,8 +466,9 @@ mod tests {
                 "#},
             );
 
-            let Loaded { config, origins } =
-                load_layers(discover(Some(dir.path()), None).unwrap()).unwrap();
+            let Loaded {
+                config, origins, ..
+            } = load_layers(discover(Some(dir.path()), None).unwrap()).unwrap();
 
             assert_eq!(config.client.model.as_deref(), Some("late-model"));
             assert_eq!(config.client.effort, Some(Effort::Low));
@@ -475,11 +554,103 @@ mod tests {
                 "tui.show_thinking = true",
             );
 
-            let Loaded { config, origins } =
-                load_layers(discover(Some(dir.path()), None).unwrap()).unwrap();
+            let Loaded {
+                config, origins, ..
+            } = load_layers(discover(Some(dir.path()), None).unwrap()).unwrap();
 
             assert_eq!(config.tui.show_thinking, Some(true));
             assert_eq!(origins.into_layers(), [Layer::DropIn(drop_in)]);
+        }
+
+        #[test]
+        fn names_the_file_tier_and_class_of_a_malformed_pattern() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write(
+                &dir.path().join("config.toml"),
+                r#"permission.ask.exec = ["git push", "ls | sh"]"#,
+            );
+
+            let err = load_layers(vec![Layer::User(path.clone())])
+                .err()
+                .expect("a malformed pattern");
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid config at {}: invalid permission.ask.exec pattern \"ls | sh\": \
+                     it must be one simple command, such as `cargo test *`. \
+                     Write a pattern for each command of a chain or pipeline.",
+                    path.display()
+                )
+            );
+        }
+
+        #[test]
+        fn parses_each_class_list_in_its_own_grammar() {
+            // Each pattern is valid in another class's grammar.
+            let dir = tempfile::tempdir().unwrap();
+            for (tier, class, pattern) in [
+                ("deny", "read", "!.env"),
+                ("ask", "edit", "!.env"),
+                ("ask", "exec", "src/*.rs"),
+                ("allow", "net", "github/get_me"),
+                ("allow", "mcp", "api.example.com"),
+            ] {
+                let path = write(
+                    &dir.path().join("config.toml"),
+                    &format!("permission.{tier}.{class} = [{pattern:?}]"),
+                );
+
+                let err = load_layers(vec![Layer::User(path.clone())])
+                    .err()
+                    .expect(pattern);
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.starts_with(&format!(
+                        "invalid config at {}: \
+                         invalid permission.{tier}.{class} pattern {pattern:?}: ",
+                        path.display()
+                    )),
+                    "{msg}"
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_invalid_lower_entries_when_higher_layers_set_the_same_keys() {
+            let dir = tempfile::tempdir().unwrap();
+            for (body, expected) in [
+                (
+                    r#"permission.ask.exec = ["ls | sh"]"#,
+                    "invalid permission.ask.exec",
+                ),
+                (
+                    r#"permission.extra_roots = ["shared"]"#,
+                    "invalid extra root",
+                ),
+                (r#"permission.mode = "bypass""#, "permission.mode"),
+            ] {
+                let user = write(&dir.path().join("config.toml"), body);
+                write(
+                    &dir.path().join("config.d/10-valid.toml"),
+                    indoc! {r#"
+                        [permission]
+                        mode = "manual"
+                        extra_roots = []
+                        ask.exec = ["git status"]
+                    "#},
+                );
+
+                let err = load_layers(discover(Some(dir.path()), None).unwrap())
+                    .err()
+                    .expect("invalid lower entries must propagate");
+
+                let message = format!("{err:#}");
+                assert!(
+                    message.starts_with(&format!("invalid config at {}:", user.display())),
+                    "{message}"
+                );
+                assert!(message.contains(expected), "{body}: {message}");
+            }
         }
 
         #[test]
@@ -940,56 +1111,6 @@ mod tests {
                     .starts_with(&format!("failed to read config at {}", path.display())),
                 "{err:#}"
             );
-        }
-
-        #[test]
-        fn names_the_file_tier_and_class_of_a_malformed_pattern() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = write(
-                &dir.path().join("config.toml"),
-                r#"permission.ask.exec = ["git push", "ls | sh"]"#,
-            );
-
-            let err = read_layer(&Layer::User(path.clone())).expect_err("a malformed pattern");
-            assert_eq!(
-                format!("{err:#}"),
-                format!(
-                    "invalid config at {}: invalid permission.ask.exec pattern \"ls | sh\": \
-                     it must be one simple command, such as `cargo test *`. \
-                     Write a pattern for each command of a chain or pipeline.",
-                    path.display()
-                )
-            );
-        }
-
-        #[test]
-        fn parses_each_class_list_in_its_own_grammar() {
-            // Each pattern parses in another class's grammar, so the error shows that the key's own
-            // grammar rejected it.
-            let dir = tempfile::tempdir().unwrap();
-            for (tier, class, pattern) in [
-                ("deny", "read", "!.env"),
-                ("ask", "edit", "!.env"),
-                ("ask", "exec", "src/*.rs"),
-                ("allow", "net", "github/get_me"),
-                ("allow", "mcp", "api.example.com"),
-            ] {
-                let path = write(
-                    &dir.path().join("config.toml"),
-                    &format!("permission.{tier}.{class} = [{pattern:?}]"),
-                );
-
-                let err = read_layer(&Layer::User(path.clone())).expect_err(pattern);
-                let msg = format!("{err:#}");
-                assert!(
-                    msg.starts_with(&format!(
-                        "invalid config at {}: \
-                         invalid permission.{tier}.{class} pattern {pattern:?}: ",
-                        path.display()
-                    )),
-                    "{msg}"
-                );
-            }
         }
 
         #[test]
