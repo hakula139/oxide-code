@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "ox"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -2016,7 +2016,7 @@ dependencies = [
 
 [[package]]
 name = "ox-core"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2077,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "ox-tui"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 dependencies = [
  "anyhow",
  "arboard",

@@ -4,6 +4,55 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.10] - 2026-11-01
+
+### Highlights
+
+- Search earlier prompts with Ctrl+R and recall them into the draft.
+- Sessions now use SQLite, with forks when concurrent processes write the same session.
+- Nix consumers reuse upstream packages, with release closures retained in Cachix.
+
+### Breaking changes
+
+- _(session)_ Sessions now live in `$XDG_DATA_HOME/ox/sessions.db`. Existing alpha.9-and-earlier session files are not loaded or migrated. `ox export` and `ox -r <file>` exchange the new format ([#686](https://github.com/hakula139/oxide-code/pull/686), [#714](https://github.com/hakula139/oxide-code/pull/714), [#729](https://github.com/hakula139/oxide-code/pull/729))
+- _(config)_ Replace `client.api_key` with `[client.auth] type = "api-key"`. Credentials and custom headers validate at startup. Configured CA bundle paths must be absolute or begin with `~/` ([#689](https://github.com/hakula139/oxide-code/pull/689), [#693](https://github.com/hakula139/oxide-code/pull/693))
+- _(theme)_ Custom theme files must add five `effort_*` slots plus `diff_add_word` and `diff_del_word`. Bare colors on background slots now set their background ([#691](https://github.com/hakula139/oxide-code/pull/691), [#775](https://github.com/hakula139/oxide-code/pull/775))
+- _(tool)_ Existing files are rewritten in place on Linux, preserving their inode, metadata and hard links. A crash, full disk or interrupted write can leave a partial file, and readers can see the rewrite ([#694](https://github.com/hakula139/oxide-code/pull/694), [#747](https://github.com/hakula139/oxide-code/pull/747))
+- _(headless)_ `stream-json` diff results replace `data.chunk` with `data.hunks`, including context and optional changed-word byte ranges. Capped diffs report `omitted_lines` ([#775](https://github.com/hakula139/oxide-code/pull/775))
+- _(nix)_ The `flake-utils` input is removed. Package builds use nixpkgs' Rust, and `nix flake check` runs the tests separately. Keep oxide-code's own nixpkgs input to reuse its published package ([#733](https://github.com/hakula139/oxide-code/pull/733), [#806](https://github.com/hakula139/oxide-code/pull/806))
+
+### Security
+
+- _(config)_ Reject credentials embedded in an API base URL and redact them from validation errors. Such URLs could expose passwords in diagnostics and send an unintended Basic authorization header. Affected: v0.1.0-alpha.1 through v0.1.0-alpha.9 ([#674](https://github.com/hakula139/oxide-code/pull/674))
+- _(permission)_ Enforce file rules for literal reader targets, paths after directory changes, `sed` reads and writes, shell scripts and startup files, read-write redirections, `$PWD` and Unix `~user` paths. Earlier shell analysis could miss these accesses or offer approval for a denied read. Affected: v0.1.0-alpha.3 through v0.1.0-alpha.9 ([#754](https://github.com/hakula139/oxide-code/pull/754), [#768](https://github.com/hakula139/oxide-code/pull/768), [#771](https://github.com/hakula139/oxide-code/pull/771), [#780](https://github.com/hakula139/oxide-code/pull/780))
+
+### Added
+
+- Search retained prompts with Ctrl+R, switch project scope with Ctrl+S, and recall a result without sending it ([#794](https://github.com/hakula139/oxide-code/pull/794))
+- Show surrounding lines and changed words in file-edit previews, including breaks between distant hunks ([#775](https://github.com/hakula139/oxide-code/pull/775))
+
+### Fixed
+
+- _(tool)_ Resolve file targets and approval paths consistently, preserve untouched line endings, retain partial-read limits after edits, and create files on volumes such as exFAT ([#676](https://github.com/hakula139/oxide-code/pull/676), [#686](https://github.com/hakula139/oxide-code/pull/686), [#694](https://github.com/hakula139/oxide-code/pull/694), [#730](https://github.com/hakula139/oxide-code/pull/730), [#778](https://github.com/hakula139/oxide-code/pull/778), [#783](https://github.com/hakula139/oxide-code/pull/783))
+- _(tool)_ Reject malformed or unknown tool-input fields before requesting approval ([#744](https://github.com/hakula139/oxide-code/pull/744))
+- _(permission)_ Apply protected-name rules to descendants and POSIX, drive and UNC roots, and give configured ask rules consistent priority. Possible recursive reads ask outside yolo without making yolo deny the whole search ([#754](https://github.com/hakula139/oxide-code/pull/754), [#793](https://github.com/hakula139/oxide-code/pull/793))
+- _(session)_ Keep manual titles and the original persistence error, and save tool rounds in the order needed to resume them ([#680](https://github.com/hakula139/oxide-code/pull/680), [#681](https://github.com/hakula139/oxide-code/pull/681), [#755](https://github.com/hakula139/oxide-code/pull/755))
+- _(tui)_ Preserve unsent and queued prompts through failed sign-in, compaction and session switches, and resume the queue after completed operations ([#680](https://github.com/hakula139/oxide-code/pull/680), [#725](https://github.com/hakula139/oxide-code/pull/725), [#728](https://github.com/hakula139/oxide-code/pull/728), [#738](https://github.com/hakula139/oxide-code/pull/738))
+- _(tui)_ Keep deletion confirmation usable when an operation is busy and edit whole grapheme clusters with readline keys ([#712](https://github.com/hakula139/oxide-code/pull/712), [#723](https://github.com/hakula139/oxide-code/pull/723))
+- _(tui)_ Reach Plan before Yolo in the mode cycle, refresh pull requests after checkout, and bound `/diff` reads ([#690](https://github.com/hakula139/oxide-code/pull/690), [#692](https://github.com/hakula139/oxide-code/pull/692))
+- _(driver)_ Replace invalid stdin bytes, preserve signal termination, stop when stdout closes, and fail runs whose sessions cannot be saved ([#675](https://github.com/hakula139/oxide-code/pull/675), [#678](https://github.com/hakula139/oxide-code/pull/678))
+- _(bash)_ Preserve arriving stdout/stderr order and keep killed commands from breaking Git Bash on Windows ([#710](https://github.com/hakula139/oxide-code/pull/710), [#739](https://github.com/hakula139/oxide-code/pull/739))
+- _(config)_ Reject a bare `~` for file paths and extra roots, improve credential-conflict errors, and bound malformed response diagnostics ([#693](https://github.com/hakula139/oxide-code/pull/693), [#737](https://github.com/hakula139/oxide-code/pull/737))
+- _(cli)_ Restore `ox help`, explain slash-command names passed as prompts, and improve accepted-value and connection errors ([#677](https://github.com/hakula139/oxide-code/pull/677))
+- _(nix)_ Reuse the upstream package with different caller nixpkgs revisions and pin release closures in Cachix ([#803](https://github.com/hakula139/oxide-code/pull/803), [#806](https://github.com/hakula139/oxide-code/pull/806))
+- _(release)_ Install third-party notices through Homebrew ([#688](https://github.com/hakula139/oxide-code/pull/688))
+
+### Changed
+
+- _(tool)_ Search file contents with ripgrep's libraries for faster results ([#777](https://github.com/hakula139/oxide-code/pull/777))
+- _(tui)_ Reparse only the growing tail of streamed thinking and summaries ([#716](https://github.com/hakula139/oxide-code/pull/716))
+- _(prompt)_ Tell the model it runs in oxide-code and which permission mode is active ([#735](https://github.com/hakula139/oxide-code/pull/735), [#784](https://github.com/hakula139/oxide-code/pull/784))
+
 ## [0.1.0-alpha.9] - 2026-10-25
 
 ### Highlights
@@ -395,6 +444,7 @@ The project fixes security issues publicly before 1.0, and the first two entries
 - _(deps)_ Bump rustls-webpki and rand for Dependabot alerts (#17)
 - _(deps)_ Bump rustls-webpki from 0.103.12 to 0.103.13 (#34)
 
+[0.1.0-alpha.10]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.9..v0.1.0-alpha.10
 [0.1.0-alpha.9]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.8..v0.1.0-alpha.9
 [0.1.0-alpha.8]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.7..v0.1.0-alpha.8
 [0.1.0-alpha.7]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.6..v0.1.0-alpha.7
