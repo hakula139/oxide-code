@@ -621,7 +621,7 @@ pub(super) fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
 }
 
 /// A build of the readers, whose option parsing and `sed` commands can differ.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Dialect {
     /// GNU, as on Linux.
     Gnu,
