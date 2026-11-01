@@ -74,7 +74,7 @@ Dev and test builds include line tables for the workspace crates and no debug in
 
 ## CI
 
-CI runs on pushes to `main`, pull requests, and manual dispatch, and the release workflow calls it again for each tag before publishing:
+CI runs on pushes to `main`, pull requests, and manual dispatch. The release workflow publishes a tag only after a push or dispatched CI run on the tagged commit passes, and calls CI itself for a dry run from another ref:
 
 | Job                          | Checks                                                                                                                                                                                                                                |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -1,42 +1,17 @@
-//! Publication of workspace file changes.
+//! Checked reads and publication of workspace file changes.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::file_tracker::MAX_TRACKED_FILE_SIZE;
-use crate::util::fs::{open_no_follow, validate_regular_file};
+use crate::util::fs::{FileReadError, open_no_follow, read_regular_contents};
 use crate::util::path::requires_directory;
-
-pub(super) fn write(path: &Path, bytes: &[u8], expected: Option<&[u8]>) -> io::Result<()> {
-    write_with(path, bytes, expected, |_| Ok(()))
-}
-
-/// The points of an in-place write where a test can act on the file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    /// The new bytes are written over the truncated original, before the sync.
-    Written,
-    /// The new bytes are synced, before the final check.
-    Synced,
-}
-
-fn write_with(
-    path: &Path,
-    bytes: &[u8],
-    expected: Option<&[u8]>,
-    checkpoint: impl FnMut(Phase) -> io::Result<()>,
-) -> io::Result<()> {
-    match expected {
-        Some(expected) => write_in_place(path, bytes, expected, checkpoint),
-        None => create(path, bytes),
-    }
-}
 
 /// Creates `path` with an exclusive open, which never replaces an existing entry, including a
 /// dangling symlink, and leaves the new file's mode to the umask and any default ACL. A failed
 /// write leaves the partial file at `path`.
-fn create(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn create(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if requires_directory(path) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -56,72 +31,117 @@ fn left_partial_file(error: &io::Error) -> io::Error {
     )
 }
 
-/// Rewrites `path` through the handle checked against `expected`, which keeps the inode with its
-/// metadata and every hard link. A crash mid-write can leave partial content, and a failed write
-/// after the truncation says so.
-fn write_in_place(
-    path: &Path,
-    bytes: &[u8],
-    expected: &[u8],
-    mut checkpoint: impl FnMut(Phase) -> io::Result<()>,
-) -> io::Result<()> {
-    let mut original = Original::open(path, expected)?;
-    original.verify(path, expected)?;
-    original.file.set_len(0)?;
-    original
-        .file
-        .rewind()
-        .and_then(|()| original.file.write_all(bytes))
-        .and_then(|()| checkpoint(Phase::Written))
-        .and_then(|()| original.file.sync_all())
-        .map_err(|error| left_partial_file(&error))?;
-    checkpoint(Phase::Synced)?;
-    original.verify(path, bytes)
-}
-
-struct Original {
+/// An existing file opened read-only for the Read-before-Edit gate, holding the content read
+/// through that handle, which a later rewrite of the same path checks against.
+pub(crate) struct Checked {
+    path: PathBuf,
     file: File,
+    content: Vec<u8>,
 }
 
-impl Original {
-    fn open(path: &Path, expected: &[u8]) -> io::Result<Self> {
+/// The points of a rewrite where a test can act on the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// The new bytes are written over the truncated original, before the sync.
+    Written,
+    /// The new bytes are synced, before the final check.
+    Synced,
+}
+
+impl Checked {
+    /// Opens `path` for reading without following a symlink at the final component or blocking on
+    /// a FIFO, then reads it, refusing anything but a regular file within
+    /// [`MAX_TRACKED_FILE_SIZE`].
+    pub(super) fn open(path: &Path) -> Result<Self, FileReadError> {
         let mut options = OpenOptions::new();
-        options.read(true).write(true);
+        options.read(true);
         let mut file = open_no_follow(path, options)?;
         let metadata = file.metadata()?;
-        validate_regular_file(&metadata, MAX_TRACKED_FILE_SIZE).map_err(io::Error::other)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
+        let content = read_regular_contents(&mut file, &metadata, MAX_TRACKED_FILE_SIZE)?;
+        Ok(Self {
+            path: path.to_owned(),
+            file,
+            content,
+        })
+    }
 
-            validate_mode(metadata.mode() & 0o7777)?;
+    /// The path the file was opened at.
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The file's content as the open read it.
+    pub(crate) fn content(&self) -> &[u8] {
+        &self.content
+    }
+
+    /// Rewrites the file in place, which keeps the inode with its metadata and every hard link.
+    /// Reopens the path for writing and refuses it unless it still names the held file with the
+    /// content the open read, then checks afterward that the path still names the file and holds
+    /// `bytes`. A crash mid-write can leave partial content, and a failed write after the
+    /// truncation says so.
+    pub(super) fn rewrite(self, bytes: &[u8]) -> io::Result<()> {
+        self.rewrite_with(bytes, |_| Ok(()))
+    }
+
+    fn rewrite_with(
+        self,
+        bytes: &[u8],
+        mut checkpoint: impl FnMut(Phase) -> io::Result<()>,
+    ) -> io::Result<()> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        let mut file = open_no_follow(&self.path, options)?;
+        #[cfg(unix)]
+        let metadata = file.metadata()?;
+        #[cfg(unix)]
+        let current_identity = (metadata.dev(), metadata.ino());
+        #[cfg(windows)]
+        let current_identity = identity(&file)?;
+        if current_identity != identity(&self.file)? {
+            return Err(replaced());
         }
+        #[cfg(unix)]
+        validate_mode(metadata.mode())?;
         #[cfg(target_os = "linux")]
         if has_capability(&file)? {
             return Err(io::Error::other(
                 "refusing to write a file with a capability set",
             ));
         }
-        if !bytes_match(&mut file, expected)? {
+        if !bytes_match(&mut file, &self.content)? {
             return Err(stale_content());
         }
-        Ok(Self { file })
+        file.set_len(0)?;
+        file.rewind()
+            .and_then(|()| file.write_all(bytes))
+            .and_then(|()| checkpoint(Phase::Written))
+            .and_then(|()| file.sync_all())
+            .map_err(|error| left_partial_file(&error))?;
+        checkpoint(Phase::Synced)?;
+        self.verify(bytes)
     }
 
-    fn verify(&self, path: &Path, expected: &[u8]) -> io::Result<()> {
+    /// Checks that the path still names the held file and holds `expected`.
+    fn verify(&self, expected: &[u8]) -> io::Result<()> {
         let mut options = OpenOptions::new();
-        options.read(true).write(true);
-        let mut current = open_no_follow(path, options)?;
+        options.read(true);
+        let mut current = open_no_follow(&self.path, options)?;
         if identity(&current)? != identity(&self.file)? {
-            return Err(io::Error::other(
-                "the file was replaced while preparing the write",
-            ));
+            return Err(replaced());
         }
         if !bytes_match(&mut current, expected)? {
             return Err(stale_content());
         }
         Ok(())
     }
+}
+
+fn replaced() -> io::Error {
+    io::Error::other("the file was replaced while preparing the write")
 }
 
 fn stale_content() -> io::Error {
@@ -192,69 +212,16 @@ mod tests {
         format!("{:?}", identity(&File::open(path).unwrap()).unwrap())
     }
 
-    mod write {
+    /// Rewrites the existing file at `path` with `bytes` through a fresh [`Checked`] open.
+    fn rewrite(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        Checked::open(path).unwrap().rewrite(bytes)
+    }
+
+    mod create {
         use super::*;
 
         #[test]
-        fn replacement_publishes_complete_bytes() {
-            for (existing, bytes) in [
-                (false, b"new".as_slice()),
-                (true, b"".as_slice()),
-                (true, b"replacement".as_slice()),
-            ] {
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("target");
-                let before = existing.then(|| {
-                    fs::write(&path, b"original").unwrap();
-                    identity_of(&path)
-                });
-
-                let result = write(&path, bytes, existing.then_some(b"original".as_slice()));
-
-                result.unwrap();
-                assert_eq!(fs::read(&path).unwrap(), bytes);
-                assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-                if let Some(before) = before {
-                    assert_eq!(identity_of(&path), before, "the write keeps the inode");
-                }
-            }
-        }
-
-        #[test]
-        fn output_can_exceed_the_input_read_limit() {
-            let bytes = vec![b'x'; usize::try_from(MAX_TRACKED_FILE_SIZE).unwrap() + 1];
-            for existing in [false, true] {
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("target");
-                if existing {
-                    fs::write(&path, b"original").unwrap();
-                }
-
-                let result = write(&path, &bytes, existing.then_some(b"original".as_slice()));
-
-                result.unwrap();
-                assert_eq!(fs::read(&path).unwrap(), bytes, "existing={existing}");
-            }
-        }
-
-        #[test]
-        fn writes_through_every_hard_link_in_place() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("target");
-            let alias = dir.path().join("alias");
-            fs::write(&path, b"original").unwrap();
-            fs::hard_link(&path, &alias).unwrap();
-            let before = identity_of(&path);
-
-            write(&path, b"new", Some(b"original")).unwrap();
-
-            assert_eq!(identity_of(&path), before);
-            assert_eq!(fs::read(&path).unwrap(), b"new");
-            assert_eq!(fs::read(&alias).unwrap(), b"new");
-        }
-
-        #[test]
-        fn create_new_refuses_existing_entries_and_dangling_links() {
+        fn refuses_existing_entries_and_dangling_links() {
             let identity = |path: &Path| {
                 #[cfg(unix)]
                 {
@@ -288,7 +255,7 @@ mod tests {
             for path in [&existing, &link] {
                 let before = identity(path);
 
-                let error = write(path, b"x", None).unwrap_err();
+                let error = create(path, b"x").unwrap_err();
 
                 assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
                 assert_eq!(identity(path), before);
@@ -300,28 +267,12 @@ mod tests {
         }
 
         #[test]
-        fn overwrite_refuses_a_symlink() {
-            let dir = tempfile::tempdir().unwrap();
-            let target = dir.path().join("target.txt");
-            fs::write(&target, "original").unwrap();
-            let link = dir.path().join("link.txt");
-            symlink_file(&target, &link);
-
-            let err = write(&link, b"x", Some(b"original")).unwrap_err();
-            #[cfg(unix)]
-            assert_eq!(err.raw_os_error(), Some(nix::errno::Errno::ELOOP as i32));
-            #[cfg(windows)]
-            assert_eq!(err.to_string(), "the final path component is a symlink");
-            assert_eq!(fs::read_to_string(&target).unwrap(), "original");
-        }
-
-        #[test]
-        fn refuses_directory_suffixed_new_paths() {
+        fn refuses_directory_suffixed_paths() {
             for name in ["missing/", "missing/."] {
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join(name);
 
-                let error = write(&path, b"new", None).unwrap_err();
+                let error = create(&path, b"new").unwrap_err();
 
                 assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name}");
                 assert_eq!(error.to_string(), "a new file path has a directory suffix");
@@ -329,112 +280,9 @@ mod tests {
             }
         }
 
-        #[cfg(target_os = "linux")]
-        #[test]
-        fn keeps_the_mode_and_extended_attributes() {
-            use std::os::unix::fs::PermissionsExt as _;
-            use xattr::FileExt as _;
-
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("target");
-            fs::write(&path, b"original").unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o751)).unwrap();
-            let file = File::open(&path).unwrap();
-            let attributes_supported = file.set_xattr("user.ox.value", b"\x00\xff").is_ok();
-            let before = identity_of(&path);
-
-            write(&path, b"new", Some(b"original")).unwrap();
-
-            let current = File::open(&path).unwrap();
-            assert_eq!(fs::read(&path).unwrap(), b"new");
-            assert_eq!(identity_of(&path), before);
-            assert_eq!(
-                current.metadata().unwrap().permissions().mode() & 0o7777,
-                0o751
-            );
-            if attributes_supported {
-                assert_eq!(
-                    current.get_xattr("user.ox.value").unwrap(),
-                    Some(b"\x00\xff".to_vec())
-                );
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        #[test]
-        fn keeps_a_named_user_acl() {
-            use xattr::FileExt as _;
-
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("target");
-            fs::write(&path, b"original").unwrap();
-            // The kernel's version 2 ACL encoding: owner rw, user 65534 r, group r, mask r, other
-            // none, each as a little-endian (tag, permissions, id) entry.
-            let mut acl = 2_u32.to_le_bytes().to_vec();
-            for (tag, permissions, id) in [
-                (1_u16, 6_u16, u32::MAX),
-                (2, 4, 65534),
-                (4, 4, u32::MAX),
-                (16, 4, u32::MAX),
-                (32, 0, u32::MAX),
-            ] {
-                acl.extend(tag.to_le_bytes());
-                acl.extend(permissions.to_le_bytes());
-                acl.extend(id.to_le_bytes());
-            }
-            let file = File::open(&path).unwrap();
-            let acl_supported = match file.set_xattr("system.posix_acl_access", &acl) {
-                Ok(()) => true,
-                Err(error) => {
-                    assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
-                    false
-                }
-            };
-            let before = identity_of(&path);
-
-            write(&path, b"new", Some(b"original")).unwrap();
-
-            assert_eq!(fs::read(&path).unwrap(), b"new");
-            assert_eq!(identity_of(&path), before);
-            if acl_supported {
-                assert_eq!(
-                    File::open(&path)
-                        .unwrap()
-                        .get_xattr("system.posix_acl_access")
-                        .unwrap(),
-                    Some(acl)
-                );
-            }
-            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-        }
-
         #[cfg(unix)]
         #[test]
-        fn writes_without_parent_write_access() {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("target");
-            fs::write(&path, b"original").unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
-            let before = identity_of(&path);
-            let denied = crate::util::fs::testing::deny_subdir_creation(dir.path());
-
-            write(&path, b"new", Some(b"original")).unwrap();
-            drop(denied);
-
-            assert_eq!(identity_of(&path), before);
-            assert_eq!(fs::read(&path).unwrap(), b"new");
-            assert_eq!(
-                fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
-                0o640
-            );
-            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-        }
-
-        #[cfg(unix)]
-        #[test]
-        fn new_file_uses_the_parents_normal_creation_mode() {
+        fn uses_the_parents_normal_creation_mode() {
             use std::os::unix::fs::PermissionsExt as _;
 
             let dir = tempfile::tempdir().unwrap();
@@ -442,96 +290,12 @@ mod tests {
             let created = dir.path().join("created");
             fs::write(&ordinary, b"").unwrap();
 
-            write(&created, b"content", None).unwrap();
+            create(&created, b"content").unwrap();
 
             assert_eq!(
                 fs::metadata(&created).unwrap().permissions().mode(),
                 fs::metadata(&ordinary).unwrap().permissions().mode()
             );
-        }
-    }
-
-    mod write_with {
-        use super::*;
-
-        #[test]
-        fn a_failed_write_says_a_partial_file_remains() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("target");
-            fs::write(&path, b"original").unwrap();
-
-            let error = write_with(&path, b"new", Some(b"original"), |phase| {
-                assert_eq!(phase, Phase::Written);
-                Err(io::Error::new(io::ErrorKind::StorageFull, "disk full"))
-            })
-            .unwrap_err();
-
-            assert_eq!(error.kind(), io::ErrorKind::StorageFull);
-            assert_eq!(
-                error.to_string(),
-                "disk full. A partial file remains. Read it before writing again."
-            );
-            assert_eq!(fs::read(&path).unwrap(), b"new");
-            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-        }
-
-        #[test]
-        fn refuses_stale_expected_bytes() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("target");
-            fs::write(&path, b"original").unwrap();
-
-            let error = write(&path, b"new", Some(b"stale")).unwrap_err();
-
-            assert_eq!(
-                error.to_string(),
-                "the file changed while preparing the write. Read it again."
-            );
-            assert_eq!(fs::read(&path).unwrap(), b"original");
-            assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-        }
-
-        #[test]
-        fn refuses_concurrent_content_and_identity_changes() {
-            for replace in [false, true] {
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("target");
-                fs::write(&path, b"original").unwrap();
-                let mut visited = Vec::new();
-
-                let result = write_with(&path, b"ours", Some(b"original"), |phase| {
-                    visited.push(phase);
-                    if phase == Phase::Synced {
-                        if replace {
-                            let other = dir.path().join("other");
-                            fs::write(&other, b"original")?;
-                            fs::rename(other, &path)?;
-                        } else {
-                            fs::write(&path, b"theirs")?;
-                        }
-                    }
-                    Ok(())
-                });
-
-                assert_eq!(
-                    result.unwrap_err().to_string(),
-                    if replace {
-                        "the file was replaced while preparing the write"
-                    } else {
-                        "the file changed while preparing the write. Read it again."
-                    }
-                );
-                assert!(visited.contains(&Phase::Synced), "{visited:?}");
-                assert_eq!(
-                    fs::read(&path).unwrap(),
-                    if replace {
-                        b"original".as_slice()
-                    } else {
-                        b"theirs"
-                    }
-                );
-                assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
-            }
         }
     }
 
@@ -550,19 +314,298 @@ mod tests {
         }
     }
 
+    mod checked {
+        use super::*;
+
+        mod open {
+            use super::*;
+
+            #[test]
+            fn refuses_a_symlink() {
+                let dir = tempfile::tempdir().unwrap();
+                let target = dir.path().join("target.txt");
+                fs::write(&target, "original").unwrap();
+                let link = dir.path().join("link.txt");
+                symlink_file(&target, &link);
+
+                let error = Checked::open(&link).err();
+
+                #[cfg(unix)]
+                assert!(
+                    matches!(&error, Some(FileReadError::Io(e))
+                        if e.raw_os_error() == Some(nix::errno::Errno::ELOOP as i32)),
+                    "{error:?}"
+                );
+                #[cfg(windows)]
+                assert!(
+                    matches!(&error, Some(FileReadError::Io(e))
+                        if e.to_string() == "the final path component is a symlink"),
+                    "{error:?}"
+                );
+                assert_eq!(fs::read_to_string(&target).unwrap(), "original");
+            }
+
+            #[cfg(unix)]
+            #[test]
+            fn refuses_a_fifo_without_blocking() {
+                let dir = tempfile::tempdir().unwrap();
+                let fifo = dir.path().join("pipe");
+                nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+                let (sender, receiver) = std::sync::mpsc::channel();
+
+                std::thread::spawn(move || sender.send(Checked::open(&fifo).map(|_| ())));
+                let result = receiver
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("the open must not block");
+
+                assert!(
+                    matches!(result, Err(FileReadError::NonRegular)),
+                    "{result:?}"
+                );
+            }
+        }
+
+        mod rewrite {
+            use super::*;
+
+            #[test]
+            fn writes_through_every_hard_link_in_place() {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                let alias = dir.path().join("alias");
+                fs::write(&path, b"original").unwrap();
+                fs::hard_link(&path, &alias).unwrap();
+                let before = identity_of(&path);
+
+                rewrite(&path, b"new").unwrap();
+
+                assert_eq!(identity_of(&path), before);
+                assert_eq!(fs::read(&path).unwrap(), b"new");
+                assert_eq!(fs::read(&alias).unwrap(), b"new");
+            }
+
+            #[test]
+            fn leaves_a_file_renamed_away_since_the_open_untouched() {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("notes.txt");
+                let backup = dir.path().join("notes.txt~");
+                fs::write(&path, b"original").unwrap();
+                let checked = Checked::open(&path).unwrap();
+                fs::rename(&path, &backup).unwrap();
+                fs::write(&path, b"saved by the editor").unwrap();
+
+                let error = checked.rewrite(b"ours").unwrap_err();
+
+                assert_eq!(
+                    error.to_string(),
+                    "the file was replaced while preparing the write"
+                );
+                assert_eq!(fs::read(&backup).unwrap(), b"original");
+                assert_eq!(fs::read(&path).unwrap(), b"saved by the editor");
+            }
+
+            #[cfg(unix)]
+            #[test]
+            fn writes_without_parent_write_access() {
+                use std::os::unix::fs::PermissionsExt as _;
+
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                fs::write(&path, b"original").unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+                let before = identity_of(&path);
+                let denied = crate::util::fs::testing::deny_subdir_creation(dir.path());
+
+                rewrite(&path, b"new").unwrap();
+                drop(denied);
+
+                assert_eq!(identity_of(&path), before);
+                assert_eq!(fs::read(&path).unwrap(), b"new");
+                assert_eq!(
+                    fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+                    0o640
+                );
+                assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+            }
+
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn keeps_the_mode_and_extended_attributes() {
+                use std::os::unix::fs::PermissionsExt as _;
+                use xattr::FileExt as _;
+
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                fs::write(&path, b"original").unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o751)).unwrap();
+                let file = File::open(&path).unwrap();
+                let attributes_supported = file.set_xattr("user.ox.value", b"\x00\xff").is_ok();
+                let before = identity_of(&path);
+
+                rewrite(&path, b"new").unwrap();
+
+                let current = File::open(&path).unwrap();
+                assert_eq!(fs::read(&path).unwrap(), b"new");
+                assert_eq!(identity_of(&path), before);
+                assert_eq!(
+                    current.metadata().unwrap().permissions().mode() & 0o7777,
+                    0o751
+                );
+                if attributes_supported {
+                    assert_eq!(
+                        current.get_xattr("user.ox.value").unwrap(),
+                        Some(b"\x00\xff".to_vec())
+                    );
+                }
+            }
+
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn keeps_a_named_user_acl() {
+                use xattr::FileExt as _;
+
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                fs::write(&path, b"original").unwrap();
+                // The kernel's version 2 ACL encoding: owner rw, user 65534 r, group r, mask r,
+                // other none, each as a little-endian (tag, permissions, id) entry.
+                let mut acl = 2_u32.to_le_bytes().to_vec();
+                for (tag, permissions, id) in [
+                    (1_u16, 6_u16, u32::MAX),
+                    (2, 4, 65534),
+                    (4, 4, u32::MAX),
+                    (16, 4, u32::MAX),
+                    (32, 0, u32::MAX),
+                ] {
+                    acl.extend(tag.to_le_bytes());
+                    acl.extend(permissions.to_le_bytes());
+                    acl.extend(id.to_le_bytes());
+                }
+                let file = File::open(&path).unwrap();
+                let acl_supported = match file.set_xattr("system.posix_acl_access", &acl) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        assert_eq!(error.raw_os_error(), Some(nix::libc::EOPNOTSUPP));
+                        false
+                    }
+                };
+                let before = identity_of(&path);
+
+                rewrite(&path, b"new").unwrap();
+
+                assert_eq!(fs::read(&path).unwrap(), b"new");
+                assert_eq!(identity_of(&path), before);
+                if acl_supported {
+                    assert_eq!(
+                        File::open(&path)
+                            .unwrap()
+                            .get_xattr("system.posix_acl_access")
+                            .unwrap(),
+                        Some(acl)
+                    );
+                }
+                assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+            }
+        }
+
+        mod rewrite_with {
+            use super::*;
+
+            #[test]
+            fn a_failed_write_says_a_partial_file_remains() {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                fs::write(&path, b"original").unwrap();
+                let checked = Checked::open(&path).unwrap();
+
+                let error = checked
+                    .rewrite_with(b"new", |phase| {
+                        assert_eq!(phase, Phase::Written);
+                        Err(io::Error::new(io::ErrorKind::StorageFull, "disk full"))
+                    })
+                    .unwrap_err();
+
+                assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+                assert_eq!(
+                    error.to_string(),
+                    "disk full. A partial file remains. Read it before writing again."
+                );
+                assert_eq!(fs::read(&path).unwrap(), b"new");
+                assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+            }
+
+            #[test]
+            fn refuses_concurrent_content_and_identity_changes() {
+                for replace in [false, true] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("target");
+                    fs::write(&path, b"original").unwrap();
+                    let mut visited = Vec::new();
+                    let checked = Checked::open(&path).unwrap();
+
+                    let result = checked.rewrite_with(b"ours", |phase| {
+                        visited.push(phase);
+                        if phase == Phase::Synced {
+                            if replace {
+                                let other = dir.path().join("other");
+                                fs::write(&other, b"original")?;
+                                fs::rename(other, &path)?;
+                            } else {
+                                fs::write(&path, b"theirs")?;
+                            }
+                        }
+                        Ok(())
+                    });
+
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        if replace {
+                            "the file was replaced while preparing the write"
+                        } else {
+                            "the file changed while preparing the write. Read it again."
+                        }
+                    );
+                    assert!(visited.contains(&Phase::Synced), "{visited:?}");
+                    assert_eq!(
+                        fs::read(&path).unwrap(),
+                        if replace {
+                            b"original".as_slice()
+                        } else {
+                            b"theirs"
+                        }
+                    );
+                    assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     mod validate_mode {
         use super::*;
 
         #[test]
         fn accepts_ordinary_permissions_and_refuses_either_set_id_bit() {
-            for mode in [0o600, 0o751, 0o1777] {
-                validate_mode(mode).unwrap();
-            }
-            for mode in [0o4755, 0o2755, 0o6755] {
-                let error = validate_mode(mode).unwrap_err();
+            for (mode, refused) in [
+                (0o600, false),
+                (0o751, false),
+                (0o755, false),
+                (0o1777, false),
+                (0o4755, true),
+                (0o2755, true),
+                (0o6755, true),
+            ] {
+                let result = validate_mode(mode);
 
-                assert!(error.to_string().contains("set-ID"), "mode={mode:o}");
+                if refused {
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "refusing to write a file with set-ID permissions",
+                        "mode={mode:o}"
+                    );
+                } else {
+                    result.unwrap_or_else(|error| panic!("mode={mode:o}: {error}"));
+                }
             }
         }
     }
@@ -576,6 +619,60 @@ mod tests {
             let file = File::open("/proc/self/status").unwrap();
 
             assert!(!has_capability(&file).unwrap());
+        }
+    }
+
+    mod create_or_rewrite {
+        use super::*;
+
+        #[test]
+        fn publishes_complete_bytes() {
+            for (existing, bytes) in [
+                (false, b"new".as_slice()),
+                (true, b"".as_slice()),
+                (true, b"replacement".as_slice()),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                let before = existing.then(|| {
+                    fs::write(&path, b"original").unwrap();
+                    identity_of(&path)
+                });
+
+                let result = if existing {
+                    rewrite(&path, bytes)
+                } else {
+                    create(&path, bytes)
+                };
+
+                result.unwrap();
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+                assert_eq!(entries(dir.path()), [std::ffi::OsString::from("target")]);
+                if let Some(before) = before {
+                    assert_eq!(identity_of(&path), before, "the write keeps the inode");
+                }
+            }
+        }
+
+        #[test]
+        fn output_can_exceed_the_input_read_limit() {
+            let bytes = vec![b'x'; usize::try_from(MAX_TRACKED_FILE_SIZE).unwrap() + 1];
+            for existing in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("target");
+                if existing {
+                    fs::write(&path, b"original").unwrap();
+                }
+
+                let result = if existing {
+                    rewrite(&path, &bytes)
+                } else {
+                    create(&path, &bytes)
+                };
+
+                result.unwrap();
+                assert_eq!(fs::read(&path).unwrap(), bytes, "existing={existing}");
+            }
         }
     }
 }

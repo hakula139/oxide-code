@@ -31,7 +31,9 @@ pub(crate) fn read_regular_file(path: &Path, limit: u64) -> Result<Vec<u8>, File
     read_regular_contents(file, &metadata, limit)
 }
 
-fn read_regular_contents(
+/// Reads `reader` after checking that its `metadata` names a regular file within `limit` bytes,
+/// consuming at most `limit + 1` bytes and rejecting overflow.
+pub(crate) fn read_regular_contents(
     reader: impl Read,
     metadata: &Metadata,
     limit: u64,
