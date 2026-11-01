@@ -443,97 +443,6 @@ mod tests {
         use super::*;
 
         #[test]
-        fn names_the_file_tier_and_class_of_a_malformed_pattern() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = write(
-                &dir.path().join("config.toml"),
-                r#"permission.ask.exec = ["git push", "ls | sh"]"#,
-            );
-
-            let err = load_layers(vec![Layer::User(path.clone())])
-                .err()
-                .expect("a malformed pattern");
-            assert_eq!(
-                format!("{err:#}"),
-                format!(
-                    "invalid config at {}: invalid permission.ask.exec pattern \"ls | sh\": \
-                     it must be one simple command, such as `cargo test *`. \
-                     Write a pattern for each command of a chain or pipeline.",
-                    path.display()
-                )
-            );
-        }
-
-        #[test]
-        fn parses_each_class_list_in_its_own_grammar() {
-            // Each pattern is valid in another class's grammar.
-            let dir = tempfile::tempdir().unwrap();
-            for (tier, class, pattern) in [
-                ("deny", "read", "!.env"),
-                ("ask", "edit", "!.env"),
-                ("ask", "exec", "src/*.rs"),
-                ("allow", "net", "github/get_me"),
-                ("allow", "mcp", "api.example.com"),
-            ] {
-                let path = write(
-                    &dir.path().join("config.toml"),
-                    &format!("permission.{tier}.{class} = [{pattern:?}]"),
-                );
-
-                let err = load_layers(vec![Layer::User(path.clone())])
-                    .err()
-                    .expect(pattern);
-                let msg = format!("{err:#}");
-                assert!(
-                    msg.starts_with(&format!(
-                        "invalid config at {}: \
-                         invalid permission.{tier}.{class} pattern {pattern:?}: ",
-                        path.display()
-                    )),
-                    "{msg}"
-                );
-            }
-        }
-
-        #[test]
-        fn rejects_invalid_lower_entries_when_higher_layers_set_the_same_keys() {
-            let dir = tempfile::tempdir().unwrap();
-            for (body, expected) in [
-                (
-                    r#"permission.ask.exec = ["ls | sh"]"#,
-                    "invalid permission.ask.exec",
-                ),
-                (
-                    r#"permission.extra_roots = ["shared"]"#,
-                    "invalid extra root",
-                ),
-                (r#"permission.mode = "bypass""#, "permission.mode"),
-            ] {
-                let user = write(&dir.path().join("config.toml"), body);
-                write(
-                    &dir.path().join("config.d/10-valid.toml"),
-                    indoc! {r#"
-                        [permission]
-                        mode = "manual"
-                        extra_roots = []
-                        ask.exec = ["git status"]
-                    "#},
-                );
-
-                let err = load_layers(discover(Some(dir.path()), None).unwrap())
-                    .err()
-                    .expect("invalid lower entries must propagate");
-
-                let message = format!("{err:#}");
-                assert!(
-                    message.starts_with(&format!("invalid config at {}:", user.display())),
-                    "{message}"
-                );
-                assert!(message.contains(expected), "{body}: {message}");
-            }
-        }
-
-        #[test]
         fn drop_ins_override_the_user_file_in_name_order() {
             let dir = tempfile::tempdir().unwrap();
             let user = write(
@@ -651,6 +560,97 @@ mod tests {
 
             assert_eq!(config.tui.show_thinking, Some(true));
             assert_eq!(origins.into_layers(), [Layer::DropIn(drop_in)]);
+        }
+
+        #[test]
+        fn names_the_file_tier_and_class_of_a_malformed_pattern() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write(
+                &dir.path().join("config.toml"),
+                r#"permission.ask.exec = ["git push", "ls | sh"]"#,
+            );
+
+            let err = load_layers(vec![Layer::User(path.clone())])
+                .err()
+                .expect("a malformed pattern");
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid config at {}: invalid permission.ask.exec pattern \"ls | sh\": \
+                     it must be one simple command, such as `cargo test *`. \
+                     Write a pattern for each command of a chain or pipeline.",
+                    path.display()
+                )
+            );
+        }
+
+        #[test]
+        fn parses_each_class_list_in_its_own_grammar() {
+            // Each pattern is valid in another class's grammar.
+            let dir = tempfile::tempdir().unwrap();
+            for (tier, class, pattern) in [
+                ("deny", "read", "!.env"),
+                ("ask", "edit", "!.env"),
+                ("ask", "exec", "src/*.rs"),
+                ("allow", "net", "github/get_me"),
+                ("allow", "mcp", "api.example.com"),
+            ] {
+                let path = write(
+                    &dir.path().join("config.toml"),
+                    &format!("permission.{tier}.{class} = [{pattern:?}]"),
+                );
+
+                let err = load_layers(vec![Layer::User(path.clone())])
+                    .err()
+                    .expect(pattern);
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.starts_with(&format!(
+                        "invalid config at {}: \
+                         invalid permission.{tier}.{class} pattern {pattern:?}: ",
+                        path.display()
+                    )),
+                    "{msg}"
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_invalid_lower_entries_when_higher_layers_set_the_same_keys() {
+            let dir = tempfile::tempdir().unwrap();
+            for (body, expected) in [
+                (
+                    r#"permission.ask.exec = ["ls | sh"]"#,
+                    "invalid permission.ask.exec",
+                ),
+                (
+                    r#"permission.extra_roots = ["shared"]"#,
+                    "invalid extra root",
+                ),
+                (r#"permission.mode = "bypass""#, "permission.mode"),
+            ] {
+                let user = write(&dir.path().join("config.toml"), body);
+                write(
+                    &dir.path().join("config.d/10-valid.toml"),
+                    indoc! {r#"
+                        [permission]
+                        mode = "manual"
+                        extra_roots = []
+                        ask.exec = ["git status"]
+                    "#},
+                );
+
+                let err = load_layers(discover(Some(dir.path()), None).unwrap())
+                    .err()
+                    .expect("invalid lower entries must propagate");
+
+                let message = format!("{err:#}");
+                assert!(
+                    message.starts_with(&format!("invalid config at {}:", user.display())),
+                    "{message}"
+                );
+                assert!(message.contains(expected), "{body}: {message}");
+            }
         }
 
         #[test]

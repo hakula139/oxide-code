@@ -252,110 +252,8 @@ mod tests {
     use crate::util::path::slash_separated;
     use crate::util::path::testing::HOME_VAR;
 
-    /// The process-environment patterns `credentials` adds on Unix, spelled out.
-    const PROC_ENVIRONS: [&str; 2] = ["/proc/*/environ", "/proc/*/task/*/environ"];
-
-    /// Each rule of `group` as its tier, class, and pattern.
-    fn patterns(group: Shipped) -> Vec<(ShippedTier, PermissionClass, String)> {
-        group
-            .rules()
-            .unwrap()
-            .iter()
-            .map(|(tier, rule)| (*tier, rule.class(), rule.pattern().to_owned()))
-            .collect()
-    }
-
-    /// The groups whose shipped ask rules hold an edit of `raw`, a resolved absolute path.
-    fn protected_by(raw: &str) -> Vec<Shipped> {
-        let target = PathTarget {
-            canonical: raw.to_owned(),
-            exact: None,
-            relative: None,
-            rooted: Vec::new(),
-            requested: raw.to_owned(),
-            deny_rooted: Vec::new(),
-            zone: Zone::Outside,
-        };
-        Shipped::VARIANTS
-            .iter()
-            .copied()
-            .filter(|group| {
-                group.rules().unwrap().iter().any(|(tier, rule)| {
-                    let bases = rule.prefix_bases(&[]);
-                    let discipline = MatchDiscipline::Deny(Prefixes::Located(&bases));
-                    *tier == ShippedTier::Ask
-                        && rule.matches_path(PermissionClass::Edit, &target, discipline)
-                })
-            })
-            .collect()
-    }
-
     mod shipped {
         use super::*;
-
-        #[test]
-        fn puts_each_rule_in_its_tier_and_class() {
-            temp_env::with_vars(
-                [
-                    (HOME_VAR, Some(abs("/home/u"))),
-                    ("XDG_DATA_HOME", Some(abs("/data"))),
-                    ("XDG_CONFIG_HOME", Some(abs("/config"))),
-                    ("CLAUDE_CONFIG_DIR", None),
-                ],
-                || {
-                    let home = slash_separated(Path::new(&abs("/home/u")));
-                    let data = slash_separated(Path::new(&abs("/data")));
-                    let config = slash_separated(Path::new(&abs("/config")));
-                    let ask_edit =
-                        |pattern: String| (ShippedTier::Ask, PermissionClass::Edit, pattern);
-                    let deny_read =
-                        |pattern: String| (ShippedTier::Deny, PermissionClass::Read, pattern);
-
-                    let names = [".git", ".githooks", ".husky", ".gitconfig", ".gitmodules"];
-                    let git: Vec<_> = names
-                        .iter()
-                        .flat_map(|name| [format!("/**/{name}"), format!("./{name}")])
-                        .chain([format!("{config}/git"), format!("{home}/.git-credentials")])
-                        .map(ask_edit)
-                        .collect();
-                    assert_eq!(patterns(Shipped::Git), git);
-                    assert_eq!(
-                        patterns(Shipped::Devices),
-                        if cfg!(unix) {
-                            vec![ask_edit("/dev/**".to_owned())]
-                        } else {
-                            Vec::new()
-                        }
-                    );
-                    assert_eq!(patterns(Shipped::Rm), []);
-                    assert_eq!(
-                        patterns(Shipped::Ssh),
-                        [
-                            ask_edit(format!("{home}/.ssh")),
-                            deny_read(format!("{home}/.ssh"))
-                        ]
-                    );
-                    let cloud = [".aws", ".azure", ".config/gcloud", ".docker", ".kube"];
-                    assert_eq!(
-                        patterns(Shipped::Cloud),
-                        cloud.map(|name| ask_edit(format!("{home}/{name}")))
-                    );
-                    let mut credentials = vec![
-                        format!("{data}/ox/credentials.json"),
-                        format!("{home}/.claude/.credentials.json"),
-                        format!("{home}/.git-credentials"),
-                        format!("{config}/git/credentials"),
-                    ];
-                    if cfg!(unix) {
-                        credentials.extend(PROC_ENVIRONS.map(str::to_owned));
-                    }
-                    assert_eq!(
-                        patterns(Shipped::Credentials),
-                        credentials.into_iter().map(deny_read).collect::<Vec<_>>()
-                    );
-                },
-            );
-        }
 
         #[test]
         fn reads_each_group_from_its_defaults_key() {
@@ -369,6 +267,83 @@ mod tests {
 
         mod rules {
             use super::*;
+
+            /// The process-environment patterns `credentials` adds on Unix, spelled out.
+            const PROC_ENVIRONS: [&str; 2] = ["/proc/*/environ", "/proc/*/task/*/environ"];
+
+            /// Each rule of `group` as its tier, class, and pattern.
+            fn patterns(group: Shipped) -> Vec<(ShippedTier, PermissionClass, String)> {
+                group
+                    .rules()
+                    .unwrap()
+                    .iter()
+                    .map(|(tier, rule)| (*tier, rule.class(), rule.pattern().to_owned()))
+                    .collect()
+            }
+
+            #[test]
+            fn puts_each_rule_in_its_tier_and_class() {
+                temp_env::with_vars(
+                    [
+                        (HOME_VAR, Some(abs("/home/u"))),
+                        ("XDG_DATA_HOME", Some(abs("/data"))),
+                        ("XDG_CONFIG_HOME", Some(abs("/config"))),
+                        ("CLAUDE_CONFIG_DIR", None),
+                    ],
+                    || {
+                        let home = slash_separated(Path::new(&abs("/home/u")));
+                        let data = slash_separated(Path::new(&abs("/data")));
+                        let config = slash_separated(Path::new(&abs("/config")));
+                        let ask_edit =
+                            |pattern: String| (ShippedTier::Ask, PermissionClass::Edit, pattern);
+                        let deny_read =
+                            |pattern: String| (ShippedTier::Deny, PermissionClass::Read, pattern);
+
+                        let names = [".git", ".githooks", ".husky", ".gitconfig", ".gitmodules"];
+                        let git: Vec<_> = names
+                            .iter()
+                            .flat_map(|name| [format!("/**/{name}"), format!("./{name}")])
+                            .chain([format!("{config}/git"), format!("{home}/.git-credentials")])
+                            .map(ask_edit)
+                            .collect();
+                        assert_eq!(patterns(Shipped::Git), git);
+                        assert_eq!(
+                            patterns(Shipped::Devices),
+                            if cfg!(unix) {
+                                vec![ask_edit("/dev/**".to_owned())]
+                            } else {
+                                Vec::new()
+                            }
+                        );
+                        assert_eq!(patterns(Shipped::Rm), []);
+                        assert_eq!(
+                            patterns(Shipped::Ssh),
+                            [
+                                ask_edit(format!("{home}/.ssh")),
+                                deny_read(format!("{home}/.ssh"))
+                            ]
+                        );
+                        let cloud = [".aws", ".azure", ".config/gcloud", ".docker", ".kube"];
+                        assert_eq!(
+                            patterns(Shipped::Cloud),
+                            cloud.map(|name| ask_edit(format!("{home}/{name}")))
+                        );
+                        let mut credentials = vec![
+                            format!("{data}/ox/credentials.json"),
+                            format!("{home}/.claude/.credentials.json"),
+                            format!("{home}/.git-credentials"),
+                            format!("{config}/git/credentials"),
+                        ];
+                        if cfg!(unix) {
+                            credentials.extend(PROC_ENVIRONS.map(str::to_owned));
+                        }
+                        assert_eq!(
+                            patterns(Shipped::Credentials),
+                            credentials.into_iter().map(deny_read).collect::<Vec<_>>()
+                        );
+                    },
+                );
+            }
 
             #[test]
             fn name_the_home_directory_however_its_variable_spells_it() {
@@ -429,6 +404,31 @@ mod tests {
 
     mod protected_names {
         use super::*;
+
+        /// The groups whose shipped ask rules hold an edit of `raw`, a resolved absolute path.
+        fn protected_by(raw: &str) -> Vec<Shipped> {
+            let target = PathTarget {
+                canonical: raw.to_owned(),
+                exact: None,
+                relative: None,
+                rooted: Vec::new(),
+                requested: raw.to_owned(),
+                deny_rooted: Vec::new(),
+                zone: Zone::Outside,
+            };
+            Shipped::VARIANTS
+                .iter()
+                .copied()
+                .filter(|group| {
+                    group.rules().unwrap().iter().any(|(tier, rule)| {
+                        let bases = rule.prefix_bases(&[]);
+                        let discipline = MatchDiscipline::Deny(Prefixes::Located(&bases));
+                        *tier == ShippedTier::Ask
+                            && rule.matches_path(PermissionClass::Edit, &target, discipline)
+                    })
+                })
+                .collect()
+        }
 
         #[test]
         fn name_the_group_of_each_protected_name_at_any_depth_and_spelling() {

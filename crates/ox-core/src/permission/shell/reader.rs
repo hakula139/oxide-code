@@ -1733,6 +1733,14 @@ mod tests {
     mod reader_args {
         use super::*;
 
+        /// The files `reader` reads from the literal words of `args`.
+        fn files(reader: &str, args: &str) -> Vec<String> {
+            let values: Vec<Option<&str>> = args.split(' ').map(Some).collect();
+            let read = reader_args(reader, &values);
+            assert!(!read.unknown, "{reader} {args}");
+            read.files.into_iter().map(|(_, file)| file.path).collect()
+        }
+
         // cspell:ignore drecurse rfpatterns
         #[test]
         fn distinguishes_recursive_operands_from_exact_auxiliary_files() {
@@ -1791,14 +1799,6 @@ mod tests {
                 assert_eq!(actual, expected, "{reader} {args}");
                 assert!(!read.unknown, "{reader} {args}");
             }
-        }
-
-        /// The files `reader` reads from the literal words of `args`.
-        fn files(reader: &str, args: &str) -> Vec<String> {
-            let values: Vec<Option<&str>> = args.split(' ').map(Some).collect();
-            let read = reader_args(reader, &values);
-            assert!(!read.unknown, "{reader} {args}");
-            read.files.into_iter().map(|(_, file)| file.path).collect()
         }
 
         #[test]
