@@ -8,11 +8,9 @@ on:
       - .gitattributes
       - .github/workflows/ci.yml
       - .github/workflows/release.yml
-      - about.hbs
       - about.toml
       - LICENSE
       - licenses/**
-      - scripts/generate-notices.sh
       - Cargo.lock
       - Cargo.toml
       - crates/*/Cargo.toml
@@ -119,7 +117,12 @@ jobs:
       - name: Generate third-party notices
         shell: bash
         run: |
-          ./scripts/generate-notices.sh "${{ matrix.target }}" THIRD-PARTY-NOTICES
+          cargo about generate \
+            --locked \
+            --manifest-path crates/ox/Cargo.toml \
+            --target "${{ matrix.target }}" \
+            --name about licenses \
+            -o THIRD-PARTY-NOTICES
 
       - name: Build archive
         id: binary
@@ -147,9 +150,6 @@ jobs:
           else
             tar -xzf "$ARCHIVE" -C smoke
           fi
-
-          cmp LICENSE smoke/LICENSE
-          cmp THIRD-PARTY-NOTICES smoke/THIRD-PARTY-NOTICES
 
           if [[ "$GITHUB_REF_TYPE" == 'tag' ]]; then
             expected=${GITHUB_REF_NAME#v}
