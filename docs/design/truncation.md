@@ -1,6 +1,6 @@
 # Tool Output Truncation
 
-Two-layer truncation combines per-tool view-shape caps with a centralized byte-budget safety net. Output cut by the dispatcher cap or a `bash` output capture is saved in full to a spill file the model can read back.
+Two-layer truncation combines per-tool view-shape caps with a centralized byte-budget safety net. Output cut by the dispatcher cap or a `bash` output capture is saved to a spill file the model can read back.
 
 ## Centralized Dispatcher Cap
 
@@ -15,13 +15,13 @@ The dispatcher caps every tool output at `MAX_OUTPUT_BYTES = 128 KiB`, including
 
 ## Per-Tool View-Shape Caps
 
-| Tool                       | View boundary                                                                                                                                                                                                                                  |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bash`                     | Bounded head-and-tail streaming capture, with full output spilled to disk. A [shared pipe](bash.md#design-decisions) preserves stdout and stderr arrival order. Each background-shell read drains the output captured since the previous read. |
-| `glob`                     | Newest matches with a total match count                                                                                                                                                                                                        |
-| `grep`                     | Bounded prefix for each output mode. Count mode continues reading for exact totals, while content and file-list modes stop when the view fills.                                                                                                |
-| `read`                     | Complete rows within a line and byte budget, refusing a row that cannot fit                                                                                                                                                                    |
-| `edit` / `tasks` / `write` | Compact success messages                                                                                                                                                                                                                       |
+| Tool                       | View boundary                                                                                                                                                                                                                           |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bash`                     | Bounded head-and-tail streaming capture, spilling oversized output. A [shared pipe](bash.md#design-decisions) preserves stdout and stderr arrival order. Each background-shell read drains the output captured since the previous read. |
+| `glob`                     | Newest matches with a total match count                                                                                                                                                                                                 |
+| `grep`                     | Bounded prefix for each output mode. Count mode continues reading for exact totals, while content and file-list modes stop when the view fills.                                                                                         |
+| `read`                     | Complete rows within a line and byte budget, refusing a row that cannot fit                                                                                                                                                             |
+| `edit` / `tasks` / `write` | Compact success messages                                                                                                                                                                                                                |
 
 ## Design Decisions
 
