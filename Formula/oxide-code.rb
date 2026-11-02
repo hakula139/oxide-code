@@ -3,9 +3,9 @@
 class OxideCode < Formula
   desc "Terminal-based AI coding assistant written in Rust"
   homepage "https://github.com/hakula139/oxide-code"
-  url "https://github.com/hakula139/oxide-code/releases/download/v0.1.0-alpha.9/oxide-code-x86_64-unknown-linux-gnu.tar.gz"
-  version "0.1.0-alpha.9"
-  sha256 "07f60f72aadff631d4f18e73575e19aa4152fd7ec8b106a9fe20b5e082b5c9c3"
+  url "https://github.com/hakula139/oxide-code/releases/download/v0.1.0-alpha.10/oxide-code-x86_64-unknown-linux-gnu.tar.gz"
+  version "0.1.0-alpha.10"
+  sha256 "464bf8671a63eef97344b1bf6880c853f1837941c1e83691f8bd4be91c6c2af8"
   license "MIT"
 
   # Every platform needs a URL for the arch requirements below to load and report.
@@ -14,8 +14,8 @@ class OxideCode < Formula
     depends_on macos: :monterey
 
     on_arm do
-      url "https://github.com/hakula139/oxide-code/releases/download/v0.1.0-alpha.9/oxide-code-aarch64-apple-darwin.tar.gz"
-      sha256 "56ea3f774ea3f744c8eb6f85228453a1348fadf88ab78c2b3814c2e498ba125f"
+      url "https://github.com/hakula139/oxide-code/releases/download/v0.1.0-alpha.10/oxide-code-aarch64-apple-darwin.tar.gz"
+      sha256 "cc63515b1b1631d80fd2dd28ad51b72911f60a44b5564c2b965eb146f86cf2e4"
     end
   end
 
