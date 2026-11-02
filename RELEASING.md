@@ -133,7 +133,7 @@ Watch the [Release workflow](https://github.com/hakula139/oxide-code/actions/wor
 - Every [target](#targets) archive and its `.sha256` sidecar are attached, and `gh attestation verify <archive> --repo hakula139/oxide-code` passes for one of them.
 - `nix run github:hakula139/oxide-code/vX.Y.Z -- --version` prints the version on one host.
 
-The workflow then renders the formula from the release sidecars, installs it through a local tap on `macos-latest` and `ubuntu-latest`, and runs `brew test` there before it opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR. The same check runs on pull requests that touch the formula, its rendering script, or the release workflows. Merging that PR is the final release step. Wait for its checks to pass, then squash-merge it. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. If the job fails, fix the cause and rerun it, since a rerun rebuilds the branch and reuses an open PR.
+The workflow then renders the formula from the release sidecars, installs it through a local tap on `macos-latest` and `ubuntu-latest`, and runs `brew test` there before it opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR. The same check runs on pull requests that touch the formula, its rendering script, or the release workflows. Merging that PR once its checks pass is the final release step. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. If the job fails, fix the cause and rerun it, since a rerun rebuilds the branch and reuses an open PR.
 
 ## Re-Cut an Existing Tag
 
