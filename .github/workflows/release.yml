@@ -281,15 +281,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      actions: write
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
     steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - name: Checkout
         uses: actions/checkout@v7
         with:
           ref: main
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Download formula
         uses: actions/download-artifact@v8
@@ -299,7 +306,7 @@ jobs:
 
       - name: Open formula PR
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           # Follow the latest release, or the newest prerelease before the first stable one.
           latest=$(
@@ -357,19 +364,9 @@ jobs:
               --label chore \
               --body-file .github/templates/homebrew-formula-pr.md
           then
-            echo "::error::Could not open the formula PR." \
-              'Enable "Allow GitHub Actions to create and approve pull requests"' \
-              'in Settings > Actions > General, then rerun this job.'
+            echo "::error::Could not open the formula PR."
             exit 1
           fi
-
-          # GitHub holds CI on a PR opened with GITHUB_TOKEN until approved, so dispatch CI now.
-          run_url=$(gh workflow run ci.yml --ref "$branch")
-          if [[ -z "$run_url" ]]; then
-            echo "::error::The CI dispatch on $branch returned no run."
-            exit 1
-          fi
-          echo "Dispatched CI: $run_url"
 
   notes:
     name: Republish Release Notes
