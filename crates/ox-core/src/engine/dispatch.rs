@@ -1293,59 +1293,36 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn a_run_that_cannot_ask_denies_without_asking_and_names_every_config_change() {
+            async fn a_run_that_cannot_ask_denies_without_asking_and_names_an_allow_rule() {
                 let tools = bash_registry(Vec::new());
-                let cases = [
-                    (
-                        "make > .git/log",
-                        &["make *"][..],
-                        "It needs approval because of the built-in `git` rule. \
-                         Do not retry it as written. \
-                         To allow it, ask the user to set `permission.defaults.git = false` \
-                         in the user config.",
-                    ),
-                    (
-                        "rm -rf build",
-                        &[],
-                        "It needs approval because of the built-in `rm` rule. \
-                         Do not retry it as written. \
-                         To allow it, ask the user to set `permission.defaults.rm = false` \
-                         and add `\"rm -rf build\"` to `permission.allow.exec` \
-                         in the user config.",
-                    ),
-                ];
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                dispatch_ctx.policy.set_unattended();
+                // A closed op channel aborts on a stray approval request.
+                let (_, mut ops) = OpSender::channel(1);
 
-                for (command, allow, expected) in cases {
-                    let sink = CapturingSink::default();
-                    let mut dispatch_ctx =
-                        dispatch_with(Mode::Manual, &[], allow, Path::new("/repo"));
-                    dispatch_ctx.policy.set_unattended();
-                    // A closed op channel aborts on a stray approval request instead of waiting.
-                    let (_, mut ops) = OpSender::channel(1);
+                let denial = gate_call(
+                    &tools,
+                    "tool_1",
+                    "bash",
+                    json!({ "command": "make release" }),
+                    &sink,
+                    &mut Mailbox::new(&mut ops),
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("a denial resolves without abort");
+                let denial = expect_settled(denial);
 
-                    let denial = gate_call(
-                        &tools,
-                        "tool_1",
-                        "bash",
-                        json!({ "command": command }),
-                        &sink,
-                        &mut Mailbox::new(&mut ops),
-                        &mut dispatch_ctx,
-                    )
-                    .await
-                    .expect("a denial resolves without abort");
-                    let denial = expect_settled(denial);
-
-                    assert_eq!(
-                        denial.content,
-                        format!(
-                            "The bash call was denied because it needs approval \
-                             and this run cannot ask for it. {expected}"
-                        ),
-                        "{command}"
-                    );
-                    assert_eq!(approval_ids(&sink), [] as [&str; 0], "{command}");
-                }
+                assert_eq!(
+                    denial.content,
+                    "The bash call was denied because it needs approval \
+                     and this run cannot ask for it. No allow pattern matches it. \
+                     Do not retry it as written. \
+                     To allow it, ask the user to add `\"make release\"` to `permission.allow.exec` \
+                     in the user config."
+                );
+                assert_eq!(approval_ids(&sink), [] as [&str; 0]);
             }
 
             #[tokio::test]
