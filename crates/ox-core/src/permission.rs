@@ -252,12 +252,6 @@ pub(crate) enum Access {
     None,
     Command(CommandTarget),
     Path(PathTarget),
-    /// A network host or an MCP `server/tool` name.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no network or MCP tool builds a name target yet")
-    )]
-    Name(String),
 }
 
 impl Access {
@@ -279,7 +273,7 @@ impl Access {
     pub(crate) fn resolved(&self) -> Option<PathBuf> {
         match self {
             Self::Path(path) => Some(path.resolved()),
-            Self::None | Self::Command(_) | Self::Name(_) => None,
+            Self::None | Self::Command(_) => None,
         }
     }
 }
@@ -3649,10 +3643,7 @@ mod tests {
                     Decision::Deny
                 );
                 assert_eq!(
-                    p.decide(
-                        PermissionClass::Net,
-                        &Access::Name("example.com".to_owned())
-                    ),
+                    p.decide(PermissionClass::Net, &Access::None),
                     Decision::Deny
                 );
             }
@@ -3716,40 +3707,6 @@ mod tests {
                 assert_eq!(
                     headless.decide(EXEC, &command("git push origin main")),
                     Decision::Unapproved
-                );
-            }
-
-            #[test]
-            fn net_and_mcp_calls_follow_their_tiers() {
-                let p = policy(
-                    Mode::Manual,
-                    &[(PermissionClass::Net, "*.evil.io")],
-                    &[(PermissionClass::Mcp, "github/create_*")],
-                    &[
-                        (PermissionClass::Mcp, "github/*"),
-                        (PermissionClass::Net, "*.github.com"),
-                    ],
-                );
-                let name = |name: &str| Access::Name(name.to_owned());
-                assert_eq!(
-                    p.decide(PermissionClass::Net, &name("a.evil.io")),
-                    Decision::Deny
-                );
-                assert_eq!(
-                    p.decide(PermissionClass::Net, &name("api.github.com")),
-                    Decision::Allow
-                );
-                assert_eq!(
-                    p.decide(PermissionClass::Net, &name("example.com")),
-                    Decision::Ask
-                );
-                assert_eq!(
-                    p.decide(PermissionClass::Mcp, &name("github/create_issue")),
-                    Decision::Ask
-                );
-                assert_eq!(
-                    p.decide(PermissionClass::Mcp, &name("github/get_me")),
-                    Decision::Allow
                 );
             }
 
@@ -5245,7 +5202,7 @@ mod tests {
                     (Decision::Allow, Basis::Mode(Mode::Yolo)),
                 );
                 assert_eq!(
-                    verdict(&yolo, EDIT, &Access::Name("notes".to_owned())),
+                    verdict(&yolo, EDIT, &Access::None),
                     (Decision::Allow, Basis::Mode(Mode::Yolo)),
                     "an edit that names no path has no protected group",
                 );
