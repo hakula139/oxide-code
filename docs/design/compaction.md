@@ -126,7 +126,7 @@ In headless runs, `driver::stdio::TextState` writes `Compacting the conversation
 
 13. **Keep queued prompts.** A session switch drops the prompts queued before it because they belong to the conversation that ended. `/compact` preserves the user's intent, so queued prompts still make sense after it.
 
-14. **Stream the summary as it generates.** A long session's summary can take tens of seconds, and streaming it shows progress and lets the user judge it early. The engine streams the text and decides its fate, so every frontend sees one protocol. A discard precedes the event that reports a failure or cancellation, and a retry discards before streaming again. The stdio frontends skip the stream and keep their one-line boundary notice.
+14. **Stream the summary as it generates.** A long session's summary can take tens of seconds, and streaming it shows progress and lets the user judge it early. The engine streams the text and decides its fate, so every frontend sees one protocol. A discard precedes the event that reports a failure or cancellation, and a retry discards before streaming again. Headless text output omits the summary stream and keeps its one-line boundary notice.
 
 15. **A failed attempt fails its prompt.** Sending the prompt against the unchanged transcript would put a request over the threshold on the wire, and the context would keep growing until it overflowed, which is the case auto-compaction exists for. The TUI hands the unsent prompt back and holds the queue, so the prompts behind it do not each start another summary request. A failed mid-turn attempt ends its turn for the same reason.
 
