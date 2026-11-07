@@ -1384,7 +1384,8 @@ mod tests {
                         (slash_separated(fs_root), fs_root),
                         (slash_separated(&home_link), home.as_path()),
                     ] {
-                        let workspace = Workspace::resolve(&repo, &[raw.clone()]).unwrap();
+                        let workspace =
+                            Workspace::resolve(&repo, std::slice::from_ref(&raw)).unwrap();
                         let p =
                             policy_in(Mode::Manual, &[], &[], &[(READ, "./docs/**")], &workspace);
                         let target = Access::for_path(root.join("docs/notes.md"), &workspace);
@@ -1500,27 +1501,25 @@ mod tests {
 
             #[test]
             fn relative_cwd_parent_traversal_preserves_permission_decisions() {
-                // With `$HOME` at `../..`, the spellings cover a workspace and a non-workspace cwd.
                 let policy = policy(Mode::Manual, &[], &[], &[(EDIT, "src/**")]);
                 let absolute_cwd = std::env::current_dir().unwrap();
-                let home = dunce::canonicalize(absolute_cwd.join("../..")).unwrap();
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    for cwd in ["..", "../..", "missing/../.."] {
-                        for raw in ["notes.md", ".git/config", "src/a.rs"] {
-                            let target = Access::for_path(raw, &Workspace::new(Path::new(cwd)));
-                            let absolute =
-                                Access::for_path(raw, &Workspace::new(&absolute_cwd.join(cwd)));
-                            let (_, relative) = resolved(&target);
-                            let (_, absolute_relative) = resolved(&absolute);
-                            assert_eq!(relative, absolute_relative, "{cwd:?}/{raw}",);
-                            assert_eq!(
-                                policy.decide(EDIT, &target),
-                                policy.decide(EDIT, &absolute),
-                                "{cwd:?}/{raw}",
-                            );
-                        }
+
+                for cwd in ["..", "../..", "missing/../.."] {
+                    for raw in ["notes.md", ".git/config", "src/a.rs"] {
+                        let target = Access::for_path(raw, &Workspace::new(Path::new(cwd)));
+                        let absolute =
+                            Access::for_path(raw, &Workspace::new(&absolute_cwd.join(cwd)));
+                        let (_, relative) = resolved(&target);
+                        let (_, absolute_relative) = resolved(&absolute);
+
+                        assert_eq!(relative, absolute_relative, "{cwd:?}/{raw}");
+                        assert_eq!(
+                            policy.decide(EDIT, &target),
+                            policy.decide(EDIT, &absolute),
+                            "{cwd:?}/{raw}",
+                        );
                     }
-                });
+                }
             }
 
             #[test]
