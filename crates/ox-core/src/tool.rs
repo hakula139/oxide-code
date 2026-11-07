@@ -880,7 +880,9 @@ mod tests {
             let tools = built_in();
 
             temp_env::with_var(HOME_VAR, Some(&home), || {
-                let deny = vec![Rule::parse(PermissionClass::Read, "~/.aws/**").unwrap()];
+                let deny = ["~/.aws/**", "~/.ssh/**"]
+                    .map(|pattern| Rule::parse(PermissionClass::Read, pattern).unwrap())
+                    .to_vec();
                 let ctx = ctx(&cwd);
                 let policy =
                     Policy::resolve(Mode::Manual, deny, Vec::new(), Vec::new(), &ctx.workspace);

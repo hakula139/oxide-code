@@ -227,10 +227,10 @@ Each key goes in the table its prefix names, so `client.compaction.auto_enabled`
 | `client.model`                             | string  | `"claude-opus-5-5"`             | [Model](#model-supported-models) to use                                                                         |
 | `client.prompt_cache_ttl`                  | string  | `"1h"`                          | [Prompt-cache TTL](#prompt_cache_ttl-cache-duration), `"5m"` or `"1h"`                                          |
 | `client.structured_outputs`                | boolean | `true`                          | Allow [JSON schemas](authentication.md#llm-gateways) for titles and permission classification, user config only |
-| `permission.auto.model`                    | string  | `"claude-haiku-5-5"`            | Approval classifier model, user config only                                                                     |
-| `permission.auto.instructions`             | array   | `[]`                            | Natural-language approval instructions, user config only                                                        |
 | `permission.allow`                         | table   | empty                           | [Calls that run without asking](permissions.md#rule-tables), user config only                                   |
 | `permission.ask`                           | table   | empty                           | [Calls that ask first](permissions.md#rule-tables), even when an allow pattern matches                          |
+| `permission.auto.instructions`             | array   | `[]`                            | Natural-language approval instructions, user config only                                                        |
+| `permission.auto.model`                    | string  | `"claude-haiku-5-5"`            | Approval classifier model, user config only                                                                     |
 | `permission.deny`                          | table   | empty                           | [Calls that never run](permissions.md#rule-tables), in every mode                                               |
 | `permission.extra_roots`                   | array   | `[]`                            | [Additional rule anchors and classifier context](permissions.md#workspace-roots), user config only              |
 | `permission.mode`                          | string  | `"auto"`                        | [Permission mode](permissions.md#modes), `"auto"`, `"manual"`, `"plan"`, or `"yolo"`, user config only          |
