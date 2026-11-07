@@ -1,6 +1,7 @@
 acked
 acking
 acks
+agentic
 ALPN
 anthropics
 APFS
@@ -21,6 +22,7 @@ DECRC
 DECSC
 deque
 desync
+devkit
 direnv
 disambiguable
 doas
@@ -48,6 +50,7 @@ fsmonitor
 fullfsync
 getpgid
 Ghostty
+GHSA
 GOARCH
 GOEXPERIMENT
 gsub
@@ -103,6 +106,7 @@ pkgs
 pname
 popd
 POSIXLY
+prek
 procs
 pushd
 pytest
