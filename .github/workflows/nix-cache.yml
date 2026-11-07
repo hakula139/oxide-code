@@ -43,7 +43,7 @@ jobs:
           ref: refs/tags/${{ inputs.tag }}
 
       - name: Set up Nix
-        uses: hakula139/devkit/actions/setup-nix@44782b619d0c4cd9562c5000f6230aa9582e67ac
+        uses: hakula139/devkit/actions/setup-nix@61682dd34d15732234bac835f3603de8de5b86f1
         with:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
