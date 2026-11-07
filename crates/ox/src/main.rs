@@ -239,10 +239,12 @@ impl Cli {
             return Ok(Run::Session(Frontend::Print));
         }
         if !stdin_is_terminal || !stdout_is_terminal {
-            bail!(
-                "the TUI needs a terminal on stdin and stdout. Pass `-p` to answer one prompt \
-                 and any piped input."
-            );
+            let hint = if self.opens_picker() {
+                "Pass `ox -r <session-id> -p \"<prompt>\"` to resume a session directly."
+            } else {
+                "Pass `-p` to answer one prompt and any piped input."
+            };
+            bail!("the TUI needs a terminal on stdin and stdout. {hint}");
         }
         Ok(Run::Session(Frontend::Tui {
             picker: self.opens_picker().then(|| self.projects()),
