@@ -145,6 +145,7 @@ fn auto_compaction_summarizes_from_the_cached_conversation() {
         let mut command = live.ox(&env_or("OX_LIVE_MODEL", DEFAULT_MODEL));
         command
             .args(["-p", prompt])
+            .env("OX_COMPACTION_AUTO_ENABLED", (index > 0).to_string())
             .env("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", "50000");
         if index > 0 {
             command.arg("-c");
@@ -453,7 +454,7 @@ fn tokens(usage: &Value, field: &str) -> u64 {
     count
 }
 
-/// About 60 kB of word lines ending in `marker`, roughly 27K tokens.
+/// Enough word lines for two full reads to exceed the resumed context's 50K-token estimate.
 fn log_text(seed: u64, marker: &str) -> String {
     const WORDS: [&str; 26] = [
         "amber", "basil", "cedar", "delta", "ember", "fable", "garnet", "harbor", "indigo",
@@ -462,7 +463,7 @@ fn log_text(seed: u64, marker: &str) -> String {
     ];
     let mut rng = fastrand::Rng::with_seed(seed);
     let mut text = String::new();
-    for number in 1..=680 {
+    for number in 1..=1200 {
         let words: Vec<&str> = (0..11).map(|_| WORDS[rng.usize(..WORDS.len())]).collect();
         _ = writeln!(text, "entry {number:04}: {}", words.join(" "));
     }
