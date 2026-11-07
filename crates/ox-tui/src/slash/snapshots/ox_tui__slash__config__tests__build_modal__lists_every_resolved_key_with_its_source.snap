@@ -33,7 +33,7 @@ expression: "render_modal(&mut modal, 80, u16::MAX)"
     "",
     "Source Files",
     "",
-    "User                not configured",
+    "User                     not configured",
     "",
     "Esc to close",
 ]

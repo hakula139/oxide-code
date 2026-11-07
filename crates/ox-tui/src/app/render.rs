@@ -442,6 +442,7 @@ mod tests {
                         },
                         &Basis::Mode(Mode::Manual),
                         Some(Box::new(exec_grant("cargo test"))),
+                        None,
                     );
                     render_app(&mut app, 60, 12);
                     tokio::time::advance(TYPE_AHEAD_GUARD).await;
@@ -1185,6 +1186,7 @@ mod tests {
                 },
                 &Basis::Mode(Mode::Manual),
                 None,
+                None,
             );
 
             insta::assert_snapshot!(render_app(&mut app, 60, 14));
@@ -1201,6 +1203,7 @@ mod tests {
                 },
                 &Basis::Mode(Mode::Manual),
                 Some(Box::new(exec_grant("cargo test"))),
+                None,
             );
 
             insta::assert_snapshot!(render_app(&mut app, 80, 14));

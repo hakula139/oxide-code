@@ -153,8 +153,8 @@ pub(crate) enum UpdateReply {
     Unclaimed,
     /// The modal shows the update and stays open.
     Shown,
-    /// The modal closes, replaced by the action that reports the update.
-    Closed(ModalAction),
+    /// The modal closes, optionally replaced by an action that reports the update.
+    Closed(Option<ModalAction>),
 }
 
 // ── ModalStack ──
@@ -195,7 +195,7 @@ impl ModalStack {
                 }
                 UpdateReply::Closed(action) => {
                     claimed = true;
-                    actions.push(action);
+                    actions.extend(action);
                     false
                 }
             });
@@ -632,9 +632,9 @@ mod tests {
             let mut stack = ModalStack::default();
             let mut confirm = ScriptedModal::new();
             confirm.declared_height = 5;
-            confirm.reply = Some(UpdateReply::Closed(ModalAction::SystemMessage(
+            confirm.reply = Some(UpdateReply::Closed(Some(ModalAction::SystemMessage(
                 "Deleted".to_owned(),
-            )));
+            ))));
             stack.push(Box::new(ScriptedModal::new()));
             stack.push(Box::new(confirm));
 
@@ -658,9 +658,9 @@ mod tests {
                 ("shown", Some(UpdateReply::Shown), Some(0)),
                 (
                     "closed",
-                    Some(UpdateReply::Closed(ModalAction::SystemMessage(
+                    Some(UpdateReply::Closed(Some(ModalAction::SystemMessage(
                         "Deleted".to_owned(),
-                    ))),
+                    )))),
                     Some(1),
                 ),
             ];

@@ -8,6 +8,7 @@ mod base_url;
 pub mod compaction;
 pub(crate) mod credentials;
 pub mod gateway;
+pub mod interaction;
 pub mod load;
 mod merge;
 pub mod permission_auto;
@@ -30,6 +31,7 @@ pub(crate) use self::base_url::BaseUrl;
 use self::compaction::{AutoCompactionConfig, CompactionConfig};
 use self::credentials::{AuthState, CredentialError};
 use self::gateway::{GatewayCompat, GatewaySnapshot, ResolvedGateway};
+use self::interaction::InteractionConfig;
 use self::load::{Loaded, ParsedPermission};
 use self::merge::Origins;
 use self::permission_auto::AutoPermissionConfig;
@@ -69,6 +71,7 @@ pub struct ConfigSnapshot {
     pub compaction: CompactionConfig,
     pub permission_mode: Mode,
     pub permission_auto: AutoPermissionConfig,
+    pub interaction: InteractionConfig,
     pub show_thinking: bool,
     pub show_welcome: bool,
     pub status_line: Vec<StatusLineSegment>,
@@ -225,6 +228,7 @@ pub struct Config {
     pub(crate) compaction: CompactionConfig,
     pub(crate) permission: Policy,
     pub(crate) permission_auto: AutoPermissionConfig,
+    pub(crate) interaction: InteractionConfig,
     /// The launch directory and the workspace roots the tools run in.
     pub(crate) workspace: Workspace,
     /// Whether adaptive thinking opts into summarized text. The request's `thinking` field derives
@@ -270,6 +274,7 @@ impl Config {
         let FileConfig {
             client,
             permission,
+            interaction,
             tui,
         } = config;
 
@@ -320,7 +325,6 @@ impl Config {
         let tui = resolve_tui(tui, &origins)?;
 
         let provenance = Provenance {
-            layers: origins.into_layers(),
             model: model_id.source,
             effort: effort.source,
             auth: auth.source,
@@ -336,6 +340,10 @@ impl Config {
             permission_mode: permission.mode_source,
             permission_auto_model: permission.auto_model_source,
             permission_auto_instructions: permission.auto_instructions_source,
+            question_timeout: origins.source("interaction.questions.timeout_seconds"),
+            question_timeout_action: origins.source("interaction.questions.on_timeout"),
+            approval_timeout: origins.source("interaction.approvals.timeout_seconds"),
+            approval_timeout_action: origins.source("interaction.approvals.on_timeout"),
             show_thinking: tui.show_thinking.source,
             show_welcome: tui.show_welcome.source,
             status_line: tui.status_line.source,
@@ -343,6 +351,7 @@ impl Config {
             theme_overrides: tui.theme_overrides,
             extra_roots: permission.extra_roots,
             rules: permission.rules,
+            layers: origins.into_layers(),
         };
 
         Ok(Self {
@@ -362,6 +371,7 @@ impl Config {
             compaction: compaction.value,
             permission: permission.policy,
             permission_auto: permission.auto,
+            interaction,
             workspace: permission.workspace,
             show_thinking: tui.show_thinking.value,
             show_welcome: tui.show_welcome.value,
@@ -445,6 +455,7 @@ impl Config {
             compaction: self.compaction,
             permission_mode: self.permission.mode(),
             permission_auto: self.permission_auto.clone(),
+            interaction: self.interaction,
             show_thinking: self.show_thinking,
             show_welcome: self.show_welcome,
             status_line: self.status_line.clone(),

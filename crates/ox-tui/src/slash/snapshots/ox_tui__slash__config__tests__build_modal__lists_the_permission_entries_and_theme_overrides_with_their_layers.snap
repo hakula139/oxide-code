@@ -36,9 +36,9 @@ expression: "render_modal(&mut modal, 80, u16::MAX)"
     "",
     "Source Files",
     "",
-    "User                /cfg/ox/config.toml",
-    "Drop-in             /cfg/ox/config.d/10-nix.toml",
-    "Project             /repo/.ox/config.toml",
+    "User                     /cfg/ox/config.toml",
+    "Drop-in                  /cfg/ox/config.d/10-nix.toml",
+    "Project                  /repo/.ox/config.toml",
     "",
     "Esc to close",
 ]

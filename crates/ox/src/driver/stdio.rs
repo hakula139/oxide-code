@@ -388,6 +388,7 @@ impl TextState {
             | Event::SignedOut { .. }
             | Event::ApprovalRequested { .. }
             | Event::QuestionAsked { .. }
+            | Event::InteractionClosed { .. }
             | Event::ArchiveUpdated { .. }
             | Event::SavedFound(_)
             | Event::SavedDeleted { .. }

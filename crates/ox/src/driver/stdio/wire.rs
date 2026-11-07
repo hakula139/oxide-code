@@ -118,6 +118,7 @@ pub(super) fn wire(event: &Event) -> Option<HeadlessEvent<'_>> {
         | Event::SignedOut { .. }
         | Event::ApprovalRequested { .. }
         | Event::QuestionAsked { .. }
+        | Event::InteractionClosed { .. }
         | Event::SessionRulesUpdated(_) => return None,
     })
 }
