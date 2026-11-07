@@ -207,8 +207,6 @@ pub(super) async fn agent_turn(
             return TurnOutcome::stopped(report, TurnStop::Replied);
         }
 
-        dispatch_ctx.classifier.user_prompts =
-            super::classifier::user_prompts(transcript.messages());
         let mut round =
             dispatch::run_tool_round(tools, tool_uses, &parse_errors, sink, mailbox, dispatch_ctx)
                 .await;
@@ -228,7 +226,13 @@ pub(super) async fn agent_turn(
         if let Some(abort) = round.abort {
             return interrupt_turn(transcript, sink, report, abort).await;
         }
-        record_drained_prompts(mailbox.drain_prompts(), transcript, sink).await;
+        record_drained_prompts(
+            mailbox.drain_prompts(),
+            transcript,
+            &mut dispatch_ctx.classifier.user_prompts,
+            sink,
+        )
+        .await;
 
         let ran = round_index + 1;
         let estimate =
@@ -433,15 +437,17 @@ async fn commit_round(
     sink.session_write(&report);
 }
 
-/// Records and appends each queued prompt, then confirms it with [`Event::PromptDrained`].
+/// Records queued user prompts and retains their authorization text for the logical turn.
 pub(super) async fn record_drained_prompts(
     texts: impl IntoIterator<Item = String>,
     transcript: &mut LiveTranscript,
+    user_prompts: &mut Vec<String>,
     sink: &dyn EventSink,
 ) {
     for text in texts {
         let report = transcript.record_message(Message::user(text.clone())).await;
         sink.session_write(&report);
+        user_prompts.push(text.clone());
         sink.emit(Event::PromptDrained(text));
     }
 }
@@ -838,6 +844,8 @@ mod tests {
         ) -> TurnOutcome {
             let mut transcript = LiveTranscript::with_messages(session, std::mem::take(messages));
             transcript.catch_up_mode(dispatch_ctx.policy.mode(), &turn.tools.plan_tools());
+            dispatch_ctx.classifier.user_prompts =
+                crate::engine::classifier::user_prompts(transcript.messages());
             let outcome = super::agent_turn(turn, &mut transcript, mailbox, dispatch_ctx).await;
             *messages = transcript.messages().to_vec();
             outcome

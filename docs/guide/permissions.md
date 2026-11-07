@@ -11,7 +11,7 @@ Read operations confined to session state, such as checking a shell task's outpu
 - **`plan`** denies edit, exec, and net calls and allows remaining unmatched read-only calls.
 - **`yolo`** allows unmatched calls. Explicit deny and ask rules still apply.
 
-The classifier cannot override your deny or ask rules. It receives your user-authored session prompts, the complete validated tool input, the resolved native path where applicable, and the working directory and workspace roots. It uses the configured API endpoint and credentials with a separate model. Assistant explanations and tool output are excluded. It does not read files or run tools to investigate a call, and it does not cache decisions. Its cost joins session usage without changing the main model's context estimate.
+The classifier cannot override your deny or ask rules. It receives your user-authored session prompts, the complete validated tool input, the resolved native path where applicable, and the working directory and workspace roots. It retains the active turn's prompts across compaction. After resuming a compacted session, it uses the visible user text and your new follow-up, and asks when that context is insufficient. It uses the configured API endpoint and credentials with a separate model. Assistant explanations and tool output are excluded. It does not read files or run tools to investigate a call, and it does not cache decisions. Its cost joins session usage without changing the main model's context estimate.
 
 Set `mode` under `[permission]` in user config. `OX_PERMISSION_MODE` overrides it, and `ox --mode <mode>` overrides both for one run. An existing explicit mode remains authoritative.
 

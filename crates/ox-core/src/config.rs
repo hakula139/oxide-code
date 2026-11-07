@@ -32,6 +32,7 @@ use self::credentials::{AuthState, CredentialError};
 use self::gateway::{GatewayCompat, GatewaySnapshot, ResolvedGateway};
 use self::load::{Loaded, ParsedPermission};
 use self::merge::Origins;
+use self::permission_auto::AutoPermissionConfig;
 use self::provenance::{Provenance, Source, Sourced, TierPattern};
 use self::schema::{ClientAuth, FileConfig, PermissionTable, ThemeTable, TuiTable};
 use crate::auth::oauth::ClaudeCodeKeychain;
@@ -67,7 +68,7 @@ pub struct ConfigSnapshot {
     pub prompt_cache_ttl: PromptCacheTtl,
     pub compaction: CompactionConfig,
     pub permission_mode: Mode,
-    pub permission_auto: self::permission_auto::AutoPermissionConfig,
+    pub permission_auto: AutoPermissionConfig,
     pub show_thinking: bool,
     pub show_welcome: bool,
     pub status_line: Vec<StatusLineSegment>,
@@ -223,7 +224,7 @@ pub struct Config {
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) compaction: CompactionConfig,
     pub(crate) permission: Policy,
-    pub(crate) permission_auto: self::permission_auto::AutoPermissionConfig,
+    pub(crate) permission_auto: AutoPermissionConfig,
     /// The launch directory and the workspace roots the tools run in.
     pub(crate) workspace: Workspace,
     /// Whether adaptive thinking opts into summarized text. The request's `thinking` field derives
@@ -656,7 +657,7 @@ struct ResolvedPermission {
     mode_source: Source,
     extra_roots: Vec<Sourced<String>>,
     rules: Vec<Sourced<TierPattern>>,
-    auto: self::permission_auto::AutoPermissionConfig,
+    auto: AutoPermissionConfig,
     auto_model_source: Source,
     auto_instructions_source: Source,
 }
@@ -681,9 +682,9 @@ fn resolve_permission(
         .unwrap_or_else(|| Sourced::fallback(Mode::default()));
 
     let auto_model = origins.sourced("permission.auto.model", file.auto.model);
-    let auto = self::permission_auto::AutoPermissionConfig {
+    let auto = AutoPermissionConfig {
         model: auto_model.as_ref().map_or_else(
-            || self::permission_auto::AutoPermissionConfig::default().model,
+            || AutoPermissionConfig::default().model,
             |model| ModelSpec::resolve(&model.value),
         ),
         instructions: file.auto.instructions,

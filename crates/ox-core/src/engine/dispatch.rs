@@ -16,7 +16,7 @@ use super::usage::UsageLedger;
 use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
-use crate::permission::{Basis, ConfigFix, Decision, Mode, Policy, SessionGrant, Workspace};
+use crate::permission::{Basis, Decision, Mode, Policy, SessionGrant, Workspace};
 use crate::prompt::plan_runs;
 use crate::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::handle::SessionHandle;
@@ -506,13 +506,13 @@ fn plan_denied_output(name: &str, tools: &ToolRegistry) -> ToolOutput {
 
 /// The synthetic error result for a call that would ask in a run nobody attends. It names what made
 /// the call ask, then the config `fix` that lets it through, or what else the model can do.
-fn unapproved_output(name: &str, basis: &Basis, fix: Option<&ConfigFix>) -> ToolOutput {
+fn unapproved_output(name: &str, basis: &Basis, fix: Option<&Rule>) -> ToolOutput {
     let why = match basis {
         Basis::Mode(_) => "No allow pattern matches it.".to_owned(),
         basis => format!("It needs approval because of {basis}."),
     };
     let next = match (fix, basis) {
-        (Some(ConfigFix::Allow(rule)), _) => format!(
+        (Some(rule), _) => format!(
             "To allow it, ask the user to add {} in the user config.",
             allow_entry(rule)
         ),
@@ -1451,7 +1451,7 @@ mod tests {
             let unrecognized = Basis::Unrecognized {
                 construct: "$((1 + 2))".to_owned(),
             };
-            let allow = ConfigFix::Allow(exec_grant(r#"echo "a\b""#).suggested().clone());
+            let allow = exec_grant(r#"echo "a\b""#).suggested().clone();
             let ask = Basis::Rule {
                 tier: Tier::Ask,
                 rule: Rule::parse(PermissionClass::Exec, "git push *").unwrap(),

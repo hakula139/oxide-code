@@ -968,9 +968,9 @@ impl Policy {
     }
 
     /// An allow pattern that would let an unattended call run.
-    pub(crate) fn config_fix(&self, class: PermissionClass, target: &Access) -> Option<ConfigFix> {
+    pub(crate) fn config_fix(&self, class: PermissionClass, target: &Access) -> Option<Rule> {
         self.session_grant(class, target)
-            .map(|grant| ConfigFix::Allow(grant.suggested))
+            .map(|grant| grant.suggested)
     }
 
     /// The `read` deny and ask rules for files below a search tool's root.
@@ -1196,13 +1196,6 @@ impl SessionGrant {
         );
         Ok(rule)
     }
-}
-
-/// A user config change that lets a held call through.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ConfigFix {
-    /// An allow rule to add.
-    Allow(Rule),
 }
 
 /// The `read` deny and ask rules a search tool applies to each file it finds, since the gate
@@ -2675,10 +2668,7 @@ mod tests {
 
                 let fix = p.config_fix(EXEC, &command("cargo test"));
 
-                assert_eq!(
-                    fix,
-                    Some(ConfigFix::Allow(Rule::parse(EXEC, "cargo test").unwrap()))
-                );
+                assert_eq!(fix, Some(Rule::parse(EXEC, "cargo test").unwrap()));
             }
         }
 

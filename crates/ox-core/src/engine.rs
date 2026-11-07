@@ -350,6 +350,7 @@ impl Engine {
             Ok(auth) => auth,
             Err(abort) => return report_unsent(sink, abort),
         };
+        let mut user_prompts = classifier::user_prompts(self.transcript.messages());
         if let Err(abort) = self.auto_compact(&auth, sink, mailbox).await {
             return report_unsent(sink, abort);
         }
@@ -357,7 +358,14 @@ impl Engine {
         let fresh = self.load_user_context(sink, mailbox).await;
         let outcome = self.transcript.begin_turn(text, fresh, title).await;
         sink.session_write(&outcome.report);
-        turn::record_drained_prompts(mailbox.drain_prompts(), &mut self.transcript, sink).await;
+        user_prompts.push(text.to_owned());
+        turn::record_drained_prompts(
+            mailbox.drain_prompts(),
+            &mut self.transcript,
+            &mut user_prompts,
+            sink,
+        )
+        .await;
 
         if self.generates_titles
             && let Some(seed) = outcome.ai_title_seed
@@ -374,8 +382,9 @@ impl Engine {
 
         let mut rounds_run = 0;
         let result = loop {
-            let TurnOutcome { mut report, result } =
-                self.run_turn(&auth, sink, mailbox, rounds_run).await;
+            let TurnOutcome { mut report, result } = self
+                .run_turn(&auth, sink, mailbox, rounds_run, &mut user_prompts)
+                .await;
             if let Err(TurnAbort::Refused(notice)) = result {
                 self.roll_back(sink, &report).await;
                 break Err(TurnAbort::Refused(notice));
@@ -392,7 +401,13 @@ impl Engine {
                 break Err(abort);
             }
             rounds_run = run;
-            turn::record_drained_prompts(mailbox.drain_prompts(), &mut self.transcript, sink).await;
+            turn::record_drained_prompts(
+                mailbox.drain_prompts(),
+                &mut self.transcript,
+                &mut user_prompts,
+                sink,
+            )
+            .await;
         };
         self.transcript.end_turn();
         match result {
@@ -408,6 +423,7 @@ impl Engine {
         sink: &dyn EventSink,
         mailbox: &mut Mailbox<'_>,
         rounds_run: u32,
+        user_prompts: &mut Vec<String>,
     ) -> TurnOutcome {
         let auto_compaction = self.auto_compaction();
         let mut dispatch_ctx = dispatch::DispatchContext {
@@ -421,11 +437,11 @@ impl Engine {
                 config: &self.permission_auto,
                 cache_ttl: self.settings.prompt_cache_ttl(),
                 context_window: self.settings.model().context_window(),
-                user_prompts: Vec::new(),
+                user_prompts: std::mem::take(user_prompts),
             },
             usage: &mut self.usage,
         };
-        turn::agent_turn(
+        let outcome = turn::agent_turn(
             TurnContext {
                 client: &self.client,
                 auth,
@@ -440,7 +456,9 @@ impl Engine {
             mailbox,
             &mut dispatch_ctx,
         )
-        .await
+        .await;
+        *user_prompts = dispatch_ctx.classifier.user_prompts;
+        outcome
     }
 
     /// Returns the transcript and the session to the turn's rollback point after the model refused
