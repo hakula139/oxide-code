@@ -163,6 +163,7 @@ async fn attaches_piped_stdin_and_continues_its_session() {
 async fn continue_reports_files_changed_since_the_session_read_them() {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().unwrap();
+    write_user_config(dir.path(), "[permission.allow]\nread = ['*']\n");
     let notes = dir.path().join("notes.txt");
     std::fs::write(&notes, "v1\n").unwrap();
     let input = serde_json::json!({ "file_path": notes }).to_string();
@@ -269,10 +270,10 @@ async fn unattended_runs_deny_a_call_that_needs_approval_and_read_no_line_as_an_
         let mut command = tokio::process::Command::from(ox(dir.path()));
         command
             .args(args)
+            .args(["--mode", "manual"])
             .current_dir(dir.path())
             .env("ANTHROPIC_AUTH_TOKEN", "test-token")
             .env("ANTHROPIC_BASE_URL", server.uri())
-            .env_remove("OX_PERMISSION_MODE")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if input.is_some() {
