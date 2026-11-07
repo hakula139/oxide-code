@@ -197,7 +197,7 @@ fn resume_without_a_terminal_fails_before_writing_anything() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("the TUI needs a terminal on stdin and stdout. Pass `-p`"),
+        stderr.contains("Pass `ox -r <session-id> -p \"<prompt>\"`"),
         "{stderr}"
     );
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());

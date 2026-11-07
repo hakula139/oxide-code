@@ -953,6 +953,7 @@ mod tests {
             fn follows_the_flags_and_opens_the_tui_only_with_the_terminals_it_needs() {
                 let tui = |picker| Ok(Run::Session(Frontend::Tui { picker }));
                 let terminal_error = "the TUI needs a terminal on stdin and stdout. Pass `-p`";
+                let resume_error = "Pass `ox -r <session-id> -p \"<prompt>\"`";
                 let cases: &[RunCase] = &[
                     (
                         &["ox", "config", "check"],
@@ -996,8 +997,8 @@ mod tests {
                         true,
                         tui(Some(ProjectScope::Every)),
                     ),
-                    (&["ox", "--resume"], true, false, Err(terminal_error)),
-                    (&["ox", "--resume"], false, true, Err(terminal_error)),
+                    (&["ox", "--resume"], true, false, Err(resume_error)),
+                    (&["ox", "--resume"], false, true, Err(resume_error)),
                 ];
 
                 for (args, stdin_is_terminal, stdout_is_terminal, expected) in cases {
