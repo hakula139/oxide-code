@@ -25,6 +25,7 @@ tracing.workspace = true
 unicode-width.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+nix.workspace = true
 signal-hook.workspace = true
 
 [dev-dependencies]

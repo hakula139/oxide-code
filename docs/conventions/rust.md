@@ -12,7 +12,7 @@ Conventions for Rust code under `crates/`. Tooling enforces some style rules, so
 ## Lint Suppression
 
 - An `#[expect]` reason explains why the code triggers the lint today.
-- The Windows file ID query in `util::fs` may use a function-scoped `#[expect(unsafe_code, reason = "...")]`, since no safe standard library API returns the volume and full file ID. Keep its raw handle and pointer inside that boundary, document its ownership and buffer invariants, and expose a safe operation. Other code remains subject to the workspace's `unsafe_code` denial.
+- The Windows file ID query in `util::fs` and the Unix signal-disposition query in `ox::driver` may use a function-scoped `#[expect(unsafe_code, reason = "...")]`, since their safe APIs do not expose those queries. Keep raw handles and pointers inside those boundaries, document ownership and buffer invariants, and expose safe operations. The signal query passes a null action so it cannot change the disposition. Other code remains subject to the workspace's `unsafe_code` denial.
 - For complexity and size lints such as `too_many_lines`, `cognitive_complexity`, and `too_many_arguments`, extract a helper or bundle parameters that belong together into a struct. Suppress the lint only when the function is irreducibly cohesive, and explain why in the reason.
 
 ## Architecture
