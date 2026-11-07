@@ -33,6 +33,15 @@ fn classifier_reply(text: &str) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_string(completion_body(text))
 }
 
+fn refused_classifier_reply() -> ResponseTemplate {
+    let mut body: serde_json::Value = serde_json::from_str(&completion_body(
+        r#"{"decision":"allow","reason":"Requested"}"#,
+    ))
+    .unwrap();
+    body["stop_reason"] = json!("refusal");
+    ResponseTemplate::new(200).set_body_json(body)
+}
+
 async fn mount_classifier(server: &MockServer, response: ResponseTemplate) {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -160,61 +169,70 @@ mod classify {
     }
 
     #[tokio::test]
-    async fn records_malformed_successful_response_usage_before_rejecting_the_verdict() {
-        let server = MockServer::start().await;
-        mount_classifier(&server, classifier_reply("not a verdict")).await;
-        let config = test_config(server.uri(), api_key(), MODEL);
-        let client = client_for(&config);
-        let auth = api_key();
-        let settings = AutoPermissionConfig::default();
-        let context = ClassifierContext {
-            client: &client,
-            auth: &auth,
-            config: &settings,
-            cache_ttl: PromptCacheTtl::FiveMin,
-            context_window: None,
-            user_prompts: vec!["inspect".to_owned()],
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let session = handle::start(&store, MODEL, None);
-        session.record_message(Message::user("inspect")).await;
-        let mut usage = UsageLedger::for_session(&[], 0);
-        let sink = CapturingSink::default();
-
-        let result = context
-            .classify(
-                Action {
-                    name: "probe",
-                    input: &json!({}),
-                    access: &Access::None,
-                },
-                &Workspace::new(Path::new("/repo")),
-                &session,
-                &mut usage,
-                &sink,
-            )
-            .await;
-
-        assert!(result.is_err(), "malformed output must not approve");
-        let records = store
-            .load_session_data(&session.session_id())
-            .unwrap()
-            .usage;
-        assert_eq!(
-            records,
-            [UsageRecord {
-                model: HAIKU.to_owned(),
+    async fn records_successful_response_usage_before_rejecting_an_invalid_or_refused_verdict() {
+        for (name, response) in [
+            ("malformed", classifier_reply("not a verdict")),
+            ("refused", refused_classifier_reply()),
+        ] {
+            let server = MockServer::start().await;
+            mount_classifier(&server, response).await;
+            let config = test_config(server.uri(), api_key(), MODEL);
+            let client = client_for(&config);
+            let auth = api_key();
+            let settings = AutoPermissionConfig::default();
+            let context = ClassifierContext {
+                client: &client,
+                auth: &auth,
+                config: &settings,
                 cache_ttl: PromptCacheTtl::FiveMin,
-                tokens: COMPLETION_USAGE,
-            }],
-        );
-        let expected = crate::engine::usage::estimate_cost_usd(&records);
-        assert_eq!(usage.total_estimated_cost_usd(), expected);
-        assert!(sink.events().iter().any(|event| matches!(
-            event,
-            Event::UsageUpdated(snapshot) if snapshot.estimated_cost_usd == Some(expected)
-        )));
+                context_window: None,
+                user_prompts: vec!["inspect".to_owned()],
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let session = handle::start(&store, MODEL, None);
+            session.record_message(Message::user("inspect")).await;
+            let mut usage = UsageLedger::for_session(&[], 0);
+            let sink = CapturingSink::default();
+
+            let result = context
+                .classify(
+                    Action {
+                        name: "probe",
+                        input: &json!({}),
+                        access: &Access::None,
+                    },
+                    &Workspace::new(Path::new("/repo")),
+                    &session,
+                    &mut usage,
+                    &sink,
+                )
+                .await;
+
+            assert!(
+                result.is_err(),
+                "{name}: invalid or refused output must not approve"
+            );
+            let records = store
+                .load_session_data(&session.session_id())
+                .unwrap()
+                .usage;
+            assert_eq!(
+                records,
+                [UsageRecord {
+                    model: HAIKU.to_owned(),
+                    cache_ttl: PromptCacheTtl::FiveMin,
+                    tokens: COMPLETION_USAGE,
+                }],
+                "{name}",
+            );
+            let expected = crate::engine::usage::estimate_cost_usd(&records);
+            assert_eq!(usage.total_estimated_cost_usd(), expected, "{name}");
+            assert!(sink.events().iter().any(|event| matches!(
+                event,
+                Event::UsageUpdated(snapshot) if snapshot.estimated_cost_usd == Some(expected)
+            )));
+        }
     }
 }
 
@@ -277,6 +295,22 @@ mod permission_gate {
                     ApprovalDecision::Approve,
                     true,
                     1,
+                    1,
+                ),
+                (
+                    "refusal with an allow-shaped response",
+                    refused_classifier_reply(),
+                    ApprovalDecision::Deny,
+                    true,
+                    0,
+                    1,
+                ),
+                (
+                    "empty reason",
+                    classifier_reply(r#"{"decision":"allow","reason":" "}"#),
+                    ApprovalDecision::Deny,
+                    true,
+                    0,
                     1,
                 ),
                 (

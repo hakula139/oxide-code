@@ -1336,7 +1336,6 @@ pub mod testing {
 mod tests {
     use super::*;
     use crate::permission::rule::escaped;
-    use crate::session::store::SessionStore;
     use crate::util::fs::testing::{symlink_dir, symlink_file};
     use crate::util::path::local_testing::{abs, canonical_tempdir};
     use crate::util::path::slash_separated;
