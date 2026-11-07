@@ -123,3 +123,96 @@ impl Tool for AskTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::tool::local_testing::temp_ctx;
+
+    mod prepare {
+        use super::*;
+
+        #[test]
+        fn rejects_unanswerable_questions_and_invalid_recommendations() {
+            for (input, expected) in [
+                (
+                    json!({"question": " "}),
+                    "The question is empty. Provide a question for the user.",
+                ),
+                (
+                    json!({"question": "Choose a color.", "options": [{"label": " "}]}),
+                    "An option has an empty label. Give every option a label.",
+                ),
+                (
+                    json!({"question": "Choose a color.", "recommended": 0}),
+                    "The recommended index does not name an option.",
+                ),
+                (
+                    json!({"question": "Choose a color.", "options": [{"label": "Blue"}], "recommended": 1}),
+                    "The recommended index does not name an option.",
+                ),
+            ] {
+                let error = AskTool.prepare(input.clone(), &temp_ctx()).unwrap_err();
+
+                assert_eq!(error, expected, "{input}");
+            }
+        }
+    }
+
+    mod run {
+        use super::*;
+
+        #[tokio::test]
+        async fn preserves_answers_empty_answers_skips_and_aborts() {
+            for answer in [
+                QuestionAnswer::Answered("Blue".to_owned()),
+                QuestionAnswer::Answered(String::new()),
+                QuestionAnswer::Skipped,
+                QuestionAnswer::Aborted,
+            ] {
+                let (questions, mut requests) = mpsc::channel(1);
+                let ctx = ToolCtx {
+                    questions,
+                    ..temp_ctx()
+                };
+                let input = json!({"question": "Choose a color.", "options": [{"label": "Blue"}], "recommended": 0});
+                let prepared = AskTool.prepare(input.clone(), &ctx).unwrap();
+                let expected = answer.clone();
+
+                let (output, ()) = tokio::join!(AskTool.run(prepared, &ctx), async {
+                    let request = requests.recv().await.unwrap();
+                    assert_eq!(request.id, "toolu_test");
+                    assert_eq!(
+                        request.question,
+                        serde_json::from_value::<Question>(input).unwrap()
+                    );
+                    request.reply.send(answer).unwrap();
+                });
+
+                assert!(!output.is_error, "{}", output.content);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&output.content).unwrap(),
+                    json!({"source": "user", "result": expected}),
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_closed_question_channel_aborts_without_an_answer() {
+            let ctx = temp_ctx();
+            let prepared = AskTool
+                .prepare(json!({"question": "Choose a color."}), &ctx)
+                .unwrap();
+
+            let output = AskTool.run(prepared, &ctx).await;
+
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&output.content).unwrap(),
+                json!({"source": "user", "result": {"status": "aborted"}}),
+            );
+        }
+    }
+}

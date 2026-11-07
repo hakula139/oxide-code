@@ -847,8 +847,8 @@ mod tests {
                 assert_eq!(
                     engine.transcript.prompt().seen.mode,
                     "The permission mode is `plan`, so only calls to `bash_output`, `bash_stop`, \
-                     `read`, `glob`, `grep`, and `tasks` run. Investigate, then present your plan \
-                     for the user to review.",
+                     `read`, `glob`, `grep`, `tasks`, and `ask` run. Investigate, then present your \
+                     plan for the user to review.",
                 );
                 assert_eq!(
                     engine.startup_notices,

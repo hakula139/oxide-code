@@ -650,6 +650,7 @@ mod tests {
     use crate::protocol::OpSender;
     use crate::protocol::local_testing::{CapturingSink, FailingSink};
     use crate::tool::ToolDefinition;
+    use crate::tool::ask::AskTool;
     use crate::tool::edit::EditTool;
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
@@ -672,6 +673,32 @@ mod tests {
 
     mod run_tool_round {
         use super::*;
+
+        struct AnsweringSink {
+            events: CapturingSink,
+            ops: OpSender,
+            answer: Option<QuestionAnswer>,
+        }
+
+        impl EventSink for AnsweringSink {
+            fn send(&self, event: Event) -> anyhow::Result<()> {
+                if let Event::QuestionAsked { id, .. } = &event {
+                    let Some(answer) = &self.answer else {
+                        self.ops.try_submit(Op::Interrupt)?;
+                        return self.events.send(event);
+                    };
+                    self.ops.try_submit(Op::AnswerQuestion {
+                        id: "old-question".to_owned(),
+                        answer: QuestionAnswer::Answered("stale answer".to_owned()),
+                    })?;
+                    self.ops.try_submit(Op::AnswerQuestion {
+                        id: id.clone(),
+                        answer: answer.clone(),
+                    })?;
+                }
+                self.events.send(event)
+            }
+        }
 
         fn call(id: &str, name: &str, input: serde_json::Value) -> PendingToolUse {
             PendingToolUse {
@@ -765,6 +792,145 @@ mod tests {
                     std::future::pending().await
                 })
             }
+        }
+
+        #[tokio::test]
+        async fn questions_resume_with_matching_answers_and_only_entered_text_is_user_context() {
+            for answer in [
+                QuestionAnswer::Answered("Blue".to_owned()),
+                QuestionAnswer::Answered(String::new()),
+                QuestionAnswer::Skipped,
+                QuestionAnswer::Aborted,
+            ] {
+                let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
+                let (ops, mut incoming) = OpSender::channel(2);
+                let sink = AnsweringSink {
+                    events: CapturingSink::default(),
+                    ops,
+                    answer: Some(answer.clone()),
+                };
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+
+                let round = run_tool_round(
+                    &tools,
+                    vec![call(
+                        "question-1",
+                        "ask",
+                        json!({"question": "Choose a color."}),
+                    )],
+                    &HashMap::new(),
+                    &sink,
+                    &mut Mailbox::new(&mut incoming),
+                    &mut dispatch_ctx,
+                )
+                .await;
+
+                assert!(round.abort.is_none(), "{:?}", round.abort);
+                let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } = &round.results[0]
+                else {
+                    panic!("expected the question result, got {:?}", round.results);
+                };
+                assert_eq!(tool_use_id, "question-1");
+                assert!(!is_error, "{content}");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(content).unwrap(),
+                    json!({"source": "user", "result": answer})
+                );
+                let expected_context = match answer {
+                    QuestionAnswer::Answered(text) => vec![ContentBlock::text(formatdoc! {"
+                        For the question:
+                        Choose a color.
+
+                        The user answered:
+                        {text}"
+                    })],
+                    QuestionAnswer::Skipped | QuestionAnswer::Aborted => Vec::new(),
+                };
+                assert_eq!(&round.results[1..], expected_context);
+                assert_eq!(approval_ids(&sink.events), [] as [&str; 0]);
+                assert_eq!(
+                    sink.events
+                        .events()
+                        .iter()
+                        .filter_map(|event| match event {
+                            Event::QuestionAsked { id, .. } => Some(id.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    ["question-1"]
+                );
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn cancelling_a_question_interrupts_the_call_without_user_context() {
+            let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
+            let (ops, mut incoming) = OpSender::channel(1);
+            let sink = AnsweringSink {
+                events: CapturingSink::default(),
+                ops,
+                answer: None,
+            };
+            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+
+            let round = tokio::time::timeout(
+                Duration::from_secs(1),
+                run_tool_round(
+                    &tools,
+                    vec![call(
+                        "question-1",
+                        "ask",
+                        json!({"question": "Choose a color."}),
+                    )],
+                    &HashMap::new(),
+                    &sink,
+                    &mut Mailbox::new(&mut incoming),
+                    &mut dispatch_ctx,
+                ),
+            )
+            .await
+            .expect("cancellation must stop the pending question");
+
+            assert!(matches!(round.abort, Some(TurnAbort::Cancelled)));
+            assert_eq!(results(&round), [("question-1", INTERRUPTED, true)]);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_disconnected_question_frontend_aborts_without_waiting() {
+            let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
+            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+
+            let round = tokio::time::timeout(
+                Duration::from_secs(1),
+                run_tool_round(
+                    &tools,
+                    vec![call(
+                        "question-1",
+                        "ask",
+                        json!({"question": "Choose a color."}),
+                    )],
+                    &HashMap::new(),
+                    &FailingSink,
+                    &mut inert_mailbox(),
+                    &mut dispatch_ctx,
+                ),
+            )
+            .await
+            .expect("an undeliverable question must not wait for an answer");
+
+            assert!(round.abort.is_none());
+            assert_eq!(
+                results(&round),
+                [(
+                    "question-1",
+                    r#"{"result":{"status":"aborted"},"source":"user"}"#,
+                    false
+                )]
+            );
         }
 
         #[tokio::test]
@@ -1037,6 +1203,50 @@ mod tests {
             /// The synthetic output `gate_call` settled the call with, panicking if it readied it.
             fn expect_settled(result: Result<Prepared, ToolOutput>) -> ToolOutput {
                 result.expect_err("the call is ready to run")
+            }
+
+            #[tokio::test]
+            async fn internal_questions_still_honor_explicit_read_deny_and_ask_rules() {
+                for (denies, marker) in [(true, "`deny.read`"), (false, "`ask.read`")] {
+                    let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
+                    let sink = CapturingSink::default();
+                    let mut dispatch_ctx =
+                        dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                    let rules = vec![Rule::parse(PermissionClass::Read, "*").unwrap()];
+                    let (deny, ask) = if denies {
+                        (rules, Vec::new())
+                    } else {
+                        (Vec::new(), rules)
+                    };
+                    let mut policy = Policy::resolve(
+                        Mode::Manual,
+                        deny,
+                        ask,
+                        Vec::new(),
+                        &[],
+                        &dispatch_ctx.workspace,
+                    )
+                    .unwrap();
+                    policy.set_unattended();
+                    dispatch_ctx.policy = Box::leak(Box::new(policy));
+
+                    let result = gate_call(
+                        &tools,
+                        "question-1",
+                        "ask",
+                        json!({"question": "Choose a color."}),
+                        &sink,
+                        &mut inert_mailbox(),
+                        &mut dispatch_ctx,
+                    )
+                    .await
+                    .expect("a configured question rule resolves without abort");
+
+                    let denial = expect_settled(result);
+                    assert!(denial.is_error);
+                    assert!(denial.content.contains(marker), "{}", denial.content);
+                    assert_eq!(approval_ids(&sink), [] as [&str; 0]);
+                }
             }
 
             #[tokio::test]

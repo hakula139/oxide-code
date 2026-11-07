@@ -216,3 +216,85 @@ impl Modal for QuestionModal {
         Some(self.answer(QuestionAnswer::Aborted))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ox_core::tool::ask::QuestionOption;
+
+    use super::*;
+    use crate::modal::testing::render_rows;
+
+    fn modal() -> QuestionModal {
+        QuestionModal::new(
+            "question-1".to_owned(),
+            Question {
+                question: "Choose a color.".to_owned(),
+                options: vec![
+                    QuestionOption {
+                        label: "Blue".to_owned(),
+                        description: None,
+                    },
+                    QuestionOption {
+                        label: "Green".to_owned(),
+                        description: None,
+                    },
+                ],
+                recommended: Some(1),
+            },
+        )
+    }
+
+    fn submitted(action: ModalKey) -> QuestionAnswer {
+        let ModalKey::Submitted(ModalAction::Dispatch(Action::Op(Op::AnswerQuestion {
+            id,
+            answer,
+        }))) = action
+        else {
+            panic!("expected a question answer, got {action:?}");
+        };
+        assert_eq!(id, "question-1");
+        answer
+    }
+
+    mod handle_key {
+        use super::*;
+
+        #[test]
+        fn submits_the_recommendation_or_a_freeform_answer_including_empty_text() {
+            for (paste, expected) in [
+                (None, "Green"),
+                (Some("custom answer"), "custom answer"),
+                (Some(""), ""),
+            ] {
+                let mut modal = modal();
+                if let Some(text) = paste {
+                    modal.handle_paste(text);
+                }
+                render_rows(&mut modal, 60, 15);
+                modal.acceptance.expire();
+
+                let answer =
+                    submitted(modal.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+                assert_eq!(answer, QuestionAnswer::Answered(expected.to_owned()));
+            }
+        }
+
+        #[test]
+        fn skipping_and_cancelling_are_distinct_from_an_empty_answer() {
+            let mut modal = modal();
+            render_rows(&mut modal, 60, 15);
+            modal.acceptance.expire();
+
+            let skipped = submitted(
+                modal.handle_key(&KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            );
+            let aborted = modal.on_cancel();
+
+            assert_eq!(skipped, QuestionAnswer::Skipped);
+            assert!(
+                matches!(aborted, Some(ModalAction::Dispatch(Action::Op(Op::AnswerQuestion { id, answer: QuestionAnswer::Aborted }))) if id == "question-1")
+            );
+        }
+    }
+}

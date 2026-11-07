@@ -739,6 +739,7 @@ mod tests {
                     ("glob", PermissionClass::Read, true),
                     ("grep", PermissionClass::Read, true),
                     ("tasks", PermissionClass::Read, false),
+                    ("ask", PermissionClass::Read, false),
                 ],
             );
         }
@@ -1157,6 +1158,7 @@ mod tests {
                         "glob",
                         "grep",
                         "tasks",
+                        "ask",
                     ],
                 );
             }
@@ -1269,7 +1271,15 @@ mod tests {
                     (
                         "built-in",
                         built_in(),
-                        &["bash_output", "bash_stop", "read", "glob", "grep", "tasks"][..],
+                        &[
+                            "bash_output",
+                            "bash_stop",
+                            "read",
+                            "glob",
+                            "grep",
+                            "tasks",
+                            "ask",
+                        ][..],
                     ),
                     ("custom", custom, &["tasks", "read"]),
                 ];
