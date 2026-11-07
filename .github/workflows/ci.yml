@@ -203,13 +203,15 @@ jobs:
         run: |
           # `needs` misses a matrix leg cancelled before it starts, so read each job from the API.
           failed=$(
-            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=all&per_page=100" \
               --paginate \
               --slurp |
               jq -r --argjson gate "$GATE_ID" '
-                [.[].jobs[]] as $jobs
+                [.[].jobs[]]
+                | group_by(.name)
+                | map(max_by(.run_attempt)) as $jobs
                 | first($jobs[] | select(.id == $gate))
-                  // error("job \($gate) is missing from this run attempt")
+                  // error("job \($gate) is missing from this workflow run")
                 # Jobs of a calling workflow share this run, so check only names with this prefix.
                 | (.name | sub("[^/]*$"; "")) as $prefix
                 | $jobs[]
