@@ -57,13 +57,16 @@ impl Walk {
                 _ => nodes.push(part),
             }
         }
-        let program = named.len();
+        let program_start = named.len();
         named.extend(words(&nodes, src).iter().map(|word| word.shell_word(src)));
         if named.iter().any(|word| !word.literal) {
             self.incomplete = true;
         }
-        if program < named.len() {
-            self.segments.push(Segment { named, program });
+        if program_start < named.len() {
+            self.segments.push(Segment {
+                named,
+                program_start,
+            });
         } else {
             self.incomplete = true;
         }

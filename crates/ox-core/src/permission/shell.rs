@@ -36,7 +36,7 @@ impl CommandTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Segment {
     named: Vec<ShellWord>,
-    program: usize,
+    program_start: usize,
 }
 
 impl Segment {
@@ -44,8 +44,8 @@ impl Segment {
         &self.named
     }
 
-    pub(super) fn programs(&self) -> impl Iterator<Item = &[ShellWord]> {
-        std::iter::once(&self.named[self.program..])
+    pub(super) fn program(&self) -> &[ShellWord] {
+        &self.named[self.program_start..]
     }
 }
 

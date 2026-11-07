@@ -275,11 +275,10 @@ fn quote(word: &str) -> String {
 /// Returns whether a deny or ask pattern holds `segment` by its named words, or by the words of a
 /// program it may run, as written or with the program's directory dropped.
 fn segment_held(pattern: &[PatternWord], segment: &Segment) -> bool {
+    let program = segment.program();
     words_held(pattern, segment.named())
-        || segment.programs().any(|program| {
-            words_held(pattern, program)
-                || bare_program(program).is_some_and(|bare| words_held(pattern, &bare))
-        })
+        || words_held(pattern, program)
+        || bare_program(program).is_some_and(|bare| words_held(pattern, &bare))
 }
 
 /// Returns whether an allow `pattern` matches all of `words`. A trailing `*` matches whatever words
