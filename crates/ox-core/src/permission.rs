@@ -118,10 +118,9 @@ pub enum Tier {
 
 // ── Workspace ──
 
-/// Where a session's tools run: the launch directory, which relative paths resolve against, and the
-/// roots inside which an edit needs no rule. The roots are the launch directory plus
-/// `permission.extra_roots`, each resolved the way a path target is, and there are none when the
-/// launch directory is `/`, `$HOME`, or an ancestor of it.
+/// Where tools run and relative path rules apply. Roots are the launch directory plus
+/// `permission.extra_roots`, resolved like path targets. There are none when the launch directory
+/// is `/`, `$HOME`, or an ancestor of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Workspace {
     cwd: PathBuf,
