@@ -147,6 +147,12 @@ impl SessionStore {
 }
 
 fn ordinary_text(blocks: Vec<ContentBlock>) -> Option<String> {
+    if blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+    {
+        return None;
+    }
     let text = blocks
         .into_iter()
         .filter_map(|block| match block {
@@ -234,11 +240,14 @@ mod tests {
                     "result",
                     50,
                     "user",
-                    &serde_json::to_string(&vec![ContentBlock::tool_result(
-                        "call",
-                        "tool output",
-                        false,
-                    )])
+                    &serde_json::to_string(&vec![
+                        ContentBlock::tool_result(
+                            "question-1",
+                            r#"{"source":"user","result":{"status":"answered","answer":"new prompt"}}"#,
+                            false,
+                        ),
+                        ContentBlock::text("new prompt"),
+                    ])
                     .unwrap(),
                 );
                 save(

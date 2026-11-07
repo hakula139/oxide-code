@@ -6,7 +6,7 @@
 
 An `Op` is one of three kinds:
 
-- **A turn.** `Prompt` starts one, `Queue` adds a prompt typed while it runs, `Interrupt` cancels it, and `Resolve` answers an outstanding approval.
+- **A turn.** `Prompt` starts one, `Queue` adds a prompt typed while it runs, `Interrupt` cancels it, `Resolve` answers an outstanding approval, and `AnswerQuestion` answers a running `ask` call.
 - **A session operation.** `Compact`, `Clear`, `Archive`, `Resume`, and `Rename` change the session, `SetArchive`, `FindSaved`, and `DeleteSaved` look up or change a saved one, and `SetModel` and `SetMode` change the settings the next turn uses.
 - **Sign-in and shutdown.** `Login`, `LoginCode`, and `Logout` manage the oxide-code login, and `Shutdown` ends the process.
 
@@ -31,7 +31,8 @@ A turn is a loop of rounds. Each round sends the transcript to the model, stream
 1. **The engine owns every session change, through ops and events.** The TUI and a headless run differ only in input and output, so behavior that changes the session or the transcript lives in the engine, and each frontend renders the same events. A slash command that changes session state forwards an `Op`, while one that only opens a modal stays local.
 2. **One end event per operation, under the op's ID.** A frontend learns that an operation ended from one event, so a lost or reordered progress event cannot leave the input held. The event is the last one the operation emits while it runs, and a shutdown is the only way an operation ends without one. The ID ties the end to its submission, so a frontend never takes the end of an op it did not wait on, such as a mode switch sent while idle, for the end of its own, and no table of which event ends which op has to track the engine.
 3. **An idle-only op is dropped.** Queueing it would apply a model or session change at a moment the user did not choose, such as after a turn they already interrupted. Dropping it keeps the frontend's own copy authoritative, and the frontend resubmits when it is ready.
-4. **Mid-turn controls share the op channel.** `Queue`, `Interrupt`, `Resolve`, `LoginCode`, `SetMode`, and `Shutdown` race the running futures in one `select!`, so a cancel, an approval, or a mode switch does not wait for a stream to finish, and the engine needs no second input path.
+4. **Mid-turn controls share the op channel.** `Queue`, `Interrupt`, `Resolve`, `AnswerQuestion`, `LoginCode`, `SetMode`, and `Shutdown` race the running futures in one `select!`, so a cancel, an answer, or a mode switch does not wait for a stream to finish. The `ask` tool delivers its question through the tool context, and dispatch waits for the matching frontend answer while retaining the same cancellation path.
+5. **Question answers retain user intent.** User-entered answers are ordinary user text beside the round's tool results, so the model receives the question and exact answer. History uses the tool result's display, and prompt recall skips messages that carry tool results.
 
 ## Out of Scope
 

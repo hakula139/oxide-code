@@ -294,6 +294,7 @@ impl App {
             Op::Prompt { .. }
             | Op::Queue(_)
             | Op::Resolve { .. }
+            | Op::AnswerQuestion { .. }
             | Op::FindSaved { .. }
             | Op::SetArchive { .. }
             | Op::DeleteSaved { .. }
@@ -340,11 +341,10 @@ impl App {
                 debug!("the engine stopped, so the TUI quits");
                 self.should_quit = true;
             }
-            // An approval decision is a control-plane reply the engine is waiting for, so a dropped
-            // one leaves the turn blocked until the user cancels it.
-            TrySendError::Full(Op::Resolve { .. }) => {
+            // A dropped reply can leave the engine waiting, so expose the cancel recovery.
+            TrySendError::Full(Op::Resolve { .. } | Op::AnswerQuestion { .. }) => {
                 self.chat.push_error(
-                    "Approval could not be delivered. Press Esc to cancel the blocked turn.",
+                    "Response could not be delivered. Press Esc to cancel the blocked turn.",
                 );
             }
             TrySendError::Full(Op::Prompt { .. }) => {
@@ -1743,7 +1743,7 @@ mod tests {
             assert!(!app.should_quit, "Full is not fatal");
             assert_eq!(
                 app.chat.last_error_text(),
-                Some("Approval could not be delivered. Press Esc to cancel the blocked turn."),
+                Some("Response could not be delivered. Press Esc to cancel the blocked turn."),
             );
         }
 

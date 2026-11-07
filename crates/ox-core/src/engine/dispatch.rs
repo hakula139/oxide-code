@@ -7,6 +7,8 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
+use indoc::formatdoc;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -20,6 +22,7 @@ use crate::permission::{Basis, Decision, Mode, Policy, SessionGrant, Workspace};
 use crate::prompt::plan_runs;
 use crate::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::handle::SessionHandle;
+use crate::tool::ask::{QuestionAnswer, QuestionRequest};
 use crate::tool::spill::run_capped;
 use crate::tool::tasks::Task;
 use crate::tool::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry, ToolSpec};
@@ -36,7 +39,7 @@ pub(super) struct DispatchContext<'a> {
 
 impl DispatchContext<'_> {
     /// The context the call `tool_use_id` prepares and runs in.
-    fn tool_ctx(&self, tool_use_id: &str) -> ToolCtx {
+    fn tool_ctx(&self, tool_use_id: &str, questions: mpsc::Sender<QuestionRequest>) -> ToolCtx {
         ToolCtx {
             workspace: Arc::clone(&self.workspace),
             session_id: self.session.session_id(),
@@ -44,6 +47,7 @@ impl DispatchContext<'_> {
             tracker: Arc::clone(&self.tracker),
             tool_use_id: tool_use_id.to_owned(),
             cancel: CancellationToken::new(),
+            questions,
         }
     }
 }
@@ -108,12 +112,16 @@ pub(super) async fn run_tool_round(
         tasks: None,
         abort: None,
     };
+    let (questions, pending_questions) = mpsc::channel(1);
     let mut dispatcher = Dispatcher {
         tools,
         parse_errors,
         sink,
         mailbox,
         dispatch_ctx,
+        questions,
+        pending_questions,
+        user_texts: Vec::new(),
     };
     let parallel_safe = |name: &str| tools.get(name).is_some_and(|(spec, _)| spec.parallel_safe);
     let mut calls = tool_uses.into_iter().peekable();
@@ -133,6 +141,9 @@ pub(super) async fn run_tool_round(
         round.push(call.id, ToolOutput::error(NOT_RUN));
     }
     round
+        .results
+        .extend(dispatcher.user_texts.into_iter().map(ContentBlock::text));
+    round
 }
 
 /// Result of a call the user interrupted before its tool started.
@@ -149,6 +160,9 @@ struct Dispatcher<'r, 'm, 'd> {
     sink: &'r dyn EventSink,
     mailbox: &'r mut Mailbox<'m>,
     dispatch_ctx: &'r mut DispatchContext<'d>,
+    questions: mpsc::Sender<QuestionRequest>,
+    pending_questions: mpsc::Receiver<QuestionRequest>,
+    user_texts: Vec<String>,
 }
 
 /// A call that passed the gate, ready to run.
@@ -177,6 +191,11 @@ struct Started {
     name: String,
     input: serde_json::Value,
     output: Option<ToolOutput>,
+}
+
+enum RunEvent {
+    Finished((usize, ToolOutput)),
+    Question(QuestionRequest),
 }
 
 impl<'r> Dispatcher<'r, '_, '_> {
@@ -274,8 +293,24 @@ impl<'r> Dispatcher<'r, '_, '_> {
             .map(|ready| async move { (ready.slot, ready.call.run().await) })
             .collect();
         while !runs.is_empty() {
-            match self.mailbox.race(runs.select_next_some(), self.sink).await {
-                Ok((slot, output)) => started[slot].output = Some(output),
+            let next = async {
+                tokio::select! {
+                    output = runs.select_next_some() => RunEvent::Finished(output),
+                    question = self.pending_questions.recv() => {
+                        RunEvent::Question(question.expect("dispatcher retains its question sender"))
+                    }
+                }
+            };
+            let result = match self.mailbox.race(next, self.sink).await {
+                Ok(RunEvent::Finished((slot, output))) => {
+                    started[slot].output = Some(output);
+                    continue;
+                }
+                Ok(RunEvent::Question(question)) => self.answer_question(question).await,
+                Err(abort) => Err(abort),
+            };
+            match result {
+                Ok(()) => {}
                 Err(abort) => {
                     drop(runs);
                     for cancel in &cancels {
@@ -290,6 +325,57 @@ impl<'r> Dispatcher<'r, '_, '_> {
             }
         }
         None
+    }
+
+    async fn answer_question(&mut self, request: QuestionRequest) -> AbortResult<()> {
+        if !self.dispatch_ctx.policy.attended() {
+            _ = request.reply.send(QuestionAnswer::Aborted);
+            return Ok(());
+        }
+        let QuestionRequest {
+            id,
+            question,
+            reply,
+        } = request;
+        let prompt = question.question.clone();
+        if self
+            .sink
+            .send(Event::QuestionAsked {
+                id: id.clone(),
+                question,
+            })
+            .is_err()
+        {
+            _ = reply.send(QuestionAnswer::Aborted);
+            return Ok(());
+        }
+        let answer = self
+            .mailbox
+            .race_or(std::future::pending(), self.sink, |op| match op {
+                Op::AnswerQuestion { id: target, answer } if target == id => Some(answer),
+                other => {
+                    warn!(id, op = ?other, "ignored op while awaiting question");
+                    None
+                }
+            })
+            .await?;
+        if let QuestionAnswer::Answered(text) = &answer {
+            let intent = formatdoc! {"
+                For the question:
+                {prompt}
+
+                The user answered:
+                {text}"
+            };
+            self.record_user_text(intent);
+        }
+        _ = reply.send(answer);
+        Ok(())
+    }
+
+    fn record_user_text(&mut self, text: String) {
+        self.dispatch_ctx.classifier.user_prompts.push(text.clone());
+        self.user_texts.push(text);
     }
 
     /// Prepares one call and runs it through the permission gate. Returns the call ready to run, a
@@ -310,7 +396,7 @@ impl<'r> Dispatcher<'r, '_, '_> {
             return Ok(Err(ToolOutput::error(format!("Unknown tool: {name}"))));
         };
 
-        let ctx = self.dispatch_ctx.tool_ctx(id);
+        let ctx = self.dispatch_ctx.tool_ctx(id, self.questions.clone());
         let prepared = match tool.prepare(input, &ctx) {
             Ok(prepared) => prepared,
             Err(message) => return Ok(Err(ToolOutput::error(message))),
@@ -416,9 +502,11 @@ impl<'r> Dispatcher<'r, '_, '_> {
                         Ok(self.allow_for_session(grant.as_ref(), *rule, name))
                     }
                     ApprovalDecision::Deny => Ok(Some(denied_output(name, "by the user"))),
-                    ApprovalDecision::DenyWithFeedback { feedback } => Ok(Some(ToolOutput::error(
-                        format!("The user denied the {name} call and wrote: {feedback}"),
-                    ))),
+                    ApprovalDecision::DenyWithFeedback { feedback } => {
+                        let text = format!("The user denied the {name} call and wrote: {feedback}");
+                        self.record_user_text(text.clone());
+                        Ok(Some(ToolOutput::error(text)))
+                    }
                     ApprovalDecision::Abort => Err(TurnAbort::Cancelled),
                 }
             }
@@ -574,6 +662,7 @@ mod tests {
     use crate::protocol::OpSender;
     use crate::protocol::local_testing::{CapturingSink, FailingSink};
     use crate::tool::ToolDefinition;
+    use crate::tool::ask::AskTool;
     use crate::tool::edit::EditTool;
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
@@ -596,6 +685,32 @@ mod tests {
 
     mod run_tool_round {
         use super::*;
+
+        struct AnsweringSink {
+            events: CapturingSink,
+            ops: OpSender,
+            answer: Option<QuestionAnswer>,
+        }
+
+        impl EventSink for AnsweringSink {
+            fn send(&self, event: Event) -> anyhow::Result<()> {
+                if let Event::QuestionAsked { id, .. } = &event {
+                    let Some(answer) = &self.answer else {
+                        self.ops.try_submit(Op::Interrupt)?;
+                        return self.events.send(event);
+                    };
+                    self.ops.try_submit(Op::AnswerQuestion {
+                        id: "old-question".to_owned(),
+                        answer: QuestionAnswer::Answered("stale answer".to_owned()),
+                    })?;
+                    self.ops.try_submit(Op::AnswerQuestion {
+                        id: id.clone(),
+                        answer: answer.clone(),
+                    })?;
+                }
+                self.events.send(event)
+            }
+        }
 
         fn call(id: &str, name: &str, input: serde_json::Value) -> PendingToolUse {
             PendingToolUse {
@@ -689,6 +804,187 @@ mod tests {
                     std::future::pending().await
                 })
             }
+        }
+
+        #[tokio::test]
+        async fn questions_resume_with_matching_answers_and_only_entered_text_is_user_context() {
+            for answer in [
+                QuestionAnswer::Answered("Blue".to_owned()),
+                QuestionAnswer::Answered(String::new()),
+                QuestionAnswer::Skipped,
+                QuestionAnswer::Aborted,
+            ] {
+                let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
+                let (ops, mut incoming) = OpSender::channel(2);
+                let sink = AnsweringSink {
+                    events: CapturingSink::default(),
+                    ops,
+                    answer: Some(answer.clone()),
+                };
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+
+                let round = run_tool_round(
+                    &tools,
+                    vec![call(
+                        "question-1",
+                        "ask",
+                        json!({"question": "Choose a color."}),
+                    )],
+                    &HashMap::new(),
+                    &sink,
+                    &mut Mailbox::new(&mut incoming),
+                    &mut dispatch_ctx,
+                )
+                .await;
+
+                assert!(round.abort.is_none(), "{:?}", round.abort);
+                let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } = &round.results[0]
+                else {
+                    panic!("expected the question result, got {:?}", round.results);
+                };
+                assert_eq!(tool_use_id, "question-1");
+                assert!(!is_error, "{content}");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(content).unwrap(),
+                    json!({"source": "user", "result": answer})
+                );
+                let expected_context = match answer {
+                    QuestionAnswer::Answered(text) => vec![ContentBlock::text(formatdoc! {"
+                        For the question:
+                        Choose a color.
+
+                        The user answered:
+                        {text}"
+                    })],
+                    QuestionAnswer::Skipped | QuestionAnswer::Aborted => Vec::new(),
+                };
+                assert_eq!(&round.results[1..], expected_context);
+                assert_eq!(approval_ids(&sink.events), [] as [&str; 0]);
+                assert_eq!(
+                    sink.events
+                        .events()
+                        .iter()
+                        .filter_map(|event| match event {
+                            Event::QuestionAsked { id, .. } => Some(id.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    ["question-1"]
+                );
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn an_unattended_question_aborts_without_opening_a_prompt_or_recording_an_answer() {
+            let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
+            let sink = CapturingSink::default();
+            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+            dispatch_ctx.policy.set_unattended();
+
+            let round = tokio::time::timeout(
+                Duration::from_secs(1),
+                run_tool_round(
+                    &tools,
+                    vec![call(
+                        "question-1",
+                        "ask",
+                        json!({"question": "Choose a color.", "options": [{"label": "Blue"}], "recommended": 0}),
+                    )],
+                    &HashMap::new(),
+                    &sink,
+                    &mut inert_mailbox(),
+                    &mut dispatch_ctx,
+                ),
+            )
+            .await
+            .expect("an unattended question must not wait for an answer");
+
+            assert!(round.abort.is_none());
+            assert_eq!(
+                results(&round),
+                [(
+                    "question-1",
+                    r#"{"result":{"status":"aborted"},"source":"user"}"#,
+                    false,
+                )],
+            );
+            assert!(
+                !sink
+                    .events()
+                    .iter()
+                    .any(|event| matches!(event, Event::QuestionAsked { .. }))
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn cancelling_a_question_interrupts_the_call_without_user_context() {
+            let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
+            let (ops, mut incoming) = OpSender::channel(1);
+            let sink = AnsweringSink {
+                events: CapturingSink::default(),
+                ops,
+                answer: None,
+            };
+            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+
+            let round = tokio::time::timeout(
+                Duration::from_secs(1),
+                run_tool_round(
+                    &tools,
+                    vec![call(
+                        "question-1",
+                        "ask",
+                        json!({"question": "Choose a color."}),
+                    )],
+                    &HashMap::new(),
+                    &sink,
+                    &mut Mailbox::new(&mut incoming),
+                    &mut dispatch_ctx,
+                ),
+            )
+            .await
+            .expect("cancellation must stop the pending question");
+
+            assert!(matches!(round.abort, Some(TurnAbort::Cancelled)));
+            assert_eq!(results(&round), [("question-1", INTERRUPTED, true)]);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_disconnected_question_frontend_aborts_without_waiting() {
+            let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
+            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+
+            let round = tokio::time::timeout(
+                Duration::from_secs(1),
+                run_tool_round(
+                    &tools,
+                    vec![call(
+                        "question-1",
+                        "ask",
+                        json!({"question": "Choose a color."}),
+                    )],
+                    &HashMap::new(),
+                    &FailingSink,
+                    &mut inert_mailbox(),
+                    &mut dispatch_ctx,
+                ),
+            )
+            .await
+            .expect("an undeliverable question must not wait for an answer");
+
+            assert!(round.abort.is_none());
+            assert_eq!(
+                results(&round),
+                [(
+                    "question-1",
+                    r#"{"result":{"status":"aborted"},"source":"user"}"#,
+                    false
+                )]
+            );
         }
 
         #[tokio::test]
@@ -936,12 +1232,16 @@ mod tests {
                 dispatch_ctx: &mut DispatchContext<'_>,
             ) -> AbortResult<Result<Prepared, ToolOutput>> {
                 let parse_errors = HashMap::new();
+                let (questions, pending_questions) = mpsc::channel(1);
                 let mut dispatcher = Dispatcher {
                     tools,
                     parse_errors: &parse_errors,
                     sink,
                     mailbox,
                     dispatch_ctx,
+                    questions,
+                    pending_questions,
+                    user_texts: Vec::new(),
                 };
                 Ok(dispatcher
                     .gate(id, name, input)
@@ -957,6 +1257,48 @@ mod tests {
             /// The synthetic output `gate_call` settled the call with, panicking if it readied it.
             fn expect_settled(result: Result<Prepared, ToolOutput>) -> ToolOutput {
                 result.expect_err("the call is ready to run")
+            }
+
+            #[tokio::test]
+            async fn internal_questions_still_honor_explicit_read_deny_and_ask_rules() {
+                for (denies, marker) in [(true, "`deny.read`"), (false, "`ask.read`")] {
+                    let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
+                    let sink = CapturingSink::default();
+                    let mut dispatch_ctx =
+                        dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                    let rules = vec![Rule::parse(PermissionClass::Read, "*").unwrap()];
+                    let (deny, ask) = if denies {
+                        (rules, Vec::new())
+                    } else {
+                        (Vec::new(), rules)
+                    };
+                    let mut policy = Policy::resolve(
+                        Mode::Manual,
+                        deny,
+                        ask,
+                        Vec::new(),
+                        &dispatch_ctx.workspace,
+                    );
+                    policy.set_unattended();
+                    dispatch_ctx.policy = Box::leak(Box::new(policy));
+
+                    let result = gate_call(
+                        &tools,
+                        "question-1",
+                        "ask",
+                        json!({"question": "Choose a color."}),
+                        &sink,
+                        &mut inert_mailbox(),
+                        &mut dispatch_ctx,
+                    )
+                    .await
+                    .expect("a configured question rule resolves without abort");
+
+                    let denial = expect_settled(result);
+                    assert!(denial.is_error);
+                    assert!(denial.content.contains(marker), "{}", denial.content);
+                    assert_eq!(approval_ids(&sink), [] as [&str; 0]);
+                }
             }
 
             #[tokio::test]

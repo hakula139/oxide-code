@@ -27,6 +27,7 @@ use crate::permission::{Basis, Mode, SessionGrant};
 use crate::session::handle::WriteReport;
 use crate::session::saved::{ArchiveUpdate, SavedError};
 use crate::session::store::listing::{ArchiveState, SessionInfo};
+use crate::tool::ask::{Question, QuestionAnswer};
 use crate::tool::bash::background::BackgroundShell;
 use crate::tool::tasks::Task;
 use crate::tool::view::{ApprovalPreview, ToolResultView};
@@ -57,6 +58,8 @@ pub enum Op {
         id: String,
         decision: ApprovalDecision,
     },
+    /// Answers the outstanding question with this tool-use ID.
+    AnswerQuestion { id: String, answer: QuestionAnswer },
     /// Swaps the model, the effort, or both for later turns.
     SetModel(ConfigPick),
     /// Switches the permission mode. Mid-turn, the switch applies from the next tool call the gate
@@ -130,6 +133,7 @@ impl Op {
             Self::Queue(_)
             | Self::Interrupt
             | Self::Resolve { .. }
+            | Self::AnswerQuestion { .. }
             | Self::LoginCode(_)
             | Self::SetMode(_)
             | Self::Shutdown => false,
@@ -371,6 +375,8 @@ pub enum Event {
         basis: Basis,
         grant: Option<Box<SessionGrant>>,
     },
+    /// A running `ask` call waits for the matching [`Op::AnswerQuestion`].
+    QuestionAsked { id: String, question: Question },
     /// The user granted a session allow rule. Carries every session allow rule now in force.
     SessionRulesUpdated(Vec<Rule>),
     /// The full task list, after a `tasks` call sets it or a loaded session restores a non-empty

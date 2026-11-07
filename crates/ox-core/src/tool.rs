@@ -1,6 +1,7 @@
 //! The [`Tool`] trait, the [`ToolRegistry`] that looks tools up by name, and helpers shared by the
 //! built-in tools.
 
+pub mod ask;
 pub mod bash;
 mod diff;
 pub(crate) mod edit;
@@ -21,8 +22,10 @@ use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use self::ask::{AskTool, QuestionRequest};
 use self::bash::BashTool;
 use self::bash::background::{BackgroundShells, BashOutputTool, BashStopTool};
 use self::edit::EditTool;
@@ -77,6 +80,7 @@ pub struct ToolCtx {
     /// Cancelled when the user interrupts the call, so work its dropped future leaves behind, such
     /// as a blocking file walk, stops early.
     pub(crate) cancel: CancellationToken,
+    pub(crate) questions: mpsc::Sender<QuestionRequest>,
 }
 
 impl ToolCtx {
@@ -382,6 +386,7 @@ impl ToolRegistry {
             Box::new(GlobTool::new(read_filter.clone())),
             Box::new(GrepTool::new(read_filter.clone())),
             Box::new(TasksTool),
+            Box::new(AskTool),
         ])
     }
 
@@ -509,6 +514,7 @@ pub(crate) mod local_testing {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
+    use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     use super::search::{SearchRoot, search_arg};
@@ -539,6 +545,7 @@ pub(crate) mod local_testing {
             tracker,
             tool_use_id: "toolu_test".to_owned(),
             cancel: CancellationToken::new(),
+            questions: mpsc::channel(1).0,
         }
     }
 
@@ -732,6 +739,7 @@ mod tests {
                     ("glob", PermissionClass::Read, true),
                     ("grep", PermissionClass::Read, true),
                     ("tasks", PermissionClass::Read, false),
+                    ("ask", PermissionClass::Read, false),
                 ],
             );
         }
@@ -1150,6 +1158,7 @@ mod tests {
                         "glob",
                         "grep",
                         "tasks",
+                        "ask",
                     ],
                 );
             }
@@ -1262,7 +1271,15 @@ mod tests {
                     (
                         "built-in",
                         built_in(),
-                        &["bash_output", "bash_stop", "read", "glob", "grep", "tasks"][..],
+                        &[
+                            "bash_output",
+                            "bash_stop",
+                            "read",
+                            "glob",
+                            "grep",
+                            "tasks",
+                            "ask",
+                        ][..],
                     ),
                     ("custom", custom, &["tasks", "read"]),
                 ];

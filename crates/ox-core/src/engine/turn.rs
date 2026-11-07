@@ -2701,7 +2701,7 @@ mod tests {
         #[tokio::test]
         async fn approval_decision_arriving_mid_turn_settles_the_call() {
             let feedback = ApprovalDecision::DenyWithFeedback {
-                feedback: "Use ls instead.".to_owned(),
+                feedback: "  Use ls instead.\nKeep this spacing.  ".to_owned(),
             };
             for (decision, result, aborted) in [
                 (ApprovalDecision::Approve, r#"{"v":42}"#, false),
@@ -2712,7 +2712,7 @@ mod tests {
                 ),
                 (
                     feedback,
-                    "The user denied the echo call and wrote: Use ls instead.",
+                    "The user denied the echo call and wrote:   Use ls instead.\nKeep this spacing.  ",
                     false,
                 ),
                 (ApprovalDecision::Abort, NOT_RUN, true),
@@ -2732,18 +2732,19 @@ mod tests {
                     decision: decision.clone(),
                 };
                 let mut messages = vec![Message::user("run echo")];
+                let mut dispatch_ctx = dispatch_with(
+                    crate::permission::Mode::Manual,
+                    &[],
+                    &[],
+                    Path::new("/repo"),
+                );
 
                 let outcome = run_on_messages(
                     turn_context(&client, &tools, &sink),
                     &session,
                     &mut messages,
                     &mut mailbox,
-                    &mut dispatch_with(
-                        crate::permission::Mode::Manual,
-                        &[],
-                        &[],
-                        Path::new("/repo"),
-                    ),
+                    &mut dispatch_ctx,
                 )
                 .await;
 
@@ -2778,6 +2779,15 @@ mod tests {
                     decision != ApprovalDecision::Approve,
                     "{decision:?}"
                 );
+                let intent =
+                    matches!(decision, ApprovalDecision::DenyWithFeedback { .. }).then_some(result);
+                let expected_prompts: Vec<_> = std::iter::once("run echo").chain(intent).collect();
+                assert_eq!(
+                    dispatch_ctx.classifier.user_prompts, expected_prompts,
+                    "{decision:?}"
+                );
+                let expected_text: Vec<_> = intent.into_iter().map(ContentBlock::text).collect();
+                assert_eq!(&messages[2].content[1..], expected_text, "{decision:?}");
             }
         }
 

@@ -160,6 +160,64 @@ async fn attaches_piped_stdin_and_continues_its_session() {
 }
 
 #[tokio::test]
+async fn aborts_questions_without_using_attached_stdin_as_an_answer() {
+    let server = MockServer::start().await;
+    mount_tool_call_once(
+        &server,
+        "question-1",
+        "ask",
+        r#"{"question":"Choose a color.","options":[{"label":"Blue"}],"recommended":0}"#,
+    )
+    .await;
+    mount_reply(&server, "Done.").await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = tokio::process::Command::from(ox(dir.path()))
+        .args(["-p", "Choose a color", "--output", "stream-json"])
+        .current_dir(dir.path())
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("ANTHROPIC_BASE_URL", server.uri())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    tokio::io::AsyncWriteExt::write_all(&mut stdin, b"Blue\n")
+        .await
+        .unwrap();
+    drop(stdin);
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output())
+        .await
+        .expect("an unattended question must not wait for an answer")
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(!events.iter().any(|event| event["type"] == "question_asked"));
+    assert_eq!(events.last().unwrap()["data"]["message"], "Done.");
+    let requests = request_bodies(&server).await;
+    assert_eq!(requests.len(), 2);
+    let messages = requests[0]["messages"].as_array().unwrap();
+    let prompt = messages.last().unwrap()["content"].as_array().unwrap();
+    assert_eq!(
+        prompt[0]["text"],
+        "Choose a color\n\n<stdin>\nBlue\n</stdin>"
+    );
+    let result = &requests[1]["messages"].as_array().unwrap().last().unwrap()["content"][0];
+    assert_eq!(result["tool_use_id"], "question-1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(result["content"].as_str().unwrap()).unwrap(),
+        serde_json::json!({"source": "user", "result": {"status": "aborted"}}),
+    );
+}
+
+#[tokio::test]
 async fn continue_reports_files_changed_since_the_session_read_them() {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().unwrap();

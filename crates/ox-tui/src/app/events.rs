@@ -24,6 +24,7 @@ use crate::clipboard::{CopyReport, Delivery};
 use crate::git_probes::GitUpdate;
 use crate::modal::EngineUpdate;
 use crate::modal::approval::ApprovalModal;
+use crate::modal::question::QuestionModal;
 use crate::slash;
 use crate::{NOTICE_DURATION, now};
 
@@ -141,6 +142,9 @@ impl App {
                 basis,
                 grant,
             } => self.push_approval_modal(id, preview, &basis, grant),
+            Event::QuestionAsked { id, question } => {
+                self.modals.push(Box::new(QuestionModal::new(id, question)));
+            }
             Event::SessionRulesUpdated(rules) => self.session_info.session_allow = rules,
             Event::TasksUpdated(tasks) => self.tasks.set(tasks),
             Event::BackgroundShellsUpdated(shells) => self.session_info.background_shells = shells,
