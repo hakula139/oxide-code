@@ -127,6 +127,7 @@ rustls
 serde
 serie
 sess
+shfmt
 shopt
 SIGTTIN
 smol
