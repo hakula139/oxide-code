@@ -528,67 +528,80 @@ impl<'r> Dispatcher<'r, '_, '_> {
                 Ok(Some(unapproved_output(name, &verdict.basis, fix.as_ref())))
             }
             Decision::Ask => {
-                let grant = self
-                    .dispatch_ctx
-                    .policy
-                    .session_grant(class, &prepared.access);
-                let preview = tool
-                    .approval_preview(name, prepared, self.dispatch_ctx.workspace.cwd())
-                    .await;
-                let settings = self.dispatch_ctx.interaction.approvals;
-                let deadline = settings
-                    .timeout_seconds
-                    .map(|timeout_seconds| PromptDeadline {
-                        timeout_seconds,
-                        action: match settings.on_timeout {
-                            ApprovalTimeoutAction::Deny => PromptTimeoutAction::Deny,
-                            ApprovalTimeoutAction::Allow => PromptTimeoutAction::Allow,
-                        },
-                    });
-                if self
-                    .sink
-                    .send(Event::ApprovalRequested {
-                        id: id.to_owned(),
-                        preview,
-                        basis: verdict.basis.clone(),
-                        grant: grant.clone().map(Box::new),
-                        deadline,
-                    })
-                    .is_err()
-                {
-                    return Ok(Some(denied_output(
-                        name,
-                        "because its approval request could not reach the user",
-                    )));
-                }
-                let reply = await_approval(id, self.mailbox, self.sink, settings).await?;
-                if reply.source == ReplySource::Timeout {
-                    self.sink.emit(Event::Notice(format!(
-                        "Permission prompt timed out: {}.",
-                        settings.on_timeout
-                    )));
-                }
-                match reply.decision {
-                    ApprovalDecision::Approve => Ok(None),
-                    ApprovalDecision::AllowForSession { rule } => {
-                        Ok(self.allow_for_session(grant.as_ref(), *rule, name))
-                    }
-                    ApprovalDecision::Deny => Ok(Some(denied_output(
-                        name,
-                        if reply.source == ReplySource::Timeout {
-                            "because its approval deadline expired"
-                        } else {
-                            "by the user"
-                        },
-                    ))),
-                    ApprovalDecision::DenyWithFeedback { feedback } => {
-                        let text = format!("The user denied the {name} call and wrote: {feedback}");
-                        self.record_user_text(text.clone());
-                        Ok(Some(ToolOutput::error(text)))
-                    }
-                    ApprovalDecision::Abort => Err(TurnAbort::Cancelled),
-                }
+                self.request_approval(spec, tool, id, prepared, verdict.basis)
+                    .await
             }
+        }
+    }
+
+    async fn request_approval(
+        &mut self,
+        spec: &ToolSpec,
+        tool: &dyn Tool,
+        id: &str,
+        prepared: &Prepared,
+        basis: Basis,
+    ) -> AbortResult<Option<ToolOutput>> {
+        let name = spec.definition.name.as_str();
+        let grant = self
+            .dispatch_ctx
+            .policy
+            .session_grant(spec.class, &prepared.access);
+        let preview = tool
+            .approval_preview(name, prepared, self.dispatch_ctx.workspace.cwd())
+            .await;
+        let settings = self.dispatch_ctx.interaction.approvals;
+        let deadline = settings
+            .timeout_seconds
+            .map(|timeout_seconds| PromptDeadline {
+                timeout_seconds,
+                action: match settings.on_timeout {
+                    ApprovalTimeoutAction::Deny => PromptTimeoutAction::Deny,
+                    ApprovalTimeoutAction::Allow => PromptTimeoutAction::Allow,
+                },
+            });
+        if self
+            .sink
+            .send(Event::ApprovalRequested {
+                id: id.to_owned(),
+                preview,
+                basis,
+                grant: grant.clone().map(Box::new),
+                deadline,
+            })
+            .is_err()
+        {
+            return Ok(Some(denied_output(
+                name,
+                "because its approval request could not reach the user",
+            )));
+        }
+        let reply = await_approval(id, self.mailbox, self.sink, settings).await?;
+        if reply.source == ReplySource::Timeout {
+            self.sink.emit(Event::Notice(format!(
+                "Permission prompt timed out: {}.",
+                settings.on_timeout
+            )));
+        }
+        match reply.decision {
+            ApprovalDecision::Approve => Ok(None),
+            ApprovalDecision::AllowForSession { rule } => {
+                Ok(self.allow_for_session(grant.as_ref(), *rule, name))
+            }
+            ApprovalDecision::Deny => Ok(Some(denied_output(
+                name,
+                if reply.source == ReplySource::Timeout {
+                    "because its approval deadline expired"
+                } else {
+                    "by the user"
+                },
+            ))),
+            ApprovalDecision::DenyWithFeedback { feedback } => {
+                let text = format!("The user denied the {name} call and wrote: {feedback}");
+                self.record_user_text(text.clone());
+                Ok(Some(ToolOutput::error(text)))
+            }
+            ApprovalDecision::Abort => Err(TurnAbort::Cancelled),
         }
     }
 
